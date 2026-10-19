@@ -30,6 +30,7 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion,
 };
+use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use reth_tasks::TaskExecutor;
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -133,15 +134,38 @@ impl P2PService {
         runtime_handle: tokio::runtime::Handle,
         max_peer_response_bytes: u64,
     ) -> Self {
+        Self::with_circuit_breaker(
+            mining_address,
+            peer_id,
+            broadcast_data_receiver,
+            runtime_handle,
+            max_peer_response_bytes,
+            CircuitBreakerManager::new(CircuitBreakerConfig::p2p_defaults()),
+        )
+    }
+
+    /// Same as [`Self::new`], recording outcomes on `circuit_breaker`.
+    ///
+    /// Clones of the manager share breaker state. The HTTP timeout stays the
+    /// timeout of this client.
+    pub fn with_circuit_breaker(
+        mining_address: IrysAddress,
+        peer_id: IrysPeerId,
+        broadcast_data_receiver: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
+        runtime_handle: tokio::runtime::Handle,
+        max_peer_response_bytes: u64,
+        circuit_breaker: CircuitBreakerManager<IrysPeerId>,
+    ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
         let client_timeout = Duration::from_secs(5);
-        let client = GossipClient::new(
+        let client = GossipClient::with_circuit_breaker(
             client_timeout,
             mining_address,
             peer_id,
             runtime_handle.clone(),
             max_peer_response_bytes,
+            circuit_breaker,
         );
 
         Self {

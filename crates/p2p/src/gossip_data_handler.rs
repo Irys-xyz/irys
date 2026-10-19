@@ -453,6 +453,29 @@ where
         .await
     }
 
+    /// Seen is the broadcast-exclusion set. Skip only when the block is
+    /// already here and making progress: processing, recently processed, or
+    /// in the tree.
+    ///
+    /// A parked cache entry is not skipped. The caller falls through to the
+    /// signature check and `dedup_and_maybe_emit_reprocess`, which re-emits
+    /// `AttemptReprocessingBlock` once the per-block cooldown has elapsed.
+    /// A hash that is seen but not stored still needs a pull.
+    async fn skip_seen_block(&self, block_hash: &BlockHash) -> GossipResult<bool> {
+        if self.block_pool.is_block_requested(block_hash).await {
+            return Ok(false);
+        }
+        if !self.cache.seen_block_from_any_peer(block_hash)? {
+            return Ok(false);
+        }
+        // Parked means the body is cached and nothing is moving it forward.
+        // Skipping here holds the block for the seen TTL.
+        if self.block_pool.is_block_parked(block_hash).await {
+            return Ok(false);
+        }
+        Ok(self.block_pool.is_block_known_locally(block_hash).await)
+    }
+
     #[tracing::instrument(skip_all, fields(block.hash = ?block_header.block_hash))]
     pub(crate) async fn handle_block_header(
         &self,
@@ -486,14 +509,9 @@ where
             return Ok(());
         }
 
-        let is_block_requested_by_the_pool = self.block_pool.is_block_requested(&block_hash).await;
-        let has_block_already_been_received = self.cache.seen_block_from_any_peer(&block_hash)?;
-
-        // This check must be after we've added the block to the cache, otherwise we won't be
-        // able to keep track of which peers seen what
-        if has_block_already_been_received && !is_block_requested_by_the_pool {
+        if self.skip_seen_block(&block_hash).await? {
             debug!(
-                "Node {}: Block {} height {} already seen and not requested by the pool, skipping",
+                "Node {}: Block {} height {} seen, not requested, and already known locally, skipping",
                 self.gossip_client.mining_address, block_header.block_hash, block_header.height
             );
             return Ok(());
@@ -531,11 +549,11 @@ where
         self.cache
             .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
 
-        // Dedup against any block we've already seen. The helper also
-        // re-emits `AttemptReprocessingBlock` for parked-after-SoftInternal
-        // blocks whose per-block cooldown has elapsed, so a parked tip
-        // block has a recovery path on honest gossip re-arrivals instead
-        // of waiting for LRU eviction.
+        // Dedup against a block the pool has already seen. The helper also
+        // re-emits `AttemptReprocessingBlock` for a parked block whose
+        // cooldown has elapsed. `skip_seen_block` does not swallow a parked
+        // entry, so a re-gossip or a sync pull reaches this helper. The
+        // cooldown is what bounds the retry rate.
         let has_block_already_been_processed = self
             .block_pool
             .dedup_and_maybe_emit_reprocess(&block_header.block_hash, block_header.height)
@@ -566,6 +584,7 @@ where
         let use_trusted_peers_only = skip_block_validation;
         let skip_validation_for_fast_track = skip_block_validation;
 
+        // Duplicate pulls are accepted. The block pool's dedup stops a second process_block.
         let sealed_block = self
             .pull_block_body(&block_header, use_trusted_peers_only, source_peer_id)
             .await?;
@@ -591,12 +610,9 @@ where
             self.gossip_client.mining_address, source_miner_address, block_hash
         );
 
-        let is_block_requested_by_the_pool = self.block_pool.is_block_requested(&block_hash).await;
-        let has_block_already_been_received = self.cache.seen_block_from_any_peer(&block_hash)?;
-
-        if has_block_already_been_received && !is_block_requested_by_the_pool {
+        if self.skip_seen_block(&block_hash).await? {
             debug!(
-                "Node {}: Block {} already seen and not requested by the pool, skipping",
+                "Node {}: Block {} seen, not requested, and already known locally, skipping",
                 self.gossip_client.mining_address, block_hash
             );
             return Ok(());
@@ -631,8 +647,7 @@ where
             return Ok(());
         }
 
-        // Same dedup-and-recover hook as the header gossip path; see the
-        // comment on the equivalent call in `handle_block_header`.
+        // Same dedup call as `handle_block_header`. See that comment.
         let has_block_already_been_processed = self
             .block_pool
             .dedup_and_maybe_emit_reprocess(&block_header.block_hash, block_header.height)
@@ -1631,5 +1646,739 @@ mod block_body_serve_cap_tests {
         let join = in_flight.await.expect_err("aborted task");
         assert!(join.is_cancelled());
         assert_eq!(fixture.handler.block_body_semaphore.available_permits(), 1);
+    }
+}
+
+#[cfg(test)]
+mod body_fetch_recovery_tests {
+    use super::*;
+    use crate::SyncChainServiceMessage;
+    use crate::block_pool::BlockRemovalReason;
+    use crate::tests::util::{FakeGossipServer, data_handler_stub_with_sync, peer_list_item};
+    use crate::types::GossipResponse;
+    use irys_domain::PeerList;
+    use irys_domain::chain_sync_state::ChainSyncState;
+    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::SealedBlock;
+    use irys_types::v2::GossipDataV2;
+    use irys_types::{
+        BlockBody, Config, DatabaseProvider, DbSyncMode, H256, IrysAddress, IrysPeerId, NodeConfig,
+        PeerScore,
+    };
+    use irys_utils::circuit_breaker::CircuitBreakerConfig;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    type TestHandler =
+        GossipDataHandler<crate::tests::util::MempoolStub, crate::tests::util::BlockDiscoveryStub>;
+
+    fn test_handler() -> (
+        irys_testing_utils::tempfile::TempDir,
+        PeerList,
+        Arc<TestHandler>,
+    ) {
+        let (dir, peer_list, handler, _sync_rx) = test_handler_with_sync();
+        (dir, peer_list, handler)
+    }
+
+    fn test_handler_with_sync() -> (
+        irys_testing_utils::tempfile::TempDir,
+        PeerList,
+        Arc<TestHandler>,
+        UnboundedReceiver<SyncChainServiceMessage>,
+    ) {
+        let dir = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = dir.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(
+                &config.node_config.base_directory,
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("open test db"),
+        ));
+        let peer_list = PeerList::test_mock().expect("peer list");
+        let (handler, sync_rx) =
+            data_handler_stub_with_sync(&config, &peer_list, db, ChainSyncState::new(false, false));
+        (dir, peer_list, handler, sync_rx)
+    }
+
+    fn signed_orphan(config: &Config) -> Arc<IrysBlockHeader> {
+        let mut chain = crate::BlockStatusProvider::produce_mock_chain(1, None, &config.consensus);
+        Arc::new(chain.pop().expect("one header"))
+    }
+
+    fn seal(header: &Arc<IrysBlockHeader>) -> Arc<SealedBlock> {
+        Arc::new(
+            SealedBlock::new(
+                Arc::clone(header),
+                BlockBody {
+                    block_hash: header.block_hash,
+                    ..Default::default()
+                },
+            )
+            .expect("signed header seals"),
+        )
+    }
+
+    fn record_block_seen(handler: &TestHandler, block_hash: BlockHash) {
+        handler
+            .cache
+            .record_seen(
+                IrysPeerId::from(IrysAddress::repeat_byte(0x11)),
+                GossipCacheKey::Block(block_hash),
+            )
+            .expect("record seen");
+    }
+
+    fn assert_reprocess_for(message: SyncChainServiceMessage, block_hash: BlockHash) {
+        assert!(
+            matches!(
+                message,
+                SyncChainServiceMessage::AttemptReprocessingBlock(hash) if hash == block_hash
+            ),
+            "expected AttemptReprocessingBlock for {block_hash:?}, got {message:?}"
+        );
+    }
+
+    fn dummy_addr() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 9))
+    }
+
+    fn orphan_header() -> Arc<IrysBlockHeader> {
+        let mut header = irys_testing_utils::new_mock_signed_header();
+        header.height = 1;
+        header.previous_block_hash = H256::random();
+        header.test_sign();
+        Arc::new(header)
+    }
+
+    fn body_for(header: &IrysBlockHeader) -> GossipResponse<Option<GossipDataV2>> {
+        GossipResponse::Accepted(Some(GossipDataV2::BlockBody(Arc::new(BlockBody {
+            block_hash: header.block_hash,
+            data_transactions: vec![],
+            commitment_transactions: vec![],
+        }))))
+    }
+
+    /// A failed body pull records the hash in the seen cache. That cache is the
+    /// broadcast-exclusion set, so the hash stays, but a later arrival must
+    /// still be able to fetch the body. Once the block is in the pool, a
+    /// further arrival is skipped and does not pull.
+    #[tokio::test]
+    async fn failed_body_pull_does_not_block_a_later_arrival() {
+        let (_dir, peer_list, handler) = test_handler();
+        let header = orphan_header();
+        let block_hash = header.block_hash;
+
+        let server_a = FakeGossipServer::new();
+        server_a.set_on_pull_data_request(|_| GossipResponse::Accepted(None));
+        let addr_a = server_a.spawn();
+        let peer_a = peer_list_item(0x41, addr_a, true, PeerScore::INITIAL);
+        let peer_a_id = peer_a.peer_id;
+        peer_list.add_or_update_peer(peer_a, true);
+
+        let first = handler
+            .handle_block_header(
+                peer_a_id,
+                IrysAddress::repeat_byte(0x41),
+                Arc::clone(&header),
+                addr_a,
+            )
+            .await;
+        assert!(first.is_err(), "the first body pull fails: {first:?}");
+        assert!(
+            !handler.block_pool.contains_block(&block_hash).await,
+            "a failed pull must not leave the block in the pool"
+        );
+
+        let b_pulls = Arc::new(AtomicUsize::new(0));
+        let pulls = Arc::clone(&b_pulls);
+        let served = Arc::clone(&header);
+        let server_b = FakeGossipServer::new();
+        server_b.set_on_pull_data_request(move |_| {
+            pulls.fetch_add(1, Ordering::SeqCst);
+            body_for(&served)
+        });
+        let addr_b = server_b.spawn();
+        let peer_b = peer_list_item(0x42, addr_b, true, PeerScore::INITIAL);
+        let peer_b_id = peer_b.peer_id;
+        peer_list.add_or_update_peer(peer_b, true);
+
+        let second = handler
+            .handle_block_header(
+                peer_b_id,
+                IrysAddress::repeat_byte(0x42),
+                Arc::clone(&header),
+                addr_b,
+            )
+            .await;
+        assert!(
+            second.is_ok(),
+            "the second arrival must be processed: {second:?}"
+        );
+        assert_eq!(
+            b_pulls.load(Ordering::SeqCst),
+            1,
+            "a later arrival must pull the body again"
+        );
+        assert!(handler.block_pool.contains_block(&block_hash).await);
+
+        let c_pulls = Arc::new(AtomicUsize::new(0));
+        let pulls = Arc::clone(&c_pulls);
+        let server_c = FakeGossipServer::new();
+        server_c.set_on_pull_data_request(move |_| {
+            pulls.fetch_add(1, Ordering::SeqCst);
+            GossipResponse::Accepted(None)
+        });
+        let addr_c = server_c.spawn();
+        let peer_c = peer_list_item(0x43, addr_c, true, PeerScore::INITIAL);
+        let peer_c_id = peer_c.peer_id;
+        peer_list.add_or_update_peer(peer_c, true);
+
+        let third = handler
+            .handle_block_header(peer_c_id, IrysAddress::repeat_byte(0x43), header, addr_c)
+            .await;
+        assert!(third.is_ok(), "{third:?}");
+        assert_eq!(
+            c_pulls.load(Ordering::SeqCst),
+            0,
+            "a block already in the pool must not be pulled again"
+        );
+    }
+
+    /// Wall-clock bound for a body pull that runs on the server runtime.
+    ///
+    /// Under a full-suite load the pull can sit in the queue longer than a
+    /// few seconds. Coverage multiplies the same way as the chain-test waits.
+    /// A gate that blocks a pull must use a larger bound than the wait for
+    /// that pull to start.
+    fn loaded_wait(base_secs: u64) -> Duration {
+        let scale = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+            3
+        } else {
+            1
+        };
+        Duration::from_secs(base_secs.saturating_mul(scale))
+    }
+
+    /// An authenticated header proves the sender can reach us. The body pull
+    /// is the proof that we can reach them, so it runs while the breaker is
+    /// open. A served body closes the breaker and marks the peer online.
+    #[tokio::test]
+    async fn open_breaker_source_peer_body_pull_closes_the_breaker() {
+        let (_dir, peer_list, mut handler) = test_handler();
+        {
+            let unique = Arc::get_mut(&mut handler).expect("unique handler");
+            let mining_address = unique.gossip_client.mining_address;
+            let local_peer_id = unique.gossip_client.peer_id;
+            unique.gossip_client = GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(5),
+                mining_address,
+                local_peer_id,
+                CircuitBreakerConfig::p2p_defaults(),
+                tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            );
+        }
+
+        let header = orphan_header();
+        let served = Arc::clone(&header);
+        let pulls = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::clone(&pulls);
+        let server = FakeGossipServer::new();
+        server.set_on_pull_data_request(move |_| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            body_for(&served)
+        });
+        let addr = server.spawn();
+        let peer = peer_list_item(0x51, addr, false, PeerScore::INITIAL);
+        let peer_id = peer.peer_id;
+        peer_list.add_or_update_peer(peer, true);
+
+        for _ in 0..5 {
+            handler
+                .gossip_client
+                .circuit_breaker()
+                .record_failure(&peer_id);
+        }
+        assert!(
+            !handler
+                .gossip_client
+                .circuit_breaker()
+                .would_allow(&peer_id),
+            "the open cooldown has not elapsed, so a normal pull must be refused"
+        );
+
+        let result = handler
+            .handle_block_header(peer_id, IrysAddress::repeat_byte(0x51), header, addr)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "the source body pull must run while the breaker is open: {result:?}"
+        );
+        assert!(
+            pulls.load(Ordering::SeqCst) >= 1,
+            "the source peer must be dialed"
+        );
+        let metrics = handler.gossip_client.circuit_breaker().metrics();
+        assert_eq!(metrics.open_count, 0, "a served body closes the breaker");
+        assert_eq!(metrics.half_open_count, 0);
+        assert!(
+            peer_list.get_peer(&peer_id).expect("peer exists").is_online,
+            "a served body marks the peer online"
+        );
+    }
+
+    fn server_holding_first_body() -> (
+        FakeGossipServer,
+        std::sync::mpsc::SyncSender<()>,
+        Arc<AtomicUsize>,
+    ) {
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+        let pulls = Arc::new(AtomicUsize::new(0));
+        let pulls_for_cb = Arc::clone(&pulls);
+        let gate = Arc::clone(&release_rx);
+        let server = FakeGossipServer::new();
+        server.set_on_pull_data_request(move |request| {
+            if !matches!(request, GossipDataRequestV2::BlockBody(_)) {
+                return GossipResponse::Accepted(None);
+            }
+            let n = pulls_for_cb.fetch_add(1, Ordering::SeqCst);
+            if n == 0
+                && let Some(rx) = gate.lock().expect("gate").take()
+            {
+                let _ = rx.recv_timeout(loaded_wait(90));
+            }
+            GossipResponse::Accepted(None)
+        });
+        (server, release_tx, pulls)
+    }
+
+    fn add_peer(peer_list: &PeerList, byte: u8, addr: SocketAddr, is_online: bool) -> IrysPeerId {
+        let peer = peer_list_item(byte, addr, is_online, PeerScore::INITIAL);
+        let peer_id = peer.peer_id;
+        peer_list.add_or_update_peer(peer, true);
+        peer_id
+    }
+
+    async fn wait_for_a_pull(
+        pulls: &AtomicUsize,
+        task: &tokio::task::JoinHandle<GossipResult<()>>,
+    ) {
+        let started = tokio::time::Instant::now();
+        loop {
+            if pulls.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            assert!(
+                !task.is_finished(),
+                "the pull finished before the peer was dialed"
+            );
+            assert!(
+                started.elapsed() < loaded_wait(30),
+                "the body pull did not start"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// A body that arrives in a POST is processed even while a pull for that
+    /// hash is running. The pool rejects a duplicate process.
+    #[tokio::test]
+    async fn body_posted_during_an_in_flight_pull_is_processed() {
+        let (_dir, peer_list, handler) = test_handler();
+        let header = orphan_header();
+        let block_hash = header.block_hash;
+
+        let (server_a, release_tx, a_pulls) = server_holding_first_body();
+        let addr_a = server_a.spawn();
+        let peer_a_id = add_peer(&peer_list, 0x91, addr_a, true);
+
+        let served_header = Arc::clone(&header);
+        let header_server = FakeGossipServer::new();
+        header_server.set_on_pull_data_request(move |request| match request {
+            GossipDataRequestV2::BlockHeader(hash) if hash == served_header.block_hash => {
+                GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::clone(
+                    &served_header,
+                ))))
+            }
+            _ => GossipResponse::Accepted(None),
+        });
+        let addr_h = header_server.spawn();
+        let _peer_h_id = add_peer(&peer_list, 0x92, addr_h, true);
+
+        let first_handler = Arc::clone(&handler);
+        let first_header = Arc::clone(&header);
+        let first = tokio::spawn(async move {
+            first_handler
+                .handle_block_header(
+                    peer_a_id,
+                    IrysAddress::repeat_byte(0x91),
+                    first_header,
+                    addr_a,
+                )
+                .await
+        });
+        wait_for_a_pull(&a_pulls, &first).await;
+
+        let posted = tokio::time::timeout(
+            loaded_wait(30),
+            handler.handle_block_body(
+                GossipRequestV2 {
+                    peer_id: IrysPeerId::from(IrysAddress::repeat_byte(0x92)),
+                    miner_address: IrysAddress::repeat_byte(0x92),
+                    data: BlockBody {
+                        block_hash,
+                        data_transactions: vec![],
+                        commitment_transactions: vec![],
+                    },
+                },
+                addr_h,
+            ),
+        )
+        .await
+        .expect("the posted body is handled while the pull is in flight");
+        assert!(posted.is_ok(), "a posted body is not an error: {posted:?}");
+        assert!(
+            handler.block_pool.contains_block(&block_hash).await,
+            "a body posted while a pull is in flight must be processed"
+        );
+
+        release_tx.send(()).expect("A is waiting");
+        let first = tokio::time::timeout(loaded_wait(30), first)
+            .await
+            .expect("A finishes after the gate opens")
+            .expect("A task");
+        let _ = first;
+    }
+
+    /// Two peers push the same header at the same time. Each arrival pulls
+    /// the body. The pool keeps one block, so a later arrival does not pull.
+    #[tokio::test]
+    async fn concurrent_header_arrivals_both_pull_and_the_block_is_processed_once() {
+        let (_dir, peer_list, handler) = test_handler();
+        let header = orphan_header();
+        let block_hash = header.block_hash;
+
+        let (release_a_tx, release_a_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_b_tx, release_b_rx) = std::sync::mpsc::sync_channel(1);
+        let release_a_rx = Arc::new(std::sync::Mutex::new(Some(release_a_rx)));
+        let release_b_rx = Arc::new(std::sync::Mutex::new(Some(release_b_rx)));
+
+        let a_pulls = Arc::new(AtomicUsize::new(0));
+        let pulls = Arc::clone(&a_pulls);
+        let gate = Arc::clone(&release_a_rx);
+        let served = Arc::clone(&header);
+        let server_a = FakeGossipServer::new();
+        server_a.set_on_pull_data_request(move |request| {
+            if !matches!(request, GossipDataRequestV2::BlockBody(_)) {
+                return GossipResponse::Accepted(None);
+            }
+            let n = pulls.fetch_add(1, Ordering::SeqCst);
+            if n == 0
+                && let Some(rx) = gate.lock().expect("gate").take()
+            {
+                let _ = rx.recv_timeout(loaded_wait(90));
+            }
+            body_for(&served)
+        });
+        let addr_a = server_a.spawn();
+        let peer_a_id = add_peer(&peer_list, 0xB1, addr_a, true);
+
+        let b_pulls = Arc::new(AtomicUsize::new(0));
+        let pulls = Arc::clone(&b_pulls);
+        let gate = Arc::clone(&release_b_rx);
+        let served = Arc::clone(&header);
+        let server_b = FakeGossipServer::new();
+        server_b.set_on_pull_data_request(move |request| {
+            if !matches!(request, GossipDataRequestV2::BlockBody(_)) {
+                return GossipResponse::Accepted(None);
+            }
+            let n = pulls.fetch_add(1, Ordering::SeqCst);
+            if n == 0
+                && let Some(rx) = gate.lock().expect("gate").take()
+            {
+                let _ = rx.recv_timeout(loaded_wait(90));
+            }
+            body_for(&served)
+        });
+        let addr_b = server_b.spawn();
+        let peer_b_id = add_peer(&peer_list, 0xB2, addr_b, true);
+
+        let handler_a = Arc::clone(&handler);
+        let header_a = Arc::clone(&header);
+        let arrival_a = tokio::spawn(async move {
+            handler_a
+                .handle_block_header(peer_a_id, IrysAddress::repeat_byte(0xB1), header_a, addr_a)
+                .await
+        });
+        let handler_b = Arc::clone(&handler);
+        let header_b = Arc::clone(&header);
+        let arrival_b = tokio::spawn(async move {
+            handler_b
+                .handle_block_header(peer_b_id, IrysAddress::repeat_byte(0xB2), header_b, addr_b)
+                .await
+        });
+
+        let started = tokio::time::Instant::now();
+        loop {
+            if a_pulls.load(Ordering::SeqCst) > 0 && b_pulls.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            let a_dropped = arrival_a.is_finished() && a_pulls.load(Ordering::SeqCst) == 0;
+            let b_dropped = arrival_b.is_finished() && b_pulls.load(Ordering::SeqCst) == 0;
+            assert!(
+                !a_dropped && !b_dropped,
+                "an arrival returned without pulling: a={} b={}",
+                a_pulls.load(Ordering::SeqCst),
+                b_pulls.load(Ordering::SeqCst)
+            );
+            assert!(
+                started.elapsed() < loaded_wait(30),
+                "both arrivals must pull the body"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        release_a_tx.send(()).expect("A is waiting");
+        release_b_tx.send(()).expect("B is waiting");
+        let result_a = tokio::time::timeout(loaded_wait(30), arrival_a)
+            .await
+            .expect("A finishes after the gate opens")
+            .expect("A task");
+        let result_b = tokio::time::timeout(loaded_wait(30), arrival_b)
+            .await
+            .expect("B finishes after the gate opens")
+            .expect("B task");
+        assert!(
+            result_a.is_ok() || result_b.is_ok(),
+            "one arrival processes the block: {result_a:?} {result_b:?}"
+        );
+        assert!(
+            handler.block_pool.contains_block(&block_hash).await,
+            "the block is in the pool"
+        );
+
+        let c_pulls = Arc::new(AtomicUsize::new(0));
+        let pulls = Arc::clone(&c_pulls);
+        let server_c = FakeGossipServer::new();
+        server_c.set_on_pull_data_request(move |_| {
+            pulls.fetch_add(1, Ordering::SeqCst);
+            GossipResponse::Accepted(None)
+        });
+        let addr_c = server_c.spawn();
+        let peer_c_id = add_peer(&peer_list, 0xB3, addr_c, true);
+        let third = tokio::time::timeout(
+            loaded_wait(30),
+            handler.handle_block_header(peer_c_id, IrysAddress::repeat_byte(0xB3), header, addr_c),
+        )
+        .await
+        .expect("the later arrival finishes");
+        assert!(third.is_ok(), "{third:?}");
+        assert_eq!(
+            c_pulls.load(Ordering::SeqCst),
+            0,
+            "the pool already has the block, so a later arrival must not pull"
+        );
+    }
+
+    /// A parked block is in the cache and not processing. After the reprocess
+    /// cooldown, a re-gossip must emit `AttemptReprocessingBlock`. The seen
+    /// TTL must not swallow that retry. The helper still suppresses a
+    /// re-gossip that arrives inside the cooldown.
+    #[tokio::test(start_paused = true)]
+    async fn parked_block_regossip_after_cooldown_emits_reprocess() {
+        let (_dir, _peer_list, handler, mut sync_rx) = test_handler_with_sync();
+        let header = signed_orphan(&handler.config);
+        let block_hash = header.block_hash;
+        handler
+            .block_pool
+            .test_insert_block_into_cache(seal(&header), false)
+            .await;
+        assert!(
+            handler
+                .block_pool
+                .dedup_and_maybe_emit_reprocess(&block_hash, header.height)
+                .await,
+            "the first observation of a parked block arms the cooldown"
+        );
+        assert_reprocess_for(
+            sync_rx
+                .try_recv()
+                .expect("priming observation emits AttemptReprocessingBlock"),
+            block_hash,
+        );
+        record_block_seen(&handler, block_hash);
+
+        tokio::time::advance(Duration::from_secs(9)).await;
+        let during = handler
+            .handle_block_header(
+                IrysPeerId::from(IrysAddress::repeat_byte(0x21)),
+                IrysAddress::repeat_byte(0x21),
+                Arc::clone(&header),
+                dummy_addr(),
+            )
+            .await;
+        assert!(during.is_ok(), "{during:?}");
+        assert!(
+            sync_rx.try_recv().is_err(),
+            "a re-gossip inside the cooldown must not emit again"
+        );
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let after = handler
+            .handle_block_header(
+                IrysPeerId::from(IrysAddress::repeat_byte(0x22)),
+                IrysAddress::repeat_byte(0x22),
+                header,
+                dummy_addr(),
+            )
+            .await;
+        assert!(after.is_ok(), "{after:?}");
+        assert_reprocess_for(
+            sync_rx
+                .try_recv()
+                .expect("a re-gossip after the cooldown must emit AttemptReprocessingBlock"),
+            block_hash,
+        );
+    }
+
+    /// A sync pull of a parked block uses `pull_and_process_block`, which
+    /// calls `handle_block_header`. That path must reach the reprocess helper
+    /// instead of returning success at the seen-skip.
+    #[tokio::test]
+    async fn sync_pull_of_parked_block_emits_reprocess() {
+        let (_dir, peer_list, handler, mut sync_rx) = test_handler_with_sync();
+        let header = signed_orphan(&handler.config);
+        let block_hash = header.block_hash;
+        handler
+            .block_pool
+            .test_insert_block_into_cache(seal(&header), false)
+            .await;
+        record_block_seen(&handler, block_hash);
+
+        let served = Arc::clone(&header);
+        let server = FakeGossipServer::new();
+        server.set_on_pull_data_request(move |request| match request {
+            GossipDataRequestV2::BlockHeader(hash) if hash == served.block_hash => {
+                GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::clone(&served))))
+            }
+            _ => GossipResponse::Accepted(None),
+        });
+        let addr = server.spawn();
+        add_peer(&peer_list, 0x61, addr, true);
+
+        let pulled = handler.pull_and_process_block(block_hash, false).await;
+        assert!(pulled.is_ok(), "{pulled:?}");
+        assert_reprocess_for(
+            sync_rx
+                .try_recv()
+                .expect("a sync pull of a parked block must emit AttemptReprocessingBlock"),
+            block_hash,
+        );
+    }
+
+    /// A block that is being processed is still skipped. A re-gossip must not
+    /// emit `AttemptReprocessingBlock` and must not pull the body.
+    #[tokio::test]
+    async fn processing_block_seen_again_is_skipped() {
+        let (_dir, peer_list, handler, mut sync_rx) = test_handler_with_sync();
+        let header = signed_orphan(&handler.config);
+        let block_hash = header.block_hash;
+        handler
+            .block_pool
+            .test_insert_block_into_cache(seal(&header), true)
+            .await;
+        record_block_seen(&handler, block_hash);
+
+        let pulls = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::clone(&pulls);
+        let server = FakeGossipServer::new();
+        server.set_on_pull_data_request(move |_| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            GossipResponse::Accepted(None)
+        });
+        let addr = server.spawn();
+        let peer_id = add_peer(&peer_list, 0x71, addr, true);
+
+        assert!(
+            handler
+                .skip_seen_block(&block_hash)
+                .await
+                .expect("skip check"),
+            "a block that is being processed must still be skipped"
+        );
+        let result = handler
+            .handle_block_header(peer_id, IrysAddress::repeat_byte(0x71), header, addr)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            sync_rx.try_recv().is_err(),
+            "no reprocess for an in-flight block"
+        );
+        assert_eq!(pulls.load(Ordering::SeqCst), 0, "no body pull");
+    }
+
+    /// A recently processed block has left the in-flight cache. A re-gossip
+    /// must still be skipped, and must not pull the body again.
+    #[tokio::test]
+    async fn recently_processed_block_seen_again_is_skipped() {
+        let (_dir, peer_list, handler, mut sync_rx) = test_handler_with_sync();
+        let header = signed_orphan(&handler.config);
+        let block_hash = header.block_hash;
+        handler
+            .block_pool
+            .test_insert_block_into_cache(seal(&header), true)
+            .await;
+        handler
+            .block_pool
+            .remove_block_from_cache(&block_hash, BlockRemovalReason::SuccessfullyProcessed)
+            .await;
+        assert!(!handler.block_pool.contains_block(&block_hash).await);
+        assert!(
+            handler.block_pool.is_block_known_locally(&block_hash).await,
+            "recently processed is still held locally"
+        );
+        record_block_seen(&handler, block_hash);
+
+        let pulls = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::clone(&pulls);
+        let server = FakeGossipServer::new();
+        server.set_on_pull_data_request(move |_| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            GossipResponse::Accepted(None)
+        });
+        let addr = server.spawn();
+        let peer_id = add_peer(&peer_list, 0x72, addr, true);
+
+        assert!(
+            handler
+                .skip_seen_block(&block_hash)
+                .await
+                .expect("skip check"),
+            "a recently processed block must still be skipped"
+        );
+        let result = handler
+            .handle_block_header(peer_id, IrysAddress::repeat_byte(0x72), header, addr)
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            sync_rx.try_recv().is_err(),
+            "no reprocess for a recently processed block"
+        );
+        assert_eq!(
+            pulls.load(Ordering::SeqCst),
+            0,
+            "a recently processed block must not be pulled again"
+        );
     }
 }

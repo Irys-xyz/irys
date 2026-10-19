@@ -221,8 +221,6 @@ pub enum GossipClientError {
     HealthCheck(String, reqwest::StatusCode),
     #[error("Failed to get json response payload from {0} with reason {1}")]
     GetJsonResponsePayload(String, String),
-    #[error("Circuit breaker open for peer {0}")]
-    CircuitBreakerOpen(IrysPeerId),
     /// The peer applied backpressure. Distinct from a transport failure: the
     /// peer is up and talking to us, it is just asking us to come back later,
     /// so the caller should back off rather than treat it as a fault.
@@ -252,8 +250,10 @@ pub struct GossipClient {
 pub enum PeerHealth {
     /// Answered and serving gossip.
     Healthy,
-    /// Answered; not serving us yet for a reason that clears on its own.
-    /// Never trips the breaker, which would suppress the probe that sees it clear.
+    /// Answered; stay online; do not raise the score.
+    ///
+    /// `GossipDisabled` will not gossip onward and still serves pulls.
+    /// `RateLimited` and `HandshakeRequired` are the same verdict.
     AnsweredNotServing,
     /// Answered and will not serve us, or reported itself not healthy.
     Unhealthy,
@@ -307,7 +307,30 @@ impl GossipClient {
         max_peer_response_bytes: u64,
     ) -> Self {
         let circuit_breaker = CircuitBreakerManager::new(circuit_config);
+        Self::with_circuit_breaker(
+            timeout,
+            mining_address,
+            peer_id,
+            runtime_handle,
+            max_peer_response_bytes,
+            circuit_breaker,
+        )
+    }
 
+    /// Build a client on an existing breaker manager.
+    ///
+    /// Clones of the manager share breaker state. The node gives this manager
+    /// to both gossip clients so a health reply closes the breaker that gates
+    /// pulls and pushes. The HTTP timeout stays on this client.
+    #[must_use]
+    pub(crate) fn with_circuit_breaker(
+        timeout: Duration,
+        mining_address: IrysAddress,
+        peer_id: IrysPeerId,
+        runtime_handle: tokio::runtime::Handle,
+        max_peer_response_bytes: u64,
+        circuit_breaker: CircuitBreakerManager<IrysPeerId>,
+    ) -> Self {
         Self {
             mining_address,
             peer_id,
@@ -370,6 +393,28 @@ impl GossipClient {
         }
         tracing::debug!(?peer, "circuit breaker open, skipping request");
         Err(GossipError::CircuitBreakerOpen(*peer))
+    }
+
+    /// Admit one pull. `probe` grants a half-open trial even when the open
+    /// cooldown has not elapsed. The source-peer body pull is that probe:
+    /// an authenticated header proves the peer can reach us, and this dial
+    /// is the proof that we can reach them. Network fan-out passes `false`.
+    fn admit_pull(&self, peer: &IrysPeerId, probe: bool) -> GossipResult<()> {
+        let allowed = if probe {
+            self.circuit_breaker.begin_probe(peer)
+        } else {
+            self.circuit_breaker.is_available(peer)
+        };
+        if allowed {
+            return Ok(());
+        }
+        tracing::debug!(?peer, probe, "circuit breaker open, skipping request");
+        Err(GossipError::CircuitBreakerOpen(*peer))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn circuit_breaker(&self) -> &CircuitBreakerManager<IrysPeerId> {
+        &self.circuit_breaker
     }
 
     /// Request a specific data to be gossiped. Returns true if the peer has the data,
@@ -440,10 +485,12 @@ impl GossipClient {
         let mut commitment_transactions = Vec::new();
         let mut data_transactions = Vec::new();
 
-        // Pull commitment transactions
+        // Pull commitment transactions. The outer body pull already
+        // admitted this peer. Another trial here would burn the window
+        // on the transactions inside one body.
         for &tx_id in commitment_tx_ids {
             match self
-                .pull_transaction_from_peer(tx_id, peer, peer_list)
+                .pull_admitted_transaction_from_peer(tx_id, peer, peer_list)
                 .await
             {
                 Ok((_, IrysTransactionResponse::Commitment(tx))) => {
@@ -459,10 +506,11 @@ impl GossipClient {
             }
         }
 
-        // Pull data transactions
+        // Pull data transactions. Same as the commitment loop: do not
+        // admit the peer again.
         for tx_id in data_tx_ids {
             match self
-                .pull_transaction_from_peer(tx_id, peer, peer_list)
+                .pull_admitted_transaction_from_peer(tx_id, peer, peer_list)
                 .await
             {
                 Ok((_, IrysTransactionResponse::Storage(tx))) => data_transactions.push(tx),
@@ -495,7 +543,19 @@ impl GossipClient {
         requested_data: GossipDataRequestV2,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
-        self.check_circuit_breaker(&peer.0)?;
+        self.admit_pull(&peer.0, false)?;
+        self.fetch_primitive_and_score(peer, requested_data, peer_list)
+            .await
+    }
+
+    /// The pull itself. The caller has already admitted the peer, so this
+    /// must not take another trial for the same request.
+    async fn fetch_primitive_and_score(
+        &self,
+        peer: &(IrysPeerId, PeerListItem),
+        requested_data: GossipDataRequestV2,
+        peer_list: &PeerList,
+    ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
         let start_time = std::time::Instant::now();
 
         let res: GossipResult<GossipResponse<Option<GossipDataV2>>> =
@@ -569,8 +629,9 @@ impl GossipClient {
         requested_data: GossipDataRequestV2,
         fallback_header: Option<&IrysBlockHeader>,
         peer_list: &PeerList,
+        probe: bool,
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
-        self.check_circuit_breaker(&peer.0)?;
+        self.admit_pull(&peer.0, probe)?;
 
         if peer.1.protocol_version == irys_types::ProtocolVersion::V1
             && let GossipDataRequestV2::BlockBody(_block_hash) = requested_data
@@ -581,7 +642,7 @@ impl GossipClient {
                 .pull_block_body_from_v1_peer(peer, header, peer_list)
                 .await;
         }
-        self.pull_primitive_data_and_update_the_score(peer, requested_data, peer_list)
+        self.fetch_primitive_and_score(peer, requested_data, peer_list)
             .await
     }
 
@@ -1005,11 +1066,8 @@ impl GossipClient {
         protocol_version: ProtocolVersion,
         peer_list: &PeerList,
     ) -> Result<PeerHealth, GossipClientError> {
-        if !self.circuit_breaker.is_available(peer_id) {
-            tracing::debug!(?peer_id, "circuit breaker open, skipping health check");
-            return Err(GossipClientError::CircuitBreakerOpen(*peer_id));
-        }
-
+        // Do not consult the breaker. This GET is the recovery probe. The
+        // inactive-peer loop and the hydrate pass already bound how often it runs.
         let url = format!(
             "{}{}",
             gossip_base_url(&peer.gossip, protocol_version),
@@ -1072,6 +1130,9 @@ impl GossipClient {
             GossipResponse::Accepted(is_gossip_enabled) => {
                 if is_gossip_enabled {
                     self.circuit_breaker.record_success(peer_id);
+                    // Serving again. Both the inactive-peer loop and hydrate
+                    // reach this probe, so the rank bit is cleared here.
+                    peer_list.clear_not_gossiping(peer_id);
                     Ok(PeerHealth::Healthy)
                 } else {
                     self.circuit_breaker.record_failure(peer_id);
@@ -1085,19 +1146,31 @@ impl GossipClient {
                 match reason {
                     RejectionReason::HandshakeRequired(requirement) => {
                         warn!("Health check requires handshake: {:?}", requirement);
-                        // No breaker failure: this peer answered, and the
-                        // handshake below is what repairs it. Tripping the
-                        // breaker would strand it — an open breaker short-
-                        // circuits this method before the handshake is asked
-                        // for, so the condition could never clear.
+                        // The peer answered, so the breaker closes. A recorded
+                        // failure would block pulls and pushes for the cooldown.
+                        // The handshake below is what restores gossip service.
+                        self.circuit_breaker.record_success(peer_id);
                         peer_list.initiate_handshake(peer.api, peer.gossip, true);
                         Ok(PeerHealth::AnsweredNotServing)
                     }
-                    // Backpressure, not a fault. Expires on its own, so unlike
-                    // the arm above there is nothing to initiate.
-                    RejectionReason::RateLimited => Ok(PeerHealth::AnsweredNotServing),
-                    RejectionReason::GossipDisabled
-                    | RejectionReason::InvalidData
+                    // The peer answered. Backpressure clears on its own, so
+                    // there is nothing to initiate. Close the breaker.
+                    RejectionReason::RateLimited => {
+                        self.circuit_breaker.record_success(peer_id);
+                        Ok(PeerHealth::AnsweredNotServing)
+                    }
+                    // The peer answered, so it is reachable and the breaker
+                    // closes. GossipDisabled means this peer will not gossip
+                    // to the rest of the network. The peer is not offline.
+                    // Callers mark it online and its score is left unchanged.
+                    RejectionReason::GossipDisabled => {
+                        self.circuit_breaker.record_success(peer_id);
+                        // Reachable, online, lower pull rank. The inactive-peer
+                        // loop and hydrate both call this probe.
+                        peer_list.mark_not_gossiping(peer_id);
+                        Ok(PeerHealth::AnsweredNotServing)
+                    }
+                    RejectionReason::InvalidData
                     | RejectionReason::UnableToVerifyOrigin
                     | RejectionReason::InvalidCredentials
                     | RejectionReason::ProtocolMismatch
@@ -1287,9 +1360,12 @@ impl GossipClient {
         route: GossipRoutes,
         body: bytes::Bytes,
     ) -> GossipResult<GossipResponse<()>> {
+        // One admission for the whole push. A rate-limit retry is the same
+        // offer, and each check takes a half-open trial. Spending the window
+        // here leaves none for the source-peer body pull.
+        self.check_circuit_breaker(peer_id)?;
         let mut attempt = 0_u32;
         loop {
-            self.check_circuit_breaker(peer_id)?;
             let result = self.send_preserialized(address, route, body.clone()).await;
             if !push_response_rate_limited(&result) || attempt == PUSH_BACKPRESSURE_RETRIES {
                 return result;
@@ -1588,17 +1664,19 @@ impl GossipClient {
                 peer_list.set_is_online_by_peer_id(peer_id, true);
                 circuit_breaker.record_success(peer_id);
             }
-            // The peer answered, and the bytes were not stored. A rate limit
-            // is backpressure. A handshake request stays probeable. Gossip
-            // paused on purpose is not a dead peer: opening the breaker would
-            // hide the next push for the whole cooldown. None of these is a
-            // delivery, so the seen-cache still allows a later offer.
+            // The peer answered, so it is reachable. The half-open trial is
+            // a success. Not a delivery: no score change, no online change,
+            // and the seen-cache still allows a later offer. Leaving the
+            // trial unsettled would refuse the source-peer body pull for the
+            // whole cooldown.
             Ok(GossipResponse::Rejected(
                 RejectionReason::RateLimited
                 | RejectionReason::HandshakeRequired(_)
                 | RejectionReason::GossipDisabled,
             ))
-            | Err(GossipError::RateLimited) => {}
+            | Err(GossipError::RateLimited) => {
+                circuit_breaker.record_success(peer_id);
+            }
             Ok(GossipResponse::Rejected(_)) => {
                 peer_list.decrease_peer_score_by_peer_id(
                     peer_id,
@@ -1606,6 +1684,7 @@ impl GossipClient {
                 );
                 circuit_breaker.record_failure(peer_id);
             }
+            // The send never started. There is no dial to score.
             Err(GossipError::CircuitBreakerOpen(_)) => {}
             Err(err) => {
                 if let GossipError::Network(_message) = err {
@@ -1663,25 +1742,37 @@ impl GossipClient {
     /// Handle scoring for data retrieval operations based on response time and success
     fn handle_data_retrieval_score<T>(
         peer_list: &PeerList,
-        result: &GossipResult<T>,
+        result: &GossipResult<GossipResponse<T>>,
         peer_id: &IrysPeerId,
         response_time: Duration,
         circuit_breaker: &CircuitBreakerManager<IrysPeerId>,
     ) {
         match result {
-            Ok(_) => {
-                if response_time <= FAST_RESPONSE_THRESHOLD {
-                    peer_list.increase_peer_score_by_peer_id(
-                        peer_id,
-                        ScoreIncreaseReason::TimelyResponse,
-                    );
-                } else if response_time <= NORMAL_RESPONSE_THRESHOLD {
-                    peer_list.increase_peer_score_by_peer_id(peer_id, ScoreIncreaseReason::Online);
-                } else {
-                    peer_list
-                        .decrease_peer_score_by_peer_id(peer_id, ScoreDecreaseReason::SlowResponse);
-                }
+            Ok(GossipResponse::Accepted(_)) => {
+                // The peer served this pull, so the next sample ranks it
+                // with peers that gossip.
+                peer_list.clear_not_gossiping(peer_id);
+            }
+            // The peer answered, so the half-open trial is a success.
+            // Not a delivery: no score change and no online mark. The
+            // push path records the same success.
+            Ok(GossipResponse::Rejected(
+                RejectionReason::RateLimited
+                | RejectionReason::HandshakeRequired(_)
+                | RejectionReason::GossipDisabled,
+            )) => {
                 circuit_breaker.record_success(peer_id);
+                return;
+            }
+            // Same class as a rejected push: the peer will not serve
+            // this data. Do not raise the score. Record the failure.
+            Ok(GossipResponse::Rejected(_)) => {
+                peer_list.decrease_peer_score_by_peer_id(
+                    peer_id,
+                    ScoreDecreaseReason::NetworkError("gossip pull rejected".to_string()),
+                );
+                circuit_breaker.record_failure(peer_id);
+                return;
             }
             Err(err) => {
                 peer_list.decrease_peer_score_by_peer_id(
@@ -1692,8 +1783,19 @@ impl GossipClient {
                     )),
                 );
                 circuit_breaker.record_failure(peer_id);
+                return;
             }
+        };
+        if response_time <= FAST_RESPONSE_THRESHOLD {
+            peer_list.increase_peer_score_by_peer_id(peer_id, ScoreIncreaseReason::TimelyResponse);
+        } else if response_time <= NORMAL_RESPONSE_THRESHOLD {
+            peer_list.increase_peer_score_by_peer_id(peer_id, ScoreIncreaseReason::Online);
+        } else {
+            peer_list.decrease_peer_score_by_peer_id(peer_id, ScoreDecreaseReason::SlowResponse);
         }
+        // Only an accepted pull is a delivery.
+        peer_list.set_is_online_by_peer_id(peer_id, true);
+        circuit_breaker.record_success(peer_id);
     }
 
     /// Sends data to a peer and update their score in a detached task
@@ -1730,9 +1832,11 @@ impl GossipClient {
         peer: &PeerListItem,
         data: &GossipDataV2,
     ) -> GossipResult<GossipResponse<()>> {
+        // Same rule as the pre-serialized push: one admission, then every
+        // rate-limit retry rides on it.
+        self.check_circuit_breaker(peer_id)?;
         let mut attempt = 0_u32;
         loop {
-            self.check_circuit_breaker(peer_id)?;
             let result = self.send_data(peer, data).await;
             if !push_response_rate_limited(&result) || attempt == PUSH_BACKPRESSURE_RETRIES {
                 return result;
@@ -1880,6 +1984,7 @@ impl GossipClient {
                 peer,
                 peer_list,
                 Self::block_body,
+                true,
             )
             .await?;
 
@@ -1927,6 +2032,25 @@ impl GossipClient {
         .await
     }
 
+    /// The caller has already admitted `peer`. Score the transaction, and
+    /// do not take another breaker trial for it.
+    async fn pull_admitted_transaction_from_peer(
+        &self,
+        tx_id: H256,
+        peer: &(IrysPeerId, PeerListItem),
+        peer_list: &PeerList,
+    ) -> Result<(IrysPeerId, IrysTransactionResponse), PeerNetworkError> {
+        let data_request = GossipDataRequestV2::Transaction(tx_id);
+        self.pull_with_handshake_retry(
+            data_request.clone(),
+            peer,
+            peer_list,
+            Self::transaction,
+            || self.fetch_primitive_and_score(peer, data_request.clone(), peer_list),
+        )
+        .await
+    }
+
     /// Pull a block from a specific peer, updating its score accordingly.
     pub async fn pull_block_header_from_peer(
         &self,
@@ -1935,7 +2059,7 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<(IrysPeerId, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockHeader(block_hash);
-        self.pull_data_from_peer_with_retry(data_request, None, peer, peer_list, Self::block)
+        self.pull_data_from_peer_with_retry(data_request, None, peer, peer_list, Self::block, false)
             .await
     }
 
@@ -2065,6 +2189,7 @@ impl GossipClient {
         peer: &(IrysPeerId, PeerListItem),
         peer_list: &PeerList,
         map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
+        probe: bool,
     ) -> Result<(IrysPeerId, T), PeerNetworkError> {
         self.pull_with_handshake_retry(data_request.clone(), peer, peer_list, map_data, || {
             self.pull_data_and_update_the_score(
@@ -2072,6 +2197,7 @@ impl GossipClient {
                 data_request.clone(),
                 fallback_header,
                 peer_list,
+                probe,
             )
         })
         .await
@@ -2137,9 +2263,6 @@ impl GossipClient {
                                 return PeerPullOutcome::RetryAfterHandshake;
                             }
                         }
-                        RejectionReason::GossipDisabled => {
-                            peer_list.set_is_online_by_peer_id(&peer.0, false);
-                        }
                         RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
                             warn!(
                                 "Peer {:?} rejected {:?} with {:?}",
@@ -2148,6 +2271,7 @@ impl GossipClient {
                         }
                         RejectionReason::InvalidData
                         | RejectionReason::RateLimited
+                        | RejectionReason::GossipDisabled
                         | RejectionReason::UnableToVerifyOrigin
                         | RejectionReason::UnsupportedProtocolVersion(_)
                         | RejectionReason::UnsupportedFeature
@@ -2180,10 +2304,13 @@ impl GossipClient {
 
     /// Build the candidate peer set for a network pull.
     ///
-    /// Returns up to 5 shuffled peers (filtered to exclude peers whose
-    /// circuit-breaker is open), plus the count of peers excluded by the filter
-    /// (pre-truncate). Filter runs after shuffle so selection stays unbiased,
-    /// and before truncate so the surviving CB-closed set fills the 5 slots.
+    /// Returns up to 5 peers (filtered to exclude peers whose circuit-breaker
+    /// is open), plus the count of peers excluded by the filter (pre-truncate).
+    /// Shuffle first, then stable-partition so peers that gossip come before
+    /// peers in `not_gossiping`. The shuffle order inside each group stays.
+    /// `not_gossiping` peers remain eligible and fill slots that serving peers
+    /// did not take. The breaker filter runs after the partition and before
+    /// truncate, so a closed breaker does not consume one of the 5 slots.
     /// Trusted-only callers get the full trusted set; general callers get every
     /// active+online peer sorted by reputation — capping the pool *before* the
     /// CB filter would let a cluster of high-score CB-open peers starve the
@@ -2200,8 +2327,24 @@ impl GossipClient {
             peer_list.top_active_peers(None, None)
         };
         peers.shuffle(&mut rand::thread_rng());
+        // Stable partition. `not_gossiping` peers stay eligible, but a peer
+        // that still gossips fills a slot first. The shuffled order inside
+        // each group stays, so a rolling restart cannot shuffle the serving
+        // peer out of every sample.
+        let not_gossiping = peer_list.not_gossiping();
+        let mut demoted = Vec::new();
+        let mut gossiping = Vec::with_capacity(peers.len());
+        for peer in peers.drain(..) {
+            if not_gossiping.contains(&peer.0) {
+                demoted.push(peer);
+            } else {
+                gossiping.push(peer);
+            }
+        }
+        gossiping.append(&mut demoted);
+        peers = gossiping;
         let before = peers.len();
-        peers.retain(|(peer_id, _)| self.circuit_breaker.is_available(peer_id));
+        peers.retain(|(peer_id, _)| self.circuit_breaker.would_allow(peer_id));
         let cb_filtered = before - peers.len();
         peers.truncate(5);
         (peers, cb_filtered)
@@ -2262,7 +2405,9 @@ impl GossipClient {
                 let fh = fallback_header;
                 futs.push(async move {
                     let peer_id = peer.0;
-                    let res = gc.pull_data_and_update_the_score(&peer, dr, fh, pl).await;
+                    let res = gc
+                        .pull_data_and_update_the_score(&peer, dr, fh, pl, false)
+                        .await;
                     (peer_id, peer, res)
                 });
             }
@@ -2357,7 +2502,6 @@ impl GossipClient {
                                 handshake_retry_candidates.push(peer);
                             }
                             RejectionReason::GossipDisabled => {
-                                peer_list.set_is_online_by_peer_id(&peer.0, false);
                                 let synth = GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} has gossip disabled",
@@ -2477,7 +2621,9 @@ impl GossipClient {
                 let fh = fallback_header;
                 retry_futs.push(async move {
                     let peer_id = peer.0;
-                    let res = gc.pull_data_and_update_the_score(peer, dr, fh, pl).await;
+                    let res = gc
+                        .pull_data_and_update_the_score(peer, dr, fh, pl, false)
+                        .await;
                     (peer_id, res)
                 });
             }
@@ -2636,19 +2782,12 @@ impl GossipClient {
             match outcome {
                 Ok(health) => {
                     debug!("Peer {} health: {:?}", peer_id, health);
-                    // A peer awaiting a handshake answered, so it stays online
-                    // and enumerable — `check_health` has already asked for the
-                    // handshake that repairs it.
+                    // The peer answered. Stay online for every
+                    // AnsweredNotServing reason: gossip disabled, rate
+                    // limited, or a handshake `check_health` already started.
                     let is_online =
                         matches!(health, PeerHealth::Healthy | PeerHealth::AnsweredNotServing);
                     peer_list.set_is_online_by_peer_id(&peer_id, is_online);
-                }
-                Err(GossipClientError::CircuitBreakerOpen(peer_id)) => {
-                    debug!(
-                        ?peer_id,
-                        "Circuit breaker open — marking peer offline pending recovery"
-                    );
-                    peer_list.set_is_online_by_peer_id(&peer_id, false);
                 }
                 Err(err) => {
                     warn!(
@@ -2799,7 +2938,6 @@ impl GossipClient {
                                     Some(GossipError::from(PeerNetworkError::FailedToRequestData(
                                         format!("{}: Peer {:?} has gossip disabled", url, peer.0),
                                     )));
-                                peer_list.set_is_online_by_peer_id(&peer.0, false);
                                 round_failures_were_handshake = false;
                             }
                             RejectionReason::InvalidData => {
@@ -3538,7 +3676,7 @@ mod tests {
 
                 GossipClient::handle_data_retrieval_score(
                     &peer_list,
-                    &Ok(()),
+                    &Ok(GossipResponse::Accepted(())),
                     &peer_id,
                     response_time,
                     &fixture.client.circuit_breaker,
@@ -3555,6 +3693,29 @@ mod tests {
                     );
                 }
             }
+        }
+
+        #[tokio::test]
+        async fn accepted_pull_clears_not_gossiping() {
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let fixture = TestFixture::new();
+            let (peer_id, _, peer) = create_test_peer(1);
+            peer_list.add_or_update_peer(peer, true);
+            peer_list.mark_not_gossiping(&peer_id);
+            assert!(peer_list.is_not_gossiping(&peer_id));
+
+            GossipClient::handle_data_retrieval_score(
+                &peer_list,
+                &Ok(GossipResponse::Accepted(())),
+                &peer_id,
+                Duration::from_millis(100),
+                &fixture.client.circuit_breaker,
+            );
+
+            assert!(
+                !peer_list.is_not_gossiping(&peer_id),
+                "an accepted pull clears not_gossiping"
+            );
         }
 
         #[tokio::test]
@@ -3576,7 +3737,7 @@ mod tests {
 
                 GossipClient::handle_data_retrieval_score(
                     &peer_list,
-                    &Ok(()),
+                    &Ok(GossipResponse::Accepted(())),
                     &peer_id,
                     response_time,
                     &fixture.client.circuit_breaker,
@@ -3649,7 +3810,7 @@ mod tests {
                     Ok(()) => {
                         GossipClient::handle_data_retrieval_score(
                             &peer_list,
-                            &Ok(()),
+                            &Ok(GossipResponse::Accepted(())),
                             &peer_id,
                             response_time,
                             &fixture.client.circuit_breaker,
@@ -3673,6 +3834,156 @@ mod tests {
                     response_time, expected_score
                 );
             }
+        }
+
+        fn production_client() -> GossipClient {
+            GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(1),
+                IrysAddress::from([1_u8; 20]),
+                IrysPeerId::from([1_u8; 20]),
+                CircuitBreakerConfig::p2p_defaults(),
+                tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            )
+        }
+
+        /// Five failures is the production threshold. The breaker is open and
+        /// the cooldown has not elapsed.
+        fn open_breaker(client: &GossipClient, peer_id: &IrysPeerId) {
+            for _ in 0..5 {
+                client.circuit_breaker.record_failure(peer_id);
+            }
+            assert!(
+                !client.circuit_breaker.would_allow(peer_id),
+                "precondition: breaker is open"
+            );
+        }
+
+        fn offline_peer(id: u8) -> (PeerList, IrysPeerId, u16) {
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let (peer_id, _, mut peer) = create_test_peer(id);
+            peer.is_online = false;
+            peer_list.add_or_update_peer(peer, true);
+            let score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
+            (peer_list, peer_id, score)
+        }
+
+        fn score_and_online(peer_list: &PeerList, peer_id: &IrysPeerId) -> (u16, bool) {
+            let peer = peer_list.get_peer(peer_id).unwrap();
+            (peer.reputation_score.get(), peer.is_online)
+        }
+
+        /// An accepted pull scores by response time, marks the peer online,
+        /// and closes the breaker.
+        #[tokio::test]
+        async fn accepted_pull_scores_marks_online_and_closes_the_breaker() {
+            let client = production_client();
+            let (peer_list, peer_id, initial_score) = offline_peer(1);
+            open_breaker(&client, &peer_id);
+
+            GossipClient::handle_data_retrieval_score(
+                &peer_list,
+                &Ok(GossipResponse::Accepted(())),
+                &peer_id,
+                Duration::from_millis(100),
+                &client.circuit_breaker,
+            );
+
+            let (score, online) = score_and_online(&peer_list, &peer_id);
+            assert!(score > initial_score, "a fast accept must raise the score");
+            assert!(online, "an accepted pull marks the peer online");
+            assert!(
+                client.circuit_breaker.would_allow(&peer_id),
+                "an accepted pull closes the breaker"
+            );
+        }
+
+        /// The peer answered. Record success so the half-open trial is not
+        /// wasted. Do not change the score and do not mark the peer online.
+        #[tokio::test]
+        async fn answered_pull_rejections_close_the_breaker_without_score_or_online() {
+            let reasons = [
+                RejectionReason::RateLimited,
+                RejectionReason::HandshakeRequired(None),
+                RejectionReason::GossipDisabled,
+            ];
+            for (index, reason) in reasons.into_iter().enumerate() {
+                let client = production_client();
+                let (peer_list, peer_id, initial_score) = offline_peer(index as u8 + 2);
+                open_breaker(&client, &peer_id);
+
+                GossipClient::handle_data_retrieval_score::<()>(
+                    &peer_list,
+                    &Ok(GossipResponse::Rejected(reason)),
+                    &peer_id,
+                    Duration::from_millis(100),
+                    &client.circuit_breaker,
+                );
+
+                let (score, online) = score_and_online(&peer_list, &peer_id);
+                assert_eq!(score, initial_score, "{reason:?} must not change the score");
+                assert!(!online, "{reason:?} must not mark the peer online");
+                assert!(
+                    client.circuit_breaker.would_allow(&peer_id),
+                    "{reason:?} is an answer and must close the breaker"
+                );
+            }
+        }
+
+        /// A rejection the push path treats as a failure records a failure
+        /// and does not raise the score.
+        #[tokio::test]
+        async fn other_pull_rejection_records_a_failure_and_does_not_raise_the_score() {
+            let client = production_client();
+            let (peer_list, peer_id, initial_score) = offline_peer(8);
+            open_breaker(&client, &peer_id);
+
+            GossipClient::handle_data_retrieval_score::<()>(
+                &peer_list,
+                &Ok(GossipResponse::Rejected(RejectionReason::ChainIdMismatch)),
+                &peer_id,
+                Duration::from_millis(100),
+                &client.circuit_breaker,
+            );
+
+            let (score, online) = score_and_online(&peer_list, &peer_id);
+            assert!(
+                score < initial_score,
+                "a hard pull rejection must not raise the score"
+            );
+            assert!(
+                !online,
+                "a hard pull rejection must not mark the peer online"
+            );
+            assert!(
+                !client.circuit_breaker.would_allow(&peer_id),
+                "a hard pull rejection records a failure"
+            );
+        }
+
+        /// A transport error records a failure, lowers the score, and does
+        /// not mark the peer online.
+        #[tokio::test]
+        async fn pull_error_records_a_failure_and_stays_offline() {
+            let client = production_client();
+            let (peer_list, peer_id, initial_score) = offline_peer(9);
+            open_breaker(&client, &peer_id);
+
+            GossipClient::handle_data_retrieval_score::<()>(
+                &peer_list,
+                &Err(GossipError::Network("timeout".to_string())),
+                &peer_id,
+                Duration::from_millis(100),
+                &client.circuit_breaker,
+            );
+
+            let (score, online) = score_and_online(&peer_list, &peer_id);
+            assert!(score < initial_score, "a pull error must lower the score");
+            assert!(!online, "a pull error must not mark the peer online");
+            assert!(
+                !client.circuit_breaker.would_allow(&peer_id),
+                "a pull error records a failure"
+            );
         }
     }
 
@@ -3762,6 +4073,39 @@ mod tests {
             );
         }
 
+        /// Open the breaker, then spend one trial so the peer is half-open
+        /// with trials still left. A soft answer must close this state.
+        fn enter_half_open(client: &GossipClient, peer_id: &IrysPeerId) {
+            for _ in 0..5 {
+                client.circuit_breaker.record_failure(peer_id);
+            }
+            assert!(
+                !client.circuit_breaker.would_allow(peer_id),
+                "precondition: breaker is open and the cooldown has not elapsed"
+            );
+            assert!(
+                client.circuit_breaker.begin_probe(peer_id),
+                "precondition: breaker is half-open"
+            );
+            assert_eq!(client.circuit_breaker.metrics().half_open_count, 1);
+        }
+
+        fn assert_answer_closed_the_breaker(client: &GossipClient, peer_id: &IrysPeerId) {
+            let metrics = client.circuit_breaker.metrics();
+            assert_eq!(
+                metrics.open_count, 0,
+                "a peer that answers is reachable, so the breaker must not stay open"
+            );
+            assert_eq!(
+                metrics.half_open_count, 0,
+                "a peer that answers is reachable, so a half-open breaker closes"
+            );
+            assert!(
+                client.circuit_breaker.is_available(peer_id),
+                "a peer that answers stays reachable"
+            );
+        }
+
         #[tokio::test]
         async fn accepted_push_raises_score_and_counts_as_delivery() {
             let client = production_client();
@@ -3792,6 +4136,8 @@ mod tests {
                 let client = production_client();
                 let (peer_list, peer_id, initial) = scored_peer();
                 let cache = GossipCache::new();
+                peer_list.set_is_online_by_peer_id(&peer_id, false);
+                enter_half_open(&client, &peer_id);
 
                 for _ in 0..5 {
                     finish_push(&client, &peer_list, &peer_id, &result, &cache);
@@ -3803,10 +4149,14 @@ mod tests {
                     .reputation_score
                     .get();
                 assert_eq!(updated, initial);
+                assert!(
+                    !peer_list.get_peer(&peer_id).expect("peer").is_online,
+                    "a rate limit is not a delivery and must not mark the peer online"
+                );
                 assert!(!push_response_accepted(&result));
                 assert!(push_response_rate_limited(&result));
                 assert!(!peer_has_data(&cache, peer_id));
-                assert!(client.circuit_breaker.is_available(&peer_id));
+                assert_answer_closed_the_breaker(&client, &peer_id);
             }
         }
 
@@ -3818,6 +4168,8 @@ mod tests {
             let result = Ok(GossipResponse::<()>::Rejected(
                 RejectionReason::GossipDisabled,
             ));
+            peer_list.set_is_online_by_peer_id(&peer_id, false);
+            enter_half_open(&client, &peer_id);
 
             for _ in 0..5 {
                 finish_push(&client, &peer_list, &peer_id, &result, &cache);
@@ -3829,9 +4181,38 @@ mod tests {
                 .reputation_score
                 .get();
             assert_eq!(updated, initial);
+            assert!(
+                !peer_list.get_peer(&peer_id).expect("peer").is_online,
+                "gossip paused on purpose must not mark the peer online"
+            );
             assert!(!push_response_accepted(&result));
             assert!(!peer_has_data(&cache, peer_id));
-            assert!(client.circuit_breaker.is_available(&peer_id));
+            assert_answer_closed_the_breaker(&client, &peer_id);
+        }
+
+        #[tokio::test]
+        async fn handshake_required_push_closes_half_open_breaker_without_score() {
+            let client = production_client();
+            let (peer_list, peer_id, initial) = scored_peer();
+            let cache = GossipCache::new();
+            let result = Ok(GossipResponse::<()>::Rejected(
+                RejectionReason::HandshakeRequired(None),
+            ));
+            peer_list.set_is_online_by_peer_id(&peer_id, false);
+            enter_half_open(&client, &peer_id);
+
+            finish_push(&client, &peer_list, &peer_id, &result, &cache);
+
+            let updated = peer_list
+                .get_peer(&peer_id)
+                .expect("peer")
+                .reputation_score
+                .get();
+            assert_eq!(updated, initial);
+            assert!(!peer_list.get_peer(&peer_id).expect("peer").is_online);
+            assert!(!push_response_accepted(&result));
+            assert!(!peer_has_data(&cache, peer_id));
+            assert_answer_closed_the_breaker(&client, &peer_id);
         }
 
         #[tokio::test]
@@ -3854,6 +4235,280 @@ mod tests {
             assert!(!push_response_accepted(&result));
             assert!(!peer_has_data(&cache, peer_id));
             assert!(!client.circuit_breaker.is_available(&peer_id));
+        }
+
+        /// Longer than the rate-limit backoff, so a push that takes the last
+        /// half-open trial cannot refill that window before the test checks.
+        const PUSH_TRIAL_COOLDOWN: Duration = Duration::from_secs(3);
+
+        /// Ordinary admission waits out the open cooldown. `begin_probe` does not.
+        async fn wait_out_open_cooldown() {
+            tokio::time::sleep(PUSH_TRIAL_COOLDOWN + Duration::from_millis(500)).await;
+        }
+
+        /// Two recovery trials. `begin_probe` spends the first after the open
+        /// cooldown, so the push has one left.
+        fn client_with_one_push_trial_left() -> GossipClient {
+            use irys_utils::circuit_breaker::{FailureThreshold, RecoveryAttempts};
+            use std::num::NonZeroU32;
+
+            let mut config = CircuitBreakerConfig::p2p_defaults();
+            config.failure_threshold = FailureThreshold::new(NonZeroU32::new(1).expect("1"));
+            config.recovery_attempts = RecoveryAttempts::new(NonZeroU32::new(2).expect("2"));
+            config.cooldown_duration = PUSH_TRIAL_COOLDOWN;
+            GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(2),
+                IrysAddress::from([3_u8; 20]),
+                IrysPeerId::from([4_u8; 20]),
+                config,
+                tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            )
+        }
+
+        /// Answers every push with `RateLimited` and counts the requests.
+        struct RateLimitedPeer {
+            addr: SocketAddr,
+            hits: Arc<AtomicUsize>,
+            stop: Arc<std::sync::atomic::AtomicBool>,
+            handle: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl RateLimitedPeer {
+            fn spawn() -> Self {
+                use std::io::Write as _;
+
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+                let addr = listener.local_addr().expect("addr");
+                let hits = Arc::new(AtomicUsize::new(0));
+                let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let hits_thread = Arc::clone(&hits);
+                let stop_thread = Arc::clone(&stop);
+                let body = serde_json::to_string(&GossipResponse::<()>::Rejected(
+                    RejectionReason::RateLimited,
+                ))
+                .expect("rate-limit body");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let handle = std::thread::spawn(move || {
+                    while !stop_thread.load(Ordering::SeqCst) {
+                        let Ok((mut stream, _)) = listener.accept() else {
+                            break;
+                        };
+                        if stop_thread.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .expect("read timeout");
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(2)))
+                            .expect("write timeout");
+                        if read_http_request(&mut stream).is_err() {
+                            continue;
+                        }
+                        hits_thread.fetch_add(1, Ordering::SeqCst);
+                        if stream.write_all(response.as_bytes()).is_err() {
+                            continue;
+                        }
+                        let _ = stream.flush();
+                    }
+                });
+                std::thread::sleep(Duration::from_millis(50));
+                Self {
+                    addr,
+                    hits,
+                    stop,
+                    handle: Some(handle),
+                }
+            }
+        }
+
+        impl Drop for RateLimitedPeer {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::SeqCst);
+                let _ = std::net::TcpStream::connect(self.addr);
+                if let Some(handle) = self.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
+
+        fn content_length_of(headers: &str) -> usize {
+            for line in headers.split("\r\n") {
+                let Some((name, value)) = line.split_once(':') else {
+                    continue;
+                };
+                if name.eq_ignore_ascii_case("content-length") {
+                    return value.trim().parse().unwrap_or(0);
+                }
+            }
+            0
+        }
+
+        fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<()> {
+            use std::io::Read as _;
+
+            let mut buf = Vec::with_capacity(1024);
+            let mut tmp = [0_u8; 1024];
+            loop {
+                let n = stream.read(&mut tmp)?;
+                if n == 0 {
+                    return Ok(());
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    if buf.len() > 1024 * 1024 {
+                        return Ok(());
+                    }
+                    continue;
+                };
+                let headers = std::str::from_utf8(&buf[..header_end]).unwrap_or("");
+                let content_length = content_length_of(headers);
+                if buf.len() - (header_end + 4) >= content_length {
+                    return Ok(());
+                }
+            }
+        }
+
+        fn peer_aimed_at(id: u8, addr: SocketAddr) -> (PeerList, IrysPeerId, PeerListItem, u16) {
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let (peer_id, _, mut peer) = create_test_peer(id);
+            peer.address.gossip = addr;
+            peer.address.api = addr;
+            peer.is_online = false;
+            peer_list.add_or_update_peer(peer.clone(), true);
+            let score = peer_list
+                .get_peer(&peer_id)
+                .expect("peer")
+                .reputation_score
+                .get();
+            (peer_list, peer_id, peer, score)
+        }
+
+        /// The push has one half-open trial. Every rate-limit retry must use
+        /// that trial, and the answer must close the breaker.
+        fn assert_rate_limited_retries_take_one_trial(
+            client: &GossipClient,
+            peer_list: &PeerList,
+            peer_id: &IrysPeerId,
+            initial_score: u16,
+            hits: &AtomicUsize,
+            result: &GossipResult<GossipResponse<()>>,
+            cache: &GossipCache,
+        ) {
+            let expected_pushes = usize::try_from(PUSH_BACKPRESSURE_RETRIES + 1).expect("fits");
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                expected_pushes,
+                "one admission must cover every rate-limit retry, got {result:?}"
+            );
+            assert!(
+                matches!(
+                    result,
+                    Ok(GossipResponse::Rejected(RejectionReason::RateLimited))
+                ),
+                "the push finishes on the rate limit, not on an open breaker: {result:?}"
+            );
+            assert!(
+                !client.circuit_breaker.begin_probe(peer_id),
+                "the push took the last half-open trial"
+            );
+            assert!(
+                !client.circuit_breaker.would_allow(peer_id),
+                "the trial is taken and not yet settled"
+            );
+            assert_eq!(client.circuit_breaker.metrics().half_open_count, 1);
+
+            finish_push(client, peer_list, peer_id, result, cache);
+
+            let peer = peer_list.get_peer(peer_id).expect("peer");
+            assert_eq!(peer.reputation_score.get(), initial_score);
+            assert!(
+                !peer.is_online,
+                "a rate limit is not a delivery and must not mark the peer online"
+            );
+            assert!(!peer_has_data(cache, *peer_id));
+            let metrics = client.circuit_breaker.metrics();
+            assert_eq!(metrics.open_count, 0);
+            assert_eq!(
+                metrics.half_open_count, 0,
+                "a rate-limited answer closes the half-open breaker"
+            );
+            assert!(
+                client.circuit_breaker.begin_probe(peer_id),
+                "the source-peer body pull is admitted once the answer closes the breaker"
+            );
+        }
+
+        #[tokio::test]
+        async fn preserialized_push_rate_limited_during_half_open_takes_one_trial() {
+            let server = RateLimitedPeer::spawn();
+            let client = client_with_one_push_trial_left();
+            let (peer_list, peer_id, _, initial_score) = peer_aimed_at(4, server.addr);
+            let cache = GossipCache::new();
+            client.circuit_breaker.record_failure(&peer_id);
+            wait_out_open_cooldown().await;
+            assert!(
+                client.circuit_breaker.begin_probe(&peer_id),
+                "precondition: half-open, one trial spent, one left"
+            );
+            assert!(
+                client.circuit_breaker.would_allow(&peer_id),
+                "precondition: one half-open trial remains"
+            );
+
+            let result = client
+                .push_preserialized_with_backoff(
+                    &peer_id,
+                    &server.addr,
+                    GossipRoutes::Chunk,
+                    bytes::Bytes::from_static(b"{}"),
+                )
+                .await;
+
+            assert_rate_limited_retries_take_one_trial(
+                &client,
+                &peer_list,
+                &peer_id,
+                initial_score,
+                &server.hits,
+                &result,
+                &cache,
+            );
+        }
+
+        #[tokio::test]
+        async fn data_push_rate_limited_during_half_open_takes_one_trial() {
+            let server = RateLimitedPeer::spawn();
+            let client = client_with_one_push_trial_left();
+            let (peer_list, peer_id, peer, initial_score) = peer_aimed_at(5, server.addr);
+            let cache = GossipCache::new();
+            client.circuit_breaker.record_failure(&peer_id);
+            wait_out_open_cooldown().await;
+            assert!(client.circuit_breaker.begin_probe(&peer_id));
+            assert!(client.circuit_breaker.would_allow(&peer_id));
+
+            let data = GossipDataV2::BlockBody(Arc::new(BlockBody {
+                block_hash: H256::zero(),
+                data_transactions: Vec::new(),
+                commitment_transactions: Vec::new(),
+            }));
+            let result = client.push_data_with_backoff(&peer_id, &peer, &data).await;
+
+            assert_rate_limited_retries_take_one_trial(
+                &client,
+                &peer_list,
+                &peer_id,
+                initial_score,
+                &server.hits,
+                &result,
+                &cache,
+            );
         }
     }
 
@@ -3957,7 +4612,7 @@ mod tests {
                                 fixture.client.circuit_breaker.record_failure(&peer_id);
                             }
                             prop_assert!(
-                                !fixture.client.circuit_breaker.is_available(&peer_id),
+                                !fixture.client.circuit_breaker.would_allow(&peer_id),
                                 "CB should be open for peer {peer_id}"
                             );
                             expected_filtered_count += 1;
@@ -3975,7 +4630,7 @@ mod tests {
 
                     for (peer_id, _) in &candidates {
                         prop_assert!(
-                            fixture.client.circuit_breaker.is_available(peer_id),
+                            fixture.client.circuit_breaker.would_allow(peer_id),
                             "candidate {peer_id} should not have CB open"
                         );
                     }
@@ -3992,6 +4647,185 @@ mod tests {
                     );
                     Ok(())
                 })?;
+            }
+        }
+
+        /// Selection is a filter. A half-open window with one trial left must
+        /// still have that trial after repeated selection: `would_allow` does
+        /// not move Open to HalfOpen, and a later `is_available` still grants
+        /// the trial.
+        #[tokio::test]
+        async fn select_candidates_for_pull_does_not_consume_the_recovery_trial() {
+            use irys_utils::circuit_breaker::{FailureThreshold, RecoveryAttempts};
+            use std::num::NonZeroU32;
+
+            let mut breaker_config = CircuitBreakerConfig::p2p_defaults();
+            breaker_config.failure_threshold = FailureThreshold::new(NonZeroU32::new(1).unwrap());
+            breaker_config.recovery_attempts = RecoveryAttempts::new(NonZeroU32::new(1).unwrap());
+            // Elapsed immediately, so the open breaker is selectable. A zero
+            // cooldown also refills a consumed trial at once, so the lock is
+            // the state: selection must leave the breaker Open.
+            breaker_config.cooldown_duration = Duration::ZERO;
+            let client = GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(1),
+                IrysAddress::from([1_u8; 20]),
+                IrysPeerId::from([1_u8; 20]),
+                breaker_config,
+                tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            );
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let (peer_id, peer) = make_test_peer(7);
+            peer_list.add_or_update_peer(peer, true);
+
+            client.circuit_breaker.record_failure(&peer_id);
+            let before = client.circuit_breaker.metrics();
+            assert_eq!(before.open_count, 1);
+            assert_eq!(before.half_open_count, 0);
+            assert!(
+                client.circuit_breaker.would_allow(&peer_id),
+                "cooldown has elapsed, so the peer is selectable"
+            );
+
+            for _ in 0..5 {
+                let (candidates, filtered) = client.select_candidates_for_pull(&peer_list, false);
+                assert_eq!(filtered, 0, "a selectable peer must not be filtered");
+                assert!(
+                    candidates.iter().any(|(id, _)| id == &peer_id),
+                    "the peer must stay a candidate"
+                );
+            }
+
+            let after = client.circuit_breaker.metrics();
+            assert_eq!(
+                after.open_count, 1,
+                "selection must not move the breaker to half-open"
+            );
+            assert_eq!(after.half_open_count, 0);
+            assert!(
+                client.circuit_breaker.is_available(&peer_id),
+                "the recovery trial is still available after selection"
+            );
+            let granted = client.circuit_breaker.metrics();
+            assert_eq!(granted.half_open_count, 1);
+            assert_eq!(granted.open_count, 0);
+        }
+
+        const SELECTION_TRIALS: usize = 64;
+
+        /// Six online peers, five of them `not_gossiping`. A shuffle that
+        /// keeps five can drop the one serving peer. Ranking must not.
+        #[tokio::test]
+        async fn serving_peer_is_selected_ahead_of_not_gossiping_peers() {
+            let fixture = TestFixture::new();
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let mut peer_ids = Vec::with_capacity(6);
+            for id in 1..=6_u8 {
+                let (peer_id, peer) = make_test_peer(id);
+                peer_list.add_or_update_peer(peer, true);
+                peer_ids.push(peer_id);
+            }
+            let serving = peer_ids[0];
+            for peer_id in peer_ids.iter().skip(1) {
+                peer_list.mark_not_gossiping(peer_id);
+            }
+
+            for _ in 0..SELECTION_TRIALS {
+                let (candidates, filtered) =
+                    fixture.client.select_candidates_for_pull(&peer_list, false);
+                assert_eq!(filtered, 0);
+                assert_eq!(candidates.len(), 5, "not_gossiping peers still fill slots");
+                assert!(
+                    candidates.iter().any(|(id, _)| *id == serving),
+                    "the serving peer must be in every sample of 5"
+                );
+                let first_demoted = candidates
+                    .iter()
+                    .position(|(id, _)| peer_list.is_not_gossiping(id));
+                if let Some(demoted_at) = first_demoted {
+                    assert!(
+                        candidates[..demoted_at]
+                            .iter()
+                            .all(|(id, _)| !peer_list.is_not_gossiping(id)),
+                        "peers that gossip come before not_gossiping peers"
+                    );
+                }
+            }
+        }
+
+        /// GossipDisabled marks the peer. A later Healthy reply clears it,
+        /// so the peer is ranked with peers that gossip.
+        #[tokio::test]
+        async fn healthy_reply_clears_not_gossiping_and_restores_pull_rank() {
+            let fixture = TestFixture::new();
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let mut peer_ids = Vec::with_capacity(6);
+            for id in 1..=6_u8 {
+                let (peer_id, peer) = make_test_peer(id);
+                peer_list.add_or_update_peer(peer, true);
+                peer_ids.push(peer_id);
+            }
+            let serving = peer_ids[0];
+            let recovered = peer_ids[1];
+            for peer_id in peer_ids.iter().skip(2) {
+                peer_list.mark_not_gossiping(peer_id);
+            }
+
+            let disabled = serde_json::to_string(&GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ))
+            .expect("serialize GossipDisabled");
+            let disabled_server =
+                MockHttpServer::new_with_response(200, &disabled, "application/json");
+            let health = fixture
+                .client
+                .check_health(
+                    &recovered,
+                    create_peer_address("127.0.0.1", disabled_server.port()),
+                    ProtocolVersion::V1,
+                    &peer_list,
+                )
+                .await
+                .expect("GossipDisabled is a reply");
+            assert_eq!(health, PeerHealth::AnsweredNotServing);
+            assert!(
+                peer_list.is_not_gossiping(&recovered),
+                "a GossipDisabled health reply marks the peer not_gossiping"
+            );
+
+            let healthy_body =
+                serde_json::to_string(&GossipResponse::Accepted(true)).expect("serialize Healthy");
+            let healthy_server =
+                MockHttpServer::new_with_response(200, &healthy_body, "application/json");
+            let health = fixture
+                .client
+                .check_health(
+                    &recovered,
+                    create_peer_address("127.0.0.1", healthy_server.port()),
+                    ProtocolVersion::V1,
+                    &peer_list,
+                )
+                .await
+                .expect("Healthy is a reply");
+            assert_eq!(health, PeerHealth::Healthy);
+            assert!(
+                !peer_list.is_not_gossiping(&recovered),
+                "Healthy clears not_gossiping"
+            );
+
+            for _ in 0..SELECTION_TRIALS {
+                let (candidates, filtered) =
+                    fixture.client.select_candidates_for_pull(&peer_list, false);
+                assert_eq!(filtered, 0);
+                assert_eq!(candidates.len(), 5);
+                assert!(
+                    candidates.iter().any(|(id, _)| *id == serving),
+                    "the peer that already gossips stays selected"
+                );
+                assert!(
+                    candidates.iter().any(|(id, _)| *id == recovered),
+                    "a peer that answered Healthy is no longer deprioritised"
+                );
             }
         }
 
@@ -4147,10 +4981,10 @@ mod tests {
                 match health {
                     Ok(health) => assert_eq!(health, expected),
                     Err(err) => {
-                        // The probe never reached this server — an open breaker
-                        // short-circuits `check_health`. Connect so the mock's
-                        // accept thread can finish, or its `Drop` joins forever
-                        // and the failure surfaces as a hang instead.
+                        // The probe returned before this server answered.
+                        // Connect so the mock's accept thread can finish, or
+                        // its `Drop` joins forever and the failure surfaces
+                        // as a hang instead.
                         let _ = std::net::TcpStream::connect(("127.0.0.1", port));
                         panic!("probe did not reach the peer: {err:?}");
                     }
@@ -4169,10 +5003,8 @@ mod tests {
             )
         }
 
-        /// A peer asking for a handshake is answering us, and the handshake the
-        /// probe requests is what repairs it. Tripping the breaker on that reply
-        /// would strand the peer: an open breaker short-circuits `check_health`
-        /// before it can ask for the handshake, so the condition never clears.
+        /// A handshake request is an answer, not a fault. Recording a failure
+        /// would open the breaker and block later pulls and pushes.
         #[tokio::test]
         async fn repeated_handshake_required_does_not_open_the_circuit_breaker() {
             let client = client_with_production_breaker();
@@ -4244,39 +5076,276 @@ mod tests {
             );
         }
 
+        /// The health GET is the recovery probe. An open breaker must not
+        /// stop it: nothing else will close the breaker while pulls stay refused.
         #[tokio::test]
-        async fn test_health_check_respects_circuit_breaker() {
-            let fixture = TestFixture::new();
+        async fn open_breaker_health_check_still_reaches_the_server() {
+            let client = client_with_production_breaker();
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
             let peer_id = IrysPeerId::from(IrysAddress::from([40_u8; 20]));
-            let peer_address = create_peer_address("127.0.0.1", 8080);
 
-            // Open the circuit by recording failures (100 to match testing config threshold)
-            for _ in 0..100 {
-                fixture.client.circuit_breaker.record_failure(&peer_id);
+            for _ in 0..5 {
+                client.circuit_breaker.record_failure(&peer_id);
             }
-
-            // Verify circuit is open
             assert!(
-                !fixture.client.circuit_breaker.is_available(&peer_id),
-                "Circuit breaker should be open after failures"
+                !client.circuit_breaker.would_allow(&peer_id),
+                "breaker is open and the cooldown has not elapsed"
             );
 
-            // Health check should return error without making a request
-            let result = fixture
-                .client
-                .check_health(&peer_id, peer_address, ProtocolVersion::V1, &peer_list)
+            let body = serde_json::to_string(&GossipResponse::Accepted(true)).unwrap();
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let health = client
+                .check_health(
+                    &peer_id,
+                    create_peer_address("127.0.0.1", server.port()),
+                    ProtocolVersion::V1,
+                    &peer_list,
+                )
+                .await;
+
+            assert_eq!(
+                health.expect("the health GET must run while the breaker is open"),
+                PeerHealth::Healthy
+            );
+            let metrics = client.circuit_breaker.metrics();
+            assert_eq!(metrics.open_count, 0);
+            assert_eq!(metrics.half_open_count, 0);
+        }
+
+        /// GossipDisabled means the peer will not gossip to the rest of the
+        /// network. The peer answered, so the breaker closes and the verdict
+        /// is AnsweredNotServing. The peer is not offline, and its score is
+        /// left unchanged.
+        #[tokio::test]
+        async fn gossip_disabled_health_reply_closes_the_breaker() {
+            let client = client_with_production_breaker();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let peer_id = IrysPeerId::from(IrysAddress::from([41_u8; 20]));
+
+            for _ in 0..5 {
+                client.circuit_breaker.record_failure(&peer_id);
+            }
+            assert!(!client.circuit_breaker.would_allow(&peer_id));
+
+            let body = serde_json::to_string(&GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ))
+            .unwrap();
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let health = client
+                .check_health(
+                    &peer_id,
+                    create_peer_address("127.0.0.1", server.port()),
+                    ProtocolVersion::V1,
+                    &peer_list,
+                )
+                .await;
+
+            assert_eq!(
+                health.expect("GossipDisabled is a reply, not a transport error"),
+                PeerHealth::AnsweredNotServing
+            );
+            let metrics = client.circuit_breaker.metrics();
+            assert_eq!(metrics.open_count, 0, "success must close the open breaker");
+            assert_eq!(metrics.half_open_count, 0);
+        }
+
+        /// RateLimited and HandshakeRequired are answers. An open breaker
+        /// closes, the verdict stays AnsweredNotServing, and a handshake
+        /// requirement still asks for a handshake.
+        #[tokio::test]
+        async fn answered_not_serving_health_replies_close_an_open_breaker() {
+            let reasons = [
+                RejectionReason::RateLimited,
+                RejectionReason::HandshakeRequired(None),
+            ];
+            for (index, reason) in reasons.into_iter().enumerate() {
+                let client = client_with_production_breaker();
+                let peer_list = PeerList::test_mock().expect("to create peer list mock");
+                let peer_id =
+                    IrysPeerId::from(IrysAddress::from([50 + u8::try_from(index).unwrap(); 20]));
+
+                for _ in 0..5 {
+                    client.circuit_breaker.record_failure(&peer_id);
+                }
+                assert!(
+                    !client.circuit_breaker.would_allow(&peer_id),
+                    "precondition: breaker is open"
+                );
+
+                let body = serde_json::to_string(&GossipResponse::<()>::Rejected(reason))
+                    .expect("serialize the rejection");
+                let server = MockHttpServer::new_with_response(200, &body, "application/json");
+                let health = client
+                    .check_health(
+                        &peer_id,
+                        create_peer_address("127.0.0.1", server.port()),
+                        ProtocolVersion::V1,
+                        &peer_list,
+                    )
+                    .await;
+
+                assert_eq!(
+                    health.expect("the peer answered"),
+                    PeerHealth::AnsweredNotServing,
+                    "{reason:?} stays AnsweredNotServing"
+                );
+                assert!(
+                    client.circuit_breaker.would_allow(&peer_id),
+                    "{reason:?} is an answer and must close the breaker"
+                );
+                assert_eq!(client.circuit_breaker.metrics().open_count, 0);
+                assert!(
+                    !peer_list.is_not_gossiping(&peer_id),
+                    "{reason:?} is not GossipDisabled and must not mark not_gossiping"
+                );
+            }
+        }
+
+        /// A chain-id mismatch is still a failure. Four recorded failures leave
+        /// the breaker closed; this reply is the one that opens it.
+        #[tokio::test]
+        async fn chain_id_mismatch_health_reply_records_a_failure() {
+            let client = client_with_production_breaker();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let peer_id = IrysPeerId::from(IrysAddress::from([42_u8; 20]));
+
+            for _ in 0..4 {
+                client.circuit_breaker.record_failure(&peer_id);
+            }
+            assert!(
+                client.circuit_breaker.would_allow(&peer_id),
+                "four failures stay under the production threshold"
+            );
+
+            let body = serde_json::to_string(&GossipResponse::<()>::Rejected(
+                RejectionReason::ChainIdMismatch,
+            ))
+            .unwrap();
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let health = client
+                .check_health(
+                    &peer_id,
+                    create_peer_address("127.0.0.1", server.port()),
+                    ProtocolVersion::V1,
+                    &peer_list,
+                )
+                .await;
+
+            assert_eq!(health.expect("the peer answered"), PeerHealth::Unhealthy);
+            assert!(
+                !client.circuit_breaker.would_allow(&peer_id),
+                "ChainIdMismatch must record a failure and open the breaker"
+            );
+            assert_eq!(client.circuit_breaker.metrics().open_count, 1);
+        }
+
+        /// The outer V1 body pull already took the only half-open trial.
+        /// The inner transaction pulls must still run, and their outcome
+        /// must still score the peer.
+        #[tokio::test]
+        async fn v1_body_transaction_pulls_do_not_take_another_breaker_trial() {
+            use crate::tests::util::FakeGossipServer;
+            use irys_testing_utils::IrysBlockHeaderTestExt as _;
+            use irys_types::irys::IrysSigner;
+            use irys_types::{
+                ConsensusConfig, DataTransaction, DataTransactionHeader, H256List, PeerAddress,
+                PeerListItem, PeerScore, RethPeerInfo,
+            };
+            use irys_utils::circuit_breaker::{FailureThreshold, RecoveryAttempts};
+            use std::num::NonZeroU32;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::time::{SystemTime, UNIX_EPOCH};
+
+            let config = ConsensusConfig::testing();
+            let signer = IrysSigner::random_signer(&config);
+            let signed = signer
+                .sign_transaction(DataTransaction {
+                    header: DataTransactionHeader::new(&config),
+                    ..Default::default()
+                })
+                .expect("sign the data transaction");
+            let tx_id = signed.header.id;
+            let tx_header = signed.header;
+
+            let mut header = irys_testing_utils::new_mock_signed_header();
+            header.data_ledgers[0].tx_ids = H256List(vec![tx_id]);
+            header.test_sign();
+            let header = Arc::new(header);
+
+            let mut breaker_config = CircuitBreakerConfig::p2p_defaults();
+            breaker_config.failure_threshold = FailureThreshold::new(NonZeroU32::new(1).unwrap());
+            breaker_config.recovery_attempts = RecoveryAttempts::new(NonZeroU32::new(1).unwrap());
+            breaker_config.cooldown_duration = Duration::from_secs(60);
+            let client = GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(5),
+                IrysAddress::from([1_u8; 20]),
+                IrysPeerId::from([2_u8; 20]),
+                breaker_config,
+                tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            );
+
+            let pulls = Arc::new(AtomicUsize::new(0));
+            let hits = Arc::clone(&pulls);
+            let server = FakeGossipServer::new();
+            server.set_on_pull_data_request(move |_| {
+                hits.fetch_add(1, Ordering::SeqCst);
+                GossipResponse::Accepted(Some(GossipDataV2::Transaction(tx_header.clone())))
+            });
+            let addr = server.spawn();
+
+            let mining_address = IrysAddress::repeat_byte(0x71);
+            let peer_id = IrysPeerId::from(mining_address);
+            let peer = PeerListItem {
+                peer_id,
+                mining_address,
+                address: PeerAddress {
+                    gossip: addr,
+                    api: addr,
+                    execution: RethPeerInfo::default(),
+                },
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                is_online: false,
+                protocol_version: ProtocolVersion::V1,
+                ..Default::default()
+            };
+            let peer_list = PeerList::test_mock().expect("peer list");
+            peer_list.add_or_update_peer(peer.clone(), true);
+            let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
+
+            client.circuit_breaker.record_failure(&peer_id);
+            assert!(
+                !client.circuit_breaker.would_allow(&peer_id),
+                "the only recovery trial is still unused and the cooldown has not elapsed"
+            );
+
+            let result = client
+                .pull_block_body_from_peer(&header, &(peer_id, peer), &peer_list)
                 .await;
 
             assert!(
-                result.is_err(),
-                "Health check should return error when circuit is open"
+                pulls.load(Ordering::SeqCst) >= 1,
+                "the transaction pull must run on the trial the body pull already took"
             );
-            let err = result.unwrap_err();
             assert!(
-                matches!(err, GossipClientError::CircuitBreakerOpen(_)),
-                "Error should indicate circuit breaker is open, got: {:?}",
-                err
+                result.is_ok(),
+                "the V1 body must be assembled from that pull: {result:?}"
+            );
+            assert!(
+                client.circuit_breaker.would_allow(&peer_id),
+                "a served transaction closes the breaker"
+            );
+            let peer = peer_list.get_peer(&peer_id).unwrap();
+            assert!(peer.is_online, "a served transaction marks the peer online");
+            assert!(
+                peer.reputation_score.get() > initial_score,
+                "the transaction outcome must still score the peer"
             );
         }
 
@@ -4322,7 +5391,7 @@ mod tests {
 
             assert!(
                 !peer_list.get_peer(&peer_id).expect("peer exists").is_online,
-                "post-condition: peer with CB-open is marked offline by hydrate"
+                "a failed health dial marks the peer offline"
             );
 
             // Recovery invariant 1: the offline peer must remain enumerable so
@@ -4336,11 +5405,9 @@ mod tests {
                 "offline peer must stay enumerable for hydrate to revisit it"
             );
 
-            // Recovery invariant 2: once the CB recovers (here simulated by an
-            // explicit `record_success`; in production this happens after the
-            // 30 s cooldown allows a half-open trial that succeeds), the peer
-            // is eligible again so the next hydrate call's `check_health` will
-            // actually attempt the request instead of short-circuiting.
+            // Recovery invariant 2: once the breaker is closed, pulls and pushes
+            // are admitted again. Hydrate always sends the health GET; the
+            // offline flag above came from the failed dial, not from the breaker.
             fixture.client.circuit_breaker.record_success(&peer_id);
             assert!(
                 fixture.client.circuit_breaker.is_available(&peer_id),
@@ -4929,7 +5996,7 @@ mod tests {
                     } else {
                         GossipClient::handle_data_retrieval_score(
                             &peer_list_clone,
-                            &Ok(()),
+                            &Ok(GossipResponse::Accepted(())),
                             &peer_id_copy,
                             response_time,
                             &fixture_clone.client.circuit_breaker,
@@ -5124,8 +6191,10 @@ mod tests {
             assert!(matches!(outcome, PeerPullOutcome::Err(_)));
         }
 
+        /// GossipDisabled is a reply. The pull fails, and the peer stays
+        /// online: a peer that answered is reachable.
         #[tokio::test]
-        async fn gossip_disabled_sets_peer_offline() {
+        async fn gossip_disabled_keeps_peer_online() {
             let peer = test_peer();
             let peer_list = PeerList::test_mock().unwrap();
             // Add the peer so set_is_online_by_peer_id can find it
@@ -5143,10 +6212,13 @@ mod tests {
             .await;
 
             assert!(matches!(outcome, PeerPullOutcome::Err(_)));
-            // Verify the peer was marked offline
-            if let Some(item) = peer_list.peer_by_id(&peer.0) {
-                assert!(!item.is_online);
-            }
+            let item = peer_list
+                .peer_by_id(&peer.0)
+                .expect("the peer stays in the list");
+            assert!(
+                item.is_online,
+                "GossipDisabled must not mark a reachable peer offline"
+            );
         }
 
         #[tokio::test]

@@ -17,6 +17,7 @@ use irys_types::{
     ProtocolVersion, RejectedResponse, RethPeerInfo, TokioServiceHandle, build_user_agent,
     get_version,
 };
+use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::{Shutdown, signal};
@@ -223,6 +224,7 @@ impl PeerNetworkServiceInner {
         peer_list: PeerList,
         sender: PeerNetworkSender,
         runtime_handle: tokio::runtime::Handle,
+        circuit_breaker: CircuitBreakerManager<IrysPeerId>,
     ) -> Self {
         let peer_address = build_peer_address(&config);
         let peers_limit = config.node_config.p2p_handshake.max_peers_per_response;
@@ -238,12 +240,13 @@ impl PeerNetworkServiceInner {
                 .build(),
             failed_announcements: HashMap::new(),
             pending_db_removals: HashSet::new(),
-            gossip_client: GossipClient::new(
+            gossip_client: GossipClient::with_circuit_breaker(
                 Duration::from_secs(5),
                 config.node_config.miner_address(),
                 config.peer_id(),
                 runtime_handle.clone(),
                 config.node_config.max_peer_response_bytes,
+                circuit_breaker,
             ),
             chain_id: config.consensus.chain_id,
             peer_address,
@@ -466,9 +469,13 @@ impl PeerNetworkService {
                                     .increase_peer_score(&peer_id, ScoreIncreaseReason::Online);
                             }
                             Ok(PeerHealth::AnsweredNotServing) => {
-                                // Alive, so still online; no credit while it
-                                // declines to serve us.
-                                debug!("Peer {:?} answered but is not serving us", peer_id);
+                                // The peer answered. Stay online and do not
+                                // raise the score. It is not serving gossip,
+                                // is rate limiting, or needs a handshake.
+                                debug!(
+                                    "Peer {:?} answered but is not serving gossip, is rate limiting, or needs a handshake",
+                                    peer_id
+                                );
                                 peer_list.set_is_online_by_peer_id(&peer_id, true);
                             }
                             Ok(PeerHealth::Unhealthy) => {
@@ -1285,7 +1292,10 @@ pub fn spawn_peer_network_service(
     )
 }
 
-pub(crate) fn spawn_peer_network_service_with_client(
+/// Same as [`spawn_peer_network_service`], recording health outcomes on
+/// `circuit_breaker`. The node passes the manager the pull client already
+/// uses, so a health reply closes the breaker that gates pulls and pushes.
+pub fn spawn_peer_network_service_with_circuit_breaker(
     db: DatabaseProvider,
     config: &Config,
     reth_peer_sender: RethPeerSender,
@@ -1293,6 +1303,7 @@ pub(crate) fn spawn_peer_network_service_with_client(
     service_sender: PeerNetworkSender,
     peer_events: broadcast::Sender<PeerEvent>,
     runtime_handle: Handle,
+    circuit_breaker: CircuitBreakerManager<IrysPeerId>,
 ) -> (TokioServiceHandle, PeerList) {
     let peer_list = PeerList::new(config, &db, service_sender.clone(), peer_events)
         .expect("Failed to load peer list data");
@@ -1304,6 +1315,7 @@ pub(crate) fn spawn_peer_network_service_with_client(
         peer_list.clone(),
         service_sender,
         runtime_handle.clone(),
+        circuit_breaker,
     ));
 
     let (shutdown_tx, shutdown_rx) = signal();
@@ -1324,6 +1336,27 @@ pub(crate) fn spawn_peer_network_service_with_client(
     (service_handle, peer_list)
 }
 
+pub(crate) fn spawn_peer_network_service_with_client(
+    db: DatabaseProvider,
+    config: &Config,
+    reth_peer_sender: RethPeerSender,
+    service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
+    service_sender: PeerNetworkSender,
+    peer_events: broadcast::Sender<PeerEvent>,
+    runtime_handle: Handle,
+) -> (TokioServiceHandle, PeerList) {
+    spawn_peer_network_service_with_circuit_breaker(
+        db,
+        config,
+        reth_peer_sender,
+        service_receiver,
+        service_sender,
+        peer_events,
+        runtime_handle,
+        CircuitBreakerManager::new(CircuitBreakerConfig::p2p_defaults()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1337,10 +1370,13 @@ mod tests {
         Config, DbSyncMode, IrysAddress, IrysPeerId, NodeConfig, PeerNetworkServiceMessage,
         RethPeerInfo,
     };
+    use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
     use std::collections::{HashMap, HashSet};
-    use std::net::{IpAddr, SocketAddr};
+    use std::io::{Read as _, Write as _};
+    use std::net::{IpAddr, SocketAddr, TcpListener};
     use std::str::FromStr as _;
     use std::sync::Arc;
+    use std::thread;
     use tokio::sync::Mutex as AsyncMutex;
     use tokio::test;
     use tokio::time::{Duration, sleep};
@@ -1391,6 +1427,18 @@ mod tests {
 
     impl TestHarness {
         fn new(temp_dir: &std::path::Path, config: Config) -> Self {
+            Self::with_circuit_breaker(
+                temp_dir,
+                config,
+                CircuitBreakerManager::new(CircuitBreakerConfig::p2p_defaults()),
+            )
+        }
+
+        fn with_circuit_breaker(
+            temp_dir: &std::path::Path,
+            config: Config,
+            circuit_breaker: CircuitBreakerManager<IrysPeerId>,
+        ) -> Self {
             let db = open_db(temp_dir);
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let reth_sender = { Arc::new(move |_info: RethPeerInfo| async move {}.boxed()) };
@@ -1408,6 +1456,7 @@ mod tests {
                 peer_list,
                 sender,
                 tokio::runtime::Handle::current(),
+                circuit_breaker,
             ));
             let (_shutdown_tx, shutdown_rx) = signal();
             let service = PeerNetworkService::new(shutdown_rx, receiver, inner.clone());
@@ -2145,5 +2194,146 @@ mod tests {
         assert!(!peer_list.temporary_peers().contains(&peer_id));
         peer_list.add_or_update_peer(peer, false);
         assert!(peer_list.temporary_peers().contains(&peer_id));
+    }
+
+    /// One HTTP response, then the socket closes. The path is ignored: the
+    /// health client builds `/gossip/v2/health` itself.
+    fn spawn_one_json_reply(body: String) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind health reply");
+        let port = listener.local_addr().expect("local addr").port();
+        let _join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept health probe");
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        port
+    }
+
+    /// GossipDisabled means the peer will not gossip to the rest of the
+    /// network. The inactive-peer health check marks that peer online and
+    /// its score is left unchanged.
+    #[test]
+    async fn inactive_health_check_keeps_gossip_disabled_peer_online_with_unchanged_score() {
+        let body = serde_json::to_string(&GossipResponse::<()>::Rejected(
+            RejectionReason::GossipDisabled,
+        ))
+        .expect("serialize GossipDisabled");
+        let port = spawn_one_json_reply(body);
+
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let harness = TestHarness::new(temp_dir.path(), config);
+
+        let (_mining_addr, mut peer) = create_test_peer(
+            "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            port,
+            false,
+            None,
+        );
+        peer.address.gossip = SocketAddr::new(IpAddr::from_str("127.0.0.1").expect("ip"), port);
+        let peer_id = peer.peer_id;
+        let score_before = peer.reputation_score.get();
+        harness.peer_list().add_or_update_peer(peer, true);
+        assert!(
+            harness
+                .peer_list()
+                .inactive_peers()
+                .iter()
+                .any(|(id, _)| *id == peer_id),
+            "an offline peer must be on the inactive-peer health path"
+        );
+
+        harness.service.run_inactive_peers_health_check().await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+        loop {
+            let current = harness
+                .peer_list()
+                .get_peer(&peer_id)
+                .expect("peer still listed");
+            let score = current.reputation_score.get();
+            if current.is_online || score != score_before || tokio::time::Instant::now() >= deadline
+            {
+                assert!(
+                    current.is_online && score == score_before,
+                    "peer online={} score={} (before {score_before}): GossipDisabled is reachable and must not change the score",
+                    current.is_online,
+                    score
+                );
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The inactive-peer probe and the pull client share one breaker. A
+    /// health reply that records success closes the breaker the pull
+    /// client consults.
+    #[test]
+    async fn inactive_health_check_closes_the_pull_clients_breaker() {
+        let body = serde_json::to_string(&GossipResponse::Accepted(true))
+            .expect("serialize Accepted(true)");
+        let port = spawn_one_json_reply(body);
+
+        let breaker = CircuitBreakerManager::new(CircuitBreakerConfig::p2p_defaults());
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let pull_client = GossipClient::with_circuit_breaker(
+            Duration::from_secs(5),
+            config.node_config.miner_address(),
+            config.peer_id(),
+            tokio::runtime::Handle::current(),
+            config.node_config.max_peer_response_bytes,
+            breaker.clone(),
+        );
+        let harness = TestHarness::with_circuit_breaker(temp_dir.path(), config, breaker);
+
+        let (_mining_addr, mut peer) = create_test_peer(
+            "0x1111111111111111111111111111111111111111",
+            port,
+            false,
+            None,
+        );
+        peer.address.gossip = SocketAddr::new(IpAddr::from_str("127.0.0.1").expect("ip"), port);
+        let peer_id = peer.peer_id;
+        harness.peer_list().add_or_update_peer(peer, true);
+        assert!(
+            harness
+                .peer_list()
+                .inactive_peers()
+                .iter()
+                .any(|(id, _)| *id == peer_id),
+            "an offline peer must be on the inactive-peer health path"
+        );
+
+        for _ in 0..5 {
+            pull_client.circuit_breaker().record_failure(&peer_id);
+        }
+        assert!(
+            !pull_client.circuit_breaker().would_allow(&peer_id),
+            "precondition: the pull breaker is open"
+        );
+
+        harness.service.run_inactive_peers_health_check().await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+        loop {
+            let closed = pull_client.circuit_breaker().would_allow(&peer_id);
+            if closed || tokio::time::Instant::now() >= deadline {
+                assert!(
+                    closed,
+                    "the inactive-peer health check must close the pull client's breaker"
+                );
+                assert_eq!(pull_client.circuit_breaker().metrics().open_count, 0);
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
     }
 }
