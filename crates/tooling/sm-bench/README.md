@@ -110,7 +110,8 @@ crates/tooling/sm-bench/scripts/run.sh \
     --loadtest /mnt/sm-2/loadtest \
     --out-root /home/ubuntu/loadtest/runs \
     --bench /home/ubuntu/loadtest/target/release/irys-sm-bench \
-    -- --schedule crates/tooling/sm-bench/presets/fine-16-32.toml
+    -- --schedule crates/tooling/sm-bench/presets/fine-16-32.toml \
+    --recall-direct-io
 ```
 
 Schedules in `presets/`, named by the question they ask:
@@ -195,7 +196,8 @@ Recall at 1/s, then ingest at 2, 4, 8, 16, and 32 MiB/s. Each step is 600 s. A h
     --recall-file /mnt/sm-2/loadtest/entropy-chunks.dat \
     --write-file /mnt/sm-2/loadtest/write-region.dat \
     --out /mnt/sm-2/loadtest/out-recall-1 \
-    --preset recall-1
+    --preset recall-1 \
+    --recall-direct-io
 ```
 
 The same profile at 1.8/s (period 555_555_555 ns):
@@ -206,7 +208,8 @@ The same profile at 1.8/s (period 555_555_555 ns):
     --recall-file /mnt/sm-2/loadtest/entropy-chunks.dat \
     --write-file /mnt/sm-2/loadtest/write-region.dat \
     --out /mnt/sm-2/loadtest/out-recall-1.8 \
-    --preset recall-1.8
+    --preset recall-1.8 \
+    --recall-direct-io
 ```
 
 In another shell, for the same out directory:
@@ -361,7 +364,8 @@ cargo build --release -p irys-sm-bench
     --preset smoke \
     --step-secs 8 \
     --out /tmp/sm-bench-out \
-    --prepopulate-index 200
+    --prepopulate-index 200 \
+    --recall-direct-io
 ```
 
 A directory with no `loadtest` component is refused and is not created.
@@ -406,7 +410,8 @@ crates/tooling/sm-bench/scripts/blk-run.sh \
     --recall-file /mnt/sm-2/loadtest/entropy-chunks.dat \
     --write-file /mnt/sm-2/loadtest/write-region.dat \
     --out /home/ubuntu/loadtest/runs/blk-1 \
-    --preset recall-1
+    --preset recall-1 \
+    --recall-direct-io
 
 # After the bench exits, Ctrl-C shell B.
 # Shell B stops bpftrace, takes one last extent snapshot, and exits.

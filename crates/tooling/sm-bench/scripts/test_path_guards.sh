@@ -3403,6 +3403,46 @@ test_ladder_trace_exits_0_when_blk_report_succeeds() {
     rm -rf "$root"
 }
 
+# Fenced sh examples that start the bench, or run.sh in front of it, pass
+# --recall-direct-io. The flag table still says the bench default is off.
+test_readme_bench_examples_pass_recall_direct_io() {
+    local name=readme-recall-direct-io readme line
+    local in_fence=0 fence="" saw=0
+    readme=$here/../README.md
+    if ! grep -F '| `--recall-direct-io` | off |' "$readme" >/dev/null; then
+        bad "$name" "flag table no longer says the bench default is off"
+        return
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$in_fence" -eq 0 ]; then
+            if [ "$line" = '```sh' ]; then
+                in_fence=1
+                fence=""
+            fi
+            continue
+        fi
+        if [ "$line" = '```' ]; then
+            in_fence=0
+            if printf '%s\n' "$fence" | grep -F -e './target/release/irys-sm-bench' -e 'crates/tooling/sm-bench/scripts/run.sh' >/dev/null; then
+                saw=$((saw + 1))
+                if ! printf '%s\n' "$fence" | grep -F -e '--recall-direct-io' >/dev/null; then
+                    bad "$name" "bench example omits --recall-direct-io ($(printf '%s\n' "$fence" | grep -m1 -v '^$'))"
+                    return
+                fi
+            fi
+            fence=""
+            continue
+        fi
+        fence="${fence}
+${line}"
+    done <"$readme"
+    if [ "$saw" -ne 5 ]; then
+        bad "$name" "expected 5 bench examples, found $saw"
+        return
+    fi
+    ok "$name"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then
