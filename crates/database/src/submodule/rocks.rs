@@ -4172,9 +4172,6 @@ fn full_scan_options() -> ReadOptions {
     opts
 }
 
-/// Leaf `data_hash` of a data proof. A value shorter than a leaf is not a
-/// content-addressed proof and has no reverse row. The hash is the leaf
-/// already stored in the proof. Chunk bytes are not hashed again.
 /// Order-independent mix of one key. Equal counts plus both accumulators
 /// means the two scans saw the same set.
 fn mix_key(state: &mut (u64, u64), bytes: &[u8]) {
@@ -4192,6 +4189,9 @@ fn stored_offset_meta(bytes: &[u8]) -> eyre::Result<OffsetMeta> {
     records::decode_offset_meta(bytes)
 }
 
+/// Leaf `data_hash` of a data proof. A value shorter than a leaf is not a
+/// content-addressed proof and has no reverse row. The hash is the leaf
+/// already stored in the proof. Chunk bytes are not hashed again.
 fn content_hash_of(proof: &[u8]) -> Option<H256> {
     const LEAF_LEN: usize = 64;
     if proof.len() < LEAF_LEN {
