@@ -276,7 +276,7 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 | `--seed` | 1 | Recall, ingest, and serve RNGs |
 | `--create-small BYTES` | unset | Create both files at this size for a local smoke run. Multiple of 262144. The recall file is mode `0444` |
 | `--num-writes-before-sync` | 100 | Production sync cadence |
-| `--entropy-sweep-max-bytes` | 262144 | One entropy pread is one chunk |
+| `--entropy-sweep-max-bytes` | 4194304 | Cap on one entropy pread. The node cap is 4 MiB, about 16 chunks of 256 KiB |
 | `--ingest-mix` | `1:40,4:25,16:20,64:10,256:5` | `chunks:weight` list |
 | `--serve-seq-chunks` | 8 | Longest sequential serve read |
 | `--ingest-concurrency` | 1024 | In-flight ingest chunks, held until durable. Not a production admission cap. Migration has no bench cap. Serve is one read at a time |
