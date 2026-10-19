@@ -1,9 +1,11 @@
-//! Two trusted miners. Node A uses the production gossip circuit breaker
-//! (5 failures, 30s cooldown). A block that B mines must land on both
-//! canonical chains before either chain moves `block_migration_depth`
-//! blocks past the shared ancestor.
+//! Two trusted miners. The genesis node uses the production gossip circuit
+//! breaker (5 failures, 30s cooldown). One case mines while that breaker
+//! is open for the peer. The other answers health with `GossipDisabled`
+//! and must leave the breaker closed. In both, the block the peer mines
+//! must land on both canonical chains before either chain moves
+//! `block_migration_depth` blocks past the shared ancestor.
 
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
 
 use eyre::{WrapErr as _, bail, ensure};
@@ -17,26 +19,60 @@ use crate::utils::{IrysNodeTest, TimeMode, coverage_adjusted_timeout};
 /// Production breaker. The gossip client that pulls block bodies is not the
 /// client that scores inactive peers, so a frozen score does not open it.
 const FAILURES_TO_OPEN: u32 = 5;
-/// A short-circuited probe is inside the 30s cooldown. Wait at most one
-/// cooldown for a dial that records a fresh failure.
+/// Bound for the unreachable health dials that open the pull breaker.
+/// A refused connection returns immediately. The bound covers a dial that
+/// waits out the client timeout instead.
 const PROBE_DEADLINE: Duration = Duration::from_secs(40);
-/// On a healthy pull the header is in the block tree within milliseconds.
-/// Kept short so it does not consume the 30s cooldown.
-const ADOPT_WAIT: Duration = Duration::from_secs(3);
+/// Longer than the mine that follows the trusted-peer restart. The sync
+/// check's hydration pass is the only other probe of the pull client, and
+/// a successful health reply closes the breaker.
+const PULL_BREAKER_QUIET_SECS: u64 = 3_600;
 
 fn adjusted(base_secs: u64) -> Duration {
     Duration::from_secs(coverage_adjusted_timeout(base_secs))
 }
 
-fn reserve_port() -> eyre::Result<u16> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .wrap_err("setup: failed to reserve a local port")?;
-    let port = listener
-        .local_addr()
-        .wrap_err("setup: failed to read the reserved port")?
-        .port();
-    drop(listener);
-    Ok(port)
+/// On a healthy pull the header is in the block tree within milliseconds.
+/// Kept short so the wait does not consume the 30s open cooldown. Coverage
+/// builds multiply the bound the same way as the other waits.
+fn adopt_wait() -> Duration {
+    adjusted(3)
+}
+
+/// Listeners held until the peer node binds. The harness binds its own
+/// sockets and does not take a caller listener. `SO_REUSEADDR` does not
+/// allow both listeners on the same port, so these are dropped on the line
+/// before `start`. Holding them until then keeps the ports reserved across
+/// the genesis restart.
+struct ReservedPorts {
+    http: TcpListener,
+    gossip: TcpListener,
+}
+
+impl ReservedPorts {
+    fn bind() -> eyre::Result<Self> {
+        let http = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .wrap_err("setup: failed to reserve a local http port")?;
+        let gossip = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .wrap_err("setup: failed to reserve a local gossip port")?;
+        Ok(Self { http, gossip })
+    }
+
+    fn http_port(&self) -> eyre::Result<u16> {
+        Ok(self
+            .http
+            .local_addr()
+            .wrap_err("setup: failed to read the reserved http port")?
+            .port())
+    }
+
+    fn gossip_port(&self) -> eyre::Result<u16> {
+        Ok(self
+            .gossip
+            .local_addr()
+            .wrap_err("setup: failed to read the reserved gossip port")?
+            .port())
+    }
 }
 
 fn tip(node: &IrysNodeTest<IrysNodeCtx>) -> eyre::Result<(u64, BlockHash)> {
@@ -98,30 +134,40 @@ async fn wait_for_startup_sync(
     }
 }
 
-async fn wait_until_peer_offline(
-    node: &IrysNodeTest<IrysNodeCtx>,
-    peer_id: IrysPeerId,
-    timeout: Duration,
-) -> eyre::Result<()> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let (online, _) = peer_status(node, peer_id)?;
-        if !online {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            bail!("setup: peer {peer_id} stayed online within {timeout:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+fn pull_client_metrics(
+    genesis: &IrysNodeTest<IrysNodeCtx>,
+) -> irys_utils::circuit_breaker::CircuitBreakerMetrics<IrysPeerId> {
+    genesis
+        .node_ctx
+        .gossip_data_handler
+        .gossip_client
+        .circuit_breaker_metrics()
 }
 
-/// Dial the block-pull gossip client until `FAILURES_TO_OPEN` probes fail, or
-/// a probe is short-circuited after a failure dial. Either way the cooldown,
-/// if the breaker opened, started on the last failure dial. A refused
-/// connection counts as a failure. `GossipDisabled` counts only where the
-/// client classifies it as one; where it does not, the breaker stays closed
-/// and the test checks that the block is still adopted.
+fn pull_breaker_is_open(genesis: &IrysNodeTest<IrysNodeCtx>, peer_id: IrysPeerId) -> bool {
+    pull_client_metrics(genesis).open_keys.contains(&peer_id)
+}
+
+fn breaker_summary(genesis: &IrysNodeTest<IrysNodeCtx>) -> String {
+    let metrics = pull_client_metrics(genesis);
+    format!(
+        "open {} half-open {} keys {:?}",
+        metrics.open_count, metrics.half_open_count, metrics.open_keys
+    )
+}
+
+/// Open the block-pull breaker for `peer_id` by dialing health at an
+/// unreachable address.
+///
+/// The breaker key is the peer id. `check_health` does not write the dial
+/// address into the peer list, so the source-peer body pull still uses the
+/// peer's real address. Localhost port 1 refuses the connection, and that
+/// refusal records a failure. Call this after startup sync: a health probe
+/// during that sync records success for a live peer and closes a breaker
+/// that was opened while the peer was down. The sync-check interval set in
+/// `start_trusted_miners` is longer than the mine that follows, so that
+/// pass cannot close this breaker before the body pull. The open cooldown
+/// starts on the dial that trips the threshold, which is this call.
 async fn open_pull_breaker(
     genesis: &IrysNodeTest<IrysNodeCtx>,
     peer_id: IrysPeerId,
@@ -131,74 +177,32 @@ async fn open_pull_breaker(
         .peer_list
         .get_peer(&peer_id)
         .ok_or_else(|| eyre::eyre!("setup: peer {peer_id} is absent from the peer list"))?;
+    let mut unreachable = peer.address;
+    unreachable.gossip = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
     let client = &genesis.node_ctx.gossip_data_handler.gossip_client;
     let peer_list = &genesis.node_ctx.peer_list;
     let deadline = Instant::now() + PROBE_DEADLINE;
-    let mut failure_dials = 0_u32;
     loop {
         let result = client
-            .check_health(&peer_id, peer.address, peer.protocol_version, peer_list)
+            .check_health(&peer_id, unreachable, peer.protocol_version, peer_list)
             .await;
-        if probe_recorded_failure(&result) {
-            failure_dials = failure_dials.saturating_add(1);
-            if failure_dials >= FAILURES_TO_OPEN {
-                info!(
-                    failure_dials,
-                    "pull breaker probes reached the failure threshold"
-                );
-                return Ok(());
-            }
-        } else if probe_is_short_circuit(&result) && failure_dials > 0 {
-            // Closed breaker: the dial that crossed FAILURES_TO_OPEN just
-            // ran. Half-open breaker: one failed recovery dial re-opens it.
-            // Either way the cooldown started on that dial.
-            info!(
-                failure_dials,
-                threshold = FAILURES_TO_OPEN,
-                "pull breaker is open after a gossip health probe"
-            );
+        if pull_breaker_is_open(genesis, peer_id) {
+            info!("pull breaker is open for the peer");
             return Ok(());
-        } else if !probe_is_short_circuit(&result) {
-            bail!(
-                "setup: gossip probe did not record a failure ({})",
-                probe_text(&result)
-            );
+        }
+        // A reply did not record a failure. A transport error did, unless
+        // the dial was skipped because the breaker was already open. That
+        // case returns above.
+        if result.is_ok() {
+            bail!("setup: unreachable health dial returned a reply ({result:?})");
         }
         if Instant::now() >= deadline {
             bail!(
-                "setup: pull breaker did not open after {failure_dials} failure dials ({})",
-                probe_text(&result)
+                "setup: pull breaker did not open for peer {peer_id} ({result:?}, {})",
+                breaker_summary(genesis)
             );
         }
-        if probe_is_short_circuit(&result) {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    }
-}
-
-fn probe_text(result: &Result<impl std::fmt::Debug, impl ToString>) -> String {
-    match result {
-        Ok(health) => format!("{health:?}"),
-        Err(err) => err.to_string(),
-    }
-}
-
-fn probe_recorded_failure(result: &Result<impl std::fmt::Debug, impl ToString>) -> bool {
-    match result {
-        Ok(health) => format!("{health:?}") == "Unhealthy",
-        Err(err) => {
-            let text = err.to_string();
-            text.starts_with("Get request")
-                || text.starts_with("Health check")
-                || text.starts_with("Failed to get json")
-        }
-    }
-}
-
-fn probe_is_short_circuit(result: &Result<impl std::fmt::Debug, impl ToString>) -> bool {
-    match result {
-        Ok(_) => false,
-        Err(err) => err.to_string().starts_with("Circuit breaker open"),
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -247,30 +251,28 @@ async fn assert_converged_before_migration(
 async fn mine_and_expect_convergence(
     genesis: &IrysNodeTest<IrysNodeCtx>,
     peer: &IrysNodeTest<IrysNodeCtx>,
-    peer_id: IrysPeerId,
     ancestor_height: u64,
     migration_depth: u64,
-    require_offline: bool,
 ) -> eyre::Result<()> {
-    if require_offline {
-        let (online, score) = peer_status(genesis, peer_id)?;
-        if online {
-            bail!(
-                "setup: A marked B online before B mined; the breaker cooldown elapsed (score {score})"
-            );
-        }
-    }
     let peer_block = peer
         .mine_block()
         .await
         .wrap_err("setup: peer failed to mine the next block")?;
-    let adopt_deadline = Instant::now() + ADOPT_WAIT;
+    let peer_hash = peer_block.block_hash;
+    let adopt_for = adopt_wait();
+    let adopt_deadline = Instant::now() + adopt_for;
+    let mut adopted = false;
     while Instant::now() < adopt_deadline {
-        if genesis.get_block_by_hash(&peer_block.block_hash).is_ok() {
+        if genesis.get_block_by_hash(&peer_hash).is_ok() {
+            adopted = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    ensure!(
+        adopted,
+        "adoption: genesis did not adopt peer block {peer_hash} within {adopt_for:?} before genesis mined its child"
+    );
     genesis
         .mine_block()
         .await
@@ -349,9 +351,6 @@ async fn assign_peer_partition(
 async fn start_trusted_miners()
 -> eyre::Result<(IrysNodeTest<IrysNodeCtx>, IrysNodeTest<IrysNodeCtx>, u64)> {
     let mut genesis_config = NodeConfig::testing_with_epochs(2);
-    // Hydrate still cannot run faster than its 10s floor. This only makes
-    // the periodic check ask sooner.
-    genesis_config.sync.periodic_sync_check_interval_secs = 5;
     // Test VDF steps are floored at 25ms. Free-run parks at the second reset
     // boundary until a block is migrated. The default testing reset (1200)
     // is that boundary after about 60s, and this test does not migrate, so
@@ -369,8 +368,9 @@ async fn start_trusted_miners()
         .await;
 
     let mut peer_config = genesis.testing_peer_with_signer(&peer_signer);
-    let http_port = reserve_port()?;
-    let gossip_port = reserve_port()?;
+    let reserved = ReservedPorts::bind()?;
+    let http_port = reserved.http_port()?;
+    let gossip_port = reserved.gossip_port()?;
     peer_config.http.bind_port = http_port;
     peer_config.http.public_port = http_port;
     peer_config.gossip.bind_port = gossip_port;
@@ -382,6 +382,12 @@ async fn start_trusted_miners()
     // address before the peer boots, so the peer never dials a dead genesis.
     let mut genesis = genesis.stop().await;
     genesis.cfg.trusted_peers = vec![peer_addr];
+    // Hydration on the pull client records success and closes the breaker.
+    // The restart test opens that breaker and then mines. This interval
+    // outlasts that mine, so the pass cannot close the breaker first.
+    // The peer config was copied before this assignment and keeps the
+    // default interval.
+    genesis.cfg.sync.periodic_sync_check_interval_secs = PULL_BREAKER_QUIET_SECS;
     let genesis = genesis.start_and_wait_for_packing("GENESIS", 20).await;
     ensure!(
         genesis.get_gossip_addr() == trusted_genesis.gossip,
@@ -396,6 +402,8 @@ async fn start_trusted_miners()
         genesis.get_peer_addr()
     );
 
+    // Drop on this line. `start` binds the same ports.
+    drop(reserved);
     let peer = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
     let peer_id = peer.node_ctx.config.peer_id();
     let genesis_peer_id = genesis.node_ctx.config.peer_id();
@@ -415,11 +423,11 @@ async fn slow_heavy_restarted_peer_block_converges_before_migration() -> eyre::R
     let api_addr = peer.get_peer_addr();
 
     let peer = peer.stop().await;
-    // Health marks B offline. The pull breaker is a different client, so open
-    // it with dials immediately before the restart. Startup sync then has to
-    // finish inside that cooldown.
-    wait_until_peer_offline(&genesis, peer_id, adjusted(25)).await?;
-    open_pull_breaker(&genesis, peer_id).await?;
+    // `stop` is the proof the process is down. The online flag moves only
+    // when the sync-check hydration probes this pull client. That pass stays
+    // quiet for the rest of the test, so it cannot record success and close
+    // the breaker opened after startup sync. The flag can stay true while
+    // the process is down. It is not the signal this test waits on.
 
     let peer = peer.start_with_name("PEER").await;
     ensure!(
@@ -438,24 +446,29 @@ async fn slow_heavy_restarted_peer_block_converges_before_migration() -> eyre::R
     );
 
     wait_for_startup_sync(&peer, &genesis, adjusted(20)).await?;
+    // Unreachable dials for this peer id. The peer list keeps the real
+    // address, so the body pull of the block mined next still reaches the
+    // peer. The breaker has to be open at that pull.
+    open_pull_breaker(&genesis, peer_id).await?;
+    ensure!(
+        pull_breaker_is_open(&genesis, peer_id),
+        "setup: pull breaker is not open for peer {peer_id} immediately before the peer mines ({})",
+        breaker_summary(&genesis)
+    );
     let ancestor_height = tip(&genesis)?.0;
-    mine_and_expect_convergence(
-        &genesis,
-        &peer,
-        peer_id,
-        ancestor_height,
-        migration_depth,
-        true,
-    )
-    .await?;
+    mine_and_expect_convergence(&genesis, &peer, ancestor_height, migration_depth).await?;
 
     peer.stop().await;
     genesis.stop().await;
     Ok(())
 }
 
+/// Broadcast off, reception on: health answers `GossipDisabled`, and the
+/// peer still serves pulls. Those replies must not open the block-pull
+/// breaker. The peer then mines, and both chains adopt the block before
+/// migration.
 #[test_log::test(tokio::test)]
-async fn slow_heavy_gossip_disabled_peer_block_converges_before_migration() -> eyre::Result<()> {
+async fn slow_heavy_gossip_disabled_peer_stays_usable_and_block_converges() -> eyre::Result<()> {
     let (genesis, peer, migration_depth) = start_trusted_miners().await?;
     let peer_id = peer.node_ctx.config.peer_id();
     ensure!(
@@ -481,9 +494,32 @@ async fn slow_heavy_gossip_disabled_peer_block_converges_before_migration() -> e
         "setup: disabling broadcast also disabled reception"
     );
 
-    // Probes hit GossipDisabled and open the block-pull breaker. Re-enable
-    // only after that, then mine inside the cooldown.
-    open_pull_breaker(&genesis, peer_id).await?;
+    // Enough replies to open the production breaker when GossipDisabled
+    // records a failure. A transport error is a setup failure: the peer
+    // has to answer.
+    let peer_entry = genesis
+        .node_ctx
+        .peer_list
+        .get_peer(&peer_id)
+        .ok_or_else(|| eyre::eyre!("setup: peer {peer_id} is absent from the peer list"))?;
+    let client = &genesis.node_ctx.gossip_data_handler.gossip_client;
+    let peer_list = &genesis.node_ctx.peer_list;
+    for _ in 0..FAILURES_TO_OPEN {
+        let result = client
+            .check_health(
+                &peer_id,
+                peer_entry.address,
+                peer_entry.protocol_version,
+                peer_list,
+            )
+            .await;
+        ensure!(
+            result.is_ok(),
+            "setup: health probe did not get a reply while gossip broadcast is disabled ({result:?})"
+        );
+    }
+    // Broadcast back on so the mined block is pushed. The replies above
+    // are what decide the breaker.
     peer.node_ctx.sync_state.set_gossip_broadcast_enabled(true);
 
     let genesis_tip = tip(&genesis)?;
@@ -492,15 +528,12 @@ async fn slow_heavy_gossip_disabled_peer_block_converges_before_migration() -> e
         genesis_tip == peer_tip,
         "setup: tips drifted while gossip broadcast was disabled. genesis {genesis_tip:?}. peer {peer_tip:?}"
     );
-    mine_and_expect_convergence(
-        &genesis,
-        &peer,
-        peer_id,
-        genesis_tip.0,
-        migration_depth,
-        false,
-    )
-    .await?;
+    ensure!(
+        !pull_breaker_is_open(&genesis, peer_id),
+        "breaker: GossipDisabled health replies opened the pull breaker for peer {peer_id} ({})",
+        breaker_summary(&genesis)
+    );
+    mine_and_expect_convergence(&genesis, &peer, genesis_tip.0, migration_depth).await?;
 
     peer.stop().await;
     genesis.stop().await;

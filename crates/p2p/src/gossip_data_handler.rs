@@ -1931,6 +1931,21 @@ mod body_fetch_recovery_tests {
         );
     }
 
+    /// Wall-clock bound for `in_flight_body_pull_suppresses_a_concurrent_arrival`.
+    ///
+    /// The pull runs on the server runtime. Under a full-suite load it can
+    /// sit in the queue longer than a few seconds. Coverage multiplies the
+    /// same way as the chain-test waits. The gate that blocks the first pull
+    /// must use a larger bound than the wait for that pull to start.
+    fn loaded_wait(base_secs: u64) -> Duration {
+        let scale = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+            3
+        } else {
+            1
+        };
+        Duration::from_secs(base_secs.saturating_mul(scale))
+    }
+
     /// While a body pull for H is running, a later arrival must not start
     /// another one. After the pull fails, the mark is gone and the next
     /// arrival pulls again.
@@ -1950,7 +1965,9 @@ mod body_fetch_recovery_tests {
             if n == 0
                 && let Some(rx) = gate.lock().expect("gate").take()
             {
-                let _ = rx.recv_timeout(Duration::from_secs(5));
+                // Longer than the start bound below. The test releases the
+                // gate; this timeout only fires when the test itself is stuck.
+                let _ = rx.recv_timeout(loaded_wait(90));
             }
             GossipResponse::Accepted(None)
         });
@@ -1982,7 +1999,7 @@ mod body_fetch_recovery_tests {
                 panic!("first arrival finished before a pull: {ended:?}");
             }
             assert!(
-                started.elapsed() < Duration::from_secs(5),
+                started.elapsed() < loaded_wait(30),
                 "the first pull did not start"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2001,7 +2018,7 @@ mod body_fetch_recovery_tests {
         peer_list.add_or_update_peer(peer_b, true);
 
         let second = tokio::time::timeout(
-            Duration::from_secs(2),
+            loaded_wait(15),
             handler.handle_block_header(
                 peer_b_id,
                 IrysAddress::repeat_byte(0x62),
@@ -2022,7 +2039,7 @@ mod body_fetch_recovery_tests {
         assert!(second.unwrap().is_ok(), "the in-flight hash is skipped");
 
         release_tx.send(()).expect("first pull is waiting");
-        let first = tokio::time::timeout(Duration::from_secs(5), first)
+        let first = tokio::time::timeout(loaded_wait(30), first)
             .await
             .expect("first pull finishes after the gate opens")
             .expect("first task");
@@ -2041,7 +2058,7 @@ mod body_fetch_recovery_tests {
         peer_list.add_or_update_peer(peer_c, true);
 
         let third = tokio::time::timeout(
-            Duration::from_secs(5),
+            loaded_wait(30),
             handler.handle_block_header(peer_c_id, IrysAddress::repeat_byte(0x63), header, addr_c),
         )
         .await
