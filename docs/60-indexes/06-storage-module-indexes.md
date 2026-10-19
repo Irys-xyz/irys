@@ -47,7 +47,18 @@ index and for the hole reserve at the same time. Both sit on the
 submodule disk. A 4.0.8 file is sparse, so the reserve runs,
 and on a large file that reserve can dominate the first open.
 `EOPNOTSUPP` leaves the file sparse.
-Any other `fallocate` error fails the open. Mining recall reads
+Any other `fallocate` error fails the open.
+
+When the partition hash in `packing_params.toml` matches the assignment
+and the ledger or the slot does not, open keeps or clears the stored
+bytes by the ledger the file already names. The same hash, ledger, and
+slot keeps the bytes. Capacity that gains a ledger keeps the bytes.
+Leaving a ledger (another ledger, another slot, or capacity) clears
+the index and rewrites the intervals to `Uninitialized`. The
+`chunks.dat` bytes stay until a later pack overwrites them. A refused
+open before that clear leaves the previous file in place.
+
+Mining recall reads
 `chunks.dat` with `O_DIRECT` (`storage.recall_direct_io`, default true).
 A direct read of a range that still has dirty buffered pages returns the
 new bytes. Linux writes that range back before the direct read (XFS and

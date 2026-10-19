@@ -3479,6 +3479,36 @@ test_runbook_builtin_testnet_partition_is_the_mainnet_file() {
     ok "$name"
 }
 
+# Same partition hash. Capacity that gains a ledger keeps bytes.
+# Leaving a ledger clears the index.
+test_runbook_same_hash_ledger_change_names_the_wipe() {
+    local name=runbook-same-hash-ledger-wipe runbook
+    runbook=$here/../../../../docs/60-indexes/06-storage-module-indexes.md
+    local text
+    if [ ! -f "$runbook" ]; then
+        bad "$name" "missing $runbook"
+        return
+    fi
+    text=$(tr '\n' ' ' <"$runbook")
+    case "$text" in
+        *'The same hash, ledger, and slot keeps the bytes.'*) ;;
+        *) bad "$name" "runbook does not say an unchanged assignment keeps the bytes"; return ;;
+    esac
+    case "$text" in
+        *'Capacity that gains a ledger keeps the bytes.'*) ;;
+        *) bad "$name" "runbook does not say capacity that gains a ledger keeps the bytes"; return ;;
+    esac
+    case "$text" in
+        *'Leaving a ledger (another ledger, another slot, or capacity)'*) ;;
+        *) bad "$name" "runbook does not say leaving a ledger wipes"; return ;;
+    esac
+    case "$text" in
+        *'rewrites the intervals to `Uninitialized`'* ) ;;
+        *) bad "$name" "runbook does not say the wipe rewrites intervals to Uninitialized"; return ;;
+    esac
+    ok "$name"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then
