@@ -1338,9 +1338,11 @@ mod tests {
         RethPeerInfo,
     };
     use std::collections::{HashMap, HashSet};
-    use std::net::{IpAddr, SocketAddr};
+    use std::io::{Read as _, Write as _};
+    use std::net::{IpAddr, SocketAddr, TcpListener};
     use std::str::FromStr as _;
     use std::sync::Arc;
+    use std::thread;
     use tokio::sync::Mutex as AsyncMutex;
     use tokio::test;
     use tokio::time::{Duration, sleep};
@@ -2145,5 +2147,82 @@ mod tests {
         assert!(!peer_list.temporary_peers().contains(&peer_id));
         peer_list.add_or_update_peer(peer, false);
         assert!(peer_list.temporary_peers().contains(&peer_id));
+    }
+
+    /// One HTTP response, then the socket closes. The path is ignored: the
+    /// health client builds `/gossip/v2/health` itself.
+    fn spawn_one_json_reply(body: String) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind health reply");
+        let port = listener.local_addr().expect("local addr").port();
+        let _join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept health probe");
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        port
+    }
+
+    /// GossipDisabled means the peer will not gossip to the rest of the
+    /// network. The inactive-peer health check still marks that peer online
+    /// and leaves its score unchanged, so it stays a lower priority than a
+    /// peer that does gossip.
+    #[test]
+    async fn inactive_health_check_keeps_gossip_disabled_peer_online_with_unchanged_score() {
+        let body = serde_json::to_string(&GossipResponse::<()>::Rejected(
+            RejectionReason::GossipDisabled,
+        ))
+        .expect("serialize GossipDisabled");
+        let port = spawn_one_json_reply(body);
+
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let harness = TestHarness::new(temp_dir.path(), config);
+
+        let (_mining_addr, mut peer) = create_test_peer(
+            "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            port,
+            false,
+            None,
+        );
+        peer.address.gossip = SocketAddr::new(IpAddr::from_str("127.0.0.1").expect("ip"), port);
+        let peer_id = peer.peer_id;
+        let score_before = peer.reputation_score.get();
+        harness.peer_list().add_or_update_peer(peer, true);
+        assert!(
+            harness
+                .peer_list()
+                .inactive_peers()
+                .iter()
+                .any(|(id, _)| *id == peer_id),
+            "an offline peer must be on the inactive-peer health path"
+        );
+
+        harness.service.run_inactive_peers_health_check().await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+        loop {
+            let current = harness
+                .peer_list()
+                .get_peer(&peer_id)
+                .expect("peer still listed");
+            let score = current.reputation_score.get();
+            if current.is_online || score != score_before || tokio::time::Instant::now() >= deadline
+            {
+                assert!(
+                    current.is_online && score == score_before,
+                    "peer online={} score={} (before {score_before}): GossipDisabled is reachable and must not change the score",
+                    current.is_online,
+                    score
+                );
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
     }
 }

@@ -1129,13 +1129,13 @@ impl GossipClient {
                     // the arm above there is nothing to initiate.
                     RejectionReason::RateLimited => Ok(PeerHealth::AnsweredNotServing),
                     // The peer answered, so it is reachable and the breaker
-                    // closes. It is not serving gossip, so the verdict stays
-                    // unhealthy: callers leave it offline and out of pull
-                    // selection. The next health probe, once gossip is on,
-                    // marks it online.
+                    // closes. GossipDisabled means this peer will not gossip
+                    // to the rest of the network. The peer is not offline.
+                    // Callers mark it online and leave its score unchanged,
+                    // so it stays a lower priority than a peer that does gossip.
                     RejectionReason::GossipDisabled => {
                         self.circuit_breaker.record_success(peer_id);
-                        Ok(PeerHealth::Unhealthy)
+                        Ok(PeerHealth::AnsweredNotServing)
                     }
                     RejectionReason::InvalidData
                     | RejectionReason::UnableToVerifyOrigin
@@ -4507,10 +4507,10 @@ mod tests {
             assert_eq!(metrics.half_open_count, 0);
         }
 
-        /// Gossip off during startup sync is an answer, so the breaker
-        /// closes. The peer is not serving gossip, so the verdict stays
-        /// unhealthy and the peer stays offline until a later probe sees
-        /// gossip enabled.
+        /// GossipDisabled means the peer will not gossip to the rest of the
+        /// network. The peer answered, so the breaker closes and the verdict
+        /// is AnsweredNotServing: the peer is not offline, and it stays a
+        /// lower priority than a peer that does gossip.
         #[tokio::test]
         async fn gossip_disabled_health_reply_closes_the_breaker() {
             let client = client_with_production_breaker();
@@ -4538,7 +4538,7 @@ mod tests {
 
             assert_eq!(
                 health.expect("GossipDisabled is a reply, not a transport error"),
-                PeerHealth::Unhealthy
+                PeerHealth::AnsweredNotServing
             );
             let metrics = client.circuit_breaker.metrics();
             assert_eq!(metrics.open_count, 0, "success must close the open breaker");
