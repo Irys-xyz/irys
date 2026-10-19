@@ -41,6 +41,9 @@ pub use gossip_data_handler::GossipDataHandler;
 pub use gossip_service::P2PService;
 pub use gossip_service::ServiceHandleWithShutdownSignal;
 pub use gossip_service::spawn_p2p_server_watcher_task;
-pub use peer_network_service::{PeerListServiceError, spawn_peer_network_service};
+pub use peer_network_service::{
+    PeerListServiceError, spawn_peer_network_service,
+    spawn_peer_network_service_with_circuit_breaker,
+};
 pub use server::GossipServer;
 pub use types::{GossipError, GossipResponse, GossipResult, GossipRoutes, RejectionReason};
