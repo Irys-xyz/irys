@@ -45,7 +45,7 @@ use irys_domain::{
 use irys_p2p::{
     BlockPool, BlockStatusProvider, ChainSyncService, ChainSyncServiceInner, GossipDataHandler,
     GossipServer, P2PService, ServiceHandleWithShutdownSignal, SyncChainServiceFacade,
-    SyncChainServiceMessage, spawn_peer_network_service,
+    SyncChainServiceMessage, spawn_peer_network_service_with_circuit_breaker,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_price_oracle::SingleOracle;
@@ -58,11 +58,12 @@ use irys_types::BlockHash;
 use irys_types::chainspec::irys_chain_spec;
 use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
-    NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
+    IrysPeerId, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
     PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
     SystemLedger, TokioServiceHandle, Traced, U256, VdfFreeRun, app_state::DatabaseProvider,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
+use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use irys_vdf::{
     ReanchorReceiver, ReanchorSignals, VdfStep,
     state::{AtomicVdfState, VdfController, VdfStateReadonly},
@@ -1743,12 +1744,17 @@ impl IrysNode {
             config.node_config.node_mode,
         )?;
 
-        let p2p_service = P2PService::new(
+        // One breaker for the pull client and the inactive-peer health client.
+        // A health reply must close the breaker that gates pulls and pushes.
+        let gossip_circuit_breaker: CircuitBreakerManager<IrysPeerId> =
+            CircuitBreakerManager::new(CircuitBreakerConfig::p2p_defaults());
+        let p2p_service = P2PService::with_circuit_breaker(
             config.node_config.miner_address(),
             config.peer_id(),
             receivers.gossip_broadcast,
             runtime_handle.clone(),
             config.node_config.max_peer_response_bytes,
+            gossip_circuit_breaker.clone(),
         );
         let sync_state = p2p_service.sync_state.clone();
 
@@ -1942,6 +1948,7 @@ impl IrysNode {
             service_senders.peer_network.clone(),
             service_senders.peer_events.clone(),
             runtime_handle.clone(),
+            gossip_circuit_breaker,
         );
 
         let execution_payload_cache = ExecutionPayloadCache::new(
@@ -2799,6 +2806,7 @@ fn init_peer_list_service(
     service_sender: PeerNetworkSender,
     peer_events: tokio::sync::broadcast::Sender<irys_domain::PeerEvent>,
     runtime_handle: Handle,
+    gossip_circuit_breaker: CircuitBreakerManager<IrysPeerId>,
 ) -> (TokioServiceHandle, PeerList) {
     let reth_peer_sender = {
         let reth_service = reth_service;
@@ -2834,7 +2842,7 @@ fn init_peer_list_service(
         })
     };
 
-    spawn_peer_network_service(
+    spawn_peer_network_service_with_circuit_breaker(
         irys_db.clone(),
         config,
         reth_peer_sender,
@@ -2842,6 +2850,7 @@ fn init_peer_list_service(
         service_sender,
         peer_events,
         runtime_handle,
+        gossip_circuit_breaker,
     )
 }
 

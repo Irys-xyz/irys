@@ -288,12 +288,26 @@ impl BlockCacheGuard {
         }
     }
 
+    #[cfg(test)]
     async fn add_block(
         &self,
         block: Arc<SealedBlock>,
         is_fast_tracking: bool,
     ) -> Option<(BlockHash, CachedBlock)> {
         self.inner.write().await.add_block(block, is_fast_tracking)
+    }
+
+    /// Check and insert under one write lock. `None` when another call is
+    /// already processing this hash.
+    async fn add_block_unless_processing(
+        &self,
+        block: Arc<SealedBlock>,
+        is_fast_tracking: bool,
+    ) -> Option<Option<(BlockHash, CachedBlock)>> {
+        self.inner
+            .write()
+            .await
+            .add_block_unless_processing(block, is_fast_tracking)
     }
 
     async fn remove_block(&self, block_hash: &BlockHash, reason: BlockRemovalReason) {
@@ -311,6 +325,15 @@ impl BlockCacheGuard {
 
     async fn contains_block(&self, block_hash: &BlockHash) -> bool {
         self.inner.write().await.blocks.contains(block_hash)
+    }
+
+    async fn contains_recently_processed(&self, block_hash: &BlockHash) -> bool {
+        // `LruCache::contains` takes `&self`, so a shared lock is enough.
+        self.inner
+            .read()
+            .await
+            .recently_processed
+            .contains(block_hash)
     }
 
     async fn orphaned_blocks_for_parent(
@@ -423,6 +446,20 @@ impl BlockCacheInner {
         }
 
         evicted
+    }
+
+    /// `add_block`, unless a call is already processing this hash. A separate
+    /// check and insert let two concurrent arrivals both pass and both run
+    /// prevalidation.
+    fn add_block_unless_processing(
+        &mut self,
+        block: Arc<SealedBlock>,
+        fast_track: bool,
+    ) -> Option<Option<(BlockHash, CachedBlock)>> {
+        if self.is_block_processing(&block.header().block_hash) {
+            return None;
+        }
+        Some(self.add_block(block, fast_track))
     }
 
     fn is_block_processing(&mut self, block_hash: &BlockHash) -> bool {
@@ -776,8 +813,11 @@ where
 
         check_block_status(&self.block_status_provider, block_hash, block_height)?;
 
-        let is_processing = self.blocks_cache.is_block_processing(&block_hash).await;
-        if is_processing {
+        let Some(maybe_evicted_or_updated) = self
+            .blocks_cache
+            .add_block_unless_processing(Arc::clone(&block), skip_validation_for_fast_track)
+            .await
+        else {
             warn!(
                 "Block pool: Block {:?} is already being processed or fast-tracked, skipping",
                 block_hash
@@ -786,12 +826,7 @@ where
             return Err(BlockPoolError::Advisory(
                 AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
             ));
-        }
-
-        let maybe_evicted_or_updated = self
-            .blocks_cache
-            .add_block(Arc::clone(&block), skip_validation_for_fast_track)
-            .await;
+        };
 
         if let Some((evicted_hash, _)) = maybe_evicted_or_updated {
             let is_evicted = evicted_hash != block_hash;
@@ -1517,8 +1552,52 @@ where
         self.blocks_cache.contains_block(block_hash).await
     }
 
+    /// True when this node already holds the block: in the in-flight cache
+    /// (including a parked orphan), recently processed, or in the block tree.
+    ///
+    /// The seen cache is the broadcast-exclusion set, so a hash can be
+    /// recorded before the body lands. A seen-skip must not use this alone:
+    /// a parked cache entry is held but is not making progress. See
+    /// [`Self::is_block_parked`].
+    pub async fn is_block_known_locally(&self, block_hash: &BlockHash) -> bool {
+        if self.blocks_cache.contains_block(block_hash).await {
+            return true;
+        }
+        if self
+            .blocks_cache
+            .contains_recently_processed(block_hash)
+            .await
+        {
+            return true;
+        }
+        self.block_status_provider.is_block_in_the_tree(block_hash)
+    }
+
     pub async fn is_block_processing(&self, block_hash: &BlockHash) -> bool {
         self.blocks_cache.is_block_processing(block_hash).await
+    }
+
+    /// In the pool cache, not processing, and not held in the tree or the
+    /// recently-processed cache.
+    ///
+    /// Side-effect free: does not stamp the reprocess cooldown. A seen-skip
+    /// must let this case through so `dedup_and_maybe_emit_reprocess` can
+    /// re-emit `AttemptReprocessingBlock` once that cooldown has elapsed.
+    pub(crate) async fn is_block_parked(&self, block_hash: &BlockHash) -> bool {
+        if !self.blocks_cache.contains_block(block_hash).await {
+            return false;
+        }
+        if self.blocks_cache.is_block_processing(block_hash).await {
+            return false;
+        }
+        if self
+            .blocks_cache
+            .contains_recently_processed(block_hash)
+            .await
+        {
+            return false;
+        }
+        !self.block_status_provider.is_block_in_the_tree(block_hash)
     }
 
     /// Mark the block as requested - for orphan block processing
@@ -1694,6 +1773,35 @@ mod tests {
         // Ensure body.block_hash matches header.block_hash for consistency
         body.block_hash = header.block_hash();
         Arc::new(SealedBlock::new(header, body).expect("Failed to create SealedBlock"))
+    }
+
+    #[test]
+    fn add_block_unless_processing_refuses_a_block_already_processing() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xAB);
+        let block = make_sealed_block(parent, 10, Default::default());
+        let block_hash = block.header().block_hash;
+
+        assert!(
+            cache
+                .add_block_unless_processing(Arc::clone(&block), false)
+                .is_some(),
+            "the first arrival inserts the block"
+        );
+        assert!(
+            cache
+                .add_block_unless_processing(Arc::clone(&block), false)
+                .is_none(),
+            "a concurrent arrival must not start a second processing run"
+        );
+
+        // A parked block is not processing, so a later arrival may retry it.
+        cache.change_block_processing_status(block_hash, false);
+        assert!(
+            cache
+                .add_block_unless_processing(Arc::clone(&block), false)
+                .is_some()
+        );
     }
 
     #[test]

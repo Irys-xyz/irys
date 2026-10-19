@@ -75,7 +75,7 @@ use reth::{
 use reth_db::{Database as _, cursor::*};
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::{
@@ -404,6 +404,9 @@ pub struct IrysNodeTest<T = ()> {
     runtime: RuntimeGuard,
     /// Per-test time-mode override; `None` means use `resolve_time_mode`'s default.
     time_mode_override: Option<TimeMode>,
+    /// Sockets the next `start` uses instead of binding new ones.
+    /// A test holds a pinned port with these until the node owns the socket.
+    held_listeners: Option<(TcpListener, TcpListener)>,
 }
 
 /// Wrapper that safely drops a tokio Runtime from any context (including async).
@@ -465,11 +468,13 @@ impl IrysNodeTest<()> {
             restart_reth_ports,
             runtime: RuntimeGuard::none(),
             time_mode_override: None,
+            held_listeners: None,
         }
     }
 
     #[diag_slow(state = "start".to_string())]
-    pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
+    pub async fn start(mut self) -> IrysNodeTest<IrysNodeCtx> {
+        let held_listeners = self.held_listeners.take();
         let span = self.get_span();
         let _enter = span.enter();
         // Resolve and install the process time source before the node boots.
@@ -512,7 +517,40 @@ impl IrysNodeTest<()> {
             }
         }
         let cfg_for_start = self.cfg.clone();
-        let (cfg, http_listener, gossip_listener) =
+        let (cfg, http_listener, gossip_listener) = if let Some((http_listener, gossip_listener)) =
+            held_listeners
+        {
+            // The caller already bound these ports and kept them until here.
+            // Binding again would release the port first, and another process
+            // could take it. A pinned port also skips the address-in-use
+            // retry, which binds a different port.
+            let http_port = http_listener
+                .local_addr()
+                .expect("held http listener has a local address")
+                .port();
+            let gossip_port = gossip_listener
+                .local_addr()
+                .expect("held gossip listener has a local address")
+                .port();
+            assert_eq!(
+                cfg_for_start.http.bind_port, http_port,
+                "held http listener port does not match config"
+            );
+            assert_eq!(
+                cfg_for_start.gossip.bind_port, gossip_port,
+                "held gossip listener port does not match config"
+            );
+            // Same defaulting as `bind_listeners`: an unset public port
+            // advertises the bound port.
+            let mut cfg_for_start = cfg_for_start;
+            if cfg_for_start.http.public_port == 0 {
+                cfg_for_start.http.public_port = http_port;
+            }
+            if cfg_for_start.gossip.public_port == 0 {
+                cfg_for_start.gossip.public_port = gossip_port;
+            }
+            (cfg_for_start, http_listener, gossip_listener)
+        } else {
             match IrysNode::bind_listeners(cfg_for_start.clone()) {
                 Ok(bound) => bound,
                 Err(err) => {
@@ -541,7 +579,8 @@ impl IrysNodeTest<()> {
                     }
                     IrysNode::bind_listeners(retry_cfg).expect("Failed to bind TCP listeners")
                 }
-            };
+            }
+        };
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -564,6 +603,7 @@ impl IrysNodeTest<()> {
             restart_reth_ports: self.restart_reth_ports,
             runtime: RuntimeGuard(Some(runtime)),
             time_mode_override: self.time_mode_override,
+            held_listeners: None,
         }
     }
 
@@ -576,6 +616,15 @@ impl IrysNodeTest<()> {
 
     pub fn with_name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
+        self
+    }
+
+    /// Bind the next `start` to these sockets instead of calling `bind_listeners`.
+    ///
+    /// The sockets stay owned by the caller until `start` moves them into the
+    /// node, so the port is not free in between.
+    pub fn with_listeners(mut self, http: TcpListener, gossip: TcpListener) -> Self {
+        self.held_listeners = Some((http, gossip));
         self
     }
 
@@ -2767,6 +2816,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             restart_reth_ports: self.restart_reth_ports,
             runtime: RuntimeGuard::none(),
             time_mode_override: self.time_mode_override,
+            held_listeners: self.held_listeners,
         }
     }
 
