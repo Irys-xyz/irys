@@ -83,7 +83,7 @@ bench=/home/ubuntu/loadtest/target/release/irys-sm-bench
 max_sectors_kb=32767
 restore_sectors_kb=1280
 drop_cache=true
-common=--index-engine rocks --rocks-preset baseline --index-group-commit 8 --ingest-concurrency 4096 --num-writes-before-sync 10000 --entropy-sweep-max-bytes 10485760
+common=--index-engine rocks --rocks-preset baseline --index-group-commit 8 --ingest-concurrency 4096 --num-writes-before-sync 10000 --entropy-sweep-max-bytes 10485760 --recall-direct-io
 run fine-16-32 --schedule crates/tooling/sm-bench/presets/fine-16-32.toml
 run recall-5x80 --schedule crates/tooling/sm-bench/presets/recall-5x80.toml --recall-chunks 80
 ```
@@ -266,6 +266,7 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 | Flag | Default | Role |
 | --- | --- | --- |
 | `--recall-chunks` | 400 | Chunks in one recall (100 MiB at 256 KiB) |
+| `--recall-direct-io` | off | Read the entropy file with `O_DIRECT` for recall. The bench default is off. The node default is on. A run that omits this flag measures buffered recall |
 | `--write-origin` | 0 | Partition offset that maps to byte 0 of the write file |
 | `--migrate-origin` | midpoint of the write window | First migration offset |
 | `--prepopulate-index N` | 0 | Synthetic index rows. Resumable via `--dir/bench-prepop.json`. Works for both index engines |
