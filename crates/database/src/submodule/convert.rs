@@ -7165,6 +7165,10 @@ mod tests {
             assert_eq!(tail.tx_start_offset, RelativeChunkOffset(1));
             Ok(())
         })?;
+        // Drop the writable handle before verify opens the same directory.
+        // A live handle compacts and deletes SST files that verify has
+        // already read from the manifest.
+        drop(opened);
         let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!report.has_mismatch(), "{report}");
         assert_eq!(report.index_audit_findings, 0, "{report}");

@@ -825,6 +825,72 @@ fn live_sst_bytes(db: &DB, handle: &rocksdb::ColumnFamily) -> u64 {
     read_cf_u64(db, handle, rocksdb::properties::LIVE_SST_FILES_SIZE).unwrap_or(0)
 }
 
+/// Directories this process has open, and how many handles share each one.
+/// `fcntl` on `LOCK` is per process, so it does not stop a second open here.
+/// The live handle compacts and deletes SST files that the second open has
+/// already seen in the manifest. A clone of one handle shares the count.
+fn open_directories() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static HELD: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct OpenClaim(PathBuf);
+
+impl Clone for OpenClaim {
+    fn clone(&self) -> Self {
+        let mut held = open_directories()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held.entry(self.0.clone()).or_insert(0) += 1;
+        Self(self.0.clone())
+    }
+}
+
+impl Drop for OpenClaim {
+    fn drop(&mut self) {
+        let mut held = open_directories()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(count) = held.get_mut(&self.0) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            held.remove(&self.0);
+        }
+    }
+}
+
+fn claim_open_directory(path: &Path) -> eyre::Result<OpenClaim> {
+    let key = open_directory_key(path)?;
+    let mut held = open_directories()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.get(&key).copied().unwrap_or(0) > 0 {
+        eyre::bail!(
+            "rocksdb directory {} is already open in this process. Close that handle before opening it again.",
+            path.display()
+        );
+    }
+    held.insert(key.clone(), 1);
+    Ok(OpenClaim(key))
+}
+
+fn open_directory_key(path: &Path) -> eyre::Result<PathBuf> {
+    if path.exists() {
+        return fs::canonicalize(path).wrap_err("canonicalize rocksdb directory");
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| eyre::eyre!("rocksdb path has no directory name"))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = fs::canonicalize(parent).wrap_err("canonicalize rocksdb parent")?;
+    Ok(parent.join(name))
+}
+
 #[derive(Clone)]
 pub struct RocksSubmoduleStore {
     /// Dropped first so the delay thread joins before `db` closes.
@@ -832,6 +898,9 @@ pub struct RocksSubmoduleStore {
     /// Joins next so a CompactRange finishes before `db` closes.
     compact: Arc<SmallFileCompactor>,
     db: Arc<DB>,
+    /// Dropped after `db`. The directory stays claimed until close finishes
+    /// deleting SST files. A second open in this process is refused until then.
+    open_claim: OpenClaim,
     /// Process cache and write-buffer manager when this open uses them.
     /// Declared after `db` so the database closes before this `Arc` drops.
     resources: Option<Arc<RocksResources>>,
@@ -1031,6 +1100,7 @@ impl RocksSubmoduleStore {
         // Read-only open does not create a database. Refuse before RocksDB
         // reports a missing CURRENT, so the error names the restore.
         refuse_schema_without_current(&path)?;
+        let open_claim = claim_open_directory(&path)?;
         let lock_file = hold_rocks_lock(&path)?;
         let layout = resolve_layout(&path, None)?;
         let unknown = existing_unknown_families(&path)?;
@@ -1045,6 +1115,7 @@ impl RocksSubmoduleStore {
             lifetime: EngineLifetime::new(Arc::clone(&group)),
             compact: SmallFileCompactor::start(Arc::clone(&db), 0, submodule.clone())?,
             db,
+            open_claim,
             resources: None,
             write: Arc::new(Mutex::new(())),
             group,
@@ -1167,6 +1238,7 @@ impl RocksSubmoduleStore {
     ) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
         refuse_unresolved_close_scratch(&path)?;
+        let open_claim = claim_open_directory(&path)?;
         let layout = if stamp_schema {
             // CURRENT without SCHEMA, or any other non-empty directory without
             // SCHEMA, is not a new database. Stamping it would hide a crash.
@@ -1225,6 +1297,7 @@ impl RocksSubmoduleStore {
                 submodule.clone(),
             )?,
             db,
+            open_claim,
             resources,
             write: Arc::new(Mutex::new(())),
             group,
@@ -1575,6 +1648,7 @@ fn abandon_open_database(store: RocksSubmoduleStore) {
         lifetime,
         compact,
         db,
+        open_claim,
         resources,
         stats,
         write,
@@ -1583,12 +1657,14 @@ fn abandon_open_database(store: RocksSubmoduleStore) {
         ..
     } = store;
     // Join threads that call into the database, then leak the handle. Closing
-    // it would write through the path this process no longer owns.
+    // it would write through the path this process no longer owns. Keep the
+    // claim: the leaked handle can still compact that directory.
     drop(lifetime);
     drop(compact);
     drop(write);
     drop(group);
     std::mem::forget(db);
+    std::mem::forget(open_claim);
     std::mem::forget(resources);
     std::mem::forget(stats);
     std::mem::forget(lock_file);
@@ -6754,6 +6830,45 @@ mod tests {
         let marker = fs::read_to_string(path.join(SCHEMA_FILE))?;
         assert_eq!(marker, SUBMODULE_SCHEMA_ROCKS_V1);
         Ok(())
+    }
+
+    /// One process must not open the same directory twice. `fcntl` on `LOCK`
+    /// does not stop a second open in this process, and the live handle's
+    /// compaction deletes SST files the second open has already read from
+    /// the manifest.
+    #[test]
+    fn second_open_of_a_live_directory_is_refused() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_one_open");
+        let path = dir.path().join("index");
+        let writer = RocksSubmoduleStore::open(&path)?;
+        let read_only = RocksSubmoduleStore::open_read_only(&path).unwrap_err();
+        assert_live_open_refused(&read_only);
+        let writable = RocksSubmoduleStore::open(&path).unwrap_err();
+        assert_live_open_refused(&writable);
+        // A clone is the same handle. Dropping one side must not allow a
+        // second open while the other side is still live.
+        let cloned = writer.clone();
+        drop(writer);
+        let still_live = RocksSubmoduleStore::open_read_only(&path).unwrap_err();
+        assert_live_open_refused(&still_live);
+        drop(cloned);
+        let other = dir.path().join("other");
+        let second = RocksSubmoduleStore::open(&other)?;
+        drop(second);
+        let reader = RocksSubmoduleStore::open_read_only(&path)?;
+        let payload = reader.schema_payload()?.expect("schema row");
+        assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
+        drop(reader);
+        let reopened = RocksSubmoduleStore::open(&path)?;
+        drop(reopened);
+        Ok(())
+    }
+
+    fn assert_live_open_refused(err: &eyre::Report) {
+        let text = format!("{err:#}");
+        assert!(text.contains("already open in this process"), "{text}");
+        assert!(!text.contains("Corruption"), "{text}");
+        assert!(!text.contains("No such file"), "{text}");
     }
 
     /// A marker that is not RocksDB v1 is refused. Open writes nothing.
