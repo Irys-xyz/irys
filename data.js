@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792452353557,
+  "lastUpdate": 1792453896804,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -17647,6 +17647,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "JesseTheRobot",
+            "username": "JesseTheRobot"
+          },
+          "distinct": true,
+          "id": "ff7ffe9e1a23838ea9e5f3ff29075ca410294687",
+          "message": "fix(api): reject price quotes over the max data tx size (#1643)\n\nGET /v1/price/{ledger}/{size} rounded the size up to whole chunks with an\nunchecked multiply. A size near u64::MAX overflowed, and with overflow checks\non (debug-release, as mainnet runs) the panic hook aborted the node. An\nexternal client used this to crash-loop mainnet nodes on 2026-10-18.\n\nReject any size whose chunk count exceeds consensus.mempool.max_data_tx_chunks\n(5 TiB on mainnet) with a 400, the same cap mempool ingress and consensus\nprevalidation enforce. That also bounds the multiply.",
+          "timestamp": "2026-10-19T23:34:07Z",
+          "tree_id": "d492715ca48f44ba2da05cb6b44726923a278feb",
+          "url": "https://github.com/Irys-xyz/irys/commit/ff7ffe9e1a23838ea9e5f3ff29075ca410294687"
+        },
+        "date": 1792453895496,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015287,
+            "range": "± 0.000244",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153738,
+            "range": "± 0.001634",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.584817,
+            "range": "± 0.133589",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.457039,
+            "range": "± 0.603121",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078844,
+            "range": "± 0.001363",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 794.1989,
+            "range": "± 30.958097",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 990.558412,
+            "range": "± 10.865594",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.12164,
+            "range": "± 0.001507",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1223.993355,
+            "range": "± 74.66326",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1572.818446,
+            "range": "± 14.450203",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033783,
+            "range": "± 0.000999",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.477936,
+            "range": "± 0.694483",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.910181,
+            "range": "± 1.183132",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
