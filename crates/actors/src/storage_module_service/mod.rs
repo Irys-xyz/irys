@@ -68,6 +68,41 @@ pub struct StorageModuleServiceInner {
     /// channel accepts. A range stays one interval, so a full partition is not
     /// expanded into one repair offset per chunk.
     pending_ranges: HashMap<usize, Vec<PartitionChunkRange>>,
+    /// Test stand-in for a periodic heal pass. `None` in every other test.
+    #[cfg(test)]
+    heal_probe: Option<Arc<HealScheduleProbe>>,
+}
+
+/// Counts 1s-arm runs between periodic heal passes. The pass sleeps for
+/// `hold` and leaves the retry flag set, so the select order is what the
+/// test measures.
+#[cfg(test)]
+struct HealScheduleProbe {
+    hold: Duration,
+    passes: std::sync::atomic::AtomicU64,
+    /// 1s-arm runs since the previous periodic pass began.
+    ticks_since_pass: std::sync::atomic::AtomicU64,
+    /// 1s-arm runs after the first periodic pass returned, read at the
+    /// start of the second pass.
+    ticks_between_passes: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(test)]
+impl HealScheduleProbe {
+    fn record_pass_start(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let pass = self.passes.fetch_add(1, Relaxed);
+        if pass == 1 {
+            self.ticks_between_passes
+                .store(self.ticks_since_pass.load(Relaxed), Relaxed);
+        }
+        self.ticks_since_pass.store(0, Relaxed);
+    }
+
+    fn record_fast_tick(&self) {
+        self.ticks_since_pass
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Reset did not finish. The assignment is unchanged. The service stays up
@@ -133,6 +168,8 @@ impl StorageModuleServiceInner {
             index_heal_needs_retry: true, // force heal until first pass reports clean
             pending_assignment: None,
             pending_ranges: HashMap::new(),
+            #[cfg(test)]
+            heal_probe: None,
         }
     }
 
@@ -874,6 +911,20 @@ impl StorageModuleService {
         }
     }
 
+    /// One periodic heal. A test probe sleeps in place of the real pass.
+    async fn periodic_index_heal(&mut self) {
+        #[cfg(test)]
+        if let Some(probe) = self.inner.heal_probe.clone() {
+            probe.record_pass_start();
+            tokio::time::sleep(probe.hold).await;
+            self.inner.index_heal_needs_retry = true;
+            return;
+        }
+        if let Err(e) = self.inner.run_index_heal().await {
+            error!("periodic data-index heal failed: {e:?}");
+        }
+    }
+
     #[tracing::instrument(name = "storage_module_service_start", level = "trace", skip_all, err)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting StorageModule Service");
@@ -884,6 +935,12 @@ impl StorageModuleService {
         if let Err(e) = self.inner.run_index_heal().await {
             error!("startup data-index heal failed: {e:?}");
             return Err(e);
+        }
+        #[cfg(test)]
+        if self.inner.heal_probe.is_some() {
+            // Startup heal on a clean tree clears the retry flag. The probe
+            // measures the periodic arm, so the flag has to stay set.
+            self.inner.index_heal_needs_retry = true;
         }
 
         let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -918,11 +975,21 @@ impl StorageModuleService {
                 // Only when the last pass left unrepaired work (multi-pass cap /
                 // soft-skips). Healthy nodes stay quiet between epochs.
                 _ = heal_interval.tick(), if self.inner.index_heal_needs_retry => {
-                    if let Err(e) = self.inner.run_index_heal().await {
-                        error!("periodic data-index heal failed: {e:?}");
+                    let started = tokio::time::Instant::now();
+                    self.periodic_index_heal().await;
+                    // A pass that lasts one period returns with the next tick
+                    // already due. This arm is ahead of the 1s arm, so another
+                    // pass would start first. CRC repair and a stored assignment
+                    // retry run only on that 1s arm. Wait one period from now.
+                    if started.elapsed() >= INDEX_HEAL_RETRY_INTERVAL {
+                        heal_interval.reset();
                     }
                 }
                 _ = interval.tick() => {
+                    #[cfg(test)]
+                    if let Some(probe) = &self.inner.heal_probe {
+                        probe.record_fast_tick();
+                    }
                     if let Some(pending) = self.inner.pending_assignment.clone() {
                         self.inner.apply_assignment(pending).await?;
                     }
@@ -980,7 +1047,13 @@ mod assignment_reset_tests {
         partition_chunk_offset_ie,
     };
     use reth_db::mdbx::DatabaseArguments;
-    use std::sync::{Arc, RwLock};
+    use std::{
+        sync::{
+            Arc, RwLock,
+            atomic::{AtomicU64, Ordering},
+        },
+        time::Duration,
+    };
     use tokio::sync::mpsc::error::TrySendError;
 
     struct Harness {
@@ -3545,6 +3618,84 @@ mod assignment_reset_tests {
             pending.len(),
             1,
             "tick retries a closed channel instead of dropping the span"
+        );
+    }
+
+    /// Drive `start` until two periodic heals have begun. Returns how many
+    /// 1s-arm runs happened after the first pass returned.
+    async fn fast_ticks_between_heal_passes(hold: Duration) -> u64 {
+        let probe = Arc::new(HealScheduleProbe {
+            hold,
+            passes: AtomicU64::new(0),
+            ticks_since_pass: AtomicU64::new(0),
+            ticks_between_passes: AtomicU64::new(0),
+        });
+        let mut harness = harness(None);
+        // No module, so the loop does not start a disk-lane thread.
+        harness.inner.storage_modules.write().unwrap().clear();
+        harness.inner.heal_probe = Some(Arc::clone(&probe));
+        let Harness {
+            _tmp,
+            _shutdown_tx,
+            receivers: _receivers,
+            inner,
+            ..
+        } = harness;
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
+        let service = StorageModuleService {
+            shutdown: shutdown_rx,
+            msg_rx,
+            inner,
+        };
+        let handle = tokio::spawn(async move {
+            service.start().await.expect("storage module service start");
+        });
+        for _ in 0..500 {
+            if probe.passes.load(Ordering::Relaxed) >= 2 || handle.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let passes = probe.passes.load(Ordering::Relaxed);
+        let between = probe.ticks_between_passes.load(Ordering::Relaxed);
+        shutdown_tx.fire();
+        drop(msg_tx);
+        let joined = handle.await;
+        assert!(
+            passes >= 2,
+            "periodic heal passes: {passes}, join: {joined:?}"
+        );
+        drop(_tmp);
+        drop(_shutdown_tx);
+        drop(_receivers);
+        between
+    }
+
+    /// A pass that lasts the whole retry period must not chain into the next
+    /// one. The 1s arm is the only place CRC repair and a stored assignment
+    /// retry run.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn budget_length_heal_runs_the_one_second_arm_between_passes() {
+        let between =
+            fast_ticks_between_heal_passes(super::index_heal::INDEX_HEAL_RETRY_INTERVAL).await;
+        assert!(
+            between > 0,
+            "1s arm runs between two budget-length heals, got {between}"
+        );
+    }
+
+    /// A pass that finishes inside the period keeps the original deadline.
+    /// Pushing every pass out by another full period would about double the
+    /// 1s ticks between passes.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn short_heal_pass_keeps_the_retry_interval() {
+        let hold =
+            super::index_heal::INDEX_HEAL_RETRY_INTERVAL.saturating_sub(Duration::from_secs(1));
+        let between = fast_ticks_between_heal_passes(hold).await;
+        assert!(
+            between > 0 && between < 90,
+            "a pass one second under the period still retries on that period, got {between} 1s ticks"
         );
     }
 }
