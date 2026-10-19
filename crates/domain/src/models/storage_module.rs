@@ -775,9 +775,9 @@ pub struct StorageModule {
     pub id: usize,
     /// The (Optional) info about a partition assigned to this storage module
     pub partition_assignment: RwLock<Option<PartitionAssignment>>,
-    /// Bumped when [`Self::rollback_unassigned_range`] clears the index.
-    /// The assignment itself does not change. A registration captured at
-    /// the previous value does not commit.
+    /// Bumped under the assignment write lock at the start of
+    /// [`Self::rollback_unassigned_range`], before the index clear.
+    /// A registration captured at the previous value does not commit.
     rollback_generation: AtomicU64,
     /// Shared across one index commit. Exclusive from the start of partition
     /// recovery until the block-index truncate returns. Lock order: this
