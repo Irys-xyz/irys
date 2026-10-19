@@ -6856,7 +6856,7 @@ mod tests {
         let second = RocksSubmoduleStore::open(&other)?;
         drop(second);
         let reader = RocksSubmoduleStore::open_read_only(&path)?;
-        let payload = reader.schema_payload()?.expect("schema row");
+        let payload = reader.schema_bytes()?.expect("schema row");
         assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
         drop(reader);
         let reopened = RocksSubmoduleStore::open(&path)?;
