@@ -1327,9 +1327,12 @@ impl GossipClient {
         route: GossipRoutes,
         body: bytes::Bytes,
     ) -> GossipResult<GossipResponse<()>> {
+        // One admission for the whole push. A rate-limit retry is the same
+        // offer, and each check takes a half-open trial. Spending the window
+        // here leaves none for the source-peer body pull.
+        self.check_circuit_breaker(peer_id)?;
         let mut attempt = 0_u32;
         loop {
-            self.check_circuit_breaker(peer_id)?;
             let result = self.send_preserialized(address, route, body.clone()).await;
             if !push_response_rate_limited(&result) || attempt == PUSH_BACKPRESSURE_RETRIES {
                 return result;
@@ -1628,17 +1631,19 @@ impl GossipClient {
                 peer_list.set_is_online_by_peer_id(peer_id, true);
                 circuit_breaker.record_success(peer_id);
             }
-            // The peer answered, and the bytes were not stored. A rate limit
-            // is backpressure. A handshake request stays probeable. Gossip
-            // paused on purpose is not a dead peer: opening the breaker would
-            // hide the next push for the whole cooldown. None of these is a
-            // delivery, so the seen-cache still allows a later offer.
+            // The peer answered, so it is reachable. The half-open trial is
+            // a success. Not a delivery: no score change, no online change,
+            // and the seen-cache still allows a later offer. Leaving the
+            // trial unsettled would refuse the source-peer body pull for the
+            // whole cooldown.
             Ok(GossipResponse::Rejected(
                 RejectionReason::RateLimited
                 | RejectionReason::HandshakeRequired(_)
                 | RejectionReason::GossipDisabled,
             ))
-            | Err(GossipError::RateLimited) => {}
+            | Err(GossipError::RateLimited) => {
+                circuit_breaker.record_success(peer_id);
+            }
             Ok(GossipResponse::Rejected(_)) => {
                 peer_list.decrease_peer_score_by_peer_id(
                     peer_id,
@@ -1646,6 +1651,7 @@ impl GossipClient {
                 );
                 circuit_breaker.record_failure(peer_id);
             }
+            // The send never started. There is no dial to score.
             Err(GossipError::CircuitBreakerOpen(_)) => {}
             Err(err) => {
                 if let GossipError::Network(_message) = err {
@@ -1711,9 +1717,8 @@ impl GossipClient {
         match result {
             Ok(GossipResponse::Accepted(_)) => {}
             // The peer answered, so the half-open trial is a success.
-            // Not a delivery: no score change and no online mark. Same
-            // class as the push path, which also leaves these alone,
-            // except the pull must record the trial or it is wasted.
+            // Not a delivery: no score change and no online mark. The
+            // push path records the same success.
             Ok(GossipResponse::Rejected(
                 RejectionReason::RateLimited
                 | RejectionReason::HandshakeRequired(_)
@@ -1790,9 +1795,11 @@ impl GossipClient {
         peer: &PeerListItem,
         data: &GossipDataV2,
     ) -> GossipResult<GossipResponse<()>> {
+        // Same rule as the pre-serialized push: one admission, then every
+        // rate-limit retry rides on it.
+        self.check_circuit_breaker(peer_id)?;
         let mut attempt = 0_u32;
         loop {
-            self.check_circuit_breaker(peer_id)?;
             let result = self.send_data(peer, data).await;
             if !push_response_rate_limited(&result) || attempt == PUSH_BACKPRESSURE_RETRIES {
                 return result;
@@ -3991,6 +3998,39 @@ mod tests {
             );
         }
 
+        /// Open the breaker, then spend one trial so the peer is half-open
+        /// with trials still left. A soft answer must close this state.
+        fn enter_half_open(client: &GossipClient, peer_id: &IrysPeerId) {
+            for _ in 0..5 {
+                client.circuit_breaker.record_failure(peer_id);
+            }
+            assert!(
+                !client.circuit_breaker.would_allow(peer_id),
+                "precondition: breaker is open and the cooldown has not elapsed"
+            );
+            assert!(
+                client.circuit_breaker.begin_probe(peer_id),
+                "precondition: breaker is half-open"
+            );
+            assert_eq!(client.circuit_breaker.metrics().half_open_count, 1);
+        }
+
+        fn assert_answer_closed_the_breaker(client: &GossipClient, peer_id: &IrysPeerId) {
+            let metrics = client.circuit_breaker.metrics();
+            assert_eq!(
+                metrics.open_count, 0,
+                "a peer that answers is reachable, so the breaker must not stay open"
+            );
+            assert_eq!(
+                metrics.half_open_count, 0,
+                "a peer that answers is reachable, so a half-open breaker closes"
+            );
+            assert!(
+                client.circuit_breaker.is_available(peer_id),
+                "a peer that answers stays reachable"
+            );
+        }
+
         #[tokio::test]
         async fn accepted_push_raises_score_and_counts_as_delivery() {
             let client = production_client();
@@ -4021,6 +4061,8 @@ mod tests {
                 let client = production_client();
                 let (peer_list, peer_id, initial) = scored_peer();
                 let cache = GossipCache::new();
+                peer_list.set_is_online_by_peer_id(&peer_id, false);
+                enter_half_open(&client, &peer_id);
 
                 for _ in 0..5 {
                     finish_push(&client, &peer_list, &peer_id, &result, &cache);
@@ -4032,10 +4074,14 @@ mod tests {
                     .reputation_score
                     .get();
                 assert_eq!(updated, initial);
+                assert!(
+                    !peer_list.get_peer(&peer_id).expect("peer").is_online,
+                    "a rate limit is not a delivery and must not mark the peer online"
+                );
                 assert!(!push_response_accepted(&result));
                 assert!(push_response_rate_limited(&result));
                 assert!(!peer_has_data(&cache, peer_id));
-                assert!(client.circuit_breaker.is_available(&peer_id));
+                assert_answer_closed_the_breaker(&client, &peer_id);
             }
         }
 
@@ -4047,6 +4093,8 @@ mod tests {
             let result = Ok(GossipResponse::<()>::Rejected(
                 RejectionReason::GossipDisabled,
             ));
+            peer_list.set_is_online_by_peer_id(&peer_id, false);
+            enter_half_open(&client, &peer_id);
 
             for _ in 0..5 {
                 finish_push(&client, &peer_list, &peer_id, &result, &cache);
@@ -4058,9 +4106,38 @@ mod tests {
                 .reputation_score
                 .get();
             assert_eq!(updated, initial);
+            assert!(
+                !peer_list.get_peer(&peer_id).expect("peer").is_online,
+                "gossip paused on purpose must not mark the peer online"
+            );
             assert!(!push_response_accepted(&result));
             assert!(!peer_has_data(&cache, peer_id));
-            assert!(client.circuit_breaker.is_available(&peer_id));
+            assert_answer_closed_the_breaker(&client, &peer_id);
+        }
+
+        #[tokio::test]
+        async fn handshake_required_push_closes_half_open_breaker_without_score() {
+            let client = production_client();
+            let (peer_list, peer_id, initial) = scored_peer();
+            let cache = GossipCache::new();
+            let result = Ok(GossipResponse::<()>::Rejected(
+                RejectionReason::HandshakeRequired(None),
+            ));
+            peer_list.set_is_online_by_peer_id(&peer_id, false);
+            enter_half_open(&client, &peer_id);
+
+            finish_push(&client, &peer_list, &peer_id, &result, &cache);
+
+            let updated = peer_list
+                .get_peer(&peer_id)
+                .expect("peer")
+                .reputation_score
+                .get();
+            assert_eq!(updated, initial);
+            assert!(!peer_list.get_peer(&peer_id).expect("peer").is_online);
+            assert!(!push_response_accepted(&result));
+            assert!(!peer_has_data(&cache, peer_id));
+            assert_answer_closed_the_breaker(&client, &peer_id);
         }
 
         #[tokio::test]
@@ -4083,6 +4160,270 @@ mod tests {
             assert!(!push_response_accepted(&result));
             assert!(!peer_has_data(&cache, peer_id));
             assert!(!client.circuit_breaker.is_available(&peer_id));
+        }
+
+        /// Two recovery trials. `begin_probe` spends the first, so the push
+        /// has one left. The cooldown is longer than the rate-limit backoff,
+        /// so a retry cannot refill the window.
+        fn client_with_one_push_trial_left() -> GossipClient {
+            use irys_utils::circuit_breaker::{FailureThreshold, RecoveryAttempts};
+            use std::num::NonZeroU32;
+
+            let mut config = CircuitBreakerConfig::p2p_defaults();
+            config.failure_threshold = FailureThreshold::new(NonZeroU32::new(1).expect("1"));
+            config.recovery_attempts = RecoveryAttempts::new(NonZeroU32::new(2).expect("2"));
+            config.cooldown_duration = Duration::from_secs(60);
+            GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(2),
+                IrysAddress::from([3_u8; 20]),
+                IrysPeerId::from([4_u8; 20]),
+                config,
+                tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            )
+        }
+
+        /// Answers every push with `RateLimited` and counts the requests.
+        struct RateLimitedPeer {
+            addr: SocketAddr,
+            hits: Arc<AtomicUsize>,
+            stop: Arc<std::sync::atomic::AtomicBool>,
+            handle: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl RateLimitedPeer {
+            fn spawn() -> Self {
+                use std::io::Write as _;
+
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+                let addr = listener.local_addr().expect("addr");
+                let hits = Arc::new(AtomicUsize::new(0));
+                let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let hits_thread = Arc::clone(&hits);
+                let stop_thread = Arc::clone(&stop);
+                let body = serde_json::to_string(&GossipResponse::<()>::Rejected(
+                    RejectionReason::RateLimited,
+                ))
+                .expect("rate-limit body");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let handle = std::thread::spawn(move || {
+                    while !stop_thread.load(Ordering::SeqCst) {
+                        let Ok((mut stream, _)) = listener.accept() else {
+                            break;
+                        };
+                        if stop_thread.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .expect("read timeout");
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(2)))
+                            .expect("write timeout");
+                        if read_http_request(&mut stream).is_err() {
+                            continue;
+                        }
+                        hits_thread.fetch_add(1, Ordering::SeqCst);
+                        if stream.write_all(response.as_bytes()).is_err() {
+                            continue;
+                        }
+                        let _ = stream.flush();
+                    }
+                });
+                std::thread::sleep(Duration::from_millis(50));
+                Self {
+                    addr,
+                    hits,
+                    stop,
+                    handle: Some(handle),
+                }
+            }
+        }
+
+        impl Drop for RateLimitedPeer {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::SeqCst);
+                let _ = std::net::TcpStream::connect(self.addr);
+                if let Some(handle) = self.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
+
+        fn content_length_of(headers: &str) -> usize {
+            for line in headers.split("\r\n") {
+                let Some((name, value)) = line.split_once(':') else {
+                    continue;
+                };
+                if name.eq_ignore_ascii_case("content-length") {
+                    return value.trim().parse().unwrap_or(0);
+                }
+            }
+            0
+        }
+
+        fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<()> {
+            use std::io::Read as _;
+
+            let mut buf = Vec::with_capacity(1024);
+            let mut tmp = [0_u8; 1024];
+            loop {
+                let n = stream.read(&mut tmp)?;
+                if n == 0 {
+                    return Ok(());
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    if buf.len() > 1024 * 1024 {
+                        return Ok(());
+                    }
+                    continue;
+                };
+                let headers = std::str::from_utf8(&buf[..header_end]).unwrap_or("");
+                let content_length = content_length_of(headers);
+                if buf.len() - (header_end + 4) >= content_length {
+                    return Ok(());
+                }
+            }
+        }
+
+        fn peer_aimed_at(id: u8, addr: SocketAddr) -> (PeerList, IrysPeerId, PeerListItem, u16) {
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let (peer_id, _, mut peer) = create_test_peer(id);
+            peer.address.gossip = addr;
+            peer.address.api = addr;
+            peer.is_online = false;
+            peer_list.add_or_update_peer(peer.clone(), true);
+            let score = peer_list
+                .get_peer(&peer_id)
+                .expect("peer")
+                .reputation_score
+                .get();
+            (peer_list, peer_id, peer, score)
+        }
+
+        /// The push has one half-open trial. Every rate-limit retry must use
+        /// that trial, and the answer must close the breaker.
+        fn assert_rate_limited_retries_take_one_trial(
+            client: &GossipClient,
+            peer_list: &PeerList,
+            peer_id: &IrysPeerId,
+            initial_score: u16,
+            hits: &AtomicUsize,
+            result: &GossipResult<GossipResponse<()>>,
+            cache: &GossipCache,
+        ) {
+            let expected_pushes = usize::try_from(PUSH_BACKPRESSURE_RETRIES + 1).expect("fits");
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                expected_pushes,
+                "one admission must cover every rate-limit retry, got {result:?}"
+            );
+            assert!(
+                matches!(
+                    result,
+                    Ok(GossipResponse::Rejected(RejectionReason::RateLimited))
+                ),
+                "the push finishes on the rate limit, not on an open breaker: {result:?}"
+            );
+            assert!(
+                !client.circuit_breaker.begin_probe(peer_id),
+                "the push took the last half-open trial"
+            );
+            assert!(
+                !client.circuit_breaker.would_allow(peer_id),
+                "the trial is taken and not yet settled"
+            );
+            assert_eq!(client.circuit_breaker.metrics().half_open_count, 1);
+
+            finish_push(client, peer_list, peer_id, result, cache);
+
+            let peer = peer_list.get_peer(peer_id).expect("peer");
+            assert_eq!(peer.reputation_score.get(), initial_score);
+            assert!(
+                !peer.is_online,
+                "a rate limit is not a delivery and must not mark the peer online"
+            );
+            assert!(!peer_has_data(cache, *peer_id));
+            let metrics = client.circuit_breaker.metrics();
+            assert_eq!(metrics.open_count, 0);
+            assert_eq!(
+                metrics.half_open_count, 0,
+                "a rate-limited answer closes the half-open breaker"
+            );
+            assert!(
+                client.circuit_breaker.begin_probe(peer_id),
+                "the source-peer body pull is admitted once the answer closes the breaker"
+            );
+        }
+
+        #[tokio::test]
+        async fn preserialized_push_rate_limited_during_half_open_takes_one_trial() {
+            let server = RateLimitedPeer::spawn();
+            let client = client_with_one_push_trial_left();
+            let (peer_list, peer_id, _, initial_score) = peer_aimed_at(4, server.addr);
+            let cache = GossipCache::new();
+            client.circuit_breaker.record_failure(&peer_id);
+            assert!(
+                client.circuit_breaker.begin_probe(&peer_id),
+                "precondition: half-open, one trial spent, one left"
+            );
+            assert!(
+                client.circuit_breaker.would_allow(&peer_id),
+                "precondition: one half-open trial remains"
+            );
+
+            let result = client
+                .push_preserialized_with_backoff(
+                    &peer_id,
+                    &server.addr,
+                    GossipRoutes::Chunk,
+                    bytes::Bytes::from_static(b"{}"),
+                )
+                .await;
+
+            assert_rate_limited_retries_take_one_trial(
+                &client,
+                &peer_list,
+                &peer_id,
+                initial_score,
+                &server.hits,
+                &result,
+                &cache,
+            );
+        }
+
+        #[tokio::test]
+        async fn data_push_rate_limited_during_half_open_takes_one_trial() {
+            let server = RateLimitedPeer::spawn();
+            let client = client_with_one_push_trial_left();
+            let (peer_list, peer_id, peer, initial_score) = peer_aimed_at(5, server.addr);
+            let cache = GossipCache::new();
+            client.circuit_breaker.record_failure(&peer_id);
+            assert!(client.circuit_breaker.begin_probe(&peer_id));
+            assert!(client.circuit_breaker.would_allow(&peer_id));
+
+            let data = GossipDataV2::BlockBody(Arc::new(BlockBody {
+                block_hash: H256::zero(),
+                data_transactions: Vec::new(),
+                commitment_transactions: Vec::new(),
+            }));
+            let result = client.push_data_with_backoff(&peer_id, &peer, &data).await;
+
+            assert_rate_limited_retries_take_one_trial(
+                &client,
+                &peer_list,
+                &peer_id,
+                initial_score,
+                &server.hits,
+                &result,
+                &cache,
+            );
         }
     }
 
