@@ -1432,12 +1432,12 @@ mod tests {
     /// both stay at the sweep cap. Code can still assign those fields.
     #[test]
     fn ignored_storage_keys_parse_and_read_sizes_stay_at_the_sweep_cap() {
-        let raw = r#"
+        let raw = "
             entropy_sweep_interval_millis = 5
             drop_recall_page_cache = true
             entropy_read_batch_bytes = 1
             entropy_readahead_bytes = 1
-        "#;
+        ";
         let cfg: StorageSyncConfig = toml::from_str(raw).expect("older keys must still parse");
         assert_eq!(cfg.entropy_sweep_interval_millis, 5);
         assert!(cfg.drop_recall_page_cache);
@@ -1460,9 +1460,11 @@ mod tests {
         assert!(!written.contains("entropy_read_batch_bytes"), "{written}");
         assert!(!written.contains("entropy_readahead_bytes"), "{written}");
 
-        let mut overridden = StorageSyncConfig::default();
-        overridden.entropy_read_batch_bytes = 256 * 1024;
-        overridden.entropy_readahead_bytes = 0;
+        let overridden = StorageSyncConfig {
+            entropy_read_batch_bytes: 256 * 1024,
+            entropy_readahead_bytes: 0,
+            ..StorageSyncConfig::default()
+        };
         assert_eq!(overridden.entropy_read_batch_bytes, 256 * 1024);
         assert_eq!(overridden.entropy_readahead_bytes, 0);
     }
