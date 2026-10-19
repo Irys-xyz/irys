@@ -14062,6 +14062,15 @@ mod tests {
 
     /// The test panic hook aborts the process. An injected panic must not.
     fn quiet_panics<R>(body: impl FnOnce() -> R) -> R {
+        quiet_panics_with(|_| {}, body)
+    }
+
+    /// Same as [`quiet_panics`], and `on_panic` runs from the panic hook.
+    /// The hook must not panic: a second panic aborts the process.
+    fn quiet_panics_with<R>(
+        on_panic: impl Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static,
+        body: impl FnOnce() -> R,
+    ) -> R {
         struct RestoreHook(
             Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>>,
         );
@@ -14073,8 +14082,24 @@ mod tests {
             }
         }
         let _restore = RestoreHook(Some(std::panic::take_hook()));
-        std::panic::set_hook(Box::new(|_| {}));
+        std::panic::set_hook(Box::new(on_panic));
         body()
+    }
+
+    /// `try_lock` on `sync_in_progress`. `held` is a live guard. `poisoned`
+    /// is a guard that was dropped while its thread was unwinding.
+    fn classify_sync_lock(module: &StorageModule) -> &'static str {
+        if module.sync_in_progress.is_poisoned() {
+            return "poisoned";
+        }
+        match module.sync_in_progress.try_lock() {
+            Ok(guard) => {
+                drop(guard);
+                "free"
+            }
+            Err(std::sync::TryLockError::WouldBlock) => "held",
+            Err(std::sync::TryLockError::Poisoned(_)) => "poisoned",
+        }
     }
 
     /// A panic while `sync_in_progress` is held must not stop `reset` or a
@@ -14107,7 +14132,13 @@ mod tests {
     }
 
     /// A pwrite worker panic is an error from the flush. The lane thread
-    /// stays up, and the sync lock stays usable for the retry.
+    /// stays up. The panic does not poison `sync_in_progress`: the lane
+    /// holds that lock on the parent thread, and `catch_unwind` stops the
+    /// worker from unwinding it.
+    ///
+    /// The chunk stays pending, so the next commit writes it and holds the
+    /// lock again. `try_lock` is `WouldBlock` for that whole commit. The
+    /// hold is not poison. That commit still stores the row.
     #[test]
     fn lane_pwrite_panic_returns_and_keeps_the_sync_lock() -> eyre::Result<()> {
         let (_tmp, _config, module) =
@@ -14115,33 +14146,137 @@ mod tests {
         let module = std::sync::Arc::new(module);
         let lane = LaneGuard::start(std::sync::Arc::clone(&module))?;
         let offset = PartitionChunkOffset::from(1);
-        let guard = module.sync_in_progress.lock().unwrap();
+        // The successful pwrite, not the panicking one, stops here. The
+        // lane thread is inside `join` and still holds `sync_in_progress`.
+        module.pause_next_sync_at(SyncPausePoint::AfterPwrite);
         module.panic_next_pwrite_for_test();
-        assert!(module.write_chunk(offset, vec![0x44_u8; 32], ChunkType::Entropy));
-        let module_ref = std::sync::Arc::clone(&module);
+
+        let poisoned_during_panic = std::sync::Arc::new(AtomicBool::new(false));
+        let hook_ran = std::sync::Arc::new(AtomicBool::new(false));
+        let module_watch = std::sync::Arc::clone(&module);
+        let (obs_tx, obs_rx) = std::sync::mpsc::channel();
+        let _watch = std::thread::spawn(move || {
+            let arrived = module_watch.wait_for_sync_pause(Duration::from_secs(15));
+            let kind = classify_sync_lock(&module_watch);
+            let poisoned = module_watch.sync_in_progress.is_poisoned();
+            module_watch.release_sync_pause();
+            let _ = obs_tx.send((arrived, kind, poisoned));
+        });
+
+        let module_flush = std::sync::Arc::clone(&module);
+        let poisoned_flag = std::sync::Arc::clone(&poisoned_during_panic);
+        let hook_flag = std::sync::Arc::clone(&hook_ran);
+        let module_hook = std::sync::Arc::clone(&module);
         let (tx, rx) = std::sync::mpsc::channel();
-        let _flush = std::thread::spawn(move || {
-            let result = module_ref.force_sync_pending_chunks();
-            let _ = tx.send(result);
-        });
-        let first = quiet_panics(|| {
-            drop(guard);
-            rx.recv_timeout(Duration::from_secs(5))
-                .unwrap_or_else(|_| panic!("lane flush did not return after a worker panic"))
-        });
+        let first = quiet_panics_with(
+            move |info| {
+                let message = info.payload().downcast_ref::<&str>().copied().unwrap_or("");
+                if message == "injected chunk write panic" {
+                    hook_flag.store(true, Ordering::SeqCst);
+                    // Parent of the worker still holds `sync_in_progress`.
+                    // The worker does not. Poison is set only when that
+                    // guard drops during unwind.
+                    poisoned_flag
+                        .store(module_hook.sync_in_progress.is_poisoned(), Ordering::SeqCst);
+                }
+            },
+            || {
+                assert!(module.write_chunk(offset, vec![0x44_u8; 32], ChunkType::Entropy));
+                let _flush = std::thread::spawn(move || {
+                    let result = module_flush.force_sync_pending_chunks();
+                    let _ = tx.send(result);
+                });
+                // The pause can sit inside this flush. The watcher releases
+                // it. Wait for that observation before the flush result.
+                let observed = obs_rx
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("pwrite pause observation was dropped");
+                let flushed = rx
+                    .recv_timeout(Duration::from_secs(15))
+                    .unwrap_or_else(|_| panic!("lane flush did not return after a worker panic"));
+                (flushed, observed)
+            },
+        );
+        let (first, (arrived, kind, poisoned)) = first;
+        assert!(
+            hook_ran.load(Ordering::SeqCst),
+            "the injected panic did not reach the hook: {first:?}"
+        );
+        assert!(
+            !poisoned_during_panic.load(Ordering::SeqCst),
+            "the worker panic poisoned the sync lock while the lane still held it: {first:?}"
+        );
         assert!(
             module.disk_lane_running(),
             "a pwrite panic killed the lane thread: {first:?}"
         );
+        if let Err(error) = &first {
+            assert!(
+                error.to_string().contains("chunk write panicked"),
+                "unexpected flush error: {error}"
+            );
+        }
         assert!(
-            module.sync_in_progress.try_lock().is_ok(),
-            "a pwrite panic poisoned the sync lock: {first:?}"
+            arrived,
+            "the pwrite after the panic did not reach AfterPwrite"
         );
+        assert!(!poisoned, "AfterPwrite saw a poisoned sync lock: {first:?}");
+        // The successful pwrite runs on a worker. The lane thread is in
+        // `join` and still holds `sync_in_progress`. `WouldBlock` is that
+        // hold. It is not poison.
+        assert_eq!(
+            kind, "held",
+            "a pwrite panic poisoned the sync lock: {kind} {first:?}"
+        );
+
+        let stored = Instant::now() + Duration::from_secs(15);
+        while module.offset_meta_for_test(offset)?.is_none() {
+            assert_ne!(
+                classify_sync_lock(&module),
+                "poisoned",
+                "the commit after the panic poisoned the sync lock"
+            );
+            assert!(
+                Instant::now() < stored,
+                "the commit after a pwrite panic did not store the row: {first:?}"
+            );
+            std::thread::yield_now();
+        }
+        let free = Instant::now() + Duration::from_secs(15);
+        loop {
+            match classify_sync_lock(&module) {
+                "free" => break,
+                "poisoned" => panic!("the sync lock stayed poisoned after the commit"),
+                "held" => {
+                    assert!(
+                        Instant::now() < free,
+                        "the sync lock stayed held after the row was stored"
+                    );
+                    std::thread::yield_now();
+                }
+                other => panic!("unexpected sync lock state {other}"),
+            }
+        }
         module.force_sync_pending_chunks()?;
-        assert!(
-            module.offset_meta_for_test(offset)?.is_some(),
-            "the retry after a pwrite panic did not store the row"
-        );
+        assert!(module.offset_meta_for_test(offset)?.is_some());
+        // `finish_lane_request` wakes this caller before the lane pass
+        // returns. A later step in that pass may hold the lock. That hold
+        // ends. It is not poison.
+        let settled = Instant::now() + Duration::from_secs(15);
+        loop {
+            match classify_sync_lock(&module) {
+                "free" => break,
+                "poisoned" => panic!("the sync lock stayed poisoned after the later flush"),
+                "held" => {
+                    assert!(
+                        Instant::now() < settled,
+                        "the sync lock stayed held after the later flush"
+                    );
+                    std::thread::yield_now();
+                }
+                other => panic!("unexpected sync lock state {other}"),
+            }
+        }
         drop(lane);
         Ok(())
     }
