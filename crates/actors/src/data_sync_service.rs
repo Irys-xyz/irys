@@ -461,10 +461,6 @@ pub enum DataSyncServiceMessage {
         peer_addr: IrysAddress,
         failure_kind: ChunkFetchFailureKind,
     },
-    PeerListUpdated,
-    PeerDisconnected {
-        peer_address: IrysAddress,
-    },
     GetActivePeersList(oneshot::Sender<Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>>),
     /// Entropy offsets a retired body-migration job left behind. The local-cache
     /// miss memo is cleared. Holes join the tail of the ready queue, and only
@@ -549,10 +545,6 @@ impl DataSyncServiceInner {
                     );
                 }
             }
-            DataSyncServiceMessage::PeerListUpdated => self.handle_peer_list_updated(),
-            DataSyncServiceMessage::PeerDisconnected {
-                peer_address: peer_addr,
-            } => self.handle_peer_disconnection(peer_addr),
             DataSyncServiceMessage::GetActivePeersList(tx) => self.handle_get_active_peers_list(tx),
             DataSyncServiceMessage::BodyMigrationHoles {
                 storage_module_id,
@@ -1150,10 +1142,6 @@ impl DataSyncServiceInner {
             }
         }
         Ok(())
-    }
-
-    fn handle_peer_list_updated(&mut self) {
-        self.sync_peer_partition_assignments();
     }
 
     fn handle_peer_disconnection(&mut self, peer_addr: IrysAddress) {
