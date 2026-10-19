@@ -437,7 +437,7 @@ async fn heavy_test_rocks_v1_failed_derive_drops_the_solution() -> eyre::Result<
         .unwrap();
 
     let mut solution = utils::solution_context(&node.node_ctx).await?;
-    let job = TxPathJob::spawn(|| Err(eyre::eyre!("data_root mismatch at offset 0")));
+    let job = TxPathJob::finished(Err(eyre::eyre!("data_root mismatch at offset 0")));
     solution.tx_path = TxPathSource::Derive(job);
 
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();

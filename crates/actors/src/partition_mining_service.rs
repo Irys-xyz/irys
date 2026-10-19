@@ -623,7 +623,7 @@ impl PartitionMiningServiceInner {
     /// Start a derive for `offset`. `None` when this miner has no consensus
     /// database, the partition has no ledger slot, the submodule is missing,
     /// RocksDB v1 has no placement for the offset, or [`TxPathJob::try_spawn`]
-    /// already has its threads running.
+    /// has no free derive slot.
     ///
     /// The job checks the derived root against `data_path` and, on RocksDB v1,
     /// against the stored placement. A mismatch fails the job.
@@ -2298,6 +2298,12 @@ mod tests {
             Some(db),
             Some(pool),
         );
+        // Keep the runtime alive until `resolve`. Dropping it first drops a
+        // blocking task that has not started.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let _enter = runtime.enter();
         let solution = mine_once(&mut inner).expect("difficulty 0 finds the first chunk");
         let derived = solution
             .tx_path

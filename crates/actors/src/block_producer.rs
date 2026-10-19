@@ -2273,7 +2273,7 @@ mod tx_path_poa_tests {
 
     #[test]
     fn failed_derive_does_not_build_a_poa() {
-        let job = TxPathJob::spawn(|| Err(eyre::eyre!("header missing at height 3")));
+        let job = TxPathJob::finished(Err(eyre::eyre!("header missing at height 3")));
         let solution = SolutionContext {
             tx_path: TxPathSource::Derive(job),
             data_path: Some(vec![1, 2, 3]),
@@ -2287,7 +2287,7 @@ mod tx_path_poa_tests {
 
     #[test]
     fn derive_result_is_reused_by_a_second_build() {
-        let job = TxPathJob::spawn(|| Ok(vec![1, 2, 3, 4]));
+        let job = TxPathJob::finished(Ok(vec![1, 2, 3, 4]));
         let solution = SolutionContext {
             tx_path: TxPathSource::Derive(job),
             chunk: vec![9],
