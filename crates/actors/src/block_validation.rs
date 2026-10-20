@@ -6280,6 +6280,20 @@ fn validate_term_ledger_expiry(
     Ok(())
 }
 
+/// Entropy unpack is sequential hashing. It runs off the async worker.
+async fn unpack_packed_chunk(
+    packed: irys_types::PackedChunk,
+    iterations: u32,
+    chunk_size: usize,
+    chain_id: u64,
+) -> Result<irys_types::UnpackedChunk, PreValidationError> {
+    tokio::task::spawn_blocking(move || {
+        irys_packing::unpack(&packed, iterations, chunk_size, chain_id)
+    })
+    .await
+    .map_err(|error| PreValidationError::InternalTaskJoin(format!("unpack: {error}")))
+}
+
 /// Bytes for one ingress-proof chunk from the local cache or a storage module.
 ///
 /// A cache row with `chunk: None` is a miss. A storage-module body must name
@@ -6287,7 +6301,7 @@ fn validate_term_ledger_expiry(
 /// a body copied out of the cache (path, byte range, length, leaf hash).
 /// A mismatch is a miss. `Ok(None)` means both sources missed, so the caller
 /// tries peers.
-fn ingress_proof_chunk_bytes_from_local(
+async fn ingress_proof_chunk_bytes_from_local(
     db: &DatabaseProvider,
     storage_modules: &StorageModulesReadGuard,
     config: &Config,
@@ -6335,12 +6349,13 @@ fn ingress_proof_chunk_bytes_from_local(
                     continue;
                 }
             };
-            let unpacked = irys_packing::unpack(
-                &packed,
+            let unpacked = unpack_packed_chunk(
+                packed,
                 config.consensus.entropy_packing_iterations,
                 config.consensus.chunk_size as usize,
                 config.consensus.chain_id,
-            );
+            )
+            .await?;
             if unpacked.data_root != data_root || unpacked.tx_offset != tx_offset {
                 continue;
             }
@@ -6880,7 +6895,8 @@ pub async fn data_txs_are_valid(
                         tx_header.data_root,
                         tx_header.data_size,
                         tx_chunk_offset,
-                    )?;
+                    )
+                    .await?;
 
                     if chunk_bytes.is_none() {
                         for api_addr in api_addrs.iter() {
@@ -6915,12 +6931,15 @@ pub async fn data_txs_are_valid(
 
                             let unpacked = match chunk_format {
                                 irys_types::ChunkFormat::Unpacked(u) => u,
-                                irys_types::ChunkFormat::Packed(p) => irys_packing::unpack(
-                                    &p,
-                                    config.consensus.entropy_packing_iterations,
-                                    config.consensus.chunk_size as usize,
-                                    config.consensus.chain_id,
-                                ),
+                                irys_types::ChunkFormat::Packed(p) => {
+                                    unpack_packed_chunk(
+                                        p,
+                                        config.consensus.entropy_packing_iterations,
+                                        config.consensus.chunk_size as usize,
+                                        config.consensus.chain_id,
+                                    )
+                                    .await?
+                                }
                             };
 
                             // Basic sanity checks before ingest
@@ -6994,7 +7013,8 @@ pub async fn data_txs_are_valid(
                                 tx_header.data_root,
                                 tx_header.data_size,
                                 tx_chunk_offset,
-                            )?;
+                            )
+                            .await?;
                             if chunk_bytes.is_some() {
                                 break;
                             }
@@ -9591,6 +9611,7 @@ mod ingress_proof_local_bytes_tests {
         NodeConfig, PartitionChunkOffset, TxChunkOffset, UnpackedChunk, irys::IrysSigner,
         ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
     };
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, RwLock};
 
     fn testing_config(base: std::path::PathBuf) -> Config {
@@ -9668,7 +9689,7 @@ mod ingress_proof_local_bytes_tests {
         StorageModulesReadGuard::new(Arc::new(RwLock::new(Vec::new())))
     }
 
-    fn local_bytes(
+    async fn local_bytes(
         db: &DatabaseProvider,
         modules: &StorageModulesReadGuard,
         config: &Config,
@@ -9682,11 +9703,12 @@ mod ingress_proof_local_bytes_tests {
             tx.header.data_size,
             TxChunkOffset::from(0_u32),
         )
+        .await
         .unwrap()
     }
 
-    #[test]
-    fn cache_body_is_used_when_no_storage_module_is_assigned() {
+    #[tokio::test]
+    async fn cache_body_is_used_when_no_storage_module_is_assigned() {
         let tmp = TempDirBuilder::new()
             .prefix("ingress-cache-body")
             .with_tracing()
@@ -9697,13 +9719,13 @@ mod ingress_proof_local_bytes_tests {
         cache_body(&db, &tx, &data);
         let modules = empty_modules();
         assert_eq!(
-            local_bytes(&db, &modules, &config, &tx).as_deref(),
+            local_bytes(&db, &modules, &config, &tx).await.as_deref(),
             Some(data.as_slice())
         );
     }
 
-    #[test]
-    fn index_only_row_with_no_local_body_is_a_miss() {
+    #[tokio::test]
+    async fn index_only_row_with_no_local_body_is_a_miss() {
         let tmp = TempDirBuilder::new()
             .prefix("ingress-index-only-miss")
             .with_tracing()
@@ -9714,11 +9736,11 @@ mod ingress_proof_local_bytes_tests {
         cache_body(&db, &tx, &data);
         strip_body(&db, &tx);
         let modules = empty_modules();
-        assert!(local_bytes(&db, &modules, &config, &tx).is_none());
+        assert!(local_bytes(&db, &modules, &config, &tx).await.is_none());
     }
 
-    #[test]
-    fn index_only_row_uses_the_storage_module_body() {
+    #[tokio::test]
+    async fn index_only_row_uses_the_storage_module_body() {
         let tmp = TempDirBuilder::new()
             .prefix("ingress-index-only-sm")
             .with_tracing()
@@ -9780,7 +9802,7 @@ mod ingress_proof_local_bytes_tests {
         strip_body(&db, &tx);
         let modules = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![Arc::new(sm)])));
         assert_eq!(
-            local_bytes(&db, &modules, &config, &tx).as_deref(),
+            local_bytes(&db, &modules, &config, &tx).await.as_deref(),
             Some(data.as_slice())
         );
     }
@@ -9842,8 +9864,8 @@ mod ingress_proof_local_bytes_tests {
         Arc::new(sm)
     }
 
-    #[test]
-    fn corrupt_storage_module_body_falls_through_to_the_next_module() {
+    #[tokio::test]
+    async fn corrupt_storage_module_body_falls_through_to_the_next_module() {
         let tmp = TempDirBuilder::new()
             .prefix("ingress-corrupt-sm")
             .with_tracing()
@@ -9861,15 +9883,62 @@ mod ingress_proof_local_bytes_tests {
 
         let only_bad = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![Arc::clone(&bad)])));
         assert!(
-            local_bytes(&db, &only_bad, &config, &tx).is_none(),
+            local_bytes(&db, &only_bad, &config, &tx).await.is_none(),
             "a body that fails the leaf check is a miss"
         );
 
         let both = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![bad, good])));
         assert_eq!(
-            local_bytes(&db, &both, &config, &tx).as_deref(),
+            local_bytes(&db, &both, &config, &tx).await.as_deref(),
             Some(data.as_slice()),
             "the next module's valid body is used"
         );
+    }
+
+    /// Unpacking a storage-module body must leave the async worker free to run
+    /// another task. The probe is queued first. It can run only if unpack waits.
+    #[tokio::test(flavor = "current_thread")]
+    async fn storage_module_unpack_lets_the_async_worker_run() {
+        let tmp = TempDirBuilder::new()
+            .prefix("ingress-unpack-yields")
+            .with_tracing()
+            .build();
+        let config = Config::new_with_random_peer_id(NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 4,
+                entropy_packing_iterations: 50_000,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        });
+        let (tx, data) = one_chunk(&config);
+        let module = store_indexed_body(&config, &tx, &data, 0);
+        let db = open_db(&tmp.path().join("db"));
+        cache_body(&db, &tx, &data);
+        strip_body(&db, &tx);
+        let modules = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![module])));
+
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        tokio::spawn(async move {
+            flag.store(true, Ordering::SeqCst);
+        });
+        let got = ingress_proof_chunk_bytes_from_local(
+            &db,
+            &modules,
+            &config,
+            tx.header.data_root,
+            tx.header.data_size,
+            TxChunkOffset::from(0_u32),
+        )
+        .await
+        .expect("local unpack");
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "unpack ran to completion without letting the async worker poll another task"
+        );
+        assert_eq!(got.as_deref(), Some(data.as_slice()));
     }
 }
