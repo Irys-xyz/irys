@@ -168,8 +168,7 @@ impl InnerCacheTask {
             )
         })?;
 
-        let chunk_offset =
-            first_unexpired_slot_index * self.config.consensus.num_chunks_in_partition;
+        let chunk_offset = first_unexpired_slot_index * epoch_snapshot.partition_chunks();
 
         // Check to see if the first overlapping block in our first active submit ledger slot is in the block index
         let mut prune_height: Option<u64> = None;
@@ -728,7 +727,7 @@ impl InnerCacheTask {
                     // in `u64`. Debug builds panic on overflow. Release builds wrap.
                     // A product that does not fit is not this slot.
                     if (slot_index as u64)
-                        .checked_mul(sm.config.consensus.num_chunks_in_partition)
+                        .checked_mul(sm.partition_chunks())
                         .is_none()
                     {
                         continue;

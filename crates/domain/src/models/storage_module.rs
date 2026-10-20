@@ -73,6 +73,9 @@ mod split_backing;
 #[cfg(feature = "bench")]
 pub use split_backing::SplitBacking;
 
+#[path = "partition_resize.rs"]
+mod partition_resize;
+
 type SubmodulePath = PathBuf;
 
 /// Real `data_root` for a stored tx path, checked against the proof leaf.
@@ -937,6 +940,11 @@ pub struct StorageModule {
     recent_chunk_times: Arc<RwLock<CircularBuffer<ChunkTimeRecord>>>,
     /// Runtime configuration parameters
     pub config: Config,
+    /// Canonical logical extent; may revert with the branch before finality.
+    partition_chunks: AtomicU64,
+    /// Durable physical bound, also checked by late packing/index writers.
+    retained_chunks: AtomicU64,
+    resize_complete: Mutex<Option<partition_resize::ResizeJournal>>,
     /// Recall, packed writes, and entropy reads. Callers enqueue; this lane
     /// takes `chunks.dat`.
     disk: disk_lane::DiskGate,
@@ -1880,6 +1888,22 @@ fn submodule_reserve_len(
     })
 }
 
+/// Bytes of `interval` below `retained_chunks`. A finalized resize truncated
+/// the rest, and open must not reserve it again.
+fn retained_submodule_len(
+    interval: &Interval<PartitionChunkOffset>,
+    retained_chunks: u64,
+    chunk_size: u64,
+) -> eyre::Result<u64> {
+    let start = u64::from(interval.start().0);
+    let span = u64::from(interval.end().0) - start + 1;
+    retained_chunks
+        .saturating_sub(start)
+        .min(span)
+        .checked_mul(chunk_size)
+        .ok_or_else(|| eyre!("retained submodule byte length overflow"))
+}
+
 #[cfg(test)]
 thread_local! {
     static SUBMODULE_OPEN_ORDER: std::cell::RefCell<Vec<&'static str>> =
@@ -2033,6 +2057,11 @@ impl StorageModule {
                 "split backing requires the submodule interval to start at partition offset 0"
             );
         }
+        // A finalized resize shrank the files. Open must not regrow them.
+        let retained = Self::read_resize_journal(storage_module_info, config)?;
+        let retained_chunks = retained.map_or(config.consensus.num_chunks_in_partition, |r| {
+            r.retained_chunks
+        });
         let mut submodule_map = NoditMap::new();
         let mut global_intervals = StorageIntervals::new();
         // Bind after a pending reset clears the old partition hash. Binding
@@ -2063,7 +2092,12 @@ impl StorageModule {
                 config.consensus.chunk_size,
                 #[cfg(feature = "bench")]
                 split.as_ref(),
-            )?;
+            )?
+            .min(retained_submodule_len(
+                &submodule_interval,
+                retained_chunks,
+                config.consensus.chunk_size,
+            )?);
             // Name the file before the migration. `set_len` does not allocate,
             // so a v1 copy still has the free space it needs. ext4 returns
             // `EFBIG` above 16 TiB - 4 KiB and the schema row stays put.
@@ -2072,7 +2106,8 @@ impl StorageModule {
             let check_chunks_len = split.is_none();
             #[cfg(not(feature = "bench"))]
             let check_chunks_len = true;
-            if check_chunks_len {
+            // Zero is a submodule a finalized resize truncated away entirely.
+            if check_chunks_len && full_len > 0 {
                 ensure_chunks_len_fits(&sub_base_path.join("chunks.dat"), full_len)?;
             }
             // Migrate the index before reserving the partition. A v1 index
@@ -2265,16 +2300,24 @@ impl StorageModule {
         }
 
         // Attempt to load a global set of intervals from the submodules
-        let loaded_intervals: NoditMap<
+        let mut loaded_intervals: NoditMap<
             PartitionChunkOffset,
             Interval<PartitionChunkOffset>,
             ChunkType,
         > = Self::load_intervals_from_submodules(&submodule_map, storage_module_info.id)?;
 
-        Self::ensure_partition_coverage(
-            &loaded_intervals,
-            config.consensus.num_chunks_in_partition,
-        )?;
+        // A crash between the journal commit and the interval rewrite leaves
+        // the old suffix in the files; the resume below rewrites them.
+        if retained.is_some() {
+            let _ = loaded_intervals
+                .cut(partition_chunk_offset_ii!(
+                    u32::try_from(retained_chunks).expect("Value exceeds u32::MAX"),
+                    u32::MAX
+                ))
+                .collect::<Vec<_>>();
+        }
+
+        Self::ensure_partition_coverage(&loaded_intervals, retained_chunks)?;
 
         // A bench split writes synthetic presence under Entropy after this
         // open returns. Reconciling here would delete a resumed prepopulate.
@@ -2325,7 +2368,7 @@ impl StorageModule {
         #[cfg(not(any(test, feature = "test-utils")))]
         drop(index_commit_fail_next);
 
-        Ok(Self {
+        let module = Self {
             id: storage_module_info.id,
             partition_assignment: RwLock::new(storage_module_info.partition_assignment),
             rollback_generation: AtomicU64::new(0),
@@ -2400,7 +2443,14 @@ impl StorageModule {
             sync_lock_blocked: AtomicBool::new(false),
             #[cfg(test)]
             pwrite_panic_once: AtomicBool::new(false),
-        })
+            partition_chunks: AtomicU64::new(retained_chunks),
+            retained_chunks: AtomicU64::new(retained_chunks),
+            resize_complete: Mutex::new(None),
+        };
+        if let Some(journal) = retained {
+            module.resume_partition_resize(journal)?;
+        }
+        Ok(module)
     }
 
     fn open_submodule_index(
@@ -2521,8 +2571,11 @@ impl StorageModule {
         // Mode 0 reserves holes up to the submodule length and leaves bytes
         // that are already written where they are. A partition that does not
         // fit fails here, before the first packed write.
-        allocate_chunks_file(&chunks_file, &path, full_len)
-            .wrap_err_with(|| format!("Failed to allocate {}", path.display()))?;
+        // Zero is a submodule a finalized resize truncated away entirely.
+        if full_len > 0 {
+            allocate_chunks_file(&chunks_file, &path, full_len)
+                .wrap_err_with(|| format!("Failed to allocate {}", path.display()))?;
+        }
         // Every chunks.dat read is a pread of a range the caller already
         // sized. The next read is not the bytes after that range. Read-ahead
         // state belongs to this open file description, and a dup shares it,
@@ -3169,7 +3222,7 @@ impl StorageModule {
         let chunk_byte_offset = u64::from(raw_tx_offset)
             .checked_mul(self.config.consensus.chunk_size)
             .ok_or_else(|| eyre::eyre!("chunk byte offset overflow"))?;
-        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
+        let num_chunks_in_partition = self.partition_chunks();
         let mut offsets = Vec::new();
         for info in infos.0 {
             if chunk_byte_offset >= info.data_size {
@@ -3305,7 +3358,7 @@ impl StorageModule {
         }
 
         let chunk_size = self.config.consensus.chunk_size;
-        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
+        let num_chunks_in_partition = self.partition_chunks();
         for tx_offset in candidates {
             let raw_offset = u32::from(*tx_offset);
             let chunk_byte_offset = u64::from(raw_offset)
@@ -3503,7 +3556,14 @@ impl StorageModule {
         if drop_marker {
             self.clear_reset_marker_in_sync()?;
         }
-        Ok(storage_interval)
+        // Before finality the physical suffix remains available for a reorg,
+        // but a new packing job must use the current logical partition size.
+        Ok(ii(
+            storage_interval.start(),
+            storage_interval.end().min(PartitionChunkOffset::from(
+                self.partition_chunks() as u32 - 1,
+            )),
+        ))
     }
 
     /// Drop the reset marker. The caller holds `sync_in_progress`.
@@ -3639,9 +3699,9 @@ impl StorageModule {
             .unwrap()
             .and_then(|part| part.slot_index)
             .map(|slot_index| {
-                let start_offset =
-                    slot_index as u64 * self.config.consensus.num_chunks_in_partition;
-                let end_offset = start_offset + self.config.consensus.num_chunks_in_partition;
+                let chunks = self.partition_chunks();
+                let start_offset = slot_index as u64 * chunks;
+                let end_offset = start_offset + chunks;
                 (start_offset..end_offset).contains(&*chunk_offset)
             })
             .unwrap_or(false)
@@ -4932,6 +4992,12 @@ impl StorageModule {
             }
             let start = submodule_interval.start();
             if only.is_some_and(|starts| !starts.contains(&start)) {
+                continue;
+            }
+            // Truncation wrote this submodule's empty file. An empty slice
+            // would otherwise be stored as `Uninitialized` over the whole span.
+            if u64::from(start.0) >= self.retained_chunks.load(Ordering::Acquire) {
+                self.lock_interval_disk().dirty.remove(&start);
                 continue;
             }
             let Some(slice) = Self::interval_slice_cow(image, *submodule_interval) else {
@@ -6349,6 +6415,10 @@ impl StorageModule {
             if resume.is_some_and(|(gap_sub, _)| sub_start < gap_sub) {
                 continue;
             }
+            // A truncated suffix has no checksum rows and is never scanned.
+            let Some(interval) = self.retained_span(*interval) else {
+                continue;
+            };
             let scan_start = match resume {
                 Some((gap_sub, gap_off)) if gap_sub == sub_start => u32::try_from(gap_off)
                     .ok()
@@ -6652,7 +6722,7 @@ impl StorageModule {
             ChunkType::Interrupted => {}
         }
 
-        spans
+        self.clamp_spans_to_partition(spans)
     }
 
     /// Uninitialized spans that overlap `range`, clipped to it.
@@ -6699,7 +6769,7 @@ impl StorageModule {
             }
             Self::cut_interval_point(&mut spans, *offset);
         }
-        spans
+        self.clamp_spans_to_partition(spans)
     }
 
     /// Live `Uninitialized` spans inside `range`.
@@ -6881,6 +6951,11 @@ impl StorageModule {
             return EntropyWrite::Rejected(EntropyRejection::NotUninitialized(label));
         }
         let mut pending = self.pending_writes.write().unwrap();
+        // Checked under the pending lock, the same lock the truncation holds
+        // while it moves the bound, so a late packing write cannot regrow the tail.
+        if !self.offset_in_partition(chunk_offset) {
+            return EntropyWrite::Rejected(EntropyRejection::NotUninitialized(None));
+        }
         if Self::queued_data_or_proof(&pending, chunk_offset) {
             return EntropyWrite::Rejected(EntropyRejection::NotUninitialized(Some(
                 ChunkType::Data,
@@ -6902,6 +6977,9 @@ impl StorageModule {
         chunk_type: ChunkType,
     ) -> bool {
         let mut pending = self.pending_writes.write().unwrap();
+        if !self.offset_in_partition(chunk_offset) {
+            return false;
+        }
         // Checked under the same lock as the insert so a pause taken while a
         // writer is between its own pre-check and this point still wins.
         if chunk_type == ChunkType::Data && self.data_writes_paused() {
@@ -7503,8 +7581,9 @@ impl StorageModule {
         let Some(slot_index) = assignment.slot_index else {
             return Err(eyre::eyre!("Ledger slot not assigned!"));
         };
-        let start = slot_index as u64 * self.config.consensus.num_chunks_in_partition;
-        let end = start + self.config.consensus.num_chunks_in_partition;
+        let chunks = self.partition_chunks();
+        let start = slot_index as u64 * chunks;
+        let end = start + chunks;
         Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)))
     }
 
@@ -9200,7 +9279,7 @@ impl StorageModule {
     /// Test utility function to mark a StorageModule as packed
     pub fn pack_with_zeros(&self) {
         let entropy_bytes = vec![0_u8; self.config.consensus.chunk_size as usize];
-        for chunk_offset in 0..self.config.consensus.num_chunks_in_partition as u32 {
+        for chunk_offset in 0..self.partition_chunks() as u32 {
             self.write_chunk(
                 PartitionChunkOffset::from(chunk_offset),
                 entropy_bytes.clone(),

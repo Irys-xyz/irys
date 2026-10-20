@@ -6,7 +6,7 @@ use irys_database::{
     insert_commitment_tx, insert_tx_header, prune_block_stream_below, tx_header_by_txid,
 };
 use irys_domain::{
-    BlockIndex, BlockTree, StorageModule, StorageModulesReadGuard, SupplyState,
+    BlockIndex, BlockTree, ChunkType, StorageModule, StorageModulesReadGuard, SupplyState,
     block_index_guard::BlockIndexReadGuard, forkchoice_markers::finalized_height,
     get_overlapped_storage_modules,
 };
@@ -296,6 +296,78 @@ impl BlockMigrationService {
         }
         irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)?;
         Ok(())
+    }
+
+    /// Update logical ledger geometry on canonical adoption, including reorgs.
+    /// Destructive truncation is separately gated on finality by the storage service.
+    ///
+    /// Hot path: runs on every tip change for every module, so the no-growth
+    /// case is two atomic loads around the bound update.
+    pub fn update_partition_geometry(
+        &self,
+        epoch: &irys_domain::EpochSnapshot,
+    ) -> eyre::Result<()> {
+        let Some(modules) = &self.storage_modules_guard else {
+            return Ok(());
+        };
+        let chunks = epoch.partition_chunks();
+        for module in modules.read().iter() {
+            let previous = module.partition_chunks();
+            module.set_partition_chunks(chunks)?;
+            // Compare the bound in force, not the request: after a finalized
+            // truncation a pre-activation canonical view is clamped and the bound
+            // does not move.
+            if module.partition_chunks() <= previous || module.partition_assignment().is_none() {
+                continue;
+            }
+            // The bound grew back: a branch without the activation became
+            // canonical. The suffix hidden by the pre-finality bound was never
+            // packed (startup and assignment only request packing up to the
+            // bound in force at the time), so re-request it now. `get_intervals`
+            // is clipped to the restored bound, so these ranges are exactly the
+            // re-exposed suffix plus any genuinely unpacked prefix. Non-blocking
+            // `try_send` from this sync path, as in the partition-recovery
+            // repack above; warn (don't fail the module) if it can't be enqueued.
+            for interval in module.get_intervals(ChunkType::Uninitialized) {
+                self.try_enqueue_packing(
+                    module.clone(),
+                    PartitionChunkRange(interval),
+                    "after partition bound grew",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Non-blocking packing request from a sync path; warns (does not fail the
+    /// module) when the request cannot be built or the channel is saturated.
+    fn try_enqueue_packing(
+        &self,
+        module: std::sync::Arc<irys_domain::StorageModule>,
+        interval: PartitionChunkRange,
+        context: &str,
+    ) {
+        let module_id = module.id;
+        match PackingRequest::new(module, interval) {
+            Ok(req) => {
+                if let Err(err) = self.packing_sender.try_send(req) {
+                    warn!(
+                        module_id,
+                        ?interval,
+                        %err,
+                        "failed to enqueue repacking request {context}"
+                    );
+                }
+            }
+            Err(err) => {
+                warn!(
+                    module_id,
+                    ?interval,
+                    %err,
+                    "failed to build repacking request {context}"
+                );
+            }
+        }
     }
 
     pub fn set_storage_modules_guard(&mut self, guard: StorageModulesReadGuard) {
@@ -851,30 +923,14 @@ impl BlockMigrationService {
                         // `Uninitialized` and is recovered by the startup repack plus
                         // data-sync. Closing the window (gating re-migration on
                         // entropy presence) is left to the packing-reconciler rework.
-                        match PackingRequest::new(
+                        self.try_enqueue_packing(
                             module.clone(),
                             PartitionChunkRange(ii(
                                 PartitionChunkOffset::from(*partition_range.start()),
                                 PartitionChunkOffset::from(*partition_range.end()),
                             )),
-                        ) {
-                            Ok(req) => {
-                                if let Err(err) = self.packing_sender.try_send(req) {
-                                    warn!(
-                                        module_id = module.id,
-                                        %err,
-                                        "failed to enqueue repacking request during partition recovery"
-                                    );
-                                }
-                            }
-                            Err(err) => {
-                                warn!(
-                                    module_id = module.id,
-                                    %err,
-                                    "failed to build repacking request during partition recovery"
-                                );
-                            }
-                        }
+                            "during partition recovery",
+                        );
                     }
                 }
             }

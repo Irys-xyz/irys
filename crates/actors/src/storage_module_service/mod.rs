@@ -22,7 +22,7 @@ use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, PACKING_PARAMS_FILE_NAME, PackingParams,
     StorageModule, StorageModuleInfo,
 };
-use irys_types::{Config, PartitionChunkRange, TokioServiceHandle, Traced};
+use irys_types::{Config, H256, PartitionChunkRange, TokioServiceHandle, Traced};
 use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::HashMap,
@@ -71,6 +71,12 @@ pub struct StorageModuleServiceInner {
     /// Test stand-in for a periodic heal pass. `None` in every other test.
     #[cfg(test)]
     heal_probe: Option<Arc<HealScheduleProbe>>,
+    /// Finalized-resize worker. Yields the activation hash once every module
+    /// completed, `None` when any module must be retried on a later tick.
+    resize_task: Option<tokio::task::JoinHandle<Option<H256>>>,
+    /// Activation whose finalized resize every module completed; stops the
+    /// per-tick worker spawn.
+    resize_done: Option<H256>,
 }
 
 /// Counts 1s-arm runs between periodic heal passes. The pass sleeps for
@@ -200,6 +206,8 @@ impl StorageModuleServiceInner {
             service_senders,
             config,
             shutdown,
+            resize_task: None,
+            resize_done: None,
             index_heal_needs_retry: true, // force heal until first pass reports clean
             pending_assignment: None,
             pending_ranges: HashMap::new(),
@@ -286,8 +294,77 @@ impl StorageModuleServiceInner {
         DiskLaneSet { handles }
     }
 
+    fn start_partition_resize(&mut self) -> eyre::Result<()> {
+        if self.resize_task.is_some() {
+            return Ok(());
+        }
+        let epoch = self.block_tree.read().canonical_epoch_snapshot();
+        let Some(resize) = epoch.partition_resize else {
+            return Ok(());
+        };
+        if self.resize_done == Some(resize.activation_hash) {
+            return Ok(());
+        }
+        let index = self.block_index.read();
+        let finalized = irys_domain::forkchoice_markers::finalized_height(
+            index.latest_height(),
+            self.config.consensus.block_tree_depth,
+            u64::from(self.config.consensus.block_migration_depth),
+        );
+        if finalized < resize.activation_height {
+            return Ok(());
+        }
+        eyre::ensure!(
+            index
+                .get_item(resize.activation_height)
+                .is_some_and(|b| b.block_hash == resize.activation_hash),
+            "finalized partition resize activation differs from canonical branch"
+        );
+        // Finality is irreversible. The block index is a shared read handle;
+        // clone modules out of the registry lock before any disk IO and run
+        // migration on the blocking pool rather than on this service's tick.
+        let modules = self.storage_modules.read().unwrap().clone();
+        self.resize_task = Some(tokio::task::spawn_blocking(move || {
+            let mut all_done = true;
+            for module in modules {
+                match module.finalize_partition_resize(&resize) {
+                    Ok(true) => tracing::info!(
+                        storage_module.id = module.id,
+                        activation.height = resize.activation_height,
+                        retained_chunks = resize.params.partition_chunks,
+                        "Completed finalized partition resize"
+                    ),
+                    Ok(false) => {}
+                    Err(e) => {
+                        all_done = false;
+                        error!(
+                            storage_module.id = module.id,
+                            "partition resize failed; will retry: {e:?}"
+                        );
+                    }
+                }
+            }
+            all_done.then_some(resize.activation_hash)
+        }));
+        Ok(())
+    }
+
     #[tracing::instrument(level = "trace", skip_all)]
-    fn tick(&mut self) {
+    async fn tick(&mut self) {
+        if self
+            .resize_task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            match self.resize_task.take().expect("finished task").await {
+                Ok(Some(activation_hash)) => self.resize_done = Some(activation_hash),
+                Ok(None) => {}
+                Err(e) => error!("partition resize worker failed; will retry: {e:?}"),
+            }
+        }
+        if let Err(e) = self.start_partition_resize() {
+            error!("finalized partition resize failed; will retry: {e:?}");
+        }
         // A stored retry is applied by the run loop before this tick. This
         // covers the case where that retry was dropped and no message remains.
         if self.pending_assignment.is_none() {
@@ -986,7 +1063,7 @@ impl StorageModuleService {
                     if let Some(pending) = self.inner.pending_assignment.clone() {
                         self.inner.apply_assignment(pending).await?;
                     }
-                    self.inner.tick();
+                    self.inner.tick().await;
                 }
             }
         }
@@ -1001,6 +1078,11 @@ impl StorageModuleService {
             self.inner.apply_assignment(msg).instrument(span).await?
         }
 
+        if let Some(task) = self.inner.resize_task.take()
+            && let Err(e) = task.await
+        {
+            error!("partition resize worker failed during shutdown: {e:?}");
+        }
         tracing::info!("shutting down StorageModule Service gracefully");
         Ok(())
     }
@@ -1241,7 +1323,7 @@ mod assignment_reset_tests {
         assert!(harness.receivers.packing.try_recv().is_err());
 
         apply_update(&mut harness, publish, 5).await;
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(!harness.module.reset_incomplete());
         assert!(harness.inner.pending_assignment.is_none());
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
@@ -1388,7 +1470,7 @@ mod assignment_reset_tests {
         );
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
         assert!(harness.receivers.packing.try_recv().is_err());
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(
             harness.receivers.packing.try_recv().is_err(),
             "a stored retry is applied by the run loop, not by this tick"
@@ -1413,7 +1495,7 @@ mod assignment_reset_tests {
         assert_full_partition_span(&request);
         drop(request);
         apply_update(&mut harness, publish, 5).await;
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(
             harness.receivers.packing.try_recv().is_err(),
             "the span is packed once"
@@ -1469,12 +1551,12 @@ mod assignment_reset_tests {
         let _saved = corrupt_packing_params(&path);
         apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
         assert!(harness.inner.pending_assignment.is_some());
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(harness.receivers.packing.try_recv().is_err());
         assert!(harness.module.reset_incomplete());
 
         harness.inner.pending_assignment = None;
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(!harness.module.reset_incomplete());
         assert!(!reset_marker(&harness.module));
         assert_eq!(
@@ -1515,7 +1597,7 @@ mod assignment_reset_tests {
         );
         assert!(!harness.module.reset_incomplete());
         assert_one_deferred_full_span(&harness);
-        deferred_span_is_sent_on_tick(&mut harness);
+        deferred_span_is_sent_on_tick(&mut harness).await;
         assert!(harness.receivers.packing.try_recv().is_err());
     }
 
@@ -1585,7 +1667,7 @@ mod assignment_reset_tests {
         harness.module.fail_next_reset_for_test();
         apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
         assert!(harness.inner.pending_assignment.is_some());
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(
             harness.module.reset_incomplete(),
             "a stored capacity retry must finish on apply, not on an idle tick"
@@ -1595,7 +1677,7 @@ mod assignment_reset_tests {
 
         harness.inner.pending_assignment = None;
         harness.inner.index_heal_needs_retry = false;
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(
             !harness.module.reset_incomplete(),
             "a tick with no stored retry clears a flag that has no marker"
@@ -1618,7 +1700,7 @@ mod assignment_reset_tests {
             "keeping the bytes must not schedule heal for a cleared index"
         );
         assert!(harness.receivers.packing.try_recv().is_err());
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
         assert_reopen_chunk(harness, ChunkType::Data);
     }
@@ -1638,7 +1720,7 @@ mod assignment_reset_tests {
         harness.module.fail_next_reset_for_test();
         apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
         set_reset_marker(&harness.module);
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(
             harness.module.reset_incomplete(),
             "a stored capacity retry must finish on apply, not on an idle tick"
@@ -1649,7 +1731,7 @@ mod assignment_reset_tests {
         harness.inner.pending_assignment = None;
         harness.inner.index_heal_needs_retry = false;
         harness.module.fail_next_reset_for_test();
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(
             harness.module.reset_incomplete(),
             "a failed finish stays incomplete for the next tick"
@@ -1658,7 +1740,7 @@ mod assignment_reset_tests {
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
         assert!(harness.receivers.packing.try_recv().is_err());
 
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(!harness.module.reset_incomplete());
         assert!(!reset_marker(&harness.module));
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
@@ -1698,7 +1780,7 @@ mod assignment_reset_tests {
         apply_update(&mut harness, explicit_unassign(&path), 4).await;
         assert!(harness.module.reset_incomplete());
         assert!(!reset_marker(&harness.module));
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(
             harness.module.reset_incomplete(),
             "a stored unassign must finish on apply, not on an idle tick"
@@ -1706,7 +1788,7 @@ mod assignment_reset_tests {
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
 
         harness.inner.pending_assignment = None;
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(!harness.module.reset_incomplete());
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
         assert_eq!(
@@ -1732,7 +1814,7 @@ mod assignment_reset_tests {
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
         harness.inner.pending_assignment = None;
         harness.inner.index_heal_needs_retry = false;
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(!harness.module.reset_incomplete());
         assert!(!reset_marker(&harness.module));
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
@@ -1786,7 +1868,7 @@ mod assignment_reset_tests {
         assert!(harness.receivers.packing.try_recv().is_err());
 
         apply_update(&mut harness, capacity, 5).await;
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
         assert!(!harness.module.reset_incomplete());
         assert!(harness.receivers.packing.try_recv().is_err());
@@ -2113,7 +2195,7 @@ mod assignment_reset_tests {
         assert!(harness.receivers.packing.try_recv().is_err());
 
         apply_update(&mut harness, unassign, 10).await;
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(!harness.module.reset_incomplete());
         assert!(harness.inner.pending_assignment.is_none());
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Data));
@@ -2671,7 +2753,7 @@ mod assignment_reset_tests {
             handle: Some(handle),
         };
         assert!(harness.module.disk_lane_running());
-        harness.inner.tick();
+        harness.inner.tick().await;
         let request = harness
             .receivers
             .packing
@@ -2942,7 +3024,7 @@ mod assignment_reset_tests {
         harness
             .module
             .requeue_crc_repair_range(repair_one_to_three().0);
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(
             harness.receivers.packing.try_recv().is_err(),
             "an unassigned module must not enqueue a repair"
@@ -2952,7 +3034,7 @@ mod assignment_reset_tests {
             left.is_empty(),
             "unassigned module must drop crc repairs, still queued: {left:?}"
         );
-        harness.inner.tick();
+        harness.inner.tick().await;
         let left = harness.module.take_crc_repair_ranges();
         assert!(
             left.is_empty(),
@@ -2968,7 +3050,7 @@ mod assignment_reset_tests {
         harness
             .module
             .requeue_crc_repair_range(repair_one_to_three().0);
-        harness.inner.tick();
+        harness.inner.tick().await;
         let request = harness
             .receivers
             .packing
@@ -2989,7 +3071,7 @@ mod assignment_reset_tests {
         harness
             .module
             .requeue_crc_repair_range(repair_one_to_three().0);
-        harness.inner.tick();
+        harness.inner.tick().await;
         let left = harness.module.take_crc_repair_ranges();
         assert!(
             left.is_empty(),
@@ -2999,7 +3081,7 @@ mod assignment_reset_tests {
             harness.receivers.packing.try_recv().is_ok(),
             "the filled channel still holds a filler request"
         );
-        harness.inner.tick();
+        harness.inner.tick().await;
         let mut saw = false;
         for _ in 0..5_001 {
             let Ok(request) = harness.receivers.packing.try_recv() else {
@@ -3028,7 +3110,7 @@ mod assignment_reset_tests {
         harness
             .module
             .requeue_crc_repair_range(repair_one_to_three().0);
-        harness.inner.tick();
+        harness.inner.tick().await;
         let accepted = harness
             .receivers
             .packing
@@ -3050,7 +3132,7 @@ mod assignment_reset_tests {
         harness
             .module
             .requeue_crc_repair_range(repair_one_to_three().0);
-        harness.inner.tick();
+        harness.inner.tick().await;
         let pending = harness
             .inner
             .pending_ranges
@@ -3073,7 +3155,7 @@ mod assignment_reset_tests {
             harness.receivers.packing.try_recv().is_ok(),
             "one filler leaves so the kept span can be sent"
         );
-        harness.inner.tick();
+        harness.inner.tick().await;
         let mut repairs = 0_usize;
         while let Ok(request) = harness.receivers.packing.try_recv() {
             if *request.chunk_range().0.start() == 1 && *request.chunk_range().0.end() == 3 {
@@ -3255,7 +3337,7 @@ mod assignment_reset_tests {
             Some(irys_domain::ChunkType::Uninitialized)
         );
         let _fillers = drain_packing(&mut harness);
-        harness.inner.tick();
+        harness.inner.tick().await;
         let request = harness
             .receivers
             .packing
@@ -3306,7 +3388,7 @@ mod assignment_reset_tests {
             "entropy offsets are not packed again"
         );
         let _fillers = drain_packing(&mut harness);
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(
             harness.receivers.packing.try_recv().is_err(),
             "capacity to ledger must not repack entropy"
@@ -3330,7 +3412,7 @@ mod assignment_reset_tests {
         );
         assert!(!harness.inner.pending_ranges.contains_key(&0));
         let _fillers = drain_packing(&mut harness);
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(
             harness.receivers.packing.try_recv().is_err(),
             "capacity to ledger must not pack over data"
@@ -3347,7 +3429,7 @@ mod assignment_reset_tests {
         let path = harness.path.clone();
         apply_update(&mut harness, publish_update(&path, hash, miner), 5).await;
         let _fillers = drain_packing(&mut harness);
-        harness.inner.tick();
+        harness.inner.tick().await;
         let request = harness
             .receivers
             .packing
@@ -3416,7 +3498,7 @@ mod assignment_reset_tests {
             Some(DataLedger::Publish.into())
         );
         let _fillers = drain_packing(&mut harness);
-        harness.inner.tick();
+        harness.inner.tick().await;
         let request = harness
             .receivers
             .packing
@@ -3446,10 +3528,10 @@ mod assignment_reset_tests {
         );
     }
 
-    fn deferred_span_is_sent_on_tick(harness: &mut Harness) {
+    async fn deferred_span_is_sent_on_tick(harness: &mut Harness) {
         let queued = drain_packing(harness);
         assert_only_filler_ranges(&queued);
-        harness.inner.tick();
+        harness.inner.tick().await;
         let request = harness
             .receivers
             .packing
@@ -3470,7 +3552,7 @@ mod assignment_reset_tests {
             harness.module.partition_assignment().unwrap().ledger_id,
             None
         );
-        deferred_span_is_sent_on_tick(&mut harness);
+        deferred_span_is_sent_on_tick(&mut harness).await;
     }
 
     #[tokio::test]
@@ -3492,7 +3574,7 @@ mod assignment_reset_tests {
         let assignment = harness.module.partition_assignment().unwrap();
         assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
         assert_eq!(assignment.slot_index, Some(1));
-        deferred_span_is_sent_on_tick(&mut harness);
+        deferred_span_is_sent_on_tick(&mut harness).await;
     }
 
     #[tokio::test]
@@ -3514,7 +3596,7 @@ mod assignment_reset_tests {
         assert!(harness.module.partition_assignment().is_none());
         apply_update(&mut harness, capacity_update(&path, hash, miner), 5).await;
         assert!(harness.module.partition_assignment().is_some());
-        deferred_span_is_sent_on_tick(&mut harness);
+        deferred_span_is_sent_on_tick(&mut harness).await;
     }
 
     /// A marker wipe on capacity→ledger publishes `Uninitialized` while the
@@ -3538,7 +3620,7 @@ mod assignment_reset_tests {
             Some(DataLedger::Publish.into())
         );
         assert_one_deferred_full_span(&harness);
-        deferred_span_is_sent_on_tick(&mut harness);
+        deferred_span_is_sent_on_tick(&mut harness).await;
         assert!(harness.receivers.packing.try_recv().is_err());
     }
 
@@ -3563,7 +3645,7 @@ mod assignment_reset_tests {
             Some(DataLedger::Publish.into())
         );
         assert_one_deferred_full_span(&harness);
-        deferred_span_is_sent_on_tick(&mut harness);
+        deferred_span_is_sent_on_tick(&mut harness).await;
         assert!(harness.receivers.packing.try_recv().is_err());
     }
 
@@ -3586,7 +3668,7 @@ mod assignment_reset_tests {
             Some(1)
         );
         assert_one_deferred_full_span(&harness);
-        deferred_span_is_sent_on_tick(&mut harness);
+        deferred_span_is_sent_on_tick(&mut harness).await;
         assert!(harness.receivers.packing.try_recv().is_err());
     }
 
@@ -3605,14 +3687,14 @@ mod assignment_reset_tests {
         set_reset_marker(&harness.module);
         harness.inner.pending_assignment = None;
         fill_packing_channel(&harness);
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
         assert_eq!(
             harness.module.partition_assignment().unwrap().ledger_id,
             Some(DataLedger::Publish.into())
         );
         assert_one_deferred_full_span(&harness);
-        deferred_span_is_sent_on_tick(&mut harness);
+        deferred_span_is_sent_on_tick(&mut harness).await;
         assert!(harness.receivers.packing.try_recv().is_err());
     }
 
@@ -3630,7 +3712,7 @@ mod assignment_reset_tests {
             harness.module.partition_assignment().unwrap().ledger_id,
             None
         );
-        deferred_span_is_sent_on_tick(&mut harness);
+        deferred_span_is_sent_on_tick(&mut harness).await;
     }
 
     /// Unassign drops a span the channel did not accept. The module cannot pack.
@@ -3658,7 +3740,7 @@ mod assignment_reset_tests {
             "unassign must drop a span the channel did not accept"
         );
         let _fillers = drain_packing(&mut harness);
-        harness.inner.tick();
+        harness.inner.tick().await;
         assert!(harness.receivers.packing.try_recv().is_err());
     }
 
@@ -3687,7 +3769,7 @@ mod assignment_reset_tests {
         );
         assert_eq!(*pending[0].0.start(), 0);
         assert_eq!(*pending[0].0.end(), 9);
-        harness.inner.tick();
+        harness.inner.tick().await;
         let pending = harness
             .inner
             .pending_ranges

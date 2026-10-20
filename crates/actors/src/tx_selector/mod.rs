@@ -1016,7 +1016,6 @@ async fn get_publish_txs_and_proofs(
             next_block_height,
             epoch_snapshot,
             parent_block_header,
-            ctx.config,
             cascade_for_block,
         )?;
 

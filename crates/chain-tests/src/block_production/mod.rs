@@ -11,3 +11,5 @@ pub(crate) mod testing_primitives;
 pub(crate) mod treasury_tracking;
 pub(crate) mod unpledge_refund;
 mod unstake_refund;
+
+mod partition_resize;

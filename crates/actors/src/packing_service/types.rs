@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use irys_domain::StorageModule;
-use irys_types::PartitionChunkRange;
+use irys_types::{PartitionChunkOffset, PartitionChunkRange, ii};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use super::{PackingError, PackingResult, config::PackingConfig};
@@ -28,9 +28,15 @@ impl PackingRequest {
                 sm_id: storage_module.id,
             })?;
 
-        // Validate chunk range is within partition bounds
-        let max_chunks = storage_module.config.consensus.num_chunks_in_partition;
-        if *chunk_range.0.end() >= max_chunks as u32 {
+        // Clamp the inclusive end to the logical partition size rather than
+        // reject: the logical size can shrink between a caller's own clamp
+        // (e.g. `StorageModule::reset`) and this check when the tip moves onto E.
+        let max_chunks = storage_module.partition_chunks();
+        let start = chunk_range.0.start();
+        let end = chunk_range.0.end().min(PartitionChunkOffset::from(
+            max_chunks.saturating_sub(1) as u32
+        ));
+        if start > end {
             return Err(PackingError::InvalidRange {
                 requested: chunk_range,
                 max: max_chunks,
@@ -39,7 +45,7 @@ impl PackingRequest {
 
         Ok(Self {
             storage_module,
-            chunk_range,
+            chunk_range: PartitionChunkRange(ii(start, end)),
         })
     }
 
