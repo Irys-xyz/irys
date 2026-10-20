@@ -9,16 +9,30 @@ use sha2::{Digest as _, Sha256};
 
 use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, NodeHash, SizeWitness};
 
-/// Leaf tag. Preimage is `0x00 ‖ segment bytes` at the segment's exact length.
-pub const TAG_LEAF: u8 = 0x00;
-/// Node tag. Preimage is `0x01 ‖ left ‖ right` (65 bytes).
-pub const TAG_NODE: u8 = 0x01;
-/// Size-witness tag. Preimage is `0x02 ‖ be64(data_size)` (9 bytes).
-pub const TAG_SIZE: u8 = 0x02;
-/// Chunk-key tag. Preimage is `0x03 ‖ data_commitment ‖ be32(c)` (37 bytes).
-pub const TAG_CHUNK_KEY: u8 = 0x03;
-/// Reserved for the segment-PoA ticket. This crate never hashes it (spec §3).
-pub const TAG_TICKET: u8 = 0x04;
+/// Single registry of domain tags (spec §3).
+///
+/// Every preimage starts with one of these bytes. Any later tag set (for
+/// example `tx_root` tags, spec §14 Q3) must avoid these bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum TreeDomainTag {
+    /// `0x00 ‖ segment bytes`, at the segment's exact length.
+    Leaf = 0x00,
+    /// `0x01 ‖ left ‖ right` (65 bytes).
+    Node = 0x01,
+    /// `0x02 ‖ be64(data_size)` (9 bytes).
+    Size = 0x02,
+    /// `0x03 ‖ data_commitment ‖ be32(c)` (37 bytes).
+    ChunkKey = 0x03,
+    /// Reserved: defined by the segment-PoA spec; not used by the tree.
+    Ticket = 0x04,
+}
+
+impl TreeDomainTag {
+    pub const fn as_byte(self) -> u8 {
+        self as u8
+    }
+}
 
 fn digest(tag: u8, parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -29,25 +43,31 @@ fn digest(tag: u8, parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// `H(0x00 ‖ bytes)`. `bytes` is hashed at its exact length: no padding (spec §3).
+/// `H(Leaf ‖ bytes)`. `bytes` is hashed at its exact length: no padding (spec §3).
 pub fn leaf(bytes: &[u8]) -> NodeHash {
-    NodeHash(digest(TAG_LEAF, &[bytes]))
+    NodeHash(digest(TreeDomainTag::Leaf.as_byte(), &[bytes]))
 }
 
-/// `H(0x01 ‖ left ‖ right)` (spec §3).
+/// `H(Node ‖ left ‖ right)` (spec §3).
 pub fn node(left: &NodeHash, right: &NodeHash) -> NodeHash {
-    NodeHash(digest(TAG_NODE, &[left.as_bytes(), right.as_bytes()]))
+    NodeHash(digest(
+        TreeDomainTag::Node.as_byte(),
+        &[left.as_bytes(), right.as_bytes()],
+    ))
 }
 
-/// `H(0x02 ‖ be64(data_size))` (spec §3). The witness covers `data_size` only.
+/// `H(Size ‖ be64(data_size))` (spec §3). The witness covers `data_size` only.
 pub fn size_witness(data_size: u64) -> SizeWitness {
-    SizeWitness(digest(TAG_SIZE, &[&data_size.to_be_bytes()]))
+    SizeWitness(digest(
+        TreeDomainTag::Size.as_byte(),
+        &[&data_size.to_be_bytes()],
+    ))
 }
 
-/// `H(0x03 ‖ data_commitment ‖ be32(c))` (spec §3).
+/// `H(ChunkKey ‖ data_commitment ‖ be32(c))` (spec §3).
 pub fn chunk_key(commitment: &DataCommitment, c: u32) -> ChunkKey {
     ChunkKey(digest(
-        TAG_CHUNK_KEY,
+        TreeDomainTag::ChunkKey.as_byte(),
         &[commitment.as_bytes(), &c.to_be_bytes()],
     ))
 }

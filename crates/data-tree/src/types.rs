@@ -74,7 +74,7 @@ impl DataTreeRoot {
 }
 
 hash_id!(
-    /// `H(0x02 ‖ be64(data_size))` (spec §3).
+    /// Size witness over `data_size` only (spec §3).
     SizeWitness
 );
 
@@ -91,6 +91,6 @@ hash_id!(
 );
 
 hash_id!(
-    /// `H(0x03 ‖ data_commitment ‖ be32(c))`. Not a tree node (spec §3, §7).
+    /// Chunk identity key. Not a tree node (spec §3, §7).
     ChunkKey
 );

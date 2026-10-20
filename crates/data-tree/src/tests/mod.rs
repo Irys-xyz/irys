@@ -5,6 +5,7 @@ mod negative;
 mod props;
 mod roundtrip;
 mod shape;
+mod tags;
 mod vectors;
 
 fn pattern(n: usize) -> Vec<u8> {
