@@ -102,6 +102,123 @@ fn push_chunk_matches_push_chunk_root() {
 
 fn synthetic(chunk_index: u32) -> NodeHash {
     let mut bytes = [0_u8; HASH_SIZE];
-    bytes[..4].copy_from_slice(&chunk_index.to_be_bytes());
+    let chunk_index_bytes = chunk_index.to_be_bytes();
+    bytes[..chunk_index_bytes.len()].copy_from_slice(&chunk_index_bytes);
     NodeHash(bytes)
+}
+
+/// Final length of each cache layer (spec §4 `build_layer`).
+///
+/// Layer 0 is the chunk roots. Each next layer is `ceil(previous / 2)`, which
+/// counts the carried unpaired node. Stop at one node. This is the spec rule,
+/// not the builder's cache.
+fn spec_layer_lengths(chunk_count: u32) -> Vec<usize> {
+    let mut layer_length = usize::try_from(chunk_count).expect("chunk count fits usize");
+    let mut lengths = vec![layer_length];
+    while layer_length > 1 {
+        layer_length = layer_length.div_ceil(2);
+        lengths.push(layer_length);
+    }
+    lengths
+}
+
+fn push_bytes(builder: &mut DataTreeBuilder, geometry: Geometry, bytes: &[u8]) {
+    let chunk_size = usize::try_from(geometry.chunk_size()).expect("chunk size fits usize");
+    for piece in bytes.chunks(chunk_size) {
+        builder.push_chunk(piece).unwrap();
+    }
+}
+
+fn assert_same_tree(left: &DataTree, right: &DataTree) {
+    assert_eq!(left.data_size(), right.data_size());
+    assert_eq!(left.chunk_count(), right.chunk_count());
+    assert_eq!(left.layers(), right.layers());
+    assert_eq!(left.data_tree_root(), right.data_tree_root());
+    assert_eq!(left.size_witness(), right.size_witness());
+    assert_eq!(left.data_commitment(), right.data_commitment());
+    for chunk_index in 0..left.chunk_count() {
+        assert_eq!(
+            left.chunk_proof(chunk_index).unwrap(),
+            right.chunk_proof(chunk_index).unwrap(),
+            "chunk {chunk_index}"
+        );
+    }
+}
+
+#[test]
+fn with_capacity_rejects_the_same_sizes_as_chunk_count() {
+    // Catches a capacity hint that accepts 0 or a size above the geometry max,
+    // or that returns a different `SizeError` than `Geometry::chunk_count`.
+    let geometry = Geometry::TESTING;
+    let max_data_size = geometry.max_data_size();
+    for data_size in [0, max_data_size + 1] {
+        assert_eq!(
+            DataTreeBuilder::with_capacity(geometry, data_size).unwrap_err(),
+            geometry.chunk_count(data_size).unwrap_err()
+        );
+    }
+    assert!(DataTreeBuilder::with_capacity(geometry, max_data_size).is_ok());
+}
+
+#[test]
+fn with_capacity_reserves_the_final_layer_lengths() {
+    // Catches a reservation that is short (the layer later grows) or long
+    // (spare capacity remains after the exact upload).
+    // Spec §4: `C = 5` is `node(node(node(R0, R1), node(R2, R3)), R4)`.
+    assert_eq!(spec_layer_lengths(1), vec![1]);
+    assert_eq!(spec_layer_lengths(5), vec![5, 3, 2, 1]);
+
+    let geometry = Geometry::TESTING;
+    // Same exhaustive range as the proof roundtrip (spec §13).
+    for data_size in 1_u64..=199 {
+        let bytes = pattern(usize::try_from(data_size).unwrap());
+        let mut builder = DataTreeBuilder::with_capacity(geometry, data_size).unwrap();
+        push_bytes(&mut builder, geometry, &bytes);
+        let tree = builder.finish().unwrap();
+        let expected = spec_layer_lengths(geometry.chunk_count(data_size).unwrap());
+        assert_eq!(tree.layers().len(), expected.len(), "n={data_size}");
+        for (layer, expected_length) in tree.layers().iter().zip(expected) {
+            assert_eq!(layer.len(), expected_length, "n={data_size}");
+            assert_eq!(
+                layer.capacity(),
+                expected_length,
+                "n={data_size} grew or reserved spare slots"
+            );
+        }
+    }
+}
+
+#[test]
+fn with_capacity_matches_new_for_the_same_bytes() {
+    // Catches a capacity hint that changes layers, the root, or a proof.
+    let geometry = Geometry::TESTING;
+    for data_size in 1_u64..=199 {
+        let bytes = pattern(usize::try_from(data_size).unwrap());
+        let mut reserved = DataTreeBuilder::with_capacity(geometry, data_size).unwrap();
+        push_bytes(&mut reserved, geometry, &bytes);
+        let mut plain = DataTreeBuilder::new(geometry);
+        push_bytes(&mut plain, geometry, &bytes);
+        assert_same_tree(&reserved.finish().unwrap(), &plain.finish().unwrap());
+    }
+}
+
+#[test]
+fn with_capacity_hint_does_not_change_the_tree() {
+    // Catches a hint that rejects a push above or below the reserved size,
+    // or that builds a different tree for that push.
+    let geometry = Geometry::TESTING;
+    let chunk_size = geometry.chunk_size();
+    let actual_size = chunk_size * 3 + chunk_size / 2;
+    let bytes = pattern(usize::try_from(actual_size).unwrap());
+    let mut plain = DataTreeBuilder::new(geometry);
+    push_bytes(&mut plain, geometry, &bytes);
+    let plain = plain.finish().unwrap();
+
+    let mut low_hint = DataTreeBuilder::with_capacity(geometry, chunk_size).unwrap();
+    push_bytes(&mut low_hint, geometry, &bytes);
+    assert_same_tree(&plain, &low_hint.finish().unwrap());
+
+    let mut high_hint = DataTreeBuilder::with_capacity(geometry, chunk_size * 6).unwrap();
+    push_bytes(&mut high_hint, geometry, &bytes);
+    assert_same_tree(&plain, &high_hint.finish().unwrap());
 }

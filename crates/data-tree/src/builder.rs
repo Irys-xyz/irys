@@ -24,6 +24,9 @@ use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash, 
 pub struct DataTreeBuilder {
     geometry: Geometry,
     layers: Vec<Vec<NodeHash>>,
+    /// Final length of each layer for a `with_capacity` hint (spec §4).
+    /// Empty after `new`: layers then grow on demand.
+    layer_capacities: Vec<usize>,
     data_size: u64,
     last_chunk_short: bool,
 }
@@ -34,9 +37,33 @@ impl DataTreeBuilder {
         Self {
             geometry,
             layers: Vec::new(),
+            layer_capacities: Vec::new(),
             data_size: 0,
             last_chunk_short: false,
         }
+    }
+
+    /// Reserve each cache layer for an upload of `data_size` bytes.
+    ///
+    /// `data_size` is only a capacity hint. Pushing a different amount still
+    /// works, and those pushes are checked exactly as with [`Self::new`]. A
+    /// `data_size` of 0, or one above the geometry maximum, is the same
+    /// [`crate::SizeError`] as [`Geometry::chunk_count`].
+    ///
+    /// Layer 0 holds the chunk roots. Each next layer holds `ceil(len / 2)`
+    /// nodes, the `build_layer` shape with the carried node included (spec §4),
+    /// until one node remains. Reserving that final length stops a large upload
+    /// from doubling each layer as it grows (spec §9).
+    pub fn with_capacity(geometry: Geometry, data_size: u64) -> Result<Self, SizeError> {
+        let chunk_count = geometry.chunk_count(data_size)?;
+        let layer_capacities = layer_capacities(chunk_count);
+        Ok(Self {
+            geometry,
+            layers: Vec::with_capacity(layer_capacities.len()),
+            layer_capacities,
+            data_size: 0,
+            last_chunk_short: false,
+        })
     }
 
     /// Hash `bytes` with `chunk_root` and append that root.
@@ -116,7 +143,12 @@ impl DataTreeBuilder {
 
     fn push_node_at(&mut self, level: usize, hash: NodeHash) {
         if self.layers.len() == level {
-            self.layers.push(Vec::new());
+            // Apply the hint when the layer is created, not before. Empty higher
+            // layers would make `finish` carry a shorter upload through them
+            // (spec §4). A missing hint, or a hint that is too small, grows the
+            // layer on demand.
+            let capacity = self.layer_capacities.get(level).copied().unwrap_or(0);
+            self.layers.push(Vec::with_capacity(capacity));
         }
         self.layers[level].push(hash);
         if self.layers[level].len().is_multiple_of(2) {
@@ -330,6 +362,23 @@ impl DataTree {
     pub(crate) fn layers(&self) -> &[Vec<NodeHash>] {
         &self.layers
     }
+}
+
+/// Final length of each cache layer for `chunk_count` chunk roots.
+///
+/// Layer 0 is the chunk roots. Each next layer is `ceil(previous / 2)`: one
+/// slot per pair, plus the carried unpaired node (spec §4 `build_layer`). Stop
+/// when one node remains. The loop is that rule; it is not a closed form.
+fn layer_capacities(chunk_count: u32) -> Vec<usize> {
+    let mut layer_length = usize::try_from(chunk_count).expect("chunk count fits usize");
+    debug_assert!(layer_length >= 1, "chunk_count rejects an empty upload");
+    let mut capacities = Vec::new();
+    capacities.push(layer_length);
+    while layer_length > 1 {
+        layer_length = layer_length.div_ceil(2);
+        capacities.push(layer_length);
+    }
+    capacities
 }
 
 fn sibling_at(layer: &[NodeHash], chunk_index: u32, level: usize) -> Option<NodeHash> {
