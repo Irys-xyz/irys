@@ -7,7 +7,6 @@ pub struct PeerBandwidthManager {
     pub partition_assignments: Vec<PartitionAssignment>,
     pub peer_address: PeerAddress,
     pub miner_address: IrysAddress,
-    pub config: Config,
     peer_stats: PeerStats, // private - external access only through wrapper methods
 }
 
@@ -25,7 +24,6 @@ impl PeerBandwidthManager {
             partition_assignments: Vec::new(),
             peer_address: peer_list_item.address,
             miner_address: *miner_address,
-            config: config.clone(),
             peer_stats: PeerStats::new(target_bandwidth_mbps, chunk_size, timeout),
         }
     }
@@ -86,11 +84,6 @@ impl PeerBandwidthManager {
     pub fn set_max_concurrency(&mut self, concurrency: usize) {
         let capped = concurrency.min(self.concurrency_ceiling());
         self.peer_stats.max_concurrency = capped as u32;
-    }
-
-    /// Get current max concurrency (dynamic limit)
-    pub fn current_max_concurrency(&self) -> usize {
-        self.peer_stats.current_max_concurrency as usize
     }
 
     /// Get available concurrency capacity (relative to dynamic limit)
