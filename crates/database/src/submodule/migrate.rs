@@ -287,7 +287,6 @@ fn run_migration(
                     &progress,
                     &totals,
                     &mut pace,
-                    started,
                     options.progress_log_interval,
                 );
                 interrupt_after(options, commits)?;
@@ -305,12 +304,11 @@ fn run_migration(
                     &progress,
                     &totals,
                     &mut pace,
-                    started,
                     options.progress_log_interval,
                 );
                 interrupt_after(options, commits)?;
                 if done {
-                    log_finished(path, &progress, &pace, started);
+                    log_finished(path, &progress, &pace);
                     set_migration_gauge(path, 1.0);
                     return Ok(stats_from(&progress));
                 }
@@ -715,13 +713,12 @@ fn note_progress(
     progress: &Progress,
     totals: &Totals,
     pace: &mut Pace,
-    started: Instant,
     interval: Duration,
 ) {
     // Log the phase this batch belonged to. `apply_copy` flips to drop in
     // the same batch that finishes the scan.
     let worked = pace.phase;
-    log_if_due(path, progress, totals, pace, started, interval);
+    log_if_due(path, progress, totals, pace, interval);
     if progress.phase == worked {
         return;
     }
@@ -738,7 +735,6 @@ fn log_if_due(
     progress: &Progress,
     totals: &Totals,
     pace: &mut Pace,
-    started: Instant,
     interval: Duration,
 ) {
     let since = pace.last_log.elapsed();
@@ -749,7 +745,7 @@ fn log_if_due(
     let done = rows_done(phase, progress);
     let total = rows_total(phase, totals);
     let delta = done.saturating_sub(pace.last_done);
-    let phase_elapsed = phase_elapsed_ms(phase, progress, pace, started);
+    let phase_elapsed = phase_elapsed_ms(phase, progress, pace);
     tracing::info!(
         path = %path.display(),
         phase = phase_name(phase),
@@ -771,11 +767,14 @@ fn log_if_due(
     pace.last_done = done;
 }
 
-fn log_finished(path: &Path, progress: &Progress, pace: &Pace, started: Instant) {
+fn log_finished(path: &Path, progress: &Progress, pace: &Pace) {
     let copy_elapsed_ms = pace.copy_elapsed_ms.unwrap_or(0);
     let drop_elapsed_ms = match pace.copy_elapsed_ms {
         Some(copy) => progress.elapsed_ms.saturating_sub(copy),
-        None => millis(started.elapsed()),
+        // A resume that starts in drop has no copy/drop split in the
+        // checkpoint. The checkpoint clock counts copy time too, so this
+        // overstates drop, but it tracks the real migration, not this process.
+        None => progress.elapsed_ms,
     };
     tracing::info!(
         path = %path.display(),
@@ -807,14 +806,16 @@ fn rows_total(phase: Phase, totals: &Totals) -> u64 {
     }
 }
 
-fn phase_elapsed_ms(phase: Phase, progress: &Progress, pace: &Pace, started: Instant) -> u64 {
+fn phase_elapsed_ms(phase: Phase, progress: &Progress, pace: &Pace) -> u64 {
     match phase {
         Phase::Copy => progress.elapsed_ms,
         Phase::Drop => match pace.copy_elapsed_ms {
             Some(copy) => progress.elapsed_ms.saturating_sub(copy),
             // A resume that starts in drop has no copy/drop split in the
-            // checkpoint. Rate this process's drop work only.
-            None => millis(started.elapsed()),
+            // checkpoint. Use the checkpoint clock: it includes copy time, so
+            // the ETA runs long, but this process's age would make it far too
+            // short after a restart.
+            None => progress.elapsed_ms,
         },
     }
 }
@@ -855,10 +856,6 @@ fn rows_per_sec(rows: u64, elapsed: Duration) -> u64 {
     }
     let rate = u128::from(rows).saturating_mul(1_000_000_000) / nanos;
     u64::try_from(rate).unwrap_or(u64::MAX)
-}
-
-fn millis(elapsed: Duration) -> u64 {
-    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn migration_fraction(progress: &Progress, totals: &Totals) -> f64 {
@@ -2249,6 +2246,113 @@ mod tests {
                 out.push((rel, irys_types::hash_sha256(&bytes)));
             }
         }
+        Ok(())
+    }
+    fn schema_bytes(path: &Path) -> eyre::Result<Vec<u8>> {
+        let env = open_or_create_db(path, SubmoduleTables::ALL, testing_args()?)?;
+        let tx = env.tx()?;
+        Ok(tx
+            .get::<Metadata>(MetadataKey::DBSchemaVersion)?
+            .unwrap_or_default())
+    }
+
+    fn assert_historical_marker(bytes: &[u8], phase: &str) {
+        let text = std::str::from_utf8(bytes).expect("marker utf8");
+        assert!(
+            text.starts_with(super::PROGRESS_PREFIX),
+            "prefix changed: {text:?}"
+        );
+        assert!(
+            text.ends_with('\n'),
+            "marker lost its trailing newline: {text:?}"
+        );
+        let rest = text
+            .strip_prefix(super::PROGRESS_PREFIX)
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+        let mut parts = rest.split(' ');
+        assert_eq!(parts.next(), Some(phase), "{rest}");
+        let fields: Vec<_> = parts.collect();
+        assert_eq!(fields.len(), 6, "marker gained or lost a field: {rest}");
+        assert!(bytes.len() <= super::MAX_MARKER_BYTES, "{}", bytes.len());
+    }
+
+    /// Kill mid-drop, then resume. Totals come from the stat plus the rows
+    /// already deleted. ETA must follow the checkpoint clock, not the few
+    /// milliseconds this process has been alive.
+    #[test]
+    fn drop_resume_eta_uses_the_checkpoint_clock() -> eyre::Result<()> {
+        const ROWS: u32 = 4;
+        let dir = temp("sm-v1-drop-resume");
+        write_contiguous(dir.path(), ROWS)?;
+        super::DURING_MIGRATION.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+            }));
+        });
+        let err = open_submodule_index(
+            dir.path(),
+            testing_args()?,
+            SubmoduleMigrationOptions {
+                progress_log_interval: std::time::Duration::from_secs(3600),
+                ..opts(1, Some(5))
+            },
+        )
+        .expect_err("stop after the first legacy delete");
+        assert!(err.to_string().contains("after 5"), "{err}");
+        let bytes = schema_bytes(dir.path())?;
+        assert_historical_marker(&bytes, "drop");
+        let stored = decode_progress(&bytes).expect("drop marker");
+        assert_eq!(stored.phase, Phase::Drop);
+        assert_eq!(stored.deleted, 1, "first drop commit deletes one key");
+        assert_eq!(stored.scanned, u64::from(ROWS));
+        assert!(
+            stored.elapsed_ms >= 1000,
+            "checkpoint {}",
+            stored.elapsed_ms
+        );
+
+        let capture = LogCapture::default();
+        let wall = std::time::Instant::now();
+        let err = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(
+                dir.path(),
+                testing_args()?,
+                SubmoduleMigrationOptions {
+                    progress_log_interval: std::time::Duration::ZERO,
+                    ..opts(1, Some(1))
+                },
+            )
+        })
+        .expect_err("one more drop commit");
+        let wall = wall.elapsed();
+        assert!(err.to_string().contains("after 1"), "{err}");
+        assert!(
+            wall < std::time::Duration::from_millis(500),
+            "resume was too slow to tell the clocks apart: {wall:?}"
+        );
+        let events = capture.events.lock().expect("events");
+        let start = find_message(&events, "submodule index migration started");
+        assert!(bool_field(start, "resumed"));
+        assert_eq!(str_field(start, "phase"), "drop");
+        assert_eq!(u64_field(start, "path_hash_rows"), u64::from(ROWS));
+        assert_eq!(u64_field(start, "path_hash_total"), u64::from(ROWS));
+        assert_eq!(u64_field(start, "legacy_data_paths_done"), 1);
+        assert_eq!(u64_field(start, "legacy_data_paths_total"), u64::from(ROWS));
+        let progress = find_message(&events, "submodule index migration progress");
+        assert_eq!(str_field(progress, "phase"), "drop");
+        assert_eq!(u64_field(progress, "rows_done"), 2);
+        assert_eq!(u64_field(progress, "rows_total"), u64::from(ROWS));
+        assert_eq!(u64_field(progress, "percent"), 50);
+        let checkpoint = u64_field(progress, "elapsed_ms");
+        let eta = u64_field(progress, "eta_ms");
+        assert!(checkpoint >= 1000, "logged checkpoint {checkpoint}");
+        assert!(
+            eta + 1 >= checkpoint / 2,
+            "eta {eta} ms with checkpoint elapsed {checkpoint} ms, rows 2/4, resume wall {wall:?}. A this-process clock reports about the resume wall, not the checkpoint."
+        );
         Ok(())
     }
 
