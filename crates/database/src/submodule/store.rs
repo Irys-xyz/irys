@@ -126,19 +126,13 @@ pub trait SubmoduleRead {
 
     /// `true` when any span holds a pending-job key.
     ///
-    /// The default asks once per span. An engine overrides this with one
-    /// cursor that seeks across the gaps. Recovery uses the override.
+    /// Touching spans are one range. One cursor seeks across the gaps.
+    /// A loop of [`Self::has_pending_in_inclusive_range`] opens a cursor
+    /// per span.
     fn has_pending_in_ranges(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
-    ) -> eyre::Result<bool> {
-        for &(start, end) in ranges {
-            if start <= end && self.has_pending_in_inclusive_range(start, end)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
+    ) -> eyre::Result<bool>;
 
     /// `true` when a tx-path interval overlaps `[start, end]`.
     ///
@@ -151,18 +145,11 @@ pub trait SubmoduleRead {
 
     /// `true` when any interval overlaps any span.
     ///
-    /// The default asks once per span. An engine overrides this with one cursor.
+    /// Touching spans are one range. One cursor seeks across the gaps.
     fn tx_intervals_overlap_ranges(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
-    ) -> eyre::Result<bool> {
-        for &(start, end) in ranges {
-            if start <= end && self.tx_interval_overlaps(start, end)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
+    ) -> eyre::Result<bool>;
 
     /// Every data-root row.
     ///
@@ -399,30 +386,16 @@ pub trait SubmoduleWrite: SubmoduleRead {
     fn del_pending_body_migrations_in_ranges(
         &mut self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
-    ) -> eyre::Result<usize> {
-        let mut removed = 0_usize;
-        for &(start, end) in ranges {
-            if start <= end {
-                removed =
-                    removed.saturating_add(self.del_pending_body_migrations_in_range(start, end)?);
-            }
-        }
-        Ok(removed)
-    }
+    ) -> eyre::Result<usize>;
 
     /// Remove tx-path coverage for every span.
     ///
-    /// The default clears one span at a time. An engine overrides this with
-    /// one read of the rows that touch the spans.
+    /// One read of the rows that touch the spans. A per-span clear reopens
+    /// that read.
     fn clear_tx_coverage_in_ranges(
         &mut self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
-    ) -> eyre::Result<()> {
-        for &(start, end) in ranges {
-            self.add_tx_path_hash_to_offset_range(start, end, None)?;
-        }
-        Ok(())
-    }
+    ) -> eyre::Result<()>;
 
     /// Delete index rows. Does not delete the schema-version metadata row.
     fn clear(&mut self) -> eyre::Result<()>;
