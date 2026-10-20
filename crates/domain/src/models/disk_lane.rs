@@ -1852,11 +1852,10 @@ impl StorageModule {
         group: u64,
         mut rx: tokio::sync::oneshot::Receiver<Result<(), WriteDataChunkError>>,
     ) -> Result<(), WriteDataChunkError> {
-        // `timeout` drops its future on expiry. Poll the receiver in place so
-        // a result sent as the deadline passes is still available to try_recv.
-        let wait =
-            std::future::poll_fn(|cx| std::future::Future::poll(std::pin::Pin::new(&mut rx), cx));
-        match tokio::time::timeout(SWEEP_WAIT, wait).await {
+        // `Receiver` is `Unpin`. A timeout on `&mut rx` drops the borrow, not
+        // the receiver, so a result sent as the deadline passes is still
+        // available to `try_recv`.
+        match tokio::time::timeout(SWEEP_WAIT, &mut rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_closed)) => Err(entropy_read_unfinished()),
             Err(_elapsed) => {
