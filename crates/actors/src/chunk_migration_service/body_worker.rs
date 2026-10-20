@@ -678,7 +678,7 @@ impl SubmoduleDrain {
     ) -> Result<Vec<(i64, i64, ChunkType)>, MigrationError> {
         let start = Self::partition_offset(first)?;
         let end = Self::partition_offset(last)?;
-        let intervals = self.sm.intervals().read().unwrap();
+        let intervals = self.sm.label_runs();
         let mut runs = Vec::new();
         for (interval, kind) in intervals.overlapping(ii(start, end)) {
             let run_start = i64::from(*interval.start()).max(first);

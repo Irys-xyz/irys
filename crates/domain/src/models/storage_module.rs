@@ -47,7 +47,7 @@ use std::{
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, Once, RwLock,
+        Arc, Mutex, Once, RwLock, RwLockReadGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -408,6 +408,41 @@ type SubmoduleMap =
 
 /// Tracks storage state of chunk ranges across all submodules
 type StorageIntervals = NoditMap<PartitionChunkOffset, Interval<PartitionChunkOffset>, ChunkType>;
+
+/// Read guard over the live interval map.
+pub struct LabelRuns<'a> {
+    guard: RwLockReadGuard<'a, StorageIntervals>,
+    #[cfg(any(test, feature = "test-utils"))]
+    visits: &'a AtomicU64,
+}
+
+impl LabelRuns<'_> {
+    /// Every stored run, in offset order.
+    pub fn iter(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (&Interval<PartitionChunkOffset>, &ChunkType)> + '_ {
+        #[cfg(any(test, feature = "test-utils"))]
+        let visits = self.visits;
+        self.guard.iter().inspect(move |_| {
+            #[cfg(any(test, feature = "test-utils"))]
+            visits.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+
+    /// Stored runs that overlap `range`, in offset order. [`Iterator::rev`]
+    /// walks that overlap from the high end and still stops early.
+    pub fn overlapping(
+        &self,
+        range: Interval<PartitionChunkOffset>,
+    ) -> impl DoubleEndedIterator<Item = (&Interval<PartitionChunkOffset>, &ChunkType)> + '_ {
+        #[cfg(any(test, feature = "test-utils"))]
+        let visits = self.visits;
+        self.guard.overlapping(range).inspect(move |_| {
+            #[cfg(any(test, feature = "test-utils"))]
+            visits.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+}
 
 /// Offsets whose on-disk label must stay `Interrupted` until the completion is
 /// stored, or until a clean shutdown writes the live map.
@@ -8435,11 +8470,38 @@ impl StorageModule {
         Ok(ranges)
     }
 
+    /// Live labels. Pending writes are not applied. The guard stays held for
+    /// the iterator, so a caller that stops early does not read the rest.
+    pub fn label_runs(&self) -> LabelRuns<'_> {
+        #[cfg(any(test, feature = "test-utils"))]
+        let visits = &self.interval_visits;
+        LabelRuns {
+            guard: self.intervals.read().unwrap(),
+            #[cfg(any(test, feature = "test-utils"))]
+            visits,
+        }
+    }
+
+    /// Mutable map for tests and the bench harness. Production reads use
+    /// [`Self::label_runs`].
+    #[cfg(any(test, feature = "test-utils", feature = "bench"))]
     pub fn intervals(&self) -> &Arc<RwLock<StorageIntervals>> {
         &self.intervals
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn cut_then_insert_interval_if_touching(
+        intervals: &mut StorageIntervals,
+        chunk_offset: PartitionChunkOffset,
+        chunk_type: ChunkType,
+    ) {
+        let chunk_interval = ii(chunk_offset, chunk_offset);
+        let _ = intervals.cut(chunk_interval);
+        let _ = intervals.insert_merge_touching_if_values_equal(chunk_interval, chunk_type);
+    }
+
+    #[cfg(not(any(test, feature = "test-utils")))]
+    fn cut_then_insert_interval_if_touching(
         intervals: &mut StorageIntervals,
         chunk_offset: PartitionChunkOffset,
         chunk_type: ChunkType,
@@ -19558,6 +19620,89 @@ mod tests {
             .write()
             .unwrap()
             .insert(PartitionChunkOffset(offset), (vec![1_u8; 32], kind));
+    }
+
+    /// A prefix read counts only the intervals it yields. Pending writes stay
+    /// out of this map. A later cut still replaces the stored label.
+    #[test]
+    fn label_runs_stops_at_the_visited_prefix() -> eyre::Result<()> {
+        let (_tmp, _config, storage) =
+            open_presence_module("label_runs_prefix", SubmoduleIndexEngine::Rocksdb)?;
+        let spans: Vec<(u32, u32, ChunkType)> = (0..8)
+            .map(|offset| {
+                let kind = if offset % 2 == 0 {
+                    ChunkType::Entropy
+                } else {
+                    ChunkType::Uninitialized
+                };
+                (offset, offset, kind)
+            })
+            .collect();
+        install_intervals(&storage, &spans);
+
+        let before = storage.interval_visit_count();
+        let point: Vec<_> = storage
+            .label_runs()
+            .overlapping(ii(PartitionChunkOffset(3), PartitionChunkOffset(3)))
+            .map(|(interval, kind)| (*interval.start(), *interval.end(), *kind))
+            .collect();
+        let visits = storage.interval_visit_count() - before;
+        assert_eq!(point, vec![(3, 3, ChunkType::Uninitialized)]);
+        assert_eq!(visits, 1, "a point overlap read {visits} intervals");
+
+        let before = storage.interval_visit_count();
+        let prefix: Vec<_> = storage
+            .label_runs()
+            .iter()
+            .take(3)
+            .map(|(interval, kind)| (*interval.start(), *kind))
+            .collect();
+        let visits = storage.interval_visit_count() - before;
+        assert_eq!(
+            prefix,
+            vec![
+                (0, ChunkType::Entropy),
+                (1, ChunkType::Uninitialized),
+                (2, ChunkType::Entropy),
+            ]
+        );
+        assert_eq!(visits, 3, "take(3) read {visits} intervals");
+
+        let before = storage.interval_visit_count();
+        let high: Vec<_> = storage
+            .label_runs()
+            .overlapping(ii(PartitionChunkOffset(0), PartitionChunkOffset(7)))
+            .rev()
+            .take(1)
+            .map(|(interval, kind)| (*interval.start(), *interval.end(), *kind))
+            .collect();
+        let visits = storage.interval_visit_count() - before;
+        assert_eq!(high, vec![(7, 7, ChunkType::Uninitialized)]);
+        assert_eq!(visits, 1, "a reverse prefix read {visits} intervals");
+
+        queue_pending(&storage, 3, ChunkType::Data);
+        let raw: Vec<_> = storage
+            .label_runs()
+            .overlapping(ii(PartitionChunkOffset(3), PartitionChunkOffset(3)))
+            .map(|(_, kind)| *kind)
+            .collect();
+        assert_eq!(raw, vec![ChunkType::Uninitialized]);
+
+        {
+            let mut intervals = storage.intervals().write().unwrap();
+            StorageModule::cut_then_insert_interval_if_touching(
+                &mut intervals,
+                PartitionChunkOffset(3),
+                ChunkType::Data,
+            );
+        }
+        let stored: Vec<_> = storage
+            .label_runs()
+            .overlapping(ii(PartitionChunkOffset(3), PartitionChunkOffset(3)))
+            .map(|(_, kind)| *kind)
+            .collect();
+        assert_eq!(stored, vec![ChunkType::Data]);
+        Ok(())
     }
 
     #[test]

@@ -1341,6 +1341,46 @@ fn interval_count(sm: &StorageModule) -> usize {
     sm.intervals().read().unwrap().iter().count()
 }
 
+/// The interval budget is also the visit budget. A range with more fragments
+/// than that budget must not be read to the end, in either direction.
+#[test]
+fn entropy_scan_reads_only_the_budgeted_intervals() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 32, 1);
+    let sm = unpacked_sm_for_ledger(&config, 32, DataLedger::Publish);
+    {
+        let mut intervals = sm.intervals().write().unwrap();
+        for offset in 0..32 {
+            let kind = if offset % 2 == 0 {
+                ChunkType::Data
+            } else {
+                ChunkType::Uninitialized
+            };
+            StorageModule::cut_then_insert_interval_if_touching(
+                &mut intervals,
+                PartitionChunkOffset::from(offset),
+                kind,
+            );
+        }
+    }
+    assert!(
+        interval_count(&sm) > 2,
+        "the fixture must be more fragments than the budget"
+    );
+
+    let before = sm.interval_visit_count();
+    let scan = entropy_scan_runs(&sm, 0, 31, false, 2);
+    let visits = sm.interval_visit_count() - before;
+    assert!(scan.interval_budget_spent);
+    assert_eq!(visits, 2, "a forward budget of 2 read {visits} intervals");
+
+    let before = sm.interval_visit_count();
+    let scan = entropy_scan_runs(&sm, 0, 31, true, 2);
+    let visits = sm.interval_visit_count() - before;
+    assert!(scan.interval_budget_spent);
+    assert_eq!(visits, 2, "a reverse budget of 2 read {visits} intervals");
+}
+
 /// Non-entropy fragments must spend the scan budget. A Publish slot whose
 /// only Entropy sits past more fragments than `max_pending * 4` must not
 /// queue that Entropy on the first tick, and the cursor must move so the

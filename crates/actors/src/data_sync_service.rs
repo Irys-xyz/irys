@@ -1595,9 +1595,7 @@ impl DataSyncServiceInner {
 
 fn storage_module_has_entropy(storage_module: &StorageModule) -> bool {
     storage_module
-        .intervals()
-        .read()
-        .unwrap()
+        .label_runs()
         .iter()
         .any(|(_, chunk_type)| *chunk_type == ChunkType::Entropy)
 }
@@ -1607,9 +1605,7 @@ fn storage_module_has_entropy_at_or_below(
     max_offset: PartitionChunkOffset,
 ) -> bool {
     storage_module
-        .intervals()
-        .read()
-        .unwrap()
+        .label_runs()
         .iter()
         .any(|(interval, chunk_type)| {
             *chunk_type == ChunkType::Entropy && *interval.start() <= *max_offset
@@ -1634,7 +1630,7 @@ fn push_residual_root(
 /// come first. A span wider than the remaining budget contributes only its
 /// prefix, never one step per chunk.
 fn sample_residual_entropy_offsets(storage_module: &StorageModule) -> (Vec<u32>, Vec<u32>) {
-    let intervals = storage_module.intervals().read().unwrap();
+    let intervals = storage_module.label_runs();
     let mut low = Vec::new();
     let mut high = Vec::new();
     let mut sampled = 0_usize;

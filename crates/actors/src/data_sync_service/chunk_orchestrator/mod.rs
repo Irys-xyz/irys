@@ -2408,7 +2408,7 @@ fn entropy_scan_runs(
             interval_budget_spent: false,
         };
     }
-    let intervals = storage_module.intervals().read().unwrap();
+    let intervals = storage_module.label_runs();
     let query = ii(
         PartitionChunkOffset::from(range_start),
         PartitionChunkOffset::from(range_end),
@@ -2512,7 +2512,7 @@ fn clip_entropy_run(
 fn entropy_interval_fingerprint(storage_module: &StorageModule) -> u64 {
     #[cfg(test)]
     ENTROPY_FINGERPRINT_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
-    let intervals = storage_module.intervals().read().unwrap();
+    let intervals = storage_module.label_runs();
     let mut mixed = 0_u64;
     let mut count = 0_u64;
     for (interval, chunk_type) in intervals.iter() {
