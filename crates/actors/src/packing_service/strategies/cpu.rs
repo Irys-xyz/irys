@@ -148,9 +148,6 @@ impl CpuPackingStrategy {
         self.peak_retained_joins.fetch_max(len, Ordering::Relaxed);
     }
 
-    #[cfg(not(test))]
-    fn note_retained(&self, _len: usize) {}
-
     /// `Ok` join handles are small, but the task stays allocated until the
     /// handle is awaited. Drain the oldest so a long range cannot hold one
     /// task per chunk.
@@ -315,6 +312,7 @@ impl super::PackingStrategy for CpuPackingStrategy {
                 });
 
                 handles.push_back(handle);
+                #[cfg(test)]
                 self.note_retained(handles.len());
                 if handles.len() >= join_cap
                     && let Some(oldest) = handles.pop_front()
