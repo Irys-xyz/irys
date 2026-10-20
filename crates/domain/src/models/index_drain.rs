@@ -150,7 +150,7 @@ impl Drop for ChunkBusy {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(test), expect(dead_code))]
 pub(super) struct IndexOp {
     pub(super) path_hash: ChunkPathHash,
     pub(super) data_path: ChunkDataPath,
