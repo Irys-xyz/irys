@@ -4689,8 +4689,8 @@ fn replace_marked_incomplete(
     #[cfg(test)]
     run_after_converting_observed(path);
     let _parent_lock = hold_parent_replace_lock(path)?;
-    // The sentinel can disappear while this process waits for the parent lock.
-    // The directory now at `path` is not the one that check saw.
+    // The parent lock does not wait. The directory can change before the
+    // non-blocking acquire, so read the sentinel again.
     if !migrate::converting_sentinel_present(path)? {
         return Err(bail_no_converting_sentinel(path));
     }
@@ -4733,7 +4733,8 @@ fn replace_marked_incomplete(
     // The parent lock is held through `lock_then_mark`, so another replace
     // cannot recreate this directory after `remove_dir_all`. A CONVERTING
     // file with no LOCK is a dropped incomplete directory and is removed.
-    // A close may have parked this directory while this process waited.
+    // A close does not take this lock. It can park the directory after the
+    // earlier scratch check. Read the marker again before the delete.
     rocks::refuse_unresolved_close_scratch(path)?;
     fs::remove_dir_all(path).wrap_err("remove incomplete target")?;
     drop(hold);
