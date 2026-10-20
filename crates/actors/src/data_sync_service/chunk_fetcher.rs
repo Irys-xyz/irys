@@ -115,24 +115,6 @@ impl HttpChunkFetcher {
         Self { client, ledger_id }
     }
 
-    pub fn with_config(
-        ledger_id: u32,
-        connect_timeout: Duration,
-        request_timeout: Duration,
-    ) -> Self {
-        let client = reqwest::Client::builder()
-            .connect_timeout(connect_timeout)
-            .timeout(request_timeout)
-            .build()
-            .expect("Failed to create HTTP client");
-
-        Self { client, ledger_id }
-    }
-
-    pub fn with_client(ledger_id: u32, client: reqwest::Client) -> Self {
-        Self { client, ledger_id }
-    }
-
     async fn get_chunk_json(
         &self,
         url: String,
@@ -309,23 +291,11 @@ impl MockChunkFetcher {
         self
     }
 
-    pub fn with_server_error(self, offset: LedgerChunkOffset, message: String) -> Self {
-        self.responses
-            .write()
-            .unwrap()
-            .insert(offset, Err(ChunkFetchError::ServerError { message }));
-        self
-    }
-
     pub fn with_timeout(self, offset: LedgerChunkOffset) -> Self {
         self.responses
             .write()
             .unwrap()
             .insert(offset, Err(ChunkFetchError::Timeout));
         self
-    }
-
-    pub fn ledger_id(&self) -> usize {
-        self.ledger_id
     }
 }
