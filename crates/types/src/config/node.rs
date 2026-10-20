@@ -183,8 +183,8 @@ impl Default for DatabaseConfig {
         Self {
             sync_mode: default_db_sync_mode(),
             cache_sync_mode: default_cache_db_sync_mode(),
-            // MDBX-SUBMODULE-INDEX: delete this assignment with the field. The default is MDBX until then.
             geometry_max_size: None,
+            // MDBX-SUBMODULE-INDEX: delete this assignment with the field. The default is MDBX until then.
             submodule_index: SubmoduleIndexEngine::Mdbx,
             rocksdb_block_cache_bytes: default_rocksdb_block_cache_bytes(),
             rocksdb_write_buffer_bytes: default_rocksdb_write_buffer_bytes(),
@@ -1869,8 +1869,8 @@ impl NodeConfig {
                 cache_sync_mode: DbSyncMode::UtterlyNoSync,
                 // Small MDBX geometry so many concurrent test node databases don't
                 // exhaust virtual address space (see TEST_DB_GEOMETRY_MAX_SIZE).
-                // MDBX-SUBMODULE-INDEX: point test configs at RocksDB when that is the only engine. This line selects MDBX.
                 geometry_max_size: Some(crate::TEST_DB_GEOMETRY_MAX_SIZE),
+                // MDBX-SUBMODULE-INDEX: point test configs at RocksDB when that is the only engine. This line selects MDBX.
                 submodule_index: SubmoduleIndexEngine::Mdbx,
                 ..DatabaseConfig::default()
             },
