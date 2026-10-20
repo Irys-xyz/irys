@@ -28,8 +28,11 @@ use super::tables::{
 };
 
 pub(super) const PROGRESS_PREFIX: &str = "irys-submodule-index migrate-v1 ";
-const PROGRESS_LOG_ROWS: u64 = 100_000;
+/// How often a running migration logs rows done, rate, and ETA.
+const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_MARKER_BYTES: usize = 512;
+/// Per-module fraction of v1 rows migrated, from 0 to 1.
+const MIGRATION_PROGRESS_METRIC: &str = "irys_submodule_migration_progress";
 
 /// What the schema row was when open began.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +97,9 @@ pub struct SubmoduleMigrationOptions {
     pub fail_after_commits: Option<u32>,
     pub batch_rows: usize,
     pub batch_value_bytes: usize,
+    /// Minimum gap between progress lines. The default is 15 seconds.
+    /// A test can set a shorter gap.
+    pub progress_log_interval: Duration,
 }
 
 impl Default for SubmoduleMigrationOptions {
@@ -102,6 +108,7 @@ impl Default for SubmoduleMigrationOptions {
             fail_after_commits: None,
             batch_rows: 2048,
             batch_value_bytes: 8 * 1024 * 1024,
+            progress_log_interval: PROGRESS_LOG_INTERVAL,
         }
     }
 }
@@ -184,8 +191,26 @@ pub(super) fn ensure_mdbx_schema(
                 elapsed: started.elapsed(),
             }
         }
-        SchemaRow::Absent => run_migration(env, path, options, Progress::new(), started)?,
-        SchemaRow::Progress(progress) => run_migration(env, path, options, progress, started)?,
+        SchemaRow::Absent => run_migration(
+            env,
+            path,
+            options,
+            Progress::new(),
+            Totals {
+                path_hash_rows,
+                legacy_rows,
+            },
+            started,
+        )?,
+        SchemaRow::Progress(progress) => {
+            // `entries` is the rows still in the table. Deleted legacy rows
+            // are already gone, so add them back to recover the phase total.
+            let totals = Totals {
+                path_hash_rows: path_hash_rows.max(progress.scanned),
+                legacy_rows: legacy_rows.saturating_add(progress.deleted),
+            };
+            run_migration(env, path, options, progress, totals, started)?
+        }
     };
     log_open(path, &stats);
     Ok(stats)
@@ -197,11 +222,27 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Row totals from MDBX `stat`, fixed for the whole run.
+struct Totals {
+    path_hash_rows: u64,
+    legacy_rows: u64,
+}
+
+/// In-memory log window. Not written to the schema row.
+struct Pace {
+    phase: Phase,
+    last_log: Instant,
+    last_done: u64,
+    /// `elapsed_ms` when copy finished, if this process saw that transition.
+    copy_elapsed_ms: Option<u64>,
+}
+
 fn run_migration(
     env: &DatabaseEnv,
     path: &Path,
     options: &SubmoduleMigrationOptions,
     mut progress: Progress,
+    totals: Totals,
     started: Instant,
 ) -> eyre::Result<MigrationStats> {
     if options.fail_after_commits == Some(0) {
@@ -213,7 +254,8 @@ fn run_migration(
     if let Some(hook) = DURING_MIGRATION.with(|cell| cell.borrow_mut().take()) {
         hook(path);
     }
-    log_started(path, &progress);
+    log_started(path, &progress, &totals);
+    set_migration_gauge(path, migration_fraction(&progress, &totals));
     let ctx = MigrateCtx {
         env,
         path,
@@ -221,6 +263,12 @@ fn run_migration(
         batch_value_bytes: options.batch_value_bytes.max(1),
         base_ms: progress.elapsed_ms,
         started,
+    };
+    let mut pace = Pace {
+        phase: progress.phase,
+        last_log: Instant::now(),
+        last_done: rows_done(progress.phase, &progress),
+        copy_elapsed_ms: None,
     };
     let mut commits = 0_u32;
     loop {
@@ -234,6 +282,14 @@ fn run_migration(
                 };
                 apply_copy(&ctx, batch, &mut progress)?;
                 commits += 1;
+                note_progress(
+                    path,
+                    &progress,
+                    &totals,
+                    &mut pace,
+                    started,
+                    options.progress_log_interval,
+                );
                 interrupt_after(options, commits)?;
             }
             Phase::Drop => {
@@ -244,8 +300,18 @@ fn run_migration(
                 };
                 let done = apply_drop(&ctx, batch, &mut progress)?;
                 commits += 1;
+                note_progress(
+                    path,
+                    &progress,
+                    &totals,
+                    &mut pace,
+                    started,
+                    options.progress_log_interval,
+                );
                 interrupt_after(options, commits)?;
                 if done {
+                    log_finished(path, &progress, &pace, started);
+                    set_migration_gauge(path, 1.0);
                     return Ok(stats_from(&progress));
                 }
             }
@@ -367,7 +433,6 @@ fn apply_copy(ctx: &MigrateCtx<'_>, batch: CopyBatch, progress: &mut Progress) -
     if !batch.rows.is_empty() && batch.next_offset <= progress.next_offset {
         eyre::bail!("submodule index migration cursor did not advance");
     }
-    let scanned_before = progress.scanned;
     let mut open = progress.open;
     let mut closed = Vec::new();
     let write = ctx.env.tx_mut()?;
@@ -414,9 +479,6 @@ fn apply_copy(ctx: &MigrateCtx<'_>, batch: CopyBatch, progress: &mut Progress) -
     touch_elapsed(progress, ctx.base_ms, ctx.started);
     write.put::<Metadata>(MetadataKey::DBSchemaVersion, encode_progress(progress))?;
     write.commit()?;
-    if progress.scanned / PROGRESS_LOG_ROWS != scanned_before / PROGRESS_LOG_ROWS {
-        log_progress(ctx.path, progress);
-    }
     if finished_copy {
         tracing::info!(
             path = %ctx.path.display(),
@@ -632,18 +694,89 @@ fn log_open(path: &Path, stats: &MigrationStats) {
     );
 }
 
-fn log_started(path: &Path, progress: &Progress) {
+fn log_started(path: &Path, progress: &Progress, totals: &Totals) {
     let resumed = progress.scanned > 0 || progress.phase == Phase::Drop || progress.deleted > 0;
     tracing::info!(
         path = %path.display(),
         detected = "v1",
         resumed,
+        phase = phase_name(progress.phase),
         path_hash_rows = progress.scanned,
+        path_hash_total = totals.path_hash_rows,
+        legacy_data_paths_done = progress.deleted,
+        legacy_data_paths_total = totals.legacy_rows,
+        elapsed_ms = progress.elapsed_ms,
         "submodule index migration started"
     );
 }
 
-fn log_progress(path: &Path, progress: &Progress) {
+fn note_progress(
+    path: &Path,
+    progress: &Progress,
+    totals: &Totals,
+    pace: &mut Pace,
+    started: Instant,
+    interval: Duration,
+) {
+    // Log the phase this batch belonged to. `apply_copy` flips to drop in
+    // the same batch that finishes the scan.
+    let worked = pace.phase;
+    log_if_due(path, progress, totals, pace, started, interval);
+    if progress.phase == worked {
+        return;
+    }
+    if worked == Phase::Copy && progress.phase == Phase::Drop {
+        pace.copy_elapsed_ms = Some(progress.elapsed_ms);
+    }
+    pace.phase = progress.phase;
+    pace.last_done = rows_done(progress.phase, progress);
+    pace.last_log = Instant::now();
+}
+
+fn log_if_due(
+    path: &Path,
+    progress: &Progress,
+    totals: &Totals,
+    pace: &mut Pace,
+    started: Instant,
+    interval: Duration,
+) {
+    let since = pace.last_log.elapsed();
+    if since < interval {
+        return;
+    }
+    let phase = pace.phase;
+    let done = rows_done(phase, progress);
+    let total = rows_total(phase, totals);
+    let delta = done.saturating_sub(pace.last_done);
+    let phase_elapsed = phase_elapsed_ms(phase, progress, pace, started);
+    tracing::info!(
+        path = %path.display(),
+        phase = phase_name(phase),
+        path_hash_rows = progress.scanned,
+        data_paths_copied = progress.copied,
+        intervals = progress.intervals,
+        legacy_data_paths_deleted = progress.deleted,
+        elapsed_ms = progress.elapsed_ms,
+        rows_done = done,
+        rows_total = total,
+        percent = percent_done(done, total),
+        rows_per_sec_interval = rows_per_sec(delta, since),
+        rows_per_sec_overall = per_sec(done, phase_elapsed),
+        eta_ms = eta_ms(done, total, phase_elapsed),
+        "submodule index migration progress"
+    );
+    set_migration_gauge(path, migration_fraction(progress, totals));
+    pace.last_log = Instant::now();
+    pace.last_done = done;
+}
+
+fn log_finished(path: &Path, progress: &Progress, pace: &Pace, started: Instant) {
+    let copy_elapsed_ms = pace.copy_elapsed_ms.unwrap_or(0);
+    let drop_elapsed_ms = match pace.copy_elapsed_ms {
+        Some(copy) => progress.elapsed_ms.saturating_sub(copy),
+        None => millis(started.elapsed()),
+    };
     tracing::info!(
         path = %path.display(),
         path_hash_rows = progress.scanned,
@@ -651,8 +784,103 @@ fn log_progress(path: &Path, progress: &Progress) {
         intervals = progress.intervals,
         legacy_data_paths_deleted = progress.deleted,
         elapsed_ms = progress.elapsed_ms,
-        "submodule index migration progress"
+        copy_rows = progress.scanned,
+        drop_rows = progress.deleted,
+        copy_elapsed_ms,
+        drop_elapsed_ms,
+        copy_elapsed_known = pace.copy_elapsed_ms.is_some(),
+        "submodule index migration finished"
     );
+}
+
+fn rows_done(phase: Phase, progress: &Progress) -> u64 {
+    match phase {
+        Phase::Copy => progress.scanned,
+        Phase::Drop => progress.deleted,
+    }
+}
+
+fn rows_total(phase: Phase, totals: &Totals) -> u64 {
+    match phase {
+        Phase::Copy => totals.path_hash_rows,
+        Phase::Drop => totals.legacy_rows,
+    }
+}
+
+fn phase_elapsed_ms(phase: Phase, progress: &Progress, pace: &Pace, started: Instant) -> u64 {
+    match phase {
+        Phase::Copy => progress.elapsed_ms,
+        Phase::Drop => match pace.copy_elapsed_ms {
+            Some(copy) => progress.elapsed_ms.saturating_sub(copy),
+            // A resume that starts in drop has no copy/drop split in the
+            // checkpoint. Rate this process's drop work only.
+            None => millis(started.elapsed()),
+        },
+    }
+}
+
+fn phase_name(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Copy => "copy",
+        Phase::Drop => "drop",
+    }
+}
+
+fn percent_done(done: u64, total: u64) -> u64 {
+    if total == 0 {
+        return 100;
+    }
+    let capped = done.min(total);
+    capped.saturating_mul(100) / total
+}
+
+fn per_sec(rows: u64, elapsed_ms: u64) -> u64 {
+    if rows == 0 || elapsed_ms == 0 {
+        return 0;
+    }
+    rows.saturating_mul(1000) / elapsed_ms
+}
+
+fn eta_ms(done: u64, total: u64, elapsed_ms: u64) -> u64 {
+    if done == 0 || elapsed_ms == 0 {
+        return 0;
+    }
+    total.saturating_sub(done).saturating_mul(elapsed_ms) / done
+}
+
+fn rows_per_sec(rows: u64, elapsed: Duration) -> u64 {
+    let nanos = elapsed.as_nanos();
+    if rows == 0 || nanos == 0 {
+        return 0;
+    }
+    let rate = u128::from(rows).saturating_mul(1_000_000_000) / nanos;
+    u64::try_from(rate).unwrap_or(u64::MAX)
+}
+
+fn millis(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn migration_fraction(progress: &Progress, totals: &Totals) -> f64 {
+    let total = totals.path_hash_rows.saturating_add(totals.legacy_rows);
+    if total == 0 {
+        return 1.0;
+    }
+    let done = progress.scanned.saturating_add(progress.deleted);
+    (done as f64) / (total as f64)
+}
+
+fn set_migration_gauge(path: &Path, fraction: f64) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        metrics::describe_gauge!(
+            MIGRATION_PROGRESS_METRIC,
+            "Fraction of one submodule index migrated from schema v1 to v2, from 0 to 1"
+        );
+    });
+    metrics::gauge!(MIGRATION_PROGRESS_METRIC, "module" => path.display().to_string())
+        .set(fraction.clamp(0.0, 1.0));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -907,6 +1135,7 @@ mod tests {
             fail_after_commits,
             batch_rows,
             batch_value_bytes: 8 * 1024 * 1024,
+            progress_log_interval: super::PROGRESS_LOG_INTERVAL,
         }
     }
 
@@ -2021,6 +2250,218 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    /// A 4-row copy is far below the old 100_000-row log. The start line still
+    /// names the total, and a zero interval emits progress without a long sleep.
+    #[test]
+    fn migration_start_logs_the_total_and_progress_follows_the_interval() -> eyre::Result<()> {
+        const ROWS: u32 = 4;
+        let dir = temp("sm-v1-progress");
+        let args = testing_args()?;
+        write_contiguous(dir.path(), ROWS)?;
+        super::DURING_MIGRATION.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            }));
+        });
+
+        let capture = LogCapture::default();
+        let err = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(
+                dir.path(),
+                args.clone(),
+                SubmoduleMigrationOptions {
+                    progress_log_interval: std::time::Duration::ZERO,
+                    ..opts(1, Some(1))
+                },
+            )
+        })
+        .expect_err("one commit then stop");
+        assert!(err.to_string().contains("after 1"), "{err}");
+
+        let events = capture.events.lock().expect("events");
+        let start = find_message(&events, "submodule index migration started");
+        assert_eq!(u64_field(start, "path_hash_total"), u64::from(ROWS));
+        assert_eq!(u64_field(start, "path_hash_rows"), 0);
+        assert!(!bool_field(start, "resumed"));
+        let progress = find_message(&events, "submodule index migration progress");
+        assert_eq!(str_field(progress, "phase"), "copy");
+        let done = u64_field(progress, "rows_done");
+        let total = u64_field(progress, "rows_total");
+        assert_eq!(total, u64::from(ROWS));
+        assert_eq!(done, 1, "the first batch is one row");
+        assert_eq!(u64_field(progress, "percent"), done * 100 / total);
+        let elapsed = u64_field(progress, "elapsed_ms");
+        assert!(
+            elapsed >= 40,
+            "the injected wait is part of monotonic elapsed, got {elapsed}"
+        );
+        assert_eq!(
+            u64_field(progress, "eta_ms"),
+            (total - done) * elapsed / done
+        );
+        let _ = u64_field(progress, "rows_per_sec_interval");
+        let _ = u64_field(progress, "rows_per_sec_overall");
+        let _ = u64_field(progress, "data_paths_copied");
+        let _ = u64_field(progress, "intervals");
+        let _ = u64_field(progress, "legacy_data_paths_deleted");
+        println!("SAMPLE {} {:?}", start.message, start.fields);
+        println!("SAMPLE {} {:?}", progress.message, progress.fields);
+        drop(events);
+
+        let capture = LogCapture::default();
+        let (_env, stats) = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(
+                dir.path(),
+                args,
+                SubmoduleMigrationOptions {
+                    progress_log_interval: std::time::Duration::ZERO,
+                    ..opts(1, None)
+                },
+            )
+        })?;
+        assert!(stats.migrated);
+        assert_eq!(stats.path_hash_rows, u64::from(ROWS));
+        let events = capture.events.lock().expect("events");
+        let start = find_message(&events, "submodule index migration started");
+        assert!(bool_field(start, "resumed"));
+        assert_eq!(u64_field(start, "path_hash_rows"), 1);
+        assert_eq!(u64_field(start, "path_hash_total"), u64::from(ROWS));
+        let drop_line = events.iter().find(|event| {
+            event.message == "submodule index migration progress"
+                && str_field(event, "phase") == "drop"
+        });
+        assert!(drop_line.is_some(), "drop phase logs on the same interval");
+        let finished = find_message(&events, "submodule index migration finished");
+        assert_eq!(u64_field(finished, "copy_rows"), u64::from(ROWS));
+        assert_eq!(u64_field(finished, "drop_rows"), u64::from(ROWS));
+        let _ = u64_field(finished, "copy_elapsed_ms");
+        let _ = u64_field(finished, "drop_elapsed_ms");
+        let _ = u64_field(finished, "elapsed_ms");
+        for event in events.iter().filter(|event| {
+            matches!(
+                event.message.as_str(),
+                "submodule index migration started"
+                    | "submodule index migration progress"
+                    | "submodule index migration finished"
+            )
+        }) {
+            println!("SAMPLE {} {:?}", event.message, event.fields);
+        }
+        Ok(())
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture {
+        events: std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>,
+    }
+
+    #[derive(Debug)]
+    struct CapturedEvent {
+        message: String,
+        fields: Vec<(String, String)>,
+    }
+
+    impl tracing::Subscriber for LogCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            let message = visitor
+                .fields
+                .iter()
+                .find(|(key, _)| key == "message")
+                .map(|(_, value)| value.trim_matches('"').to_owned())
+                .unwrap_or_else(|| event.metadata().name().to_owned());
+            self.events.lock().expect("events").push(CapturedEvent {
+                message,
+                fields: visitor.fields,
+            });
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct FieldVisitor {
+        fields: Vec<(String, String)>,
+    }
+
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .push((field.name().to_owned(), format!("{value:?}")));
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .push((field.name().to_owned(), value.to_string()));
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.fields
+                .push((field.name().to_owned(), value.to_string()));
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.fields
+                .push((field.name().to_owned(), value.to_string()));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .push((field.name().to_owned(), value.to_owned()));
+        }
+    }
+
+    fn find_message<'a>(events: &'a [CapturedEvent], message: &str) -> &'a CapturedEvent {
+        events
+            .iter()
+            .find(|event| event.message == message)
+            .unwrap_or_else(|| panic!("missing {message}; saw {events:?}"))
+    }
+
+    fn field<'a>(event: &'a CapturedEvent, name: &str) -> &'a str {
+        event
+            .fields
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_else(|| panic!("missing {name} on {}: {:?}", event.message, event.fields))
+    }
+
+    fn u64_field(event: &CapturedEvent, name: &str) -> u64 {
+        field(event, name)
+            .parse()
+            .unwrap_or_else(|_| panic!("field {name} = {}", field(event, name)))
+    }
+
+    fn bool_field(event: &CapturedEvent, name: &str) -> bool {
+        match field(event, name) {
+            "true" => true,
+            "false" => false,
+            other => panic!("field {name} = {other}"),
+        }
+    }
+
+    fn str_field<'a>(event: &'a CapturedEvent, name: &str) -> &'a str {
+        field(event, name)
     }
 
     /// Copy `IRYS_SUBMODULE_V1_DB` and migrate the copy. The source path is
