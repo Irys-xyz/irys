@@ -354,7 +354,7 @@ pub fn process_ledger_transactions(
     let path_pairs = get_tx_path_pairs(block, ledger, txs).map_err(|e| {
         MigrationError::Other(format!("tx path merklization failed for {ledger:?}: {e}"))
     })?;
-    let mut prev_chunk_offset = ledger_start_offset(block, ledger, block_index);
+    let mut prev_chunk_offset = ledger_start_offset(block, ledger, block_index)?;
 
     for (tx_index, ((_txid, tx_path), tx)) in path_pairs.into_iter().enumerate() {
         let tx_index = u32::try_from(tx_index)
@@ -606,23 +606,31 @@ fn fill_submit_misses(
 /// block sits right after the prior block's epoch predates activation.
 /// Treat a missing entry as zero chunks (the ledger started at this block)
 /// instead of indexing into it, which would panic.
+///
+/// A missing previous block index item is an error, not offset 0: `get_item`
+/// is `None` both for a missing row and for a failed view, and either would
+/// place this block's txs at the start of the ledger.
 #[tracing::instrument(level = "trace", skip_all, fields(block.height = block.height, ledger = ?ledger))]
 fn ledger_start_offset(
     block: &IrysBlockHeader,
     ledger: DataLedger,
     block_index: &BlockIndex,
-) -> LedgerChunkOffset {
-    let start_chunk_offset = if block.height > 0 {
-        block_index.get_item(block.height - 1).map_or(0, |prev| {
-            prev.ledgers
-                .iter()
-                .find(|item| item.ledger == ledger)
-                .map_or(0, |item| item.total_chunks)
-        })
-    } else {
-        0
+) -> Result<LedgerChunkOffset, MigrationError> {
+    if block.height == 0 {
+        return Ok(LedgerChunkOffset::from(0));
+    }
+    let Some(prev) = block_index.get_item(block.height - 1) else {
+        return Err(MigrationError::Other(format!(
+            "block index item at height {} could not be read; not indexing {ledger:?} at offset 0",
+            block.height - 1
+        )));
     };
-    LedgerChunkOffset::from(start_chunk_offset)
+    let start_chunk_offset = prev
+        .ledgers
+        .iter()
+        .find(|item| item.ledger == ledger)
+        .map_or(0, |item| item.total_chunks);
+    Ok(LedgerChunkOffset::from(start_chunk_offset))
 }
 
 #[instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
@@ -1321,6 +1329,112 @@ mod tests {
             Some(vec![PartitionChunkOffset::from(2)])
         );
         Ok(())
+    }
+
+    /// The block at this height is in the index. The previous height is not.
+    /// Indexing must fail and leave the module empty. Offset 0 is only correct
+    /// when the previous item is present and has no entry for this ledger.
+    #[test]
+    fn missing_previous_block_index_item_indexes_nothing() -> eyre::Result<()> {
+        let mut f = fixture(1, Some(u64::MAX))?;
+        set_block_height(&mut f, 1);
+        f.ensure_block_indexed()?;
+        assert!(
+            f.block_index.get_item(0).is_none(),
+            "the previous height must be absent for this case"
+        );
+
+        let result = index_fixture_block(&f);
+        let rows = f.rows()?;
+        assert!(
+            matches!(result, Err(MigrationError::Other(_))),
+            "a missing previous block index item must not become ledger offset 0; wrote {rows:?}, got {result:?}"
+        );
+        assert!(
+            rows.is_empty(),
+            "a failed previous-item read must not write a pending body row; wrote {rows:?}"
+        );
+        assert!(
+            f.sm.partition_offsets_for_data_root_chunk(
+                f.tx.header.data_root,
+                TxChunkOffset::from(0)
+            )?
+            .is_none(),
+            "a failed previous-item read must not write a tx path at offset 0"
+        );
+        Ok(())
+    }
+
+    /// A present previous item that has no Submit entry means this ledger
+    /// starts here. The tx is indexed at offset 0.
+    #[test]
+    fn previous_item_without_this_ledger_indexes_at_zero() -> eyre::Result<()> {
+        let mut f = fixture(1, Some(u64::MAX))?;
+        set_block_height(&mut f, 1);
+        f.block_index.push_item(
+            &BlockIndexItem {
+                block_hash: H256::random(),
+                num_ledgers: 1,
+                ledgers: vec![LedgerIndexItem {
+                    total_chunks: 9,
+                    tx_root: H256::zero(),
+                    ledger: DataLedger::Publish,
+                }],
+            },
+            0,
+        )?;
+        f.ensure_block_indexed()?;
+
+        index_fixture_block(&f)?;
+
+        let rows = f.rows()?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, PartitionChunkOffset::from(0));
+        assert_eq!(rows[0].1.start_offset.0, 0);
+        Ok(())
+    }
+
+    /// The previous item's chunk count for this ledger is this block's start.
+    /// A 1-chunk tx after 4 existing chunks lands at partition offset 4.
+    #[test]
+    fn previous_ledger_total_is_the_start_offset() -> eyre::Result<()> {
+        let mut f = fixture(1, Some(u64::MAX))?;
+        set_block_height(&mut f, 1);
+        let submit = &f.block.data_ledgers[DataLedger::Submit];
+        f.block_index.push_item(
+            &BlockIndexItem {
+                block_hash: H256::random(),
+                num_ledgers: 1,
+                ledgers: vec![LedgerIndexItem {
+                    total_chunks: 4,
+                    tx_root: submit.tx_root,
+                    ledger: DataLedger::Submit,
+                }],
+            },
+            0,
+        )?;
+        f.ensure_block_indexed()?;
+
+        index_fixture_block(&f)?;
+
+        let rows = f.rows()?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, PartitionChunkOffset::from(4));
+        assert_eq!(rows[0].1.start_offset.0, 4);
+        assert_eq!(
+            f.sm.partition_offsets_for_data_root_chunk(
+                f.tx.header.data_root,
+                TxChunkOffset::from(0)
+            )?,
+            Some(vec![PartitionChunkOffset::from(4)])
+        );
+        Ok(())
+    }
+
+    fn set_block_height(f: &mut Fixture, height: u64) {
+        let mut block = (*f.block).clone();
+        block.height = height;
+        f.block = Arc::new(block);
     }
 
     /// The indexer has the shared recovery lock and has not read the hash.
