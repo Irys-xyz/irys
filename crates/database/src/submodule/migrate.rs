@@ -855,14 +855,11 @@ fn hex_hash(hash: H256) -> String {
 }
 
 fn parse_hash(text: &str) -> Option<H256> {
+    // `H256::from_str` accepts a `0x` prefix. The row stores 64 hex chars.
     if text.len() != 64 {
         return None;
     }
-    let mut bytes = [0_u8; 32];
-    for (index, slot) in bytes.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    Some(H256(bytes))
+    text.parse::<H256>().ok()
 }
 
 #[cfg(test)]
@@ -1214,6 +1211,70 @@ mod tests {
         );
         assert!(decode_progress(SUBMODULE_SCHEMA.as_bytes()).is_none());
         assert!(decode_progress(b"irys-submodule-index migrate-v1 copy nope\n").is_none());
+    }
+
+    /// A 64-byte hash field that is not 64 hex chars is a foreign row.
+    /// Open classifies it. It does not panic on a char boundary.
+    #[test]
+    fn corrupt_progress_hash_is_foreign() {
+        let hash = format!("{}{}{}", "a".repeat(31), "é", "b".repeat(31));
+        assert_eq!(hash.len(), 64, "byte length matches a hex hash");
+        assert!(
+            hash.chars().count() < 64,
+            "a multibyte char sits inside the field"
+        );
+
+        let copy = format!("{}copy 12 4,11,{hash} 12 9 2 15\n", super::PROGRESS_PREFIX);
+        assert!(
+            decode_progress(copy.as_bytes()).is_none(),
+            "a multibyte copy hash is not progress"
+        );
+        assert!(matches!(
+            super::classify(&Some(copy.into_bytes())),
+            super::SchemaRow::Foreign
+        ));
+
+        let drop_row = format!("{}drop {hash} 12 9 2 3 20\n", super::PROGRESS_PREFIX);
+        assert!(
+            decode_progress(drop_row.as_bytes()).is_none(),
+            "a multibyte drop key is not progress"
+        );
+
+        let upper = "AB".repeat(32);
+        let upper_row = format!("{}drop {upper} 1 2 3 4 5\n", super::PROGRESS_PREFIX);
+        let parsed = decode_progress(upper_row.as_bytes()).expect("uppercase hex still decodes");
+        assert_eq!(parsed.drop_next, Some(H256::repeat_byte(0xAB)));
+
+        let stored = h(0xAB);
+        let written = Progress {
+            phase: Phase::Copy,
+            next_offset: 1,
+            open: Some(super::OpenRun {
+                start: 0,
+                end: 0,
+                tx_hash: stored,
+            }),
+            drop_next: None,
+            scanned: 1,
+            copied: 1,
+            intervals: 1,
+            deleted: 0,
+            elapsed_ms: 1,
+        };
+        let bytes = encode_progress(&written);
+        let text = std::str::from_utf8(&bytes).expect("progress is utf-8");
+        let hex = format!("{stored:x}");
+        assert_eq!(hex.len(), 64);
+        assert!(
+            hex.chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+            "{hex}"
+        );
+        assert!(text.contains(&hex), "{text}");
+        assert_eq!(
+            decode_progress(&bytes).expect("written row").open,
+            written.open
+        );
     }
 
     #[test]
