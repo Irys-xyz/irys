@@ -8015,11 +8015,8 @@ impl StorageModule {
         &self,
         ledger_offset: LedgerChunkOffset,
     ) -> Result<Option<PackedChunk>> {
-        let range = self.get_storage_module_ledger_offsets()?;
-        let delta = *(ledger_offset - range.start());
-        let partition_offset = PartitionChunkOffset(
-            u32::try_from(delta).wrap_err("partition offset does not fit in u32")?,
-        );
+        let partition_offset =
+            PartitionChunkOffset(self.make_offset_partition_relative_guarded(ledger_offset)?);
 
         self.generate_full_chunk(partition_offset)
     }
@@ -9582,6 +9579,46 @@ mod tests {
             partition_assignment: assignment,
             submodules: vec![(partition_chunk_offset_ii!(0, last), path.into())],
         }
+    }
+
+    /// A module reassigned onto a higher slot no longer owns the old ledger
+    /// offset. That read is an error. The new slot's first offset still reads.
+    #[test]
+    fn ledger_offset_below_a_reassigned_module_is_an_error() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("ledger_offset_reassign")
+            .build();
+        let config = testing_config(tmp.path(), 32, 8);
+        let assignment = submit_assignment(0);
+        let storage = StorageModule::new(
+            &one_span(7, tmp.path().join("sub"), Some(assignment)),
+            &config,
+        )?;
+
+        let at_start = storage.generate_full_chunk_ledger_offset(LedgerChunkOffset::from(0))?;
+        assert!(at_start.is_none(), "an empty in-range offset is a miss");
+        let at_end = storage.generate_full_chunk_ledger_offset(LedgerChunkOffset::from(7))?;
+        assert!(at_end.is_none(), "the last in-range offset is a miss");
+
+        let mut next = assignment;
+        next.slot_index = Some(1);
+        storage.assign_partition(next, 3)?;
+
+        let below = storage
+            .generate_full_chunk_ledger_offset(LedgerChunkOffset::from(0))
+            .expect_err("the old slot is below the module");
+        assert!(
+            below
+                .to_string()
+                .contains("chunk offset not in storage module"),
+            "{below}"
+        );
+        let moved = storage.generate_full_chunk_ledger_offset(LedgerChunkOffset::from(8))?;
+        assert!(
+            moved.is_none(),
+            "the new slot's first offset is still a miss, not an error"
+        );
+        Ok(())
     }
 
     fn data_header(data_root: H256, data_size: u64) -> DataTransactionHeader {
