@@ -239,6 +239,7 @@ fn setup_tracing_subscriber(
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy();
+    let global_max = filter.max_level_hint();
 
     let subscriber = subscriber
         .with(filter)
@@ -249,12 +250,26 @@ fn setup_tracing_subscriber(
     let tracer = tracer_provider.tracer(service_name.to_string());
     let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
     // A node can log at debug locally without shipping debug to the log store.
-    let otel_log_layer = OpenTelemetryTracingBridge::new(logger_provider).with_filter(
-        otlp_log_filter(std::env::var(OTLP_LOG_FILTER_ENV).ok().as_deref()),
-    );
+    let otlp_filter = otlp_log_filter(std::env::var(OTLP_LOG_FILTER_ENV).ok().as_deref());
+    let otlp_max = otlp_filter.as_ref().and_then(EnvFilter::max_level_hint);
+    let otel_log_layer = OpenTelemetryTracingBridge::new(logger_provider).with_filter(otlp_filter);
 
     let subscriber = subscriber.with(otel_trace_layer).with(otel_log_layer);
     subscriber.init();
+
+    if otlp_filter_wider_than_global(otlp_max, global_max) {
+        tracing::warn!(
+            otlp_max = ?otlp_max,
+            global_max = ?global_max,
+            "{OTLP_LOG_FILTER_ENV} allows more verbose logs than RUST_LOG; RUST_LOG caps what is exported"
+        );
+    }
+}
+
+/// The OTLP filter can only narrow the global one, so a more verbose OTLP
+/// level has no effect. No hint on either side means it cannot be compared.
+fn otlp_filter_wider_than_global(otlp: Option<LevelFilter>, global: Option<LevelFilter>) -> bool {
+    matches!((otlp, global), (Some(otlp), Some(global)) if otlp > global)
 }
 
 /// Filter for the OTLP log layer. `None` or an empty value adds no filter, so
@@ -468,6 +483,34 @@ mod tests {
         assert_eq!(exported_levels(None), want);
         assert_eq!(exported_levels(Some("")), want);
         assert_eq!(exported_levels(Some("  ")), want);
+    }
+
+    #[test]
+    fn warns_only_when_the_otlp_filter_is_more_verbose() {
+        assert!(otlp_filter_wider_than_global(
+            Some(LevelFilter::DEBUG),
+            Some(LevelFilter::INFO)
+        ));
+        assert!(!otlp_filter_wider_than_global(
+            Some(LevelFilter::INFO),
+            Some(LevelFilter::DEBUG)
+        ));
+        assert!(!otlp_filter_wider_than_global(
+            Some(LevelFilter::INFO),
+            Some(LevelFilter::INFO)
+        ));
+        assert!(!otlp_filter_wider_than_global(
+            None,
+            Some(LevelFilter::INFO)
+        ));
+        assert!(!otlp_filter_wider_than_global(
+            Some(LevelFilter::DEBUG),
+            None
+        ));
+        assert_eq!(
+            otlp_log_filter(Some("debug")).and_then(|f| f.max_level_hint()),
+            Some(LevelFilter::DEBUG)
+        );
     }
 
     #[test]
