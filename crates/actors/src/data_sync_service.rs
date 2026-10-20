@@ -219,32 +219,6 @@ fn sync_test_node_config(base: &std::path::Path, num_chunks: u64) -> irys_types:
     }
 }
 
-/// Give every storage module one dispatch opportunity per round, rotating the
-/// first module between ticks. The callback returns whether it consumed work.
-/// Rounds stop once no module can use another shared peer permit.
-#[cfg(test)]
-fn dispatch_round_robin<T: Copy>(
-    ids: &mut [T],
-    cursor: usize,
-    mut dispatch: impl FnMut(T) -> bool,
-) -> usize {
-    if ids.is_empty() {
-        return 0;
-    }
-    let start = cursor % ids.len();
-    ids.rotate_left(start);
-    loop {
-        let mut dispatched = false;
-        for id in ids.iter().copied() {
-            dispatched |= dispatch(id);
-        }
-        if !dispatched {
-            break;
-        }
-    }
-    (cursor + 1) % ids.len()
-}
-
 /// Term-ledger SMs (Submit / OneYear / ThirtyDay) take a turn before Publish
 /// in each inner pass. Publish copies Submit data for promotion; if Submit
 /// replicas stay on the write frontier, Publish has many sources. When shared
@@ -335,37 +309,7 @@ pub(crate) fn classify_synced_chunk(
 
 #[cfg(test)]
 mod scheduler_fairness_tests {
-    use super::{dispatch_round_robin, dispatch_term_then_publish};
-
-    #[test]
-    fn shared_capacity_is_round_robin_across_storage_modules() {
-        let mut ids = [0_u8, 1_u8];
-        let mut permits = 3_usize;
-        let mut order = Vec::new();
-        let next_cursor = dispatch_round_robin(&mut ids, 0, |id| {
-            if permits == 0 {
-                return false;
-            }
-            permits -= 1;
-            order.push(id);
-            true
-        });
-        assert_eq!(order, vec![0, 1, 0]);
-        assert_eq!(next_cursor, 1);
-
-        let mut ids = [0_u8, 1_u8];
-        let mut permits = 3_usize;
-        let mut order = Vec::new();
-        let _ = dispatch_round_robin(&mut ids, next_cursor, |id| {
-            if permits == 0 {
-                return false;
-            }
-            permits -= 1;
-            order.push(id);
-            true
-        });
-        assert_eq!(order, vec![1, 0, 1]);
-    }
+    use super::dispatch_term_then_publish;
 
     #[test]
     fn term_ledgers_take_permits_before_publish_when_capacity_is_scarce() {
