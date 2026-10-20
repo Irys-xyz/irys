@@ -826,7 +826,9 @@ pub struct StorageModule {
     pending_writes: RwLock<PendingWrites>,
     /// Entropy read past a demand span. Lock order: `intervals`, then
     /// `pending_writes`, then this cache. A write takes `pending_writes`
-    /// and then this cache.
+    /// and then this cache. An entropy write takes `intervals` before
+    /// `pending_writes`. The reverse deadlocks a reader that already holds
+    /// `intervals`.
     entropy_cache: Mutex<disk_lane::EntropyPadCache>,
     /// Shared with submodule drains so tests can fail the next index commit.
     #[cfg(any(test, feature = "test-utils"))]
@@ -1148,6 +1150,25 @@ pub fn get_atomic_file<P: AsRef<Path> + std::fmt::Debug>(path: P) -> eyre::Resul
         .read(true)
         .open(&path)
         .wrap_err_with(|| format!("Failed to create or open atomic file for {:?}", path))
+}
+
+/// Result of an entropy insert. The caller must handle a refusal.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntropyWrite {
+    Queued,
+    Rejected(EntropyRejection),
+}
+
+/// Why an entropy insert did not queue.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntropyRejection {
+    /// No assignment, or its hash is not the hash the bytes were packed for.
+    NotAssigned,
+    /// Live label is not `Uninitialized`, or queued data or a proof owns the offset.
+    /// `None` means the interval map has no label at the offset.
+    NotUninitialized(Option<ChunkType>),
 }
 
 /// Defines how chunk data is processed and stored
@@ -3559,8 +3580,9 @@ impl StorageModule {
     /// `sync_in_progress`. No holder of `sync_in_progress` takes
     /// `partition_assignment`. Readers drop the assignment read lock before
     /// `pending_writes`, `intervals`, or `sync_in_progress`.
-    /// `write_entropy_chunk` holds the assignment read lock across its
-    /// pending insert, so reset cannot clear `pending` and then lose it.
+    /// `write_entropy_chunk` holds the assignment read lock, then the
+    /// interval read lock, across its pending insert, so reset cannot
+    /// clear `pending` and then lose it.
     ///
     /// `next` of `None` clears the assignment. A failed reset leaves the
     /// previous assignment in place. A wipe that commits and then fails to
@@ -6709,6 +6731,27 @@ impl StorageModule {
         spans
     }
 
+    /// Live `Uninitialized` spans inside `range`.
+    ///
+    /// Empty when the module is unassigned or the hash is not `packed_for`.
+    /// A queued body is cut, same as [`Self::uninitialized_spans_overlapping`].
+    /// This is a hint. [`Self::write_entropy_chunk`] is the guard.
+    pub fn entropy_gaps(
+        &self,
+        packed_for: PartitionHash,
+        range: Interval<PartitionChunkOffset>,
+    ) -> Vec<Interval<PartitionChunkOffset>> {
+        let assignment = self.partition_assignment.read().unwrap();
+        if assignment
+            .as_ref()
+            .map(|assignment| assignment.partition_hash)
+            != Some(packed_for)
+        {
+            return Vec::new();
+        }
+        self.uninitialized_spans_overlapping(range)
+    }
+
     /// Matching intervals, ascending. Touching equals become one span.
     fn intervals_matching(
         &self,
@@ -6820,25 +6863,38 @@ impl StorageModule {
         self.enqueue_pending_chunk(chunk_offset, bytes, chunk_type)
     }
 
+    /// The live interval label. Pending is not this map.
+    fn live_label(intervals: &StorageIntervals, offset: PartitionChunkOffset) -> Option<ChunkType> {
+        intervals.get_at_point(offset).copied()
+    }
+
     /// Entropy packed for `packed_for`.
     ///
-    /// The assignment read lock is held across the pending insert.
+    /// One section, in this order: the assignment read lock, the interval
+    /// read lock, then the pending write lock. None of them drop before the
+    /// insert or the refusal. The hash must be the assignment. The live label
+    /// must be `Uninitialized`. A live `Interrupted` label is the in-flight
+    /// durable-point mark. A queued data body, a parked data body, or a proof
+    /// blocks the offset even when the durable point has not taken its lock.
+    /// A queued entropy body may be replaced.
+    ///
     /// [`Self::reset_with_assignment`] takes the assignment write lock before
     /// it clears `pending`, so this insert cannot land bytes for a partition
-    /// the module no longer has. `None` refuses the write. A raw
-    /// [`Self::write_chunk`] of `ChunkType::Entropy` does not check the
-    /// assignment. That path is for bytes that were not packed for a hash.
+    /// the module no longer has. A raw [`Self::write_chunk`] of
+    /// `ChunkType::Entropy` does not check the assignment or the label. That
+    /// path is for bytes that were not packed for a hash.
     pub fn write_entropy_chunk(
         &self,
         chunk_offset: PartitionChunkOffset,
         bytes: Vec<u8>,
         packed_for: PartitionHash,
-    ) -> bool {
+    ) -> EntropyWrite {
         let assignment = self.partition_assignment.read().unwrap();
-        let current = assignment
+        if assignment
             .as_ref()
-            .map(|assignment| assignment.partition_hash);
-        if current != Some(packed_for) {
+            .map(|assignment| assignment.partition_hash)
+            != Some(packed_for)
+        {
             debug!(
                 target: "irys::packing",
                 module_id = self.id,
@@ -6846,9 +6902,26 @@ impl StorageModule {
                 %packed_for,
                 "refusing entropy packed for a partition this module is not assigned"
             );
-            return false;
+            return EntropyWrite::Rejected(EntropyRejection::NotAssigned);
         }
-        self.enqueue_pending_chunk(chunk_offset, bytes, ChunkType::Entropy)
+        let intervals = self.intervals.read().unwrap();
+        let label = Self::live_label(&intervals, chunk_offset);
+        if label != Some(ChunkType::Uninitialized) {
+            return EntropyWrite::Rejected(EntropyRejection::NotUninitialized(label));
+        }
+        let mut pending = self.pending_writes.write().unwrap();
+        if Self::queued_data_or_proof(&pending, chunk_offset) {
+            return EntropyWrite::Rejected(EntropyRejection::NotUninitialized(Some(
+                ChunkType::Data,
+            )));
+        }
+        self.queue_pending_body(&mut pending, chunk_offset, bytes, ChunkType::Entropy);
+        drop(pending);
+        drop(intervals);
+        drop(assignment);
+        self.fail_sweep_offset(chunk_offset);
+        self.disk.notify();
+        EntropyWrite::Queued
     }
 
     fn enqueue_pending_chunk(
@@ -6866,10 +6939,28 @@ impl StorageModule {
         // The durable point holds `sync_in_progress` while the live label is
         // still `Interrupted`. Replacing this offset's queued data body, or
         // its proof, would publish Data for bytes the point no longer owns.
-        // Entropy that does not replace data still queues.
+        // Entropy that does not replace data still queues. `write_entropy_chunk`
+        // refuses that replacement even when this lock is free.
         if Self::queued_data_or_proof(&pending, chunk_offset) && self.sync_lock_is_held() {
             return false;
         }
+        self.queue_pending_body(&mut pending, chunk_offset, bytes, chunk_type);
+        drop(pending);
+        // A sweep slot may already hold a pad copied before this write.
+        // Fail that slot so a later fold cannot XOR the old bytes.
+        self.fail_sweep_offset(chunk_offset);
+        // The lane writes the next window when it is woken.
+        self.disk.notify();
+        true
+    }
+
+    fn queue_pending_body(
+        &self,
+        pending: &mut PendingWrites,
+        chunk_offset: PartitionChunkOffset,
+        bytes: Vec<u8>,
+        chunk_type: ChunkType,
+    ) {
         let priority = match chunk_type {
             ChunkType::Entropy => disk_lane::WritePriority::Packing,
             _ => disk_lane::WritePriority::Ingress,
@@ -6884,13 +6975,6 @@ impl StorageModule {
         pending.proofs.remove(&chunk_offset);
         self.entropy_cache.lock().unwrap().invalidate(chunk_offset);
         *self.last_pending_write.write().unwrap() = Instant::now();
-        drop(pending);
-        // A sweep slot may already hold a pad copied before this write.
-        // Fail that slot so a later fold cannot XOR the old bytes.
-        self.fail_sweep_offset(chunk_offset);
-        // The lane writes the next window when it is woken.
-        self.disk.notify();
-        true
     }
 
     /// Queued `Data` at `offset`, or a proof waiting for that offset.
@@ -10021,7 +10105,8 @@ mod tests {
             .ok_or_else(|| eyre::eyre!("partition hash missing"))?;
         let entropy = vec![0xE1_u8; 32];
         eyre::ensure!(
-            storage.write_entropy_chunk(offset, entropy.clone(), packed_for),
+            storage.write_entropy_chunk(offset, entropy.clone(), packed_for)
+                == EntropyWrite::Queued,
             "entropy write was refused"
         );
         storage.sync_pending_chunks()?;
@@ -11596,6 +11681,209 @@ mod tests {
             .insert(offset, (H256::repeat_byte(7), vec![7, 7, 7]));
     }
 
+    fn open_entropy_module(
+        prefix: &str,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        StorageModule,
+        H256,
+    )> {
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
+        let config = testing_config(tmp.path(), 32, 4);
+        let hash = H256::repeat_byte(0x11);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(partition_chunk_offset_ii!(0, 3), tmp.path().join("sub"))],
+        };
+        let storage = StorageModule::new(&info, &config)?;
+        Ok((tmp, storage, hash))
+    }
+
+    /// Queued data, with its proof, and no durable-point lock. Entropy for
+    /// that offset must leave both in place. A parked data body is the same
+    /// refusal.
+    #[test]
+    fn entropy_write_keeps_queued_data_when_sync_is_not_held() -> eyre::Result<()> {
+        let (_tmp, storage, hash) = open_entropy_module("entropy_keeps_queued_data")?;
+        let offset = PartitionChunkOffset::from(1);
+        queue_proved_data(&storage, offset, 0xD4);
+        assert!(
+            !storage.sync_lock_is_held(),
+            "the durable point must not hold the sync lock"
+        );
+        let wrote = storage.write_entropy_chunk(offset, vec![0xEE; 32], hash);
+        let pending = storage.pending_writes.read().unwrap();
+        let queued = pending
+            .get(&offset)
+            .map(|(bytes, kind)| (bytes.clone(), *kind));
+        let proof = pending.proofs.get(&offset).cloned();
+        drop(pending);
+        assert_eq!(
+            wrote,
+            EntropyWrite::Rejected(EntropyRejection::NotUninitialized(Some(ChunkType::Data))),
+            "queued data was replaced: wrote={wrote:?} queued={queued:?} proof={proof:?}"
+        );
+        assert_eq!(queued, Some((vec![0xD4_u8; 32], ChunkType::Data)));
+        assert!(proof.is_some(), "the queued proof was removed");
+
+        let parked = PartitionChunkOffset::from(2);
+        {
+            let mut pending = storage.pending_writes.write().unwrap();
+            pending.written_ahead.insert(
+                parked,
+                WrittenAhead {
+                    bytes: vec![0xA1; 32],
+                    chunk_type: ChunkType::Data,
+                    priority: disk_lane::WritePriority::Ingress,
+                    queued_at: Instant::now(),
+                    pwrite_at: None,
+                },
+            );
+            pending
+                .proofs
+                .insert(parked, (H256::repeat_byte(9), vec![9, 9]));
+        }
+        let wrote_parked = storage.write_entropy_chunk(parked, vec![0xEE; 32], hash);
+        let pending = storage.pending_writes.read().unwrap();
+        let ahead = pending
+            .written_ahead
+            .get(&parked)
+            .map(|ahead| (ahead.bytes.clone(), ahead.chunk_type));
+        let parked_proof = pending.proofs.contains_key(&parked);
+        let parked_body = pending
+            .get(&parked)
+            .map(|(bytes, kind)| (bytes.clone(), *kind));
+        drop(pending);
+        assert_eq!(
+            wrote_parked,
+            EntropyWrite::Rejected(EntropyRejection::NotUninitialized(Some(ChunkType::Data))),
+            "parked data was replaced: wrote={wrote_parked:?} ahead={ahead:?} proof={parked_proof} body={parked_body:?}"
+        );
+        assert_eq!(ahead, Some((vec![0xA1_u8; 32], ChunkType::Data)));
+        assert!(parked_proof, "the parked proof was removed");
+        assert!(parked_body.is_none(), "entropy was queued over parked data");
+        Ok(())
+    }
+
+    /// A live label other than `Uninitialized` is not an entropy target.
+    /// The interval map is the label. Pending is not.
+    #[test]
+    fn entropy_write_rejects_a_live_label_that_is_not_uninitialized() -> eyre::Result<()> {
+        let cases = [ChunkType::Interrupted, ChunkType::Data, ChunkType::Entropy];
+        for kind in cases {
+            let (_tmp, storage, hash) = open_entropy_module("entropy_live_label")?;
+            let offset = PartitionChunkOffset::from(0);
+            {
+                let mut intervals = storage.intervals.write().unwrap();
+                StorageModule::cut_then_insert_interval_if_touching(&mut intervals, offset, kind);
+            }
+            let wrote = storage.write_entropy_chunk(offset, vec![0xEE; 32], hash);
+            assert_eq!(
+                wrote,
+                EntropyWrite::Rejected(EntropyRejection::NotUninitialized(Some(kind))),
+                "live {kind:?} accepted an entropy write"
+            );
+            let pending = storage.pending_writes.read().unwrap();
+            assert!(
+                pending.get(&offset).is_none(),
+                "entropy body queued on live {kind:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The assigned hash queues entropy on `Uninitialized` and may replace a
+    /// queued entropy body. A different hash, or no assignment, does not.
+    #[test]
+    fn entropy_write_queues_only_for_the_assigned_uninitialized_offset() -> eyre::Result<()> {
+        let (_tmp, storage, hash) = open_entropy_module("entropy_write_assigned")?;
+        let offset = PartitionChunkOffset::from(0);
+        assert_eq!(
+            storage.write_entropy_chunk(offset, vec![0xA1; 32], hash),
+            EntropyWrite::Queued
+        );
+        assert_eq!(
+            storage.write_entropy_chunk(offset, vec![0xB2; 32], hash),
+            EntropyWrite::Queued,
+            "a second entropy body must replace the queued one"
+        );
+        let pending = storage.pending_writes.read().unwrap();
+        let queued = pending
+            .get(&offset)
+            .map(|(bytes, kind)| (bytes.clone(), *kind));
+        drop(pending);
+        assert_eq!(queued, Some((vec![0xB2_u8; 32], ChunkType::Entropy)));
+
+        let other = PartitionChunkOffset::from(1);
+        let wrong = H256::repeat_byte(0x22);
+        assert_eq!(
+            storage.write_entropy_chunk(other, vec![0xEE; 32], wrong),
+            EntropyWrite::Rejected(EntropyRejection::NotAssigned)
+        );
+        assert!(storage.pending_writes.read().unwrap().get(&other).is_none());
+
+        storage.reset_with_assignment(None, 1)?;
+        assert_eq!(
+            storage.write_entropy_chunk(PartitionChunkOffset::from(2), vec![0xEE; 32], hash),
+            EntropyWrite::Rejected(EntropyRejection::NotAssigned)
+        );
+        Ok(())
+    }
+
+    /// Entropy inserts and the durable point share the module. A reversed
+    /// lock order hangs this loop. The deadline is monotonic.
+    #[test]
+    fn entropy_write_does_not_deadlock_against_the_durable_point() {
+        let (_tmp, storage, hash) =
+            open_entropy_module("entropy_write_lock_order").expect("module");
+        let storage = Arc::new(storage);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer_storage = Arc::clone(&storage);
+        let writer = std::thread::spawn(move || {
+            let mut writes = 0_u64;
+            while Instant::now() < deadline {
+                let offset = PartitionChunkOffset::from((writes % 4) as u32);
+                let outcome = writer_storage.write_entropy_chunk(offset, vec![0xEE; 32], hash);
+                // Put an entropy label back so the next pass takes `pending`
+                // again while the durable point is in its own critical section.
+                if matches!(
+                    outcome,
+                    EntropyWrite::Rejected(EntropyRejection::NotUninitialized(Some(
+                        ChunkType::Entropy
+                    )))
+                ) {
+                    let mut intervals = writer_storage.intervals().write().unwrap();
+                    StorageModule::cut_then_insert_interval_if_touching(
+                        &mut intervals,
+                        offset,
+                        ChunkType::Uninitialized,
+                    );
+                }
+                writes += 1;
+            }
+            let _ = tx.send(writes);
+        });
+        let syncer_storage = Arc::clone(&storage);
+        let syncer = std::thread::spawn(move || {
+            while Instant::now() < deadline {
+                let _ = syncer_storage.force_sync_pending_chunks();
+            }
+        });
+        let writes = rx
+            .recv_timeout(Duration::from_secs(4))
+            .expect("entropy write hung against the durable point");
+        writer.join().expect("writer");
+        syncer.join().expect("syncer");
+        assert!(writes > 0, "the writer did not run");
+    }
+
     /// A data durable point holds `sync_in_progress` across pwrite. The live
     /// label is still `Interrupted`. Entropy for that offset must not replace
     /// the queued body or its proof. Entropy for a different offset, including
@@ -11626,16 +11914,21 @@ mod tests {
                         Some(ChunkType::Interrupted),
                         "the in-flight label is still Interrupted"
                     );
-                    assert!(
+                    assert_eq!(
                         storage_ref.write_entropy_chunk(other, vec![0xAB; 32], hash),
+                        EntropyWrite::Queued,
                         "entropy for an offset with no queued data still queues"
                     );
-                    assert!(
+                    assert_eq!(
                         storage_ref.write_entropy_chunk(other, vec![0xCD; 32], hash),
+                        EntropyWrite::Queued,
                         "a newer entropy body replaces queued entropy while sync is held"
                     );
-                    assert!(
-                        !storage_ref.write_entropy_chunk(offset, vec![0xEE; 32], hash),
+                    assert_eq!(
+                        storage_ref.write_entropy_chunk(offset, vec![0xEE; 32], hash),
+                        EntropyWrite::Rejected(EntropyRejection::NotUninitialized(Some(
+                            ChunkType::Interrupted,
+                        ))),
                         "entropy must not replace an in-flight data write"
                     );
                     storage_ref.release_sync_pause();
@@ -19191,8 +19484,9 @@ mod tests {
             let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
             assert_eq!(loaded.ledger, None);
             assert_eq!(loaded.partition_hash, Some(hash));
-            assert!(
+            assert_eq!(
                 opened.write_entropy_chunk(PartitionChunkOffset::from(0), vec![0x11_u8; 32], hash),
+                EntropyWrite::Queued,
                 "a wiped expiry did not accept a repack"
             );
             opened.force_sync_pending_chunks()?;
@@ -19333,8 +19627,9 @@ mod tests {
                 opened.data_root_and_tx_offset_at(offset)?.is_none(),
                 "{engine:?}: the old placement stayed"
             );
-            assert!(
+            assert_eq!(
                 opened.write_entropy_chunk(offset, vec![0x11_u8; 32], hash),
+                EntropyWrite::Queued,
                 "{engine:?}: the wiped span did not accept a repack"
             );
             opened.force_sync_pending_chunks()?;
@@ -20294,11 +20589,8 @@ mod tests {
         offset: PartitionChunkOffset,
     ) -> eyre::Result<DataRoot> {
         let chunk_size = storage.config.consensus.chunk_size as usize;
-        let packed_for = storage
-            .partition_hash()
-            .ok_or_else(|| eyre::eyre!("partition hash missing"))?;
         eyre::ensure!(
-            storage.write_entropy_chunk(offset, vec![0xE1; chunk_size], packed_for),
+            storage.write_chunk(offset, vec![0xE1; chunk_size], ChunkType::Entropy),
             "entropy replacement was refused"
         );
         let signer = IrysSigner::random_signer(&storage.config.consensus);
@@ -20636,12 +20928,9 @@ mod tests {
             "{engine:?} settled serve bytes are not the committed body"
         );
 
-        let hash = storage
-            .partition_hash()
-            .ok_or_else(|| eyre::eyre!("partition hash missing"))?;
         let chunk_size = storage.config.consensus.chunk_size as usize;
         eyre::ensure!(
-            storage.write_entropy_chunk(offset, vec![0xE1; chunk_size], hash),
+            storage.write_chunk(offset, vec![0xE1; chunk_size], ChunkType::Entropy),
             "entropy overwrite was refused"
         );
         storage.force_sync_pending_chunks()?;
@@ -20806,14 +21095,13 @@ mod tests {
                 storage.wait_for_sync_pause(Duration::from_secs(5)),
                 "serve did not pause after the body read"
             );
-            let hash = storage
-                .partition_hash()
-                .ok_or_else(|| eyre::eyre!("partition hash missing"))?;
             let chunk_size = storage.config.consensus.chunk_size as usize;
             // The same pad the first pack read. The unpacked bytes match, so
             // the packed checksum stays and only the data path changes.
+            // Raw write: the live label is already Data. An entropy pack
+            // refuses that label.
             eyre::ensure!(
-                storage.write_entropy_chunk(offset, vec![0; chunk_size], hash),
+                storage.write_chunk(offset, vec![0; chunk_size], ChunkType::Entropy),
                 "entropy overwrite was refused"
             );
             storage.force_sync_pending_chunks()?;
@@ -21417,8 +21705,7 @@ mod tests {
         storage.pack_with_zeros();
         let (unpacked, ..) = index_partition(&storage)?;
         let offset = PartitionChunkOffset::from(0);
-        let hash = H256::repeat_byte(0x11);
-        assert!(storage.write_entropy_chunk(offset, vec![0x22; 32], hash));
+        assert!(storage.write_chunk(offset, vec![0x22; 32], ChunkType::Entropy));
         storage.sync_pending_chunks()?;
         storage.write_data_chunk(&unpacked[0])?;
         let pending = storage.pending_writes.read().unwrap();
@@ -21447,7 +21734,10 @@ mod tests {
             storage_ref
                 .reset_with_assignment(Some(capacity_assignment()), 1)
                 .expect("reset");
-            assert!(storage_ref.write_entropy_chunk(offset, vec![0x22; 32], hash));
+            assert_eq!(
+                storage_ref.write_entropy_chunk(offset, vec![0x22; 32], hash),
+                EntropyWrite::Queued
+            );
             assert_eq!(
                 live_label(storage_ref, 0),
                 Some(ChunkType::Uninitialized),
@@ -21490,7 +21780,10 @@ mod tests {
             storage_ref
                 .reset_with_assignment(Some(capacity_assignment()), 1)
                 .expect("reset");
-            assert!(storage_ref.write_entropy_chunk(offset, vec![0x22; 32], hash));
+            assert_eq!(
+                storage_ref.write_entropy_chunk(offset, vec![0x22; 32], hash),
+                EntropyWrite::Queued
+            );
             storage_ref.sync_pending_chunks().expect("entropy sync");
             assert_eq!(live_label(storage_ref, 0), Some(ChunkType::Entropy));
             assert!(

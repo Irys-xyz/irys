@@ -54,63 +54,18 @@ const PENDING_ROOM_POLL: std::time::Duration = std::time::Duration::from_millis(
 /// How long packing waits for a module's pending writes to drain.
 const PENDING_ROOM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// What an entropy pack may do with one offset on this attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EntropyOffset {
-    /// Live label is `Uninitialized`, and the hash matches.
-    Pack,
-    /// Live label is `Data`, `Entropy`, or `Interrupted`. Do not write.
-    Skip,
-    /// The module is unassigned, or the hash is no longer `packed_for`.
-    Refused,
-}
-
-/// Re-check the assignment and the live label immediately before an entropy write.
-///
-/// `Data` is never a pack target. `Entropy` is already packed. A live
-/// `Interrupted` label is the in-flight durable-point mark, so it is not a
-/// pack target either. Open reloads a file `Interrupted` span as
-/// `Uninitialized`, and that label is packed. A retry that starts again at
-/// the original offset must not replace `Data` or `Entropy`.
-pub(crate) fn classify_entropy_offset(
-    storage_module: &irys_domain::StorageModule,
-    offset: PartitionChunkOffset,
-    packed_for: irys_types::partition::PartitionHash,
-) -> EntropyOffset {
-    let Some(assignment) = storage_module.partition_assignment() else {
-        return EntropyOffset::Refused;
-    };
-    if assignment.partition_hash != packed_for {
-        return EntropyOffset::Refused;
-    }
-    match storage_module.get_chunk_type(&offset) {
-        Some(irys_domain::ChunkType::Uninitialized) => EntropyOffset::Pack,
-        Some(
-            irys_domain::ChunkType::Interrupted
-            | irys_domain::ChunkType::Data
-            | irys_domain::ChunkType::Entropy,
-        )
-        | None => EntropyOffset::Skip,
-    }
-}
-
 /// Spans inside `range` that an entropy retry may still pack.
 ///
 /// Empty when the assignment is gone or the hash changed. A range that is
-/// still entirely uninitialized comes back as that one span.
+/// still entirely uninitialized comes back as that one span. This is a hint.
+/// [`irys_domain::StorageModule::write_entropy_chunk`] decides the write.
 pub(crate) fn entropy_target_ranges(
     storage_module: &irys_domain::StorageModule,
     packed_for: irys_types::partition::PartitionHash,
     range: PartitionChunkRange,
 ) -> Vec<PartitionChunkRange> {
-    let Some(assignment) = storage_module.partition_assignment() else {
-        return Vec::new();
-    };
-    if assignment.partition_hash != packed_for {
-        return Vec::new();
-    }
     storage_module
-        .uninitialized_spans_overlapping(range.0)
+        .entropy_gaps(packed_for, range.0)
         .into_iter()
         .map(PartitionChunkRange)
         .collect()
@@ -195,9 +150,7 @@ pub use types::{PackingHandle, PackingIdleWaiter, PackingRequest};
 
 use dashmap::DashMap;
 use irys_packing::{PACKING_TYPE, PackingType};
-use irys_types::{
-    Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, TokioServiceHandle,
-};
+use irys_types::{Config, IrysAddress, PartitionChunkRange, TokioServiceHandle};
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tracing::{debug, info, warn};
 

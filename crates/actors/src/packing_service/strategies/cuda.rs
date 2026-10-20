@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use irys_domain::StorageModule;
+use irys_domain::{EntropyRejection, EntropyWrite, StorageModule};
 use irys_packing::{CUDAConfig, capacity_pack_range_cuda_c};
 use irys_types::{
     Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, partition::PartitionHash,
@@ -140,26 +140,10 @@ impl super::PackingStrategy for CudaPackingStrategy {
                     }
                 };
 
-                // Write packed chunks. Re-check each offset: a retry must not
-                // replace Data, and a hash change is not this assignment.
+                // Write packed chunks. The module refuses a label that is not
+                // uninitialized, and a hash that is no longer this assignment.
                 for i in 0..num_chunks {
                     let offset = PartitionChunkOffset::from(start + i);
-                    match crate::packing_service::classify_entropy_offset(
-                        &storage_module_clone,
-                        offset,
-                        partition_hash,
-                    ) {
-                        crate::packing_service::EntropyOffset::Skip => continue,
-                        crate::packing_service::EntropyOffset::Refused => {
-                            stop_flag.store(true, Ordering::Relaxed);
-                            return Err(format!(
-                                "entropy write refused at offset {} during CUDA packing for SM {}",
-                                start + i,
-                                storage_module_id
-                            ));
-                        }
-                        crate::packing_service::EntropyOffset::Pack => {}
-                    }
                     let byte_range = super::cuda_chunk_byte_range(i, chunk_size).ok_or_else(|| {
                         format!(
                             "CUDA packing chunk {i} byte range overflows for SM {storage_module_id}"
@@ -170,13 +154,17 @@ impl super::PackingStrategy for CudaPackingStrategy {
                         out[byte_range].to_vec(),
                         partition_hash,
                     );
-                    if !wrote {
-                        stop_flag.store(true, Ordering::Relaxed);
-                        return Err(format!(
-                            "entropy write refused at offset {} during CUDA packing for SM {}",
-                            start + i,
-                            storage_module_id
-                        ));
+                    match wrote {
+                        EntropyWrite::Rejected(EntropyRejection::NotUninitialized(_)) => continue,
+                        EntropyWrite::Rejected(EntropyRejection::NotAssigned) => {
+                            stop_flag.store(true, Ordering::Relaxed);
+                            return Err(format!(
+                                "entropy write refused at offset {} during CUDA packing for SM {}",
+                                start + i,
+                                storage_module_id
+                            ));
+                        }
+                        EntropyWrite::Queued => {}
                     }
 
                     // Wait for the disk before queueing more entropy.

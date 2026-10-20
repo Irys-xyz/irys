@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt as _;
-use irys_domain::StorageModule;
+use irys_domain::{EntropyRejection, EntropyWrite, StorageModule};
 use irys_types::{
     Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig, ii,
     partition::PartitionHash, partition_chunk_offset_ii, remote_packing::RemotePackingRequest,
@@ -77,23 +77,18 @@ impl RemotePackingStrategy {
             }
             // The stream is positional. A Data or Entropy offset consumes its
             // bytes and is not written. A hash change fails the body.
-            let wrote = match crate::packing_service::classify_entropy_offset(
-                storage_module,
+            match storage_module.write_entropy_chunk(
                 PartitionChunkOffset(range_start),
+                chunk_bytes.to_vec(),
                 partition_hash,
             ) {
-                crate::packing_service::EntropyOffset::Skip => true,
-                crate::packing_service::EntropyOffset::Refused => false,
-                crate::packing_service::EntropyOffset::Pack => storage_module.write_entropy_chunk(
-                    PartitionChunkOffset(range_start),
-                    chunk_bytes.to_vec(),
-                    partition_hash,
-                ),
-            };
-            if !wrote {
-                return Err(format!(
-                    "entropy write refused at offset {range_start} for partition {partition_hash}"
-                ));
+                EntropyWrite::Queued
+                | EntropyWrite::Rejected(EntropyRejection::NotUninitialized(_)) => {}
+                EntropyWrite::Rejected(EntropyRejection::NotAssigned) => {
+                    return Err(format!(
+                        "entropy write refused at offset {range_start} for partition {partition_hash}"
+                    ));
+                }
             }
             notify.notify_waiters();
 

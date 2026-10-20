@@ -146,7 +146,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::{
-        ChunkType, StorageModule, StorageModuleInfo, SyncFailurePoint, SyncPausePoint,
+        ChunkType, EntropyRejection, EntropyWrite, StorageModule, StorageModuleInfo,
+        SyncFailurePoint, SyncPausePoint,
     };
     use super::{checksum, classify, test_mismatch_count, test_unknown_count};
     use irys_testing_utils::utils::TempDirBuilder;
@@ -911,7 +912,10 @@ mod tests {
         };
         module.assign_partition(assign(hash_a), 1)?;
         let first = vec![0x11_u8; CHUNK];
-        assert!(module.write_entropy_chunk(PartitionChunkOffset::from(0), first.clone(), hash_a));
+        assert_eq!(
+            module.write_entropy_chunk(PartitionChunkOffset::from(0), first.clone(), hash_a),
+            EntropyWrite::Queued
+        );
         module.sync_pending_chunks()?;
         let served = module.read_chunks(partition_chunk_offset_ii!(0, 0))?;
         assert_eq!(
@@ -930,11 +934,10 @@ mod tests {
             "reset drops repairs for the old bytes"
         );
 
-        assert!(!module.write_entropy_chunk(
-            PartitionChunkOffset::from(0),
-            vec![0x33_u8; CHUNK],
-            hash_a
-        ));
+        assert_eq!(
+            module.write_entropy_chunk(PartitionChunkOffset::from(0), vec![0x33_u8; CHUNK], hash_a),
+            EntropyWrite::Rejected(EntropyRejection::NotAssigned)
+        );
         assert!(!module.has_pending_writes());
         module.sync_pending_chunks()?;
         assert!(
@@ -948,7 +951,10 @@ mod tests {
         );
 
         let fresh = vec![0x44_u8; CHUNK];
-        assert!(module.write_entropy_chunk(PartitionChunkOffset::from(0), fresh.clone(), hash_b));
+        assert_eq!(
+            module.write_entropy_chunk(PartitionChunkOffset::from(0), fresh.clone(), hash_b),
+            EntropyWrite::Queued
+        );
         module.sync_pending_chunks()?;
         let served = module.read_chunks(partition_chunk_offset_ii!(0, 0))?;
         assert_eq!(
@@ -959,11 +965,10 @@ mod tests {
         );
 
         module.reset_with_assignment(None, 3)?;
-        assert!(!module.write_entropy_chunk(
-            PartitionChunkOffset::from(1),
-            vec![0x55_u8; CHUNK],
-            hash_b
-        ));
+        assert_eq!(
+            module.write_entropy_chunk(PartitionChunkOffset::from(1), vec![0x55_u8; CHUNK], hash_b),
+            EntropyWrite::Rejected(EntropyRejection::NotAssigned)
+        );
         assert!(!module.has_pending_writes());
         Ok(())
     }

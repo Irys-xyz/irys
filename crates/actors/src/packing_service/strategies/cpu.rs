@@ -7,7 +7,7 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use irys_domain::StorageModule;
+use irys_domain::{EntropyRejection, EntropyWrite, StorageModule};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_types::IrysAddress;
 use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, partition::PartitionHash};
@@ -23,6 +23,68 @@ pub(crate) struct PackPause {
     pub started: Notify,
     pub release: Notify,
     pub fail_with: Mutex<Option<String>>,
+}
+
+/// Blocks the entropy write. The blocking packer sets `arrived`, then waits
+/// until `release`. The clock is monotonic.
+#[cfg(test)]
+pub(crate) struct WriteGate {
+    inner: Mutex<WriteGateState>,
+    cv: std::sync::Condvar,
+}
+
+#[cfg(test)]
+struct WriteGateState {
+    arrived: bool,
+    release: bool,
+}
+
+#[cfg(test)]
+impl WriteGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Mutex::new(WriteGateState {
+                arrived: false,
+                release: false,
+            }),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    pub(crate) fn wait_turn(&self) {
+        let mut state = self.inner.lock().expect("write gate");
+        state.arrived = true;
+        self.cv.notify_all();
+        while !state.release {
+            state = self.cv.wait(state).expect("write gate");
+        }
+    }
+
+    pub(crate) fn wait_arrived(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut state = self.inner.lock().expect("write gate");
+        while !state.arrived {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (guard, wait) = self
+                .cv
+                .wait_timeout(state, deadline.saturating_duration_since(now))
+                .expect("write gate");
+            state = guard;
+            if wait.timed_out() && !state.arrived {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn release(&self) {
+        let mut state = self.inner.lock().expect("write gate");
+        state.release = true;
+        self.cv.notify_all();
+    }
 }
 
 /// CPU-based packing strategy
@@ -43,6 +105,8 @@ pub(crate) struct CpuPackingStrategy {
     chunks_started: AtomicUsize,
     #[cfg(test)]
     pack_pause: Arc<Mutex<Option<Arc<PackPause>>>>,
+    #[cfg(test)]
+    write_gate: Arc<Mutex<Option<Arc<WriteGate>>>>,
 }
 
 impl CpuPackingStrategy {
@@ -69,7 +133,14 @@ impl CpuPackingStrategy {
             chunks_started: AtomicUsize::new(0),
             #[cfg(test)]
             pack_pause,
+            #[cfg(test)]
+            write_gate: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[cfg(test)]
+    fn set_write_gate(&self, gate: Option<Arc<WriteGate>>) {
+        *self.write_gate.lock().expect("write gate") = gate;
     }
 
     #[cfg(test)]
@@ -123,7 +194,6 @@ impl super::PackingStrategy for CpuPackingStrategy {
         short_writes_before_sync: u32,
     ) -> Result<(), String> {
         let range_start = *chunk_range.0.start();
-        let range_end = *chunk_range.0.end();
 
         #[cfg(test)]
         {
@@ -140,59 +210,64 @@ impl super::PackingStrategy for CpuPackingStrategy {
         let mut handles = VecDeque::new();
         let join_cap = usize::from(self.concurrency).max(1);
         let mut failed = None;
+        #[cfg(test)]
+        let write_gate = self.write_gate.lock().expect("write gate").clone();
 
-        for i in range_start..=range_end {
-            #[cfg(test)]
-            {
-                self.chunks_started
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Hint only. Empty means nothing in this range is uninitialized, or
+        // the hash is no longer assigned. The write is the guard for a label
+        // that changes after this read.
+        let gaps = storage_module.entropy_gaps(partition_hash, chunk_range.0);
+        if gaps.is_empty() {
+            let still_assigned = storage_module
+                .partition_assignment()
+                .is_some_and(|assignment| assignment.partition_hash == partition_hash);
+            if !still_assigned {
+                return Err(format!(
+                    "entropy write refused at offset {range_start} for SM {storage_module_id}"
+                ));
             }
-            // Re-check before hashing. A retry must not pack Data, and must
-            // not treat a hash change as this assignment.
-            match crate::packing_service::classify_entropy_offset(
-                storage_module,
-                PartitionChunkOffset::from(i),
-                partition_hash,
-            ) {
-                crate::packing_service::EntropyOffset::Skip => continue,
-                crate::packing_service::EntropyOffset::Refused => {
-                    failed = Some(format!(
-                        "entropy write refused at offset {i} for SM {storage_module_id}"
-                    ));
-                    break;
-                }
-                crate::packing_service::EntropyOffset::Pack => {}
-            }
-            // Wait for the disk before queueing more entropy.
-            if i % short_writes_before_sync == 0 {
-                if let Err(err) = crate::packing_service::wait_for_pending_room(
-                    storage_module,
-                    "CPU packing (periodic)",
-                )
-                .await
+            return Ok(());
+        }
+
+        'spans: for span in gaps {
+            for i in span.start().0..=span.end().0 {
+                #[cfg(test)]
                 {
-                    failed = Some(err);
-                    break;
+                    self.chunks_started
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                yield_now().await;
-            }
+                // Wait for the disk before queueing more entropy.
+                if i % short_writes_before_sync == 0 {
+                    if let Err(err) = crate::packing_service::wait_for_pending_room(
+                        storage_module,
+                        "CPU packing (periodic)",
+                    )
+                    .await
+                    {
+                        failed = Some(err);
+                        break 'spans;
+                    }
+                    yield_now().await;
+                }
 
-            // Acquire permit for this chunk
-            let permit = self
-                .semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("Failure acquiring a CPU packing semaphore");
+                // Acquire permit for this chunk
+                let permit = self
+                    .semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("Failure acquiring a CPU packing semaphore");
 
-            let chunk_size = self.chunk_size;
-            let entropy_iterations = self.entropy_iterations;
-            let storage_module_clone = storage_module.clone();
-            let chain_id = self.chain_id;
-            let notify = self.notify.clone();
+                let chunk_size = self.chunk_size;
+                let entropy_iterations = self.entropy_iterations;
+                let storage_module_clone = storage_module.clone();
+                let chain_id = self.chain_id;
+                let notify = self.notify.clone();
+                #[cfg(test)]
+                let write_gate = write_gate.clone();
 
-            // Pack in blocking thread pool
-            let handle = self.runtime_handle
+                // Pack in blocking thread pool
+                let handle = self.runtime_handle
                 .clone()
                 .spawn_blocking(move || {
                     let mut out = Vec::with_capacity(chunk_size);
@@ -218,24 +293,9 @@ impl super::PackingStrategy for CpuPackingStrategy {
 
                     // The label can change while this chunk is hashed. Data
                     // that landed in that window is not overwritten.
-                    match crate::packing_service::classify_entropy_offset(
-                        &storage_module_clone,
-                        PartitionChunkOffset::from(i),
-                        partition_hash,
-                    ) {
-                        crate::packing_service::EntropyOffset::Skip => {
-                            drop(permit);
-                            notify.notify_waiters();
-                            return Ok(());
-                        }
-                        crate::packing_service::EntropyOffset::Refused => {
-                            drop(permit);
-                            notify.notify_waiters();
-                            return Err(format!(
-                                "entropy write refused at offset {i} for SM {storage_module_id}"
-                            ));
-                        }
-                        crate::packing_service::EntropyOffset::Pack => {}
+                    #[cfg(test)]
+                    if let Some(gate) = write_gate {
+                        gate.wait_turn();
                     }
 
                     let wrote = storage_module_clone.write_entropy_chunk(
@@ -245,35 +305,37 @@ impl super::PackingStrategy for CpuPackingStrategy {
                     );
                     drop(permit);
                     notify.notify_waiters();
-                    if !wrote {
-                        return Err(format!(
+                    match wrote {
+                        EntropyWrite::Queued
+                        | EntropyWrite::Rejected(EntropyRejection::NotUninitialized(_)) => Ok(()),
+                        EntropyWrite::Rejected(EntropyRejection::NotAssigned) => Err(format!(
                             "entropy write refused at offset {i} for SM {storage_module_id}"
-                        ));
+                        )),
                     }
-                    Ok(())
                 });
 
-            handles.push_back(handle);
-            self.note_retained(handles.len());
-            if handles.len() >= join_cap
-                && let Some(oldest) = handles.pop_front()
-            {
-                Self::collect_join(oldest, storage_module_id, &mut failed).await;
-                if failed.is_some() {
-                    // A refused write fails the whole range. Do not hash the rest.
-                    break;
+                handles.push_back(handle);
+                self.note_retained(handles.len());
+                if handles.len() >= join_cap
+                    && let Some(oldest) = handles.pop_front()
+                {
+                    Self::collect_join(oldest, storage_module_id, &mut failed).await;
+                    if failed.is_some() {
+                        // A refused write fails the whole range. Do not hash the rest.
+                        break 'spans;
+                    }
                 }
-            }
 
-            // Log progress periodically
-            crate::packing_service::log_packing_progress(
-                "CPU",
-                i,
-                &chunk_range,
-                storage_module_id,
-                &partition_hash,
-                &mining_address,
-            );
+                // Log progress periodically
+                crate::packing_service::log_packing_progress(
+                    "CPU",
+                    i,
+                    &chunk_range,
+                    storage_module_id,
+                    &partition_hash,
+                    &mining_address,
+                );
+            }
         }
 
         // A refused write or a panicked worker must fail the range so the
@@ -400,14 +462,9 @@ mod tests {
         let started = packer
             .chunks_started
             .load(std::sync::atomic::Ordering::Relaxed);
-        assert!(
-            started >= 1,
-            "the loop must attempt the first chunk, started {started}"
-        );
-        assert!(
-            started <= usize::from(packer.concurrency),
-            "refused write must stop the range; started {started} chunks, cap {}",
-            packer.concurrency
+        assert_eq!(
+            started, 0,
+            "a range the module will not accept is not hashed, started {started}"
         );
     }
 
@@ -537,6 +594,59 @@ mod tests {
             module.get_chunk_type(&PartitionChunkOffset(1)),
             Some(ChunkType::Entropy),
             "the uninitialized tail is still packed"
+        );
+    }
+
+    /// Data queued after the chunk is hashed must stay data. The write is the
+    /// guard. The gate is the window between the hash and that write.
+    #[test_log::test(tokio::test)]
+    async fn cpu_pack_does_not_overwrite_data_queued_while_the_chunk_is_hashed() {
+        let (_tmp, config, module, hash) = test_module_span("cpu_mid_pack_data", 2);
+        let packer = strategy(config.clone());
+        let gate = Arc::new(super::WriteGate::new());
+        packer.set_write_gate(Some(Arc::clone(&gate)));
+        let module_for_pack = Arc::clone(&module);
+        let miner = config.node_config.miner_address();
+        let sm_id = module.id;
+        let packed = tokio::spawn(async move {
+            packer
+                .pack(
+                    &module_for_pack,
+                    PartitionChunkRange(partition_chunk_offset_ii!(0, 0)),
+                    miner,
+                    hash,
+                    sm_id,
+                    100,
+                )
+                .await
+        });
+        // The packer waits inside `spawn_blocking`. Waiting here on the
+        // runtime thread would leave that task unpolled.
+        let gate_for_wait = Arc::clone(&gate);
+        let reached = tokio::task::spawn_blocking(move || {
+            gate_for_wait.wait_arrived(std::time::Duration::from_secs(5))
+        })
+        .await
+        .expect("gate wait");
+        assert!(reached, "pack did not reach the entropy write");
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0xD4_u8; 32],
+            ChunkType::Data,
+        ));
+        gate.release();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), packed)
+            .await
+            .expect("pack did not finish")
+            .expect("pack task");
+        assert!(
+            result.is_ok(),
+            "queued data must not fail the pack, got {result:?}"
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Data),
+            "entropy replaced the data body queued while the chunk was hashed"
         );
     }
 
