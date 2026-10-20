@@ -136,17 +136,17 @@ python3 crates/tooling/sm-bench/scripts/analysis/minutes.py \
     /home/ubuntu/loadtest/runs/fine-16-32/samples.jsonl ingest-32
 ```
 
-`scripts/analysis/disktime.py` reads an `iostat -dmx` log. Busy time is `%util` times 10, in milliseconds. Transfer time is bytes divided by a zone rate. The remainder is positioning. `--recall-rate` defaults to 200 MiB/s. `--region-rate` defaults to 146 MiB/s. `--device` is required. The first device line is the since-boot average and is skipped.
+`scripts/analysis/disktime.py` reads an `iostat -dmx` log. Busy time is `%util` times 10, in milliseconds. Transfer time is bytes divided by a zone rate. The remainder is positioning. `--recall-rate` defaults to 200 MiB/s. `--region-rate` defaults to 146 MiB/s. `--recall-mib` defaults to 100, one default recall (400 chunks of 256 KiB) each second. `recall-1.8` issues 1.8 of those recalls; pass `--recall-mib 180` for that preset. `--device` is required. The first device line is the since-boot average and is skipped. `--window NAME:START:END` indexes the samples that remain. START and END are sample indexes. The name is printed on the row. `fine-16-32` is 600 s of idle, then five 600 s ingest steps. Startup before the first step shifts those indexes. `--scan` prints 60 s buckets so the write rate can be matched to a step.
 
 ```sh
 python3 crates/tooling/sm-bench/scripts/analysis/disktime.py \
     /home/ubuntu/loadtest/runs/fine-16-32/iostat.log \
-    --device sdc --window ingest-32:0:600
+    --device sdc --scan
 ```
 
 `scripts/analysis/ladder.py` prints one block per step from `samples.jsonl`. Its percentile is the floor rank of the per-second maxima. The bench table uses nearest-rank over every recall sample in the step. Those two numbers differ.
 
-`blk-report.py` writes `blk-transitions.csv` next to the trace. A row is one request class followed by another, with the service time of the second request. `packed_write` followed by `flush` is the drive writing its cache back to the media. See [Disk-time split](#disk-time-split).
+`blk-report.py` writes `blk-transitions.csv` next to the trace. A row is one request class followed by another. The accumulated time is the positioning time of the second request. A flush has no transfer, so that time equals its service time. `packed_write` followed by `flush` is the drive writing its cache back to the media. See [Disk-time split](#disk-time-split).
 
 ### Teardown
 
