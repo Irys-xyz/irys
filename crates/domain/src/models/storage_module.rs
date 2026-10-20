@@ -9147,33 +9147,6 @@ impl StorageModule {
         per_sec as u64
     }
 
-    /// Ledger offsets whose stored data-proof leaf is `content_hash`.
-    ///
-    /// Each submodule reports partition offsets. This adds the module's
-    /// ledger start. Schema v2 and MDBX return the not-supported error.
-    /// The caller must already have a partition assignment.
-    pub fn ledger_offsets_for_content_hash(
-        &self,
-        content_hash: H256,
-    ) -> eyre::Result<Vec<LedgerChunkOffset>> {
-        let base = *self.get_storage_module_ledger_offsets()?.start();
-        let mut found = Vec::new();
-        for (_, submodule) in self.submodules.iter() {
-            let offsets = submodule
-                .db
-                .view(|tx| tx.offsets_for_content_hash(content_hash))?;
-            for offset in offsets {
-                let ledger = base.checked_add(u64::from(offset.0)).ok_or_else(|| {
-                    eyre::eyre!("ledger offset overflow for partition offset {}", offset.0)
-                })?;
-                found.push(LedgerChunkOffset::from(ledger));
-            }
-        }
-        found.sort_unstable();
-        found.dedup();
-        Ok(found)
-    }
-
     /// Utility method asking the StorageModule to return its chunk range in
     /// ledger relative coordinates
     pub fn get_storage_module_ledger_offsets(&self) -> eyre::Result<LedgerChunkRange> {
