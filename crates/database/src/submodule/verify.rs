@@ -11,13 +11,12 @@ use std::path::Path;
 use irys_types::{H256, PartitionChunkOffset};
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::mdbx::DatabaseArguments;
-use reth_db::mdbx::Error as MdbxError;
 use reth_db::table::Table;
 use reth_db::transaction::DbTx;
-use reth_db::{DatabaseEnv, DatabaseEnvKind, DatabaseError};
+use reth_db::{DatabaseEnv, DatabaseEnvKind};
 
 use super::db::{get_data_path_by_offset, get_path_hashes_by_offset, get_tx_path_by_offset};
-use super::migrate::require_submodule_index_copy;
+use super::migrate::{missing_table, require_submodule_index_copy};
 use super::tables::v1::ChunkDataPathByPathHash;
 use super::tables::{
     ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfosByDataRoot,
@@ -360,11 +359,4 @@ fn note(report: &mut ReadEquivalenceReport, kind: &'static str, at: String) {
     if report.samples.len() < MISMATCH_SAMPLES {
         report.samples.push(MismatchSample { kind, at });
     }
-}
-
-fn missing_table(err: &DatabaseError) -> bool {
-    let DatabaseError::Open(info) = err else {
-        return false;
-    };
-    *info == MdbxError::NotFound.into()
 }
