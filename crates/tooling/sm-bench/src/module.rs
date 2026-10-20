@@ -213,15 +213,6 @@ impl Drop for OpenedModule {
     }
 }
 
-/// Copied from the body-migration worker. That helper is crate-private.
-pub(crate) fn pending_ceiling(num_writes_before_sync: u64, chunk_size: u64) -> u64 {
-    let one_batch = num_writes_before_sync.saturating_mul(chunk_size);
-    let derived = (num_writes_before_sync.saturating_mul(2))
-        .max(256)
-        .saturating_mul(chunk_size);
-    derived.max(one_batch)
-}
-
 pub(crate) fn flush_batch(num_writes_before_sync: u64, chunk_size: u64) -> u64 {
     num_writes_before_sync.saturating_mul(chunk_size)
 }

@@ -33,7 +33,7 @@ use crate::drivers::{
 use crate::guard::{
     CHUNK_SIZE, check_region_extents, create_small, require_loadtest, require_loadtest_ancestor,
 };
-use crate::module::{OpenRequest, flush_batch, open_module, pending_ceiling, span_limit};
+use crate::module::{OpenRequest, flush_batch, open_module, span_limit};
 use crate::prepop::prepopulate;
 use crate::report::{
     PageCacheSpan, RocksStepStats, SampleWriter, StepLog, StepRow, git_info, index_banner,
@@ -467,7 +467,7 @@ fn run() -> eyre::Result<i32> {
         "irys-sm-bench: partition {partition_chunks} chunks, recall offset {recall_offset_chunks}, write window {write_origin}..{write_end}, ingest frontier {ingest_cursor}, migration frontier {migration_cursor}"
     );
 
-    let ceiling = pending_ceiling(args.num_writes_before_sync, CHUNK_SIZE);
+    let ceiling = opened.module.pending_memory_ceiling_bytes();
     let flush = flush_batch(args.num_writes_before_sync, CHUNK_SIZE);
     let span = span_limit(args.entropy_sweep_max_bytes, CHUNK_SIZE);
     let git = git_info();
