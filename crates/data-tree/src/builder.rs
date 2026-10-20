@@ -89,6 +89,36 @@ impl DataTreeBuilder {
         Ok(())
     }
 
+    /// Hash a batch of consecutive chunks, then append those roots in order.
+    ///
+    /// `bytes` splits on `chunk_size`. Every piece but the last is one full
+    /// chunk. A short last piece is the upload's last chunk; a later push
+    /// fails, as with [`Self::push_chunk`].
+    ///
+    /// The batch is checked before any hashing, and a failed check does not
+    /// change the builder (spec §10). The appended roots match
+    /// [`Self::push_chunk`] on each piece in order. Chunk roots do not depend
+    /// on each other (spec §9), but the tree must stay deterministic (spec §10):
+    /// the piece index selects the slice, and the collected vector is that
+    /// index order, not the order workers finish.
+    ///
+    /// Hashing uses the rayon global pool. A caller may run this inside their
+    /// own `ThreadPool::install` to bound the threads.
+    #[cfg(feature = "parallel")]
+    pub fn push_chunks_parallel(&mut self, bytes: &[u8]) -> Result<(), BuildError> {
+        let (split, piece_count) = self.validate_chunk_batch(bytes)?;
+        let roots = hash_chunk_pieces(&self.geometry, bytes, split, piece_count)?;
+        for (piece_index, root) in roots.into_iter().enumerate() {
+            let (start, end) = piece_bounds(bytes.len(), split, piece_index);
+            let chunk_length = u64::try_from(end - start).expect("piece length fits u64");
+            // Lengths, the short-chunk rule, and the chunk limit were checked
+            // for every piece. This is the success path of `push_chunk_root`.
+            self.push_chunk_root(root, chunk_length)
+                .expect("chunk batch was validated");
+        }
+        Ok(())
+    }
+
     /// Carry odd tails and return the tree. Fails when no chunk was pushed.
     pub fn finish(mut self) -> Result<DataTree, BuildError> {
         if self.pushed_chunk_count() == 0 {
@@ -122,6 +152,61 @@ impl DataTreeBuilder {
             });
         }
         Ok(())
+    }
+
+    /// Check every piece before hashing. On error the builder is unchanged (spec §10).
+    ///
+    /// Returns the split width and the number of pieces. A `chunk_size` that
+    /// does not fit `usize` cannot repeat in this slice, so the split is the
+    /// whole slice and there is one piece.
+    #[cfg(feature = "parallel")]
+    fn validate_chunk_batch(&self, bytes: &[u8]) -> Result<(usize, usize), BuildError> {
+        if bytes.is_empty() {
+            // Same rejection as `push_chunk(&[])`. `prepare_push(0)` always fails.
+            self.prepare_push(0)?;
+            unreachable!("prepare_push rejects an empty chunk");
+        }
+
+        let chunk_size = self.geometry.chunk_size();
+        let split = usize::try_from(chunk_size).unwrap_or(bytes.len());
+        debug_assert!(split >= 1, "geometry rejects a chunk size of 0");
+
+        let mut offset = 0_usize;
+        let mut pushed = self.pushed_chunk_count();
+        let mut previous_piece_short = self.last_chunk_short;
+        let mut piece_count = 0_usize;
+        while offset < bytes.len() {
+            if previous_piece_short {
+                return Err(BuildError::AfterShortChunk);
+            }
+            let end = match offset.checked_add(split) {
+                Some(end) => end.min(bytes.len()),
+                None => bytes.len(),
+            };
+            let chunk_length = u64::try_from(end - offset).expect("piece length fits u64");
+            // Same length rule as `prepare_push`. The split makes every piece
+            // but the last full, and the last piece `1..=chunk_size`.
+            if chunk_length == 0 {
+                return Err(BuildError::ChunkLength(ChunkLengthError::Empty));
+            }
+            if chunk_length > chunk_size {
+                return Err(BuildError::ChunkLength(ChunkLengthError::TooLong {
+                    chunk_length,
+                    chunk_size,
+                }));
+            }
+            if pushed >= self.geometry.max_data_tx_chunks() {
+                return Err(BuildError::TooManyChunks {
+                    max_data_tx_chunks: self.geometry.max_data_tx_chunks(),
+                });
+            }
+            pushed = pushed.checked_add(1).expect("chunk count fits u32");
+            previous_piece_short = chunk_length < chunk_size;
+            piece_count = piece_count.checked_add(1).expect("piece count fits usize");
+            offset = end;
+        }
+        debug_assert_eq!(offset, bytes.len());
+        Ok((split, piece_count))
     }
 
     fn commit_push(&mut self, root: NodeHash, chunk_length: u64) {
@@ -190,24 +275,31 @@ impl DataTree {
     /// Split `data` into chunks and build the tree.
     ///
     /// Empty `data` is `BuildError::Empty`. A length above the geometry maximum
-    /// is `BuildError::TooManyChunks`.
+    /// is `BuildError::TooManyChunks`. With the `parallel` feature the chunk
+    /// roots are hashed as one batch (spec §9). The tree matches the sequential
+    /// pushes either way (spec §10).
     pub fn from_bytes(geometry: Geometry, data: &[u8]) -> Result<Self, BuildError> {
         let mut builder = DataTreeBuilder::new(geometry);
         if data.is_empty() {
             return builder.finish();
         }
-        let mut offset = 0_usize;
-        while offset < data.len() {
-            let remaining = data.len() - offset;
-            let chunk_length = match usize::try_from(geometry.chunk_size()) {
-                Ok(chunk_size) => chunk_size.min(remaining),
-                // `chunk_size` does not fit `usize`, so the whole slice is one chunk.
-                Err(_) => remaining,
-            };
-            // `chunk_size >= 1` and `remaining >= 1`, so this slice is non-empty.
-            debug_assert!(chunk_length > 0);
-            builder.push_chunk(&data[offset..offset + chunk_length])?;
-            offset += chunk_length;
+        #[cfg(feature = "parallel")]
+        builder.push_chunks_parallel(data)?;
+        #[cfg(not(feature = "parallel"))]
+        {
+            let mut offset = 0_usize;
+            while offset < data.len() {
+                let remaining = data.len() - offset;
+                let chunk_length = match usize::try_from(geometry.chunk_size()) {
+                    Ok(chunk_size) => chunk_size.min(remaining),
+                    // `chunk_size` does not fit `usize`, so the whole slice is one chunk.
+                    Err(_) => remaining,
+                };
+                // `chunk_size >= 1` and `remaining >= 1`, so this slice is non-empty.
+                debug_assert!(chunk_length > 0);
+                builder.push_chunk(&data[offset..offset + chunk_length])?;
+                offset += chunk_length;
+            }
         }
         builder.finish()
     }
@@ -379,6 +471,37 @@ fn layer_capacities(chunk_count: u32) -> Vec<usize> {
         capacities.push(layer_length);
     }
     capacities
+}
+
+/// Byte range of piece `piece_index` when `bytes` is split into `split`-byte pieces.
+#[cfg(feature = "parallel")]
+fn piece_bounds(byte_length: usize, split: usize, piece_index: usize) -> (usize, usize) {
+    let start = piece_index.checked_mul(split).expect("piece start fits");
+    let end = match start.checked_add(split) {
+        Some(end) => end.min(byte_length),
+        None => byte_length,
+    };
+    (start, end)
+}
+
+/// Chunk root of each piece. The output index is the piece index (spec §9, §10).
+#[cfg(feature = "parallel")]
+fn hash_chunk_pieces(
+    geometry: &Geometry,
+    bytes: &[u8],
+    split: usize,
+    piece_count: usize,
+) -> Result<Vec<NodeHash>, BuildError> {
+    use rayon::prelude::*;
+
+    let byte_length = bytes.len();
+    (0..piece_count)
+        .into_par_iter()
+        .map(|piece_index| {
+            let (start, end) = piece_bounds(byte_length, split, piece_index);
+            chunk_root(geometry, &bytes[start..end]).map_err(BuildError::from)
+        })
+        .collect()
 }
 
 fn sibling_at(layer: &[NodeHash], chunk_index: u32, level: usize) -> Option<NodeHash> {

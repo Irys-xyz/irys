@@ -5254,6 +5254,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "proptest",
+ "rayon",
  "rstest",
  "serde",
  "serde_json",

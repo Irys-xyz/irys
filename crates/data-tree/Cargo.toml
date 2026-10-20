@@ -8,9 +8,14 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = ["parallel"]
+parallel = ["dep:rayon"]
+
 [dependencies]
 sha2.workspace = true
 thiserror.workspace = true
+rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 hex.workspace = true
