@@ -144,13 +144,6 @@ impl EpochSnapshot {
             }
         }
 
-        // `new` returns `Self`. A corrupt packing file aborts here.
-        // `BlockTree::restore_from_db` calls `new` before `replay_epoch_data`
-        // and expects that replay, so process start does not return this error.
-        let _storage_module_info = new_self
-            .map_storage_modules_to_partition_assignments()
-            .expect("packing params to load");
-
         new_self
     }
 
