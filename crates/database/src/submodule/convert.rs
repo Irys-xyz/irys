@@ -2319,11 +2319,13 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     let (Ok(left), Ok(right)) = (lexical_target(left), lexical_target(right)) else {
         return true;
     };
+    // No existing ancestor, or the current directory could not be read.
+    // Refuse the pair.
     let Some(left) = canonical_existing(&left) else {
-        return false;
+        return true;
     };
     let Some(right) = canonical_existing(&right) else {
-        return false;
+        return true;
     };
     if left == right {
         return false;
@@ -2365,8 +2367,17 @@ fn ledger_base(slot_index: u64, chunks_per_partition: u64) -> Option<i64> {
 }
 
 /// Canonical path, including components that do not exist yet.
+///
+/// A relative path is joined to the process current directory before the
+/// walk. `current_dir` or `canonicalize` failing returns `None`, and the
+/// overlap check refuses that pair.
 fn canonical_existing(path: &Path) -> Option<PathBuf> {
-    let mut current = path.to_path_buf();
+    let path = if path.is_relative() {
+        std::env::current_dir().ok()?.join(path)
+    } else {
+        path.to_path_buf()
+    };
+    let mut current = path;
     let mut suffix = Vec::new();
     loop {
         if current.exists() {
@@ -6592,6 +6603,32 @@ mod tests {
             super::lexical_target(Path::new("/tmp/rocks")).unwrap(),
             PathBuf::from("/tmp/rocks")
         );
+    }
+
+    /// A relative target is resolved from the current directory. When that
+    /// directory is the source, the target sits inside it and must be refused.
+    /// A source that is not an ancestor of the current directory stays usable.
+    #[test]
+    fn relative_target_inside_the_source_is_refused() -> eyre::Result<()> {
+        let source = std::env::current_dir()?;
+        let options = super::ConvertOptions::new(testing_args()?);
+        let inside = Path::new("sweep16-x4-relative-inside-source");
+        assert!(
+            !source.join(inside).exists(),
+            "the relative name must not already exist"
+        );
+        let err = super::guard_paths(&source, inside, &options).unwrap_err();
+        assert!(format!("{err:#}").contains("overlap"), "{err:#}");
+
+        let root = temp("convert-relative-outside");
+        let outside = root.path().join("source");
+        fs::create_dir(&outside)?;
+        super::guard_paths(
+            &outside,
+            Path::new("sweep16-x4-relative-outside-source"),
+            &options,
+        )?;
+        Ok(())
     }
 
     /// Incomplete MDBX directory: convert schema, `CONVERTING`, and a file the
