@@ -37,6 +37,13 @@ pub const CHUNK_META_BY_OFFSET_CF: &str = "ChunkMetaByOffset";
 /// convert from MDBX, or reset the storage module). It does not name any
 /// other layout.
 pub fn unrecognised_rocks_layout(marker: &str) -> String {
+    // Ansible (Irys-xyz/ansible) greps the irys binary for the sentence after
+    // the layout marker. Keep that sentence in this one string literal.
+    //   shared/canary_update.yml
+    //   shared/submodule_index_rocksdb.yml
+    //   shared/tasks/flip_and_restart.yml
+    //   shared/tasks/submodule_index_reverify_if_moved.sh
+    // tests/submodule_index_rocksdb_test.py checks the same sentence.
     format!(
         "unrecognised RocksDB index layout {marker:?}; this build reads RocksDB v1 only. If this directory came from a pre-release build, move it aside and convert from MDBX or reset the storage module"
     )
@@ -268,6 +275,22 @@ mod tests {
     use reth_db::mdbx::DatabaseArguments;
 
     use super::*;
+
+    /// Ansible greps the irys binary for this sentence. The formatted error
+    /// must contain it as one contiguous literal.
+    #[test]
+    fn unrecognised_rocks_layout_keeps_the_ansible_sentence() {
+        let message = unrecognised_rocks_layout("");
+        assert_eq!(
+            message,
+            "unrecognised RocksDB index layout \"\"; this build reads RocksDB v1 only. If this directory came from a pre-release build, move it aside and convert from MDBX or reset the storage module"
+        );
+        assert!(
+            unrecognised_rocks_layout("irys-submodule-index rocksdb 9\n")
+                .contains("; this build reads RocksDB v1 only. If this directory came from a pre-release build, move it aside and convert from MDBX or reset the storage module"),
+            "the sentence must follow the layout marker"
+        );
+    }
 
     #[test]
     // MDBX-SUBMODULE-INDEX: delete this test with the MDBX table set.
