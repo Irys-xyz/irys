@@ -7,8 +7,11 @@ use thiserror::Error;
 /// `Geometry::new` rejected a parameter set (spec §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum GeometryError {
-    /// `segments_per_chunk` is not a power of two in `1..=256`.
-    #[error("segments_per_chunk {segments_per_chunk} is not a power of two in 1..=256")]
+    /// `segments_per_chunk` is not a power of two in `1..=MAX_SEGMENTS_PER_CHUNK`.
+    #[error(
+        "segments_per_chunk {segments_per_chunk} is not a power of two in 1..={max_segments_per_chunk}",
+        max_segments_per_chunk = crate::geometry::MAX_SEGMENTS_PER_CHUNK
+    )]
     SegmentsPerChunk {
         /// Rejected value.
         segments_per_chunk: u32,
@@ -140,7 +143,7 @@ pub enum VerifyError {
         /// Length of the supplied slice.
         actual: u64,
     },
-    /// The proof is not `32 * k` bytes for the `k` the geometry requires.
+    /// The proof is not `32 * k` bytes for the `k` the geometry requires (spec §5).
     ///
     /// A length that is not a multiple of 32 fails here, before any hashing (spec §5, §10).
     #[error("proof length {actual} does not match {expected}")]

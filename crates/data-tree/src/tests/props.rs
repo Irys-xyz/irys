@@ -5,12 +5,13 @@ use proptest::prelude::*;
 use crate::DataTree;
 use crate::error::VerifyError;
 use crate::geometry::Geometry;
+use crate::types::HASH_SIZE;
 use crate::verify::{verify_chunk, verify_segment};
 
 proptest! {
     #[test]
     fn random_bytes_proofs_verify_and_mutations_fail(
-        data in proptest::collection::vec(any::<u8>(), 1..=256)
+        data in proptest::collection::vec(any::<u8>(), 1..=RANDOM_UPLOAD_BYTES)
     ) {
         check_upload(&data)?;
     }
@@ -157,7 +158,7 @@ fn check_proof_mutation(
     check: impl Fn(&[u8]) -> Result<(), VerifyError>,
 ) -> Result<(), TestCaseError> {
     if proof.is_empty() {
-        // `C = 1` chunk proofs are empty. Junk of 1 or 32 bytes is the wrong length.
+        // `C = 1` chunk proofs are empty. Junk of 1 byte or one hash is the wrong length.
         let err = check(&[0]).unwrap_err();
         prop_assert_eq!(
             err,
@@ -166,12 +167,12 @@ fn check_proof_mutation(
                 actual: 1
             }
         );
-        let err = check(&[0_u8; 32]).unwrap_err();
+        let err = check(&[0_u8; HASH_SIZE]).unwrap_err();
         prop_assert_eq!(
             err,
             VerifyError::InvalidProofLength {
                 expected: 0,
-                actual: 32
+                actual: HASH_SIZE
             }
         );
         return Ok(());
@@ -182,6 +183,11 @@ fn check_proof_mutation(
     prop_assert_eq!(err, VerifyError::CommitmentMismatch);
     Ok(())
 }
+
+/// Eight testing chunks. Enough uploads to cross several tree shapes (spec §13).
+const RANDOM_UPLOAD_CHUNKS: usize = 8;
+
+const RANDOM_UPLOAD_BYTES: usize = RANDOM_UPLOAD_CHUNKS * Geometry::TESTING.chunk_size() as usize;
 
 fn chunk_slice(geometry: &Geometry, data: &[u8], data_size: u64, chunk_index: u32) -> Vec<u8> {
     let start = usize::try_from(u64::from(chunk_index) * geometry.chunk_size()).unwrap();

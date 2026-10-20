@@ -6,17 +6,18 @@
 //! appends `node(left, right)` to the next layer. `finish` carries odd tails
 //! until one root remains.
 //!
-//! A proof reads siblings from this cache. At level `l`, `i = c >> l`; the
-//! sibling is `layers[l][i ^ 1]` when that index exists, and nothing when the
-//! node was carried. The proof length is `depth(c, C)`, never the height of
-//! the builder's stack (spec §4).
+//! The stack is `build_layer` kept between pushes, not a fresh recursive `path`
+//! (spec §4). A `path` recomputes each sibling subtree; this cache stores those
+//! subtrees, so `layers[l][i ^ 1]` is the sibling `path` would append. A missing
+//! slot is a node that was carried up. The proof length is `depth(c, C)`, never
+//! the height of the stack (spec §4).
 
 use crate::chunk::{chunk_root, segment_siblings};
 use crate::error::{BuildError, ChunkLengthError, ProofError, SizeError};
 use crate::geometry::Geometry;
 use crate::hash::{self, node};
 use crate::shape::depth;
-use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, NodeHash, SizeWitness};
+use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash, SizeWitness};
 
 /// Accumulates chunk roots into a data tree.
 #[derive(Debug, Clone)]
@@ -42,7 +43,8 @@ impl DataTreeBuilder {
     ///
     /// The length is checked before hashing (spec §10).
     pub fn push_chunk(&mut self, bytes: &[u8]) -> Result<(), BuildError> {
-        let chunk_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        // A slice length fits `u64` on every supported target.
+        let chunk_length = u64::try_from(bytes.len()).expect("byte length fits u64");
         self.prepare_push(chunk_length)?;
         let root = chunk_root(&self.geometry, bytes)?;
         self.commit_push(root, chunk_length);
@@ -92,19 +94,13 @@ impl DataTreeBuilder {
                 max_data_tx_chunks: self.geometry.max_data_tx_chunks(),
             });
         }
-        // `max_data_tx_chunks * chunk_size` fits `u64`, and each push is at most
-        // one chunk, so the running total fits. Refuse if it does not.
-        if self.data_size.checked_add(chunk_length).is_none() {
-            return Err(BuildError::TooManyChunks {
-                max_data_tx_chunks: self.geometry.max_data_tx_chunks(),
-            });
-        }
         Ok(())
     }
 
     fn commit_push(&mut self, root: NodeHash, chunk_length: u64) {
         self.push_node_at(0, root);
-        // `prepare_push` rejected a sum that does not fit.
+        // `max_data_tx_chunks * chunk_size` fits `u64`, and each push is at most
+        // one chunk, so the running total fits.
         self.data_size = self
             .data_size
             .checked_add(chunk_length)
@@ -114,7 +110,8 @@ impl DataTreeBuilder {
 
     fn pushed_chunk_count(&self) -> u32 {
         let layer_length = self.layers.first().map_or(0, Vec::len);
-        u32::try_from(layer_length).unwrap_or(u32::MAX)
+        // Pushes stop at `max_data_tx_chunks`, which fits `u32`.
+        u32::try_from(layer_length).expect("chunk count fits u32")
     }
 
     fn push_node_at(&mut self, level: usize, hash: NodeHash) {
@@ -175,9 +172,8 @@ impl DataTree {
                 // `chunk_size` does not fit `usize`, so the whole slice is one chunk.
                 Err(_) => remaining,
             };
-            if chunk_length == 0 {
-                return Err(BuildError::ChunkLength(ChunkLengthError::Empty));
-            }
+            // `chunk_size >= 1` and `remaining >= 1`, so this slice is non-empty.
+            debug_assert!(chunk_length > 0);
             builder.push_chunk(&data[offset..offset + chunk_length])?;
             offset += chunk_length;
         }
@@ -191,9 +187,10 @@ impl DataTree {
 
     /// Number of chunk roots.
     pub fn chunk_count(&self) -> u32 {
-        self.layers
-            .first()
-            .map_or(0, |layer| u32::try_from(layer.len()).unwrap_or(u32::MAX))
+        self.layers.first().map_or(0, |layer| {
+            // `finish` only returns a tree whose chunk count fits `u32`.
+            u32::try_from(layer.len()).expect("chunk count fits u32")
+        })
     }
 
     /// Chunk root stored at index `c`.
@@ -202,7 +199,7 @@ impl DataTree {
     pub fn chunk_root(&self, chunk_index: u32) -> Result<NodeHash, SizeError> {
         let layer = self.layers.first();
         let layer_length = layer.map_or(0, Vec::len);
-        let chunk_count = u32::try_from(layer_length).unwrap_or(u32::MAX);
+        let chunk_count = u32::try_from(layer_length).expect("chunk count fits u32");
         let Some(layer) = layer else {
             return Err(SizeError::ChunkIndexOutOfRange {
                 chunk_index,
@@ -257,7 +254,7 @@ impl DataTree {
         }
         debug_assert_eq!(
             proof.len(),
-            usize::try_from(depth(chunk_index, chunk_count)).unwrap_or(0) * 32
+            usize::try_from(depth(chunk_index, chunk_count)).expect("depth fits usize") * HASH_SIZE
         );
         Ok(proof)
     }
@@ -282,7 +279,7 @@ impl DataTree {
             }));
         }
         let expected = self.geometry.chunk_len(self.data_size, chunk_index)?;
-        let actual = u64::try_from(chunk_bytes.len()).unwrap_or(u64::MAX);
+        let actual = u64::try_from(chunk_bytes.len()).expect("byte length fits u64");
         if actual != expected {
             return Err(ProofError::InvalidChunkLength { expected, actual });
         }
@@ -297,25 +294,18 @@ impl DataTree {
         }
         proof.extend(self.chunk_proof(chunk_index)?);
         debug_assert_eq!(
-            proof.len() / 32,
-            usize::try_from(
-                self.geometry
-                    .height()
-                    .saturating_add(depth(chunk_index, chunk_count))
-            )
-            .unwrap_or(0)
+            proof.len() / HASH_SIZE,
+            // `h + depth(c, C)` fits `u32`: `h` is at most `MAX_SUBTREE_HEIGHT`.
+            usize::try_from(self.geometry.height() + depth(chunk_index, chunk_count))
+                .expect("proof hash count fits usize")
         );
         Ok(proof)
     }
 
     fn ensure_chunk(&self, chunk_index: u32) -> Result<u32, SizeError> {
         let layer_length = self.layers.first().map_or(0, Vec::len);
-        let Ok(chunk_count) = u32::try_from(layer_length) else {
-            return Err(SizeError::ChunkIndexOutOfRange {
-                chunk_index,
-                chunk_count: u32::MAX,
-            });
-        };
+        // `finish` only returns a tree whose chunk count fits `u32`.
+        let chunk_count = u32::try_from(layer_length).expect("chunk count fits u32");
         if chunk_index >= chunk_count {
             return Err(SizeError::ChunkIndexOutOfRange {
                 chunk_index,
@@ -326,11 +316,12 @@ impl DataTree {
     }
 
     fn root_hash(&self) -> NodeHash {
-        // `finish` carries tails until one node remains. A missing root is a
-        // broken builder; return a digest that no honest commitment uses.
-        let Some(layer) = self.layers.last().filter(|layer| !layer.is_empty()) else {
-            return NodeHash([0; 32]);
-        };
+        // `finish` carries tails until one node remains.
+        let layer = self
+            .layers
+            .last()
+            .filter(|layer| !layer.is_empty())
+            .expect("finish leaves a root");
         debug_assert_eq!(layer.len(), 1, "finish leaves one root");
         layer[layer.len() - 1]
     }
@@ -342,11 +333,17 @@ impl DataTree {
 }
 
 fn sibling_at(layer: &[NodeHash], chunk_index: u32, level: usize) -> Option<NodeHash> {
-    let index = if level >= usize::try_from(u32::BITS).unwrap_or(32) {
-        0
-    } else {
-        chunk_index >> level
+    // At level `l`, the node index is `c >> l` and the sibling flips that bit
+    // (`i ^ 1`). A missing slot is a carried unpaired node (spec §4).
+    //
+    // A shift of a `u32` by `u32::BITS` or more is 0. Rust panics on that shift.
+    // Only a tree of `u32::MAX` chunks reaches that level, and the level is the
+    // root, which has no sibling.
+    let index = match u32::try_from(level) {
+        Ok(shift) if shift < u32::BITS => chunk_index >> shift,
+        _ => 0,
     };
-    let sibling = index ^ 1;
-    layer.get(usize::try_from(sibling).ok()?).copied()
+    let sibling_index = index ^ 1;
+    let sibling_index = usize::try_from(sibling_index).expect("sibling index fits usize");
+    layer.get(sibling_index).copied()
 }

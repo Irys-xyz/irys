@@ -1,8 +1,13 @@
+//! Checked-in hashes and roots from spec §13. The numbers in the rows are the
+//! vector inputs; the hex strings are the expected digests.
+
 use super::{assert_hex, concat_hex, pattern};
 use crate::DataTree;
+use crate::MAX_SUBTREE_HEIGHT;
 use crate::geometry::Geometry;
 use crate::hash::{self, empty, leaf};
 use crate::types::DataTreeRoot;
+use crate::types::HASH_SIZE;
 use crate::verify::{verify_chunk, verify_segment};
 
 #[test]
@@ -16,7 +21,7 @@ fn primitive_vectors() {
         empty(6).as_bytes(),
         "2be3cf0551cc6936d461e3dc43f3c4bf50cbee1bc091925254e879f4e7665e94",
     );
-    for empty_height in 1..=8 {
+    for empty_height in 1..=MAX_SUBTREE_HEIGHT {
         assert_eq!(
             empty(empty_height),
             hash::node(&empty(empty_height - 1), &empty(empty_height - 1))
@@ -40,7 +45,8 @@ fn primitive_vectors() {
     );
 
     // spec §4: the commitment is node(data_tree_root, size_witness).
-    let root = DataTreeRoot::from([9_u8; 32]);
+    // Any filler byte. The check is the commitment formula, not this value.
+    let root = DataTreeRoot::from([9_u8; HASH_SIZE]);
     let data_size = 123_u64;
     let via_node = hash::node(
         &crate::types::NodeHash(*root.as_bytes()),
@@ -55,7 +61,7 @@ fn primitive_vectors() {
 #[test]
 #[should_panic(expected = "exceeds 8")]
 fn empty_above_8_panics() {
-    let _ = empty(9);
+    let _ = empty(MAX_SUBTREE_HEIGHT + 1);
 }
 
 #[test]

@@ -7,7 +7,11 @@ use std::sync::LazyLock;
 
 use sha2::{Digest as _, Sha256};
 
-use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, NodeHash, SizeWitness};
+use crate::geometry::MAX_SUBTREE_HEIGHT;
+use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash, SizeWitness};
+
+/// `empty(0) ..= empty(MAX_SUBTREE_HEIGHT)` (spec §3, §9).
+const EMPTY_TABLE_LEN: usize = MAX_SUBTREE_HEIGHT as usize + 1;
 
 /// Single registry of domain tags (spec §3).
 ///
@@ -18,11 +22,11 @@ use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, NodeHash, SizeWitness
 pub enum TreeDomainTag {
     /// `0x00 ‖ segment bytes`, at the segment's exact length.
     Leaf = 0x00,
-    /// `0x01 ‖ left ‖ right` (65 bytes).
+    /// `0x01 ‖ left ‖ right` (one tag byte plus two digests).
     Node = 0x01,
-    /// `0x02 ‖ be64(data_size)` (9 bytes).
+    /// `0x02 ‖ be64(data_size)` (one tag byte plus a `u64`).
     Size = 0x02,
-    /// `0x03 ‖ data_commitment ‖ be32(c)` (37 bytes).
+    /// `0x03 ‖ data_commitment ‖ be32(c)` (one tag byte, one digest, and a `u32`).
     ChunkKey = 0x03,
     /// Reserved: defined by the segment-PoA spec; not used by the tree.
     Ticket = 0x04,
@@ -34,7 +38,7 @@ impl TreeDomainTag {
     }
 }
 
-fn digest(tag: u8, parts: &[&[u8]]) -> [u8; 32] {
+fn digest(tag: u8, parts: &[&[u8]]) -> [u8; HASH_SIZE] {
     let mut hasher = Sha256::new();
     hasher.update([tag]);
     for part in parts {
@@ -77,20 +81,24 @@ pub fn chunk_key(commitment: &DataCommitment, chunk_index: u32) -> ChunkKey {
 /// Root of an empty perfect subtree of height `k` (spec §3, §9).
 ///
 /// `empty(0)` is `leaf("")`. `empty(k)` is `node(empty(k - 1), empty(k - 1))`.
-/// Panics if `k > 8`. A chunk subtree never asks for more: `segments_per_chunk`
-/// is at most 256, so its height is at most 8 (spec §2).
+/// Panics if `k > MAX_SUBTREE_HEIGHT`. A chunk subtree never asks for more:
+/// `segments_per_chunk` is at most [`MAX_SEGMENTS_PER_CHUNK`](crate::geometry::MAX_SEGMENTS_PER_CHUNK),
+/// so its height is at most [`MAX_SUBTREE_HEIGHT`] (spec §2).
 ///
 /// `k` is `empty_height`.
 pub fn empty(empty_height: u32) -> NodeHash {
-    static TABLE: LazyLock<[NodeHash; 9]> = LazyLock::new(|| {
-        let mut table = [NodeHash([0; 32]); 9];
+    static TABLE: LazyLock<[NodeHash; EMPTY_TABLE_LEN]> = LazyLock::new(|| {
+        let mut table = [NodeHash([0; HASH_SIZE]); EMPTY_TABLE_LEN];
         table[0] = leaf(b"");
         for height in 1..table.len() {
             table[height] = node(&table[height - 1], &table[height - 1]);
         }
         table
     });
-    assert!(empty_height <= 8, "empty height {empty_height} exceeds 8");
+    assert!(
+        empty_height <= MAX_SUBTREE_HEIGHT,
+        "empty height {empty_height} exceeds {MAX_SUBTREE_HEIGHT}"
+    );
     TABLE[empty_height as usize]
 }
 

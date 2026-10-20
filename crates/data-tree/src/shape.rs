@@ -1,14 +1,17 @@
 //! Chunk-tree shape: `depth` and the RFC 9162 inclusion walk (spec §4, §5).
 
 use crate::hash::node;
-use crate::types::NodeHash;
+use crate::types::{HASH_SIZE, NodeHash};
 
-/// Largest power of two strictly below `chunk_count`.
+/// Largest power of two strictly below `chunk_count` (`k` in spec §4).
 ///
-/// `chunk_count >= 2`. `1 << (31 - (C - 1).leading_zeros())` (spec §4).
+/// `chunk_count >= 2`. `floor_log2(chunk_count - 1)` is
+/// `u32::BITS - 1 - (chunk_count - 1).leading_zeros()`. Shifting 1 by that
+/// amount is the greatest power of two that is `<= chunk_count - 1`, so it is
+/// strictly below `chunk_count`.
 fn largest_power_of_two_below(chunk_count: u32) -> u32 {
     debug_assert!(chunk_count >= 2);
-    1_u32 << (31 - (chunk_count - 1).leading_zeros())
+    1_u32 << (u32::BITS - 1 - (chunk_count - 1).leading_zeros())
 }
 
 /// Chunk-level siblings in the proof of chunk `c` (spec §5).
@@ -25,6 +28,7 @@ pub fn depth(chunk_index: u32, chunk_count: u32) -> u32 {
     while chunk_count > 1 {
         let left_subtree_size = largest_power_of_two_below(chunk_count);
         if chunk_index < left_subtree_size {
+            // `k` is a power of two, so `trailing_zeros` is `log2(k)` (spec §5).
             return sibling_count + 1 + left_subtree_size.trailing_zeros();
         }
         chunk_index -= left_subtree_size;
@@ -39,8 +43,8 @@ pub fn depth(chunk_index: u32, chunk_count: u32) -> u32 {
 /// `node_index` is the RFC's `fn`. `last_index` is the RFC's `sn`.
 ///
 /// Returns `None` when the proof is too long, too short, or not a sequence of
-/// 32-byte hashes. A verifier checks the proof length before calling this, so
-/// `None` here means the bytes do not walk to a root.
+/// `HASH_SIZE`-byte hashes. A verifier checks the proof length before calling
+/// this, so `None` here means the bytes do not walk to a root.
 ///
 /// `c` is `chunk_index`.
 pub(crate) fn climb(
@@ -49,22 +53,24 @@ pub(crate) fn climb(
     chunk_count: u32,
     proof: &[u8],
 ) -> Option<NodeHash> {
-    if chunk_count == 0 || chunk_index >= chunk_count || !proof.len().is_multiple_of(32) {
+    if chunk_count == 0 || chunk_index >= chunk_count || !proof.len().is_multiple_of(HASH_SIZE) {
         return None;
     }
     // `fn` / `sn` in RFC 9162 §2.1.3.2.
     let mut node_index = chunk_index;
     let mut last_index = chunk_count - 1;
-    for sibling in proof.chunks_exact(32) {
+    for sibling in proof.chunks_exact(HASH_SIZE) {
         if last_index == 0 {
             return None;
         }
-        let Ok(bytes) = <[u8; 32]>::try_from(sibling) else {
+        let Ok(bytes) = <[u8; HASH_SIZE]>::try_from(sibling) else {
             return None;
         };
         let sibling = NodeHash(bytes);
+        // `fn` is odd, or it is the last index: the sibling is on the left (spec §5).
         if node_index & 1 == 1 || node_index == last_index {
             root = node(&sibling, &root);
+            // While `fn` is even and not zero, both indices move up one level (spec §5).
             while node_index & 1 == 0 && node_index != 0 {
                 node_index >>= 1;
                 last_index >>= 1;

@@ -2,12 +2,19 @@
 
 use core::fmt;
 
-fn write_lower_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8; 32]) -> fmt::Result {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = [0_u8; 64];
-    for (i, byte) in bytes.iter().enumerate() {
-        out[i * 2] = HEX[usize::from(byte >> 4)];
-        out[i * 2 + 1] = HEX[usize::from(byte & 0x0f)];
+/// SHA-256 digest width in bytes (spec §3, §5). Proofs are a sequence of these.
+pub const HASH_SIZE: usize = 32;
+
+/// Characters in the lowercase hex form of one digest.
+const HEX_LENGTH: usize = HASH_SIZE * 2;
+
+fn write_lower_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8; HASH_SIZE]) -> fmt::Result {
+    const HEX_ALPHABET: &[u8] = b"0123456789abcdef";
+    let mut out = [0_u8; HEX_LENGTH];
+    for (byte_index, byte) in bytes.iter().enumerate() {
+        // High nibble, then low nibble.
+        out[byte_index * 2] = HEX_ALPHABET[usize::from(byte >> 4)];
+        out[byte_index * 2 + 1] = HEX_ALPHABET[usize::from(byte & 0x0f)];
     }
     match core::str::from_utf8(&out) {
         Ok(text) => f.write_str(text),
@@ -19,17 +26,17 @@ macro_rules! hash_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
         #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-        pub struct $name(pub [u8; 32]);
+        pub struct $name(pub [u8; HASH_SIZE]);
 
         impl $name {
             /// Raw digest bytes.
-            pub const fn as_bytes(&self) -> &[u8; 32] {
+            pub const fn as_bytes(&self) -> &[u8; HASH_SIZE] {
                 &self.0
             }
         }
 
-        impl From<[u8; 32]> for $name {
-            fn from(bytes: [u8; 32]) -> Self {
+        impl From<[u8; HASH_SIZE]> for $name {
+            fn from(bytes: [u8; HASH_SIZE]) -> Self {
                 Self(bytes)
             }
         }

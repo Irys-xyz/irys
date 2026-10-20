@@ -1,3 +1,4 @@
+use crate::geometry::Geometry;
 use crate::shape::depth;
 
 #[test]
@@ -17,9 +18,10 @@ fn depth_matches_the_spec_table() {
         assert_eq!(depth(chunk_index, 4096), 12, "c={chunk_index}");
     }
 
-    // 5 TiB: 25 siblings below 2^24, 23 at and above it (spec §5).
-    let max_chunk_count = 20_971_520_u32;
-    let split = 1_u32 << 24;
+    // 5 TiB: 25 siblings below this index, 23 at and above it (spec §5).
+    const DEPTH_DROP_CHUNK_INDEX: u32 = 1 << 24;
+    let max_chunk_count = Geometry::MAINNET.max_data_tx_chunks();
+    let split = DEPTH_DROP_CHUNK_INDEX;
     assert_eq!(depth(0, max_chunk_count), 25);
     assert_eq!(depth(split - 1, max_chunk_count), 25);
     assert_eq!(depth(split, max_chunk_count), 23);

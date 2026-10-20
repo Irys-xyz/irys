@@ -5,6 +5,28 @@
 
 use crate::error::{GeometryError, SizeError};
 
+/// Upper bound on `segments_per_chunk` (spec §2). A power of two, and at most this.
+pub const MAX_SEGMENTS_PER_CHUNK: u32 = 256;
+
+/// `log2(MAX_SEGMENTS_PER_CHUNK)`. A chunk subtree is never taller (spec §2).
+pub const MAX_SUBTREE_HEIGHT: u32 = MAX_SEGMENTS_PER_CHUNK.trailing_zeros();
+
+/// Mainnet and testnet chunk size, 256 KiB (spec §2).
+const MAINNET_CHUNK_SIZE: u64 = 262_144;
+
+/// Mainnet and testnet segments per chunk (spec §2).
+const MAINNET_SEGMENTS_PER_CHUNK: u32 = 64;
+
+/// `testing()` chunk size (spec §2). Not the hash width: a test chunk happens to
+/// be 32 bytes as well.
+const TESTING_CHUNK_SIZE: u64 = 32;
+
+/// `testing()` segments per chunk (spec §2).
+const TESTING_SEGMENTS_PER_CHUNK: u32 = 4;
+
+/// Maximum chunks in one upload. `2^24 + 2^22`, 5 TiB at the mainnet chunk size (spec §2).
+const MAX_DATA_TX_CHUNKS: u32 = 20_971_520;
+
 /// Validated `(chunk_size, segments_per_chunk, max_data_tx_chunks)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
@@ -15,10 +37,18 @@ pub struct Geometry {
 
 impl Geometry {
     /// Mainnet and testnet: 256 KiB chunks, 64 segments, 5 TiB maximum.
-    pub const MAINNET: Self = Self::from_parts(262_144, 64, 20_971_520);
+    pub const MAINNET: Self = Self::from_parts(
+        MAINNET_CHUNK_SIZE,
+        MAINNET_SEGMENTS_PER_CHUNK,
+        MAX_DATA_TX_CHUNKS,
+    );
 
     /// `testing()`: 32-byte chunks, 4 segments, the same maximum chunk count.
-    pub const TESTING: Self = Self::from_parts(32, 4, 20_971_520);
+    pub const TESTING: Self = Self::from_parts(
+        TESTING_CHUNK_SIZE,
+        TESTING_SEGMENTS_PER_CHUNK,
+        MAX_DATA_TX_CHUNKS,
+    );
 
     /// Accept a geometry or say which rule failed (spec §2).
     ///
@@ -29,7 +59,7 @@ impl Geometry {
         segments_per_chunk: u32,
         max_data_tx_chunks: u32,
     ) -> Result<Self, GeometryError> {
-        if segments_per_chunk > 256 || !segments_per_chunk.is_power_of_two() {
+        if segments_per_chunk > MAX_SEGMENTS_PER_CHUNK || !segments_per_chunk.is_power_of_two() {
             return Err(GeometryError::SegmentsPerChunk { segments_per_chunk });
         }
         if chunk_size == 0 {
@@ -67,7 +97,7 @@ impl Geometry {
         self.chunk_size
     }
 
-    /// Leaves in one chunk subtree. A power of two in `1..=256`.
+    /// Leaves in one chunk subtree. A power of two in `1..=MAX_SEGMENTS_PER_CHUNK`.
     pub const fn segments_per_chunk(&self) -> u32 {
         self.segments_per_chunk
     }
@@ -82,8 +112,9 @@ impl Geometry {
         self.chunk_size / (self.segments_per_chunk as u64)
     }
 
-    /// `log2(segments_per_chunk)`, the height of a chunk subtree.
+    /// `h = log2(segments_per_chunk)`, the height of a chunk subtree (spec §2).
     pub const fn height(&self) -> u32 {
+        // `segments_per_chunk` is a power of two, so `trailing_zeros` is `log2`.
         self.segments_per_chunk.trailing_zeros()
     }
 
