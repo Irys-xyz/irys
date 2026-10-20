@@ -426,6 +426,9 @@ opt-level = 3
 [profile.test-release.package.sha2]
 opt-level = 3
 
+[profile.test-release.package.irys-data-tree]
+opt-level = 3
+
 [profile.test-release.package.openssl]
 opt-level = 3
 
@@ -464,6 +467,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.irys-data-tree]
 opt-level = 3
 
 [profile.dev.package.openssl]
