@@ -1860,6 +1860,72 @@ mod tests {
         Ok(())
     }
 
+    /// A retired span longer than the data-sync hot-slot budget sends only that
+    /// many entropy offsets. The hole scan picks up the rest.
+    #[tokio::test]
+    async fn retired_entropy_holes_stop_at_the_pending_request_cap() -> eyre::Result<()> {
+        let offsets = retire_entropy_holes(8, 3).await?;
+        assert_eq!(offsets.len(), 3);
+        assert_eq!(
+            offsets,
+            vec![
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(1),
+                PartitionChunkOffset::from(2),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A pending-request cap of zero still sends the first hole.
+    #[tokio::test]
+    async fn retired_entropy_holes_send_one_when_the_pending_cap_is_zero() -> eyre::Result<()> {
+        let offsets = retire_entropy_holes(8, 0).await?;
+        assert_eq!(offsets.len(), 1);
+        assert_eq!(offsets, vec![PartitionChunkOffset::from(0)]);
+        Ok(())
+    }
+
+    /// Pack, index, and stall one entropy span until retirement. Returns the
+    /// offsets handed to data sync.
+    async fn retire_entropy_holes(
+        num_chunks: u64,
+        max_pending_chunk_requests: u64,
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
+        let f = fixture(num_chunks, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.index()?;
+        let mut node_config = f.config.node_config.clone();
+        node_config.data_sync.max_pending_chunk_requests = max_pending_chunk_requests;
+        let config = Config::new(node_config, f.config.peer_id());
+        let (senders, mut receivers) = crate::services::ServiceSenders::new();
+        let worker = BodyMigrationWorker::new(
+            f.guard.clone(),
+            f.db.clone(),
+            config,
+            Arc::new(Notify::new()),
+            f.shutdown.clone(),
+            senders.data_sync.clone(),
+        );
+
+        assert_eq!(worker.drain_pass().await.retired, 0);
+        for _ in 2..MAX_BODY_MIGRATION_ATTEMPTS {
+            assert_eq!(worker.drain_pass().await.retired, 0);
+        }
+        assert_eq!(worker.drain_pass().await.retired, 1);
+
+        let traced = receivers
+            .data_sync
+            .try_recv()
+            .expect("retired holes are handed to data sync");
+        match traced.inner {
+            crate::DataSyncServiceMessage::BodyMigrationHoles { chunk_offsets, .. } => {
+                Ok(chunk_offsets)
+            }
+            _ => panic!("expected body migration holes"),
+        }
+    }
+
     /// The per-pass write budget paces, it does not abandon: the row survives a
     /// partial pass and a *fresh* worker (a restart) continues from the first
     /// non-durable offset.

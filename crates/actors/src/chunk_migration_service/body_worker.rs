@@ -623,6 +623,9 @@ impl SubmoduleDrain {
 
     /// Entropy offsets in this job's span. Data sync may still hold a cache
     /// miss memo for them. Offsets that already store a body are omitted.
+    ///
+    /// The list stops at the data-sync pending-request cap, and at one when
+    /// that cap is zero. The hole scan picks up offsets that do not fit.
     fn entropy_holes(
         &self,
         key: PartitionChunkOffset,
@@ -632,6 +635,12 @@ impl SubmoduleDrain {
         if chunk_size == 0 {
             return Vec::new();
         }
+        let hole_limit = self
+            .config
+            .node_config
+            .data_sync
+            .max_pending_chunk_requests
+            .max(1);
         let Ok(num_chunks) = i64::try_from(job.data_size.div_ceil(chunk_size)) else {
             return Vec::new();
         };
@@ -662,6 +671,9 @@ impl SubmoduleDrain {
                 };
                 if !pending_busy || matches!(self.chunk_type(&offset), Some(ChunkType::Entropy)) {
                     holes.push(offset);
+                    if holes.len() as u64 >= hole_limit {
+                        return holes;
+                    }
                 }
                 cursor += 1;
             }
