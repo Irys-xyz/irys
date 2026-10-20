@@ -19,7 +19,7 @@ rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 hex.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
 serde_json.workspace = true
 proptest.workspace = true
 rstest.workspace = true
