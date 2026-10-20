@@ -114,6 +114,20 @@ fn data_root_for_tx_path_hash(
     Ok(Some(binding.data_root))
 }
 
+/// Placement covering `offset`. Advances `index` past rows that already ended.
+fn covering_placement<'a>(
+    placements: &'a [Placement],
+    index: &mut usize,
+    offset: PartitionChunkOffset,
+) -> Option<&'a Placement> {
+    while *index < placements.len() && placements[*index].end < offset {
+        *index += 1;
+    }
+    placements
+        .get(*index)
+        .filter(|placement| placement.start <= offset && placement.end >= offset)
+}
+
 /// Index rows for `[start, end]` resolved inside the caller's read transaction.
 ///
 /// A tx path, a data-root placement list, and a data path that several offsets
@@ -146,12 +160,7 @@ fn metas_in_tx(
         let Some(tx_path_hash) = hashes.tx_path_hash else {
             continue;
         };
-        while placement_index < placements.len() && placements[placement_index].end < offset {
-            placement_index += 1;
-        }
-        let covered = placements
-            .get(placement_index)
-            .filter(|placement| placement.start <= offset && placement.end >= offset);
+        let covered = covering_placement(&placements, &mut placement_index, offset);
         let (data_root, data_size) = if let Some(placement) = covered {
             (placement.data_root, placement.data_size)
         } else {
@@ -8390,15 +8399,7 @@ impl StorageModule {
                 let mut cur = group_start;
                 loop {
                     let idx = usize::try_from(cur.0 - start.0)?;
-                    while placement_index < placements.len()
-                        && placements[placement_index].end < cur
-                    {
-                        placement_index += 1;
-                    }
-                    out[idx] = match placements
-                        .get(placement_index)
-                        .filter(|placement| placement.start <= cur && placement.end >= cur)
-                    {
+                    out[idx] = match covering_placement(&placements, &mut placement_index, cur) {
                         Some(placement) => {
                             Self::tx_offset_in_placement(placement, cur, chunk_size)?
                         }
