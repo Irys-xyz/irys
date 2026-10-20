@@ -354,8 +354,7 @@ pub fn process_ledger_transactions(
     let path_pairs = get_tx_path_pairs(block, ledger, txs).map_err(|e| {
         MigrationError::Other(format!("tx path merklization failed for {ledger:?}: {e}"))
     })?;
-    let block_offsets = get_block_offsets_in_ledger(block, ledger, block_index);
-    let mut prev_chunk_offset = block_offsets.start();
+    let mut prev_chunk_offset = ledger_start_offset(block, ledger, block_index);
 
     for (tx_index, ((_txid, tx_path), tx)) in path_pairs.into_iter().enumerate() {
         let tx_index = u32::try_from(tx_index)
@@ -599,37 +598,21 @@ fn fill_submit_misses(
     Ok(())
 }
 
-/// Computes the range of chunks added to a ledger by the transactions in a block,
-/// relative to the ledger.
+/// Ledger offset where `block` starts appending to `ledger`.
 ///
-/// The calculation starts from the previous block's `max_chunk_offset` (or 0 for genesis)
-/// for the given ledger and extends to this block's `max_chunk_offset` within the same ledger.
-///
-/// # Arguments
-/// * `block_header` - The block header containing height and ledger information.
-/// * `ledger` - The target ledger (e.g., Submit or Publish).
-/// * `block_index` - Index of historical block data.
-///
-/// # Returns
-/// A `LedgerChunkRange` representing the [start, end] chunk offsets of the chunks
-/// added to the ledger by the specified block.
+/// Height 0 starts at 0. The previous block's `total_chunks` is the next
+/// 0-indexed offset. The previous block may legitimately lack this ledger
+/// entirely — e.g. a Cascade term ledger (OneYear/ThirtyDay) whose first
+/// block sits right after the prior block's epoch predates activation.
+/// Treat a missing entry as zero chunks (the ledger started at this block)
+/// instead of indexing into it, which would panic.
 #[tracing::instrument(level = "trace", skip_all, fields(block.height = block.height, ledger = ?ledger))]
-fn get_block_offsets_in_ledger(
+fn ledger_start_offset(
     block: &IrysBlockHeader,
     ledger: DataLedger,
     block_index: &BlockIndex,
-) -> LedgerChunkRange {
-    // Use the block index to get the ledger relative chunk offset of the
-    // start of this new block from the previous block.
+) -> LedgerChunkOffset {
     let start_chunk_offset = if block.height > 0 {
-        // The previous block's `total_chunks` is used directly as this block's
-        // start offset (the count of chunks already in the ledger is the next
-        // 0-indexed offset).
-        // The previous block may legitimately lack this ledger entirely — e.g.
-        // a Cascade term ledger (OneYear/ThirtyDay) whose first block sits right
-        // after the prior block's epoch predates activation. Treat a missing
-        // entry as zero chunks (the ledger started at this block) instead of
-        // indexing into it, which would panic.
         block_index.get_item(block.height - 1).map_or(0, |prev| {
             prev.ledgers
                 .iter()
@@ -639,21 +622,7 @@ fn get_block_offsets_in_ledger(
     } else {
         0
     };
-
-    // Calculate the end offset, accounting for blocks that add no chunks to the ledger.
-    // If chunks were added: end_offset = total_chunks - 1 (convert count to 0-indexed offset)
-    // If no chunks added: end_offset = start_offset (creates an empty/invalid range, which
-    // correctly signals that this block contributed nothing to the ledger)
-    let end_chunk_offset = if block.data_ledgers[ledger].total_chunks > start_chunk_offset {
-        block.data_ledgers[ledger].total_chunks.saturating_sub(1)
-    } else {
-        start_chunk_offset
-    };
-
-    LedgerChunkRange(ii(
-        LedgerChunkOffset::from(start_chunk_offset),
-        LedgerChunkOffset::from(end_chunk_offset),
-    ))
+    LedgerChunkOffset::from(start_chunk_offset)
 }
 
 #[instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
