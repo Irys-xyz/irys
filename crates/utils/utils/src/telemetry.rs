@@ -35,8 +35,9 @@ const METRICS_EXPORT_INTERVAL: std::time::Duration = std::time::Duration::from_s
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 const DEFAULT_LOGS_ENDPOINT: &str = "http://localhost:4318/v1/logs";
 const DEFAULT_SERVICE_NAME: &str = "irys-node";
-/// `EnvFilter` directives for the events exported as OTLP logs. `RUST_LOG`
-/// still applies first, so this can only narrow it. Default: `info`.
+/// `EnvFilter` directives for the events exported as OTLP logs. Unset or
+/// empty exports what `RUST_LOG` allows. `RUST_LOG` applies first, so this
+/// can only narrow it.
 const OTLP_LOG_FILTER_ENV: &str = "IRYS_OTLP_LOG_FILTER";
 
 struct TelemetryConfig {
@@ -256,11 +257,11 @@ fn setup_tracing_subscriber(
     subscriber.init();
 }
 
-/// Filter for the OTLP log layer. `None` or an empty value means `info`.
-fn otlp_log_filter(directives: Option<&str>) -> EnvFilter {
-    EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .parse_lossy(directives.unwrap_or_default().trim())
+/// Filter for the OTLP log layer. `None` or an empty value adds no filter, so
+/// exported logs follow `RUST_LOG`.
+fn otlp_log_filter(directives: Option<&str>) -> Option<EnvFilter> {
+    let directives = directives.map(str::trim).filter(|d| !d.is_empty())?;
+    Some(EnvFilter::builder().parse_lossy(directives))
 }
 
 fn install_panic_hook() {
@@ -296,8 +297,9 @@ fn install_panic_hook() {
 /// - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`: Override endpoint for traces (optional)
 /// - `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`: Override endpoint for logs (optional)
 /// - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`: Override endpoint for metrics (optional)
-/// - `IRYS_OTLP_LOG_FILTER`: `EnvFilter` directives for exported logs (default `info`).
-///   `RUST_LOG` still governs local output and caps what is exported.
+/// - `IRYS_OTLP_LOG_FILTER`: `EnvFilter` directives for exported logs (optional).
+///   Unset exports what `RUST_LOG` allows. `RUST_LOG` still governs local output
+///   and caps what is exported.
 ///
 /// # Errors
 ///
@@ -457,22 +459,22 @@ mod tests {
     }
 
     #[test]
-    fn otlp_logs_default_to_info_under_a_debug_rust_log() {
-        let want = vec![tracing::Level::INFO, tracing::Level::WARN];
+    fn otlp_logs_follow_rust_log_when_unset() {
+        let want = vec![
+            tracing::Level::DEBUG,
+            tracing::Level::INFO,
+            tracing::Level::WARN,
+        ];
         assert_eq!(exported_levels(None), want);
         assert_eq!(exported_levels(Some("")), want);
         assert_eq!(exported_levels(Some("  ")), want);
     }
 
     #[test]
-    fn otlp_log_filter_can_widen_to_debug() {
+    fn otlp_log_filter_narrows_rust_log_when_set() {
         assert_eq!(
-            exported_levels(Some("debug")),
-            vec![
-                tracing::Level::DEBUG,
-                tracing::Level::INFO,
-                tracing::Level::WARN
-            ]
+            exported_levels(Some("info")),
+            vec![tracing::Level::INFO, tracing::Level::WARN]
         );
         assert_eq!(exported_levels(Some("warn")), vec![tracing::Level::WARN]);
     }
