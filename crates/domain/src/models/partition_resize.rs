@@ -76,9 +76,29 @@ impl StorageModule {
             "invalid logical partition size"
         );
         let retained = self.retained_chunks.load(Ordering::Acquire);
-        self.partition_chunks
-            .store(chunks.min(retained), Ordering::Release);
+        let bound = chunks.min(retained);
+        let previous = self.partition_chunks.swap(bound, Ordering::AcqRel);
+        if bound > previous {
+            // A branch without the activation became canonical. The suffix
+            // hidden by the smaller bound was never packed; the storage-module
+            // service picks it up with `take_regrown_suffix`.
+            self.regrown_from.fetch_min(previous, Ordering::AcqRel);
+        }
         Ok(())
+    }
+
+    /// The suffix re-exposed since the last call, clipped to the bound now in
+    /// force. `None` when the bound has not grown, or shrank back over it.
+    pub fn take_regrown_suffix(&self) -> Option<Interval<PartitionChunkOffset>> {
+        let from = self.regrown_from.swap(u64::MAX, Ordering::AcqRel);
+        let end = self.partition_chunks().checked_sub(1)?;
+        if from > end {
+            return None;
+        }
+        Some(ii(
+            PartitionChunkOffset(u32::try_from(from).ok()?),
+            PartitionChunkOffset(u32::try_from(end).ok()?),
+        ))
     }
 
     /// `false` past the logical partition end or the retained physical end.

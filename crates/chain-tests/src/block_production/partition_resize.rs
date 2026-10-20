@@ -121,6 +121,11 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
     let module_infos = epoch
         .map_storage_modules_to_partition_assignments()
         .expect("map storage modules");
+    assert!(
+        module_infos.iter().any(|m| !m.submodules.is_empty()),
+        "no storage submodule to check truncation on"
+    );
+    let max_len = geometry.partition_chunks * parent.config.consensus.chunk_size;
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let complete = module_infos.iter().all(|m| {
@@ -128,7 +133,7 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
                     let path = node.cfg.base_directory.join(path);
                     path.join("partition_resize.json").exists()
                         && std::fs::metadata(path.join("chunks.dat"))
-                            .is_ok_and(|m| m.len() <= 8 * 32)
+                            .is_ok_and(|m| m.len() <= max_len)
                 })
             });
             if complete {

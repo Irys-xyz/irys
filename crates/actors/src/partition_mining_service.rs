@@ -560,12 +560,15 @@ impl PartitionMiningServiceInner {
         let recall_range_index = self.get_recall_range(vdf_step, &mining_seed, &partition_hash)?;
 
         // Starting chunk index within partition
-        let start_chunk_offset =
-            (recall_range_index as u32).saturating_mul(self.geometry.recall_chunks as u32);
+        let recall_chunks =
+            u32::try_from(self.geometry.recall_chunks).wrap_err("recall_chunks exceeds u32")?;
+        let start_chunk_offset = u32::try_from(recall_range_index)
+            .wrap_err("recall range index exceeds u32")?
+            .saturating_mul(recall_chunks);
 
         let read_range = partition_chunk_offset_ie!(
             start_chunk_offset,
-            start_chunk_offset + self.geometry.recall_chunks as u32
+            start_chunk_offset.saturating_add(recall_chunks)
         );
 
         let RecallChunks { chunks, rows: _ } =

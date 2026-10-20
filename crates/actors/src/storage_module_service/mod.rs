@@ -381,6 +381,7 @@ impl StorageModuleServiceInner {
             // thread: the mining thread must not take `sync_in_progress`.
             sm.confirm_crc_suspects();
             self.enqueue_crc_repairs(sm);
+            self.enqueue_regrown_suffix(sm);
             if sm.disk_lane_running() {
                 sm.wake_disk_lane();
                 continue;
@@ -778,6 +779,36 @@ impl StorageModuleServiceInner {
         }
         if !deferred.is_empty() {
             self.pending_ranges.insert(module.id, deferred);
+        }
+    }
+
+    /// Pack the suffix a growing partition bound re-exposed. Only its
+    /// `Uninitialized` spans are sent; a span the channel does not accept is
+    /// kept with the other deferred ranges and sent by a later tick.
+    fn enqueue_regrown_suffix(&mut self, module: &Arc<StorageModule>) {
+        let Some(range) = module.take_regrown_suffix() else {
+            return;
+        };
+        if module.partition_assignment().is_none() {
+            // Assignment packs the module up to the bound then in force.
+            return;
+        }
+        let mut deferred = Vec::new();
+        for span in module
+            .uninitialized_spans_overlapping(range)
+            .into_iter()
+            .map(PartitionChunkRange)
+        {
+            match self.try_enqueue_packing(module, span) {
+                PackSend::Accepted | PackSend::Rejected => {}
+                PackSend::Deferred => deferred.push(span),
+            }
+        }
+        if !deferred.is_empty() {
+            self.pending_ranges
+                .entry(module.id)
+                .or_default()
+                .extend(deferred);
         }
     }
 
@@ -3276,6 +3307,62 @@ mod assignment_reset_tests {
             .expect("offset 5 stays uninitialized");
         assert_eq!(*neighbor_req.chunk_range().0.start(), 5);
         assert_eq!(*neighbor_req.chunk_range().0.end(), 5);
+        Ok(())
+    }
+
+    /// A reorg that drops a pre-finality activation grows the bound back.
+    /// The re-exposed suffix is packed on the next tick, and a full channel
+    /// keeps it until a later tick can send it.
+    #[tokio::test]
+    async fn regrown_suffix_survives_a_full_packing_channel() -> eyre::Result<()> {
+        let mut harness = harness(None);
+        let module = Arc::clone(&harness.module);
+        let span = |request: &PackingRequest| {
+            (
+                *request.chunk_range().0.start(),
+                *request.chunk_range().0.end(),
+            )
+        };
+
+        module.set_partition_chunks(4)?;
+        assert_eq!(
+            module.take_regrown_suffix(),
+            None,
+            "a shrink exposes nothing"
+        );
+        // Growth clipped by a later shrink keeps only the part still in bound.
+        module.set_partition_chunks(10)?;
+        module.set_partition_chunks(6)?;
+        assert_eq!(
+            module.take_regrown_suffix(),
+            Some(irys_types::partition_chunk_offset_ii!(4, 5))
+        );
+        assert_eq!(
+            module.take_regrown_suffix(),
+            None,
+            "the suffix is taken once"
+        );
+
+        module.set_partition_chunks(4)?;
+        fill_packing_channel(&harness);
+        module.set_partition_chunks(10)?;
+        harness.inner.tick().await;
+        let pending = harness
+            .inner
+            .pending_ranges
+            .get(&0)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(pending.len(), 1, "a full channel keeps the regrown suffix");
+        assert_eq!((*pending[0].0.start(), *pending[0].0.end()), (4, 9));
+
+        drain_packing(&mut harness);
+        harness.inner.tick().await;
+        let sent: Vec<_> = drain_packing(&mut harness).iter().map(span).collect();
+        assert_eq!(sent, vec![(4, 9)], "the kept suffix is sent once");
+        assert!(!harness.inner.pending_ranges.contains_key(&0));
+        harness.inner.tick().await;
+        assert!(drain_packing(&mut harness).is_empty(), "no repeat send");
         Ok(())
     }
 

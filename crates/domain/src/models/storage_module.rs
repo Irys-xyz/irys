@@ -944,6 +944,9 @@ pub struct StorageModule {
     partition_chunks: AtomicU64,
     /// Durable physical bound, also checked by late packing/index writers.
     retained_chunks: AtomicU64,
+    /// Lowest offset re-exposed by a growing bound that the storage-module
+    /// service has not yet handed to packing; `u64::MAX` when none.
+    regrown_from: AtomicU64,
     resize_complete: Mutex<Option<partition_resize::ResizeJournal>>,
     /// Recall, packed writes, and entropy reads. Callers enqueue; this lane
     /// takes `chunks.dat`.
@@ -2445,6 +2448,7 @@ impl StorageModule {
             pwrite_panic_once: AtomicBool::new(false),
             partition_chunks: AtomicU64::new(retained_chunks),
             retained_chunks: AtomicU64::new(retained_chunks),
+            regrown_from: AtomicU64::new(u64::MAX),
             resize_complete: Mutex::new(None),
         };
         if let Some(journal) = retained {

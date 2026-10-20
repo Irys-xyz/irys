@@ -6,7 +6,7 @@ use irys_database::{
     insert_commitment_tx, insert_tx_header, prune_block_stream_below, tx_header_by_txid,
 };
 use irys_domain::{
-    BlockIndex, BlockTree, ChunkType, StorageModule, StorageModulesReadGuard, SupplyState,
+    BlockIndex, BlockTree, StorageModule, StorageModulesReadGuard, SupplyState,
     block_index_guard::BlockIndexReadGuard, forkchoice_markers::finalized_height,
     get_overlapped_storage_modules,
 };
@@ -301,8 +301,8 @@ impl BlockMigrationService {
     /// Update logical ledger geometry on canonical adoption, including reorgs.
     /// Destructive truncation is separately gated on finality by the storage service.
     ///
-    /// Hot path: runs on every tip change for every module, so the no-growth
-    /// case is two atomic loads around the bound update.
+    /// Hot path: runs on every tip change for every module; the no-growth
+    /// case is an atomic load and swap.
     pub fn update_partition_geometry(
         &self,
         epoch: &irys_domain::EpochSnapshot,
@@ -312,29 +312,11 @@ impl BlockMigrationService {
         };
         let chunks = epoch.partition_chunks();
         for module in modules.read().iter() {
-            let previous = module.partition_chunks();
+            // A growing bound (a branch without the activation became
+            // canonical) re-exposes a suffix that was never packed. The module
+            // records it and the storage-module service packs it on its next
+            // tick, keeping it across a full packing channel.
             module.set_partition_chunks(chunks)?;
-            // Compare the bound in force, not the request: after a finalized
-            // truncation a pre-activation canonical view is clamped and the bound
-            // does not move.
-            if module.partition_chunks() <= previous || module.partition_assignment().is_none() {
-                continue;
-            }
-            // The bound grew back: a branch without the activation became
-            // canonical. The suffix hidden by the pre-finality bound was never
-            // packed (startup and assignment only request packing up to the
-            // bound in force at the time), so re-request it now. `get_intervals`
-            // is clipped to the restored bound, so these ranges are exactly the
-            // re-exposed suffix plus any genuinely unpacked prefix. Non-blocking
-            // `try_send` from this sync path, as in the partition-recovery
-            // repack above; warn (don't fail the module) if it can't be enqueued.
-            for interval in module.get_intervals(ChunkType::Uninitialized) {
-                self.try_enqueue_packing(
-                    module.clone(),
-                    PartitionChunkRange(interval),
-                    "after partition bound grew",
-                );
-            }
         }
         Ok(())
     }
