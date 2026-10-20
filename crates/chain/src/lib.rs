@@ -3,6 +3,7 @@ pub mod genesis_builder;
 pub mod genesis_utilities;
 mod metrics;
 pub mod peer_utilities;
+mod storage_module_init;
 pub mod utils;
 pub mod vdf_seed_source;
 

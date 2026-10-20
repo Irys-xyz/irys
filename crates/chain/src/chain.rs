@@ -2731,12 +2731,12 @@ impl IrysNode {
         config: &Config,
         storage_module_infos: Vec<StorageModuleInfo>,
     ) -> eyre::Result<Arc<RwLock<Vec<Arc<StorageModule>>>>> {
-        let mut storage_modules = Vec::new();
-        for info in storage_module_infos {
-            let arc_module = Arc::new(StorageModule::new(&info, config)?);
-            storage_modules.push(arc_module.clone());
-        }
-
+        let storage_modules = crate::storage_module_init::open_storage_modules(
+            config,
+            storage_module_infos,
+            #[cfg(test)]
+            Duration::ZERO,
+        )?;
         Ok(Arc::new(RwLock::new(storage_modules)))
     }
 
