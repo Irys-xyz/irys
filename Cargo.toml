@@ -8,6 +8,7 @@ members = [
   "crates/types",
   "crates/packing",
   "crates/database",
+  "crates/data-tree",
   "crates/storage",
   "crates/config",
   "crates/efficient-sampling",
@@ -43,6 +44,7 @@ authors = []
 [workspace.dependencies]
 # Irys
 irys-database = { path = "./crates/database" }
+irys-data-tree = { path = "./crates/data-tree" }
 irys-domain = { path = "./crates/domain" }
 irys-actors = { path = "./crates/actors" }
 irys-api-server = { path = "./crates/api-server" }
