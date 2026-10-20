@@ -1,6 +1,9 @@
 mod builder;
 mod depth;
 mod geometry;
+mod negative;
+mod props;
+mod roundtrip;
 mod shape;
 
 fn pattern(n: usize) -> Vec<u8> {

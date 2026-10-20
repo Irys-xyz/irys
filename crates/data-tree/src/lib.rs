@@ -12,6 +12,7 @@ pub mod geometry;
 pub mod hash;
 pub mod shape;
 pub mod types;
+pub mod verify;
 
 pub use builder::{DataTree, DataTreeBuilder};
 pub use chunk::chunk_root;
@@ -23,6 +24,7 @@ pub use hash::{
 };
 pub use shape::depth;
 pub use types::{ChunkKey, DataCommitment, DataTreeRoot, NodeHash, SizeWitness};
+pub use verify::{verify_chunk, verify_segment, verify_size};
 
 #[cfg(test)]
 mod tests;
