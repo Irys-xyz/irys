@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792507898841,
+  "lastUpdate": 1792524622324,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -17862,6 +17862,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000112,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fa266766db62c15eb5d1907f4014b22ba6da8f95",
+          "message": "feat(telemetry): optional separate filter for exported OTLP logs (IRYS_OTLP_LOG_FILTER) (#1638)\n\n* feat(telemetry): filter exported OTLP logs separately from RUST_LOG\n\nThe OTLP log exporter sat behind the same EnvFilter as local output, so\na node run with RUST_LOG=debug shipped every debug event to the log\nstore. On devnet under upload load that was ~120 GB/day into\nElasticsearch, and it filled the observability host's disk three times.\n\nThe OTLP log layer now has its own per-layer filter from\nIRYS_OTLP_LOG_FILTER (EnvFilter directives, default `info`). RUST_LOG\nstill controls local output and caps what is exported. Set\nIRYS_OTLP_LOG_FILTER=debug to export debug again.\n\n* feat(telemetry): export what RUST_LOG allows unless IRYS_OTLP_LOG_FILTER is set\n\nAn unset IRYS_OTLP_LOG_FILTER defaulted exported logs to info, so a node\nhad to set the variable to export at its RUST_LOG level. Unset or empty\nnow adds no per-layer filter: exported logs follow RUST_LOG. Setting the\nvariable still narrows what is exported, for example info under a debug\nRUST_LOG.\n\n* feat(telemetry): warn when IRYS_OTLP_LOG_FILTER is more verbose than RUST_LOG\n\nThe OTLP log filter is a per-layer filter, so it can only narrow\nRUST_LOG. IRYS_OTLP_LOG_FILTER=debug under RUST_LOG=info exports info and\nsilently drops the debug the operator asked for. Compare the two filters'\nmax level hints at startup and log a warning when the OTLP one is wider.\nA filter with no hint is not compared.\n\n* fix(telemetry): reject an invalid IRYS_OTLP_LOG_FILTER instead of exporting nothing\n\nThe value was parsed lossily, so an invalid directive was dropped and\ncould leave a filter that exported no logs at all, errors included,\nwhile local logging carried on. Parse strictly. An invalid value is\nrejected whole: exported logs follow RUST_LOG and the node warns at\nstartup.",
+          "timestamp": "2026-10-20T20:16:32+01:00",
+          "tree_id": "6dd9c243460f38b3141f62a41187ca60868d9d79",
+          "url": "https://github.com/Irys-xyz/irys/commit/fa266766db62c15eb5d1907f4014b22ba6da8f95"
+        },
+        "date": 1792524620904,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015128,
+            "range": "± 0.000409",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153633,
+            "range": "± 0.006319",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.556552,
+            "range": "± 0.02964",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.356074,
+            "range": "± 0.448462",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083663,
+            "range": "± 0.00431",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 830.558319,
+            "range": "± 22.747617",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1108.788212,
+            "range": "± 12.495384",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.165479,
+            "range": "± 0.016627",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1600.030632,
+            "range": "± 44.719494",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1816.975341,
+            "range": "± 106.281838",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034204,
+            "range": "± 0.002034",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 217.125815,
+            "range": "± 7.05963",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.161504,
+            "range": "± 0.929725",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
             "range": "± 0.000002",
             "unit": "ms/iter"
           }
