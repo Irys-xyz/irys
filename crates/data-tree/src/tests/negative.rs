@@ -12,76 +12,85 @@ use crate::verify::{verify_chunk, verify_segment, verify_size};
 
 #[test]
 fn range_checks_fail_before_hashing() {
-    let geom = Geometry::TESTING;
-    let n = 32_u64;
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap();
+    let geometry = Geometry::TESTING;
+    let data_size = 32_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let commitment = tree.data_commitment();
-    let max = geom.max_data_size();
+    let max_data_size = geometry.max_data_size();
 
     assert_eq!(
-        verify_chunk(&geom, &commitment, 0, 0, &data, &[]).unwrap_err(),
-        VerifyError::Size(SizeError::DataSizeOutOfRange { n: 0, max })
+        verify_chunk(&geometry, &commitment, 0, 0, &data, &[]).unwrap_err(),
+        VerifyError::Size(SizeError::DataSizeOutOfRange {
+            data_size: 0,
+            max_data_size
+        })
     );
     assert_eq!(
-        verify_segment(&geom, &commitment, 0, 0, 0, &[], &[]).unwrap_err(),
-        VerifyError::Size(SizeError::DataSizeOutOfRange { n: 0, max })
+        verify_segment(&geometry, &commitment, 0, 0, 0, &[], &[]).unwrap_err(),
+        VerifyError::Size(SizeError::DataSizeOutOfRange {
+            data_size: 0,
+            max_data_size
+        })
     );
     assert_eq!(
-        verify_chunk(&geom, &commitment, max + 1, 0, &data, &[]).unwrap_err(),
-        VerifyError::Size(SizeError::DataSizeOutOfRange { n: max + 1, max })
+        verify_chunk(&geometry, &commitment, max_data_size + 1, 0, &data, &[]).unwrap_err(),
+        VerifyError::Size(SizeError::DataSizeOutOfRange {
+            data_size: max_data_size + 1,
+            max_data_size
+        })
     );
     // `C = 1`, so index 1 is past the tree. The empty proof is not hashed.
     assert_eq!(
-        verify_chunk(&geom, &commitment, n, 1, &data, &[]).unwrap_err(),
+        verify_chunk(&geometry, &commitment, data_size, 1, &data, &[]).unwrap_err(),
         VerifyError::Size(SizeError::ChunkIndexOutOfRange {
-            c: 1,
+            chunk_index: 1,
             chunk_count: 1
         })
     );
     assert_eq!(
         verify_segment(
-            &geom,
+            &geometry,
             &commitment,
-            n,
+            data_size,
             0,
-            geom.segments_per_chunk(),
+            geometry.segments_per_chunk(),
             &[],
             &[]
         )
         .unwrap_err(),
         VerifyError::Size(SizeError::SegmentIndexOutOfRange {
-            j: geom.segments_per_chunk(),
-            spc: geom.segments_per_chunk()
+            segment_index: geometry.segments_per_chunk(),
+            segments_per_chunk: geometry.segments_per_chunk()
         })
     );
 }
 
 #[test]
 fn proof_length_is_checked_before_hashing() {
-    let geom = Geometry::TESTING;
+    let geometry = Geometry::TESTING;
     // Three full chunks: `depth(0, 3) = 2` (spec §5).
-    let n = 96_u64;
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap();
+    let data_size = 96_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let commitment = tree.data_commitment();
     let chunk = data[..32].to_vec();
     let proof = tree.chunk_proof(0).unwrap();
     assert_eq!(depth(0, 3), 2);
     assert_eq!(proof.len(), 64);
-    verify_chunk(&geom, &commitment, n, 0, &chunk, &proof).unwrap();
+    verify_chunk(&geometry, &commitment, data_size, 0, &chunk, &proof).unwrap();
 
     let mut too_long = proof.clone();
     too_long.extend_from_slice(&[0_u8; 32]);
     assert_eq!(
-        verify_chunk(&geom, &commitment, n, 0, &chunk, &too_long).unwrap_err(),
+        verify_chunk(&geometry, &commitment, data_size, 0, &chunk, &too_long).unwrap_err(),
         VerifyError::InvalidProofLength {
             expected: 64,
             actual: 96
         }
     );
     assert_eq!(
-        verify_chunk(&geom, &commitment, n, 0, &chunk, &proof[..32]).unwrap_err(),
+        verify_chunk(&geometry, &commitment, data_size, 0, &chunk, &proof[..32]).unwrap_err(),
         VerifyError::InvalidProofLength {
             expected: 64,
             actual: 32
@@ -90,7 +99,7 @@ fn proof_length_is_checked_before_hashing() {
     let mut not_aligned = proof;
     not_aligned.push(0);
     assert_eq!(
-        verify_chunk(&geom, &commitment, n, 0, &chunk, &not_aligned).unwrap_err(),
+        verify_chunk(&geometry, &commitment, data_size, 0, &chunk, &not_aligned).unwrap_err(),
         VerifyError::InvalidProofLength {
             expected: 64,
             actual: 65
@@ -98,13 +107,21 @@ fn proof_length_is_checked_before_hashing() {
     );
 
     // `C = 2`: an empty proof is one hash too short (spec §5).
-    let n = 64_u64;
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap();
+    let data_size = 64_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let chunk = data[..32].to_vec();
     assert_eq!(depth(0, 2), 1);
     assert_eq!(
-        verify_chunk(&geom, &tree.data_commitment(), n, 0, &chunk, &[]).unwrap_err(),
+        verify_chunk(
+            &geometry,
+            &tree.data_commitment(),
+            data_size,
+            0,
+            &chunk,
+            &[]
+        )
+        .unwrap_err(),
         VerifyError::InvalidProofLength {
             expected: 32,
             actual: 0
@@ -114,14 +131,14 @@ fn proof_length_is_checked_before_hashing() {
 
 #[test]
 fn byte_length_is_checked_before_hashing() {
-    let geom = Geometry::TESTING;
-    let n = 32_u64;
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap();
+    let geometry = Geometry::TESTING;
+    let data_size = 32_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let commitment = tree.data_commitment();
     let proof = tree.chunk_proof(0).unwrap();
     assert_eq!(
-        verify_chunk(&geom, &commitment, n, 0, &data[..31], &proof).unwrap_err(),
+        verify_chunk(&geometry, &commitment, data_size, 0, &data[..31], &proof).unwrap_err(),
         VerifyError::InvalidChunkLength {
             expected: 32,
             actual: 31
@@ -130,7 +147,7 @@ fn byte_length_is_checked_before_hashing() {
     let mut extra = data.clone();
     extra.push(0);
     assert_eq!(
-        verify_chunk(&geom, &commitment, n, 0, &extra, &proof).unwrap_err(),
+        verify_chunk(&geometry, &commitment, data_size, 0, &extra, &proof).unwrap_err(),
         VerifyError::InvalidChunkLength {
             expected: 32,
             actual: 33
@@ -140,14 +157,32 @@ fn byte_length_is_checked_before_hashing() {
     let segment_proof = tree.segment_proof(0, 0, &data).unwrap();
     let segment = &data[..8];
     assert_eq!(
-        verify_segment(&geom, &commitment, n, 0, 0, &segment[..7], &segment_proof).unwrap_err(),
+        verify_segment(
+            &geometry,
+            &commitment,
+            data_size,
+            0,
+            0,
+            &segment[..7],
+            &segment_proof
+        )
+        .unwrap_err(),
         VerifyError::InvalidSegmentLength {
             expected: 8,
             actual: 7
         }
     );
     assert_eq!(
-        verify_segment(&geom, &commitment, n, 0, 0, &data[..9], &segment_proof).unwrap_err(),
+        verify_segment(
+            &geometry,
+            &commitment,
+            data_size,
+            0,
+            0,
+            &data[..9],
+            &segment_proof
+        )
+        .unwrap_err(),
         VerifyError::InvalidSegmentLength {
             expected: 8,
             actual: 9
@@ -158,10 +193,10 @@ fn byte_length_is_checked_before_hashing() {
 #[test]
 fn zero_padding_is_rejected_and_hashes_differ() {
     // `n = 33`: the last chunk is one byte. Padding must not reach the hasher.
-    let geom = Geometry::TESTING;
-    let n = 33_u64;
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap();
+    let geometry = Geometry::TESTING;
+    let data_size = 33_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let commitment = tree.data_commitment();
     let short = data[32..].to_vec();
     assert_eq!(short.len(), 1);
@@ -169,11 +204,11 @@ fn zero_padding_is_rejected_and_hashes_differ() {
     let mut padded_chunk = short.clone();
     padded_chunk.resize(32, 0);
     assert_ne!(
-        chunk_root(&geom, &short).unwrap(),
-        chunk_root(&geom, &padded_chunk).unwrap()
+        chunk_root(&geometry, &short).unwrap(),
+        chunk_root(&geometry, &padded_chunk).unwrap()
     );
     assert_eq!(
-        verify_chunk(&geom, &commitment, n, 1, &padded_chunk, &proof).unwrap_err(),
+        verify_chunk(&geometry, &commitment, data_size, 1, &padded_chunk, &proof).unwrap_err(),
         VerifyError::InvalidChunkLength {
             expected: 1,
             actual: 32
@@ -182,30 +217,39 @@ fn zero_padding_is_rejected_and_hashes_differ() {
 
     let segment_proof = tree.segment_proof(1, 0, &short).unwrap();
     let mut padded_segment = short.clone();
-    padded_segment.resize(usize::try_from(geom.segment_size()).unwrap(), 0);
+    padded_segment.resize(usize::try_from(geometry.segment_size()).unwrap(), 0);
     assert_ne!(leaf(&short), leaf(&padded_segment));
     assert_eq!(
-        verify_segment(&geom, &commitment, n, 1, 0, &padded_segment, &segment_proof).unwrap_err(),
+        verify_segment(
+            &geometry,
+            &commitment,
+            data_size,
+            1,
+            0,
+            &padded_segment,
+            &segment_proof
+        )
+        .unwrap_err(),
         VerifyError::InvalidSegmentLength {
             expected: 1,
-            actual: geom.segment_size()
+            actual: geometry.segment_size()
         }
     );
 }
 
 #[test]
 fn a_proof_for_another_index_does_not_verify() {
-    let geom = Geometry::TESTING;
-    let n = 96_u64;
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap();
+    let geometry = Geometry::TESTING;
+    let data_size = 96_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let commitment = tree.data_commitment();
     let proof_0 = tree.chunk_proof(0).unwrap();
     let chunk_1 = &data[32..64];
     verify_chunk(
-        &geom,
+        &geometry,
         &commitment,
-        n,
+        data_size,
         1,
         chunk_1,
         &tree.chunk_proof(1).unwrap(),
@@ -213,7 +257,7 @@ fn a_proof_for_another_index_does_not_verify() {
     .unwrap();
     // Same proof length (`depth` is 2 for both), different bytes.
     assert_eq!(
-        verify_chunk(&geom, &commitment, n, 1, chunk_1, &proof_0).unwrap_err(),
+        verify_chunk(&geometry, &commitment, data_size, 1, chunk_1, &proof_0).unwrap_err(),
         VerifyError::CommitmentMismatch
     );
 }
@@ -221,20 +265,28 @@ fn a_proof_for_another_index_does_not_verify() {
 #[test]
 fn wrong_size_with_the_same_chunk_count_mismatches() {
     // `n = 96` and `n = 80` are both `C = 3`. Chunk 0 is full either way.
-    let geom = Geometry::TESTING;
-    let n = 96_u64;
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap();
+    let geometry = Geometry::TESTING;
+    let data_size = 96_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let chunk = &data[..32];
     let proof = tree.chunk_proof(0).unwrap();
-    let n_wrong = 80_u64;
+    let wrong_data_size = 80_u64;
     assert_eq!(
-        geom.chunk_count(n).unwrap(),
-        geom.chunk_count(n_wrong).unwrap()
+        geometry.chunk_count(data_size).unwrap(),
+        geometry.chunk_count(wrong_data_size).unwrap()
     );
-    assert_eq!(geom.chunk_len(n_wrong, 0).unwrap(), 32);
+    assert_eq!(geometry.chunk_len(wrong_data_size, 0).unwrap(), 32);
     assert_eq!(
-        verify_chunk(&geom, &tree.data_commitment(), n_wrong, 0, chunk, &proof).unwrap_err(),
+        verify_chunk(
+            &geometry,
+            &tree.data_commitment(),
+            wrong_data_size,
+            0,
+            chunk,
+            &proof
+        )
+        .unwrap_err(),
         VerifyError::CommitmentMismatch
     );
 }
@@ -242,18 +294,26 @@ fn wrong_size_with_the_same_chunk_count_mismatches() {
 #[test]
 fn wrong_size_with_another_chunk_count_rejects_the_proof_length() {
     // Right-hand chunk: `depth(2, 3) = 1`, `depth(2, 4) = 2` (spec §5).
-    let geom = Geometry::TESTING;
-    let n = 96_u64;
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap();
+    let geometry = Geometry::TESTING;
+    let data_size = 96_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let chunk = &data[64..96];
     let proof = tree.chunk_proof(2).unwrap();
     assert_eq!(proof.len(), 32);
     assert_eq!(depth(2, 3), 1);
     assert_eq!(depth(2, 4), 2);
-    let n_wrong = 128_u64;
+    let wrong_data_size = 128_u64;
     assert_eq!(
-        verify_chunk(&geom, &tree.data_commitment(), n_wrong, 2, chunk, &proof).unwrap_err(),
+        verify_chunk(
+            &geometry,
+            &tree.data_commitment(),
+            wrong_data_size,
+            2,
+            chunk,
+            &proof
+        )
+        .unwrap_err(),
         VerifyError::InvalidProofLength {
             expected: 64,
             actual: 32
@@ -263,25 +323,42 @@ fn wrong_size_with_another_chunk_count_rejects_the_proof_length() {
 
 #[test]
 fn every_flipped_sibling_bit_mismatches() {
-    let geom = Geometry::TESTING;
-    let n = 112_u64;
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap();
+    let geometry = Geometry::TESTING;
+    let data_size = 112_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let commitment = tree.data_commitment();
 
     let chunk = &data[64..96];
     let chunk_proof = tree.chunk_proof(2).unwrap();
-    verify_chunk(&geom, &commitment, n, 2, chunk, &chunk_proof).unwrap();
-    assert_every_bit_flip_mismatches(&chunk_proof, |bad| {
-        verify_chunk(&geom, &commitment, n, 2, chunk, bad)
+    verify_chunk(&geometry, &commitment, data_size, 2, chunk, &chunk_proof).unwrap();
+    assert_every_bit_flip_mismatches(&chunk_proof, |flipped_proof| {
+        verify_chunk(&geometry, &commitment, data_size, 2, chunk, flipped_proof)
     });
 
     let chunk3 = &data[96..112];
     let segment = &chunk3[8..16];
     let segment_proof = tree.segment_proof(3, 1, chunk3).unwrap();
-    verify_segment(&geom, &commitment, n, 3, 1, segment, &segment_proof).unwrap();
-    assert_every_bit_flip_mismatches(&segment_proof, |bad| {
-        verify_segment(&geom, &commitment, n, 3, 1, segment, bad)
+    verify_segment(
+        &geometry,
+        &commitment,
+        data_size,
+        3,
+        1,
+        segment,
+        &segment_proof,
+    )
+    .unwrap();
+    assert_every_bit_flip_mismatches(&segment_proof, |flipped_proof| {
+        verify_segment(
+            &geometry,
+            &commitment,
+            data_size,
+            3,
+            1,
+            segment,
+            flipped_proof,
+        )
     });
 }
 
@@ -290,14 +367,14 @@ fn assert_every_bit_flip_mismatches(
     check: impl Fn(&[u8]) -> Result<(), VerifyError>,
 ) {
     assert!(!proof.is_empty());
-    for i in 0..proof.len() {
+    for byte_index in 0..proof.len() {
         for bit in 0..8 {
-            let mut bad = proof.to_vec();
-            bad[i] ^= 1 << bit;
+            let mut flipped_proof = proof.to_vec();
+            flipped_proof[byte_index] ^= 1 << bit;
             assert_eq!(
-                check(&bad).unwrap_err(),
+                check(&flipped_proof).unwrap_err(),
                 VerifyError::CommitmentMismatch,
-                "byte {i} bit {bit}"
+                "byte {byte_index} bit {bit}"
             );
         }
     }
@@ -312,26 +389,27 @@ fn a_64_byte_segment_equal_to_two_hashes_is_a_leaf() {
     bytes[..32].copy_from_slice(left.as_bytes());
     bytes[32..].copy_from_slice(right.as_bytes());
     assert_ne!(leaf(&bytes), node(&left, &right));
-    let geom = Geometry::new(64, 1, 1).unwrap();
-    assert_eq!(geom.height(), 0);
-    assert_eq!(chunk_root(&geom, &bytes).unwrap(), leaf(&bytes));
+    let geometry = Geometry::new(64, 1, 1).unwrap();
+    assert_eq!(geometry.height(), 0);
+    assert_eq!(chunk_root(&geometry, &bytes).unwrap(), leaf(&bytes));
 }
 
 #[test]
 fn verify_size_rejects_a_different_size_with_no_range_check() {
     // spec §5: `verify_size` takes any `u64`, including 0. No geometry.
-    let geom = Geometry::TESTING;
-    let n = 32_u64;
-    let tree = DataTree::from_bytes(geom, &pattern(usize::try_from(n).unwrap())).unwrap();
+    let geometry = Geometry::TESTING;
+    let data_size = 32_u64;
+    let tree =
+        DataTree::from_bytes(geometry, &pattern(usize::try_from(data_size).unwrap())).unwrap();
     let commitment = tree.data_commitment();
     let root = tree.data_tree_root();
-    verify_size(&commitment, &root, n).unwrap();
+    verify_size(&commitment, &root, data_size).unwrap();
     assert_eq!(
         verify_size(&commitment, &root, 0).unwrap_err(),
         VerifyError::CommitmentMismatch
     );
     assert_eq!(
-        verify_size(&commitment, &root, n - 1).unwrap_err(),
+        verify_size(&commitment, &root, data_size - 1).unwrap_err(),
         VerifyError::CommitmentMismatch
     );
 }
@@ -345,23 +423,23 @@ fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
     // Test geometry, `n = 96` (`C = 3`), `c = 0`, `depth = 2`.
     // `n = 97` is `C = 4`, and `depth(0, 4) = 2` as well. The two-hash proof
     // `[R1, R2]` climbs to the original root under `C = 4`.
-    let geom = Geometry::TESTING;
-    let n = 96_u64;
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap();
+    let geometry = Geometry::TESTING;
+    let data_size = 96_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let anchored = tree.data_commitment();
     let root = tree.data_tree_root();
     let chunk = &data[..32];
     let proof = tree.chunk_proof(0).unwrap();
     assert_eq!(depth(0, 3), 2);
     assert_eq!(depth(0, 4), 2);
-    verify_chunk(&geom, &anchored, n, 0, chunk, &proof).unwrap();
+    verify_chunk(&geometry, &anchored, data_size, 0, chunk, &proof).unwrap();
 
-    let n_wrong = 97_u64;
-    let rederived = hash::data_commitment(&root, n_wrong);
-    verify_chunk(&geom, &rederived, n_wrong, 0, chunk, &proof).unwrap();
+    let wrong_data_size = 97_u64;
+    let rederived = hash::data_commitment(&root, wrong_data_size);
+    verify_chunk(&geometry, &rederived, wrong_data_size, 0, chunk, &proof).unwrap();
     assert_eq!(
-        verify_chunk(&geom, &anchored, n_wrong, 0, chunk, &proof).unwrap_err(),
+        verify_chunk(&geometry, &anchored, wrong_data_size, 0, chunk, &proof).unwrap_err(),
         VerifyError::CommitmentMismatch
     );
 
@@ -371,7 +449,15 @@ fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
     assert_eq!(depth(2, 3), 1);
     assert_eq!(right_proof.len(), 32);
     assert_eq!(
-        verify_chunk(&geom, &rederived, n_wrong, 2, right, &right_proof).unwrap_err(),
+        verify_chunk(
+            &geometry,
+            &rederived,
+            wrong_data_size,
+            2,
+            right,
+            &right_proof
+        )
+        .unwrap_err(),
         VerifyError::InvalidProofLength {
             expected: 64,
             actual: 32

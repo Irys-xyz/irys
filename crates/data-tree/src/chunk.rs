@@ -10,48 +10,56 @@ use crate::hash::{empty, leaf, node};
 use crate::types::NodeHash;
 
 /// Chunk root of `bytes`. The length must be in `1..=chunk_size` (spec §4).
-pub fn chunk_root(geom: &Geometry, bytes: &[u8]) -> Result<NodeHash, ChunkLengthError> {
-    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if len == 0 {
+pub fn chunk_root(geometry: &Geometry, bytes: &[u8]) -> Result<NodeHash, ChunkLengthError> {
+    let chunk_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if chunk_length == 0 {
         return Err(ChunkLengthError::Empty);
     }
-    if len > geom.chunk_size() {
+    if chunk_length > geometry.chunk_size() {
         return Err(ChunkLengthError::TooLong {
-            len,
-            chunk_size: geom.chunk_size(),
+            chunk_length,
+            chunk_size: geometry.chunk_size(),
         });
     }
-    Ok(subtree(geom, bytes, 0, geom.height()))
+    Ok(subtree(geometry, bytes, 0, geometry.height()))
 }
 
 /// `h` in-chunk siblings for segment `j`, level 0 first (spec §4, §5).
 ///
 /// The caller guarantees `j < segments_per_chunk` and that `bytes` is a legal
 /// chunk. An out-of-range `j` still returns hashes; it does not panic.
-pub(crate) fn segment_siblings(geom: &Geometry, bytes: &[u8], j: u32) -> Vec<NodeHash> {
-    let height = geom.height();
-    let mut siblings = Vec::with_capacity(usize::try_from(height).unwrap_or(0));
-    let mut index = j;
-    for level in 0..height {
+///
+/// `j` is `segment_index`.
+pub(crate) fn segment_siblings(
+    geometry: &Geometry,
+    bytes: &[u8],
+    segment_index: u32,
+) -> Vec<NodeHash> {
+    let subtree_height = geometry.height();
+    let mut siblings = Vec::with_capacity(usize::try_from(subtree_height).unwrap_or(0));
+    let mut segment_index = segment_index;
+    for level in 0..subtree_height {
         // `j < segments_per_chunk <= 256` and `level < height <= 8`, so this fits.
-        let start_leaf = (index ^ 1).checked_shl(level).unwrap_or(u32::MAX);
-        siblings.push(subtree(geom, bytes, start_leaf, level));
-        index >>= 1;
+        let start_leaf = (segment_index ^ 1).checked_shl(level).unwrap_or(u32::MAX);
+        siblings.push(subtree(geometry, bytes, start_leaf, level));
+        segment_index >>= 1;
     }
     siblings
 }
 
-/// Root of the aligned subtree of height `height` whose first leaf is `start_leaf`.
-fn subtree(geom: &Geometry, bytes: &[u8], start_leaf: u32, height: u32) -> NodeHash {
-    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    let Some(range_start) = (start_leaf as u64).checked_mul(geom.segment_size()) else {
-        return empty(height.min(8));
+/// Root of the aligned subtree of height `subtree_height` whose first leaf is `start_leaf`.
+fn subtree(geometry: &Geometry, bytes: &[u8], start_leaf: u32, subtree_height: u32) -> NodeHash {
+    let chunk_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let Some(range_start) = (start_leaf as u64).checked_mul(geometry.segment_size()) else {
+        return empty(subtree_height.min(8));
     };
-    if range_start >= len {
-        return empty(height.min(8));
+    if range_start >= chunk_length {
+        return empty(subtree_height.min(8));
     }
-    if height == 0 {
-        let end = range_start.saturating_add(geom.segment_size()).min(len);
+    if subtree_height == 0 {
+        let end = range_start
+            .saturating_add(geometry.segment_size())
+            .min(chunk_length);
         // `range_start < len` and `len` came from `bytes.len()`, so both ends fit.
         // Clamp anyway: a verifier must not panic on a slice (spec §10).
         let start = usize::try_from(range_start).unwrap_or(bytes.len());
@@ -61,9 +69,9 @@ fn subtree(geom: &Geometry, bytes: &[u8], start_leaf: u32, height: u32) -> NodeH
         return leaf(&bytes[start..end]);
     }
     // `height` is at most 8, so the shift and the leaf index fit.
-    let half = 1_u32 << (height - 1);
-    let left = subtree(geom, bytes, start_leaf, height - 1);
-    let right_start = start_leaf.saturating_add(half);
-    let right = subtree(geom, bytes, right_start, height - 1);
+    let left_subtree_size = 1_u32 << (subtree_height - 1);
+    let left = subtree(geometry, bytes, start_leaf, subtree_height - 1);
+    let right_start = start_leaf.saturating_add(left_subtree_size);
+    let right = subtree(geometry, bytes, right_start, subtree_height - 1);
     node(&left, &right)
 }

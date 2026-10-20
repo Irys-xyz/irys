@@ -8,21 +8,21 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum GeometryError {
     /// `segments_per_chunk` is not a power of two in `1..=256`.
-    #[error("segments_per_chunk {spc} is not a power of two in 1..=256")]
+    #[error("segments_per_chunk {segments_per_chunk} is not a power of two in 1..=256")]
     SegmentsPerChunk {
         /// Rejected value.
-        spc: u32,
+        segments_per_chunk: u32,
     },
     /// `chunk_size` is 0.
     #[error("chunk_size must be greater than 0")]
     ChunkSizeZero,
     /// `chunk_size` is not divisible by `segments_per_chunk`.
-    #[error("chunk_size {chunk_size} is not divisible by segments_per_chunk {spc}")]
+    #[error("chunk_size {chunk_size} is not divisible by segments_per_chunk {segments_per_chunk}")]
     ChunkSizeNotMultiple {
         /// Rejected chunk size.
         chunk_size: u64,
         /// Rejected segments per chunk.
-        spc: u32,
+        segments_per_chunk: u32,
     },
     /// `max_data_tx_chunks` is 0.
     #[error("max_data_tx_chunks must be at least 1")]
@@ -36,28 +36,28 @@ pub enum GeometryError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum SizeError {
     /// `n` is 0 or above `max_data_tx_chunks * chunk_size`.
-    #[error("data_size {n} is outside 1..={max}")]
+    #[error("data_size {data_size} is outside 1..={max_data_size}")]
     DataSizeOutOfRange {
-        /// Rejected byte length.
-        n: u64,
+        /// Rejected byte length (`n`).
+        data_size: u64,
         /// Maximum byte length for this geometry.
-        max: u64,
+        max_data_size: u64,
     },
     /// Chunk index `c` is not strictly below the chunk count.
-    #[error("chunk index {c} is outside 0..{chunk_count}")]
+    #[error("chunk index {chunk_index} is outside 0..{chunk_count}")]
     ChunkIndexOutOfRange {
-        /// Rejected chunk index.
-        c: u32,
+        /// Rejected chunk index (`c`).
+        chunk_index: u32,
         /// Chunk count for the data size.
         chunk_count: u32,
     },
     /// Segment index `j` is not strictly below `segments_per_chunk`.
-    #[error("segment index {j} is outside 0..{spc}")]
+    #[error("segment index {segment_index} is outside 0..{segments_per_chunk}")]
     SegmentIndexOutOfRange {
-        /// Rejected segment index.
-        j: u32,
+        /// Rejected segment index (`j`).
+        segment_index: u32,
         /// Segments per chunk.
-        spc: u32,
+        segments_per_chunk: u32,
     },
 }
 
@@ -68,10 +68,10 @@ pub enum ChunkLengthError {
     #[error("chunk is empty")]
     Empty,
     /// The slice is longer than `chunk_size`.
-    #[error("chunk length {len} exceeds chunk_size {chunk_size}")]
+    #[error("chunk length {chunk_length} exceeds chunk_size {chunk_size}")]
     TooLong {
         /// Rejected length.
-        len: u64,
+        chunk_length: u64,
         /// Geometry chunk size.
         chunk_size: u64,
     },
@@ -87,10 +87,10 @@ pub enum BuildError {
     #[error("push after a short chunk")]
     AfterShortChunk,
     /// The upload would exceed `max_data_tx_chunks`.
-    #[error("chunk count exceeds max_data_tx_chunks {max}")]
+    #[error("chunk count exceeds max_data_tx_chunks {max_data_tx_chunks}")]
     TooManyChunks {
         /// Configured maximum.
-        max: u32,
+        max_data_tx_chunks: u32,
     },
     /// `finish` with no chunks. `data_size` must be at least 1.
     #[error("data tree has no chunks")]

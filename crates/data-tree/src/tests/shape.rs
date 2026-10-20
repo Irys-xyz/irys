@@ -14,9 +14,9 @@ use crate::types::NodeHash;
 /// A proof for every chunk of every `C` does not finish before the test timeout.
 #[test]
 fn builder_matches_spec_shape_for_every_chunk_count() {
-    let geom = Geometry::TESTING;
-    let len = geom.chunk_size();
-    let mut builder = DataTreeBuilder::new(geom);
+    let geometry = Geometry::TESTING;
+    let chunk_size = geometry.chunk_size();
+    let mut builder = DataTreeBuilder::new(geometry);
     let mut leaves = Vec::<NodeHash>::with_capacity(4097);
     // One entry per contiguous leaf range. Rebuilding every prefix from scratch
     // repeats those hashes (opt-level 0) and does not finish in the test budget.
@@ -25,7 +25,7 @@ fn builder_matches_spec_shape_for_every_chunk_count() {
     for chunk_count in 1_u32..=4097 {
         let leaf = synthetic(chunk_count - 1);
         leaves.push(leaf);
-        builder.push_chunk_root(leaf, len).unwrap();
+        builder.push_chunk_root(leaf, chunk_size).unwrap();
         let tree = builder.clone().finish().unwrap();
         let expect_layers = spec_layers(&leaves, &mut layer_cache);
         assert_eq!(
@@ -37,7 +37,7 @@ fn builder_matches_spec_shape_for_every_chunk_count() {
             assert_eq!(got, expect, "layer {level} C={chunk_count}");
         }
         assert_eq!(tree.chunk_count(), chunk_count);
-        assert_eq!(tree.data_size(), u64::from(chunk_count) * len);
+        assert_eq!(tree.data_size(), u64::from(chunk_count) * chunk_size);
         let expect_root = spec_t_cached(&leaves, &mut root_cache);
         assert_eq!(
             tree.data_tree_root().as_bytes(),
@@ -60,20 +60,25 @@ fn builder_matches_spec_shape_for_every_chunk_count() {
                 "fresh root C={chunk_count}"
             );
             assert_eq!(expect_root, path_root, "cached root C={chunk_count}");
-            for (c, expect_path) in expect_paths.iter().enumerate() {
-                let c = u32::try_from(c).unwrap();
-                let got = tree.chunk_proof(c).unwrap();
+            for (chunk_index, expect_path) in expect_paths.iter().enumerate() {
+                let chunk_index = u32::try_from(chunk_index).unwrap();
+                let got = tree.chunk_proof(chunk_index).unwrap();
                 let flat = flatten(expect_path);
-                assert_eq!(got, flat, "path C={chunk_count} c={c}");
+                assert_eq!(got, flat, "path C={chunk_count} c={chunk_index}");
                 assert_eq!(
                     got.len(),
-                    usize::try_from(depth(c, chunk_count)).unwrap() * 32,
-                    "depth C={chunk_count} c={c}"
+                    usize::try_from(depth(chunk_index, chunk_count)).unwrap() * 32,
+                    "depth C={chunk_count} c={chunk_index}"
                 );
                 assert_eq!(
-                    climb(leaves[usize::try_from(c).unwrap()], c, chunk_count, &got),
+                    climb(
+                        leaves[usize::try_from(chunk_index).unwrap()],
+                        chunk_index,
+                        chunk_count,
+                        &got
+                    ),
                     Some(path_root),
-                    "climb C={chunk_count} c={c}"
+                    "climb C={chunk_count} c={chunk_index}"
                 );
             }
         }
@@ -91,9 +96,9 @@ fn checks_every_chunk_proof(chunk_count: u32) -> bool {
     BOUNDARY.binary_search(&chunk_count).is_ok()
 }
 
-fn synthetic(i: u32) -> NodeHash {
+fn synthetic(chunk_index: u32) -> NodeHash {
     let mut bytes = [0_u8; 32];
-    bytes[..4].copy_from_slice(&i.to_be_bytes());
+    bytes[..4].copy_from_slice(&chunk_index.to_be_bytes());
     NodeHash(bytes)
 }
 
@@ -174,9 +179,9 @@ fn spec_t_range(
     let value = if end - start == 1 {
         nodes[start]
     } else {
-        let k = largest_power_of_two_below(end - start);
-        let left = spec_t_range(nodes, start, start + k, cache);
-        let right = spec_t_range(nodes, start + k, end, cache);
+        let left_subtree_size = largest_power_of_two_below(end - start);
+        let left = spec_t_range(nodes, start, start + left_subtree_size, cache);
+        let right = spec_t_range(nodes, start + left_subtree_size, end, cache);
         node(&left, &right)
     };
     cache.insert((start, end), value);
@@ -188,9 +193,9 @@ fn spec_paths(nodes: &[NodeHash]) -> (NodeHash, Vec<Vec<NodeHash>>) {
     if nodes.len() == 1 {
         return (nodes[0], vec![Vec::new()]);
     }
-    let k = largest_power_of_two_below(nodes.len());
-    let (left_root, left_paths) = spec_paths(&nodes[..k]);
-    let (right_root, right_paths) = spec_paths(&nodes[k..]);
+    let left_subtree_size = largest_power_of_two_below(nodes.len());
+    let (left_root, left_paths) = spec_paths(&nodes[..left_subtree_size]);
+    let (right_root, right_paths) = spec_paths(&nodes[left_subtree_size..]);
     let root = node(&left_root, &right_root);
     let mut paths = Vec::with_capacity(nodes.len());
     for mut path in left_paths {
@@ -204,6 +209,6 @@ fn spec_paths(nodes: &[NodeHash]) -> (NodeHash, Vec<Vec<NodeHash>>) {
     (root, paths)
 }
 
-fn largest_power_of_two_below(count: usize) -> usize {
-    1_usize << (usize::BITS - 1 - (count - 1).leading_zeros())
+fn largest_power_of_two_below(chunk_count: usize) -> usize {
+    1_usize << (usize::BITS - 1 - (chunk_count - 1).leading_zeros())
 }

@@ -12,61 +12,69 @@ use crate::shape::{climb, depth};
 use crate::types::{DataCommitment, DataTreeRoot, NodeHash};
 
 /// Check one chunk against an anchored commitment (spec §5, §6).
+///
+/// `c` is `chunk_index`.
 pub fn verify_chunk(
-    geom: &Geometry,
+    geometry: &Geometry,
     commitment: &DataCommitment,
     data_size: u64,
-    c: u32,
+    chunk_index: u32,
     bytes: &[u8],
     proof: &[u8],
 ) -> Result<(), VerifyError> {
-    let chunk_len = geom.chunk_len(data_size, c)?;
-    if let Err(actual) = exact_len(bytes, chunk_len) {
+    let chunk_length = geometry.chunk_len(data_size, chunk_index)?;
+    if let Err(actual) = exact_byte_length(bytes, chunk_length) {
         return Err(VerifyError::InvalidChunkLength {
-            expected: chunk_len,
+            expected: chunk_length,
             actual,
         });
     }
-    let chunk_count = geom.chunk_count(data_size)?;
-    let expected_proof = proof_byte_len(depth(c, chunk_count));
+    let chunk_count = geometry.chunk_count(data_size)?;
+    let expected_proof = proof_byte_length(depth(chunk_index, chunk_count));
     if proof.len() != expected_proof {
         return Err(VerifyError::InvalidProofLength {
             expected: expected_proof,
             actual: proof.len(),
         });
     }
-    let root = match chunk_root(geom, bytes) {
+    let root = match chunk_root(geometry, bytes) {
         Ok(root) => root,
         Err(_) => {
             return Err(VerifyError::InvalidChunkLength {
-                expected: chunk_len,
-                actual: len_u64(bytes),
+                expected: chunk_length,
+                actual: byte_length(bytes),
             });
         }
     };
-    let climbed = climb(root, c, chunk_count, proof).ok_or(VerifyError::CommitmentMismatch)?;
+    let climbed =
+        climb(root, chunk_index, chunk_count, proof).ok_or(VerifyError::CommitmentMismatch)?;
     commitment_matches(commitment, climbed, data_size)
 }
 
 /// Check one segment against an anchored commitment (spec §5, §6).
+///
+/// `c` is `chunk_index`. `j` is `segment_index`.
 pub fn verify_segment(
-    geom: &Geometry,
+    geometry: &Geometry,
     commitment: &DataCommitment,
     data_size: u64,
-    c: u32,
-    j: u32,
+    chunk_index: u32,
+    segment_index: u32,
     bytes: &[u8],
     proof: &[u8],
 ) -> Result<(), VerifyError> {
-    let segment_len = geom.segment_len(data_size, c, j)?;
-    if let Err(actual) = exact_len(bytes, segment_len) {
+    let segment_length = geometry.segment_len(data_size, chunk_index, segment_index)?;
+    if let Err(actual) = exact_byte_length(bytes, segment_length) {
         return Err(VerifyError::InvalidSegmentLength {
-            expected: segment_len,
+            expected: segment_length,
             actual,
         });
     }
-    let chunk_count = geom.chunk_count(data_size)?;
-    let hash_count = match geom.height().checked_add(depth(c, chunk_count)) {
+    let chunk_count = geometry.chunk_count(data_size)?;
+    let hash_count = match geometry
+        .height()
+        .checked_add(depth(chunk_index, chunk_count))
+    {
         Some(count) => count,
         None => {
             return Err(VerifyError::InvalidProofLength {
@@ -75,14 +83,14 @@ pub fn verify_segment(
             });
         }
     };
-    let expected_proof = proof_byte_len(hash_count);
+    let expected_proof = proof_byte_length(hash_count);
     if proof.len() != expected_proof {
         return Err(VerifyError::InvalidProofLength {
             expected: expected_proof,
             actual: proof.len(),
         });
     }
-    let in_chunk_bytes = usize::try_from(geom.height())
+    let in_chunk_bytes = usize::try_from(geometry.height())
         .unwrap_or(0)
         .saturating_mul(32);
     let Some((in_chunk, chunk_proof)) = proof.split_at_checked(in_chunk_bytes) else {
@@ -92,7 +100,7 @@ pub fn verify_segment(
         });
     };
     let mut root = leaf(bytes);
-    let mut index = j;
+    let mut segment_index = segment_index;
     for sibling in in_chunk.chunks_exact(32) {
         let Ok(bytes) = <[u8; 32]>::try_from(sibling) else {
             return Err(VerifyError::InvalidProofLength {
@@ -101,19 +109,21 @@ pub fn verify_segment(
             });
         };
         let sibling = NodeHash(bytes);
-        root = if index & 1 == 0 {
+        root = if segment_index & 1 == 0 {
             node(&root, &sibling)
         } else {
             node(&sibling, &root)
         };
-        index >>= 1;
+        segment_index >>= 1;
     }
-    let climbed =
-        climb(root, c, chunk_count, chunk_proof).ok_or(VerifyError::CommitmentMismatch)?;
+    let climbed = climb(root, chunk_index, chunk_count, chunk_proof)
+        .ok_or(VerifyError::CommitmentMismatch)?;
     commitment_matches(commitment, climbed, data_size)
 }
 
 /// `node(data_tree_root, size_witness(n)) == commitment` (spec §5).
+///
+/// `n` is `data_size`.
 pub fn verify_size(
     commitment: &DataCommitment,
     root: &DataTreeRoot,
@@ -139,7 +149,7 @@ fn commitment_matches(
     }
 }
 
-fn exact_len(bytes: &[u8], expected: u64) -> Result<(), u64> {
+fn exact_byte_length(bytes: &[u8], expected: u64) -> Result<(), u64> {
     match u64::try_from(bytes.len()) {
         Ok(actual) if actual == expected => Ok(()),
         Ok(actual) => Err(actual),
@@ -147,11 +157,11 @@ fn exact_len(bytes: &[u8], expected: u64) -> Result<(), u64> {
     }
 }
 
-fn len_u64(bytes: &[u8]) -> u64 {
+fn byte_length(bytes: &[u8]) -> u64 {
     u64::try_from(bytes.len()).unwrap_or(u64::MAX)
 }
 
-fn proof_byte_len(hash_count: u32) -> usize {
+fn proof_byte_length(hash_count: u32) -> usize {
     usize::try_from(hash_count)
         .ok()
         .and_then(|count| count.checked_mul(32))

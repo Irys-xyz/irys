@@ -19,8 +19,8 @@ fn finish_without_chunks_fails() {
 
 #[test]
 fn push_rejects_empty_long_and_too_many() {
-    let geom = Geometry::new(32, 4, 2).unwrap();
-    let mut builder = DataTreeBuilder::new(geom);
+    let geometry = Geometry::new(32, 4, 2).unwrap();
+    let mut builder = DataTreeBuilder::new(geometry);
     assert_eq!(
         builder.push_chunk_root(synthetic(0), 0).unwrap_err(),
         BuildError::ChunkLength(ChunkLengthError::Empty)
@@ -32,7 +32,7 @@ fn push_rejects_empty_long_and_too_many() {
     assert_eq!(
         builder.push_chunk_root(synthetic(0), 33).unwrap_err(),
         BuildError::ChunkLength(ChunkLengthError::TooLong {
-            len: 33,
+            chunk_length: 33,
             chunk_size: 32
         })
     );
@@ -40,7 +40,9 @@ fn push_rejects_empty_long_and_too_many() {
     builder.push_chunk_root(synthetic(1), 32).unwrap();
     assert_eq!(
         builder.push_chunk_root(synthetic(2), 32).unwrap_err(),
-        BuildError::TooManyChunks { max: 2 }
+        BuildError::TooManyChunks {
+            max_data_tx_chunks: 2
+        }
     );
 }
 
@@ -63,13 +65,13 @@ fn push_after_a_short_chunk_fails() {
 
 #[test]
 fn push_chunk_matches_push_chunk_root() {
-    let geom = Geometry::TESTING;
+    let geometry = Geometry::TESTING;
     let bytes = pattern(32);
-    let mut from_bytes = DataTreeBuilder::new(geom);
+    let mut from_bytes = DataTreeBuilder::new(geometry);
     from_bytes.push_chunk(&bytes).unwrap();
-    let mut from_root = DataTreeBuilder::new(geom);
+    let mut from_root = DataTreeBuilder::new(geometry);
     from_root
-        .push_chunk_root(chunk_root(&geom, &bytes).unwrap(), 32)
+        .push_chunk_root(chunk_root(&geometry, &bytes).unwrap(), 32)
         .unwrap();
     assert_eq!(
         from_bytes.finish().unwrap().data_tree_root(),
@@ -77,8 +79,8 @@ fn push_chunk_matches_push_chunk_root() {
     );
 }
 
-fn synthetic(i: u32) -> NodeHash {
+fn synthetic(chunk_index: u32) -> NodeHash {
     let mut bytes = [0_u8; 32];
-    bytes[..4].copy_from_slice(&i.to_be_bytes());
+    bytes[..4].copy_from_slice(&chunk_index.to_be_bytes());
     NodeHash(bytes)
 }

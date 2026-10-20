@@ -30,9 +30,7 @@ impl Geometry {
         max_data_tx_chunks: u32,
     ) -> Result<Self, GeometryError> {
         if segments_per_chunk > 256 || !segments_per_chunk.is_power_of_two() {
-            return Err(GeometryError::SegmentsPerChunk {
-                spc: segments_per_chunk,
-            });
+            return Err(GeometryError::SegmentsPerChunk { segments_per_chunk });
         }
         if chunk_size == 0 {
             return Err(GeometryError::ChunkSizeZero);
@@ -40,7 +38,7 @@ impl Geometry {
         if !chunk_size.is_multiple_of(segments_per_chunk as u64) {
             return Err(GeometryError::ChunkSizeNotMultiple {
                 chunk_size,
-                spc: segments_per_chunk,
+                segments_per_chunk,
             });
         }
         if max_data_tx_chunks == 0 {
@@ -94,33 +92,52 @@ impl Geometry {
         self.chunk_size * (self.max_data_tx_chunks as u64)
     }
 
-    /// `ceil(n / chunk_size)` when `1 <= n <= max_data_size`.
-    pub const fn chunk_count(&self, n: u64) -> Result<u32, SizeError> {
-        let max = self.max_data_size();
-        if n == 0 || n > max {
-            return Err(SizeError::DataSizeOutOfRange { n, max });
+    /// `C = ceil(n / chunk_size)` when `1 <= n <= max_data_size`.
+    ///
+    /// `n` is `data_size`.
+    pub const fn chunk_count(&self, data_size: u64) -> Result<u32, SizeError> {
+        let max_data_size = self.max_data_size();
+        if data_size == 0 || data_size > max_data_size {
+            return Err(SizeError::DataSizeOutOfRange {
+                data_size,
+                max_data_size,
+            });
         }
-        let count = n.div_ceil(self.chunk_size);
-        // `TryFrom` is not a const trait yet. `count` fits `u32` whenever `n`
-        // fits this geometry: `C <= max_data_tx_chunks`.
+        let count = data_size.div_ceil(self.chunk_size);
+        // `TryFrom` is not a const trait yet. `count` fits `u32` whenever
+        // `data_size` fits this geometry: `C <= max_data_tx_chunks`.
         if count > u32::MAX as u64 {
-            return Err(SizeError::DataSizeOutOfRange { n, max });
+            return Err(SizeError::DataSizeOutOfRange {
+                data_size,
+                max_data_size,
+            });
         }
         Ok(count as u32)
     }
 
     /// Byte length of chunk `c`. Requires `c < chunk_count(n)` (spec §2).
-    pub fn chunk_len(&self, n: u64, c: u32) -> Result<u64, SizeError> {
-        let chunk_count = self.chunk_count(n)?;
-        if c >= chunk_count {
-            return Err(SizeError::ChunkIndexOutOfRange { c, chunk_count });
+    ///
+    /// `n` is `data_size`. `c` is `chunk_index`.
+    pub fn chunk_len(&self, data_size: u64, chunk_index: u32) -> Result<u64, SizeError> {
+        let chunk_count = self.chunk_count(data_size)?;
+        if chunk_index >= chunk_count {
+            return Err(SizeError::ChunkIndexOutOfRange {
+                chunk_index,
+                chunk_count,
+            });
         }
-        let Some(start) = (c as u64).checked_mul(self.chunk_size) else {
-            return Err(SizeError::ChunkIndexOutOfRange { c, chunk_count });
+        let Some(start) = (chunk_index as u64).checked_mul(self.chunk_size) else {
+            return Err(SizeError::ChunkIndexOutOfRange {
+                chunk_index,
+                chunk_count,
+            });
         };
         // `c < C` and `C = ceil(n / chunk_size)` imply `start < n`.
-        let Some(remain) = n.checked_sub(start) else {
-            return Err(SizeError::ChunkIndexOutOfRange { c, chunk_count });
+        let Some(remain) = data_size.checked_sub(start) else {
+            return Err(SizeError::ChunkIndexOutOfRange {
+                chunk_index,
+                chunk_count,
+            });
         };
         Ok(if remain < self.chunk_size {
             remain
@@ -134,44 +151,61 @@ impl Geometry {
     /// Requires `c < chunk_count(n)` and `j < segments_per_chunk`. Returns 0 when
     /// the segment starts at or past `n` (spec §2). The subtraction runs only
     /// when the start is strictly below `n`.
-    pub fn segment_len(&self, n: u64, c: u32, j: u32) -> Result<u64, SizeError> {
-        let chunk_count = self.chunk_count(n)?;
-        if c >= chunk_count {
-            return Err(SizeError::ChunkIndexOutOfRange { c, chunk_count });
-        }
-        if j >= self.segments_per_chunk {
-            return Err(SizeError::SegmentIndexOutOfRange {
-                j,
-                spc: self.segments_per_chunk,
+    ///
+    /// `n` is `data_size`. `c` is `chunk_index`. `j` is `segment_index`.
+    pub fn segment_len(
+        &self,
+        data_size: u64,
+        chunk_index: u32,
+        segment_index: u32,
+    ) -> Result<u64, SizeError> {
+        let chunk_count = self.chunk_count(data_size)?;
+        if chunk_index >= chunk_count {
+            return Err(SizeError::ChunkIndexOutOfRange {
+                chunk_index,
+                chunk_count,
             });
         }
-        let seg = self.segment_size();
-        let Some(base) = (c as u64).checked_mul(self.chunk_size) else {
-            return Err(SizeError::ChunkIndexOutOfRange { c, chunk_count });
-        };
-        let Some(off) = (j as u64).checked_mul(seg) else {
+        if segment_index >= self.segments_per_chunk {
             return Err(SizeError::SegmentIndexOutOfRange {
-                j,
-                spc: self.segments_per_chunk,
+                segment_index,
+                segments_per_chunk: self.segments_per_chunk,
+            });
+        }
+        let segment_size = self.segment_size();
+        let Some(chunk_start) = (chunk_index as u64).checked_mul(self.chunk_size) else {
+            return Err(SizeError::ChunkIndexOutOfRange {
+                chunk_index,
+                chunk_count,
+            });
+        };
+        let Some(segment_offset) = (segment_index as u64).checked_mul(segment_size) else {
+            return Err(SizeError::SegmentIndexOutOfRange {
+                segment_index,
+                segments_per_chunk: self.segments_per_chunk,
             });
         };
         // Overflow means the start does not fit in `u64`, so it is past `n`.
         // Fail closed: a 0 here would let an empty slice stand in for real bytes.
-        let Some(start) = base.checked_add(off) else {
+        let Some(start) = chunk_start.checked_add(segment_offset) else {
             return Err(SizeError::DataSizeOutOfRange {
-                n,
-                max: self.max_data_size(),
+                data_size,
+                max_data_size: self.max_data_size(),
             });
         };
-        if start >= n {
+        if start >= data_size {
             return Ok(0);
         }
-        let Some(remain) = n.checked_sub(start) else {
+        let Some(remain) = data_size.checked_sub(start) else {
             return Err(SizeError::DataSizeOutOfRange {
-                n,
-                max: self.max_data_size(),
+                data_size,
+                max_data_size: self.max_data_size(),
             });
         };
-        Ok(if remain < seg { remain } else { seg })
+        Ok(if remain < segment_size {
+            remain
+        } else {
+            segment_size
+        })
     }
 }

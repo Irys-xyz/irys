@@ -17,58 +17,106 @@ proptest! {
 }
 
 fn check_upload(data: &[u8]) -> Result<(), TestCaseError> {
-    let geom = Geometry::TESTING;
-    let n = u64::try_from(data.len()).unwrap();
-    let tree = DataTree::from_bytes(geom, data).unwrap();
+    let geometry = Geometry::TESTING;
+    let data_size = u64::try_from(data.len()).unwrap();
+    let tree = DataTree::from_bytes(geometry, data).unwrap();
     let commitment = tree.data_commitment();
-    for c in 0..tree.chunk_count() {
-        check_chunk(&geom, &commitment, &tree, data, n, c)?;
+    for chunk_index in 0..tree.chunk_count() {
+        check_chunk(&geometry, &commitment, &tree, data, data_size, chunk_index)?;
     }
     Ok(())
 }
 
 fn check_chunk(
-    geom: &Geometry,
+    geometry: &Geometry,
     commitment: &crate::DataCommitment,
     tree: &DataTree,
     data: &[u8],
-    n: u64,
-    c: u32,
+    data_size: u64,
+    chunk_index: u32,
 ) -> Result<(), TestCaseError> {
-    let chunk = chunk_slice(geom, data, n, c);
-    let proof = tree.chunk_proof(c).unwrap();
-    verify_chunk(geom, commitment, n, c, &chunk, &proof)
-        .map_err(|err| TestCaseError::fail(format!("chunk n={n} c={c}: {err}")))?;
-    let mut bad_chunk = chunk.clone();
-    bad_chunk[0] ^= 1;
-    let err = verify_chunk(geom, commitment, n, c, &bad_chunk, &proof).unwrap_err();
-    prop_assert_eq!(err, VerifyError::CommitmentMismatch);
-    check_proof_mutation(proof, |bad| {
-        verify_chunk(geom, commitment, n, c, &chunk, bad)
+    let chunk = chunk_slice(geometry, data, data_size, chunk_index);
+    let proof = tree.chunk_proof(chunk_index).unwrap();
+    verify_chunk(geometry, commitment, data_size, chunk_index, &chunk, &proof).map_err(|err| {
+        TestCaseError::fail(format!("chunk n={data_size} c={chunk_index}: {err}"))
     })?;
-    for j in 0..geom.segments_per_chunk() {
-        check_segment(geom, commitment, tree, data, n, c, &chunk, j)?;
+    let mut flipped_chunk = chunk.clone();
+    flipped_chunk[0] ^= 1;
+    let err = verify_chunk(
+        geometry,
+        commitment,
+        data_size,
+        chunk_index,
+        &flipped_chunk,
+        &proof,
+    )
+    .unwrap_err();
+    prop_assert_eq!(err, VerifyError::CommitmentMismatch);
+    check_proof_mutation(proof, |flipped_proof| {
+        verify_chunk(
+            geometry,
+            commitment,
+            data_size,
+            chunk_index,
+            &chunk,
+            flipped_proof,
+        )
+    })?;
+    for segment_index in 0..geometry.segments_per_chunk() {
+        check_segment(
+            geometry,
+            commitment,
+            tree,
+            data,
+            data_size,
+            chunk_index,
+            &chunk,
+            segment_index,
+        )?;
     }
     Ok(())
 }
 
 fn check_segment(
-    geom: &Geometry,
+    geometry: &Geometry,
     commitment: &crate::DataCommitment,
     tree: &DataTree,
     data: &[u8],
-    n: u64,
-    c: u32,
+    data_size: u64,
+    chunk_index: u32,
     chunk: &[u8],
-    j: u32,
+    segment_index: u32,
 ) -> Result<(), TestCaseError> {
-    let segment = segment_slice(geom, data, n, c, j);
-    let proof = tree.segment_proof(c, j, chunk).unwrap();
-    verify_segment(geom, commitment, n, c, j, &segment, &proof)
-        .map_err(|err| TestCaseError::fail(format!("segment n={n} c={c} j={j}: {err}")))?;
+    let segment = segment_slice(geometry, data, data_size, chunk_index, segment_index);
+    let proof = tree
+        .segment_proof(chunk_index, segment_index, chunk)
+        .unwrap();
+    verify_segment(
+        geometry,
+        commitment,
+        data_size,
+        chunk_index,
+        segment_index,
+        &segment,
+        &proof,
+    )
+    .map_err(|err| {
+        TestCaseError::fail(format!(
+            "segment n={data_size} c={chunk_index} j={segment_index}: {err}"
+        ))
+    })?;
     if segment.is_empty() {
         // No byte to flip. A non-empty slice fails the length check (spec §5).
-        let err = verify_segment(geom, commitment, n, c, j, &[0], &proof).unwrap_err();
+        let err = verify_segment(
+            geometry,
+            commitment,
+            data_size,
+            chunk_index,
+            segment_index,
+            &[0],
+            &proof,
+        )
+        .unwrap_err();
         prop_assert_eq!(
             err,
             VerifyError::InvalidSegmentLength {
@@ -77,13 +125,30 @@ fn check_segment(
             }
         );
     } else {
-        let mut bad = segment.clone();
-        bad[0] ^= 1;
-        let err = verify_segment(geom, commitment, n, c, j, &bad, &proof).unwrap_err();
+        let mut flipped_segment = segment.clone();
+        flipped_segment[0] ^= 1;
+        let err = verify_segment(
+            geometry,
+            commitment,
+            data_size,
+            chunk_index,
+            segment_index,
+            &flipped_segment,
+            &proof,
+        )
+        .unwrap_err();
         prop_assert_eq!(err, VerifyError::CommitmentMismatch);
     }
-    check_proof_mutation(proof, |bad| {
-        verify_segment(geom, commitment, n, c, j, &segment, bad)
+    check_proof_mutation(proof, |flipped_proof| {
+        verify_segment(
+            geometry,
+            commitment,
+            data_size,
+            chunk_index,
+            segment_index,
+            &segment,
+            flipped_proof,
+        )
     })
 }
 
@@ -111,26 +176,36 @@ fn check_proof_mutation(
         );
         return Ok(());
     }
-    let mut bad = proof;
-    bad[0] ^= 1;
-    let err = check(&bad).unwrap_err();
+    let mut flipped_proof = proof;
+    flipped_proof[0] ^= 1;
+    let err = check(&flipped_proof).unwrap_err();
     prop_assert_eq!(err, VerifyError::CommitmentMismatch);
     Ok(())
 }
 
-fn chunk_slice(geom: &Geometry, data: &[u8], n: u64, c: u32) -> Vec<u8> {
-    let start = usize::try_from(u64::from(c) * geom.chunk_size()).unwrap();
-    let len = usize::try_from(geom.chunk_len(n, c).unwrap()).unwrap();
-    data[start..start + len].to_vec()
+fn chunk_slice(geometry: &Geometry, data: &[u8], data_size: u64, chunk_index: u32) -> Vec<u8> {
+    let start = usize::try_from(u64::from(chunk_index) * geometry.chunk_size()).unwrap();
+    let chunk_length =
+        usize::try_from(geometry.chunk_len(data_size, chunk_index).unwrap()).unwrap();
+    data[start..start + chunk_length].to_vec()
 }
 
-fn segment_slice(geom: &Geometry, data: &[u8], n: u64, c: u32, j: u32) -> Vec<u8> {
-    let len = geom.segment_len(n, c, j).unwrap();
-    if len == 0 {
+fn segment_slice(
+    geometry: &Geometry,
+    data: &[u8],
+    data_size: u64,
+    chunk_index: u32,
+    segment_index: u32,
+) -> Vec<u8> {
+    let segment_length = geometry
+        .segment_len(data_size, chunk_index, segment_index)
+        .unwrap();
+    if segment_length == 0 {
         return Vec::new();
     }
-    let start = u64::from(c) * geom.chunk_size() + u64::from(j) * geom.segment_size();
+    let start = u64::from(chunk_index) * geometry.chunk_size()
+        + u64::from(segment_index) * geometry.segment_size();
     let start = usize::try_from(start).unwrap();
-    let len = usize::try_from(len).unwrap();
-    data[start..start + len].to_vec()
+    let segment_length = usize::try_from(segment_length).unwrap();
+    data[start..start + segment_length].to_vec()
 }

@@ -21,7 +21,7 @@ use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, NodeHash, SizeWitness
 /// Accumulates chunk roots into a data tree.
 #[derive(Debug, Clone)]
 pub struct DataTreeBuilder {
-    geom: Geometry,
+    geometry: Geometry,
     layers: Vec<Vec<NodeHash>>,
     data_size: u64,
     last_chunk_short: bool,
@@ -29,9 +29,9 @@ pub struct DataTreeBuilder {
 
 impl DataTreeBuilder {
     /// An empty builder. `finish` fails until at least one chunk is pushed.
-    pub fn new(geom: Geometry) -> Self {
+    pub fn new(geometry: Geometry) -> Self {
         Self {
-            geom,
+            geometry,
             layers: Vec::new(),
             data_size: 0,
             last_chunk_short: false,
@@ -42,76 +42,79 @@ impl DataTreeBuilder {
     ///
     /// The length is checked before hashing (spec §10).
     pub fn push_chunk(&mut self, bytes: &[u8]) -> Result<(), BuildError> {
-        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        self.prepare_push(len)?;
-        let root = chunk_root(&self.geom, bytes)?;
-        self.commit_push(root, len);
+        let chunk_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        self.prepare_push(chunk_length)?;
+        let root = chunk_root(&self.geometry, bytes)?;
+        self.commit_push(root, chunk_length);
         Ok(())
     }
 
     /// Append a chunk root hashed by the caller, with the chunk's byte length.
     ///
-    /// Callers that hash chunks in parallel use this. `len` is 0 or above
-    /// `chunk_size`, a push after a short chunk, and a chunk count above
+    /// Callers that hash chunks in parallel use this. `chunk_length` is 0 or
+    /// above `chunk_size`, a push after a short chunk, and a chunk count above
     /// `max_data_tx_chunks` are errors.
-    pub fn push_chunk_root(&mut self, root: NodeHash, len: u64) -> Result<(), BuildError> {
-        self.prepare_push(len)?;
-        self.commit_push(root, len);
+    pub fn push_chunk_root(&mut self, root: NodeHash, chunk_length: u64) -> Result<(), BuildError> {
+        self.prepare_push(chunk_length)?;
+        self.commit_push(root, chunk_length);
         Ok(())
     }
 
     /// Carry odd tails and return the tree. Fails when no chunk was pushed.
     pub fn finish(mut self) -> Result<DataTree, BuildError> {
-        if self.chunk_len_pushed() == 0 {
+        if self.pushed_chunk_count() == 0 {
             return Err(BuildError::Empty);
         }
         self.carry_odd_tails();
         debug_assert_eq!(self.layers.last().map(Vec::len), Some(1));
         Ok(DataTree {
-            geom: self.geom,
+            geometry: self.geometry,
             layers: self.layers,
             data_size: self.data_size,
         })
     }
 
-    fn prepare_push(&self, len: u64) -> Result<(), BuildError> {
+    fn prepare_push(&self, chunk_length: u64) -> Result<(), BuildError> {
         if self.last_chunk_short {
             return Err(BuildError::AfterShortChunk);
         }
-        if len == 0 {
+        if chunk_length == 0 {
             return Err(BuildError::ChunkLength(ChunkLengthError::Empty));
         }
-        if len > self.geom.chunk_size() {
+        if chunk_length > self.geometry.chunk_size() {
             return Err(BuildError::ChunkLength(ChunkLengthError::TooLong {
-                len,
-                chunk_size: self.geom.chunk_size(),
+                chunk_length,
+                chunk_size: self.geometry.chunk_size(),
             }));
         }
-        if self.chunk_len_pushed() >= self.geom.max_data_tx_chunks() {
+        if self.pushed_chunk_count() >= self.geometry.max_data_tx_chunks() {
             return Err(BuildError::TooManyChunks {
-                max: self.geom.max_data_tx_chunks(),
+                max_data_tx_chunks: self.geometry.max_data_tx_chunks(),
             });
         }
         // `max_data_tx_chunks * chunk_size` fits `u64`, and each push is at most
         // one chunk, so the running total fits. Refuse if it does not.
-        if self.data_size.checked_add(len).is_none() {
+        if self.data_size.checked_add(chunk_length).is_none() {
             return Err(BuildError::TooManyChunks {
-                max: self.geom.max_data_tx_chunks(),
+                max_data_tx_chunks: self.geometry.max_data_tx_chunks(),
             });
         }
         Ok(())
     }
 
-    fn commit_push(&mut self, root: NodeHash, len: u64) {
+    fn commit_push(&mut self, root: NodeHash, chunk_length: u64) {
         self.push_node_at(0, root);
         // `prepare_push` rejected a sum that does not fit.
-        self.data_size = self.data_size.checked_add(len).expect("data_size fits u64");
-        self.last_chunk_short = len < self.geom.chunk_size();
+        self.data_size = self
+            .data_size
+            .checked_add(chunk_length)
+            .expect("data_size fits u64");
+        self.last_chunk_short = chunk_length < self.geometry.chunk_size();
     }
 
-    fn chunk_len_pushed(&self) -> u32 {
-        let len = self.layers.first().map_or(0, Vec::len);
-        u32::try_from(len).unwrap_or(u32::MAX)
+    fn pushed_chunk_count(&self) -> u32 {
+        let layer_length = self.layers.first().map_or(0, Vec::len);
+        u32::try_from(layer_length).unwrap_or(u32::MAX)
     }
 
     fn push_node_at(&mut self, level: usize, hash: NodeHash) {
@@ -120,9 +123,9 @@ impl DataTreeBuilder {
         }
         self.layers[level].push(hash);
         if self.layers[level].len().is_multiple_of(2) {
-            let len = self.layers[level].len();
-            let left = self.layers[level][len - 2];
-            let right = self.layers[level][len - 1];
+            let layer_length = self.layers[level].len();
+            let left = self.layers[level][layer_length - 2];
+            let right = self.layers[level][layer_length - 1];
             let parent = node(&left, &right);
             self.push_node_at(level + 1, parent);
         }
@@ -131,14 +134,14 @@ impl DataTreeBuilder {
     fn carry_odd_tails(&mut self) {
         let mut level = 0;
         while level < self.layers.len() {
-            let len = self.layers[level].len();
-            if !len.is_multiple_of(2) {
+            let layer_length = self.layers[level].len();
+            if !layer_length.is_multiple_of(2) {
                 // A single node on the highest layer is the root. Carrying it
                 // again would hash the root with itself.
-                if len == 1 && level + 1 == self.layers.len() {
+                if layer_length == 1 && level + 1 == self.layers.len() {
                     break;
                 }
-                let tail = self.layers[level][len - 1];
+                let tail = self.layers[level][layer_length - 1];
                 self.push_node_at(level + 1, tail);
             }
             level += 1;
@@ -149,7 +152,7 @@ impl DataTreeBuilder {
 /// A finished data tree: chunk roots, internal nodes, and `data_size`.
 #[derive(Debug, Clone)]
 pub struct DataTree {
-    geom: Geometry,
+    geometry: Geometry,
     layers: Vec<Vec<NodeHash>>,
     data_size: u64,
 }
@@ -159,24 +162,24 @@ impl DataTree {
     ///
     /// Empty `data` is `BuildError::Empty`. A length above the geometry maximum
     /// is `BuildError::TooManyChunks`.
-    pub fn from_bytes(geom: Geometry, data: &[u8]) -> Result<Self, BuildError> {
-        let mut builder = DataTreeBuilder::new(geom);
+    pub fn from_bytes(geometry: Geometry, data: &[u8]) -> Result<Self, BuildError> {
+        let mut builder = DataTreeBuilder::new(geometry);
         if data.is_empty() {
             return builder.finish();
         }
         let mut offset = 0_usize;
         while offset < data.len() {
             let remaining = data.len() - offset;
-            let step = match usize::try_from(geom.chunk_size()) {
+            let chunk_length = match usize::try_from(geometry.chunk_size()) {
                 Ok(chunk_size) => chunk_size.min(remaining),
                 // `chunk_size` does not fit `usize`, so the whole slice is one chunk.
                 Err(_) => remaining,
             };
-            if step == 0 {
+            if chunk_length == 0 {
                 return Err(BuildError::ChunkLength(ChunkLengthError::Empty));
             }
-            builder.push_chunk(&data[offset..offset + step])?;
-            offset += step;
+            builder.push_chunk(&data[offset..offset + chunk_length])?;
+            offset += chunk_length;
         }
         builder.finish()
     }
@@ -194,17 +197,28 @@ impl DataTree {
     }
 
     /// Chunk root stored at index `c`.
-    pub fn chunk_root(&self, c: u32) -> Result<NodeHash, SizeError> {
+    ///
+    /// `c` is `chunk_index`.
+    pub fn chunk_root(&self, chunk_index: u32) -> Result<NodeHash, SizeError> {
         let layer = self.layers.first();
-        let len = layer.map_or(0, Vec::len);
-        let chunk_count = u32::try_from(len).unwrap_or(u32::MAX);
+        let layer_length = layer.map_or(0, Vec::len);
+        let chunk_count = u32::try_from(layer_length).unwrap_or(u32::MAX);
         let Some(layer) = layer else {
-            return Err(SizeError::ChunkIndexOutOfRange { c, chunk_count });
+            return Err(SizeError::ChunkIndexOutOfRange {
+                chunk_index,
+                chunk_count,
+            });
         };
-        let Some(idx) = usize::try_from(c).ok().filter(|idx| *idx < layer.len()) else {
-            return Err(SizeError::ChunkIndexOutOfRange { c, chunk_count });
+        let Some(index) = usize::try_from(chunk_index)
+            .ok()
+            .filter(|index| *index < layer.len())
+        else {
+            return Err(SizeError::ChunkIndexOutOfRange {
+                chunk_index,
+                chunk_count,
+            });
         };
-        Ok(layer[idx])
+        Ok(layer[index])
     }
 
     /// Root over the data only (spec §4).
@@ -223,23 +237,27 @@ impl DataTree {
     }
 
     /// Chunk identity key for index `c` (spec §7).
-    pub fn chunk_key(&self, c: u32) -> Result<ChunkKey, SizeError> {
-        self.ensure_chunk(c)?;
-        Ok(hash::chunk_key(&self.data_commitment(), c))
+    ///
+    /// `c` is `chunk_index`.
+    pub fn chunk_key(&self, chunk_index: u32) -> Result<ChunkKey, SizeError> {
+        self.ensure_chunk(chunk_index)?;
+        Ok(hash::chunk_key(&self.data_commitment(), chunk_index))
     }
 
     /// Chunk proof for index `c`: `32 * depth(c, C)` bytes, leaf to root (spec §5).
-    pub fn chunk_proof(&self, c: u32) -> Result<Vec<u8>, ProofError> {
-        let chunk_count = self.ensure_chunk(c)?;
+    ///
+    /// `c` is `chunk_index`.
+    pub fn chunk_proof(&self, chunk_index: u32) -> Result<Vec<u8>, ProofError> {
+        let chunk_count = self.ensure_chunk(chunk_index)?;
         let mut proof = Vec::new();
         for (level, layer) in self.layers.iter().enumerate() {
-            if let Some(sibling) = sibling_at(layer, c, level) {
+            if let Some(sibling) = sibling_at(layer, chunk_index, level) {
                 proof.extend_from_slice(sibling.as_bytes());
             }
         }
         debug_assert_eq!(
             proof.len(),
-            usize::try_from(depth(c, chunk_count)).unwrap_or(0) * 32
+            usize::try_from(depth(chunk_index, chunk_count)).unwrap_or(0) * 32
         );
         Ok(proof)
     }
@@ -248,46 +266,61 @@ impl DataTree {
     ///
     /// `chunk_bytes` must be exactly `chunk_len` and must hash to the stored
     /// chunk root. Those checks run before the sibling hashes are built.
-    pub fn segment_proof(&self, c: u32, j: u32, chunk_bytes: &[u8]) -> Result<Vec<u8>, ProofError> {
-        let chunk_count = self.ensure_chunk(c)?;
-        if j >= self.geom.segments_per_chunk() {
+    ///
+    /// `c` is `chunk_index`. `j` is `segment_index`.
+    pub fn segment_proof(
+        &self,
+        chunk_index: u32,
+        segment_index: u32,
+        chunk_bytes: &[u8],
+    ) -> Result<Vec<u8>, ProofError> {
+        let chunk_count = self.ensure_chunk(chunk_index)?;
+        if segment_index >= self.geometry.segments_per_chunk() {
             return Err(ProofError::Size(SizeError::SegmentIndexOutOfRange {
-                j,
-                spc: self.geom.segments_per_chunk(),
+                segment_index,
+                segments_per_chunk: self.geometry.segments_per_chunk(),
             }));
         }
-        let expected = self.geom.chunk_len(self.data_size, c)?;
+        let expected = self.geometry.chunk_len(self.data_size, chunk_index)?;
         let actual = u64::try_from(chunk_bytes.len()).unwrap_or(u64::MAX);
         if actual != expected {
             return Err(ProofError::InvalidChunkLength { expected, actual });
         }
-        let computed = chunk_root(&self.geom, chunk_bytes)
+        let computed = chunk_root(&self.geometry, chunk_bytes)
             .map_err(|_| ProofError::InvalidChunkLength { expected, actual })?;
-        if computed != self.chunk_root(c)? {
+        if computed != self.chunk_root(chunk_index)? {
             return Err(ProofError::ChunkRootMismatch);
         }
         let mut proof = Vec::new();
-        for sibling in segment_siblings(&self.geom, chunk_bytes, j) {
+        for sibling in segment_siblings(&self.geometry, chunk_bytes, segment_index) {
             proof.extend_from_slice(sibling.as_bytes());
         }
-        proof.extend(self.chunk_proof(c)?);
+        proof.extend(self.chunk_proof(chunk_index)?);
         debug_assert_eq!(
             proof.len() / 32,
-            usize::try_from(self.geom.height().saturating_add(depth(c, chunk_count))).unwrap_or(0)
+            usize::try_from(
+                self.geometry
+                    .height()
+                    .saturating_add(depth(chunk_index, chunk_count))
+            )
+            .unwrap_or(0)
         );
         Ok(proof)
     }
 
-    fn ensure_chunk(&self, c: u32) -> Result<u32, SizeError> {
-        let len = self.layers.first().map_or(0, Vec::len);
-        let Ok(chunk_count) = u32::try_from(len) else {
+    fn ensure_chunk(&self, chunk_index: u32) -> Result<u32, SizeError> {
+        let layer_length = self.layers.first().map_or(0, Vec::len);
+        let Ok(chunk_count) = u32::try_from(layer_length) else {
             return Err(SizeError::ChunkIndexOutOfRange {
-                c,
+                chunk_index,
                 chunk_count: u32::MAX,
             });
         };
-        if c >= chunk_count {
-            return Err(SizeError::ChunkIndexOutOfRange { c, chunk_count });
+        if chunk_index >= chunk_count {
+            return Err(SizeError::ChunkIndexOutOfRange {
+                chunk_index,
+                chunk_count,
+            });
         }
         Ok(chunk_count)
     }
@@ -308,11 +341,11 @@ impl DataTree {
     }
 }
 
-fn sibling_at(layer: &[NodeHash], c: u32, level: usize) -> Option<NodeHash> {
+fn sibling_at(layer: &[NodeHash], chunk_index: u32, level: usize) -> Option<NodeHash> {
     let index = if level >= usize::try_from(u32::BITS).unwrap_or(32) {
         0
     } else {
-        c >> level
+        chunk_index >> level
     };
     let sibling = index ^ 1;
     layer.get(usize::try_from(sibling).ok()?).copied()

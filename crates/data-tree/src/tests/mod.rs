@@ -8,9 +8,9 @@ mod shape;
 mod tags;
 mod vectors;
 
-fn pattern(n: usize) -> Vec<u8> {
-    (0..n)
-        .map(|i| u8::try_from(i % 251).expect("251 fits in u8"))
+fn pattern(byte_length: usize) -> Vec<u8> {
+    (0..byte_length)
+        .map(|byte_index| u8::try_from(byte_index % 251).expect("251 fits in u8"))
         .collect()
 }
 

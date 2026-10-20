@@ -16,8 +16,11 @@ fn primitive_vectors() {
         empty(6).as_bytes(),
         "2be3cf0551cc6936d461e3dc43f3c4bf50cbee1bc091925254e879f4e7665e94",
     );
-    for k in 1..=8 {
-        assert_eq!(empty(k), hash::node(&empty(k - 1), &empty(k - 1)));
+    for empty_height in 1..=8 {
+        assert_eq!(
+            empty(empty_height),
+            hash::node(&empty(empty_height - 1), &empty(empty_height - 1))
+        );
     }
     assert_hex(
         hash::size_witness(1).as_bytes(),
@@ -38,13 +41,13 @@ fn primitive_vectors() {
 
     // spec §4: the commitment is node(data_tree_root, size_witness).
     let root = DataTreeRoot::from([9_u8; 32]);
-    let n = 123_u64;
+    let data_size = 123_u64;
     let via_node = hash::node(
         &crate::types::NodeHash(*root.as_bytes()),
-        &crate::types::NodeHash(*hash::size_witness(n).as_bytes()),
+        &crate::types::NodeHash(*hash::size_witness(data_size).as_bytes()),
     );
     assert_eq!(
-        hash::data_commitment(&root, n).as_bytes(),
+        hash::data_commitment(&root, data_size).as_bytes(),
         via_node.as_bytes()
     );
 }
@@ -94,8 +97,8 @@ fn testing_root_vectors() {
             "f8ba5215b628deec40d735d6cdf825016fca443f0f8cbff3eb5361de59e8ab03",
         ),
     ];
-    for (n, root, commitment) in rows {
-        assert_root(Geometry::TESTING, *n, root, commitment);
+    for (data_size, root, commitment) in rows {
+        assert_root(Geometry::TESTING, *data_size, root, commitment);
     }
 }
 
@@ -148,20 +151,20 @@ fn mainnet_root_vectors() {
             "027fba531187d84813dd203d3e03dda3a3898cde1bbfd2675b54e46c230d6e89",
         ),
     ];
-    for (n, root, commitment) in rows {
-        assert_root(Geometry::MAINNET, *n, root, commitment);
+    for (data_size, root, commitment) in rows {
+        assert_root(Geometry::MAINNET, *data_size, root, commitment);
     }
 }
 
 #[test]
 fn testing_n112_proof_vectors() {
-    let geom = Geometry::TESTING;
-    let n = 112_u64;
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap();
+    let geometry = Geometry::TESTING;
+    let data_size = 112_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let commitment = tree.data_commitment();
 
-    let chunk2 = chunk_bytes(&geom, &data, n, 2);
+    let chunk2 = chunk_bytes(&geometry, &data, data_size, 2);
     let chunk_proof = tree.chunk_proof(2).unwrap();
     assert_eq!(
         chunk_proof,
@@ -170,9 +173,9 @@ fn testing_n112_proof_vectors() {
             "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
         ])
     );
-    verify_chunk(&geom, &commitment, n, 2, &chunk2, &chunk_proof).unwrap();
+    verify_chunk(&geometry, &commitment, data_size, 2, &chunk2, &chunk_proof).unwrap();
 
-    let chunk3 = chunk_bytes(&geom, &data, n, 3);
+    let chunk3 = chunk_bytes(&geometry, &data, data_size, 3);
     let segment_proof = tree.segment_proof(3, 1, &chunk3).unwrap();
     assert_eq!(
         segment_proof,
@@ -183,15 +186,15 @@ fn testing_n112_proof_vectors() {
             "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
         ])
     );
-    let seg_len = usize::try_from(geom.segment_len(n, 3, 1).unwrap()).unwrap();
-    let seg_off = usize::try_from(geom.segment_size()).unwrap();
+    let segment_length = usize::try_from(geometry.segment_len(data_size, 3, 1).unwrap()).unwrap();
+    let segment_offset = usize::try_from(geometry.segment_size()).unwrap();
     verify_segment(
-        &geom,
+        &geometry,
         &commitment,
-        n,
+        data_size,
         3,
         1,
-        &chunk3[seg_off..seg_off + seg_len],
+        &chunk3[segment_offset..segment_offset + segment_length],
         &segment_proof,
     )
     .unwrap();
@@ -202,20 +205,23 @@ fn testing_n112_proof_vectors() {
     );
 }
 
-fn assert_root(geom: Geometry, n: u64, root: &str, commitment: &str) {
-    let data = pattern(usize::try_from(n).unwrap());
-    let tree = DataTree::from_bytes(geom, &data).unwrap_or_else(|err| panic!("n={n}: {err}"));
+fn assert_root(geometry: Geometry, data_size: u64, root: &str, commitment: &str) {
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree =
+        DataTree::from_bytes(geometry, &data).unwrap_or_else(|err| panic!("n={data_size}: {err}"));
     assert_eq!(
         u64::from(tree.chunk_count()),
-        geom.chunk_count(n).unwrap().into()
+        geometry.chunk_count(data_size).unwrap().into()
     );
     assert_hex(tree.data_tree_root().as_bytes(), root);
     assert_hex(tree.data_commitment().as_bytes(), commitment);
-    assert_eq!(tree.size_witness(), hash::size_witness(n));
+    assert_eq!(tree.size_witness(), hash::size_witness(data_size));
 }
 
-fn chunk_bytes(geom: &Geometry, data: &[u8], n: u64, c: u32) -> Vec<u8> {
-    let start = usize::try_from(c).unwrap() * usize::try_from(geom.chunk_size()).unwrap();
-    let len = usize::try_from(geom.chunk_len(n, c).unwrap()).unwrap();
-    data[start..start + len].to_vec()
+fn chunk_bytes(geometry: &Geometry, data: &[u8], data_size: u64, chunk_index: u32) -> Vec<u8> {
+    let start =
+        usize::try_from(chunk_index).unwrap() * usize::try_from(geometry.chunk_size()).unwrap();
+    let chunk_length =
+        usize::try_from(geometry.chunk_len(data_size, chunk_index).unwrap()).unwrap();
+    data[start..start + chunk_length].to_vec()
 }

@@ -65,10 +65,12 @@ pub fn size_witness(data_size: u64) -> SizeWitness {
 }
 
 /// `H(ChunkKey ‖ data_commitment ‖ be32(c))` (spec §3).
-pub fn chunk_key(commitment: &DataCommitment, c: u32) -> ChunkKey {
+///
+/// `c` is `chunk_index`.
+pub fn chunk_key(commitment: &DataCommitment, chunk_index: u32) -> ChunkKey {
     ChunkKey(digest(
         TreeDomainTag::ChunkKey.as_byte(),
-        &[commitment.as_bytes(), &c.to_be_bytes()],
+        &[commitment.as_bytes(), &chunk_index.to_be_bytes()],
     ))
 }
 
@@ -77,7 +79,9 @@ pub fn chunk_key(commitment: &DataCommitment, c: u32) -> ChunkKey {
 /// `empty(0)` is `leaf("")`. `empty(k)` is `node(empty(k - 1), empty(k - 1))`.
 /// Panics if `k > 8`. A chunk subtree never asks for more: `segments_per_chunk`
 /// is at most 256, so its height is at most 8 (spec §2).
-pub fn empty(k: u32) -> NodeHash {
+///
+/// `k` is `empty_height`.
+pub fn empty(empty_height: u32) -> NodeHash {
     static TABLE: LazyLock<[NodeHash; 9]> = LazyLock::new(|| {
         let mut table = [NodeHash([0; 32]); 9];
         table[0] = leaf(b"");
@@ -86,8 +90,8 @@ pub fn empty(k: u32) -> NodeHash {
         }
         table
     });
-    assert!(k <= 8, "empty height {k} exceeds 8");
-    TABLE[k as usize]
+    assert!(empty_height <= 8, "empty height {empty_height} exceeds 8");
+    TABLE[empty_height as usize]
 }
 
 /// `node(data_tree_root, size_witness(data_size))` (spec §4).
