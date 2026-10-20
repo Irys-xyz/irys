@@ -2362,10 +2362,7 @@ mod tests {
 
         let solution = mine_once(&mut inner).expect("difficulty 0 finds the first chunk");
         assert_eq!(solution.chunk_offset, 0);
-        assert_eq!(
-            solution.tx_path.stored_bytes(),
-            Some(expected_tx.as_slice())
-        );
+        assert_eq!(solution.tx_path, TxPathSource::Stored(Some(expected_tx)));
         assert_eq!(
             solution.data_path.as_deref(),
             Some(expected_data.as_slice())

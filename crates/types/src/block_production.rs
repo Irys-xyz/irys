@@ -60,14 +60,6 @@ impl Default for TxPathSource {
 }
 
 impl TxPathSource {
-    /// Bytes already in memory. A running derive returns `None`.
-    pub fn stored_bytes(&self) -> Option<&[u8]> {
-        match self {
-            Self::Stored(Some(bytes)) => Some(bytes),
-            Self::Stored(None) | Self::Derive(_) => None,
-        }
-    }
-
     /// Stored bytes, or the derive result. The derive runs once.
     pub fn resolve(&self, timeout: Duration) -> Result<Option<TxPath>, TxPathError> {
         match self {
