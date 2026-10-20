@@ -146,7 +146,9 @@ impl Geometry {
         Ok(count as u32)
     }
 
-    /// Byte length of chunk `c`. Requires `c < chunk_count(n)` (spec §2).
+    /// Number of data bytes in chunk `c` (spec §2 `chunk_len`): `chunk_size` for
+    /// every chunk but the last, `1..=chunk_size` for the last. Not a count of
+    /// segments. Requires `c < chunk_count(n)`.
     ///
     /// `n` is `data_size`. `c` is `chunk_index`.
     pub fn chunk_len(&self, data_size: u64, chunk_index: u32) -> Result<u64, SizeError> {
@@ -177,7 +179,10 @@ impl Geometry {
         })
     }
 
-    /// Byte length of segment `j` in chunk `c`.
+    /// Number of data bytes in segment `j` of chunk `c` (spec §2 `segment_len`):
+    /// `segment_size` for a full segment, fewer for the segment holding the last
+    /// data byte, 0 for a segment past the data. This is the exact length a
+    /// segment hashes at; no padding is hashed (spec §3).
     ///
     /// Requires `c < chunk_count(n)` and `j < segments_per_chunk`. Returns 0 when
     /// the segment starts at or past `n` (spec §2). The subtraction runs only
