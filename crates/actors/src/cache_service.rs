@@ -846,18 +846,13 @@ impl InnerCacheTask {
         let Some(start) = self.ledger_chunk_start(&block, ledger)? else {
             return Ok(None);
         };
-        let Some(tx_ids) = block
-            .data_ledgers
-            .iter()
-            .find(|entry| entry.ledger_id == u32::from(ledger))
-            .map(|entry| entry.tx_ids.0.clone())
-        else {
+        let Some(tx_ids) = block.get_data_ledger_tx_ids_ordered(ledger) else {
             return Ok(None);
         };
         let chunk_size = self.config.consensus.chunk_size;
         self.db.view_eyre(|tx| {
             let mut cursor = start;
-            for id in &tx_ids {
+            for id in tx_ids {
                 let Some(header) = tx_header_by_txid(tx, id)? else {
                     return Ok(None);
                 };
@@ -897,11 +892,7 @@ impl InnerCacheTask {
             return Ok(None);
         };
         Ok(Some(LedgerChunkOffset::from(
-            prev.data_ledgers
-                .iter()
-                .find(|entry| entry.ledger_id == u32::from(ledger))
-                .map(|entry| entry.total_chunks)
-                .unwrap_or(0),
+            prev.ledger_total_chunks(ledger),
         )))
     }
 
