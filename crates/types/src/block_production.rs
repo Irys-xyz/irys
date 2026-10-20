@@ -262,31 +262,6 @@ fn finish_job(slot: &TxPathSlot, done: Result<TxPath, String>) {
     *guard = TxPathState::Done(done);
     slot.ready.notify_all();
 }
-#[derive(Debug, Clone)]
-pub struct Partition {
-    pub id: PartitionId,
-    pub mining_address: IrysAddress,
-}
-
-pub type PartitionId = u64;
-
-impl Default for Partition {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            mining_address: IrysAddress::random(),
-        }
-    }
-}
-
-impl Partition {
-    pub fn random_with_id(id: u64) -> Self {
-        Self {
-            id,
-            mining_address: IrysAddress::random(),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
