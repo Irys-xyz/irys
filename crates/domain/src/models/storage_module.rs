@@ -28,7 +28,7 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, DatabaseConfig, H256, IrysAddress,
     LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange,
     ProofDeserialize as _, RelativeChunkOffset, SubmoduleIndexEngine, TxChunkOffset, TxPath,
-    UnpackedChunk, get_leaf_proof, ledger_chunk_offset_ie,
+    UnpackedChunk, get_leaf_proof, ledger_chunk_offset_ie, max_chunk_offset,
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii,
 };
@@ -257,10 +257,8 @@ fn tx_chunk_offset_from_leaf(
 ) -> eyre::Result<TxChunkOffset> {
     let bytes = u64::try_from(leaf_byte_offset)
         .map_err(|_| eyre!("data path leaf offset does not fit in u64"))?;
-    let chunks = bytes.div_ceil(chunk_size);
-    let index = chunks
-        .checked_sub(1)
-        .ok_or_else(|| eyre!("data path leaf offset is 0"))?;
+    let index =
+        max_chunk_offset(bytes, chunk_size).ok_or_else(|| eyre!("data path leaf offset is 0"))?;
     u32::try_from(index)
         .map(TxChunkOffset::from)
         .map_err(|_| eyre!("data path leaf offset exceeds u32::MAX chunks"))
@@ -9578,10 +9576,9 @@ fn body_job_coverage(
     if chunk_size == 0 {
         return None;
     }
-    let num_chunks = i64::try_from(job.data_size.div_ceil(chunk_size)).ok()?;
-    if num_chunks == 0 {
-        return None;
-    }
+    // Last index plus one is the chunk count. The count must fit in `i64`.
+    let num_chunks =
+        i64::try_from(max_chunk_offset(job.data_size, chunk_size)?.checked_add(1)?).ok()?;
     let tx_start = i64::from(*job.start_offset);
     let first = i64::from(*key);
     let last = (tx_start + num_chunks - 1).min(interval_end);
