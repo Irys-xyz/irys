@@ -250,13 +250,25 @@ fn setup_tracing_subscriber(
     let tracer = tracer_provider.tracer(service_name.to_string());
     let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
     // A node can log at debug locally without shipping debug to the log store.
-    let otlp_filter = otlp_log_filter(std::env::var(OTLP_LOG_FILTER_ENV).ok().as_deref());
+    // An invalid value would export nothing, not even errors. Follow RUST_LOG
+    // instead and say so once the subscriber is up.
+    let (otlp_filter, otlp_error) =
+        match otlp_log_filter(std::env::var(OTLP_LOG_FILTER_ENV).ok().as_deref()) {
+            Ok(filter) => (filter, None),
+            Err(error) => (None, Some(error)),
+        };
     let otlp_max = otlp_filter.as_ref().and_then(EnvFilter::max_level_hint);
     let otel_log_layer = OpenTelemetryTracingBridge::new(logger_provider).with_filter(otlp_filter);
 
     let subscriber = subscriber.with(otel_trace_layer).with(otel_log_layer);
     subscriber.init();
 
+    if let Some(error) = otlp_error {
+        tracing::warn!(
+            %error,
+            "{OTLP_LOG_FILTER_ENV} is not a valid filter; exported logs follow RUST_LOG"
+        );
+    }
     if otlp_filter_wider_than_global(otlp_max, global_max) {
         tracing::warn!(
             otlp_max = ?otlp_max,
@@ -273,10 +285,16 @@ fn otlp_filter_wider_than_global(otlp: Option<LevelFilter>, global: Option<Level
 }
 
 /// Filter for the OTLP log layer. `None` or an empty value adds no filter, so
-/// exported logs follow `RUST_LOG`.
-fn otlp_log_filter(directives: Option<&str>) -> Option<EnvFilter> {
-    let directives = directives.map(str::trim).filter(|d| !d.is_empty())?;
-    Some(EnvFilter::builder().parse_lossy(directives))
+/// exported logs follow `RUST_LOG`. Any invalid directive rejects the whole
+/// value: a lossy parse would drop it and could leave a filter that exports
+/// nothing.
+fn otlp_log_filter(
+    directives: Option<&str>,
+) -> Result<Option<EnvFilter>, tracing_subscriber::filter::ParseError> {
+    match directives.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(directives) => EnvFilter::builder().parse(directives).map(Some),
+        None => Ok(None),
+    }
 }
 
 fn install_panic_hook() {
@@ -464,7 +482,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let subscriber = Registry::default()
             .with(EnvFilter::new("debug"))
-            .with(Capture(Arc::clone(&seen)).with_filter(otlp_log_filter(directives)));
+            .with(Capture(Arc::clone(&seen)).with_filter(otlp_log_filter(directives).unwrap()));
         tracing::subscriber::with_default(subscriber, || {
             tracing::debug!("debug event");
             tracing::info!("info event");
@@ -508,8 +526,21 @@ mod tests {
             None
         ));
         assert_eq!(
-            otlp_log_filter(Some("debug")).and_then(|f| f.max_level_hint()),
+            otlp_log_filter(Some("debug"))
+                .unwrap()
+                .and_then(|f| f.max_level_hint()),
             Some(LevelFilter::DEBUG)
+        );
+    }
+
+    #[test]
+    fn invalid_otlp_log_filter_is_rejected_whole() {
+        assert!(otlp_log_filter(Some("foo=verbose")).is_err());
+        assert!(otlp_log_filter(Some("info,foo=verbose")).is_err());
+        assert!(
+            otlp_log_filter(Some("info,irys_p2p=debug"))
+                .unwrap()
+                .is_some()
         );
     }
 
