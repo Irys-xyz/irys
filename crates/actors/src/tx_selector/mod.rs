@@ -1040,7 +1040,21 @@ async fn get_publish_txs_and_proofs(
             ctx.db,
         )?;
 
+        // Sorted by tx id above. Stop once the cap is full so later candidates
+        // skip ingress-proof work. Ineligible candidates do not count, and
+        // anything not selected stays eligible for a later block.
+        let publish_cap = usize::try_from(ctx.config.consensus.mempool.max_publish_txs_per_block)
+            .expect("max_publish_txs_per_block to fit into usize");
+
         for tx_header in &tx_headers {
+            if publish_txs.len() >= publish_cap {
+                info!(
+                    publish_selection.selected = publish_txs.len(),
+                    publish_selection.cap = publish_cap,
+                    "Publish-ledger cap reached; remaining candidates stay eligible for a later block"
+                );
+                break;
+            }
             debug!(
                 "Processing publish candidate tx {} {:#?}",
                 &tx_header.id, &tx_header
@@ -1320,32 +1334,6 @@ async fn get_publish_txs_and_proofs(
         }
     }
 
-    // Candidates are already sorted by tx id. Keep that order and leave the
-    // rest eligible for a later block. The cap is above the submit rate, so a
-    // burst drains instead of growing without a bound.
-    let publish_cap = usize::try_from(ctx.config.consensus.mempool.max_publish_txs_per_block)
-        .expect("max_publish_txs_per_block to fit into usize");
-    let proofs_per_tx = usize::try_from(
-        ctx.config
-            .number_of_ingress_proofs_total_at(current_timestamp),
-    )
-    .unwrap_or(usize::MAX);
-    let ready = publish_txs.len();
-    apply_publish_tx_cap(
-        &mut publish_txs,
-        &mut publish_proofs,
-        publish_cap,
-        proofs_per_tx,
-    );
-    if publish_txs.len() < ready {
-        info!(
-            publish_selection.ready = ready,
-            publish_selection.selected = publish_txs.len(),
-            publish_selection.cap = publish_cap,
-            "Publish-ledger cap reached; remaining candidates stay eligible for a later block"
-        );
-    }
-
     let txs = &publish_txs.iter().map(|h| h.id).collect::<Vec<_>>();
     debug!(tx.ids = ?txs, "Publish transactions");
 
@@ -1521,49 +1509,4 @@ fn retain_unconfirmed_submit_candidates(
 ) {
     pending_valid_submit_ledger_tx
         .retain(|_, tx| tx.metadata().included_height.is_none() && tx.promoted_height().is_none());
-}
-
-/// Drop publish txs past `cap`, and the ingress proofs that belong to them.
-///
-/// `proofs` is the flat list: `proofs_per_tx` proofs per tx, in the same order
-/// as `txs`.
-fn apply_publish_tx_cap<T, P>(
-    txs: &mut Vec<T>,
-    proofs: &mut Vec<P>,
-    cap: usize,
-    proofs_per_tx: usize,
-) {
-    if txs.len() <= cap {
-        return;
-    }
-    debug_assert_eq!(
-        proofs.len(),
-        txs.len().saturating_mul(proofs_per_tx),
-        "publish proof list must be proofs_per_tx entries per tx"
-    );
-    txs.truncate(cap);
-    proofs.truncate(cap.saturating_mul(proofs_per_tx));
-}
-
-#[cfg(test)]
-mod publish_cap_tests {
-    use super::apply_publish_tx_cap;
-
-    #[test]
-    fn cap_keeps_the_first_txs_and_their_proofs() {
-        let mut txs = vec!["a", "b", "c", "d"];
-        let mut proofs = vec![1, 1, 2, 2, 3, 3, 4, 4];
-        apply_publish_tx_cap(&mut txs, &mut proofs, 2, 2);
-        assert_eq!(txs, ["a", "b"]);
-        assert_eq!(proofs, [1, 1, 2, 2]);
-    }
-
-    #[test]
-    fn cap_above_the_ready_count_keeps_every_ready_tx() {
-        let mut txs = vec![1, 2];
-        let mut proofs = vec![10, 20];
-        apply_publish_tx_cap(&mut txs, &mut proofs, 5, 1);
-        assert_eq!(txs, [1, 2]);
-        assert_eq!(proofs, [10, 20]);
-    }
 }
