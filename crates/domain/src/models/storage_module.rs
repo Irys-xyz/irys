@@ -3683,7 +3683,7 @@ impl StorageModule {
             .unwrap_or(false)
     }
 
-    /// Only used in testing to get a db reference to verify insertions happened.
+    /// One submodule for tests and sm-bench. Production code stays inside the module.
     pub fn get_submodule(&self, local_offset: PartitionChunkOffset) -> Option<&StorageSubmodule> {
         if let Some(submodule) = self.submodules.get_at_point(local_offset) {
             Some(submodule)
