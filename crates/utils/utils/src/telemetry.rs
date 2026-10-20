@@ -21,7 +21,7 @@ use std::sync::{Mutex, OnceLock};
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    EnvFilter, Registry, layer::SubscriberExt as _, util::SubscriberInitExt as _,
+    EnvFilter, Layer as _, Registry, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
 static LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
@@ -35,6 +35,10 @@ const METRICS_EXPORT_INTERVAL: std::time::Duration = std::time::Duration::from_s
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 const DEFAULT_LOGS_ENDPOINT: &str = "http://localhost:4318/v1/logs";
 const DEFAULT_SERVICE_NAME: &str = "irys-node";
+/// `EnvFilter` directives for the events exported as OTLP logs. Unset or
+/// empty exports what `RUST_LOG` allows. `RUST_LOG` applies first, so this
+/// can only narrow it.
+const OTLP_LOG_FILTER_ENV: &str = "IRYS_OTLP_LOG_FILTER";
 
 struct TelemetryConfig {
     service_name: String,
@@ -235,6 +239,7 @@ fn setup_tracing_subscriber(
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy();
+    let global_max = filter.max_level_hint();
 
     let subscriber = subscriber
         .with(filter)
@@ -244,10 +249,52 @@ fn setup_tracing_subscriber(
 
     let tracer = tracer_provider.tracer(service_name.to_string());
     let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-    let otel_log_layer = OpenTelemetryTracingBridge::new(logger_provider);
+    // A node can log at debug locally without shipping debug to the log store.
+    // An invalid value would export nothing, not even errors. Follow RUST_LOG
+    // instead and say so once the subscriber is up.
+    let (otlp_filter, otlp_error) =
+        match otlp_log_filter(std::env::var(OTLP_LOG_FILTER_ENV).ok().as_deref()) {
+            Ok(filter) => (filter, None),
+            Err(error) => (None, Some(error)),
+        };
+    let otlp_max = otlp_filter.as_ref().and_then(EnvFilter::max_level_hint);
+    let otel_log_layer = OpenTelemetryTracingBridge::new(logger_provider).with_filter(otlp_filter);
 
     let subscriber = subscriber.with(otel_trace_layer).with(otel_log_layer);
     subscriber.init();
+
+    if let Some(error) = otlp_error {
+        tracing::warn!(
+            %error,
+            "{OTLP_LOG_FILTER_ENV} is not a valid filter; exported logs follow RUST_LOG"
+        );
+    }
+    if otlp_filter_wider_than_global(otlp_max, global_max) {
+        tracing::warn!(
+            otlp_max = ?otlp_max,
+            global_max = ?global_max,
+            "{OTLP_LOG_FILTER_ENV} allows more verbose logs than RUST_LOG; RUST_LOG caps what is exported"
+        );
+    }
+}
+
+/// The OTLP filter can only narrow the global one, so a more verbose OTLP
+/// level has no effect. No hint on either side means it cannot be compared.
+fn otlp_filter_wider_than_global(otlp: Option<LevelFilter>, global: Option<LevelFilter>) -> bool {
+    matches!((otlp, global), (Some(otlp), Some(global)) if otlp > global)
+}
+
+/// Filter for the OTLP log layer. `None` or an empty value adds no filter, so
+/// exported logs follow `RUST_LOG`. Any invalid directive rejects the whole
+/// value: a lossy parse would drop it and could leave a filter that exports
+/// nothing.
+fn otlp_log_filter(
+    directives: Option<&str>,
+) -> Result<Option<EnvFilter>, tracing_subscriber::filter::ParseError> {
+    match directives.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(directives) => EnvFilter::builder().parse(directives).map(Some),
+        None => Ok(None),
+    }
 }
 
 fn install_panic_hook() {
@@ -283,6 +330,9 @@ fn install_panic_hook() {
 /// - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`: Override endpoint for traces (optional)
 /// - `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`: Override endpoint for logs (optional)
 /// - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`: Override endpoint for metrics (optional)
+/// - `IRYS_OTLP_LOG_FILTER`: `EnvFilter` directives for exported logs (optional).
+///   Unset exports what `RUST_LOG` allows. `RUST_LOG` still governs local output
+///   and caps what is exported.
 ///
 /// # Errors
 ///
@@ -414,6 +464,93 @@ mod tests {
                 "span ID must not be all zeros"
             );
         }
+    }
+
+    /// Count events that reach a layer behind `otlp_log_filter`, under a
+    /// permissive global filter like a node running `RUST_LOG=debug`.
+    fn exported_levels(directives: Option<&str>) -> Vec<tracing::Level> {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::Context;
+
+        struct Capture(Arc<Mutex<Vec<tracing::Level>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                self.0.lock().unwrap().push(*event.metadata().level());
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default()
+            .with(EnvFilter::new("debug"))
+            .with(Capture(Arc::clone(&seen)).with_filter(otlp_log_filter(directives).unwrap()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!("debug event");
+            tracing::info!("info event");
+            tracing::warn!("warn event");
+        });
+        seen.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn otlp_logs_follow_rust_log_when_unset() {
+        let want = vec![
+            tracing::Level::DEBUG,
+            tracing::Level::INFO,
+            tracing::Level::WARN,
+        ];
+        assert_eq!(exported_levels(None), want);
+        assert_eq!(exported_levels(Some("")), want);
+        assert_eq!(exported_levels(Some("  ")), want);
+    }
+
+    #[test]
+    fn warns_only_when_the_otlp_filter_is_more_verbose() {
+        assert!(otlp_filter_wider_than_global(
+            Some(LevelFilter::DEBUG),
+            Some(LevelFilter::INFO)
+        ));
+        assert!(!otlp_filter_wider_than_global(
+            Some(LevelFilter::INFO),
+            Some(LevelFilter::DEBUG)
+        ));
+        assert!(!otlp_filter_wider_than_global(
+            Some(LevelFilter::INFO),
+            Some(LevelFilter::INFO)
+        ));
+        assert!(!otlp_filter_wider_than_global(
+            None,
+            Some(LevelFilter::INFO)
+        ));
+        assert!(!otlp_filter_wider_than_global(
+            Some(LevelFilter::DEBUG),
+            None
+        ));
+        assert_eq!(
+            otlp_log_filter(Some("debug"))
+                .unwrap()
+                .and_then(|f| f.max_level_hint()),
+            Some(LevelFilter::DEBUG)
+        );
+    }
+
+    #[test]
+    fn invalid_otlp_log_filter_is_rejected_whole() {
+        assert!(otlp_log_filter(Some("foo=verbose")).is_err());
+        assert!(otlp_log_filter(Some("info,foo=verbose")).is_err());
+        assert!(
+            otlp_log_filter(Some("info,irys_p2p=debug"))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn otlp_log_filter_narrows_rust_log_when_set() {
+        assert_eq!(
+            exported_levels(Some("info")),
+            vec![tracing::Level::INFO, tracing::Level::WARN]
+        );
+        assert_eq!(exported_levels(Some("warn")), vec![tracing::Level::WARN]);
     }
 
     #[test]
