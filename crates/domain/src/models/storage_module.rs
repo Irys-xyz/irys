@@ -57,9 +57,6 @@ use tracing::{debug, error, info, warn};
 use super::index_read_metrics::{self, METADATA, MIGRATION, RECALL};
 use crate::{CircularBuffer, StorageModulesReadGuard};
 
-#[path = "index_drain.rs"]
-mod index_drain;
-
 #[path = "disk_lane.rs"]
 mod disk_lane;
 
@@ -837,7 +834,7 @@ pub struct StorageModule {
     /// `pending_writes`. The reverse deadlocks a reader that already holds
     /// `intervals`.
     entropy_cache: Mutex<disk_lane::EntropyPadCache>,
-    /// Shared with submodule drains so tests can fail the next index commit.
+    /// The next packed submit fails once and writes no index row.
     #[cfg(any(test, feature = "test-utils"))]
     index_commit_fail_next: Arc<AtomicBool>,
     /// Set while `reset` has not finished. Heal must not rebuild this index.
@@ -931,8 +928,8 @@ pub struct StorageModule {
     /// Crash tests drop the module without storing batched completions.
     #[cfg(test)]
     suppress_interval_flush: AtomicBool,
-    /// Shared with every submodule drain. `pause_data_writes` / `reset` bump it
-    /// so queued index ops with a stale generation are cancelled.
+    /// `pause_data_writes` and `reset` bump this. A packed write that captured
+    /// the previous value does not commit.
     index_write_generation: Arc<AtomicU64>,
     /// Physical storage locations indexed by chunk ranges
     submodules: SubmoduleMap,
@@ -1149,7 +1146,6 @@ pub struct StorageSubmodule {
     /// Mutex containing the interval file path
     /// we create an [`AtomicWriteFile`] for each interval file update, to ensure we are never left with interrupted writes
     intervals_file: Arc<Mutex<PathBuf>>,
-    index_drain: index_drain::IndexDrain,
 }
 
 pub fn get_atomic_file<P: AsRef<Path> + std::fmt::Debug>(path: P) -> eyre::Result<AtomicWriteFile> {
@@ -2053,7 +2049,6 @@ impl StorageModule {
         let mut reset_dbs: Vec<SubmoduleIndex> = Vec::new();
         let index_write_generation = Arc::new(AtomicU64::new(0));
         let index_commit_fail_next = Arc::new(AtomicBool::new(false));
-        let index_gap = Arc::new(index_drain::IndexGap::new());
 
         // Initialize the submodules from the StorageModuleInfo
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
@@ -2211,12 +2206,6 @@ impl StorageModule {
                         split: opened.split,
                         db: submodule_db.clone(),
                         intervals_file: Arc::new(Mutex::new(submodules_intervals_file)),
-                        index_drain: index_drain::IndexDrain::start(
-                            submodule_db.clone(),
-                            Arc::clone(&index_write_generation),
-                            Arc::clone(&index_commit_fail_next),
-                            Arc::clone(&index_gap),
-                        )?,
                     },
                 )
                 .map_err(|e| {
@@ -2387,7 +2376,7 @@ impl StorageModule {
             submodules: submodule_map,
             recent_chunk_times: Arc::new(RwLock::new(CircularBuffer::new(8_000))), // sample window 10s = 10s x 800 chunks/s = capacity 8_000
             config: config.clone(),
-            disk: disk_lane::DiskGate::with_index_gap(index_gap),
+            disk: disk_lane::DiskGate::new(),
             #[cfg(test)]
             recall_io: RecallIoAtoms::new(),
             crc_repairs: Mutex::new(BTreeSet::new()),
@@ -3026,29 +3015,6 @@ impl StorageModule {
     }
 
     #[cfg(test)]
-    fn submit_index_op_for_test(
-        &self,
-        offset: PartitionChunkOffset,
-        data_path: Vec<u8>,
-        generation: u64,
-    ) -> std::sync::mpsc::Receiver<Result<(), WriteDataChunkError>> {
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let submodule = self
-            .submodules
-            .get_at_point(offset)
-            .expect("test offset must belong to a submodule");
-        submodule.index_drain.submit(index_drain::IndexOp {
-            path_hash: UnpackedChunk::hash_data_path(&data_path),
-            data_path,
-            offset,
-            generation,
-            done: done_tx,
-            wake: None,
-        });
-        done_rx
-    }
-
-    #[cfg(test)]
     fn inject_sync_failure(&self, point: SyncFailurePoint) -> eyre::Result<()> {
         let mut failure = self.sync_failure.lock().unwrap();
         if let Some((armed, skip)) = *failure
@@ -3409,14 +3375,12 @@ impl StorageModule {
         }
     }
 
-    /// Bump the index generation, wait out ops that captured the old one, and
-    /// drop queued bytes. Lock order: `pending_writes`, then `entropy_cache`.
+    /// Bump the index generation and drop queued bytes. A packed write that
+    /// captured the old generation does not commit. Lock order:
+    /// `pending_writes`, then `entropy_cache`.
     fn clear_pending_for_reset(&self) {
         let mut pending = self.pending_writes.write().unwrap();
         self.index_write_generation.fetch_add(1, Ordering::SeqCst);
-        for (_, submodule) in self.submodules.iter() {
-            submodule.index_drain.wait_idle();
-        }
         pending.chunks.clear();
         pending.occupancy.clear();
         pending.priorities.clear();
@@ -7159,11 +7123,6 @@ impl StorageModule {
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) {
-        for (interval, submodule) in self.submodules.iter() {
-            if *interval.end() >= *start && *interval.start() <= *end {
-                submodule.index_drain.wait_idle_in_range(start, end);
-            }
-        }
         {
             let mut pending = self.pending_writes.write().unwrap();
             pending.retain(|offset, _| *offset < start || *offset > end);
@@ -9286,11 +9245,9 @@ impl Drop for StorageModule {
         if self.abandon_on_drop.load(Ordering::SeqCst) {
             return;
         }
-        // Index submits for deposited bodies must finish before the drains stop.
+        // Queued entropy reads must reach the write queue before the index
+        // sync and the chunk fsync.
         self.drain_entropy_queue();
-        for (_, submodule) in self.submodules.iter() {
-            submodule.index_drain.shutdown();
-        }
         for (_, submodule) in self.submodules.iter() {
             if let Err(err) = submodule.db.sync_group() {
                 error!(
@@ -13543,65 +13500,6 @@ mod tests {
 
         storage_module.resume_data_writes();
         storage_module.write_data_chunk(&chunk)?;
-        assert!(storage_module.is_data_write_pending_at(PartitionChunkOffset::from(0)));
-        Ok(())
-    }
-
-    #[test]
-    fn reset_waits_for_inflight_drain_and_clears_pending() -> eyre::Result<()> {
-        let tmp_dir = TempDirBuilder::new()
-            .prefix("reset_clears_pending")
-            .with_tracing()
-            .build();
-        let config = testing_config(tmp_dir.path(), 5, 5);
-        let storage_module =
-            StorageModule::new(&one_span(4, "hdd0", Some(submit_assignment(0))), &config)?;
-        storage_module.pack_with_zeros();
-        storage_module.force_sync_pending_chunks()?;
-
-        assert!(storage_module.write_chunk(
-            PartitionChunkOffset::from(0),
-            vec![9; 5],
-            ChunkType::Data
-        ));
-        assert!(storage_module.has_pending_writes());
-
-        storage_module.pause_data_writes();
-        let queued = storage_module.submit_index_op_for_test(
-            PartitionChunkOffset::from(1),
-            vec![1, 2, 3],
-            0,
-        );
-        let _ = storage_module.reset()?;
-        assert!(!storage_module.has_pending_writes());
-        assert!(matches!(
-            queued.recv()?,
-            Err(WriteDataChunkError::WritesPaused)
-        ));
-        storage_module
-            .get_submodule(PartitionChunkOffset::from(1))
-            .ok_or_eyre("submodule")?
-            .db
-            .view(|tx| {
-                assert!(
-                    tx.get_path_hashes_by_offset(PartitionChunkOffset::from(1))?
-                        .is_none()
-                );
-                Ok(())
-            })?;
-
-        storage_module.resume_data_writes();
-        storage_module.pack_with_zeros();
-        storage_module.force_sync_pending_chunks()?;
-        let data_root = H256::random();
-        let data_tx = data_header(data_root, 5);
-        storage_module.index_transaction_data(
-            &data_tx,
-            &vec![5, 6, 7, 8],
-            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
-            0,
-        )?;
-        storage_module.write_data_chunk(&five_byte_chunk(data_root))?;
         assert!(storage_module.is_data_write_pending_at(PartitionChunkOffset::from(0)));
         Ok(())
     }

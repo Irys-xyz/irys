@@ -30,10 +30,7 @@ use irys_types::{ChunkDataPath, ChunkPathHash, PartitionChunkOffset, UnpackedChu
 use nodit::Interval;
 use std::os::unix::fs::FileExt as _;
 
-use super::{
-    BatchEnqueueItem, ChunkType, StorageModule, WriteDataChunkError, WriteRun,
-    index_drain::{ChunkBusy, IndexGap},
-};
+use super::{BatchEnqueueItem, ChunkType, StorageModule, WriteDataChunkError, WriteRun};
 
 /// How long a caller waits for its entropy read before it gives up.
 const SWEEP_WAIT: Duration = Duration::from_secs(30);
@@ -83,7 +80,7 @@ pub(super) fn reorder_grace(chunk_size: u64) -> Duration {
 
 type SweepNotify = tokio::sync::oneshot::Sender<Result<(), WriteDataChunkError>>;
 
-/// Condvar shared by the lane, recall waiters, and index acks.
+/// Condvar shared by the lane and recall waiters.
 /// `epoch` advances under `mu` on every wake. A waiter that reads it
 /// under `mu` before waiting cannot miss a wake that already ran.
 #[derive(Clone)]
@@ -431,8 +428,6 @@ pub(super) struct DiskGate {
     /// The service thread owns sweeps and flushes while this is set.
     lane_started: AtomicBool,
     lane_stop: AtomicBool,
-    /// Index commits wait while a chunk run or a mining recall holds this.
-    index_gap: Arc<IndexGap>,
     /// Set for the life of `run_disk_lane`. External flushes use it to avoid
     /// waiting for themselves.
     lane_thread: Mutex<Option<std::thread::ThreadId>>,
@@ -742,10 +737,8 @@ pub(super) struct WriteHold<'a> {
 }
 
 /// Drops the recall count even when the read returns with an error.
-/// The index pin drops with it, after the `pread`s have returned.
 pub(super) struct RecallHold<'a> {
     gate: &'a DiskGate,
-    _index: ChunkBusy,
 }
 
 impl std::fmt::Debug for DiskGate {
@@ -780,12 +773,7 @@ impl Drop for ClearExclusive<'_> {
 }
 
 impl DiskGate {
-    #[cfg(test)]
     pub(super) fn new() -> Self {
-        Self::with_index_gap(Arc::new(IndexGap::new()))
-    }
-
-    pub(super) fn with_index_gap(index_gap: Arc<IndexGap>) -> Self {
         Self {
             recall_waiters: AtomicUsize::new(0),
             write_holds: AtomicUsize::new(0),
@@ -798,7 +786,6 @@ impl DiskGate {
             sweep_busy: Mutex::new(()),
             lane_started: AtomicBool::new(false),
             lane_stop: AtomicBool::new(false),
-            index_gap,
             lane_thread: Mutex::new(None),
             handoff: LaneHandoff::new(),
             write_retry_at: Mutex::new(None),
@@ -1108,9 +1095,6 @@ impl DiskGate {
     }
 
     pub(super) fn begin_recall(&self) -> RecallHold<'_> {
-        // Pin before the owed flush waits. The `pread` must not wait for an
-        // index commit, and a commit must not start under the `pread`.
-        let index = self.index_gap.pin_recall();
         let mut guard = self.lock_wake();
         // Do not count this recall yet. The owed window has to submit, and a
         // recall waiter would make that submit wait for this recall.
@@ -1120,10 +1104,7 @@ impl DiskGate {
         self.recall_waiters.fetch_add(1, Ordering::SeqCst);
         self.wake.notify_locked();
         drop(guard);
-        RecallHold {
-            gate: self,
-            _index: index,
-        }
+        RecallHold { gate: self }
     }
 
     /// Block the next recall until one packed-write window commits.
@@ -2839,7 +2820,7 @@ impl StorageModule {
         if self.take_index_commit_failure() {
             self.fail_slot(
                 slot,
-                WriteDataChunkError::Other(eyre::eyre!("injected index drain commit failure")),
+                WriteDataChunkError::Other(eyre::eyre!("injected index commit failure")),
             );
             self.fail_queued_group(group);
             return;
@@ -3537,8 +3518,8 @@ impl StorageModule {
     }
 
     /// Sleep until the lane has work. `seen` is the wake epoch at the previous
-    /// poll. An index ack bumps that epoch under the same lock, so the ack is
-    /// polled before the next sleep.
+    /// poll. A wake bumps that epoch under the same lock, so a wake that
+    /// already ran is polled before the next sleep.
     fn wait_until_lane_event(&self, mut seen: u64) -> u64 {
         loop {
             if self.disk.stop_requested() || self.lane_work_ready() {
@@ -3754,26 +3735,22 @@ impl StorageModule {
     }
 
     fn disk_lane_pass(&self) {
-        // Recall sets `recall_waiters` before it reads, and it already pinned
-        // the index gap. Submit nothing until that hold drops.
+        // Recall sets `recall_waiters` before it reads. Submit nothing until
+        // that hold drops.
         if self.disk.recall_pending() {
             return;
         }
-        // Completion rewrites wait out an active recall. They do not take the
-        // chunk-io hold, so a recall queued behind them is not blocked on the
-        // interval file.
+        // Completion rewrites wait out an active recall, so a recall that is
+        // already waiting is not blocked on the interval file.
         if let Err(error) = self.flush_interval_completions_locked(false) {
             tracing::error!(
                 "Couldn't rewrite intervals for storage_module {}: {error}",
                 self.id
             );
         }
-        // The index drain stays paused for this pass. Presence rows commit on
-        // this thread after `chunks.dat` is fdatasync'd. Submitting them to
-        // the drain here would wait on this hold.
-        let chunk_io = self.disk.index_gap.hold_for_chunk_io();
+        // A recall can arrive during the interval rewrite. It owns the disk
+        // before this pass writes or reads entropy.
         if self.disk.recall_pending() {
-            drop(chunk_io);
             return;
         }
         // An external flush or interval rewrite runs here, before this pass
