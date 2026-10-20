@@ -118,8 +118,43 @@ impl std::fmt::Display for ResetNotFinished {
 
 impl std::error::Error for ResetNotFinished {}
 
+/// Send one packing request without blocking.
+///
+/// `Full` and `Closed` are [`PackSend::Deferred`]: the caller keeps the span.
+/// An invalid request is [`PackSend::Rejected`] and is not retried.
+pub(crate) fn send_packing_request(
+    sender: &crate::packing_service::PackingSender,
+    module: &Arc<StorageModule>,
+    range: PartitionChunkRange,
+) -> PackSend {
+    let Ok(req) = PackingRequest::new(module.clone(), range) else {
+        return PackSend::Rejected;
+    };
+    match sender.try_send(req) {
+        Ok(()) => PackSend::Accepted,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                target = "irys::packing",
+                storage_module.id = %module.id,
+                storage_module.packing_interval = ?range,
+                "Deferring packing request until the channel accepts it"
+            );
+            PackSend::Deferred
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+            tracing::error!(
+                target = "irys::packing",
+                storage_module.id = %module.id,
+                storage_module.packing_interval = ?range,
+                "Packing channel closed; failed to enqueue repacking request"
+            );
+            PackSend::Deferred
+        }
+    }
+}
+
 /// Outcome of one non-blocking send to the packing channel.
-enum PackSend {
+pub(crate) enum PackSend {
     Accepted,
     /// The channel is full or closed. The caller keeps the range.
     Deferred,
@@ -646,31 +681,7 @@ impl StorageModuleServiceInner {
         module: &Arc<StorageModule>,
         range: PartitionChunkRange,
     ) -> PackSend {
-        let sender = self.service_senders.packing_sender();
-        let Ok(req) = PackingRequest::new(module.clone(), range) else {
-            return PackSend::Rejected;
-        };
-        match sender.try_send(req) {
-            Ok(()) => PackSend::Accepted,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!(
-                    target = "irys::packing",
-                    storage_module.id = %module.id,
-                    storage_module.packing_interval = ?range,
-                    "Deferring packing request until the channel accepts it"
-                );
-                PackSend::Deferred
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
-                tracing::error!(
-                    target = "irys::packing",
-                    storage_module.id = %module.id,
-                    storage_module.packing_interval = ?range,
-                    "Packing channel closed; failed to enqueue repacking request"
-                );
-                PackSend::Deferred
-            }
-        }
+        send_packing_request(&self.service_senders.packing_sender(), module, range)
     }
 
     /// Hand crc mismatches to the packing queue. A full channel keeps the

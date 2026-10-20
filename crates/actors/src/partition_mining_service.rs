@@ -5,7 +5,6 @@ use crate::{
         BroadcastDifficultyUpdate, BroadcastMiningSeed, BroadcastPartitionsExpiration,
         MiningBroadcastEvent,
     },
-    packing_service::PackingRequest,
     services::ServiceSenders,
 };
 use eyre::WrapErr as _;
@@ -71,6 +70,10 @@ pub struct PartitionMiningServiceInner {
     /// Hash the expiry notice named. A retry resets only while this hash is
     /// still the one stored.
     expiry_partition_hash: Option<irys_types::H256>,
+    /// Capacity spans whose reset is stored and whose packing send did not
+    /// land. Retried until the channel accepts them. Offsets that are no
+    /// longer uninitialized are not sent.
+    deferred_expiry_packs: Vec<PartitionChunkRange>,
     /// Path lookups this miner issued. Proves a non-winning recall does not
     /// open the index.
     #[cfg(test)]
@@ -199,6 +202,7 @@ impl PartitionMiningServiceInner {
             expiry_reset_pending: false,
             expiry_update_height: 0,
             expiry_partition_hash: None,
+            deferred_expiry_packs: Vec::new(),
             #[cfg(test)]
             data_path_lookups: std::sync::atomic::AtomicU64::new(0),
         }
@@ -272,31 +276,46 @@ impl PartitionMiningServiceInner {
         self.expiry_partition_hash = None;
     }
 
-    /// Finish an expiry reset that returned an error. No-op when none is
-    /// pending. `reset` returning `Ok`, or never running, is not completion.
-    /// The expiry is done when the capacity assignment is stored, or when
-    /// the slot now stored is one this notice must keep.
+    /// Finish an expiry reset that returned an error, then send any span a
+    /// full channel kept. The send runs when no reset is pending. A reset
+    /// that stores a new capacity assignment replaces those spans first, so
+    /// a span from the previous assignment is not packed.
     fn finish_expiry_reset(&mut self) {
-        if !self.expiry_reset_pending {
-            return;
+        if self.expiry_reset_pending {
+            // A ledger installed while the reset was pending owns the module.
+            // Retrying the capacity reset would remove that slot. A read error
+            // here is not that ledger: the locked call below leaves the index
+            // in place and keeps the expiry armed.
+            if self.ledger_slot_stored_since(self.expiry_update_height) {
+                self.expiry_reset_pending = false;
+            } else if let Some(partition_hash) = self.expiry_partition_hash {
+                self.finish_or_arm_expiry(
+                    partition_hash,
+                    "Finished a pending partition expiry reset",
+                    "Partition expiry reset still failing",
+                );
+            } else {
+                self.expiry_reset_pending = false;
+            }
         }
-        // A ledger installed while the reset was pending owns the module.
-        // Retrying the capacity reset would remove that slot. A read error
-        // here is not that ledger: the locked call below leaves the index
-        // in place and keeps the expiry armed.
-        if self.ledger_slot_stored_since(self.expiry_update_height) {
-            self.expiry_reset_pending = false;
-            return;
+        self.retry_deferred_expiry_packs();
+    }
+
+    /// Send spans a full or closed channel kept. Clip each span to offsets
+    /// that are still uninitialized, so data written since the reset is not
+    /// packed over.
+    fn retry_deferred_expiry_packs(&mut self) {
+        let waiting = std::mem::take(&mut self.deferred_expiry_packs);
+        for range in waiting {
+            for span in self
+                .storage_module
+                .uninitialized_spans_overlapping(range.0)
+                .into_iter()
+                .map(PartitionChunkRange)
+            {
+                self.send_or_defer_expiry_pack(span);
+            }
         }
-        let Some(partition_hash) = self.expiry_partition_hash else {
-            self.expiry_reset_pending = false;
-            return;
-        };
-        self.finish_or_arm_expiry(
-            partition_hash,
-            "Finished a pending partition expiry reset",
-            "Partition expiry reset still failing",
-        );
     }
 
     /// Store capacity and pack, or leave the module alone.
@@ -317,7 +336,7 @@ impl PartitionMiningServiceInner {
                     storage_module.packing_interval = ?interval,
                     "{done_message}"
                 );
-                self.enqueue_expiry_packing(partition_hash, PartitionChunkRange(interval));
+                self.enqueue_expiry_packing(PartitionChunkRange(interval));
             }
             Ok(None) => {
                 self.expiry_reset_pending = false;
@@ -367,28 +386,23 @@ impl PartitionMiningServiceInner {
             .reset_expired_to_capacity(expired_hash, self.expiry_update_height)
     }
 
-    fn enqueue_expiry_packing(&self, partition_hash: irys_types::H256, range: PartitionChunkRange) {
-        let Ok(req) = PackingRequest::new(self.storage_module.clone(), range) else {
-            return;
-        };
-        match self.service_senders.packing_sender.try_send(req) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                warn!(
-                    storage_module.id = %self.storage_module.id,
-                    storage_module.partition_hash = ?partition_hash,
-                    storage_module.packing_interval = ?range,
-                    "Dropping packing request due to a saturated channel"
-                );
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
-                error!(
-                    storage_module.id = %self.storage_module.id,
-                    storage_module.partition_hash = ?partition_hash,
-                    storage_module.packing_interval = ?range,
-                    "Packing channel closed; failed to enqueue repacking request"
-                );
-            }
+    /// Pack `range`. A full or closed channel keeps the span. A new expiry
+    /// replaces spans the channel has not accepted: the reset cleared them.
+    fn enqueue_expiry_packing(&mut self, range: PartitionChunkRange) {
+        self.deferred_expiry_packs.clear();
+        self.send_or_defer_expiry_pack(range);
+    }
+
+    fn send_or_defer_expiry_pack(&mut self, range: PartitionChunkRange) {
+        if matches!(
+            crate::storage_module_service::send_packing_request(
+                &self.service_senders.packing_sender,
+                &self.storage_module,
+                range,
+            ),
+            crate::storage_module_service::PackSend::Deferred
+        ) {
+            self.deferred_expiry_packs.push(range);
         }
     }
 
@@ -1066,7 +1080,8 @@ impl PartitionMiningService {
                     }
                 }
 
-                _ = expiry_retry.tick(), if self.state.expiry_reset_pending => {
+                _ = expiry_retry.tick(), if self.state.expiry_reset_pending
+                    || !self.state.deferred_expiry_packs.is_empty() => {
                     self.state.finish_expiry_reset();
                 }
             }
@@ -1078,6 +1093,7 @@ impl PartitionMiningService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packing_service::PackingRequest;
     use irys_domain::{PACKING_PARAMS_FILE_NAME, PackingParams, StorageModuleInfo};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
@@ -1256,6 +1272,228 @@ mod tests {
         assert_eq!(assignment.slot_index, None);
         assert!(!inner.expiry_reset_pending);
         assert!(receivers.packing.try_recv().is_ok());
+    }
+
+    fn fill_expiry_packing_channel(inner: &PartitionMiningServiceInner) {
+        use tokio::sync::mpsc::error::TrySendError;
+        let sender = inner.service_senders.packing_sender();
+        let range = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 0));
+        loop {
+            let request =
+                PackingRequest::new(Arc::clone(&inner.storage_module), range).expect("assigned");
+            match sender.try_send(request) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => break,
+                Err(TrySendError::Closed(_)) => panic!("packing channel closed while filling"),
+            }
+        }
+    }
+
+    fn count_full_expiry_spans(receivers: &mut crate::services::ServiceReceivers) -> usize {
+        let mut full = 0_usize;
+        while let Ok(request) = receivers.packing.try_recv() {
+            if *request.chunk_range().0.start() == 0 && *request.chunk_range().0.end() == 9 {
+                full += 1;
+            }
+        }
+        full
+    }
+
+    /// The channel has room. Expiry stores capacity and sends the span once.
+    /// A later retry does not send it again.
+    #[test]
+    fn open_channel_expiry_sends_the_span_once() {
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x81, Some((DataLedger::Submit, 0)));
+        let submit = storage_module.partition_assignment().expect("assigned");
+        storage_module
+            .assign_partition(submit, 10)
+            .expect("store the slot before the notice");
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
+
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
+
+        assert_eq!(
+            storage_module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        assert!(!inner.expiry_reset_pending);
+        assert_eq!(count_full_expiry_spans(&mut receivers), 1);
+        inner.finish_expiry_reset();
+        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
+    }
+
+    /// The channel is full when expiry stores capacity. The span stays queued
+    /// and is sent once the channel can take it.
+    #[test]
+    #[tracing_test::traced_test]
+    fn full_channel_expiry_sends_the_kept_span_after_room() {
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x82, Some((DataLedger::Submit, 0)));
+        let submit = storage_module.partition_assignment().expect("assigned");
+        storage_module
+            .assign_partition(submit, 10)
+            .expect("store the slot before the notice");
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
+        fill_expiry_packing_channel(&inner);
+
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
+
+        assert_eq!(
+            storage_module.partition_assignment().unwrap().ledger_id,
+            None,
+            "the capacity assignment is stored before the send"
+        );
+        assert!(!inner.expiry_reset_pending, "the reset finished");
+        assert_eq!(
+            count_full_expiry_spans(&mut receivers),
+            0,
+            "a saturated channel does not accept the expiry span"
+        );
+        assert!(
+            logs_contain("Deferring packing request until the channel accepts it"),
+            "a saturated channel keeps the span"
+        );
+        assert!(
+            !logs_contain("Dropping packing request"),
+            "a kept span is not logged as dropped"
+        );
+
+        inner.finish_expiry_reset();
+        assert_eq!(
+            count_full_expiry_spans(&mut receivers),
+            1,
+            "the kept span is sent once the channel is empty"
+        );
+        inner.finish_expiry_reset();
+        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
+    }
+
+    /// Data written after the reset, before the deferred send, is not packed.
+    #[test]
+    fn full_channel_expiry_does_not_pack_a_span_that_became_data() {
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x83, Some((DataLedger::Submit, 0)));
+        let submit = storage_module.partition_assignment().expect("assigned");
+        storage_module
+            .assign_partition(submit, 10)
+            .expect("store the slot before the notice");
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
+        fill_expiry_packing_channel(&inner);
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
+        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
+
+        for offset in 0..10_u32 {
+            assert!(storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![0xD4_u8; 32],
+                ChunkType::Data,
+            ));
+        }
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync data");
+
+        inner.finish_expiry_reset();
+        assert!(
+            receivers.packing.try_recv().is_err(),
+            "data that landed before the deferred send is not packed"
+        );
+    }
+
+    /// Only the offsets that are still uninitialized are packed on the retry.
+    #[test]
+    fn full_channel_expiry_packs_only_the_offsets_still_uninitialized() {
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x84, Some((DataLedger::Submit, 0)));
+        let submit = storage_module.partition_assignment().expect("assigned");
+        storage_module
+            .assign_partition(submit, 10)
+            .expect("store the slot before the notice");
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
+        fill_expiry_packing_channel(&inner);
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
+        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
+
+        assert!(storage_module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0xD4_u8; 32],
+            ChunkType::Data,
+        ));
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync data");
+
+        inner.finish_expiry_reset();
+        let request = receivers
+            .packing
+            .try_recv()
+            .expect("the uninitialized tail is packed");
+        assert_eq!(*request.chunk_range().0.start(), 1);
+        assert_eq!(*request.chunk_range().0.end(), 9);
+        assert!(receivers.packing.try_recv().is_err());
+    }
+
+    /// A closed packing channel keeps the span. A later retry still holds it.
+    #[test]
+    fn closed_channel_expiry_keeps_the_span() {
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x85, Some((DataLedger::Submit, 0)));
+        let submit = storage_module.partition_assignment().expect("assigned");
+        storage_module
+            .assign_partition(submit, 10)
+            .expect("store the slot before the notice");
+        let (mut inner, receivers) = expiry_service(&config, Arc::clone(&storage_module));
+        drop(receivers);
+
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
+
+        assert_eq!(
+            storage_module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        assert!(!inner.expiry_reset_pending);
+        assert_eq!(inner.deferred_expiry_packs.len(), 1);
+        inner.finish_expiry_reset();
+        assert_eq!(inner.deferred_expiry_packs.len(), 1);
+    }
+
+    /// A later reset replaces a span the channel has not accepted. The retry
+    /// sends that new span, not the one from the previous reset.
+    #[test]
+    fn later_expiry_replaces_a_deferred_span() {
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x86, Some((DataLedger::Submit, 0)));
+        let submit = storage_module.partition_assignment().expect("assigned");
+        storage_module
+            .assign_partition(submit, 10)
+            .expect("store the slot before the notice");
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
+        fill_expiry_packing_channel(&inner);
+
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
+        assert_eq!(inner.deferred_expiry_packs.len(), 1);
+
+        storage_module.fail_next_reset_for_test();
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 30);
+        assert!(inner.expiry_reset_pending);
+        assert_eq!(
+            inner.deferred_expiry_packs.len(),
+            1,
+            "a failed reset leaves the span the channel did not take"
+        );
+        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
+
+        inner.finish_expiry_reset();
+        assert!(!inner.expiry_reset_pending);
+        assert!(inner.deferred_expiry_packs.is_empty());
+        assert_eq!(
+            count_full_expiry_spans(&mut receivers),
+            1,
+            "the retry sends the span from the reset that stored capacity"
+        );
+        inner.finish_expiry_reset();
+        assert_eq!(count_full_expiry_spans(&mut receivers), 0);
     }
 
     /// The height check can see the expiring slot and then drop its lock.
