@@ -9,7 +9,7 @@ use irys_domain::{
     BatchEnqueueItem, BlockIndex, StorageModule, StorageModulesReadGuard, WriteDataChunkError,
     get_overlapped_storage_modules,
 };
-use irys_storage::{InclusiveInterval as _, ie, ii};
+use irys_storage::ie;
 use irys_types::{
     Base64, BlockHash, Config, DataLedger, DataRoot, DataTransactionHeader, DataTransactionLedger,
     H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof, SendTraced as _,
@@ -998,7 +998,7 @@ mod tests {
         open_or_create_db, submodule::tables::PendingBodyMigration, tables::IrysTables,
     };
     use irys_domain::{ChunkType, StorageModuleInfo};
-    use irys_storage::ie;
+    use irys_storage::{ie, ii};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         BlockIndexItem, ConsensusConfig, DataTransaction, DataTransactionHeaderV1,
