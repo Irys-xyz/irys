@@ -1220,11 +1220,8 @@ fn live_intervals_by_data_root(
     }
     let mut by_hash: HashMap<H256, Option<DataRoot>> = HashMap::new();
     let mut by_root: HashMap<DataRoot, Vec<(i32, i32)>> = HashMap::new();
-    for (range_start, range_end) in merge_inclusive_ranges(ranges) {
-        let rows = tx.tx_intervals_in_range(
-            PartitionChunkOffset(range_start),
-            PartitionChunkOffset(range_end),
-        )?;
+    for (range_start, range_end) in coalesce_inclusive_spans(&ranges) {
+        let rows = tx.tx_intervals_in_range(range_start, range_end)?;
         #[cfg(test)]
         INTERVAL_ROWS_READ.with(|cell| cell.set(cell.get().saturating_add(rows.len())));
         for row in rows {
@@ -1260,33 +1257,17 @@ fn live_intervals_by_data_root(
 fn info_extent_query_range(
     info: &DataRootInfo,
     chunk_size: u64,
-) -> eyre::Result<Option<(u32, u32)>> {
+) -> eyre::Result<Option<(PartitionChunkOffset, PartitionChunkOffset)>> {
     let (extent_start, extent_end) = placement_extent(info, chunk_size)?;
     if extent_end < 0 {
         return Ok(None);
     }
     let start = extent_start.max(0) as u32;
     let end = extent_end as u32;
-    Ok(Some((start, end)))
-}
-
-fn merge_inclusive_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
-    if ranges.is_empty() {
-        return ranges;
-    }
-    ranges.sort_unstable();
-    let mut merged = Vec::with_capacity(ranges.len());
-    let mut current = ranges[0];
-    for range in ranges.into_iter().skip(1) {
-        if range.0 <= current.1.saturating_add(1) {
-            current.1 = current.1.max(range.1);
-        } else {
-            merged.push(current);
-            current = range;
-        }
-    }
-    merged.push(current);
-    merged
+    Ok(Some((
+        PartitionChunkOffset(start),
+        PartitionChunkOffset(end),
+    )))
 }
 
 /// Infos that still have a live interval. `None` when every info stayed.
