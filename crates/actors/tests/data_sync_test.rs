@@ -436,12 +436,17 @@ impl TestSetup {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                min_durable_interval_ms: 0,
+                ..StorageSyncConfig::default()
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 100,
                 max_storage_throughput_bps: 1000 * 1024 * 1024, // 100 MB/s as BPS
                 bandwidth_adjustment_interval: Duration::from_secs(1),
                 chunk_request_timeout: timeout,
+                pending_body_hold_timeout: Duration::from_secs(10 * 60),
+                max_local_cache_hits_per_tick: 64,
             },
             base_directory: base_path,
             ..NodeConfig::testing()
@@ -1038,6 +1043,17 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
         u32::from(DataLedger::OneYear) as usize
     ));
 
+    let db = {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use irys_types::app_state::DatabaseProvider;
+        let env = open_or_create_db(
+            config.node_config.base_directory.join("orchestrator-db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        )
+        .expect("open orchestrator test db");
+        DatabaseProvider(Arc::new(env))
+    };
     let orchestrator = ChunkOrchestrator::new(
         storage_module.clone(),
         Arc::new(RwLock::new(HashMap::new())),
@@ -1046,6 +1062,7 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
         mock_fetcher,
         config.node_config.clone(),
         tokio::runtime::Handle::current(),
+        db.clone(),
     );
 
     // Before the fix this panics: "should be able to look up data_ledger by id".
@@ -1104,6 +1121,7 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
         )),
         cascade_node_config,
         tokio::runtime::Handle::current(),
+        db,
     );
     assert_eq!(anomaly_orchestrator.get_max_chunk_offset(), None);
 }

@@ -1,8 +1,6 @@
 use irys_database::{
     IrysDatabaseArgs as _, cache_chunk, cache_data_root, cached_chunk_by_chunk_offset,
-    db::IrysDatabaseExt as _,
-    open_or_create_db,
-    submodule::{get_data_root_infos_for_data_root, get_full_tx_path, get_path_hashes_by_offset},
+    db::IrysDatabaseExt as _, open_or_create_db, submodule::SubmoduleStore as _,
     tables::IrysTables,
 };
 use irys_domain::{ChunkType, StorageModule, StorageModuleInfo, StorageSubmodule};
@@ -514,10 +512,11 @@ fn verify_tx_path_in_submodule(submodule: &StorageSubmodule, tx_path: &[u8], tx_
     submodule
         .db
         .view(|tx| {
-            let path = get_full_tx_path(tx, tx_path_hash)
-                .unwrap()
+            let path = tx
+                .get_full_tx_path(tx_path_hash)?
                 .expect("tx_path bytes not found in index");
             assert_eq!(path, tx_path);
+            Ok(())
         })
         .unwrap();
 }
@@ -532,7 +531,7 @@ fn verify_tx_path_offsets(
         .db
         .view(|tx| {
             for offset in *chunk_range.0.start()..=*chunk_range.0.end() {
-                match get_path_hashes_by_offset(tx, PartitionChunkOffset::from(offset)).unwrap() {
+                match tx.get_path_hashes_by_offset(PartitionChunkOffset::from(offset))? {
                     Some(paths) => {
                         let tx_ph = paths
                             .tx_path_hash
@@ -550,6 +549,7 @@ fn verify_tx_path_offsets(
                     }
                 }
             }
+            Ok(())
         })
         .unwrap();
 }
@@ -592,11 +592,12 @@ fn verify_data_root_start_offset(
     submodule
         .db
         .view(|tx| {
-            let data_root_infos = get_data_root_infos_for_data_root(tx, data_root)
-                .unwrap()
+            let data_root_infos = tx
+                .get_data_root_infos_for_data_root(data_root)?
                 .expect("start offsets not found");
             assert_eq!(data_root_infos.0.len(), 1);
             assert_eq!(data_root_infos.0[0].start_offset, expected_offset.into());
+            Ok(())
         })
         .unwrap();
 }
@@ -605,9 +606,9 @@ fn verify_data_root_data_size(submodule: &StorageSubmodule, data_root: H256, exp
     assert_eq!(
         submodule
             .db
-            .view_eyre(|tx| {
-                let data_root_infos = get_data_root_infos_for_data_root(tx, data_root)
-                    .unwrap()
+            .view(|tx| {
+                let data_root_infos = tx
+                    .get_data_root_infos_for_data_root(data_root)?
                     .expect("to find metadata for data_root");
                 assert!(!data_root_infos.0.is_empty());
                 Ok(Some(data_root_infos.0[0].data_size))

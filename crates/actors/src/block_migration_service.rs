@@ -6,7 +6,7 @@ use irys_database::{
     insert_commitment_tx, insert_tx_header, prune_block_stream_below, tx_header_by_txid,
 };
 use irys_domain::{
-    BlockIndex, BlockTree, ChunkType, StorageModule, StorageModulesReadGuard, SupplyState,
+    BlockIndex, BlockTree, StorageModule, StorageModulesReadGuard, SupplyState,
     block_index_guard::BlockIndexReadGuard, forkchoice_markers::finalized_height,
     get_overlapped_storage_modules,
 };
@@ -743,8 +743,20 @@ impl BlockMigrationService {
             // `write_data_chunk`; any of them landing a write between
             // `drop_pending_writes_in_range` and the interval re-mark below
             // would flush orphaned bytes as `Data` over a cleared index.
-            let _writes_paused =
-                PausedDataWrites::pause(storage_modules_guard.read().iter().cloned().collect());
+            let modules: Vec<Arc<StorageModule>> =
+                storage_modules_guard.read().iter().cloned().collect();
+            let _writes_paused = PausedDataWrites::pause(modules.clone());
+            // Hold every module's index gate until the block index truncate
+            // returns. A registration that starts during recovery blocks on
+            // the shared gate, then re-reads the index and writes nothing
+            // when this block is no longer at its height. Lock order matches
+            // the shared side: module id, then the gate, then assignment.
+            let mut ordered = modules;
+            ordered.sort_by_key(|module| module.id);
+            let _index_recovery: Vec<_> = ordered
+                .iter()
+                .map(|module| module.lock_index_recovery_exclusive())
+                .collect();
             // Phase 2: Unassign storage module offsets and clear orphaned index entries
             for info in &rollback_infos {
                 for (ledger, range) in &info.ledger_ranges {
@@ -798,56 +810,29 @@ impl BlockMigrationService {
                             }
                         };
 
-                        let range_start = *partition_range.start();
-                        let range_end = *partition_range.end();
+                        let range_start = PartitionChunkOffset::from(*partition_range.start());
+                        let range_end = PartitionChunkOffset::from(*partition_range.end());
 
-                        // Drop queued (not-yet-synced) writes in the orphaned range
-                        // first: a later `sync_pending_chunks` would otherwise replay
-                        // them and flip the intervals we clear below back to `Data`
-                        // over a now-empty offset index. This closes the queued-write
-                        // path; a sync already mid-flush (its batch snapshotted before
-                        // this drop) can still replay, but that window is transient and
-                        // healed by the repack enqueued below.
-                        module.drop_pending_writes_in_range(
-                            PartitionChunkOffset::from(range_start),
-                            PartitionChunkOffset::from(range_end),
-                        );
-
-                        // Clear per-offset tx/data path index entries for orphaned txs.
-                        module.clear_offset_index_in_range(
-                            PartitionChunkOffset::from(range_start),
-                            PartitionChunkOffset::from(range_end),
-                        )?;
-
-                        // Scope the DataRootInfos clear to the orphaned placements so
-                        // a data_root shared with a still-canonical block keeps its
-                        // canonical placement.
-                        module.clear_data_root_infos_in_range(
-                            PartitionChunkOffset::from(range_start),
-                            PartitionChunkOffset::from(range_end),
+                        // Wait out a durable point that already copied this batch.
+                        // That point holds `sync_in_progress` until it has labeled
+                        // the run. The clear runs after that label, then publishes
+                        // `Uninitialized`. A missed packing send leaves that label,
+                        // so startup packing still repacks the span.
+                        module.rollback_unassigned_range(
+                            range_start,
+                            range_end,
                             &info.data_roots,
                         )?;
-                        // The chunk bodies those placements still owed belong to
-                        // orphaned txs: drop the jobs so the body worker never
-                        // writes them into the re-marked range.
-                        module.purge_pending_body_migrations_in_range(
-                            PartitionChunkOffset::from(range_start),
-                            PartitionChunkOffset::from(range_end),
-                        )?;
 
-                        // Mark offsets as Uninitialized (not Entropy — on-disk bytes are packed data)
-                        {
-                            let mut intervals = module.intervals().write().unwrap();
-                            for offset in range_start..=range_end {
-                                let part_offset = PartitionChunkOffset::from(offset);
-                                StorageModule::cut_then_insert_interval_if_touching(
-                                    &mut intervals,
-                                    part_offset,
-                                    ChunkType::Uninitialized,
-                                );
-                            }
+                        // The range is packed again. Zeros in the rewritten span
+                        // must not stay mismatches under the old flag.
+                        if let Err(err) = module.clear_chunk_crc_complete() {
+                            warn!(
+                                module_id = module.id,
+                                %err,
+                                "failed to clear chunk crc complete during partition recovery"
+                            );
                         }
-                        module.write_intervals_to_submodules()?;
 
                         // Re-request packing for the re-marked range. These offsets
                         // are now `Uninitialized` with no entropy on disk; packing is
@@ -1271,7 +1256,7 @@ mod tests {
         IrysDatabaseArgs as _, cache_data_root, open_or_create_db, read_block_stream_from,
         tables::{CachedDataRoots, IrysTables},
     };
-    use irys_domain::{BlockTree, StorageModuleInfo};
+    use irys_domain::{BlockTree, ChunkType, StorageModuleInfo};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::partition::PartitionAssignment;
     use irys_types::{
@@ -2915,7 +2900,7 @@ mod tests {
     /// is also placed by a still-canonical block.
     #[test]
     fn recover_from_network_partition_scopes_data_root_infos_clear() -> eyre::Result<()> {
-        use irys_database::submodule::{add_data_root_info, tables::DataRootInfo};
+        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
         use irys_types::RelativeChunkOffset;
 
         let (db, _db_tmp) = open_db()?;
@@ -2956,17 +2941,15 @@ mod tests {
         let orphan_txid = H256::random();
         {
             let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(3))?;
-            submodule.db.update_eyre(|tx| {
-                add_data_root_info(
-                    tx,
+            submodule.db.update(|tx| {
+                tx.add_data_root_info(
                     shared_data_root,
                     &DataRootInfo {
                         start_offset: RelativeChunkOffset(0),
                         data_size: 32,
                     },
                 )?;
-                add_data_root_info(
-                    tx,
+                tx.add_data_root_info(
                     shared_data_root,
                     &DataRootInfo {
                         start_offset: RelativeChunkOffset(3),

@@ -22,6 +22,30 @@ use irys_types::{
 use rust_decimal_macros::dec;
 use std::sync::Arc;
 
+/// Copy every producer handle. `AtomicU32` is not `Clone`, so the streak starts at zero.
+/// These tests build a one-shot producer and never share a streak with the node.
+fn cloned_producer_inner(source: &BlockProducerInner, config: Config) -> BlockProducerInner {
+    BlockProducerInner {
+        config,
+        db: source.db.clone(),
+        block_discovery: source.block_discovery.clone(),
+        mining_broadcaster: source.mining_broadcaster.clone(),
+        service_senders: source.service_senders.clone(),
+        reward_curve: source.reward_curve.clone(),
+        vdf_steps_guard: source.vdf_steps_guard.clone(),
+        block_tree_guard: source.block_tree_guard.clone(),
+        mempool_guard: source.mempool_guard.clone(),
+        price_oracle: source.price_oracle.clone(),
+        reth_payload_builder: source.reth_payload_builder.clone(),
+        reth_provider: source.reth_provider.clone(),
+        consensus_engine_handle: source.consensus_engine_handle.clone(),
+        block_index: source.block_index.clone(),
+        reth_node_adapter: source.reth_node_adapter.clone(),
+        chunk_ingress_state: source.chunk_ingress_state.clone(),
+        tx_path_fail_streak: std::sync::atomic::AtomicU32::new(0),
+    }
+}
+
 // This test ensures that during full block validation, data transaction pricing validates the perm fee
 #[test_log::test(tokio::test)]
 async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
@@ -105,24 +129,10 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     let block_prod_strategy = EvilBlockProdStrategy {
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
-            inner: Arc::new(BlockProducerInner {
-                config: Config::new_with_random_peer_id(evil_config),
-                db: genesis_block_prod.db.clone(),
-                block_discovery: genesis_block_prod.block_discovery.clone(),
-                mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
-                service_senders: genesis_block_prod.service_senders.clone(),
-                reward_curve: genesis_block_prod.reward_curve.clone(),
-                vdf_steps_guard: genesis_block_prod.vdf_steps_guard.clone(),
-                block_tree_guard: genesis_block_prod.block_tree_guard.clone(),
-                mempool_guard: genesis_block_prod.mempool_guard.clone(),
-                price_oracle: genesis_block_prod.price_oracle.clone(),
-                reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
-                reth_provider: genesis_block_prod.reth_provider.clone(),
-                consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
-                block_index: genesis_block_prod.block_index.clone(),
-                reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
-                chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
-            }),
+            inner: Arc::new(cloned_producer_inner(
+                genesis_block_prod,
+                Config::new_with_random_peer_id(evil_config),
+            )),
         },
     };
 
@@ -278,24 +288,10 @@ async fn heavy_block_insufficient_perm_fee_pre_validation_only() -> eyre::Result
     let block_prod_strategy = EvilBlockProdStrategy {
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
-            inner: Arc::new(BlockProducerInner {
-                config: Config::new_with_random_peer_id(evil_config),
-                db: genesis_block_prod.db.clone(),
-                block_discovery: genesis_block_prod.block_discovery.clone(),
-                mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
-                service_senders: genesis_block_prod.service_senders.clone(),
-                reward_curve: genesis_block_prod.reward_curve.clone(),
-                vdf_steps_guard: genesis_block_prod.vdf_steps_guard.clone(),
-                block_tree_guard: genesis_block_prod.block_tree_guard.clone(),
-                mempool_guard: genesis_block_prod.mempool_guard.clone(),
-                price_oracle: genesis_block_prod.price_oracle.clone(),
-                reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
-                reth_provider: genesis_block_prod.reth_provider.clone(),
-                consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
-                block_index: genesis_block_prod.block_index.clone(),
-                reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
-                chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
-            }),
+            inner: Arc::new(cloned_producer_inner(
+                genesis_block_prod,
+                Config::new_with_random_peer_id(evil_config),
+            )),
         },
     };
 
@@ -416,24 +412,10 @@ async fn block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
     let block_prod_strategy = EvilBlockProdStrategy {
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
-            inner: Arc::new(BlockProducerInner {
-                config: Config::new_with_random_peer_id(evil_config),
-                db: genesis_block_prod.db.clone(),
-                block_discovery: genesis_block_prod.block_discovery.clone(),
-                mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
-                service_senders: genesis_block_prod.service_senders.clone(),
-                reward_curve: genesis_block_prod.reward_curve.clone(),
-                vdf_steps_guard: genesis_block_prod.vdf_steps_guard.clone(),
-                block_tree_guard: genesis_block_prod.block_tree_guard.clone(),
-                mempool_guard: genesis_block_prod.mempool_guard.clone(),
-                price_oracle: genesis_block_prod.price_oracle.clone(),
-                reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
-                reth_provider: genesis_block_prod.reth_provider.clone(),
-                consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
-                block_index: genesis_block_prod.block_index.clone(),
-                reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
-                chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
-            }),
+            inner: Arc::new(cloned_producer_inner(
+                genesis_block_prod,
+                Config::new_with_random_peer_id(evil_config),
+            )),
         },
     };
 
@@ -927,26 +909,10 @@ async fn heavy_block_term_ledger_tx_with_perm_fee_gets_rejected() -> eyre::Resul
     let block_prod_strategy = EvilBlockProdStrategy {
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
-            inner: Arc::new(BlockProducerInner {
-                config: Config::new_with_random_peer_id(
-                    genesis_node.node_ctx.config.node_config.clone(),
-                ),
-                db: genesis_block_prod.db.clone(),
-                block_discovery: genesis_block_prod.block_discovery.clone(),
-                mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
-                service_senders: genesis_block_prod.service_senders.clone(),
-                reward_curve: genesis_block_prod.reward_curve.clone(),
-                vdf_steps_guard: genesis_block_prod.vdf_steps_guard.clone(),
-                block_tree_guard: genesis_block_prod.block_tree_guard.clone(),
-                mempool_guard: genesis_block_prod.mempool_guard.clone(),
-                price_oracle: genesis_block_prod.price_oracle.clone(),
-                reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
-                reth_provider: genesis_block_prod.reth_provider.clone(),
-                consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
-                block_index: genesis_block_prod.block_index.clone(),
-                reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
-                chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
-            }),
+            inner: Arc::new(cloned_producer_inner(
+                genesis_block_prod,
+                Config::new_with_random_peer_id(genesis_node.node_ctx.config.node_config.clone()),
+            )),
         },
     };
 

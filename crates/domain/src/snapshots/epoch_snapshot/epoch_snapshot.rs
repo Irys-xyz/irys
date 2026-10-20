@@ -144,9 +144,6 @@ impl EpochSnapshot {
             }
         }
 
-        // While we don't return these module infos, we call this method for validating of the storage modules
-        let _storage_module_info = new_self.map_storage_modules_to_partition_assignments();
-
         new_self
     }
 
@@ -183,7 +180,7 @@ impl EpochSnapshot {
             previous_epoch_block = Some(block_header);
         }
 
-        let storage_module_info = self.map_storage_modules_to_partition_assignments();
+        let storage_module_info = self.map_storage_modules_to_partition_assignments()?;
 
         Ok(storage_module_info)
     }
@@ -1330,7 +1327,9 @@ impl EpochSnapshot {
     ///
     /// # Returns
     /// * `Vec<StorageModuleInfo>` - Vector of storage module information with assigned partitions
-    pub fn map_storage_modules_to_partition_assignments(&self) -> Vec<StorageModuleInfo> {
+    pub fn map_storage_modules_to_partition_assignments(
+        &self,
+    ) -> eyre::Result<Vec<StorageModuleInfo>> {
         let miner = self.config.node_config.miner_address();
         let assignments = self.get_partition_assignments(miner);
         let num_chunks = self.config.consensus.num_chunks_in_partition as u32;
@@ -1341,7 +1340,7 @@ impl EpochSnapshot {
             .submodule_paths;
 
         // Collect existing storage module packing info
-        let mut sm_packing_info = self.collect_packing_info(paths);
+        let mut sm_packing_info = self.collect_packing_info(paths)?;
         debug!("Packing info: {:#?}", &sm_packing_info);
 
         let mut module_infos = Vec::new();
@@ -1414,7 +1413,7 @@ impl EpochSnapshot {
             });
         }
 
-        module_infos
+        Ok(module_infos)
     }
 
     /// Returns partitions expiring at height + 1 to this [EpochSnapshot]. Empty unless next block is an epoch block with expiring partitions.
@@ -1573,22 +1572,24 @@ impl EpochSnapshot {
     /// Loops though all the paths in the storage_submodules.toml and attempts to read the existing
     /// packing params from that path, building a list of (PathBuf, Option<PackingParams>) whose
     /// indexes map to the index of the path in the .toml
-    fn collect_packing_info(&self, paths: &[PathBuf]) -> Vec<(PathBuf, Option<PackingParams>)> {
-        paths
-            .iter()
-            .map(|path| {
-                let sub_base_path = self.config.node_config.base_directory.join(path.clone());
-                let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
+    fn collect_packing_info(
+        &self,
+        paths: &[PathBuf],
+    ) -> eyre::Result<Vec<(PathBuf, Option<PackingParams>)>> {
+        let mut out = Vec::with_capacity(paths.len());
+        for path in paths {
+            let sub_base_path = self.config.node_config.base_directory.join(path.clone());
+            let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
 
-                let params = if params_path.exists() {
-                    Some(PackingParams::from_toml(&params_path).expect("packing params to load"))
-                } else {
-                    None
-                };
+            let params = if params_path.exists() {
+                Some(PackingParams::from_toml(&params_path)?)
+            } else {
+                None
+            };
 
-                (path.clone(), params)
-            })
-            .collect()
+            out.push((path.clone(), params));
+        }
+        Ok(out)
     }
 
     /// Processes partition assignments for a specific ledger, creating StorageModuleInfo entries and updating packing state.
@@ -1626,13 +1627,18 @@ impl EpochSnapshot {
                 submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path)],
             });
 
-            // Update packing info (so this storage module doesn't get assigned to something else)
+            // Update packing info (so this storage module doesn't get assigned to something else).
+            // Keep the recorded iterations and chunk size.
+            let previous = sm_packing_info[id].1;
             sm_packing_info[id].1 = Some(PackingParams {
                 packing_address: miner,
                 partition_hash: Some(pa.partition_hash),
                 ledger: pa.ledger_id,
                 slot: pa.slot_index,
                 last_updated_height: Some(self.epoch_height),
+                entropy_packing_iterations: previous
+                    .and_then(|params| params.entropy_packing_iterations),
+                chunk_size: previous.and_then(|params| params.chunk_size),
             });
         }
     }
@@ -1721,8 +1727,10 @@ fn bigfloat_truncate_to_3_decimals(value: &num_bigfloat::BigFloat) -> num_bigflo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CommitmentState, PartitionAssignments};
+    use crate::{CommitmentState, PACKING_PARAMS_FILE_NAME, PartitionAssignments};
+    use irys_config::submodules::StorageSubmodulesConfig;
     use irys_database::data_ledger::Ledgers;
+    use std::path::PathBuf;
 
     use irys_types::{
         Config, ConsensusConfig, ConsensusOptions, DataLedger, IrysBlockHeader, NodeConfig,
@@ -1788,6 +1796,54 @@ mod tests {
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
             assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
         }
+    }
+
+    fn snapshot_with_submodules(config: Config, submodule_paths: Vec<PathBuf>) -> EpochSnapshot {
+        EpochSnapshot {
+            ledgers: Ledgers::new(&config.consensus, ForBlock::inactive()),
+            partition_assignments: PartitionAssignments::new(),
+            all_active_partitions: Vec::new(),
+            unassigned_partitions: Vec::new(),
+            storage_submodules_config: Some(StorageSubmodulesConfig {
+                is_using_hardcoded_paths: true,
+                submodule_paths,
+            }),
+            config,
+            commitment_state: CommitmentState::default(),
+            epoch_block: IrysBlockHeader::default(),
+            previous_epoch_block: None,
+            expired_partition_infos: None,
+            epoch_height: 0,
+        }
+    }
+
+    /// A truncated packing file is an error. A missing file stays an empty module.
+    #[test]
+    fn corrupt_packing_params_is_a_mapping_error() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("corrupt_packing_params")
+            .build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let sub = PathBuf::from("sub");
+        let sub_dir = tmp.path().join(&sub);
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        std::fs::write(sub_dir.join(PACKING_PARAMS_FILE_NAME), b"not = toml [[[").unwrap();
+
+        let snapshot = snapshot_with_submodules(config.clone(), vec![sub]);
+        let err = snapshot
+            .map_storage_modules_to_partition_assignments()
+            .expect_err("a corrupt packing file must not abort mapping");
+        let message = err.to_string();
+        assert!(message.contains("packing params"), "{message}");
+
+        let absent = snapshot_with_submodules(config, vec![PathBuf::from("absent")]);
+        let infos = absent
+            .map_storage_modules_to_partition_assignments()
+            .expect("a missing packing file is an empty module");
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].partition_assignment.is_none());
     }
 
     mod validate_commitments {

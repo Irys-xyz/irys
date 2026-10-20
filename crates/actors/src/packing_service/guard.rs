@@ -89,6 +89,8 @@ mod tests {
     #[test]
     fn test_guard_notify_on_create_and_drop() {
         use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
 
         let counter = Arc::new(AtomicUsize::new(0));
         let notify = Arc::new(Notify::new());
@@ -96,26 +98,34 @@ mod tests {
 
         let notified_clone = notified.clone();
         let notify_clone = notify.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
 
-        // Spawn a task that waits for notification
+        // `notify_waiters` wakes only futures that already exist. Create the
+        // `Notified` future, then signal, before the guard notifies.
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
-                notify_clone.notified().await;
+                let waiter = notify_clone.notified();
+                let _ = ready_tx.send(());
+                waiter.await;
                 notified_clone.store(true, Ordering::Relaxed);
             });
         });
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter registers notified() before the guard is created");
 
-        // Create guard - should trigger notification
         {
             let _guard = ActiveWorkerGuard::new(counter, notify);
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            assert!(
-                notified.load(Ordering::Relaxed),
-                "Should be notified on guard creation"
-            );
+            let start = Instant::now();
+            while !notified.load(Ordering::Relaxed) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(2),
+                    "Should be notified on guard creation"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
     }
 }

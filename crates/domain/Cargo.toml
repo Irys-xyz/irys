@@ -6,6 +6,11 @@ rust-version.workspace = true
 
 [features]
 test-utils = ["irys-types/test-utils"]
+# Load-test hook. Production builds leave this off. `cargo check --workspace`
+# turns it on by feature unification with `irys-sm-bench`; the split is `None`
+# unless the bench calls `StorageModule::open_split`. `StorageModule::new`
+# still selects the index engine from config.
+bench = ["irys-database/rocksdb"]
 
 [dependencies]
 alloy-core.workspace = true
@@ -13,20 +18,22 @@ atomic-write-file = "0.2"
 derive_more.workspace = true
 eyre.workspace = true
 libc = "0.2"
+metrics.workspace = true
 irys-types.workspace = true
 irys-config.workspace = true
-irys-database.workspace = true
+irys-database = { workspace = true, features = ["rocksdb"] }
 irys-packing.workspace = true
 irys-storage.workspace = true
 irys-reth-node-bridge.workspace = true
 nodit.workspace = true
 openssl.workspace = true
+opentelemetry.workspace = true
 serde.workspace = true
 tracing.workspace = true
 rand.workspace = true
 reth-db.workspace = true
 rust_decimal.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 lru.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types.workspace = true
@@ -40,6 +47,7 @@ num-bigfloat = "1"
 base58.workspace=true
 thiserror.workspace=true
 semver.workspace = true
+crc32c = "0.6.8"
 
 [dev-dependencies]
 test-log.workspace = true

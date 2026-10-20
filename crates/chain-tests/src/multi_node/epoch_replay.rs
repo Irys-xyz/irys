@@ -146,7 +146,8 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
             .block_tree_guard
             .read()
             .canonical_epoch_snapshot()
-            .map_storage_modules_to_partition_assignments();
+            .map_storage_modules_to_partition_assignments()
+            .expect("packing params");
 
         assert!(peer_sm_infos_before[0].partition_assignment.is_some());
         assert_eq!(
@@ -185,7 +186,7 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
         .join(PACKING_PARAMS_FILE_NAME);
     let mut params = PackingParams::from_toml(&params_path).expect("packing params to load");
     params.last_updated_height = None;
-    params.write_to_disk(&params_path);
+    params.write_to_disk(&params_path)?;
 
     // 5. Mine another epoch to get peer partition assigned to data ledger slot
     info!("Mining second epoch to assign peer to data ledger slot...");
@@ -267,7 +268,8 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
         .block_tree_guard
         .read()
         .canonical_epoch_snapshot()
-        .map_storage_modules_to_partition_assignments();
+        .map_storage_modules_to_partition_assignments()
+        .expect("packing params");
 
     let peer_assignment_before = peer_sm_infos_before[0].partition_assignment.unwrap();
     let peer_assignment_after = sm_infos_after

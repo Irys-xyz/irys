@@ -10,7 +10,7 @@ use irys_types::{
 };
 use reth::providers::{ReceiptProvider as _, TransactionsProvider as _};
 use reth::rpc::types::BlockNumberOrTag;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, Instant, sleep};
 
 use crate::block_production::unpledge_refund::{
     assert_single_log_for, send_unpledge_all, setup_env, setup_env_with_block_migration_depth,
@@ -117,13 +117,11 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         "Expected one UNPLEDGE_REFUND log per drained pledge"
     );
 
-    // Ensure storage modules are empty and pledge count is zero after the epoch.
-    let post_unpledge_assignments: Vec<_> = {
-        let sms = peer_node.node_ctx.storage_modules_guard.read();
-        sms.iter()
-            .filter_map(|sm| sm.partition_assignment())
-            .collect()
-    };
+    // The epoch block is published before the storage-module task finishes
+    // the reset. The assignment stays until that reset returns, so wait for
+    // the release instead of reading the guard once.
+    let post_unpledge_assignments =
+        wait_for_assignments_released(&peer_node, seconds_to_wait).await;
     assert!(
         post_unpledge_assignments.is_empty(),
         "All capacity assignments must be released before attempting unstake"
@@ -875,6 +873,30 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Poll until every partition assignment is gone, or `seconds_to_wait` elapses.
+///
+/// The bound is monotonic. A wall-clock jump does not shorten or extend it.
+async fn wait_for_assignments_released(
+    peer: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    seconds_to_wait: usize,
+) -> Vec<PartitionAssignment> {
+    let deadline = Instant::now() + Duration::from_secs(seconds_to_wait as u64);
+    loop {
+        let assignments = peer_assignments(peer);
+        if assignments.is_empty() || Instant::now() >= deadline {
+            return assignments;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn peer_assignments(peer: &IrysNodeTest<irys_chain::IrysNodeCtx>) -> Vec<PartitionAssignment> {
+    let sms = peer.node_ctx.storage_modules_guard.read();
+    sms.iter()
+        .filter_map(|sm| sm.partition_assignment())
+        .collect()
+}
+
 /// Get receipts for a block
 async fn get_block_receipts(
     node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
@@ -1302,13 +1324,10 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
     )
     .await;
 
-    // Verify all storage modules are unassigned
-    let post_epoch_assignments: Vec<_> = {
-        let sms = peer_node.node_ctx.storage_modules_guard.read();
-        sms.iter()
-            .filter_map(|sm| sm.partition_assignment())
-            .collect()
-    };
+    // The epoch block is published before the storage-module task finishes
+    // the reset. The assignment stays until that reset returns, so wait for
+    // the release instead of reading the guard once.
+    let post_epoch_assignments = wait_for_assignments_released(&peer_node, seconds_to_wait).await;
     assert!(
         post_epoch_assignments.is_empty(),
         "All storage modules must be unassigned after unpledge refunds"

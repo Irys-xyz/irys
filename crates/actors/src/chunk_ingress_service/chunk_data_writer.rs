@@ -64,6 +64,18 @@ impl ChunkDataWriter {
         Self { tx, pending_hashes }
     }
 
+    /// A writer whose channel is already closed, so `queue_write` fails before
+    /// any cache batch exists.
+    #[cfg(test)]
+    pub(super) fn closed_for_test() -> Self {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        Self {
+            tx,
+            pending_hashes: Arc::new(DashSet::new()),
+        }
+    }
+
     /// Queue a chunk and return its exact batch-commit acknowledgement.
     ///
     /// Concurrent writes are still committed in shared MDBX batches, but each

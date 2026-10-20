@@ -255,7 +255,8 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             .block_tree_guard
             .read()
             .canonical_epoch_snapshot()
-            .map_storage_modules_to_partition_assignments();
+            .map_storage_modules_to_partition_assignments()
+            .expect("packing params");
 
         node.wait_until_height_confirmed(6, 10).await?;
 
@@ -333,7 +334,8 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         .block_tree_guard
         .read()
         .canonical_epoch_snapshot()
-        .map_storage_modules_to_partition_assignments();
+        .map_storage_modules_to_partition_assignments()
+        .expect("packing params");
 
     assert_eq!(sm_infos_before, sm_infos_after);
 

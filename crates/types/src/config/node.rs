@@ -54,6 +54,50 @@ impl From<DbSyncMode> for reth_db::mdbx::SyncMode {
     }
 }
 
+/// Per-chunk submodule index engine. The default stays MDBX.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+// MDBX-SUBMODULE-INDEX: make RocksDB the only submodule index engine, then remove this enum and the submodule_index key. The consensus database stays MDBX. DatabaseConfig denies unknown fields, so delete the key only after configs no longer contain it.
+pub enum SubmoduleIndexEngine {
+    #[default]
+    Mdbx,
+    Rocksdb,
+}
+
+/// Block cache shared by every RocksDB submodule index in the process.
+///
+/// Partitioned filters stay in this cache. A 64 MiB cache has 1 MiB shards,
+/// and a full filter for a 4 TB partition is about 20 MB, so that block is
+/// loaded and dropped on every lookup. 1 GiB is 16 MiB per shard. The
+/// write-buffer manager charges memtables to this cache, so this value must
+/// be at least [`DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES`].
+///
+/// Inline data-path and tx-path blocks live here too. There is no separate
+/// blob cache for new values. A directory that still has blob files reads
+/// them through this same cache until compaction inlines them.
+pub const DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+/// Memtable budget for every RocksDB submodule index in the process.
+///
+/// An idle column family holds about 1 MiB. Forty databases and seven
+/// families (the empty default family plus six user families) are about
+/// 280 MiB, which fits in 512 MiB. The cache must be at least this large
+/// because the charge lives in the block cache. A path value sits in the
+/// memtable until flush whether or not blob files are enabled, so this
+/// budget does not grow when values stay inline.
+pub const DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
+/// High-priority Env threads. Flushes use this pool. The pool is process-wide.
+///
+/// Two threads let one flush run while another disk flushes. One thread per
+/// database is not required: the pool is shared.
+pub const DEFAULT_ROCKSDB_FLUSH_THREADS: u32 = 2;
+/// Low-priority Env threads. Compactions use this pool. The pool is process-wide.
+///
+/// Four threads let several of about ten HDD spindles compact at once. The
+/// optional rate limit is the byte cap.
+pub const DEFAULT_ROCKSDB_COMPACTION_THREADS: u32 = 4;
+/// `0` leaves the flush and compaction rate limiter off.
+pub const DEFAULT_ROCKSDB_RATE_LIMIT_BYTES_PER_SEC: u64 = 0;
+
 /// Database durability and sync settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +119,41 @@ pub struct DatabaseConfig {
     /// address space. See `TEST_DB_GEOMETRY_MAX_SIZE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_max_size: Option<usize>,
+
+    /// Engine for each storage submodule's per-chunk index.
+    /// `mdbx` opens `db/`. `rocksdb` opens a sibling `rocks/` directory.
+    #[serde(default)]
+    // MDBX-SUBMODULE-INDEX: remove this field once every config is on RocksDB and the key has been retired. An omitted key selects MDBX.
+    pub submodule_index: SubmoduleIndexEngine,
+
+    /// Block cache shared by every RocksDB submodule index. Ignored for MDBX.
+    /// See [`DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES`].
+    #[serde(default = "default_rocksdb_block_cache_bytes")]
+    pub rocksdb_block_cache_bytes: u64,
+
+    /// Memtable budget shared by every RocksDB submodule index and charged to
+    /// the block cache. Ignored for MDBX. Writers are not stalled. RocksDB
+    /// schedules flushes once mutable memtables pass 7/8 of this budget.
+    #[serde(default = "default_rocksdb_write_buffer_bytes")]
+    pub rocksdb_write_buffer_bytes: u64,
+
+    /// Process-wide RocksDB flush threads. Ignored for MDBX.
+    #[serde(default = "default_rocksdb_flush_threads")]
+    pub rocksdb_flush_threads: u32,
+
+    /// Process-wide RocksDB compaction threads. Ignored for MDBX.
+    #[serde(default = "default_rocksdb_compaction_threads")]
+    pub rocksdb_compaction_threads: u32,
+
+    /// Flush and compaction write cap, bytes per second, per submodule
+    /// database. `0` leaves the limiter off. Ignored for MDBX.
+    ///
+    /// One limiter per physical disk is the right scope. Each open builds its
+    /// own limiter, and the open does not know which disk the directory is
+    /// on. N submodules on one disk then get N times this rate. Set the value
+    /// to the disk budget divided by the submodule count on that disk.
+    #[serde(default = "default_rocksdb_rate_limit_bytes_per_sec")]
+    pub rocksdb_rate_limit_bytes_per_sec: u64,
 }
 
 fn default_db_sync_mode() -> DbSyncMode {
@@ -83,6 +162,21 @@ fn default_db_sync_mode() -> DbSyncMode {
 fn default_cache_db_sync_mode() -> DbSyncMode {
     DbSyncMode::SafeNoSync
 }
+fn default_rocksdb_block_cache_bytes() -> u64 {
+    DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES
+}
+fn default_rocksdb_write_buffer_bytes() -> u64 {
+    DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES
+}
+fn default_rocksdb_flush_threads() -> u32 {
+    DEFAULT_ROCKSDB_FLUSH_THREADS
+}
+fn default_rocksdb_compaction_threads() -> u32 {
+    DEFAULT_ROCKSDB_COMPACTION_THREADS
+}
+fn default_rocksdb_rate_limit_bytes_per_sec() -> u64 {
+    DEFAULT_ROCKSDB_RATE_LIMIT_BYTES_PER_SEC
+}
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
@@ -90,6 +184,13 @@ impl Default for DatabaseConfig {
             sync_mode: default_db_sync_mode(),
             cache_sync_mode: default_cache_db_sync_mode(),
             geometry_max_size: None,
+            // MDBX-SUBMODULE-INDEX: delete this assignment with the field. The default is MDBX until then.
+            submodule_index: SubmoduleIndexEngine::Mdbx,
+            rocksdb_block_cache_bytes: default_rocksdb_block_cache_bytes(),
+            rocksdb_write_buffer_bytes: default_rocksdb_write_buffer_bytes(),
+            rocksdb_flush_threads: default_rocksdb_flush_threads(),
+            rocksdb_compaction_threads: default_rocksdb_compaction_threads(),
+            rocksdb_rate_limit_bytes_per_sec: default_rocksdb_rate_limit_bytes_per_sec(),
         }
     }
 }
@@ -472,8 +573,13 @@ impl OracleConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct StorageSyncConfig {
-    /// Number of write operations before forcing a sync to disk
-    /// Higher values improve performance but increase data loss risk on crashes
+    /// Pending chunk count that lets a non-force flush write one submodule.
+    ///
+    /// This count does not set the `fdatasync` gap. That gap is
+    /// [`Self::min_durable_interval_ms`]. Reaching the count also releases
+    /// every short packed run. A busy disk no longer waits out the reorder
+    /// grace for a neighbor. The value also sizes the pending-byte ceiling
+    /// and the packing sync stride. `0` is rejected.
     pub num_writes_before_sync: u64,
     /// Ceiling, in bytes, on chunk bodies one storage module may hold in memory
     /// awaiting flush before background body migration pauses writing to it.
@@ -482,6 +588,164 @@ pub struct StorageSyncConfig {
     /// floored at 256 chunks so a small `num_writes_before_sync` cannot stall
     /// the worker on the storage service's idle flush.
     pub max_pending_write_bytes: Option<u64>,
+    /// Parsed so an older config that set this key still loads. A queued
+    /// entropy sweep runs when the disk is free. The disk lane does not read
+    /// this value, and it is not written back.
+    #[serde(default = "default_entropy_sweep_interval_millis", skip_serializing)]
+    pub entropy_sweep_interval_millis: u64,
+    /// Max bytes of one entropy pread. A hold is at least one chunk.
+    /// A coalesced packed `pwrite` uses its own cap. A non-coalesced pwrite
+    /// still uses this one.
+    #[serde(default = "default_entropy_sweep_max_bytes")]
+    pub entropy_sweep_max_bytes: u64,
+    /// Max unread gap, in bytes, a sweep may read through and discard.
+    /// Zero bridges no hole.
+    #[serde(default = "default_entropy_coalesce_hole_bytes")]
+    pub entropy_coalesce_hole_bytes: u64,
+    /// Milliseconds a short entropy span waits for a neighboring chunk.
+    ///
+    /// The wait runs while the disk is idle. The oldest chunk in the span
+    /// starts it, so a neighbor does not restart it. A span that already
+    /// reaches [`Self::entropy_read_batch_bytes`] does not wait. A packing
+    /// span does not wait. A lone chunk is issued when this ends. `0` issues
+    /// every formed span at once.
+    #[serde(default = "default_entropy_read_grace_ms")]
+    pub entropy_read_grace_ms: u64,
+    /// Bytes a span must cover before it is read without
+    /// [`Self::entropy_read_grace_ms`].
+    ///
+    /// [`Self::entropy_sweep_max_bytes`] still limits the pread. A config
+    /// file that sets this key still loads, and the loaded value is the
+    /// sweep cap. Tests and the bench assign the field in code. `0` on that
+    /// path treats every span as large enough to issue at once.
+    #[serde(
+        default = "default_entropy_read_batch_bytes",
+        skip_serializing,
+        deserialize_with = "freeze_entropy_bytes_at_sweep_cap"
+    )]
+    pub entropy_read_batch_bytes: u64,
+    /// Extra bytes a short ingress span may read past its last queued chunk.
+    ///
+    /// The whole pread still stops at [`Self::entropy_sweep_max_bytes`], at
+    /// the transaction's last chunk in this module, and at the submodule.
+    /// A config file that sets this key still loads, and the loaded value is
+    /// the sweep cap. Tests and the bench assign the field in code. `0` on
+    /// that path does not read ahead.
+    #[serde(
+        default = "default_entropy_readahead_bytes",
+        skip_serializing,
+        deserialize_with = "freeze_entropy_bytes_at_sweep_cap"
+    )]
+    pub entropy_readahead_bytes: u64,
+    /// Cap, in bytes, on the per-module entropy read-ahead cache.
+    ///
+    /// The oldest pad is dropped first. `0` keeps nothing. Reset, a
+    /// partition-hash change, and a pause drop the cache. A write drops
+    /// that offset.
+    #[serde(default = "default_entropy_readahead_cache_bytes")]
+    pub entropy_readahead_cache_bytes: u64,
+    /// Seconds between completion rewrites of each submodule's `intervals.json`.
+    ///
+    /// A write-ahead transition is still stored immediately: `Interrupted`
+    /// before chunk bytes change, and `Uninitialized` on reset or rollback.
+    /// Each of those rewrites is atomic (`fsync` of the temp file, then
+    /// `fsync` of the directory). A completion (`Data` or `Entropy` after the
+    /// chunk `fdatasync` and the presence commit) stays in memory and shares
+    /// one rewrite at most this often, or sooner when a write-ahead rewrite
+    /// already has to hit the disk. Clean shutdown writes the live map.
+    /// `0` rewrites completions on every sync.
+    #[serde(default = "default_intervals_persist_secs")]
+    pub intervals_persist_secs: u64,
+    /// Milliseconds a RocksDB submodule index may leave a non-durable write
+    /// unsynced.
+    ///
+    /// The write is in the WAL page cache. It becomes durable at the next
+    /// synced write on that database, when this backstop syncs the WAL, or
+    /// on clean shutdown. `0` makes the backstop thread sync as soon as it
+    /// wakes. MDBX ignores this key. Open leaves group commit off, so each
+    /// MDBX registration is durable before the write returns.
+    #[serde(default = "default_index_wal_backstop_ms")]
+    pub index_wal_backstop_ms: u64,
+    /// Threads that prefetch tx headers when a data solution has no stored tx path.
+    ///
+    /// The derive starts when the solution is found. Block production awaits it
+    /// when it builds the PoA, so parent selection, mempool selection, and the
+    /// Reth payload build run while the headers are read. `1` reads headers on
+    /// the derive thread. `0` is raised to 1. The pool is
+    /// `min(configured, available_parallelism)` and at least 1. The default
+    /// is 16.
+    #[serde(default = "default_tx_path_derive_threads")]
+    pub tx_path_derive_threads: usize,
+    /// Minimum milliseconds between durable points.
+    ///
+    /// The default is 250. On HDD storage modules that cap keeps a
+    /// 16–28 MiB/s ingest, at one recall per second, under drive saturation
+    /// (about 7–19 points of drive time) and adds about 100 ms to durable
+    /// p99. `0` syncs on every gap.
+    ///
+    /// A durable point is the `chunks.dat` `fdatasync` and the synced presence
+    /// commit that follows it. A positive value defers a pair that would land
+    /// sooner than this after the previous pair. Pwrites keep running. Recall
+    /// does not wait on a deferred pair.
+    ///
+    /// These still run the pair immediately: `force_sync_pending_chunks`,
+    /// shutdown, drop, pending bytes over [`Self::durable_headroom_permille`]
+    /// of the ceiling, and a pending-byte level above the ceiling
+    /// (`max_pending_write_bytes`, or
+    /// `max(2 × num_writes_before_sync, 256) × chunk_size × submodules`).
+    /// Reset drops pending bytes instead of waiting. Headroom loss ends the
+    /// wait sooner. The interval is not a bound while a mining recall holds
+    /// the disk: the lane does not start the point, and the `fdatasync`
+    /// waits until that `pread` returns.
+    #[serde(default = "default_min_durable_interval_ms")]
+    pub min_durable_interval_ms: u64,
+    /// Pending bytes, in parts per thousand of the memory ceiling, above
+    /// which a durable point runs at once.
+    ///
+    /// The lane defers only while pending bytes (queued, written ahead, and
+    /// unpacked) stay at or under `ceiling * durable_headroom_permille / 1000`,
+    /// and only until [`Self::min_durable_interval_ms`]. Crossing the line
+    /// closes deferral. It stays closed until pending bytes are at or under
+    /// half that line, so a full queue cannot re-arm a large sync by dipping
+    /// just under the line. An owed recall flush still defers on this line:
+    /// that recall is waiting on the flush and must not wait on the fdatasync.
+    ///
+    /// The default is 400. `1000` puts the line on the ceiling. `0` runs a
+    /// point as soon as any byte is pending, except while a recall flush is owed.
+    #[serde(default = "default_durable_headroom_permille")]
+    pub durable_headroom_permille: u64,
+    /// Accepted so an older config that set this key still loads.
+    /// The value is ignored and is not written back. Recall pages stay cached.
+    #[serde(default, skip_serializing)]
+    pub drop_recall_page_cache: bool,
+    /// When true, mining recall reads `chunks.dat` through a second read-only
+    /// descriptor opened with `O_DIRECT`.
+    ///
+    /// A recall range is read once per step. A buffered read of that range
+    /// fills the page cache with pages nothing else will hit, and that cache
+    /// is also where RocksDB SST pages and other reused file data live.
+    /// `O_DIRECT` keeps the recall bytes out of that cache.
+    ///
+    /// The default is true: buffered recall reads put about 100 MiB of
+    /// use-once pages per partition per step into the page cache and evict
+    /// everything else (measured on devnet HDDs: page cache full within
+    /// minutes; serving p50 5–8 ms buffered vs 0.8 ms direct, recall p50
+    /// ~12% lower direct). `testing()` keeps it off. An open that fails with
+    /// `EINVAL` or `EOPNOTSUPP` logs one warning and keeps the buffered
+    /// descriptor. Any other errno fails module open. Set this flag false
+    /// to skip the direct descriptor. Serving, the entropy sweep, and packing
+    /// validation stay on the buffered descriptor either way.
+    ///
+    /// A direct read of a range that still has dirty buffered pages returns
+    /// the new bytes. Linux writes that range back before the direct read
+    /// (XFS and ext4 iomap).
+    #[serde(default = "default_recall_direct_io")]
+    pub recall_direct_io: bool,
+}
+
+/// Mining recall reads `chunks.dat` with `O_DIRECT` unless a config says otherwise.
+pub const fn default_recall_direct_io() -> bool {
+    true
 }
 
 impl Default for StorageSyncConfig {
@@ -489,8 +753,141 @@ impl Default for StorageSyncConfig {
         Self {
             num_writes_before_sync: 100,
             max_pending_write_bytes: None,
+            entropy_sweep_interval_millis: default_entropy_sweep_interval_millis(),
+            entropy_sweep_max_bytes: default_entropy_sweep_max_bytes(),
+            entropy_coalesce_hole_bytes: default_entropy_coalesce_hole_bytes(),
+            entropy_read_grace_ms: default_entropy_read_grace_ms(),
+            entropy_read_batch_bytes: default_entropy_read_batch_bytes(),
+            entropy_readahead_bytes: default_entropy_readahead_bytes(),
+            entropy_readahead_cache_bytes: default_entropy_readahead_cache_bytes(),
+            drop_recall_page_cache: false,
+            recall_direct_io: default_recall_direct_io(),
+            intervals_persist_secs: default_intervals_persist_secs(),
+            index_wal_backstop_ms: default_index_wal_backstop_ms(),
+            tx_path_derive_threads: default_tx_path_derive_threads(),
+            min_durable_interval_ms: default_min_durable_interval_ms(),
+            durable_headroom_permille: default_durable_headroom_permille(),
         }
     }
+}
+
+/// Default gap between completion rewrites of `intervals.json`.
+pub const DEFAULT_INTERVALS_PERSIST_SECS: u64 = 30;
+
+/// Default RocksDB index WAL backstop. See [`StorageSyncConfig::index_wal_backstop_ms`].
+pub const DEFAULT_INDEX_WAL_BACKSTOP_MS: u64 = 1000;
+
+/// Default tx-header prefetch threads. See [`StorageSyncConfig::tx_path_derive_threads`].
+pub const DEFAULT_TX_PATH_DERIVE_THREADS: usize = 16;
+
+/// Default gap between durable points, in milliseconds. See
+/// [`StorageSyncConfig::min_durable_interval_ms`].
+pub const DEFAULT_MIN_DURABLE_INTERVAL_MS: u64 = 250;
+
+/// Default headroom line, in parts per thousand of the pending-byte ceiling.
+/// See [`StorageSyncConfig::durable_headroom_permille`].
+pub const DEFAULT_DURABLE_HEADROOM_PERMILLE: u64 = 400;
+
+fn default_intervals_persist_secs() -> u64 {
+    DEFAULT_INTERVALS_PERSIST_SECS
+}
+
+fn default_index_wal_backstop_ms() -> u64 {
+    DEFAULT_INDEX_WAL_BACKSTOP_MS
+}
+
+fn default_tx_path_derive_threads() -> usize {
+    DEFAULT_TX_PATH_DERIVE_THREADS
+}
+
+fn default_min_durable_interval_ms() -> u64 {
+    DEFAULT_MIN_DURABLE_INTERVAL_MS
+}
+
+fn default_durable_headroom_permille() -> u64 {
+    DEFAULT_DURABLE_HEADROOM_PERMILLE
+}
+
+fn default_entropy_sweep_interval_millis() -> u64 {
+    1000
+}
+
+/// Default cap on one entropy pread.
+///
+/// 4 MiB is about 22 ms at the quiet-drive rate the in-flight budget uses
+/// (182 MiB/s), so one read stays inside a recall's margin. One 256 KiB
+/// chunk is a random read on an HDD and does not fill that margin.
+pub const DEFAULT_ENTROPY_SWEEP_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Default unread gap a sweep may read through. One 256 KiB chunk.
+pub const DEFAULT_ENTROPY_COALESCE_HOLE_BYTES: u64 = 256 * 1024;
+
+/// How long a short entropy span waits for a neighbor, including on an idle disk.
+///
+/// 20 ms collects a burst of concurrent chunk posts and stays well under the
+/// 250 ms durable interval. A lone chunk is late by this much.
+pub const DEFAULT_ENTROPY_READ_GRACE_MS: u64 = 20;
+
+/// Bytes a span must reach before it skips [`DEFAULT_ENTROPY_READ_GRACE_MS`].
+/// The pread is still bounded by [`DEFAULT_ENTROPY_SWEEP_MAX_BYTES`].
+pub const DEFAULT_ENTROPY_READ_BATCH_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Extra bytes read past a short ingress span.
+///
+/// The same 4 MiB as [`DEFAULT_ENTROPY_SWEEP_MAX_BYTES`]. A one-chunk span
+/// can grow to that cap. A larger value cannot be issued until the sweep
+/// cap is raised, because one pread stays inside the recall margin.
+pub const DEFAULT_ENTROPY_READAHEAD_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Per-module cap on cached read-ahead entropy.
+///
+/// 64 MiB is 256 chunks. That covers the in-flight window of a few
+/// concurrent uploads on one HDD module. Older pads are dropped first.
+pub const DEFAULT_ENTROPY_READAHEAD_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn default_entropy_sweep_max_bytes() -> u64 {
+    DEFAULT_ENTROPY_SWEEP_MAX_BYTES
+}
+
+fn default_entropy_coalesce_hole_bytes() -> u64 {
+    DEFAULT_ENTROPY_COALESCE_HOLE_BYTES
+}
+
+fn default_entropy_read_grace_ms() -> u64 {
+    DEFAULT_ENTROPY_READ_GRACE_MS
+}
+
+fn default_entropy_read_batch_bytes() -> u64 {
+    DEFAULT_ENTROPY_READ_BATCH_BYTES
+}
+
+fn default_entropy_readahead_bytes() -> u64 {
+    DEFAULT_ENTROPY_READAHEAD_BYTES
+}
+
+/// Accept a configured read size and keep the sweep cap.
+///
+/// One pread cannot pass [`DEFAULT_ENTROPY_SWEEP_MAX_BYTES`]. A smaller
+/// value is not a node-config knob. Tests and the bench assign the field
+/// in code, which does not go through this function.
+fn freeze_entropy_bytes_at_sweep_cap<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _configured = u64::deserialize(deserializer)?;
+    Ok(DEFAULT_ENTROPY_SWEEP_MAX_BYTES)
+}
+
+fn default_entropy_readahead_cache_bytes() -> u64 {
+    DEFAULT_ENTROPY_READAHEAD_CACHE_BYTES
+}
+
+fn default_pending_body_hold_timeout() -> Duration {
+    Duration::from_secs(10 * 60)
+}
+
+fn default_max_local_cache_hits_per_tick() -> u64 {
+    64
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -508,6 +905,25 @@ pub struct DataSyncServiceConfig {
         serialize_with = "serde_utils::serialize_duration_string"
     )]
     pub chunk_request_timeout: Duration,
+    /// How long data sync leaves an offset to a live body-migration job.
+    ///
+    /// The clock starts when the hold starts. It restarts when that job's row
+    /// key moves forward. A job that makes no progress is fetched from peers
+    /// after this. Monotonic; not wall-clock and not the job's attempt count.
+    #[serde(
+        deserialize_with = "serde_utils::duration_from_string",
+        serialize_with = "serde_utils::serialize_duration_string",
+        default = "default_pending_body_hold_timeout"
+    )]
+    pub pending_body_hold_timeout: Duration,
+    /// Local-cache lookups one storage module may do in one data-sync tick.
+    ///
+    /// Each lookup reads the submodule index and the chunk cache. A hit also
+    /// hashes the body. The cap keeps that work off an unbounded burst.
+    /// Zero is raised to one so the popped offset is not left in front of
+    /// every peer fetch.
+    #[serde(default = "default_max_local_cache_hits_per_tick")]
+    pub max_local_cache_hits_per_tick: u64,
 }
 
 impl Default for DataSyncServiceConfig {
@@ -517,6 +933,8 @@ impl Default for DataSyncServiceConfig {
             max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
             bandwidth_adjustment_interval: Duration::from_secs(5),
             chunk_request_timeout: Duration::from_secs(10),
+            pending_body_hold_timeout: default_pending_body_hold_timeout(),
+            max_local_cache_hits_per_tick: default_max_local_cache_hits_per_tick(),
         }
     }
 }
@@ -1001,8 +1419,11 @@ pub struct VdfNodeConfig {
     #[serde(default)]
     pub free_run: VdfFreeRun,
 
-    /// When true, enforce a minimum step duration to prevent VDF from
-    /// outrunning block production when sha_1s_difficulty is low.
+    /// When true, the local step uses a 25ms floor instead of one second.
+    /// Test configs set this so a tiny hash count can still produce many steps
+    /// per second. Production leaves it false: the hash count stays the
+    /// consensus difficulty, and a core that finishes early waits out the rest
+    /// of the second.
     #[serde(default)]
     pub throttle: bool,
 
@@ -1302,12 +1723,32 @@ impl NodeConfig {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                entropy_sweep_max_bytes: 256 * 1024,
+                entropy_coalesce_hole_bytes: 256 * 1024,
+                // Tests drive the sweep themselves and must not sleep on a grace.
+                entropy_read_grace_ms: 0,
+                entropy_read_batch_bytes: 256 * 1024,
+                // Tests count one pread per span. Read-ahead would add bytes.
+                entropy_readahead_bytes: 0,
+                entropy_readahead_cache_bytes: 0,
+                drop_recall_page_cache: false,
+                recall_direct_io: false,
+                // Tests read `intervals.json` as soon as `sync` returns.
+                intervals_persist_secs: 0,
+                index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
+                tx_path_derive_threads: DEFAULT_TX_PATH_DERIVE_THREADS,
+                // Tests read durability as soon as `sync` returns. 0 does not defer.
+                min_durable_interval_ms: 0,
+                durable_headroom_permille: DEFAULT_DURABLE_HEADROOM_PERMILLE,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
                 max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
                 bandwidth_adjustment_interval: Duration::from_secs(5),
                 chunk_request_timeout: Duration::from_secs(10),
+                pending_body_hold_timeout: default_pending_body_hold_timeout(),
+                max_local_cache_hits_per_tick: default_max_local_cache_hits_per_tick(),
             },
             trusted_peers: vec![/* PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
@@ -1429,6 +1870,9 @@ impl NodeConfig {
                 // Small MDBX geometry so many concurrent test node databases don't
                 // exhaust virtual address space (see TEST_DB_GEOMETRY_MAX_SIZE).
                 geometry_max_size: Some(crate::TEST_DB_GEOMETRY_MAX_SIZE),
+                // MDBX-SUBMODULE-INDEX: point test configs at RocksDB when that is the only engine. This line selects MDBX.
+                submodule_index: SubmoduleIndexEngine::Mdbx,
+                ..DatabaseConfig::default()
             },
         }
     }
@@ -1495,12 +1939,28 @@ impl NodeConfig {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 1000,
+                entropy_sweep_max_bytes: DEFAULT_ENTROPY_SWEEP_MAX_BYTES,
+                entropy_coalesce_hole_bytes: DEFAULT_ENTROPY_COALESCE_HOLE_BYTES,
+                entropy_read_grace_ms: DEFAULT_ENTROPY_READ_GRACE_MS,
+                entropy_read_batch_bytes: DEFAULT_ENTROPY_READ_BATCH_BYTES,
+                entropy_readahead_bytes: DEFAULT_ENTROPY_READAHEAD_BYTES,
+                entropy_readahead_cache_bytes: DEFAULT_ENTROPY_READAHEAD_CACHE_BYTES,
+                drop_recall_page_cache: false,
+                recall_direct_io: default_recall_direct_io(),
+                intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,
+                index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
+                tx_path_derive_threads: DEFAULT_TX_PATH_DERIVE_THREADS,
+                min_durable_interval_ms: DEFAULT_MIN_DURABLE_INTERVAL_MS,
+                durable_headroom_permille: DEFAULT_DURABLE_HEADROOM_PERMILLE,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
                 max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
                 bandwidth_adjustment_interval: Duration::from_secs(5),
                 chunk_request_timeout: Duration::from_secs(10),
+                pending_body_hold_timeout: default_pending_body_hold_timeout(),
+                max_local_cache_hits_per_tick: default_max_local_cache_hits_per_tick(),
             },
             trusted_peers: vec![],
             // trusted_peers: vec![PeerAddress {
@@ -1701,6 +2161,52 @@ mod run_mode_tests {
     use rstest::rstest;
 
     #[test]
+    fn omitted_intervals_persist_secs_uses_the_node_default() {
+        let parsed: StorageSyncConfig = toml::from_str("num_writes_before_sync = 7").unwrap();
+        assert_eq!(parsed.num_writes_before_sync, 7);
+        assert_eq!(
+            parsed.intervals_persist_secs,
+            DEFAULT_INTERVALS_PERSIST_SECS
+        );
+        let immediate: StorageSyncConfig = toml::from_str("intervals_persist_secs = 0").unwrap();
+        assert_eq!(immediate.intervals_persist_secs, 0);
+        assert_eq!(parsed.index_wal_backstop_ms, DEFAULT_INDEX_WAL_BACKSTOP_MS);
+        let backstop: StorageSyncConfig = toml::from_str("index_wal_backstop_ms = 0").unwrap();
+        assert_eq!(backstop.index_wal_backstop_ms, 0);
+        assert_eq!(
+            parsed.tx_path_derive_threads,
+            DEFAULT_TX_PATH_DERIVE_THREADS
+        );
+        let threads: StorageSyncConfig = toml::from_str("tx_path_derive_threads = 4").unwrap();
+        assert_eq!(threads.tx_path_derive_threads, 4);
+        assert_eq!(
+            parsed.min_durable_interval_ms,
+            DEFAULT_MIN_DURABLE_INTERVAL_MS
+        );
+        assert_eq!(
+            parsed.durable_headroom_permille,
+            DEFAULT_DURABLE_HEADROOM_PERMILLE
+        );
+        assert_eq!(NodeConfig::testing().storage.min_durable_interval_ms, 0);
+        assert_eq!(
+            NodeConfig::testnet().storage.min_durable_interval_ms,
+            DEFAULT_MIN_DURABLE_INTERVAL_MS
+        );
+        // An explicit 0 still overrides the production default.
+        let every_gap: StorageSyncConfig =
+            toml::from_str("min_durable_interval_ms = 0\ndurable_headroom_permille = 400").unwrap();
+        assert_eq!(every_gap.min_durable_interval_ms, 0);
+        assert_eq!(every_gap.durable_headroom_permille, 400);
+        // Absent key: O_DIRECT recall is the production default.
+        assert!(parsed.recall_direct_io);
+        let buffered: StorageSyncConfig = toml::from_str("recall_direct_io = false").unwrap();
+        assert!(!buffered.recall_direct_io);
+        assert!(StorageSyncConfig::default().recall_direct_io);
+        assert!(NodeConfig::testnet().storage.recall_direct_io);
+        assert!(!NodeConfig::testing().storage.recall_direct_io);
+    }
+
+    #[test]
     fn run_mode_defaults_to_production() {
         assert_eq!(RunMode::default(), RunMode::Production);
         assert!(!RunMode::default().is_test());
@@ -1795,10 +2301,101 @@ mod run_mode_tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete the submodule_index assertion in this test when the field is removed. The other assertions stay.
     fn database_config_defaults() {
         let config = DatabaseConfig::default();
         assert_eq!(config.sync_mode, DbSyncMode::Durable);
         assert_eq!(config.cache_sync_mode, DbSyncMode::SafeNoSync);
+        assert_eq!(config.submodule_index, SubmoduleIndexEngine::Mdbx);
+        assert_eq!(
+            config.rocksdb_block_cache_bytes,
+            DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES
+        );
+        assert_eq!(
+            config.rocksdb_write_buffer_bytes,
+            DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES
+        );
+        assert_eq!(config.rocksdb_flush_threads, DEFAULT_ROCKSDB_FLUSH_THREADS);
+        assert_eq!(
+            config.rocksdb_compaction_threads,
+            DEFAULT_ROCKSDB_COMPACTION_THREADS
+        );
+        assert_eq!(
+            config.rocksdb_rate_limit_bytes_per_sec,
+            DEFAULT_ROCKSDB_RATE_LIMIT_BYTES_PER_SEC
+        );
+        assert_eq!(DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES, 1024 * 1024 * 1024);
+        assert_eq!(DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES, 512 * 1024 * 1024);
+        assert_eq!(DEFAULT_ROCKSDB_FLUSH_THREADS, 2);
+        assert_eq!(DEFAULT_ROCKSDB_COMPACTION_THREADS, 4);
+        assert_eq!(DEFAULT_ROCKSDB_RATE_LIMIT_BYTES_PER_SEC, 0);
+
+        let omitted: DatabaseConfig = toml::from_str("").expect("empty toml");
+        assert_eq!(omitted, DatabaseConfig::default());
+        let omitted_json: DatabaseConfig = serde_json::from_str("{}").expect("empty json");
+        assert_eq!(omitted_json, DatabaseConfig::default());
+
+        let tuned: DatabaseConfig = toml::from_str(
+            "
+            rocksdb_block_cache_bytes = 8388608
+            rocksdb_write_buffer_bytes = 4194304
+            rocksdb_flush_threads = 1
+            rocksdb_compaction_threads = 1
+            rocksdb_rate_limit_bytes_per_sec = 1048576
+            ",
+        )
+        .expect("rocks resource toml");
+        assert_eq!(tuned.rocksdb_block_cache_bytes, 8 * 1024 * 1024);
+        assert_eq!(tuned.rocksdb_write_buffer_bytes, 4 * 1024 * 1024);
+        assert_eq!(tuned.rocksdb_flush_threads, 1);
+        assert_eq!(tuned.rocksdb_compaction_threads, 1);
+        assert_eq!(tuned.rocksdb_rate_limit_bytes_per_sec, 1024 * 1024);
+        assert_eq!(tuned.sync_mode, DbSyncMode::Durable);
+        assert_eq!(tuned.submodule_index, SubmoduleIndexEngine::Mdbx);
+    }
+
+    /// A config with no `submodule_index` stays on MDBX. `rocksdb` selects the
+    /// sibling engine. Any other string is rejected.
+    #[test]
+    // MDBX-SUBMODULE-INDEX: rewrite this test when the key is removed. It pins an omitted key to MDBX.
+    fn submodule_index_engine_serde() {
+        let missing_toml: DatabaseConfig = toml::from_str(
+            r#"
+            sync_mode = "Durable"
+            cache_sync_mode = "SafeNoSync"
+            "#,
+        )
+        .expect("toml without submodule_index");
+        assert_eq!(missing_toml.submodule_index, SubmoduleIndexEngine::Mdbx);
+
+        let missing_json: DatabaseConfig =
+            serde_json::from_str("{}").expect("json without submodule_index");
+        assert_eq!(missing_json.submodule_index, SubmoduleIndexEngine::Mdbx);
+
+        let mdbx: DatabaseConfig = toml::from_str("submodule_index = \"mdbx\"").expect("mdbx toml");
+        assert_eq!(mdbx.submodule_index, SubmoduleIndexEngine::Mdbx);
+
+        let rocks_toml: DatabaseConfig =
+            toml::from_str("submodule_index = \"rocksdb\"").expect("rocksdb toml");
+        assert_eq!(rocks_toml.submodule_index, SubmoduleIndexEngine::Rocksdb);
+
+        let rocks_json: DatabaseConfig =
+            serde_json::from_str(r#"{"submodule_index":"rocksdb"}"#).expect("rocksdb json");
+        assert_eq!(rocks_json.submodule_index, SubmoduleIndexEngine::Rocksdb);
+
+        assert!(
+            toml::from_str::<DatabaseConfig>("submodule_index = \"lmdb\"").is_err(),
+            "unknown toml engine must fail"
+        );
+        assert!(
+            serde_json::from_str::<DatabaseConfig>(r#"{"submodule_index":"other"}"#).is_err(),
+            "unknown json engine must fail"
+        );
+
+        assert_eq!(
+            NodeConfig::testing().database.submodule_index,
+            SubmoduleIndexEngine::Mdbx
+        );
     }
 
     /// Regression test: a legacy TOML config that predates the `run_mode`,

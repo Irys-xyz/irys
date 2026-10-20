@@ -1316,6 +1316,9 @@ impl IrysNode {
                         .iter()
                         .filter(|sm| sm.partition_assignment().is_some())
                         .count() as u64;
+                    for module in modules.iter() {
+                        module.report_index_metrics();
+                    }
                     drop(modules);
                     metrics::record_storage_modules_total(total);
                     metrics::record_partitions_assigned(assigned);
@@ -1906,7 +1909,7 @@ impl IrysNode {
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
 
         let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
-        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
+        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
 
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
@@ -2029,6 +2032,7 @@ impl IrysNode {
             &service_senders,
             reth_node_adapter.clone(),
             irys_db.clone(),
+            storage_modules_guard.clone(),
             execution_payload_cache.clone(),
             receivers.validation_service,
             runtime_handle.clone(),
@@ -2138,6 +2142,7 @@ impl IrysNode {
             &vdf_state_readonly,
             &service_senders,
             latest_block.diff,
+            &irys_db,
             runtime_handle.clone(),
         );
 
@@ -2499,10 +2504,30 @@ impl IrysNode {
         vdf_steps_guard: &VdfStateReadonly,
         service_senders: &ServiceSenders,
         initial_difficulty: U256,
+        irys_db: &DatabaseProvider,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Vec<PartitionMiningController>, Vec<TokioServiceHandle>) {
         let mut controllers = Vec::new();
         let mut handles = Vec::new();
+        let configured = config.node_config.storage.tx_path_derive_threads;
+        let available = std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(1);
+        let tx_path_threads = configured.min(available).max(1);
+        let tx_path_pool = Arc::new(
+            match irys_database::tx_path_derive::tx_path_derive_pool(tx_path_threads) {
+                Ok(pool) => pool,
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        threads = tx_path_threads,
+                        "tx path derive pool failed; falling back to one thread"
+                    );
+                    irys_database::tx_path_derive::tx_path_derive_pool(1)
+                        .expect("one-thread tx path derive pool")
+                }
+            },
+        );
         for sm in storage_modules_guard.read().iter() {
             let inner = PartitionMiningServiceInner::new(
                 config,
@@ -2511,6 +2536,8 @@ impl IrysNode {
                 false, // do not start mining automatically
                 vdf_steps_guard.clone(),
                 initial_difficulty,
+                Some(irys_db.clone()),
+                Some(Arc::clone(&tx_path_pool)),
             );
             let (controller, handle) =
                 PartitionMiningService::spawn_service(inner, runtime_handle.clone());
@@ -2593,6 +2620,7 @@ impl IrysNode {
             block_index,
             reth_node_adapter,
             chunk_ingress_state,
+            tx_path_fail_streak: std::sync::atomic::AtomicU32::new(0),
         });
 
         // Spawn the service and get the handle

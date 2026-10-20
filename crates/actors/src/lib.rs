@@ -40,6 +40,8 @@ pub use chunk_ingress_service::{
 pub use data_sync_service::*;
 pub use mempool_guard::*;
 pub use mempool_service::*;
+#[cfg(any(test, feature = "test-utils"))]
+pub use metrics::tx_path_derive_failed_for_test;
 pub use metrics::{record_chain_sync_block_rejected, record_reth_fcu_head_height};
 pub use mining_bus::MiningBus;
 pub use partition_mining_service::*;

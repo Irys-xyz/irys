@@ -447,6 +447,7 @@ pub fn consensus_db_args(
     Ok(args)
 }
 
+// MDBX-SUBMODULE-INDEX: delete this function with the MDBX submodule engine. Consensus keeps consensus_db_args.
 /// Builds [`DatabaseArguments`] for a **storage submodule** database from a
 /// [`irys_types::DatabaseConfig`]. Production reserves 2 TiB; `geometry_max_size`
 /// (set by test configs) overrides that with a small cap.
@@ -1493,6 +1494,29 @@ pub fn delete_reclaimable_cached_chunks_older_than<T: DbTx + DbTxMut>(
     }
     // MDBX removes the dupsort key with its final value, preserving the
     // `dup_count(root) == None` empty-bucket invariant used by cache callers.
+    Ok(chunks_pruned)
+}
+
+/// Capacity-prunes bodies of `tx_offsets` older than `older_than`, with no
+/// durability or ingress-hash gate. Only for chunks this node is neither
+/// assigned to store nor proving: their only copy is not here.
+pub fn delete_unprotected_cached_chunks_older_than<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    tx_offsets: &BTreeSet<TxChunkOffset>,
+    older_than: UnixTimestamp,
+) -> eyre::Result<u64> {
+    let mut chunks_pruned = 0;
+    let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
+    let mut walker = cursor.walk_dup(Some(data_root), None)?;
+    while let Some((_key, entry)) = walker.next().transpose()? {
+        if entry.meta.updated_at >= older_than || !tx_offsets.contains(&entry.index) {
+            continue;
+        }
+        tx.delete::<CachedChunks>(entry.meta.chunk_path_hash, None)?;
+        tx.delete::<CachedChunksIndex>(data_root, Some(entry))?;
+        chunks_pruned += 1;
+    }
     Ok(chunks_pruned)
 }
 

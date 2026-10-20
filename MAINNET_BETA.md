@@ -20,6 +20,8 @@ Miners provide storage to the network in the form of partitions. These partition
 The minimum amount of storage a miner can provide to the protocol is a full 22TB partition with the ability to pledge multiple partitions to the protocol.
 
 We recommend formatting your drives with XFS - it has demonstrated the best characteristics (fast I/O, low space overhead) out of the suitable mainline file systems.
+
+A mainnet partition is one file of 18.01 TiB. ext4's maximum file size is 16 TiB - 4 KiB, so that file does not fit. The node `set_len`s `chunks.dat` to the partition length before it opens the index, and that `set_len` returns `EFBIG` on ext4. The index is not migrated. `EFBIG` does not mean the disk is full. Use XFS, or another filesystem that can hold at least 18.01 TiB in one file.
 # Building from source
 First download the source for the latest tagged release at https://github.com/Irys-xyz/irys/releases (tagged mainnet-\*, DO NOT use the testnet-\* tagged releases!)
 ## Dependencies

@@ -673,7 +673,9 @@ async fn partition_expiration_and_repacking_test() {
         commitments,
         &config,
     );
-    let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
+    let storage_module_infos = epoch_snapshot
+        .map_storage_modules_to_partition_assignments()
+        .expect("packing params");
     let mut storage_modules: StorageModuleVec = Vec::new();
     // Create a list of storage modules wrapping the storage files
     for info in storage_module_infos {
@@ -733,6 +735,8 @@ async fn partition_expiration_and_repacking_test() {
             should_mine,
             vdf_steps_guard.clone(),
             U256::zero(),
+            None,
+            None,
         );
 
         let (controller, handle) =
@@ -824,9 +828,10 @@ async fn partition_expiration_and_repacking_test() {
                 infos.iter().map(|info| info.partition_hash).collect()
             });
 
-        service_senders.send_partitions_expiration(BroadcastPartitionsExpiration(H256List(
-            expired_partition_hashes,
-        )));
+        service_senders.send_partitions_expiration(BroadcastPartitionsExpiration {
+            partition_hashes: H256List(expired_partition_hashes),
+            update_height: new_epoch_block.height,
+        });
 
         previous_epoch_block = Some(new_epoch_block.clone());
 
@@ -1025,7 +1030,9 @@ async fn epoch_blocks_reinitialization_test() {
     );
 
     // Get the genesis storage modules and their assigned partitions
-    let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
+    let storage_module_infos = epoch_snapshot
+        .map_storage_modules_to_partition_assignments()
+        .expect("packing params");
     debug!("{:#?}", storage_module_infos);
 
     genesis_block.block_hash = H256::from_slice(&[0; 32]);
@@ -1141,14 +1148,18 @@ async fn epoch_blocks_reinitialization_test() {
         commitments,
         &config,
     );
-    let storage_module_infos = epoch_service.map_storage_modules_to_partition_assignments();
+    let storage_module_infos = epoch_service
+        .map_storage_modules_to_partition_assignments()
+        .expect("packing params");
     epoch_service
         .replay_epoch_data(epoch_block_data)
         .expect("to replay the epoch data");
 
     debug!("{:#?}", storage_module_infos);
 
-    let new_sm_infos = epoch_service.map_storage_modules_to_partition_assignments();
+    let new_sm_infos = epoch_service
+        .map_storage_modules_to_partition_assignments()
+        .expect("packing params");
 
     debug!("{:#?}", new_sm_infos);
 
