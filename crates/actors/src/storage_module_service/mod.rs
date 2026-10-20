@@ -19,7 +19,7 @@ use eyre::OptionExt as _;
 use index_heal::{HealOutcome, INDEX_HEAL_RETRY_INTERVAL, IndexHealCtx, heal_ledger_data_indexes};
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
-    BlockIndexReadGuard, BlockTreeReadGuard, ChunkType, PACKING_PARAMS_FILE_NAME, PackingParams,
+    BlockIndexReadGuard, BlockTreeReadGuard, PACKING_PARAMS_FILE_NAME, PackingParams,
     StorageModule, StorageModuleInfo,
 };
 use irys_types::{Config, PartitionChunkRange, TokioServiceHandle, Traced};
@@ -621,28 +621,6 @@ impl StorageModuleServiceInner {
         }
     }
 
-    /// Offsets of `range` whose live label is still `Uninitialized`.
-    /// Pending writes are applied. Entropy and Data are left out.
-    fn uninitialized_covering(
-        module: &StorageModule,
-        range: PartitionChunkRange,
-    ) -> Vec<PartitionChunkRange> {
-        let start = range.0.start().0;
-        let end = range.0.end().0;
-        let mut spans = Vec::new();
-        for interval in module.get_intervals(ChunkType::Uninitialized) {
-            let span_start = interval.start().0.max(start);
-            let span_end = interval.end().0.min(end);
-            if span_start <= span_end {
-                spans.push(PartitionChunkRange(irys_types::ii(
-                    irys_types::PartitionChunkOffset::from(span_start),
-                    irys_types::PartitionChunkOffset::from(span_end),
-                )));
-            }
-        }
-        spans
-    }
-
     /// Send a deferred span that is still `Uninitialized`. A full channel
     /// keeps that part for `tick`. Entropy and Data are not sent.
     fn enqueue_deferred_uninitialized(&mut self, module: &Arc<StorageModule>) {
@@ -651,7 +629,11 @@ impl StorageModuleServiceInner {
         };
         let mut deferred = Vec::new();
         for range in waiting {
-            for span in Self::uninitialized_covering(module, range) {
+            for span in module
+                .uninitialized_spans_overlapping(range.0)
+                .into_iter()
+                .map(PartitionChunkRange)
+            {
                 match self.try_enqueue_packing(module, span) {
                     PackSend::Accepted => {}
                     PackSend::Deferred => deferred.push(span),
@@ -3126,6 +3108,93 @@ mod assignment_reset_tests {
             !harness.inner.pending_ranges.contains_key(&0),
             "an accepted reset pack is not retried"
         );
+    }
+
+    /// A one-offset deferred span must not walk every interval fragment.
+    /// Pending data inside that offset is not packed. A fresh module still
+    /// returns its uninitialized span, and a neighbor offset still packs.
+    #[tokio::test]
+    async fn deferred_uninitialized_scan_reads_only_the_overlap() -> eyre::Result<()> {
+        let mut harness = harness(None);
+        let full = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 9));
+        harness.inner.pending_ranges.insert(0, vec![full]);
+        harness
+            .inner
+            .enqueue_deferred_uninitialized(&harness.module);
+        let fresh = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("a fresh module packs its uninitialized span");
+        assert_eq!(*fresh.chunk_range().0.start(), 0);
+        assert_eq!(*fresh.chunk_range().0.end(), 9);
+        assert!(harness.receivers.packing.try_recv().is_err());
+
+        for offset in (0..10_u32).filter(|offset| offset % 2 == 0) {
+            assert!(
+                harness.module.write_chunk(
+                    PartitionChunkOffset::from(offset),
+                    vec![0xE1_u8; 32],
+                    irys_domain::ChunkType::Entropy,
+                ),
+                "entropy at {offset}"
+            );
+        }
+        harness.module.force_sync_pending_chunks()?;
+        let entropy = harness
+            .module
+            .get_intervals(irys_domain::ChunkType::Entropy)
+            .len();
+        assert!(
+            entropy >= 5,
+            "even offsets did not fragment the interval map: {entropy}"
+        );
+
+        let one = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(1, 1));
+        harness.inner.pending_ranges.insert(0, vec![one]);
+        let before = harness.module.interval_visit_count();
+        harness
+            .inner
+            .enqueue_deferred_uninitialized(&harness.module);
+        let visits = harness.module.interval_visit_count() - before;
+        let packed = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("offset 1 stays uninitialized");
+        assert_eq!(*packed.chunk_range().0.start(), 1);
+        assert_eq!(*packed.chunk_range().0.end(), 1);
+        assert!(visits <= 2, "one-offset query visited {visits} intervals");
+        assert!(harness.receivers.packing.try_recv().is_err());
+
+        assert!(harness.module.write_chunk(
+            PartitionChunkOffset::from(3),
+            vec![0xD4_u8; 32],
+            irys_domain::ChunkType::Data,
+        ));
+        let pending = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(3, 3));
+        harness.inner.pending_ranges.insert(0, vec![pending]);
+        harness
+            .inner
+            .enqueue_deferred_uninitialized(&harness.module);
+        assert!(
+            harness.receivers.packing.try_recv().is_err(),
+            "pending data inside the range is not packed"
+        );
+
+        let neighbor = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(5, 5));
+        harness.inner.pending_ranges.insert(0, vec![neighbor]);
+        harness
+            .inner
+            .enqueue_deferred_uninitialized(&harness.module);
+        let neighbor_req = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("offset 5 stays uninitialized");
+        assert_eq!(*neighbor_req.chunk_range().0.start(), 5);
+        assert_eq!(*neighbor_req.chunk_range().0.end(), 5);
+        Ok(())
     }
 
     fn write_span(module: &StorageModule, from: u32, to: u32, kind: irys_domain::ChunkType) {
