@@ -44,8 +44,6 @@ use tokio::sync::{
 };
 use tracing::{Instrument as _, debug, error, info, trace, warn};
 
-pub const REGENERATE_PROOFS: bool = true;
-
 /// Outcome of the CDR pruning-horizon policy for one `CachedDataRoots` entry.
 struct CdrEvictionState {
     inclusion_max_height: Option<u64>,
@@ -1465,75 +1463,37 @@ impl InnerCacheTask {
 
         // Regenerate local expired proofs (only when under capacity)
         for proof in to_reanchor.iter() {
-            if REGENERATE_PROOFS {
-                if let Err(error) = reanchor_and_store_ingress_proof(
-                    &self.block_tree_guard,
-                    &self.db,
-                    &self.config,
-                    &signer,
-                    proof,
-                    &self.gossip_broadcast,
-                    &self.ingress_proof_generation_state,
-                ) {
-                    if error.is_benign() {
-                        debug!(ingress_proof.data_root = ?proof, "Skipped ingress proof reanchoring: {error}");
-                    } else {
-                        warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {error}");
-                    }
-                }
-            } else {
-                debug!(
-                    ingress_proof.data_root = ?proof.data_root,
-                    "Skipping reanchoring of ingress proof due to REGENERATE_PROOFS = false"
-                );
-                // Content-checked delete, same TOCTOU guard as the `to_delete`
-                // loop: only remove the local proof if it is still the one we
-                // scanned, so a proof refreshed since the scan is preserved.
-                let scanned = CompactCachedIngressProof(CachedIngressProof {
-                    address: local_addr,
-                    proof: proof.clone(),
-                });
-                if let Err(e) = self.db.update_eyre(|rw_tx| {
-                    delete_ingress_proof_if_unchanged(rw_tx, proof.data_root, scanned)
-                }) {
-                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
+            if let Err(error) = reanchor_and_store_ingress_proof(
+                &self.block_tree_guard,
+                &self.db,
+                &self.config,
+                &signer,
+                proof,
+                &self.gossip_broadcast,
+                &self.ingress_proof_generation_state,
+            ) {
+                if error.is_benign() {
+                    debug!(ingress_proof.data_root = ?proof, "Skipped ingress proof reanchoring: {error}");
+                } else {
+                    warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {error}");
                 }
             }
         }
 
         for proof in to_regen.iter() {
-            if REGENERATE_PROOFS {
-                if let Err(error) = generate_and_store_ingress_proof(
-                    &self.block_tree_guard,
-                    &self.db,
-                    &self.config,
-                    proof.data_root,
-                    None,
-                    &self.gossip_broadcast,
-                    &self.ingress_proof_generation_state,
-                ) {
-                    if error.is_benign() {
-                        debug!(ingress_proof.data_root = ?proof.data_root, "Skipped ingress proof regeneration: {error}");
-                    } else {
-                        warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {error}");
-                    }
-                }
-            } else {
-                debug!(
-                    ingress_proof.data_root = ?proof.data_root,
-                    "Regeneration disabled, removing ingress proof for data root"
-                );
-                // Content-checked delete, same TOCTOU guard as the `to_delete`
-                // loop: only remove the local proof if it is still the one we
-                // scanned, so a proof refreshed since the scan is preserved.
-                let scanned = CompactCachedIngressProof(CachedIngressProof {
-                    address: local_addr,
-                    proof: proof.clone(),
-                });
-                if let Err(e) = self.db.update_eyre(|rw_tx| {
-                    delete_ingress_proof_if_unchanged(rw_tx, proof.data_root, scanned)
-                }) {
-                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
+            if let Err(error) = generate_and_store_ingress_proof(
+                &self.block_tree_guard,
+                &self.db,
+                &self.config,
+                proof.data_root,
+                None,
+                &self.gossip_broadcast,
+                &self.ingress_proof_generation_state,
+            ) {
+                if error.is_benign() {
+                    debug!(ingress_proof.data_root = ?proof.data_root, "Skipped ingress proof regeneration: {error}");
+                } else {
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {error}");
                 }
             }
         }
