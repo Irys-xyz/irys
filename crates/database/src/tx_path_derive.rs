@@ -167,13 +167,12 @@ fn load_bounds_and_header(
 ) -> eyre::Result<(BlockBounds, irys_types::IrysBlockHeader)> {
     db.view_eyre(|tx| {
         let bounds = locate_block(tx, ledger, chunk_offset)?;
-        let header = block_header_by_hash(tx, &bounds.block_hash, false)?.ok_or_else(|| {
-            eyre!(
-                "block header {} missing at height {}",
-                bounds.block_hash,
-                bounds.height
-            )
-        })?;
+        let header = block_header_by_hash(tx, &bounds.block_hash, false)?.ok_or(
+            DeriveError::MissingBlockHeader {
+                hash: bounds.block_hash,
+                height: bounds.height,
+            },
+        )?;
         Ok((bounds, header))
     })
 }
@@ -344,12 +343,50 @@ fn load_block(
     })
 }
 
+/// The consensus database does not contain this offset yet.
+///
+/// [`consensus_is_behind`] matches this type. A plain report that uses the
+/// same words is still a hard error.
+#[derive(Debug)]
+enum DeriveError {
+    IndexEmpty,
+    PastFrontier {
+        chunk_offset: u64,
+        ledger: DataLedger,
+        anchor_max: u64,
+        anchor: u64,
+    },
+    MissingBlockHeader {
+        hash: H256,
+        height: u64,
+    },
+}
+
+impl std::fmt::Display for DeriveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IndexEmpty => formatter.write_str("block index is empty"),
+            Self::PastFrontier {
+                chunk_offset,
+                ledger,
+                anchor_max,
+                anchor,
+            } => write!(
+                formatter,
+                "offset {chunk_offset} is past ledger {ledger} frontier {anchor_max} at height {anchor}"
+            ),
+            Self::MissingBlockHeader { hash, height } => {
+                write!(formatter, "block header {hash} missing at height {height}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DeriveError {}
+
 /// `true` when `err` means the consensus database does not contain this offset yet.
 pub fn consensus_is_behind(err: &eyre::Report) -> bool {
-    let text = format!("{err:#}");
-    text.contains("is past ledger")
-        || text.contains("block index is empty")
-        || (text.contains("block header") && text.contains("missing"))
+    err.downcast_ref::<DeriveError>().is_some()
 }
 
 /// Chunk count of `ledger` at the latest migrated height.
@@ -630,14 +667,18 @@ fn locate_block<T: DbTx>(
     ledger: DataLedger,
     chunk_offset: u64,
 ) -> eyre::Result<BlockBounds> {
-    let anchor = block_index_latest_height(tx)?.ok_or_else(|| eyre!("block index is empty"))?;
+    let anchor = block_index_latest_height(tx)?.ok_or(DeriveError::IndexEmpty)?;
     let anchor_item = block_index_item_by_height(tx, &anchor)?;
     let anchor_max = ledger_total(&anchor_item.ledgers, ledger)
         .ok_or_else(|| eyre!("ledger {ledger} is inactive at anchor height {anchor}"))?;
     if chunk_offset >= anchor_max {
-        eyre::bail!(
-            "offset {chunk_offset} is past ledger {ledger} frontier {anchor_max} at height {anchor}"
-        );
+        return Err(DeriveError::PastFrontier {
+            chunk_offset,
+            ledger,
+            anchor_max,
+            anchor,
+        }
+        .into());
     }
 
     let mut lo = 0_u64;
@@ -881,7 +922,7 @@ pub fn tx_path_hash(proof: &[u8]) -> H256 {
 #[cfg(test)]
 mod tests {
     use super::{
-        derive_tx_path_at_offset, derive_tx_path_synthetic, proof_for_headers,
+        consensus_is_behind, derive_tx_path_at_offset, derive_tx_path_synthetic, proof_for_headers,
         read_stored_tx_data_path, resolve_proof_at, tx_header_schema, tx_path_hash,
     };
     use crate::db::IrysDatabaseExt as _;
@@ -935,6 +976,10 @@ mod tests {
         let gap = super::assign_tx_index(&headers, &bounds, 12, chunk_size)
             .expect_err("tail past the txs");
         assert!(gap.to_string().contains("not inside a tx"), "{gap}");
+        assert!(
+            !consensus_is_behind(&gap),
+            "a span tail is a hard error: {gap}"
+        );
 
         let short = super::BlockBounds {
             height: 1,
@@ -946,6 +991,82 @@ mod tests {
             super::assign_tx_index(&headers, &short, 10, chunk_size).expect("inside the span"),
             (0, 10)
         );
+    }
+
+    /// Frontier skip is a typed error. The same words in another report are not.
+    #[test]
+    fn consensus_behind_is_typed_not_a_substring() {
+        let decoy =
+            eyre::eyre!("block header storage inconsistent: the previous header is missing");
+        assert!(
+            !consensus_is_behind(&decoy),
+            "an unrelated missing-header report is a hard error"
+        );
+        let words = eyre::eyre!("offset 9 is past ledger publish frontier 4 at height 2");
+        assert!(
+            !consensus_is_behind(&words),
+            "those words in a plain report are not a frontier skip"
+        );
+
+        let dir = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().expect("testing args"),
+        )
+        .expect("open db");
+
+        let empty =
+            derive_tx_path_at_offset(&db, DataLedger::Publish, 0, 32).expect_err("empty index");
+        assert!(
+            consensus_is_behind(&empty),
+            "an empty block index is behind: {empty}"
+        );
+        assert!(
+            empty.to_string().contains("block index is empty"),
+            "{empty}"
+        );
+
+        let block = block_with(0, &[], 4, &[], 0);
+        let block_hash = block.block_hash;
+        db.update_eyre(|tx| {
+            insert_block_header(tx, &block)?;
+            insert_block_index_items_for_block(tx, &block)?;
+            Ok(())
+        })
+        .expect("write one block");
+
+        let past = derive_tx_path_at_offset(&db, DataLedger::Publish, 5, 32)
+            .expect_err("past the frontier");
+        assert!(
+            consensus_is_behind(&past),
+            "an offset past the frontier is behind: {past}"
+        );
+        assert!(past.to_string().contains("is past ledger"), "{past}");
+
+        let inactive = derive_tx_path_at_offset(&db, DataLedger::OneYear, 0, 32)
+            .expect_err("ledger has no row");
+        assert!(
+            !consensus_is_behind(&inactive),
+            "an inactive ledger is a hard error: {inactive}"
+        );
+        assert!(inactive.to_string().contains("inactive"), "{inactive}");
+
+        db.update_eyre(|tx| {
+            use crate::tables::IrysBlockHeaders;
+            use reth_db::transaction::DbTxMut as _;
+            tx.delete::<IrysBlockHeaders>(block_hash, None)?;
+            Ok(())
+        })
+        .expect("drop the header");
+        let missing = derive_tx_path_at_offset(&db, DataLedger::Publish, 0, 32)
+            .expect_err("header row is gone");
+        assert!(
+            consensus_is_behind(&missing),
+            "a missing block header is behind: {missing}"
+        );
+        assert!(missing.to_string().contains("block header"), "{missing}");
+        assert!(missing.to_string().contains("missing"), "{missing}");
     }
 
     #[test]
