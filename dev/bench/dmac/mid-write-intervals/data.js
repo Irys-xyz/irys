@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792534280071,
+  "lastUpdate": 1792549157207,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -18073,6 +18073,110 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 273.056105,
             "range": "± 0.397153",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000118,
+            "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "8108f557b195761cbaa8bdb100770560d0e83db7",
+          "message": "perf(storage): record entropy overwrites in mid_write_intervals.json instead of rewriting intervals.json",
+          "timestamp": "2026-10-20T21:48:10Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1659/commits/8108f557b195761cbaa8bdb100770560d0e83db7"
+        },
+        "date": 1792549155856,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011938,
+            "range": "± 0.00013",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119812,
+            "range": "± 0.001278",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.201615,
+            "range": "± 0.003652",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.881216,
+            "range": "± 0.014638",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074579,
+            "range": "± 0.000099",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 744.285153,
+            "range": "± 0.25457",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 967.789606,
+            "range": "± 0.661038",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.11729,
+            "range": "± 0.000165",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1171.532974,
+            "range": "± 1.185139",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1525.264857,
+            "range": "± 0.583062",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034838,
+            "range": "± 0.000969",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 218.835951,
+            "range": "± 5.663169",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 309.376673,
+            "range": "± 4.691407",
             "unit": "ms/iter"
           },
           {
