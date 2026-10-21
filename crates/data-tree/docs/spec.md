@@ -308,7 +308,7 @@ The data tx header keeps its layout and gets no new version tag (decided). From 
 | `data_commitment` | — | — | derived on decode (one hash); never encoded |
 
 - Both inputs are signed and the commitment is derived from them, so the size is bound to the commitment. Only chunk proofs show that the data matches it.
-- A tx whose `data_tree_root` was built for another size cannot have its last chunk proven under the signed size. Its data never verifies in full, so it never completes and expires like any unsupplied upload.
+- Some chunks of a tx whose `data_tree_root` was built for another size can verify under the signed size. A chunk can verify at its own index or at another index, including the last. Its chunks never all verify, so the tx never completes and expires like any unsupplied upload. Never treat a last-chunk accept, or any single chunk accept, as a size or completion signal. Completion means every chunk verified.
 - From Estuary, `tx_root` is v2 (Appendix C). The leaf is `H(0x05 ‖ data_tree_root ‖ be64(data_size) ‖ prefix_hash ‖ be64(chunk_start))`. A proven leaf binds `data_tree_root` and the exact `data_size`, so a verifier re-derives `node(data_tree_root, size_witness(data_size))`. Whether `prefix_hash` stays in the leaf is open (Appendix C item 3).
 
 | Chunk message field (gossip, `POST /v1/chunk`, gateway batches) | Size | Note |
