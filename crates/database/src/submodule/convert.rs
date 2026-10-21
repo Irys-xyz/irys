@@ -648,9 +648,10 @@ pub fn convert_mdbx_to_rocks(
 
 /// Convert, then verify, against one open MDBX source.
 ///
-/// The source is warmed and pinned for both passes. A tx-path mismatch or an
-/// unresolved placement aborts before the target directory is created, which
-/// is the same scan `--dry-run` runs. The pin drops when this returns.
+/// The source is warmed and pinned for both passes, so verify re-reads it from
+/// memory instead of a cold HDD. The convert's own row checks replace a separate
+/// `--dry-run` pass; a failure leaves the same unsealed target a plain convert
+/// leaves. The pin drops when this returns.
 // MDBX-SUBMODULE-INDEX: delete this function with the mdbx-to-rocks command.
 pub fn convert_mdbx_to_rocks_and_verify(
     mdbx_dir: &Path,
@@ -664,7 +665,6 @@ pub fn convert_mdbx_to_rocks_and_verify(
     require_mdbx_dat(&prep.mdbx_dir)?;
     let opened = map_open(open_mdbx_source(&prep.mdbx_dir, exclusive_args(options)))?;
     let _pin = super::warmup::pre_read_index_file(opened_env(&opened), &prep.mdbx_dir);
-    preview_before_write(&opened, &prep.rocks_dir, options, &prep.db, &prep.map)?;
     let total = source_row_total(&opened)?;
     let stats = {
         let _pace = PaceGuard::start(&prep.mdbx_dir, "convert", total);
@@ -712,37 +712,6 @@ fn convert_opened(
         OpenedMdbx::Empty(_) => write_empty_rocks(rocks_dir, options)?,
     };
     Ok(finish_stats(stats, started, source_v1))
-}
-
-/// The row scan `--dry-run` uses to abort before creating the target.
-///
-/// Open already refused a foreign schema, an incomplete conversion, and an
-/// in-progress migration. `ensure_consensus_covers` runs again inside the
-/// copy, before this scan and before the real write. Empty and reset sources
-/// have no row scan.
-fn preview_before_write(
-    opened: &OpenedMdbx,
-    rocks_dir: &Path,
-    options: &ConvertOptions,
-    db: &DatabaseEnv,
-    map: &PlacementMap,
-) -> eyre::Result<()> {
-    if matches!(opened, OpenedMdbx::Empty(_)) || source_reset(opened)? {
-        return Ok(());
-    }
-    let mut preview = options.clone();
-    preview.dry_run = true;
-    preview.fail_after_batches = None;
-    match opened {
-        OpenedMdbx::V2(src) => {
-            copy_v2_rocks(src, rocks_dir, &preview, db, map)?;
-        }
-        OpenedMdbx::V1(env) => {
-            copy_v1_rocks(env, rocks_dir, &preview, db, map)?;
-        }
-        OpenedMdbx::Empty(_) => {}
-    }
-    Ok(())
 }
 
 /// Compares two RocksDB v1 indexes.
