@@ -48,6 +48,11 @@ pub fn verify_chunk(
 
 /// Check one segment against an anchored commitment (spec §5, §6).
 ///
+/// Several segments of one chunk are checked one by one: each carries its own
+/// `h` in-chunk siblings and they share one chunk proof (spec §5, §15 Q2). A
+/// compact multiproof that drops siblings another revealed segment computes
+/// was designed and not adopted; its design is in spec Appendix B.
+///
 /// `c` is `chunk_index`. `j` is `segment_index`.
 pub fn verify_segment(
     geometry: &Geometry,

@@ -264,7 +264,7 @@ climb(r, c, C, hashes):                   // RFC 9162 §2.1.3.2 inclusion walk, 
 - **Size proof:** `require node(data_tree_root, size_witness(n)) == D`.
 - **Packed bytes:** unpack, then trim to `chunk_len` or `segment_len` before hashing. The segment-PoA spec also requires the trimmed tail to unpack to zero.
 - **Empty proof:** valid only when `C = 1`. In storage, `None` means "no proof written" and an empty value is a present proof. Never treat an empty proof as missing.
-- **Compact multiproof:** a possible future format, not the multi-segment encoding above. This spec defines no rules for it.
+- **Compact multiproof:** a possible future format, not the multi-segment encoding above. Its design is in Appendix B.
 
 | Upload | `C` | Max depth | v1 chunk path | Chunk proof | Segment proof | 4 segments of one chunk (option B / compact form) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -272,7 +272,7 @@ climb(r, c, C, hashes):                   // RFC 9162 §2.1.3.2 inclusion walk, 
 | 1 GiB | 4,096 | 12 | 1,216 | **384** | 576 | 1,152 / 896 |
 | 5 TiB (max) | 20,971,520 | 25 | 2,464 | **800** (736 for `c ≥ 2^24`) | 992 | 1,568 / 1,312 |
 
-All sizes are in bytes and exclude the segment and chunk bytes. The last column is option B (`4 × h` in-chunk siblings plus one chunk proof), then a compact multiproof at most. The compact form is a possible future format. It is not defined here.
+All sizes are in bytes and exclude the segment and chunk bytes. The last column is option B (`4 × h` in-chunk siblings plus one chunk proof), then a compact multiproof at most. The compact form is a possible future format, designed in Appendix B.
 
 ## 6. Trust anchor rule
 
@@ -518,7 +518,7 @@ The data root is external: clients, SDKs and the gateway commit to it. It lands 
 | Date | Decision |
 | --- | --- |
 | 2026-10-21 | Q1. Proof order is leaf to root, and leaf to root is the default order for every proof in the protocol. Compression is not a reason to pick an order: the measured gap comes from where the constant row bytes sit, not from the order (Appendix A.1) |
-| 2026-10-21 | Q2. A multi-segment answer is independent segment proofs that share one chunk proof. A compact multiproof saves about 1.4% and needs a second consensus verifier, so it is not this format. It can be a later format if custody needs it |
+| 2026-10-21 | Q2. A multi-segment answer is independent segment proofs that share one chunk proof. A compact multiproof saves about 1.4% and needs a second consensus verifier, so it is not this format. It can be a later format if custody needs it (design: Appendix B) |
 | 2026-10-21 | Q4. A `tx_root` leaf value is `fold(data_tree_root, prefix_hash)` and the span note is the exact `data_size`. A proven leaf authenticates both, so a verifier re-derives `node(data_tree_root, size_witness(span))`. The `tx_root` code stays unchanged |
 | 2026-10-21 | Q5. The size witness covers `data_size` only: `H(0x02 ‖ be64(data_size))`. Geometry is already on the consensus surface a client needs before it can verify, so the commitment does not repeat it |
 | 2026-10-21 | Q6. An ingress proof signs `data_commitment`, so one proof covers exactly one (data, size). A planned proof of a chunk range binds `data_commitment` and that range for the same reason |
@@ -591,3 +591,86 @@ SST table. Today's trailer only. A non-empty value is the byte string `encode_of
 - Open `ChunkMetaByOffset` with the baseline options cited above. Write one batch, flush the family, then compact the whole key range with bottommost compaction forced. The SST size is the sum of live file sizes for that family.
 
 The one-chunk SST matches to the byte in either order. The blobs preset sends a value to a blob file at or above 2,048 bytes (`BLOB_MIN_BYTES`, `rocks.rs` line 67). Every row here is 6 to 518 bytes, so that preset writes the same SST and no blob file. Block-cache size does not change these SST bytes.
+
+## Appendix B. Compact multi-segment proof (designed, not adopted)
+
+§15 Q2 chose independent segment proofs that share one chunk proof (§5). This appendix keeps the design of the compact form so it can be adopted later, as a separate format, if custody answers need the bytes. Nothing in this spec or crate implements it, and no vectors exist for it.
+
+**What it saves.** In option B every segment carries all `h` in-chunk siblings, even when another revealed segment's climb already computes that sibling. The compact form sends only the siblings that no revealed segment can compute. Counts below are for `h = 6` (mainnet), checked over every index set:
+
+| Segments revealed in one chunk | Option B in-chunk hashes | Compact in-chunk hashes |
+| --- | --- | --- |
+| 1 | 6 | 6 |
+| 2 | 12 | 5 (adjacent pair) to 10 |
+| 4 | 24 | 4 to 16 |
+| 64 (whole chunk) | 384 | 0 |
+
+At 4 segments the compact form saves at least 8 hashes (256 B): about 1.4% of an answer that carries 4 × 4 KiB of segment bytes. The chunk proof is the same in both forms and is sent once.
+
+**Example.** `SPC = 8` (`h = 3`), segments 1 and 6 of one chunk. Option B sends `[L0, A23, B4567]` and `[L7, A45, B0123]`: six hashes. The compact form sends `[L0, L7, A23, A45]`: four hashes. `B0123` and `B4567` are dropped, because the climbs from segments 1 and 6 compute them.
+
+```
+                 R_c
+          ┌───────┴───────┐
+        B0123           B4567          ◄ computed, not sent
+       ┌──┴──┐         ┌──┴──┐
+      A01   A23       A45   A67        ◄ A23, A45 sent (aux 3, 4)
+     ┌┴┐   ┌┴┐       ┌┴┐   ┌┴┐
+    L0 L1 L2 L3     L4 L5 L6 L7        ◄ L0, L7 sent (aux 1, 2); L1, L6 revealed
+```
+
+**Encoding.** One compact proof covers one chunk. Segments in two chunks are two compact proofs, each with its own chunk proof.
+
+```
+compact_proof = be16(m) ‖ j_1 ‖ … ‖ j_m ‖ aux[0] ‖ … ‖ aux[a−1] ‖ chunk_proof
+    m          number of revealed segments, 1 ≤ m ≤ SPC
+    j_i        one byte each (SPC ≤ 256), strictly increasing, j_i < SPC
+    aux        a 32-byte hashes, in the canonical order below; a = aux_count(J)
+    chunk_proof  32 × depth(c, C) bytes, leaf to root, as in §5
+```
+
+The revealed segment bytes travel next to the proof in index order; each length is `segment_len(n, c, j_i)`, so no lengths are encoded.
+
+**Canonical order and verification.** The verifier walks the chunk subtree level by level, bottom up, and within a level by ascending position. At each position it pairs two known siblings, or takes the next `aux` hash. That walk fixes the one order in which `aux` is written.
+
+```
+aux_count(J):                            // from the indices alone; no hashing
+    known = J; a = 0
+    for level in 0 .. h:
+        next = []
+        for each p in known, ascending:
+            if p is even and p + 1 is in known: consume both
+            else: a = a + 1
+            append p >> 1 to next (once per pair)
+        known = next
+    return a                             // known is now [0]
+
+verify_compact(D, n, c, proof, segment_bytes):
+    parse m, J; require 1 ≤ m ≤ SPC; require J strictly increasing and every j < SPC
+    require 1 ≤ n ≤ max; C = ceil(n / chunk_size); require c < C
+    require len(segment_bytes[i]) == segment_len(n, c, j_i) for every i
+    a = aux_count(J)
+    require len(proof) == 2 + m + 32 × (a + depth(c, C))      // exact, before any hashing
+    known = [(j_i, leaf(segment_bytes[i])) for i in 1..m]; next_aux = 0
+    for level in 0 .. h:
+        next = []
+        for each (p, x) in known, ascending p:
+            if p is even and the next entry is (p + 1, y): parent = node(x, y); consume both
+            else if p is even: parent = node(x, aux[next_aux]); next_aux += 1
+            else:              parent = node(aux[next_aux], x); next_aux += 1
+            append (p >> 1, parent) to next
+        known = next
+    require next_aux == a and known == [(0, r)]               // every hash used, one root
+    r = climb(r, c, C, chunk_proof)
+    require node(r, size_witness(n)) == D
+```
+
+**Rules that make it safe.**
+
+- *Canonical.* Strictly increasing indices give one encoding per index set, and the walk gives one `aux` order. For a fixed `(D, n, c, J)` the valid proof is unique up to SHA-256 collisions, as in §10.
+- *Length before hashing.* `aux_count(J)` needs only the indices. The exact proof length is checked before any hash, and `m ≤ SPC` caps the parse.
+- *Every hash used.* A proof with a spare or a missing `aux` hash fails the length check. The final `next_aux == a` check is an invariant, not a second length check.
+- *Positional binding.* As in §10, the shape is fixed by `(n, chunk_size, SPC)`. A revealed segment hashes at its exact length, and a segment past the data is `leaf("")` with empty bytes.
+- *Same anchor.* The commitment must be anchored (§6).
+
+**If it is adopted.** Add a `verify_compact` beside `verify_segment` with the same error kinds, an encoder on `DataTree`, a §5 row, a §13 vector group (the option B cases, plus `m = SPC`, an index set with `aux_count = 0`, and the negative cases: unsorted or repeated indices, `j ≥ SPC`, `m = 0`, `m > SPC`, one `aux` hash too many or too few, a flipped bit in each `aux` hash), and property tests that the compact proof and the option B proofs agree on every index set of small geometries. A joint proof across several chunks of one upload (a chunk-level multiproof over the RFC 6962 shape, with carried nodes) is a further step and is not designed here.
