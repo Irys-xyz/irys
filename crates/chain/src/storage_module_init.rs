@@ -40,7 +40,6 @@ pub(super) async fn open_storage_modules(
         match result {
             Ok(Ok(module)) => opened.push(module),
             Ok(Err(err)) => failures.push(format!("{label}: {err:#}")),
-            Err(err) if err.is_panic() => failures.push(format!("{label}: panicked while opening")),
             Err(err) => failures.push(format!("{label}: {err}")),
         }
     }
@@ -74,7 +73,7 @@ mod tests {
     use irys_database::reth_db::Database as _;
     use irys_database::submodule::tables::{
         ChunkPathHashes, ChunkPathHashesByOffset, Metadata, SUBMODULE_SCHEMA, SubmoduleTables,
-        TxPathIntervalByStart,
+        TxPathInterval, TxPathIntervalByStart,
     };
     use irys_database::{open_or_create_db, submodule_db_args};
     use irys_domain::StorageModuleInfo;
@@ -133,10 +132,44 @@ mod tests {
         tx.commit()?;
         // Open drops tx intervals when this file is missing. A live module
         // already has it. `Data` keeps the rows the migration just wrote.
+        write_data_intervals(base, name)
+    }
+
+    fn write_data_intervals(base: &Path, name: &str) -> eyre::Result<()> {
         let mut intervals = String::from("[[{\"start\":0,\"end\":");
         intervals.push_str(&(CHUNKS - 1).to_string());
         intervals.push_str("},\"Data\"]]");
         std::fs::write(base.join(name).join("intervals.json"), intervals)?;
+        Ok(())
+    }
+
+    /// Schema v2 already. Open must leave the interval row where it is.
+    fn seed_v2(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
+        let dir = db_dir(base, name);
+        std::fs::create_dir_all(&dir)?;
+        let env = open_or_create_db(&dir, SubmoduleTables::ALL, db_args(config)?)?;
+        let tx = env.tx_mut()?;
+        tx.put::<Metadata>(
+            MetadataKey::DBSchemaVersion,
+            SUBMODULE_SCHEMA.as_bytes().to_vec(),
+        )?;
+        tx.put::<TxPathIntervalByStart>(
+            PartitionChunkOffset(0),
+            TxPathInterval {
+                end: PartitionChunkOffset(CHUNKS - 1),
+                tx_path_hash: H256::repeat_byte(9),
+            },
+        )?;
+        tx.commit()?;
+        drop(env);
+        write_data_intervals(base, name)
+    }
+
+    /// `rocks/SCHEMA` with an MDBX config. Open must refuse this directory.
+    fn seed_rocks(base: &Path, name: &str) -> eyre::Result<()> {
+        let rocks = base.join(name).join("rocks");
+        std::fs::create_dir_all(&rocks)?;
+        std::fs::write(rocks.join("SCHEMA"), b"irys-submodule-index rocksdb 1\n")?;
         Ok(())
     }
 
@@ -164,6 +197,28 @@ mod tests {
             .unwrap_or_else(|| panic!("{name} has no interval"));
         assert_eq!(interval.end, PartitionChunkOffset(CHUNKS - 1));
         assert_eq!(interval.tx_path_hash, H256::repeat_byte(7));
+        Ok(())
+    }
+
+    fn assert_v2_unchanged(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
+        let env = open_or_create_db(db_dir(base, name), SubmoduleTables::ALL, db_args(config)?)?;
+        let tx = env.tx()?;
+        let schema = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)?;
+        assert_eq!(
+            schema.as_deref(),
+            Some(SUBMODULE_SCHEMA.as_bytes()),
+            "{name} schema changed"
+        );
+        let interval = tx
+            .get::<TxPathIntervalByStart>(PartitionChunkOffset::from(0))?
+            .unwrap_or_else(|| panic!("{name} lost its interval"));
+        assert_eq!(interval.end, PartitionChunkOffset(CHUNKS - 1));
+        assert_eq!(interval.tx_path_hash, H256::repeat_byte(9));
+        assert_eq!(
+            tx.entries::<ChunkPathHashesByOffset>()?,
+            0,
+            "{name} gained path-hash rows"
+        );
         Ok(())
     }
 
@@ -202,10 +257,14 @@ mod tests {
         let bad_second = "bad-3";
         let kept_a = "kept-a";
         let kept_b = "kept-b";
+        let already = "already-v2";
+        let rocks = "rocks-mod";
         seed_foreign(&config, base, bad_first)?;
         seed_v1(&config, base, kept_a)?;
         seed_foreign(&config, base, bad_second)?;
         seed_v1(&config, base, kept_b)?;
+        seed_v2(&config, base, already)?;
+        seed_rocks(base, rocks)?;
         let err = open_storage_modules(
             &config,
             vec![
@@ -213,11 +272,13 @@ mod tests {
                 info(2, kept_a),
                 info(3, bad_second),
                 info(4, kept_b),
+                info(5, already),
+                info(6, rocks),
             ],
             Duration::ZERO,
         )
         .await
-        .expect_err("two modules have a foreign schema");
+        .expect_err("foreign schemas and a rocks directory must fail");
         let text = format!("{err:#}");
         assert!(
             text.contains(bad_first) && text.contains(bad_second),
@@ -227,8 +288,19 @@ mod tests {
             text.contains("storage module 1") && text.contains("storage module 3"),
             "{text}"
         );
+        assert!(
+            text.contains("storage module 6")
+                && text.contains(rocks)
+                && text.contains("the Rocks index was not copied"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("storage module 5"),
+            "already-v2 module failed to open: {text}"
+        );
         assert_migrated(&config, base, kept_a)?;
         assert_migrated(&config, base, kept_b)?;
+        assert_v2_unchanged(&config, base, already)?;
         Ok(())
     }
 }
