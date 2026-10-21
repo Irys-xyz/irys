@@ -1,10 +1,12 @@
 mod builder;
 mod depth;
 mod geometry;
+mod geometry_props;
 mod negative;
 mod props;
 mod roundtrip;
 mod shape;
+mod strategies;
 mod tags;
 mod vectors;
 
