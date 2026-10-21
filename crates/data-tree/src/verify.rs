@@ -85,12 +85,8 @@ pub fn verify_segment(
     let mut root = leaf(bytes);
     let mut segment_index = segment_index;
     for sibling in in_chunk.chunks_exact(HASH_SIZE) {
-        let Ok(bytes) = <[u8; HASH_SIZE]>::try_from(sibling) else {
-            return Err(VerifyError::InvalidProofLength {
-                expected: expected_proof,
-                actual: proof.len(),
-            });
-        };
+        let bytes = <[u8; HASH_SIZE]>::try_from(sibling)
+            .expect("chunks_exact yields HASH_SIZE-byte slices");
         let sibling = NodeHash(bytes);
         // Bit `level` of `j`, after the shifts above, picks the side (spec §5).
         // Even: this segment is the left child.

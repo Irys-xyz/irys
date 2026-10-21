@@ -159,19 +159,15 @@ impl Geometry {
                 chunk_count,
             });
         }
-        let Some(start) = (chunk_index as u64).checked_mul(self.chunk_size) else {
-            return Err(SizeError::ChunkIndexOutOfRange {
-                chunk_index,
-                chunk_count,
-            });
-        };
+        // `c < C <= max_data_tx_chunks`. `Geometry::new` proved
+        // `max_data_tx_chunks * chunk_size` fits `u64`, so this product does too.
+        let start = (chunk_index as u64)
+            .checked_mul(self.chunk_size)
+            .expect("chunk_index < chunk_count, and max_data_tx_chunks * chunk_size fits u64");
         // `c < C` and `C = ceil(n / chunk_size)` imply `start < n`.
-        let Some(remain) = data_size.checked_sub(start) else {
-            return Err(SizeError::ChunkIndexOutOfRange {
-                chunk_index,
-                chunk_count,
-            });
-        };
+        let remain = data_size
+            .checked_sub(start)
+            .expect("chunk_index < chunk_count implies the chunk start is below data_size");
         Ok(if remain < self.chunk_size {
             remain
         } else {
@@ -209,35 +205,25 @@ impl Geometry {
             });
         }
         let segment_size = self.segment_size();
-        let Some(chunk_start) = (chunk_index as u64).checked_mul(self.chunk_size) else {
-            return Err(SizeError::ChunkIndexOutOfRange {
-                chunk_index,
-                chunk_count,
-            });
-        };
-        let Some(segment_offset) = (segment_index as u64).checked_mul(segment_size) else {
-            return Err(SizeError::SegmentIndexOutOfRange {
-                segment_index,
-                segments_per_chunk: self.segments_per_chunk,
-            });
-        };
-        // Overflow means the start does not fit in `u64`, so it is past `n`.
-        // Fail closed: a 0 here would let an empty slice stand in for real bytes.
-        let Some(start) = chunk_start.checked_add(segment_offset) else {
-            return Err(SizeError::DataSizeOutOfRange {
-                data_size,
-                max_data_size: self.max_data_size(),
-            });
-        };
+        // `c < C <= max_data_tx_chunks` and `j < segments_per_chunk`. Both
+        // products, and their sum, are at most `max_data_tx_chunks * chunk_size`,
+        // which `Geometry::new` proved fits `u64`.
+        let chunk_start = (chunk_index as u64)
+            .checked_mul(self.chunk_size)
+            .expect("chunk_index < chunk_count, and max_data_tx_chunks * chunk_size fits u64");
+        let segment_offset = (segment_index as u64)
+            .checked_mul(segment_size)
+            .expect("segment_index < segments_per_chunk, so the offset is below chunk_size");
+        let start = chunk_start
+            .checked_add(segment_offset)
+            .expect("chunk start plus segment offset is at most max_data_tx_chunks * chunk_size");
         if start >= data_size {
             return Ok(0);
         }
-        let Some(remain) = data_size.checked_sub(start) else {
-            return Err(SizeError::DataSizeOutOfRange {
-                data_size,
-                max_data_size: self.max_data_size(),
-            });
-        };
+        // `start < data_size`, so this stays at or above zero.
+        let remain = data_size
+            .checked_sub(start)
+            .expect("segment start is below data_size");
         Ok(if remain < segment_size {
             remain
         } else {

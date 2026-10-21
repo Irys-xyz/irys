@@ -1,5 +1,8 @@
-use crate::error::{GeometryError, SizeError};
+use crate::error::{GeometryError, SizeError, VerifyError};
 use crate::geometry::{Geometry, MAX_SEGMENTS_PER_CHUNK};
+use crate::shape::depth;
+use crate::types::{DataCommitment, HASH_SIZE};
+use crate::verify_segment;
 use rstest::rstest;
 
 #[test]
@@ -119,5 +122,128 @@ fn lengths_follow_the_spec() {
             data_size: max_data_size + 1,
             max_data_size
         })
+    );
+}
+
+/// Greatest `max_data_size` at [`MAX_SEGMENTS_PER_CHUNK`].
+///
+/// `chunk_size` is the greatest multiple of the segment count. One chunk is the
+/// greatest product: any larger chunk count forces a smaller `chunk_size`.
+fn largest_accepted_geometry() -> Geometry {
+    let segments_per_chunk = MAX_SEGMENTS_PER_CHUNK;
+    let segment_count = u64::from(segments_per_chunk);
+    let chunk_size = u64::MAX - (u64::MAX % segment_count);
+    const ONE_CHUNK: u32 = 1;
+    Geometry::new(chunk_size, segments_per_chunk, ONE_CHUNK)
+        .expect("one chunk of the greatest multiple fits u64")
+}
+
+/// `u32::MAX` chunks and the greatest `chunk_size` whose product still fits,
+/// at [`MAX_SEGMENTS_PER_CHUNK`]. The last chunk index times `chunk_size` is the
+/// largest product `chunk_len` forms at this segment count.
+fn geometry_at_max_chunk_count() -> Geometry {
+    let segments_per_chunk = MAX_SEGMENTS_PER_CHUNK;
+    let max_data_tx_chunks = u32::MAX;
+    let segment_count = u64::from(segments_per_chunk);
+    let largest_chunk_size = u64::MAX / u64::from(max_data_tx_chunks);
+    let chunk_size = largest_chunk_size - (largest_chunk_size % segment_count);
+    let geometry = Geometry::new(chunk_size, segments_per_chunk, max_data_tx_chunks)
+        .expect("max chunk count times this chunk size fits u64");
+    assert_eq!(
+        Geometry::new(
+            chunk_size + segment_count,
+            segments_per_chunk,
+            max_data_tx_chunks
+        ),
+        Err(GeometryError::MaxDataSizeOverflow)
+    );
+    geometry
+}
+
+fn last_indexes(geometry: &Geometry) -> (u64, u32, u32) {
+    let data_size = geometry.max_data_size();
+    let chunk_count = geometry
+        .chunk_count(data_size)
+        .expect("max data size is in range");
+    let chunk_index = chunk_count - 1;
+    let segment_index = geometry.segments_per_chunk() - 1;
+    (data_size, chunk_index, segment_index)
+}
+
+#[test]
+fn chunk_len_holds_for_the_last_chunk_of_the_extreme_geometries() {
+    for geometry in [largest_accepted_geometry(), geometry_at_max_chunk_count()] {
+        let (data_size, chunk_index, _) = last_indexes(&geometry);
+        assert_eq!(
+            geometry.chunk_len(data_size, chunk_index).unwrap(),
+            geometry.chunk_size()
+        );
+    }
+}
+
+#[test]
+fn segment_len_holds_for_the_last_segment_of_the_extreme_geometries() {
+    for geometry in [largest_accepted_geometry(), geometry_at_max_chunk_count()] {
+        let (data_size, chunk_index, segment_index) = last_indexes(&geometry);
+        assert_eq!(
+            geometry
+                .segment_len(data_size, chunk_index, segment_index)
+                .unwrap(),
+            geometry.segment_size()
+        );
+        // The segment starts past this one byte. The result is 0, and the
+        // length is not produced by a subtraction below zero.
+        assert_eq!(geometry.segment_len(1, 0, segment_index).unwrap(), 0);
+    }
+}
+
+#[test]
+fn verify_segment_does_not_panic_on_the_extreme_geometries() {
+    let commitment = DataCommitment([0x11; HASH_SIZE]);
+
+    let geometry = largest_accepted_geometry();
+    let (data_size, chunk_index, segment_index) = last_indexes(&geometry);
+    // The last segment is `segment_size` bytes. That length does not fit a
+    // test allocation. An empty slice fails the length check, which runs after
+    // `segment_len` and before hashing.
+    assert_eq!(
+        verify_segment(
+            &geometry,
+            &commitment,
+            data_size,
+            chunk_index,
+            segment_index,
+            &[],
+            &[],
+        ),
+        Err(VerifyError::InvalidSegmentLength {
+            expected: geometry.segment_size(),
+            actual: 0,
+        })
+    );
+
+    let geometry = geometry_at_max_chunk_count();
+    // `1 << u32::BITS` is the greatest `chunk_size` this chunk count accepts.
+    assert_eq!(geometry.chunk_size(), 1_u64 << u32::BITS);
+    let (data_size, chunk_index, segment_index) = last_indexes(&geometry);
+    let chunk_count = geometry.chunk_count(data_size).unwrap();
+    let segment_length = geometry
+        .segment_len(data_size, chunk_index, segment_index)
+        .unwrap();
+    let segment_bytes = usize::try_from(segment_length).unwrap();
+    let bytes = vec![0_u8; segment_bytes];
+    let hash_count = geometry.height() + depth(chunk_index, chunk_count);
+    let proof = vec![0_u8; usize::try_from(hash_count).unwrap() * HASH_SIZE];
+    assert_eq!(
+        verify_segment(
+            &geometry,
+            &commitment,
+            data_size,
+            chunk_index,
+            segment_index,
+            &bytes,
+            &proof,
+        ),
+        Err(VerifyError::CommitmentMismatch)
     );
 }
