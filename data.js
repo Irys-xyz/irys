@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792596897425,
+  "lastUpdate": 1792601024438,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -18295,6 +18295,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000148,
             "range": "± 0.000009",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3360dd80a1838f3d6c7b13ba08b17281f6c94e10",
+          "message": "fix(data-sync): settle a panicking delivery task to a local error (#1664)",
+          "timestamp": "2026-10-21T09:28:41-07:00",
+          "tree_id": "9972396bd70ecd01bfa58aec8710eb489f8e359c",
+          "url": "https://github.com/Irys-xyz/irys/commit/3360dd80a1838f3d6c7b13ba08b17281f6c94e10"
+        },
+        "date": 1792601023002,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015737,
+            "range": "± 0.001155",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.157457,
+            "range": "± 0.008167",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.581423,
+            "range": "± 0.06722",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.509536,
+            "range": "± 0.324596",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082277,
+            "range": "± 0.000887",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 850.577694,
+            "range": "± 39.852676",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 986.37121,
+            "range": "± 8.572766",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.121758,
+            "range": "± 0.003963",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1203.71679,
+            "range": "± 117.766908",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1922.373496,
+            "range": "± 156.845486",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034193,
+            "range": "± 0.000848",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 212.790559,
+            "range": "± 3.362423",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.673629,
+            "range": "± 0.537414",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
