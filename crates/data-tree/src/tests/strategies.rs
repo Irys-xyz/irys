@@ -6,13 +6,20 @@
 //! when it is set, so a soak can raise every new property together:
 //!
 //! ```text
+//! cat > /tmp/data-tree-soak-nextest.toml <<'EOF'
+//! [profile.default]
+//! slow-timeout = { period = "20m", terminate-after = 2 }
+//! EOF
 //! PROPTEST_CASES=330000 XTASK_NO_PRUNE=1 cargo nextest run -p irys-data-tree \
+//!   --config-file /tmp/data-tree-soak-nextest.toml \
 //!   -E 'test(/::panic_freedom::/) | test(/::differential::/) | test(/::builder_props::/) | test(/::geometry_props::/)'
 //! ```
 //!
-//! Nextest runs those tests in parallel, so the wall clock is the slowest one.
-//! That is the honest-tree test: about 4 seconds at 2000 cases on an opt-level 3
-//! dev build, so 330000 cases is about ten minutes. An unset variable uses the
+//! The repo's default nextest profile kills a test after two 30 s periods.
+//! The temporary config raises that for the soak only. Nextest runs those
+//! tests in parallel, so the wall clock is the slowest one. That is the
+//! honest-tree test: about 4 seconds at 2000 cases on an opt-level 3 dev
+//! build, so 330000 cases is about ten minutes. An unset variable uses the
 //! per-test count passed to [`case_config`]. A value proptest cannot parse as
 //! `u32` leaves the built-in default of 256.
 //!
