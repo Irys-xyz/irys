@@ -520,9 +520,9 @@ Q1, Q2, Q4, Q5, Q6, Q7, Q8, Q9 and Q10 are decided (§15). Q3 is deferred and do
 
 | # | Baseline | Open option |
 | --- | --- | --- |
-| Q3, `tx_root` format | Keep today's format. From activation the PoA `tx_path` check rejects non-zero note padding. The cross-tree caveat in §10 stays | Tagged 8-byte notes. This removes 24 malleable bytes per node, makes `tx_path` about 25% smaller, and closes the §10 caveat. It may land with Estuary or a later fork. New tags must avoid `0x00` to `0x04` |
+| Q3, `tx_root` format | Keep today's format. From activation the PoA `tx_path` check rejects non-zero note padding. The cross-tree caveat in §10 stays | `tx_root` v2 (Appendix C): positional leaves that bind each tx's `data_size` and chunk start, domain tags `0x05` to `0x07`, a count witness, witness-last proofs. It removes the malleable padding, the byte-sum placement drift and the §10 caveat. It may land with Estuary or a later fork |
 
-The data root is external: clients, SDKs and the gateway commit to it. It lands first, and it is hard to change later. `tx_root` is internal to the protocol, so its format can change in any fork. That is why the data tree is fixed now and the `tx_root` format can wait.
+The data root is external: clients, SDKs and the gateway commit to it. It lands first, and it is hard to change later. `tx_root` is produced by the protocol, so its format can change in any fork; gateway receipts that prove through it change with it. That is why the data tree is fixed now and the `tx_root` format can wait.
 
 ## 15. Decision log
 
@@ -538,6 +538,7 @@ The data root is external: clients, SDKs and the gateway commit to it. It lands 
 | 2026-10-21 | Q9. The tree's rule is 1 ≤ SPC ≤ 256, a power of two, and it sets no tighter protocol floor. A bound is a property of how the tree is used, not of the tree. The irys node rejects SPC < 2 wherever the segment-PoA rule runs, because an empty segment proof signs like an absent optional RLP field |
 | 2026-10-21 | Q10. Every proof ends with `size_witness(n)`, leaf to root, so the witness is the last hash. A chunk proof is the chunk-level siblings then the witness: `32 × (depth(c, C) + 1)` bytes, and for `C = 1` it is `[size_witness(n)]`. A segment proof is the `h` in-chunk siblings then that chunk proof. Plain concatenation is the full segment proof in every case, including one chunk. The verifier checks the length, requires the last hash to equal `size_witness` computed from the `data_size` it is checking, and does not climb until that matches. It then climbs the siblings and requires `node(root, size_witness(n))` to equal the commitment. A sibling-only proof of a one-leaf tree is empty, and containers that store or sign proofs confuse empty with missing: a header binding with empty lists becomes absent, nested inner proofs are skipped when empty, and `ChunkWithProof.proof` defaults to empty. Witness-last costs 32 B per proof on the wire. In a storage-module row the witness is the same for every chunk of an upload, so LZ4 shares it. Rejected: leaf-first for every proof, which adds 32 B per proof and per storage row, and the leaf differs per row so LZ4 cannot share it; and a leaf only when the proof would otherwise be empty, which is a special-case branch |
 | 2026-10-21 | The data root is external: clients, SDKs and the gateway commit to it, so it lands first and is hard to change later. `tx_root` is internal to the protocol and can change in any fork |
+| 2026-10-21 | `tx_root` v2, when adopted (Appendix C): it commits to its leaf count with a count witness, and its proofs end with that witness. Gateway receipts are meant to be near self-contained paths from `tx_root` to a chunk, so a verifier holding only `tx_root` must get the count bound |
 | 2026-10-19 | Tag registry `0x00` to `0x04` (`0x04` is the mining ticket) and `segments_per_chunk ≤ 256` (segment-PoA spec, ticket encoding) |
 | 2026-10-19 | The fork release deletes the old data-PoA verifier and keeps the capacity PoA path bit-exact |
 | 2026-10-19 | `tx_path` note padding: if `tx_root` keeps its format, the PoA check rejects non-zero padding from activation |
@@ -605,6 +606,18 @@ SST table. Today's trailer only. A non-empty value is the byte string `encode_of
 - Open `ChunkMetaByOffset` with the baseline options cited above. Write one batch, flush the family, then compact the whole key range with bottommost compaction forced. The SST size is the sum of live file sizes for that family.
 
 The one-chunk SST matches to the byte in either order. The blobs preset sends a value to a blob file at or above 2,048 bytes (`BLOB_MIN_BYTES`, `rocks.rs` line 67). Every row here is 6 to 518 bytes, so that preset writes the same SST and no blob file. Block-cache size does not change these SST bytes.
+
+### A.2 Gateway receipt chain (as of 2026-10-21)
+
+A read of the gateway codebase (the `gateway` repository, paths relative to its root) for §14 Q10 and the `tx_root` design (Appendix C). Findings:
+
+- **The receipt carries no block header.** A receipt is the JSON `DataItemReceipt` (`crates/shared/dto/src/lib.rs`): block height and hash, `txRoot`, `txLedgerIndex`, `txByteOffset`, and base64url proofs. The gateway's node stream parser keeps only a block's height and hash (`crates/shared/chain-stream/src/wire/node.rs`). The header's `tx_root`, `tx_ids` and signature are dropped.
+- **The anchor is a `tx_root` rebuilt from every tx in the block.** `verify_data_item_receipt` (`crates/shared/gateway-core/src/verify.rs`) takes a `RelayAttestedAnchor` (`crates/shared/gateway-core/src/anchor.rs`) rebuilt from the relay's quorum population rows. Its comment: "This is **not** a node-header-signed `tx_root`". The leaf count is the row count, so a verifier must fetch the whole tx list to check one item. The tx index in a receipt is checked against that list, not proven.
+- **Empty and missing collapse in three containers:** a header binding whose lists are both empty becomes absent; nested inner proofs use `skip_serializing_if = "Vec::is_empty"`; `ChunkWithProof.proof` uses `#[serde(default)]`. These fail closed today only because every v1 proof is at least 64 bytes. A sibling-only one-leaf proof would fall into each of them. This is why §15 Q10 makes every proof end with its witness.
+- **One Merkle library serves four trees** (`crates/shared/bundle-format-v2/src/merkle.rs`): `data_root`, `tx_root`, `bundle_items_root` (leaf: item `data_root` and `data_size`) and `item_headers_root`, all in the v1 note format. `bundle_items_root` has the shape of `tx_root`.
+- **What a format change breaks:** receipt proof bytes are not golden-pinned. The receipt JSON shape, the indexer OpenAPI snapshot and two Merkle root hex values are.
+
+Consequences: `tx_root` v2 commits to its leaf count (count witness, Appendix C), so a receipt can be a near self-contained path from an anchored `tx_root` to a chunk; every proof ends with its witness (§15 Q10).
 
 ## Appendix B. Compact multi-segment proof (designed, not adopted)
 
@@ -689,3 +702,68 @@ verify_compact(D, n, c, proof, segment_bytes):
 - *Same anchor.* The commitment must be anchored (§6).
 
 **If it is adopted.** Add a `verify_compact` beside `verify_segment` with the same error kinds, an encoder on `DataTree`, a §5 row, a §13 vector group (the option B cases, plus `m = SPC`, an index set with `aux_count = 0`, and the negative cases: unsorted or repeated indices, `j ≥ SPC`, `m = 0`, `m > SPC`, one `aux` hash too many or too few, a flipped bit in each `aux` hash), and property tests that the compact proof and the option B proofs agree on every index set of small geometries. A joint proof across several chunks of one upload (a chunk-level multiproof over the RFC 6962 shape, with carried nodes) is a further step and is not designed here.
+
+## Appendix C. `tx_root` v2 (designed, not implemented)
+
+§14 Q3 defers the `tx_root` format. This appendix is the design to adopt when it is scheduled. Nothing in this crate or the node implements it yet. It applies the data tree's rules to the ledger tree: positional leaves, one SHA-256 call per node with domain tags, no notes, a witness that binds the leaf count, and witness-last proofs (§15 Q10).
+
+**Why it changes.** Today's `tx_root` (`crates/types/src/merkle.rs`, shared with v1 `data_path` and ingress proofs):
+
+- Each node carries a 32-byte note, of which 24 bytes are unchecked padding. One `tx_path` has many byte encodings.
+- The notes are prefix sums of raw `data_size`, but txs are placed in whole chunks. A PoA target `block_chunk × chunk_size` lands on the wrong byte after any tx that does not end on a chunk boundary.
+- It has no domain tags, which leaves the cross-tree caveat in §10.
+- It does not commit to its leaf count. Gateway receipts are meant to be near self-contained Merkle paths from `tx_root` down to a chunk (block header → `tx_root` → tx → `data_commitment` → chunk), so a verifier that holds only `tx_root` must still get the count bound (Appendix A.2).
+
+**Hashing.** New tags, in the one registry with §3 (`TreeDomainTag` gains them when this is implemented):
+
+| Tag | Name | Preimage | Use |
+| --- | --- | --- | --- |
+| `0x05` | TX_LEAF | `0x05 ‖ data_tree_root ‖ be64(data_size) ‖ prefix_hash ‖ be64(chunk_start)` (81 B) | one data tx |
+| `0x06` | TX_NODE | `0x06 ‖ left ‖ right` (65 B) | every node of the ledger tree, and its top node |
+| `0x07` | TX_COUNT | `0x07 ‖ be32(N)` (5 B) | count witness |
+
+```
+N           = number of data txs in this ledger of this block, in tx_ids order k = 0 .. N−1
+chunk_start_k = Σ_{i<k} ceil(data_size_i / chunk_size)          // block-relative chunk index (§8)
+leaf_k      = H(0x05 ‖ data_tree_root_k ‖ be64(data_size_k) ‖ prefix_hash_k ‖ be64(chunk_start_k))
+tx_root     = H(0x06 ‖ T(leaf_0 .. leaf_{N−1}) ‖ count_witness(N))   for N ≥ 1     // T() of §4 with TX_NODE
+tx_root     = 0^32                                                     for N = 0     // unchanged sentinel
+count_witness(N) = H(0x07 ‖ be32(N))
+```
+
+- The leaf binds the tx's exact `data_size`, so a proven leaf gives the anchored commitment `node(data_tree_root, size_witness(data_size))` (§6, §15 Q4). It replaces the span note.
+- The leaf binds `chunk_start`, so the PoA mapping uses chunk counts only: `c = b − chunk_start_k`, `0 ≤ c < ceil(data_size_k / chunk_size)`, where `b` is the block-relative chunk index. No byte sums.
+- A separate node tag means a ledger-tree node can never be read as a data-tree node.
+
+**Proofs.** Witness-last, like the data tree: the siblings of `leaf_k` in `T`, leaf to root, then `count_witness(N)`. Length `32 × (depth(k, N) + 1)`. Never empty.
+
+```
+verify_tx(tx_root, N, k, data_tree_root, data_size, prefix_hash, chunk_start, proof):
+    require 1 ≤ N and k < N
+    require len(proof) == 32 × (depth(k, N) + 1)                      // before any hashing
+    require last hash of proof == H(0x07 ‖ be32(N))                   // own witness; never climb an unchecked one
+    r = climb(H(0x05 ‖ data_tree_root ‖ be64(data_size) ‖ prefix_hash ‖ be64(chunk_start)), k, N, siblings)
+                                                                       // climb() of §5 with TX_NODE
+    require H(0x06 ‖ r ‖ H(0x07 ‖ be32(N))) == tx_root
+```
+
+The count witness makes a proof bind `N` and the position `k` (the direction bits come from `(k, N)`), so a receipt does not need the block's tx list, and a tx index in a receipt is proven, not a separate claim.
+
+**Sizes.**
+
+| Data txs in the ledger | Today's `tx_path` | v2 proof |
+| --- | --- | --- |
+| 1 | 64 B | 32 B |
+| 2 | 160 B | 64 B |
+| 100 | 736 B | 256 B |
+
+**Activation.** `tx_root` and the PoA's `tx_path` are signed, so the change is height-gated. It is cheapest at Estuary: §15 Q8 refuses every data tx up to and including E, so every earlier `tx_root` is `0^32` and no data PoA exists, and no v1 `tx_path` verifier is needed. In a later fork, validation, `tx_path` derivation and storage need both formats, gated by height.
+
+**What changes when it is implemented.** A new encoder (the v1 `merkle.rs` encoder also builds `data_path` and ingress proofs and stays for those). Block production, block validation and migration compute the new `tx_root`. PoA validation verifies with `verify_tx`. `tx_path` derivation (`crates/database/src/tx_path_derive.rs`) builds v2 proofs by height. The MDBX path tables that parse the last 64 bytes as a v1 leaf, and the RocksDB derive, follow. The gateway's receipt verifier and its index trees (`bundle_items_root` has the same shape: a root plus a size per leaf) may adopt the same form with their own tags. Vectors: one group per tree, with `N` = 1, 2, 3, 100, every `k` for small `N`, and negatives (wrong `N`, wrong `k`, wrong witness, a flipped bit per sibling, a wrong `chunk_start`, one hash too many or too few).
+
+**Open items.**
+
+1. When: with Estuary (one format) or a later fork (both formats by height).
+2. What a PoA carries: `(k, N, chunk_start)` explicitly, so a validator needs only the owning tx header; or derived from the block's tx headers (smaller PoA, more reads).
+3. Whether `prefix_hash` stays in the leaf (today's leaf folds it in).
+4. Where the code lives: `irys-data-tree`, which shares `T`, `climb`, `depth` and the tag registry, or a separate crate.
