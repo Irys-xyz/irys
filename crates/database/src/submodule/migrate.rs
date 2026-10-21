@@ -9,16 +9,16 @@
 //! Each batch is one MDBX transaction. The schema row holds the resume point
 //! until the last batch writes [`SUBMODULE_SCHEMA`]. Open does not return
 //! until that row is current, so a caller never reads a half-migrated index.
-//! Before the migration, the data file is read once from start to end so random
-//! row lookups hit the page cache instead of a cold HDD.
+//! Before the copy, `mdbx_env_warmup` loads the open environment's pages and
+//! pins them. The pin is released when the migration returns.
 
-use std::io::Read as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use irys_types::{ChunkDataPath, ChunkPathHash, H256, PartitionChunkOffset};
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::mdbx::Error as MdbxError;
+use reth_db::mdbx::ffi;
 use reth_db::transaction::{DbTx, DbTxMut as _};
 use reth_db::{Database as _, DatabaseEnv, DatabaseError};
 
@@ -266,8 +266,9 @@ fn run_migration(
         hook(path);
     }
     // Fresh copy and a resumed copy or drop both enter here. v2, empty, and
-    // foreign schemas never call `run_migration`.
-    pre_read_index_file(path);
+    // foreign schemas never call `run_migration`. The pin drops on every
+    // return, including `?`, and unlocks pages before this function returns.
+    let _warmed = pre_read_index_file(env, path);
     log_started(path, &progress, &totals);
     set_migration_gauge(path, migration_fraction(&progress, &totals));
     let ctx = MigrateCtx {
@@ -693,53 +694,89 @@ pub(super) fn migration_required(env: &DatabaseEnv) -> eyre::Result<bool> {
     })
 }
 
-/// Bytes per `read` while warming the index. A large buffer keeps the pass sequential.
-const PRE_READ_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+/// `mdbx_env_warmup` timeout, 16.16 fixed-point seconds. Zero turns the check
+/// off. 180s covers a 3 GiB sequential read at about 20 MiB/s. A faster disk
+/// returns when the load finishes. Past that, libmdbx returns
+/// `MDBX_RESULT_TRUE` and the migration still runs.
+const WARMUP_TIMEOUT_16DOT16: std::os::raw::c_uint = 180 << 16;
+const WARMUP_LOAD: ffi::MDBX_warmup_flags_t = ffi::MDBX_warmup_force | ffi::MDBX_warmup_oomsafe;
 
-/// Read `mdbx.dat` once so the copy's random lookups hit the page cache.
-///
-/// `DatabaseEnv::open` leaves `MDBX_NOSUBDIR` unset, so the data file is
-/// `mdbx.dat` inside the directory passed to open. A missing file or a
-/// permission error is only a warning: the migration still runs.
-fn pre_read_index_file(dir: &Path) {
-    let path = dir.join("mdbx.dat");
-    let started = Instant::now();
-    match read_file_bytes(&path) {
-        Ok(bytes) => {
-            let elapsed = started.elapsed();
-            let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-            let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX).max(1);
-            // Decimal MB/s: bytes/s divided by 1_000_000.
-            let mb_per_sec = bytes.saturating_mul(1_000) / nanos;
-            tracing::info!(
-                path = %path.display(),
-                bytes,
-                elapsed_ms,
-                mb_per_sec,
-                "submodule index pre-read"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                path = %path.display(),
-                %error,
-                "submodule index pre-read failed"
-            );
+/// Releases the pin on drop. The lock call can pin pages and still return an
+/// error (a timeout after `mlock2`), so drop always unlocks.
+#[must_use = "dropping the pin releases the page lock"]
+struct WarmupPin<'a>(&'a DatabaseEnv);
+
+impl Drop for WarmupPin<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = env_warmup(self.0, ffi::MDBX_warmup_release) {
+            tracing::warn!(%error, "submodule index pre-read unlock failed");
         }
     }
 }
 
-fn read_file_bytes(path: &Path) -> std::io::Result<u64> {
-    let mut file = std::fs::File::open(path)?;
-    let mut buf = vec![0_u8; PRE_READ_BUFFER_BYTES];
-    let mut bytes = 0_u64;
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            return Ok(bytes);
+/// Load the migrating env's pages so the copy's random lookups stay resident.
+///
+/// Lock does not raise `RLIMIT_MEMLOCK` unless `MDBX_warmup_touchlimit` is
+/// set, and it is not. A failed `mlock2` pins nothing and skips the load, so
+/// the retry is force and oomsafe only. Any failure warns. Startup continues.
+fn pre_read_index_file<'a>(env: &'a DatabaseEnv, dir: &Path) -> WarmupPin<'a> {
+    let path = dir.join("mdbx.dat");
+    let started = Instant::now();
+    let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    let locked = match env_warmup(env, WARMUP_LOAD | ffi::MDBX_warmup_lock) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "submodule index pre-read lock failed"
+            );
+            match env_warmup(env, WARMUP_LOAD) {
+                Ok(()) => false,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "submodule index pre-read failed"
+                    );
+                    return WarmupPin(env);
+                }
+            }
         }
-        bytes = bytes.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+    };
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    tracing::info!(
+        path = %path.display(),
+        bytes,
+        elapsed_ms,
+        locked,
+        "submodule index pre-read"
+    );
+    WarmupPin(env)
+}
+
+fn env_warmup(env: &DatabaseEnv, flags: ffi::MDBX_warmup_flags_t) -> Result<(), String> {
+    let tx = env.tx().map_err(|error| error.to_string())?;
+    let environment = tx.inner().env().clone();
+    drop(tx);
+    let rc = environment.with_raw_env_ptr(|env_ptr| unsafe {
+        // SAFETY: `environment` is an Arc clone of this open env and outlives
+        // the call. The read transaction is already dropped, so `txn` is null.
+        // libmdbx accepts a live env with a null txn. The pointer is not stored.
+        ffi::mdbx_env_warmup(env_ptr, std::ptr::null(), flags, WARMUP_TIMEOUT_16DOT16)
+    });
+    if rc == 0 {
+        return Ok(());
     }
+    let detail = if rc == ffi::MDBX_RESULT_TRUE {
+        std::borrow::Cow::Borrowed("warmup timed out")
+    } else {
+        unsafe {
+            // SAFETY: `mdbx_strerror` returns a C string that stays valid for this copy.
+            std::ffi::CStr::from_ptr(ffi::mdbx_strerror(rc)).to_string_lossy()
+        }
+    };
+    Err(format!("{detail} (rc={rc})"))
 }
 
 fn log_open(path: &Path, stats: &MigrationStats) {
@@ -2593,9 +2630,9 @@ mod tests {
         }
     }
 
-    /// A v1 open reads `mdbx.dat` once before the copy starts. A later v2
-    /// open of the same directory does not. The byte count is the file
-    /// length at the hook, which runs before any migration write.
+    /// A v1 open warms the index before the copy starts and logs `locked`.
+    /// A later v2 open of the same directory does not. `bytes` is the data
+    /// file length at the hook, which runs before any migration write.
     #[test]
     fn v1_migration_pre_reads_the_index_and_v2_open_does_not() -> eyre::Result<()> {
         const ROWS: u32 = 4;
@@ -2628,6 +2665,11 @@ mod tests {
         let pre = find_message(&events, "submodule index pre-read");
         let file_bytes = *size.lock().expect("size");
         assert_eq!(u64_field(pre, "bytes"), file_bytes);
+        assert!(
+            matches!(field(pre, "locked"), "true" | "false"),
+            "locked must be a bool, got {}",
+            field(pre, "locked")
+        );
         assert!(
             str_field(pre, "path").ends_with("mdbx.dat"),
             "{}",
