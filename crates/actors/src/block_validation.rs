@@ -1936,6 +1936,26 @@ pub async fn prevalidate_block(
         });
     }
 
+    // The Publish cap is a length compare. Signer recovery walks every declared
+    // publish tx id, and signature checks walk every supplied publish tx.
+    // Reject an over-cap ledger before either of those.
+    let mempool_consensus = config.node_config.consensus_config().mempool;
+    let max_publish_txs = mempool_consensus.max_publish_txs_per_block;
+    let mut publish_tx_slots: usize = 0;
+    for dl in &block.data_ledgers {
+        if dl.ledger_id != DataLedger::Publish as u32 {
+            continue;
+        }
+        let supplied = transactions.get_ledger_txs(DataLedger::Publish).len();
+        publish_tx_slots = publish_tx_slots.saturating_add(dl.tx_ids.len().max(supplied));
+    }
+    if publish_tx_slots > max_publish_txs as usize {
+        return Err(PreValidationError::TooManyPublishTxs {
+            max: max_publish_txs,
+            got: publish_tx_slots,
+        });
+    }
+
     // Validate ingress proof signers are unique and staked
     validate_ingress_proof_signers(block, &parent_epoch_snapshot)?;
     debug!(
@@ -1981,11 +2001,10 @@ pub async fn prevalidate_block(
     // Transaction validation
     // ========================================
 
-    // Validate all data ledger transactions: count, IDs, and signatures
-    let mempool_consensus = config.node_config.consensus_config().mempool;
+    // Validate all data ledger transactions: count, IDs, and signatures.
+    // The Publish cap already ran, before ingress-proof signer recovery.
     let max_data_txs = mempool_consensus.max_data_txs_per_block;
     let mut total_term_txs: usize = 0;
-    let mut total_publish_txs: usize = 0;
 
     for dl in &block.data_ledgers {
         let ledger = DataLedger::try_from(dl.ledger_id).map_err(|_| {
@@ -2006,27 +2025,18 @@ pub async fn prevalidate_block(
 
         // Count term ledger txs for max_data_txs enforcement.
         // Publish has its own cap and is not part of this total.
-        if ledger == DataLedger::Publish {
-            total_publish_txs += ledger_txs.len();
-        } else {
+        if ledger != DataLedger::Publish {
             total_term_txs += ledger_txs.len();
         }
     }
 
-    // Enforce the per-block tx caps BEFORE the per-ledger tx_root recompute below.
+    // Enforce the term-ledger cap BEFORE the per-ledger tx_root recompute below.
     // The count limit is an O(1) structural check, so reject an over-sized block
     // before doing O(N) merkle work.
     if total_term_txs > max_data_txs as usize {
         return Err(PreValidationError::TooManyDataTxs {
             max: max_data_txs,
             got: total_term_txs,
-        });
-    }
-    let max_publish_txs = mempool_consensus.max_publish_txs_per_block;
-    if total_publish_txs > max_publish_txs as usize {
-        return Err(PreValidationError::TooManyPublishTxs {
-            max: max_publish_txs,
-            got: total_publish_txs,
         });
     }
 
