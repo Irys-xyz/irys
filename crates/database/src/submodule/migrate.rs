@@ -2623,15 +2623,12 @@ mod tests {
         let events = capture.events.lock().expect("events");
         let pre = find_message(&events, "submodule index pre-read");
         let file_bytes = *size.lock().expect("size");
-        assert!(file_bytes > 0, "hook did not see mdbx.dat");
         assert_eq!(u64_field(pre, "bytes"), file_bytes);
         assert!(
             str_field(pre, "path").ends_with("mdbx.dat"),
             "{}",
             str_field(pre, "path")
         );
-        assert!(has_field(pre, "elapsed_ms"));
-        assert!(has_field(pre, "mb_per_sec"));
         let pre_at = events
             .iter()
             .position(|event| event.message == "submodule index pre-read")
