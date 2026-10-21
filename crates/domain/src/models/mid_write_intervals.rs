@@ -207,13 +207,18 @@ pub(super) fn read_mid_write_file(path: &Path) -> Result<Vec<Interval<PartitionC
 ///
 /// A file that does not end in a newline holds a torn earlier append; the
 /// record starts on a fresh line so the reader can still decode it. A
-/// failed write or fdatasync cuts the file back to its earlier length. An
-/// append to an empty file also fsyncs the directory, so a new file
-/// survives a crash even when an earlier attempt's directory fsync failed.
+/// failed write or fdatasync cuts the file back to its earlier length.
+///
+/// An append to an empty file also fsyncs the directory, so a new file
+/// survives a crash. A failed directory fsync cuts the record back too, so
+/// the retry finds an empty file and fsyncs again. That cut is best effort:
+/// `force_dir_sync` fsyncs the directory whatever the length, and the caller
+/// sets it until an append has succeeded since open or the last truncate.
 /// Returns `true` when the directory was fsynced.
 pub(super) fn append_mid_write(
     path: &Path,
     spans: &[Interval<PartitionChunkOffset>],
+    force_dir_sync: bool,
 ) -> Result<bool> {
     let line = encode_line(spans)?;
     let mut file = OpenOptions::new()
@@ -249,9 +254,10 @@ pub(super) fn append_mid_write(
         let _ = file.set_len(previous_len).and_then(|()| file.sync_data());
         return Err(err);
     }
-    let dir_synced = previous_len == 0;
-    if dir_synced {
-        sync_parent_dir(path)?;
+    let dir_synced = previous_len == 0 || force_dir_sync;
+    if dir_synced && let Err(err) = sync_parent_dir(path) {
+        let _ = file.set_len(previous_len).and_then(|()| file.sync_data());
+        return Err(err);
     }
     Ok(dir_synced)
 }
@@ -283,7 +289,17 @@ pub(super) fn rewrite_mid_write(
         .wrap_err_with(|| mid_write_error(path, "replace"))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The next directory fsync on this thread fails.
+    static FAIL_NEXT_DIR_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn sync_parent_dir(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_DIR_SYNC.with(|fail| fail.replace(false)) {
+        eyre::bail!("injected directory fsync failure");
+    }
     let dir = path
         .parent()
         .ok_or_else(|| eyre!("{} has no parent directory", path.display()))?;
@@ -307,10 +323,13 @@ mod tests {
         let path = mid_write_path(tmp.path());
         assert!(read_mid_write_file(&path)?.is_empty(), "missing is empty");
         assert!(
-            append_mid_write(&path, &[span(4, 4), span(5, 6)])?,
+            append_mid_write(&path, &[span(4, 4), span(5, 6)], false)?,
             "new file"
         );
-        assert!(!append_mid_write(&path, &[span(9, 9)])?, "existing file");
+        assert!(
+            !append_mid_write(&path, &[span(9, 9)], false)?,
+            "existing file"
+        );
         assert_eq!(read_mid_write_file(&path)?, vec![span(4, 6), span(9, 9)]);
         let text = fs::read_to_string(&path)?;
         let first = text.lines().next().expect("one line");
@@ -330,13 +349,13 @@ mod tests {
     fn corrupt_line_is_skipped_and_later_records_apply() -> Result<()> {
         let tmp = TempDirBuilder::new().prefix("mid_write_corrupt").build();
         let path = mid_write_path(tmp.path());
-        append_mid_write(&path, &[span(1, 1)])?;
+        append_mid_write(&path, &[span(1, 1)], false)?;
         let mut bad = encode_line(&[span(2, 2)])?;
         bad[0] = if bad[0] == b'0' { b'1' } else { b'0' };
         let mut file = OpenOptions::new().append(true).open(&path)?;
         file.write_all(&bad)?;
         drop(file);
-        append_mid_write(&path, &[span(3, 3)])?;
+        append_mid_write(&path, &[span(3, 3)], false)?;
         let len = fs::metadata(&path)?.len();
         assert_eq!(read_mid_write_file(&path)?, vec![span(1, 1), span(3, 3)]);
         assert_eq!(fs::metadata(&path)?.len(), len, "a middle line was cut");
@@ -347,7 +366,7 @@ mod tests {
     fn torn_tail_is_ignored_and_cut() -> Result<()> {
         let tmp = TempDirBuilder::new().prefix("mid_write_torn_unit").build();
         let path = mid_write_path(tmp.path());
-        append_mid_write(&path, &[span(1, 1)])?;
+        append_mid_write(&path, &[span(1, 1)], false)?;
         let good_len = fs::metadata(&path)?.len();
         let torn = encode_line(&[span(2, 2)])?;
         let mut file = OpenOptions::new().append(true).open(&path)?;
@@ -364,12 +383,12 @@ mod tests {
     fn append_after_a_torn_append_starts_a_fresh_line() -> Result<()> {
         let tmp = TempDirBuilder::new().prefix("mid_write_retry").build();
         let path = mid_write_path(tmp.path());
-        append_mid_write(&path, &[span(1, 1)])?;
+        append_mid_write(&path, &[span(1, 1)], false)?;
         let torn = encode_line(&[span(2, 2)])?;
         let mut file = OpenOptions::new().append(true).open(&path)?;
         file.write_all(&torn[..torn.len() / 2])?;
         drop(file);
-        append_mid_write(&path, &[span(2, 2)])?;
+        append_mid_write(&path, &[span(2, 2)], false)?;
         assert_eq!(read_mid_write_file(&path)?, vec![span(1, 1), span(2, 2)]);
         Ok(())
     }
@@ -381,10 +400,41 @@ mod tests {
         let tmp = TempDirBuilder::new().prefix("mid_write_dir_sync").build();
         let path = mid_write_path(tmp.path());
         fs::write(&path, b"")?;
-        assert!(append_mid_write(&path, &[span(1, 1)])?);
-        assert!(!append_mid_write(&path, &[span(2, 2)])?);
+        assert!(append_mid_write(&path, &[span(1, 1)], false)?);
+        assert!(!append_mid_write(&path, &[span(2, 2)], false)?);
         rewrite_mid_write(&path, &[])?;
-        assert!(append_mid_write(&path, &[span(3, 3)])?);
+        assert!(append_mid_write(&path, &[span(3, 3)], false)?);
+        Ok(())
+    }
+
+    /// The record is fdatasynced but the directory fsync fails. The record
+    /// is cut back, so the retry finds an empty file and fsyncs again.
+    #[test]
+    fn failed_directory_fsync_rolls_the_record_back() -> Result<()> {
+        let tmp = TempDirBuilder::new().prefix("mid_write_dir_fail").build();
+        let path = mid_write_path(tmp.path());
+        FAIL_NEXT_DIR_SYNC.with(|fail| fail.set(true));
+        let failed = append_mid_write(&path, &[span(1, 1)], false)
+            .expect_err("the directory fsync was injected to fail");
+        assert!(format!("{failed:#}").contains("injected"), "{failed:#}");
+        assert_eq!(fs::metadata(&path)?.len(), 0, "the record stayed");
+        assert!(
+            append_mid_write(&path, &[span(1, 1)], false)?,
+            "the retry skipped the directory fsync"
+        );
+        assert_eq!(read_mid_write_file(&path)?, vec![span(1, 1)]);
+        Ok(())
+    }
+
+    /// The caller's flag fsyncs the directory even when the file is not
+    /// empty, as after a rollback that itself failed.
+    #[test]
+    fn forced_directory_fsync_ignores_the_length() -> Result<()> {
+        let tmp = TempDirBuilder::new().prefix("mid_write_dir_force").build();
+        let path = mid_write_path(tmp.path());
+        append_mid_write(&path, &[span(1, 1)], false)?;
+        assert!(!append_mid_write(&path, &[span(2, 2)], false)?);
+        assert!(append_mid_write(&path, &[span(3, 3)], true)?);
         Ok(())
     }
 
@@ -392,7 +442,7 @@ mod tests {
     fn rewrite_keeps_only_the_given_spans() -> Result<()> {
         let tmp = TempDirBuilder::new().prefix("mid_write_rewrite").build();
         let path = mid_write_path(tmp.path());
-        append_mid_write(&path, &[span(1, 1)])?;
+        append_mid_write(&path, &[span(1, 1)], false)?;
         rewrite_mid_write(&path, &[span(7, 8)])?;
         assert_eq!(read_mid_write_file(&path)?, vec![span(7, 8)]);
         let names: Vec<_> = fs::read_dir(tmp.path())?

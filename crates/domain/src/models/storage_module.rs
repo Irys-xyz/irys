@@ -4772,11 +4772,17 @@ impl StorageModule {
             // Held across the coverage check, the append, and the record, so
             // a truncation cannot drop a span between them.
             let path = recover_mutex(&submodule.mid_write_file);
-            let needed = {
+            let (needed, force_dir_sync) = {
                 let mut disk = self.lock_interval_disk();
                 if !self.interval_snapshot_current(snapshot_epoch) {
                     return Ok(true);
                 }
+                // No append has succeeded since open or the last truncate, so
+                // the file's directory entry may not be durable yet.
+                let force_dir_sync = disk
+                    .mid_write
+                    .get(&start)
+                    .is_none_or(mid_write_intervals::MidWriteLog::is_empty);
                 let mut needed = Vec::new();
                 let mut rearmed = Vec::new();
                 for span in &spans {
@@ -4806,12 +4812,13 @@ impl StorageModule {
                         disk.mask.insert_merge_touching_or_overlapping(*span);
                     }
                 }
-                needed
+                (needed, force_dir_sync)
             };
             if needed.is_empty() {
                 continue;
             }
-            let _dir_synced = mid_write_intervals::append_mid_write(&path, &needed)?;
+            let _dir_synced =
+                mid_write_intervals::append_mid_write(&path, &needed, force_dir_sync)?;
             #[cfg(test)]
             self.mid_write_syncs.fetch_add(1, Ordering::SeqCst);
             let mut disk = self.lock_interval_disk();
@@ -16714,7 +16721,7 @@ mod tests {
         let (tmp, config, storage) = entropy_batch_module("mid_write_open_period_0", 0)?;
         let log = mid_write_file_path(&storage, 0);
         drop(storage);
-        mid_write_intervals::append_mid_write(&log, &[partition_chunk_offset_ii!(2, 2)])?;
+        mid_write_intervals::append_mid_write(&log, &[partition_chunk_offset_ii!(2, 2)], false)?;
 
         let reopened = StorageModule::new(&one_span(10, "sub", None), &config)?;
         let offset = PartitionChunkOffset::from(2);
@@ -16781,7 +16788,7 @@ mod tests {
         drop(storage);
         assert_eq!(fs::metadata(&log)?.len(), 0);
         // A crash after this append, mid-`pwrite`, with no fold after it.
-        mid_write_intervals::append_mid_write(&log, &[partition_chunk_offset_ii!(2, 3)])?;
+        mid_write_intervals::append_mid_write(&log, &[partition_chunk_offset_ii!(2, 3)], false)?;
         let stored = fs::read(&intervals_path)?;
 
         let reopened = StorageModule::new(&indexed_entropy_info(&config), &config)?;
@@ -16825,7 +16832,7 @@ mod tests {
         let log = mid_write_file_path(&storage, 0);
         storage.suppress_interval_flush_for_test();
         drop(storage);
-        mid_write_intervals::append_mid_write(&log, &[partition_chunk_offset_ii!(2, 2)])?;
+        mid_write_intervals::append_mid_write(&log, &[partition_chunk_offset_ii!(2, 2)], false)?;
         let good_len = fs::metadata(&log)?.len();
         let mut file = OpenOptions::new().append(true).open(&log)?;
         file.write_all(b"0000abcd [[{\"start\":5,\"en")?;
