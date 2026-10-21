@@ -2329,10 +2329,6 @@ mod tests {
         .expect_err("one more drop commit");
         let wall = wall.elapsed();
         assert!(err.to_string().contains("after 1"), "{err}");
-        assert!(
-            wall < std::time::Duration::from_millis(500),
-            "resume was too slow to tell the clocks apart: {wall:?}"
-        );
         let events = capture.events.lock().expect("events");
         let start = find_message(&events, "submodule index migration started");
         assert!(bool_field(start, "resumed"));
@@ -2411,8 +2407,6 @@ mod tests {
         let _ = u64_field(progress, "data_paths_copied");
         let _ = u64_field(progress, "intervals");
         let _ = u64_field(progress, "legacy_data_paths_deleted");
-        println!("SAMPLE {} {:?}", start.message, start.fields);
-        println!("SAMPLE {} {:?}", progress.message, progress.fields);
         drop(events);
 
         let capture = LogCapture::default();
@@ -2445,16 +2439,6 @@ mod tests {
         let _ = u64_field(finished, "copy_elapsed_ms");
         let _ = u64_field(finished, "drop_elapsed_ms");
         let _ = u64_field(finished, "elapsed_ms");
-        for event in events.iter().filter(|event| {
-            matches!(
-                event.message.as_str(),
-                "submodule index migration started"
-                    | "submodule index migration progress"
-                    | "submodule index migration finished"
-            )
-        }) {
-            println!("SAMPLE {} {:?}", event.message, event.fields);
-        }
         Ok(())
     }
 

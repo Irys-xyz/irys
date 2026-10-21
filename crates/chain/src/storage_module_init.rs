@@ -20,7 +20,11 @@ pub(super) async fn open_storage_modules(
     let labels: Vec<String> = infos.iter().map(module_label).collect();
     let opens = infos.into_iter().map(|info| {
         let config = config.clone();
+        // spawn_blocking does not carry the caller's span. Give each open its
+        // own child span so interleaved migration progress names its module.
+        let span = tracing::info_span!("open_storage_module", storage_module.id = info.id);
         tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
             #[cfg(test)]
             if !open_delay.is_zero() {
                 std::thread::sleep(open_delay);
