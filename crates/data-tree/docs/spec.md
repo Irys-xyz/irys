@@ -282,7 +282,7 @@ Verify chunks and segments only against an **anchored** `data_commitment`: one d
 | --- | --- |
 | L1 chunk ingress, PoA, mining, migration | the signed tx header |
 | Gateway receipt verifier | a proven `tx_root` leaf. Re-derive the commitment: the leaf value is `fold(data_tree_root, prefix_hash)` and the span note is the exact byte span, so the anchor is `node(data_tree_root, size_witness(span))` (§7) |
-| Gateway staging ingest | the item envelope, which signs `data_tree_root` and `data_size`. `data_commitment` is derived. Owner decision; gateway team sign-off pending (§15) |
+| Gateway staging ingest | the item envelope, which signs `data_tree_root` and `data_size`. `data_commitment` is derived (§15 Q7) |
 | Gateway relay | its payload-quorum attestation of the tx |
 | Gateway data service | tx records from the Indexer are not authenticated today. They need the signed header or a `tx_root` proof before the service deletes its size checks |
 
@@ -392,7 +392,7 @@ v2 ships at Estuary's activation, together with the partition resize and the seg
 
 **Order of work.**
 
-1. The wire-format decisions are closed (§15). Q3 stays deferred (§14) and does not change the data-tree vectors. The gateway team signs off the item envelope (§15).
+1. The wire-format decisions are closed (§15). Q3 stays deferred (§14) and does not change the data-tree vectors. The gateway team has signed off the item envelope (§15 Q7).
 2. Generate the shared vectors (§13) from one reference implementation and check them into both repos. Each implementation passes them before it merges.
 3. Implement L1 and gateway in parallel. The gateway node simulator emits v2 proofs.
 4. Run a joint devnet: the gateway test harness against a node with the partition-resize migration, and the multiversion harness across the activation as a cutover.
@@ -423,7 +423,7 @@ v2 ships at Estuary's activation, together with the partition resize and the seg
 
 | Gateway area | Change |
 | --- | --- |
-| Item envelope | signs `data_tree_root` and `data_size`. `data_commitment` is derived, as on the L1 header (§6). Owner decision; gateway team sign-off pending (§15) |
+| Item envelope | signs `data_tree_root` and `data_size`. `data_commitment` is derived, as on the L1 header (§6, §15 Q7) |
 | `bundle_items_root` | leaves use `data_tree_root` and the item's exact byte span, as `tx_root` does (§7) |
 | Custody framing | multi-segment answers use independent segment proofs that share one chunk proof (§5). The custody spec defines the framing |
 
@@ -522,7 +522,7 @@ The data root is external: clients, SDKs and the gateway commit to it. It lands 
 | 2026-10-21 | Q4. A `tx_root` leaf value is `fold(data_tree_root, prefix_hash)` and the span note is the exact `data_size`. A proven leaf authenticates both, so a verifier re-derives `node(data_tree_root, size_witness(span))`. The `tx_root` code stays unchanged |
 | 2026-10-21 | Q5. The size witness covers `data_size` only: `H(0x02 ‖ be64(data_size))`. Geometry is already on the consensus surface a client needs before it can verify, so the commitment does not repeat it |
 | 2026-10-21 | Q6. An ingress proof signs `data_commitment`, so one proof covers exactly one (data, size). A planned proof of a chunk range binds `data_commitment` and that range for the same reason |
-| 2026-10-21 | Q7. The gateway item envelope signs `data_tree_root` and `data_size`, and `data_commitment` is derived, as the L1 header does. This anchors the size and keeps one format for L1, the gateway and SDKs. Owner decision; gateway team sign-off pending |
+| 2026-10-21 | Q7. The gateway item envelope signs `data_tree_root` and `data_size`, and `data_commitment` is derived, as the L1 header does. This anchors the size and keeps one format for L1, the gateway and SDKs. Owner decision; the gateway team signed off on 2026-10-21 |
 | 2026-10-21 | Q8. Every data tx in a block up to and including Estuary's activation block E is refused. Mainnet stores no data and test networks reset, so no pre-activation data tx can exist, and the fork release needs no v1 data code and no anchor rule |
 | 2026-10-21 | Q9. The tree's rule is 1 ≤ SPC ≤ 256, a power of two, and it sets no tighter protocol floor. A bound is a property of how the tree is used, not of the tree. The irys node rejects SPC < 2 wherever the segment-PoA rule runs, because an empty segment proof signs like an absent optional RLP field |
 | 2026-10-21 | The data root is external: clients, SDKs and the gateway commit to it, so it lands first and is hard to change later. `tx_root` is internal to the protocol and can change in any fork |
