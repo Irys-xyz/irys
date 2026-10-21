@@ -10,9 +10,11 @@
 //! until the last batch writes [`SUBMODULE_SCHEMA`]. Open does not return
 //! until that row is current, so a caller never reads a half-migrated index.
 //! Before the copy, `mdbx_env_warmup` loads the open environment's pages and
-//! pins them. The pin is released when the migration returns.
+//! pins them when the process memlock budget has room. The pin is released
+//! when the migration returns.
 
 use std::path::Path;
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use irys_types::{ChunkDataPath, ChunkPathHash, H256, PartitionChunkOffset};
@@ -701,49 +703,157 @@ pub(super) fn migration_required(env: &DatabaseEnv) -> eyre::Result<bool> {
 const WARMUP_TIMEOUT_16DOT16: std::os::raw::c_uint = 180 << 16;
 const WARMUP_LOAD: ffi::MDBX_warmup_flags_t = ffi::MDBX_warmup_force | ffi::MDBX_warmup_oomsafe;
 
+/// A module holds at most one reservation and never waits while holding one.
+struct MemlockBudget {
+    total: u64,
+    held: Mutex<u64>,
+    ready: Condvar,
+}
+
+struct MemlockPermit<'a> {
+    budget: &'a MemlockBudget,
+    bytes: u64,
+}
+
+impl MemlockBudget {
+    fn new(total: u64) -> Self {
+        Self {
+            total,
+            held: Mutex::new(0),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// `None` when `need` exceeds the budget. `on_wait(available)` runs once, under this lock.
+    fn reserve(&self, need: u64, on_wait: impl FnOnce(u64)) -> Option<MemlockPermit<'_>> {
+        if need > self.total {
+            return None;
+        }
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut free = self.total.saturating_sub(*held);
+        if free < need {
+            on_wait(free);
+            while free < need {
+                held = self
+                    .ready
+                    .wait(held)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                free = self.total.saturating_sub(*held);
+            }
+        }
+        *held += need;
+        Some(MemlockPermit {
+            budget: self,
+            bytes: need,
+        })
+    }
+}
+
+impl Drop for MemlockPermit<'_> {
+    fn drop(&mut self) {
+        if self.bytes == 0 {
+            return;
+        }
+        let mut held = self
+            .budget
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = held.saturating_sub(self.bytes);
+        self.budget.ready.notify_all();
+    }
+}
+
+fn memlock_budget() -> &'static MemlockBudget {
+    static BUDGET: OnceLock<MemlockBudget> = OnceLock::new();
+    // Headroom is max(soft / 8, 64 MiB). `RLIM_INFINITY` or a failed read does not gate.
+    BUDGET.get_or_init(|| {
+        const MIN_HEADROOM: u64 = 64 << 20;
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` is a writable `rlimit` and outlives the call.
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) };
+        let total = if rc != 0 || limit.rlim_cur == libc::RLIM_INFINITY {
+            u64::MAX
+        } else {
+            let soft = limit.rlim_cur;
+            soft.saturating_sub((soft / 8).max(MIN_HEADROOM))
+        };
+        MemlockBudget::new(total)
+    })
+}
+
 /// Releases the pin on drop. The lock call can pin pages and still return an
-/// error (a timeout after `mlock2`), so drop always unlocks.
+/// error (a timeout after `mlock2`), so drop always unlocks, then returns any
+/// reservation still held.
 #[must_use = "dropping the pin releases the page lock"]
-struct WarmupPin<'a>(&'a DatabaseEnv);
+struct WarmupPin<'a> {
+    env: &'a DatabaseEnv,
+    permit: Option<MemlockPermit<'static>>,
+}
 
 impl Drop for WarmupPin<'_> {
     fn drop(&mut self) {
-        if let Err(error) = env_warmup(self.0, ffi::MDBX_warmup_release) {
+        if let Err(error) = env_warmup(self.env, ffi::MDBX_warmup_release) {
             tracing::warn!(%error, "submodule index pre-read unlock failed");
         }
+        drop(self.permit.take());
     }
 }
 
 /// Load the migrating env's pages so the copy's random lookups stay resident.
 ///
-/// Lock does not raise `RLIMIT_MEMLOCK` unless `MDBX_warmup_touchlimit` is
-/// set, and it is not. A failed `mlock2` pins nothing and skips the load, so
-/// the retry is force and oomsafe only. Any failure warns. Startup continues.
+/// Lock does not raise `RLIMIT_MEMLOCK` (`MDBX_warmup_touchlimit` is not set).
+/// Reserve the file length first. Above the budget, or after a failed lock,
+/// release and load unpinned. A lock error skips the page load.
 fn pre_read_index_file<'a>(env: &'a DatabaseEnv, dir: &Path) -> WarmupPin<'a> {
     let path = dir.join("mdbx.dat");
-    let started = Instant::now();
     let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-    let locked = match env_warmup(env, WARMUP_LOAD | ffi::MDBX_warmup_lock) {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(
-                path = %path.display(),
-                %error,
-                "submodule index pre-read lock failed"
-            );
-            match env_warmup(env, WARMUP_LOAD) {
-                Ok(()) => false,
-                Err(error) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        %error,
-                        "submodule index pre-read failed"
-                    );
-                    return WarmupPin(env);
-                }
+    let budget = memlock_budget();
+    let mut permit = budget.reserve(bytes, |available| {
+        tracing::info!(
+            path = %path.display(),
+            need = bytes,
+            available,
+            "submodule index waiting for memlock budget"
+        );
+    });
+    if permit.is_none() {
+        tracing::warn!(
+            path = %path.display(),
+            need = bytes,
+            total = budget.total,
+            "submodule index pre-read exceeds memlock budget"
+        );
+    }
+    let started = Instant::now();
+    let mut locked = false;
+    if permit.is_some() {
+        match env_warmup(env, WARMUP_LOAD | ffi::MDBX_warmup_lock) {
+            Ok(()) => locked = true,
+            Err(error) => {
+                permit = None;
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "submodule index pre-read lock failed"
+                );
             }
         }
-    };
+    }
+    if !locked && let Err(error) = env_warmup(env, WARMUP_LOAD) {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "submodule index pre-read failed"
+        );
+        return WarmupPin { env, permit };
+    }
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     tracing::info!(
         path = %path.display(),
@@ -752,7 +862,7 @@ fn pre_read_index_file<'a>(env: &'a DatabaseEnv, dir: &Path) -> WarmupPin<'a> {
         locked,
         "submodule index pre-read"
     );
-    WarmupPin(env)
+    WarmupPin { env, permit }
 }
 
 fn env_warmup(env: &DatabaseEnv, flags: ffi::MDBX_warmup_flags_t) -> Result<(), String> {
@@ -2704,6 +2814,106 @@ mod tests {
             "{events:?}"
         );
         Ok(())
+    }
+
+    /// Break: `reserve` grants overlapping permits, or drop does not return the
+    /// bytes. The second call must block until the first permit drops.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn second_reservation_waits_until_the_first_drops() {
+        let budget = std::sync::Arc::new(super::MemlockBudget::new(100));
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let budget_first = std::sync::Arc::clone(&budget);
+        let order_first = std::sync::Arc::clone(&order);
+        let first = tokio::task::spawn_blocking(move || {
+            let permit = budget_first
+                .reserve(60, |_| {})
+                .expect("60 bytes fit in a budget of 100");
+            order_first.lock().expect("order").push(1);
+            held_tx.send(()).expect("test holds the channel");
+            release_rx.recv().expect("test releases the first permit");
+            drop(permit);
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("first reservation");
+
+        let budget_second = std::sync::Arc::clone(&budget);
+        let order_second = std::sync::Arc::clone(&order);
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let second = tokio::task::spawn_blocking(move || {
+            let permit = budget_second
+                .reserve(60, |available| {
+                    waiting_tx.send(available).expect("test listens");
+                })
+                .expect("60 bytes fit once the first permit drops");
+            order_second.lock().expect("order").push(2);
+            drop(permit);
+        });
+
+        let available = waiting_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("second reservation waits");
+        assert_eq!(
+            available, 40,
+            "available is the budget minus the first hold"
+        );
+        assert_eq!(*order.lock().expect("order"), [1]);
+        release_tx.send(()).expect("first task is waiting");
+        second.await.expect("second task");
+        first.await.expect("first task");
+        assert_eq!(*order.lock().expect("order"), [1, 2]);
+    }
+
+    /// Break: a request larger than the whole budget waits, or it consumes
+    /// budget. It returns unpinned while another reservation is still held.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reservation_above_the_total_returns_unpinned_immediately() {
+        let budget = std::sync::Arc::new(super::MemlockBudget::new(100));
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let budget_holder = std::sync::Arc::clone(&budget);
+        let holder = tokio::task::spawn_blocking(move || {
+            let permit = budget_holder
+                .reserve(40, |_| {})
+                .expect("40 bytes fit in a budget of 100");
+            held_tx.send(()).expect("test holds the channel");
+            release_rx.recv().expect("test releases the holder");
+            drop(permit);
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("holder reserved");
+
+        let budget_over = std::sync::Arc::clone(&budget);
+        let over = tokio::task::spawn_blocking(move || {
+            budget_over
+                .reserve(101, |_| panic!("a request above the total must not wait"))
+                .is_none()
+        });
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), over)
+            .await
+            .expect("over-budget reserve must not wait for the held permit")
+            .expect("task");
+        assert!(outcome, "a request above the total is unpinned");
+
+        let budget_rest = std::sync::Arc::clone(&budget);
+        let (got_tx, got_rx) = std::sync::mpsc::channel();
+        let rest = tokio::task::spawn_blocking(move || {
+            let permit = budget_rest
+                .reserve(60, |_| panic!("60 bytes fit beside the held 40"))
+                .expect("60 bytes fit in the remaining budget");
+            got_tx.send(()).expect("test holds the channel");
+            drop(permit);
+        });
+        got_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("remaining budget is still free");
+        rest.await.expect("rest task");
+        release_tx.send(()).expect("holder is waiting");
+        holder.await.expect("holder task");
     }
 
     /// A 4-row copy is far below the old 100_000-row log. The start line still
