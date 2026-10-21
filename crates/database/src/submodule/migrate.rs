@@ -3144,6 +3144,90 @@ mod tests {
         field(event, name)
     }
 
+    /// Warmup must fault the index in. `MDBX_warmup_oomsafe` succeeds without reading.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn warmup_loads_the_index_into_the_page_cache() -> eyre::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let dir = temp("sm-warmup");
+        let path = dir.path();
+        // 64 KiB growth keeps the unread tail past `first_unallocated` under 10%.
+        let args = testing_args()?.with_growth_step(Some(64 * 1024));
+        {
+            let db = open_or_create_db(path, master::MasterV1Tables::ALL, args.clone())?;
+            let tx = db.tx_mut()?;
+            let blob = vec![0xab; 4096];
+            for i in 0..512_u32 {
+                let mut key = [0_u8; 32];
+                key[..4].copy_from_slice(&i.to_le_bytes());
+                tx.put::<master::ChunkDataPathByPathHash>(H256::from(key), blob.clone())?;
+            }
+            tx.commit()?;
+        }
+        let file = path.join("mdbx.dat");
+        let fd = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&file)?;
+        fd.sync_data()?;
+        let rc = unsafe {
+            // SAFETY: `fd` is open. Offset 0 and length 0 advise the whole file.
+            libc::posix_fadvise(fd.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
+        };
+        eyre::ensure!(rc == 0, "posix_fadvise DONTNEED failed: {rc}");
+        drop(fd);
+        let (cold, n) = resident_pages(&file)?;
+        if cold * 2 > n {
+            eprintln!("note: DONTNEED left {cold}/{n} pages resident; skipping");
+            return Ok(());
+        }
+        let db = open_or_create_db(path, master::MasterV1Tables::ALL, args)?;
+        let _pin = super::pre_read_index_file(&db, path);
+        let (hot, pages) = resident_pages(&file)?;
+        // Reads stop at `first_unallocated`. 90% leaves that growth-step tail unread.
+        assert!(
+            hot * 10 >= pages * 9,
+            "residency {hot}/{pages} after warmup (cold {cold}/{n})"
+        );
+        Ok(())
+    }
+
+    /// Resident page count and total pages, from `mincore` on a read-only mmap.
+    #[cfg(target_os = "linux")]
+    fn resident_pages(path: &Path) -> eyre::Result<(usize, usize)> {
+        use std::os::fd::AsRawFd as _;
+        let file = std::fs::File::open(path)?;
+        let len = usize::try_from(file.metadata()?.len())?;
+        let page = usize::try_from(unsafe {
+            // SAFETY: `sysconf` reads a process constant and takes no pointer.
+            libc::sysconf(libc::_SC_PAGESIZE)
+        })?;
+        let map = unsafe {
+            // SAFETY: read-only shared map of this file for `len` bytes. Unmapped below.
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        eyre::ensure!(map != libc::MAP_FAILED && page > 0, "mmap");
+        let pages = len.div_ceil(page);
+        let mut vec = vec![0_u8; pages];
+        let rc = unsafe {
+            // SAFETY: `map` spans `len` and `vec` has one byte per page.
+            libc::mincore(map, len, vec.as_mut_ptr())
+        };
+        let unmap_rc = unsafe {
+            // SAFETY: `map` is the mapping above and is not used again.
+            libc::munmap(map, len)
+        };
+        eyre::ensure!(rc == 0 && unmap_rc == 0, "mincore {rc} munmap {unmap_rc}");
+        Ok((vec.iter().filter(|byte| (**byte & 1) == 1).count(), pages))
+    }
+
     /// Copy `IRYS_SUBMODULE_V1_DB` and migrate the copy. The source path is
     /// never opened.
     #[test]
