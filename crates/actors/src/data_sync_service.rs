@@ -14,6 +14,7 @@ use crate::{
 };
 use chunk_fetcher::ChunkFetchFailureKind;
 use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator, ChunkRequestState};
+use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::ingress_proofs_by_data_root;
 use irys_domain::{BatchEnqueueItem, BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
@@ -26,6 +27,7 @@ use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::{HashMap, HashSet},
+    panic::AssertUnwindSafe,
     sync::{
         Arc, RwLock,
         atomic::{AtomicUsize, Ordering},
@@ -284,6 +286,35 @@ async fn process_delivered_body(
                     .min(INGRESS_OVERLOADED_BACKOFF_MAX);
             }
             Err(error) => return Err(DeliveryError::Ingress(error)),
+        }
+    }
+}
+
+/// Run a delivery to its result. A delivery that takes longer than `timeout`
+/// or panics still yields a local error, so the offset waiting on it goes back
+/// to pending. Without a result the offset would stay requested for good:
+/// it holds no peer slot, so no slot sweep or peer removal touches it.
+async fn settle_delivery(
+    delivery: impl Future<Output = Result<UnpackedChunk, DeliveryError>>,
+    timeout: Duration,
+) -> Result<UnpackedChunk, DeliveryError> {
+    match AssertUnwindSafe(tokio::time::timeout(timeout, delivery))
+        .catch_unwind()
+        .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(_elapsed)) => Err(DeliveryError::Local(format!(
+            "unpack, validation, and ingress took longer than {timeout:?}"
+        ))),
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("non-string panic payload");
+            Err(DeliveryError::Local(format!(
+                "delivery task panicked: {message}"
+            )))
         }
     }
 }
@@ -1010,15 +1041,9 @@ impl DataSyncServiceInner {
         self.runtime_handle.spawn(
             async move {
                 let _held = held;
-                let timeout = pipeline.timeout;
                 let result =
-                    tokio::time::timeout(timeout, process_delivered_body(chunk, &pipeline))
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(DeliveryError::Local(format!(
-                                "unpack, validation, and ingress took longer than {timeout:?}"
-                            )))
-                        });
+                    settle_delivery(process_delivered_body(chunk, &pipeline), pipeline.timeout)
+                        .await;
                 let Some(requested_at) = requested_at else {
                     if let Err(error) = result {
                         debug!("untracked data-sync body was not accepted: {error}");
@@ -2158,7 +2183,7 @@ mod peer_event_channel_tests {
 mod ingress_handoff_tests {
     use super::{
         DeliveryError, DeliveryPipeline, forward_chunk_to_ingress,
-        ingress_error_is_invalid_peer_data, unpack_off_loop,
+        ingress_error_is_invalid_peer_data, settle_delivery, unpack_off_loop,
     };
     use crate::chunk_ingress_service::{ChunkIngressError, CriticalChunkIngressError};
     use crate::services::ServiceSenders;
@@ -2206,6 +2231,40 @@ mod ingress_handoff_tests {
             partition_offset,
             partition_hash,
         }
+    }
+
+    /// A delivery that panics still yields a local error, which sends the
+    /// offset back to pending instead of leaving it requested for good.
+    #[tokio::test]
+    async fn a_panicking_delivery_settles_to_a_local_error() {
+        let delivery = async {
+            if true {
+                panic!("injected delivery panic");
+            }
+            Err(DeliveryError::Local("unreachable".to_string()))
+        };
+        let result = settle_delivery(delivery, Duration::from_secs(5)).await;
+        assert!(
+            matches!(
+                &result,
+                Err(DeliveryError::Local(message))
+                    if message.contains("delivery task panicked: injected delivery panic")
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_delivery_settles_to_a_local_error() {
+        let result = settle_delivery(
+            std::future::pending::<Result<UnpackedChunk, DeliveryError>>(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(DeliveryError::Local(message)) if message.contains("longer than")),
+            "{result:?}"
+        );
     }
 
     /// A packed body is unpacked on the blocking pool, and only while a
