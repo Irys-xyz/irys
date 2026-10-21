@@ -32,11 +32,14 @@ const MAINNET_ROOT_CASES: usize = 34;
 const CHUNK_PROOF_CASES: usize = 160;
 /// Mainnet segments for chunk counts 1 and 2, four boundary segments, one partial, one printed.
 const SEGMENT_PROOF_CASES: usize = 198;
+/// spec §13 multi-segment group: m = 1, 2, 4, 64, one adjacent pair, one two-chunk pair.
+const MULTI_SEGMENT_CASES: usize = 6;
 /// spec §13 negative list, with one case per sibling bit of the printed segment proof.
 const NEGATIVE_CASES: usize = 17;
 
-const FILE_NAMES: [&str; 6] = [
+const FILE_NAMES: [&str; 7] = [
     "chunk_proofs.json",
+    "multi_segment.json",
     "negative.json",
     "primitives.json",
     "roots_mainnet.json",
@@ -52,6 +55,7 @@ fn shared_vectors_match_the_crate_and_spec() {
     let roots_mainnet: VectorFile<RootCase> = read_json("roots_mainnet.json");
     let chunk_proofs: VectorFile<ChunkProofCase> = read_json("chunk_proofs.json");
     let segment_proofs: VectorFile<SegmentProofCase> = read_json("segment_proofs.json");
+    let multi_segment: VectorFile<MultiSegmentCase> = read_json("multi_segment.json");
     let negative: VectorFile<NegativeCase> = read_json("negative.json");
 
     assert_eq!(primitives.cases.len(), PRIMITIVE_CASES);
@@ -59,6 +63,7 @@ fn shared_vectors_match_the_crate_and_spec() {
     assert_eq!(roots_mainnet.cases.len(), MAINNET_ROOT_CASES);
     assert_eq!(chunk_proofs.cases.len(), CHUNK_PROOF_CASES);
     assert_eq!(segment_proofs.cases.len(), SEGMENT_PROOF_CASES);
+    assert_eq!(multi_segment.cases.len(), MULTI_SEGMENT_CASES);
     assert_eq!(negative.cases.len(), NEGATIVE_CASES);
     for description in [
         &primitives.description,
@@ -66,6 +71,7 @@ fn shared_vectors_match_the_crate_and_spec() {
         &roots_mainnet.description,
         &chunk_proofs.description,
         &segment_proofs.description,
+        &multi_segment.description,
         &negative.description,
     ] {
         assert!(description.contains("spec"), "{description}");
@@ -75,7 +81,16 @@ fn shared_vectors_match_the_crate_and_spec() {
     assert!(segment_proofs.geometry.is_none());
     assert_same_geometry(roots_testing.geometry.as_ref().unwrap(), Geometry::TESTING);
     assert_same_geometry(roots_mainnet.geometry.as_ref().unwrap(), Geometry::MAINNET);
+    assert_same_geometry(multi_segment.geometry.as_ref().unwrap(), Geometry::MAINNET);
     assert_same_geometry(negative.geometry.as_ref().unwrap(), Geometry::TESTING);
+    assert!(
+        multi_segment.description.contains("917504"),
+        "the description states the upload"
+    );
+    assert!(
+        multi_segment.description.contains("partial"),
+        "the description states why this upload"
+    );
 
     // Printed hex from spec §13. A mismatch is a bug in the crate or the generator.
     assert_printed_spec(
@@ -91,6 +106,7 @@ fn shared_vectors_match_the_crate_and_spec() {
     check_roots(&roots_mainnet);
     check_chunk_proofs(&chunk_proofs);
     check_segment_proofs(&segment_proofs);
+    check_multi_segment(&multi_segment);
     check_negative(&negative);
 }
 
@@ -567,6 +583,165 @@ fn check_segment_proofs(file: &VectorFile<SegmentProofCase>) {
     }
 }
 
+fn check_multi_segment(file: &VectorFile<MultiSegmentCase>) {
+    let geometry_json = file
+        .geometry
+        .as_ref()
+        .expect("multi-segment file has a geometry");
+    let geometry = geometry_of(geometry_json);
+    let data_size = half_past_three_chunks(&geometry);
+    let shapes = multi_segment_shapes(&geometry, data_size);
+    assert_eq!(file.cases.len(), shapes.len());
+    assert_eq!(shapes.len(), MULTI_SEGMENT_CASES);
+
+    let groups = group_uploads(&file.cases, |case| {
+        UploadKey::new(geometry_json, &case.pattern, case.data_size)
+    });
+    assert_eq!(groups.len(), 1, "the multi-segment cases share one upload");
+    for (key, cases) in groups {
+        let (data, tree) = build_upload_with_bytes(&key);
+        assert_eq!(cases.len(), shapes.len());
+        for (case, shape) in cases.iter().zip(&shapes) {
+            check_one_multi_segment(&geometry, data_size, &data, &tree, case, shape);
+        }
+    }
+}
+
+/// spec §4: 3.5 mainnet chunks. The last chunk is partial.
+fn half_past_three_chunks(geometry: &Geometry) -> u64 {
+    let chunk_size = geometry.chunk_size();
+    let data_size = 3 * chunk_size + chunk_size / 2;
+    assert_eq!(data_size, 917_504, "spec §4");
+    let chunk_count = geometry.chunk_count(data_size).expect("data size in range");
+    assert_eq!(chunk_count, 4, "spec §4");
+    let last_chunk_index = chunk_count - 1;
+    let last_chunk_length = geometry
+        .chunk_len(data_size, last_chunk_index)
+        .expect("last chunk in range");
+    assert!(last_chunk_length < chunk_size, "the last chunk is partial");
+    data_size
+}
+
+/// The six spec §13 shapes, in generator order.
+fn multi_segment_shapes(geometry: &Geometry, data_size: u64) -> Vec<Vec<(u32, Vec<u32>)>> {
+    assert_eq!(
+        geometry.segments_per_chunk(),
+        64,
+        "spec §13: m = 64 is every segment of one mainnet chunk"
+    );
+    let chunk_count = geometry.chunk_count(data_size).expect("data size in range");
+    let last_chunk_index = chunk_count - 1;
+    let mut shapes = Vec::new();
+    // Chunk 0 is full. m = 1, 2, 4, and 64 are its first m segments.
+    for segment_count in [1_u32, 2, 4, geometry.segments_per_chunk()] {
+        let segments: Vec<u32> = (0..segment_count).collect();
+        shapes.push(vec![(0, segments)]);
+    }
+    // Half of the last chunk holds bytes (spec §4). The next segment is empty.
+    let first_empty_segment = geometry.segments_per_chunk() / 2;
+    let last_full_segment = first_empty_segment - 1;
+    assert_eq!(
+        first_empty_segment,
+        last_full_segment + 1,
+        "the pair is adjacent"
+    );
+    shapes.push(vec![(
+        last_chunk_index,
+        vec![last_full_segment, first_empty_segment],
+    )]);
+    shapes.push(vec![
+        (last_chunk_index - 1, vec![0]),
+        (last_chunk_index, vec![0]),
+    ]);
+    assert!(
+        shapes.iter().any(|shape| shape
+            .iter()
+            .any(|(chunk_index, _)| *chunk_index == last_chunk_index)),
+        "one case touches the last chunk"
+    );
+    shapes
+}
+
+fn check_one_multi_segment(
+    geometry: &Geometry,
+    data_size: u64,
+    data: &[u8],
+    tree: &DataTree,
+    case: &MultiSegmentCase,
+    shape: &[(u32, Vec<u32>)],
+) {
+    let label = format!("multi-segment {}", case.data_size);
+    assert_eq!(case.pattern, MOD251, "{label}");
+    assert_eq!(case.data_size, data_size, "{label}");
+    assert_eq!(
+        hex_of(tree.data_commitment().as_bytes()),
+        case.data_commitment,
+        "{label}"
+    );
+    assert_eq!(case.chunks.len(), shape.len(), "{label}");
+    if case.chunks.len() == 2 {
+        assert_ne!(
+            case.chunks[0].chunk_proof, case.chunks[1].chunk_proof,
+            "{label}: two chunks, two proofs"
+        );
+    }
+    for (chunk, (chunk_index, segment_indexes)) in case.chunks.iter().zip(shape) {
+        assert_eq!(chunk.chunk_index, *chunk_index, "{label}");
+        let chunk_label = format!("{label} chunk {}", chunk.chunk_index);
+        let chunk_proof = tree
+            .chunk_proof(chunk.chunk_index)
+            .unwrap_or_else(|err| panic!("{chunk_label}: {err}"));
+        let stored_chunk_proof = decode_hex(&chunk.chunk_proof, &chunk_label);
+        assert_eq!(stored_chunk_proof, chunk_proof, "{chunk_label}");
+        let chunk_bytes = chunk_slice(geometry, data, case.data_size, chunk.chunk_index);
+        assert_eq!(chunk.segments.len(), segment_indexes.len(), "{chunk_label}");
+        for (segment, &segment_index) in chunk.segments.iter().zip(segment_indexes) {
+            assert_eq!(segment.segment_index, segment_index, "{chunk_label}");
+            let segment_label = format!("{chunk_label} segment {segment_index}");
+            let segment_proof = tree
+                .segment_proof(chunk.chunk_index, segment_index, chunk_bytes)
+                .unwrap_or_else(|err| panic!("{segment_label}: {err}"));
+            // spec §5: h in-chunk siblings, then the chunk proof.
+            let in_chunk_len = usize::try_from(geometry.height()).expect("height fits") * HASH_SIZE;
+            assert_eq!(
+                segment_proof.len(),
+                in_chunk_len + chunk_proof.len(),
+                "{segment_label}"
+            );
+            let stored_siblings = decode_hex(&segment.in_chunk_siblings, &segment_label);
+            assert_eq!(
+                stored_siblings,
+                segment_proof[..in_chunk_len],
+                "{segment_label}"
+            );
+            assert_eq!(
+                &segment_proof[in_chunk_len..],
+                chunk_proof.as_slice(),
+                "{segment_label}"
+            );
+            let mut proof = stored_siblings;
+            proof.extend_from_slice(&stored_chunk_proof);
+            let segment_bytes = segment_slice(
+                geometry,
+                data,
+                case.data_size,
+                chunk.chunk_index,
+                segment_index,
+            );
+            verify_segment(
+                geometry,
+                &tree.data_commitment(),
+                case.data_size,
+                chunk.chunk_index,
+                segment_index,
+                segment_bytes,
+                &proof,
+            )
+            .unwrap_or_else(|err| panic!("{segment_label}: {err}"));
+        }
+    }
+}
+
 fn check_negative(file: &VectorFile<NegativeCase>) {
     let file_geometry = file.geometry.as_ref().expect("negative file geometry");
     for case in &file.cases {
@@ -1020,6 +1195,10 @@ fn decode_hash(text: &str) -> [u8; HASH_SIZE] {
     <[u8; HASH_SIZE]>::try_from(bytes.as_slice()).expect("digest is 32 bytes")
 }
 
+fn decode_hex(text: &str, label: &str) -> Vec<u8> {
+    hex::decode(text).unwrap_or_else(|err| panic!("{label}: hex: {err}"))
+}
+
 fn vector_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("vectors")
 }
@@ -1123,6 +1302,30 @@ struct SegmentProofCase {
     chunk_count: u32,
     data_commitment: String,
     proof: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MultiSegmentCase {
+    pattern: String,
+    data_size: u64,
+    data_commitment: String,
+    chunks: Vec<MultiSegmentChunk>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MultiSegmentChunk {
+    chunk_index: u32,
+    chunk_proof: String,
+    segments: Vec<MultiSegmentSegment>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MultiSegmentSegment {
+    segment_index: u32,
+    in_chunk_siblings: String,
 }
 
 #[derive(Debug, Deserialize)]
