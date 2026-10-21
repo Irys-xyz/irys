@@ -168,6 +168,12 @@ pub struct ChunkRequest {
     /// retry becomes pending. A body that arrives during the backoff is read
     /// on that next cycle. A same-cycle peer rotation does not clear this.
     pub local_cache_miss: bool,
+    /// The peer delivered this `Requested` body and its slot is already
+    /// released. Ingress runs in a spawned task, and the offset stays
+    /// `Requested` until `ChunkIngressed` arrives. A peer disconnect or a
+    /// slot sweep must not release that slot again. Only meaningful while the
+    /// state is `Requested`; a new dispatch clears it.
+    pub body_in_ingress: bool,
 }
 
 /// Result of one local-cache attempt for the offset `dispatch_next` popped.
@@ -374,6 +380,13 @@ impl ChunkOrchestrator {
 
     pub(crate) const fn ledger_id(&self) -> u32 {
         self.ledger_id
+    }
+
+    /// Track `offset` as a ready `Pending` request at the queue tail. An
+    /// offset already tracked is left alone.
+    #[cfg(test)]
+    pub(crate) fn queue_pending_for_test(&mut self, offset: PartitionChunkOffset) {
+        self.enqueue_pending(offset, Instant::now(), false);
     }
 
     /// Allocation of the fetcher this orchestrator dispatches with.
@@ -1005,6 +1018,7 @@ impl ChunkOrchestrator {
             retry_round: 0,
             ready_since: now,
             local_cache_miss: false,
+            body_in_ingress: false,
         });
         if at_front {
             self.ready_offsets.push_front(chunk_offset);
@@ -1860,6 +1874,7 @@ impl ChunkOrchestrator {
         request.attempt_count = request.attempt_count.saturating_add(1);
         metrics::record_data_sync_attempt(self.ledger_id, attempt_kind);
         request.request_state = ChunkRequestState::Requested(peer_addr, start_instant);
+        request.body_in_ingress = false;
 
         let chunk_fetcher = self.chunk_fetcher.clone();
         let tx = self.service_senders.data_sync.clone();
@@ -1932,10 +1947,17 @@ impl ChunkOrchestrator {
         DispatchStart::Started
     }
 
-    /// Peer delivered the chunk body. Credits peer bandwidth stats but leaves
-    /// the request in [`ChunkRequestState::Requested`] until
+    /// Peer delivered the chunk body. Releases the peer slot and records the
+    /// latency, but leaves the request in
+    /// [`ChunkRequestState::Requested`] with `body_in_ingress` set until
     /// [`Self::mark_chunk_awaiting_durability`] / [`Self::mark_chunk_blocked`] /
-    /// [`Self::requeue_after_local_write_failure`] decides the local outcome.
+    /// [`Self::requeue_after_local_write_failure`] /
+    /// [`Self::on_ingressed_chunk_rejected`] decides the local outcome.
+    /// `dispatch_next` sends only `Pending` offsets, so this one is not
+    /// fetched again while ingress runs. A second call for the same delivery
+    /// is an error and releases nothing. The returned record's `start_time`
+    /// identifies this attempt in [`Self::body_awaiting_ingress`]. The success
+    /// credit waits for [`Self::credit_accepted_delivery`].
     ///
     /// Peer delivery success must not be conflated with durable local storage.
     pub fn on_chunk_fetched(
@@ -1969,6 +1991,14 @@ impl ChunkOrchestrator {
         if expected_peer != peer_addr {
             return Err(eyre::eyre!("Peer mismatch for chunk {:?}", chunk_offset));
         }
+        if request.body_in_ingress {
+            return Err(eyre::eyre!(
+                "Chunk {:?} from {} already released its peer slot",
+                chunk_offset,
+                peer_addr
+            ));
+        }
+        request.body_in_ingress = true;
 
         let completion_time = Instant::now();
         let duration = completion_time.duration_since(start_instant);
@@ -1982,14 +2012,48 @@ impl ChunkOrchestrator {
 
         self.recent_chunk_times.push(completion_record.clone());
 
-        // Credit the peer for successful delivery regardless of local write outcome.
+        // Free the slot now. The body is checked later, so the streak reset
+        // and byte credit wait for `credit_accepted_delivery`.
         if let Ok(mut peers) = self.active_sync_peers.write()
             && let Some(peer_manager) = peers.get_mut(&peer_addr)
         {
-            peer_manager.on_chunk_request_completed(completion_record.clone());
+            peer_manager.on_chunk_delivered(completion_record.clone());
         }
 
         Ok(completion_record)
+    }
+
+    /// The body `peer_addr` delivered passed validation and ingress. Clears
+    /// that peer's failure streak and counts the bytes. The local write
+    /// outcome does not matter here.
+    pub fn credit_accepted_delivery(&self, peer_addr: IrysAddress) {
+        if let Ok(mut peers) = self.active_sync_peers.write()
+            && let Some(peer_manager) = peers.get_mut(&peer_addr)
+        {
+            peer_manager.on_delivery_accepted();
+        }
+    }
+
+    /// True while the body `peer_addr` delivered for the attempt that started
+    /// at `requested_at` is still in the spawned ingress. A `ChunkIngressed`
+    /// result is applied only then, so a result from a replaced orchestrator
+    /// or an earlier attempt cannot settle a newer one.
+    pub fn body_awaiting_ingress(
+        &self,
+        chunk_offset: PartitionChunkOffset,
+        peer_addr: IrysAddress,
+        requested_at: Instant,
+    ) -> bool {
+        self.chunk_requests
+            .get(&chunk_offset)
+            .is_some_and(|request| {
+                request.body_in_ingress
+                    && matches!(
+                        request.request_state,
+                        ChunkRequestState::Requested(addr, started)
+                            if addr == peer_addr && started == requested_at
+                    )
+            })
     }
 
     /// Local write entered the pending buffer. Durability is confirmed
@@ -2191,6 +2255,38 @@ impl ChunkOrchestrator {
         peer_addr: IrysAddress,
         failure_kind: crate::chunk_fetcher::ChunkFetchFailureKind,
     ) -> eyre::Result<()> {
+        self.fail_requested(chunk_offset, peer_addr, failure_kind, false)
+    }
+
+    /// Ingress or local validation rejected a body that `peer_addr` already
+    /// delivered. [`Self::on_chunk_fetched`] released that slot, so this
+    /// records the failure on the peer without releasing a slot again. The
+    /// offset is retried from another peer the same way as a failed fetch.
+    #[tracing::instrument(level = "trace", skip_all, fields(
+        chunk.offset = %chunk_offset,
+        peer.address = %peer_addr
+    ))]
+    pub fn on_ingressed_chunk_rejected(
+        &mut self,
+        chunk_offset: PartitionChunkOffset,
+        peer_addr: IrysAddress,
+    ) -> eyre::Result<()> {
+        self.fail_requested(
+            chunk_offset,
+            peer_addr,
+            crate::chunk_fetcher::ChunkFetchFailureKind::InvalidResponse,
+            true,
+        )
+    }
+
+    /// `slot_released` is true when the body arrived and its slot was freed.
+    fn fail_requested(
+        &mut self,
+        chunk_offset: PartitionChunkOffset,
+        peer_addr: IrysAddress,
+        failure_kind: crate::chunk_fetcher::ChunkFetchFailureKind,
+        slot_released: bool,
+    ) -> eyre::Result<()> {
         let all_peers_exhausted = {
             let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
                 eyre::eyre!("Chunk failure for unknown offset: {:?}", chunk_offset)
@@ -2219,6 +2315,14 @@ impl ChunkOrchestrator {
                     peer_addr
                 ));
             }
+            if request.body_in_ingress != slot_released {
+                return Err(eyre::eyre!(
+                    "Chunk failure at {:?} from {}: body_in_ingress is {}",
+                    chunk_offset,
+                    peer_addr,
+                    request.body_in_ingress
+                ));
+            }
 
             request.excluded.insert(expected_peer);
             !self.current_peers.is_empty()
@@ -2232,6 +2336,7 @@ impl ChunkOrchestrator {
             && let Some(peer_manager) = peers.get_mut(&peer_addr)
         {
             match failure_kind {
+                _ if slot_released => peer_manager.on_delivered_chunk_rejected(),
                 crate::chunk_fetcher::ChunkFetchFailureKind::NotFound => {
                     peer_manager.on_chunk_not_found()
                 }
@@ -2261,15 +2366,17 @@ impl ChunkOrchestrator {
 
     /// Release every peer slot this orchestrator still holds. Call once,
     /// immediately before the orchestrator is removed. Rows that already left
-    /// `Requested` are skipped: their completion released the slot. A missing
-    /// manager is skipped. The request map is left unchanged because the
-    /// orchestrator is dropped next. A second call while those rows stay
-    /// `Requested` would release the same slots again.
+    /// `Requested`, and rows whose body is in ingress, are skipped: their
+    /// completion released the slot. A missing manager is skipped. The
+    /// request map is left unchanged because the orchestrator is dropped next.
+    /// A second call while those rows stay `Requested` would release the
+    /// same slots again.
     pub(super) fn release_in_flight_peer_slots(&mut self) {
         let peers: Vec<IrysAddress> = self
             .chunk_requests
             .values()
             .filter_map(|request| match request.request_state {
+                ChunkRequestState::Requested(_, _) if request.body_in_ingress => None,
                 ChunkRequestState::Requested(addr, _) => Some(addr),
                 ChunkRequestState::Pending
                 | ChunkRequestState::AwaitingDurability(..)
@@ -2295,8 +2402,11 @@ impl ChunkOrchestrator {
         let now = Instant::now();
         let mut ready = Vec::new();
         for (offset, request) in &mut self.chunk_requests {
+            // A delivered body is already off the network. Its ingress result
+            // still decides the offset; requeuing it here would fetch it twice.
             if let ChunkRequestState::Requested(addr, _) = request.request_state
                 && addr == peer_addr
+                && !request.body_in_ingress
             {
                 request.request_state = ChunkRequestState::Pending;
                 request.ready_since = now;

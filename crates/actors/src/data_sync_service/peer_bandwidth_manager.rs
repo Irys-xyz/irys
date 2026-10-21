@@ -58,6 +58,23 @@ impl PeerBandwidthManager {
         self.peer_stats.record_request_failed();
     }
 
+    /// The body arrived. Frees the slot and records latency only. See
+    /// [`Self::on_delivery_accepted`].
+    pub fn on_chunk_delivered(&mut self, completion_record: ChunkTimeRecord) {
+        self.peer_stats.record_request_delivered(completion_record);
+    }
+
+    /// The delivered body passed validation and ingress.
+    pub fn on_delivery_accepted(&mut self) {
+        self.peer_stats.record_delivery_accepted();
+    }
+
+    /// Validation or ingress rejected a body this peer already delivered.
+    /// [`Self::on_chunk_delivered`] released that slot.
+    pub fn on_delivered_chunk_rejected(&mut self) {
+        self.peer_stats.record_delivered_chunk_rejected();
+    }
+
     /// Release a request that returned 404 without treating a sparse-ledger
     /// absence as a transport or peer-health failure.
     pub fn on_chunk_not_found(&mut self) {

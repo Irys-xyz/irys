@@ -342,13 +342,12 @@ async fn test_bandwidth_rating_initialization() {
     let low_realistic = PeerStats::new(20, REALISTIC_CHUNK_SIZE, DEFAULT_TIMEOUT);
     let high_realistic = PeerStats::new(100, REALISTIC_CHUNK_SIZE, DEFAULT_TIMEOUT);
 
-    // The 10 MiB sweep is the ceiling. The baseline stays the bandwidth half.
+    // The 10 MiB sweep is the ceiling. Every fresh peer starts at 20.
     assert!(low_realistic.max_concurrency >= 40);
     assert!(high_realistic.max_concurrency >= 40);
     assert!(high_realistic.max_concurrency >= low_realistic.max_concurrency);
-    assert_eq!(high_realistic.baseline_concurrency, 10);
-    assert!(low_realistic.baseline_concurrency < high_realistic.baseline_concurrency);
-    assert!(low_realistic.baseline_concurrency < 40);
+    assert_eq!(high_realistic.baseline_concurrency, 20);
+    assert_eq!(low_realistic.baseline_concurrency, 20);
     assert_eq!(
         low_realistic.available_concurrency(),
         low_realistic.baseline_concurrency
@@ -473,14 +472,18 @@ async fn delivered_bytes_ramp_a_256kib_peer_to_the_sweep_ceiling() {
     );
 }
 
-/// Each timeout halves the in-flight allowance from the 10-slot baseline.
-/// One failure is 5 and two failures are 2, both above the floor, so a shift
-/// that is short or long by one fails. The third failure is the floor of 1.
-/// A completed request clears the streak.
+/// Each timeout halves the in-flight allowance from the 20-slot baseline.
+/// One failure is 10, two are 5, and three are 2, all above the floor, so a
+/// shift that is short or long by one fails. The fourth failure is the floor
+/// of 1. A completed request clears the streak.
 #[test]
 async fn consecutive_timeouts_shrink_inflight_before_any_bytes_and_a_success_recovers() {
     const CHUNK: u64 = 256 * 1024;
     let mut stats = PeerStats::new(100, CHUNK, DEFAULT_TIMEOUT);
+    assert_eq!(stats.available_concurrency(), 20);
+
+    stats.record_request_started();
+    stats.record_request_failed();
     assert_eq!(stats.available_concurrency(), 10);
 
     stats.record_request_started();
