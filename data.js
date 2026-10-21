@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792534280071,
+  "lastUpdate": 1792550868391,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -18079,6 +18079,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000118,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b8aff9c9a64eee28a352dbc5149afe0e24415a2f",
+          "message": "perf(storage): record entropy overwrites in mid_write_intervals.json instead of rewriting intervals.json (#1659)\n\n* feat(storage): record entropy overwrites in mid_write_intervals.json\n\nAn entropy chunk write was rewriting intervals.json to publish one\nInterrupted span, because the 512 MiB look-ahead stops at Entropy so\nit does not drop neighboring placements on reload. Append that span to\nmid_write_intervals.json and fsync it before pwrite. Open applies the\nlist as Uninitialized and leaves every other label as stored. The full\ndocument is still rewritten on the persist timer, force_sync, or shutdown.\n\n* fix(storage): retry the mid-write directory fsync after it fails\n\nA failed directory fsync on the log's first append left the fdatasynced\nrecord in the file, so the retry saw a non-empty file and skipped the\ndirectory fsync. Cut the record back on that failure, and have the caller\nforce the directory fsync until an append succeeds after open or a\ntruncate, so a failed rollback cannot skip it either.",
+          "timestamp": "2026-10-20T19:29:15-07:00",
+          "tree_id": "2c1392132e141aaf70ccc3868b6616d0d450e9c7",
+          "url": "https://github.com/Irys-xyz/irys/commit/b8aff9c9a64eee28a352dbc5149afe0e24415a2f"
+        },
+        "date": 1792550865506,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.01605,
+            "range": "± 0.001175",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.159596,
+            "range": "± 0.026878",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.547625,
+            "range": "± 0.022214",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 11.181964,
+            "range": "± 0.925122",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.086727,
+            "range": "± 0.00666",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 846.494889,
+            "range": "± 19.701231",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 980.633762,
+            "range": "± 9.084771",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.121088,
+            "range": "± 0.002838",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1192.592247,
+            "range": "± 14.497949",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1555.249823,
+            "range": "± 18.087844",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035847,
+            "range": "± 0.002156",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 219.006645,
+            "range": "± 14.233955",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 276.703109,
+            "range": "± 20.490118",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000117,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
