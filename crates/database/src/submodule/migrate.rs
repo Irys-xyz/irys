@@ -696,7 +696,10 @@ pub(super) fn migration_required(env: &DatabaseEnv) -> eyre::Result<bool> {
 
 /// 180 s, 16.16 fixed-point seconds. Zero disables the check.
 const WARMUP_TIMEOUT_16DOT16: std::os::raw::c_uint = 180 << 16;
-const WARMUP_LOAD: ffi::MDBX_warmup_flags_t = ffi::MDBX_warmup_force | ffi::MDBX_warmup_oomsafe;
+// Not `MDBX_warmup_oomsafe`: on Linux it "touches" pages by writev-ing one byte per page to /dev/null, which never
+// reads the buffer, so nothing is loaded (measured on testnet: 4.7 GB "warmed" in 11 ms, then cold random reads).
+// `force` alone reads one byte per page with readahead on for the range, a sequential load.
+const WARMUP_LOAD: ffi::MDBX_warmup_flags_t = ffi::MDBX_warmup_force;
 
 /// A module holds at most one reservation and never waits while holding one.
 struct MemlockBudget {
