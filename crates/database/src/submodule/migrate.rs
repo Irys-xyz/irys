@@ -33,6 +33,10 @@ use super::tables::{
 pub(super) const PROGRESS_PREFIX: &str = "irys-submodule-index migrate-v1 ";
 /// How often a running migration logs rows done, rate, and ETA.
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(15);
+/// Row cap for one copy commit and one drop commit.
+const DEFAULT_BATCH_ROWS: usize = 16_384;
+/// Copy and drop value cap. Eight modules at once hold 8 x 64 MiB of values.
+const DEFAULT_BATCH_VALUE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MARKER_BYTES: usize = 512;
 /// Per-module fraction of v1 rows migrated, from 0 to 1.
 const MIGRATION_PROGRESS_METRIC: &str = "irys_submodule_migration_progress";
@@ -109,8 +113,8 @@ impl Default for SubmoduleMigrationOptions {
     fn default() -> Self {
         Self {
             fail_after_commits: None,
-            batch_rows: 2048,
-            batch_value_bytes: 8 * 1024 * 1024,
+            batch_rows: DEFAULT_BATCH_ROWS,
+            batch_value_bytes: DEFAULT_BATCH_VALUE_BYTES,
             progress_log_interval: PROGRESS_LOG_INTERVAL,
         }
     }
