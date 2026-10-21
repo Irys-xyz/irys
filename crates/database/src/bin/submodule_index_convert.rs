@@ -57,8 +57,7 @@ optional:
                                  CONVERTING. Illegal on verify and verify-rocks.
                                  Illegal with --verify.
   --verify                       mdbx-to-rocks only. Warm and pin the MDBX source,
-                                 run the dry-run checks, convert, then verify in
-                                 this process. Prints the convert counts and the
+                                 convert, then verify in this process. Prints the convert counts and the
                                  verify report. Exits 1 when a compared value differs.
   --allow-unresolved             write the target even when the consensus database
                                  does not cover every placement. Those placements
@@ -438,7 +437,11 @@ fn init_info_tracing() {
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
         .from_env_lossy();
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // stderr: stdout carries the key: value report the switch play reads.
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 fn paths_are_same(left: &Path, right: &Path) -> bool {
