@@ -24,7 +24,8 @@ mod warmup;
 // MDBX-SUBMODULE-INDEX: drop convert_mdbx_to_rocks, convert_rocks_to_mdbx, and verify_mdbx_and_rocks from this export. verify_rocks_records can move out.
 pub use convert::{
     ConvertOptions, ConvertStats, EngineEquivalenceReport, convert_mdbx_to_rocks,
-    convert_rocks_to_mdbx, verify_mdbx_and_rocks, verify_rocks_records,
+    convert_mdbx_to_rocks_and_verify, convert_rocks_to_mdbx, verify_mdbx_and_rocks,
+    verify_rocks_records,
 };
 // MDBX-SUBMODULE-INDEX: delete this re-export with db.rs.
 pub use db::*;
