@@ -52,8 +52,8 @@ impl Geometry {
 
     /// Accept a geometry or say which rule failed (spec §2).
     ///
-    /// `segments_per_chunk` may be 1. The lower bound of 2 is a config-layer
-    /// choice (spec §14 Q9); this crate does not make it.
+    /// `segments_per_chunk` may be 1. The lower bound of 2 is a consumer
+    /// rule (spec §2); this crate does not make it.
     pub const fn new(
         chunk_size: u64,
         segments_per_chunk: u32,
