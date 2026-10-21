@@ -17,6 +17,8 @@ pub mod store;
 pub mod tables;
 // MDBX-SUBMODULE-INDEX: remove with the migrate CLI. This compares MDBX schema v1 with the migrated schema v2.
 mod verify;
+// MDBX-SUBMODULE-INDEX: remove with the MDBX submodule engine. The consensus database stays MDBX.
+mod warmup;
 
 #[cfg(feature = "rocksdb")]
 // MDBX-SUBMODULE-INDEX: drop convert_mdbx_to_rocks, convert_rocks_to_mdbx, and verify_mdbx_and_rocks from this export. verify_rocks_records can move out.
