@@ -3,6 +3,7 @@ mod depth;
 mod geometry;
 mod geometry_props;
 mod negative;
+mod panic_freedom;
 mod props;
 mod roundtrip;
 mod shape;
