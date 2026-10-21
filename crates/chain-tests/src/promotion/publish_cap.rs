@@ -1,14 +1,17 @@
 use crate::utils::IrysNodeTest;
+use alloy_core::primitives::U256;
 use irys_types::{DataLedger, H256, NodeConfig};
 
-/// The producer fills the Publish ledger up to `max_publish_txs_per_block`, and
-/// the ready candidates above the cap stay eligible for the next block.
+/// The producer fills the Publish ledger up to `max_publish_txs_per_block` in
+/// fee priority order, and the ready candidates above the cap stay eligible for
+/// the next block.
 #[test_log::test(tokio::test)]
 async fn heavy_publish_selection_stops_at_cap() -> eyre::Result<()> {
     let seconds_to_wait = 30;
-    // One ready candidate more than the cap.
-    let seeds = [10_u8, 40, 70];
-    let publish_cap = seeds.len() - 1;
+    // One ready candidate more than the cap. Each entry is (data seed, extra
+    // term fee above the quoted price). The first entry has the lowest fee.
+    let candidates = [(10_u8, 0_u64), (40, 2), (70, 1)];
+    let publish_cap = candidates.len() - 1;
 
     let config = NodeConfig::testing()
         .with_consensus(|consensus| {
@@ -31,16 +34,25 @@ async fn heavy_publish_selection_stops_at_cap() -> eyre::Result<()> {
     node.mine_block().await?;
 
     let mut txs = Vec::new();
-    for seed in seeds {
+    for (seed, extra_term_fee) in candidates {
         let chunks = vec![[seed; 32], [seed + 1; 32], [seed + 2; 32]];
         let data: Vec<u8> = chunks.iter().flatten().copied().collect();
-        let tx = node
-            .post_publish_data_tx(&signer, data)
-            .await
-            .expect("publish tx accepted");
+        let price = node
+            .get_data_price(DataLedger::Publish, data.len() as u64)
+            .await?;
+        let tx = signer.create_publish_transaction(
+            data,
+            node.get_anchor().await?,
+            price.perm_fee.into(),
+            (price.term_fee + U256::from(extra_term_fee)).into(),
+        )?;
+        let tx = signer.sign_transaction(tx)?;
+        node.post_data_tx_raw(&tx.header).await;
+        node.wait_for_mempool(tx.header.id, seconds_to_wait).await?;
         txs.push((tx, chunks));
     }
     let tx_ids: Vec<H256> = txs.iter().map(|(tx, _)| tx.header.id).collect();
+    let lowest_fee_tx_id = tx_ids[0];
 
     // Submit inclusion, then chunks, then one ingress proof for each tx.
     let submit_block = node.mine_block().await?;
@@ -69,17 +81,16 @@ async fn heavy_publish_selection_stops_at_cap() -> eyre::Result<()> {
         "Publish ledger must hold exactly the cap when more candidates are ready"
     );
 
+    assert!(
+        !first_publish.contains(&lowest_fee_tx_id),
+        "the lowest-fee candidate must be the one left out"
+    );
+
     // The candidate left out is promoted in the next block.
-    let left_out: Vec<H256> = tx_ids
-        .iter()
-        .copied()
-        .filter(|id| !first_publish.contains(id))
-        .collect();
-    assert_eq!(left_out.len(), 1);
     let second_block = node.mine_block().await?;
     assert_eq!(
         second_block.data_ledgers[DataLedger::Publish].tx_ids.0,
-        left_out,
+        vec![lowest_fee_tx_id],
         "the candidate above the cap must be promoted in the next block"
     );
 
