@@ -236,6 +236,7 @@ fn insert_requested(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset, 
         ChunkRequest {
             excluded: HashSet::new(),
             local_cache_miss: false,
+            body_in_ingress: false,
             request_state: ChunkRequestState::Requested(peer, Instant::now()),
             attempt_count: 1,
             retry_round: 0,
@@ -251,6 +252,7 @@ fn insert_pending(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset) {
         ChunkRequest {
             excluded: HashSet::new(),
             local_cache_miss: false,
+            body_in_ingress: false,
             request_state: ChunkRequestState::Pending,
             attempt_count: 0,
             retry_round: 0,
@@ -327,6 +329,7 @@ async fn mark_helpers_require_valid_source_state() {
         ChunkRequest {
             excluded: HashSet::new(),
             local_cache_miss: false,
+            body_in_ingress: false,
             request_state: ChunkRequestState::Pending,
             attempt_count: 0,
             retry_round: 0,
@@ -606,6 +609,7 @@ async fn blocked_excluded_from_pending_budget_and_dispatch_selection() {
         ChunkRequest {
             excluded: HashSet::new(),
             local_cache_miss: false,
+            body_in_ingress: false,
             request_state: ChunkRequestState::Pending,
             attempt_count: 0,
             retry_round: 0,
@@ -648,6 +652,7 @@ async fn unblock_missing_data_root_index_requeues_only_that_reason() {
         ChunkRequest {
             excluded: HashSet::new(),
             local_cache_miss: false,
+            body_in_ingress: false,
             request_state: ChunkRequestState::Pending,
             attempt_count: 0,
             retry_round: 0,
@@ -1036,6 +1041,7 @@ async fn delayed_retry_metadata_discards_soonest_deadline_within_bound() {
             ChunkRequest {
                 excluded: HashSet::new(),
                 local_cache_miss: false,
+                body_in_ingress: false,
                 request_state: ChunkRequestState::Delayed {
                     retry_at: now + Duration::from_secs(u64::from(value) + 1),
                 },
@@ -2682,6 +2688,7 @@ async fn release_in_flight_slots_restores_peer_selection() {
         ChunkRequest {
             excluded: HashSet::new(),
             local_cache_miss: false,
+            body_in_ingress: false,
             request_state: ChunkRequestState::Completed,
             attempt_count: 1,
             retry_round: 0,
@@ -2693,6 +2700,7 @@ async fn release_in_flight_slots_restores_peer_selection() {
         ChunkRequest {
             excluded: HashSet::new(),
             local_cache_miss: false,
+            body_in_ingress: false,
             request_state: ChunkRequestState::AwaitingDurability(Instant::now()),
             attempt_count: 1,
             retry_round: 0,
@@ -2704,6 +2712,7 @@ async fn release_in_flight_slots_restores_peer_selection() {
         ChunkRequest {
             excluded: HashSet::new(),
             local_cache_miss: false,
+            body_in_ingress: false,
             request_state: ChunkRequestState::Delayed {
                 retry_at: Instant::now(),
             },
@@ -2717,6 +2726,7 @@ async fn release_in_flight_slots_restores_peer_selection() {
         ChunkRequest {
             excluded: HashSet::new(),
             local_cache_miss: false,
+            body_in_ingress: false,
             request_state: ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex),
             attempt_count: 1,
             retry_round: 0,
@@ -2728,6 +2738,7 @@ async fn release_in_flight_slots_restores_peer_selection() {
         ChunkRequest {
             excluded: HashSet::new(),
             local_cache_miss: false,
+            body_in_ingress: false,
             request_state: ChunkRequestState::HeldByBodyWorker,
             attempt_count: 1,
             retry_round: 0,
@@ -2772,8 +2783,9 @@ async fn release_in_flight_slots_restores_peer_selection() {
     );
     assert_eq!(fresh.find_best_peer(None), Some(fresh_peer));
 
-    // A live failure penalizes. A later delivery clears that streak and
-    // releases once. The drop then ignores the row that left Requested.
+    // A live failure penalizes. A later delivery releases once; only its
+    // acceptance clears the streak. The drop then ignores the row that left
+    // Requested.
     let lived_tmp = TempDirBuilder::new().build();
     let lived_config = test_config(lived_tmp.path().to_path_buf(), 64);
     let mut lived = make_orchestrator(packed_sm(&lived_config, 64), &lived_config);
@@ -2800,8 +2812,14 @@ async fn release_in_flight_slots_restores_peer_selection() {
     );
     assert_eq!(
         peer_accounting(&lived, lived_peer).2,
+        1,
+        "an unchecked delivery does not clear the failure streak"
+    );
+    lived.credit_accepted_delivery(lived_peer);
+    assert_eq!(
+        peer_accounting(&lived, lived_peer).2,
         0,
-        "a delivery clears the failure streak"
+        "an accepted delivery clears the failure streak"
     );
     lived
         .mark_chunk_awaiting_durability(PartitionChunkOffset::from(1))
@@ -2813,4 +2831,171 @@ async fn release_in_flight_slots_restores_peer_selection() {
         after_delivery,
         "a row that already left Requested is not released again"
     );
+}
+
+fn peer_active(orch: &ChunkOrchestrator, peer: IrysAddress) -> usize {
+    orch.active_sync_peers.read().unwrap()[&peer].active_requests()
+}
+
+fn start_slot(orch: &ChunkOrchestrator, peer: IrysAddress) {
+    orch.active_sync_peers
+        .write()
+        .unwrap()
+        .get_mut(&peer)
+        .unwrap()
+        .on_chunk_request_started();
+}
+
+/// A delivered body frees its slot once. It stays `Requested` with the body
+/// in ingress, so it is not dispatched again, and a second delivery for it
+/// releases nothing.
+#[test_log::test(tokio::test)]
+async fn delivered_body_releases_its_slot_once_and_is_not_dispatched_again() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 64;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm, &config, open_test_db(&config));
+    let peer = add_assigned_peer(&mut orch, &config, 61, 9161);
+    for value in 0..u32::try_from(num_chunks).expect("chunks") {
+        insert_pending(&mut orch, PartitionChunkOffset::from(value));
+    }
+
+    let mut started = 0;
+    while orch.dispatch_next() {
+        started += 1;
+    }
+    assert_eq!(started, 20, "a fresh peer takes 20 fetches");
+    assert_eq!(peer_active(&orch, peer), 20);
+    wait_for_ledger_requests(&fetcher, 20).await;
+
+    let delivered = PartitionChunkOffset::from(0);
+    assert!(matches!(
+        orch.chunk_requests[&delivered].request_state,
+        ChunkRequestState::Requested(..)
+    ));
+    let attempt = orch
+        .on_chunk_fetched(delivered, peer)
+        .expect("delivery")
+        .start_time;
+    assert_eq!(peer_active(&orch, peer), 19);
+    assert!(orch.body_awaiting_ingress(delivered, peer, attempt));
+    assert!(
+        !orch.body_awaiting_ingress(delivered, peer, Instant::now()),
+        "a result for another attempt does not match"
+    );
+    assert!(
+        orch.on_chunk_fetched(delivered, peer).is_err(),
+        "a second delivery for the same body is rejected"
+    );
+    assert_eq!(peer_active(&orch, peer), 19, "and releases nothing");
+
+    assert!(orch.dispatch_next(), "the released slot is used at once");
+    assert_eq!(peer_active(&orch, peer), 20);
+    assert!(orch.body_awaiting_ingress(delivered, peer, attempt));
+    wait_for_ledger_requests(&fetcher, 21).await;
+    let delivered_ledger = LedgerChunkOffset::from(0);
+    let fetches = fetcher
+        .request_log
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|(offset, _)| *offset == delivered_ledger)
+        .count();
+    assert_eq!(fetches, 1, "the delivered offset is not fetched again");
+
+    // The success path moves the offset on without touching the slot.
+    orch.note_body_buffered(delivered).expect("buffered");
+    assert!(matches!(
+        orch.chunk_requests[&delivered].request_state,
+        ChunkRequestState::AwaitingDurability(_)
+    ));
+    assert_eq!(peer_active(&orch, peer), 20);
+}
+
+/// A rejected body counts one peer failure and excludes the peer for that
+/// offset. A local requeue blames nobody. Neither releases a slot.
+#[test_log::test(tokio::test)]
+async fn ingress_outcomes_do_not_release_the_slot_again() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let mut orch = make_orchestrator(sm, &config);
+    let peer_a = add_assigned_peer(&mut orch, &config, 62, 9162);
+    let peer_b = add_assigned_peer(&mut orch, &config, 63, 9163);
+    let rejected = PartitionChunkOffset::from(0);
+    let requeued = PartitionChunkOffset::from(1);
+    let sibling = PartitionChunkOffset::from(2);
+    for offset in [rejected, requeued, sibling] {
+        insert_requested(&mut orch, offset, peer_a);
+        start_slot(&orch, peer_a);
+    }
+    orch.on_chunk_fetched(rejected, peer_a).expect("delivery");
+    orch.on_chunk_fetched(requeued, peer_a).expect("delivery");
+    assert_eq!(peer_active(&orch, peer_a), 1);
+
+    assert!(
+        orch.on_chunk_failed(rejected, peer_a, ChunkFetchFailureKind::Timeout)
+            .is_err(),
+        "a fetch failure cannot arrive for a delivered body"
+    );
+    orch.on_ingressed_chunk_rejected(rejected, peer_a)
+        .expect("rejected");
+    let request = &orch.chunk_requests[&rejected];
+    assert!(matches!(request.request_state, ChunkRequestState::Pending));
+    assert!(request.excluded.contains(&peer_a));
+    assert_eq!(orch.find_best_peer(Some(&request.excluded)), Some(peer_b));
+
+    orch.requeue_after_local_write_failure(requeued)
+        .expect("requeued");
+    let request = &orch.chunk_requests[&requeued];
+    assert!(matches!(request.request_state, ChunkRequestState::Pending));
+    assert!(!request.excluded.contains(&peer_a));
+
+    let peers = orch.active_sync_peers.read().unwrap();
+    assert_eq!(
+        peers[&peer_a].active_requests(),
+        1,
+        "only the sibling holds a slot"
+    );
+    assert_eq!(peers[&peer_a].consecutive_failures(), 1);
+    assert_eq!(peers[&peer_a].total_failures(), 1);
+}
+
+/// A peer disconnect and an orchestrator drop leave a body in ingress alone.
+/// Its slot is already free and its ingress result still decides the offset.
+#[test_log::test(tokio::test)]
+async fn body_in_ingress_survives_peer_removal_and_slot_sweep() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let mut orch = make_orchestrator(sm, &config);
+    let peer = add_assigned_peer(&mut orch, &config, 64, 9164);
+    let delivered = PartitionChunkOffset::from(0);
+    let in_flight = PartitionChunkOffset::from(1);
+    for offset in [delivered, in_flight] {
+        insert_requested(&mut orch, offset, peer);
+        start_slot(&orch, peer);
+    }
+    let attempt = orch
+        .on_chunk_fetched(delivered, peer)
+        .expect("delivery")
+        .start_time;
+    // Another storage module holds one more slot on this peer.
+    start_slot(&orch, peer);
+    assert_eq!(peer_active(&orch, peer), 2);
+
+    orch.release_in_flight_peer_slots();
+    assert_eq!(
+        peer_active(&orch, peer),
+        1,
+        "only the fetch still on the network is released"
+    );
+
+    orch.remove_peer(peer);
+    assert!(orch.body_awaiting_ingress(delivered, peer, attempt));
+    assert!(matches!(
+        orch.chunk_requests[&in_flight].request_state,
+        ChunkRequestState::Pending
+    ));
 }
