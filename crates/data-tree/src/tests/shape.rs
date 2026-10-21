@@ -233,7 +233,12 @@ fn spec_path(chunk_index: u32, nodes: &[NodeHash]) -> Vec<NodeHash> {
 }
 
 fn largest_power_of_two_below(chunk_count: usize) -> usize {
-    // Same bit formula as `shape::largest_power_of_two_below`, on `usize`.
-    // `k` in spec §4: the greatest power of two that is strictly below `chunk_count`.
-    1_usize << (usize::BITS - 1 - (chunk_count - 1).leading_zeros())
+    // spec §4: "the largest power of two < C". This loop is independent of
+    // `shape::largest_power_of_two_below`, so a wrong production formula cannot
+    // pass by agreeing with itself.
+    let mut power_of_two = 1;
+    while power_of_two * 2 < chunk_count {
+        power_of_two *= 2;
+    }
+    power_of_two
 }
