@@ -28,7 +28,7 @@ Data      chunk 0   chunk 1   chunk 2   chunk 3
           256 KiB   256 KiB   256 KiB   128 KiB
 
 A segment proof climbs all three levels: 6 siblings in its segment subtree,
-then its siblings in the chunk tree, then the size witness in the last step.
+then its siblings in the chunk tree, then the size witness as the last hash.
 ```
 
 Read it from the bottom up: each chunk's 64 segments hash into a chunk root; the chunk roots form the chunk tree, whose root is `data_tree_root`; `data_commitment` joins that root with the size witness. Every change, against v1 as it exists today:
@@ -41,11 +41,11 @@ Read it from the bottom up: each chunk's 64 segments hash into a chunk root; the
 | Domain separation | none: a leaf and a node differ only in how many parts they hash | one-byte tags: `0x00` leaf, `0x01` node, `0x02` size witness, `0x03` chunk key (§3) |
 | Tree shape | `build_layer`: pair nodes left to right, carry an unpaired node up a level | the same shape at the chunk level; inside each chunk, a perfect subtree of 64 segment leaves, with empty leaves past the data |
 | Position in a proof | read from the byte-offset notes | computed from the chunk index `c` and the chunk count `C` |
-| Proof contents | at each level, both children and a note (96 B), plus the leaf (64 B) | at each level, only the sibling (32 B) |
-| Proof order | root to leaf | leaf to root: a v2 step holds only the sibling hash, so the check must start at the leaf and climb - lets us drop the notes |
-| Chunk proof | 2,464 B at 5 TiB; 64 B for a one-chunk upload | 800 B at 5 TiB; empty for a one-chunk upload |
-| Segment proof | none | 192 B (one chunk) to 992 B (5 TiB) |
-| Size | implicit: the note of the rightmost leaf | `size_witness = H(0x02 ‖ be64(data_size))`, checked in the last step of every proof |
+| Proof contents | at each level, both children and a note (96 B), plus the leaf (64 B) | at each level, only the sibling (32 B), then the size witness (32 B) |
+| Proof order | root to leaf | leaf to root: each step is one hash, so the check starts at the leaf and climbs. The size witness is the last hash |
+| Chunk proof | 2,464 B at 5 TiB; 64 B for a one-chunk upload | 832 B at 5 TiB; 32 B for a one-chunk upload |
+| Segment proof | none | 224 B (one chunk) to 1,024 B (5 TiB) |
+| Size | implicit: the note of the rightmost leaf | `size_witness = H(0x02 ‖ be64(data_size))`, the last hash of every proof. The verifier requires it to equal its own witness before the climb |
 | Root | `data_root` | `data_tree_root` (over the data) and `data_commitment = node(data_tree_root, size_witness)` |
 | Sizes per root | many: txs can name one `data_root` with different sizes | one: a `data_commitment` fixes its size |
 | Tx header | `data_root`, `data_size` | `data_tree_root` in the same field, `data_size`; the commitment is derived; no new version tag |
@@ -64,9 +64,9 @@ Read it from the bottom up: each chunk's 64 segments hash into a chunk root; the
 | --- | --- | --- |
 | Smaller proof-of-access and custody answers | segment leaves and segment proofs | an answer shrinks from a whole chunk plus its path (about 258 KiB) to segments plus paths (about 5 to 18 KB): less block space and gossip bandwidth |
 | One size per root | the size witness in every proof; the commitment covers data and size | deletes provisional sizes, chunk parking, rightmost-chunk confirmation and size re-checks. Two txs can no longer name the same root with different sizes |
-| Canonical proofs | proofs of sibling hashes only, no notes | removes 24 malleable bytes per node; node and gateway verifiers accept exactly the same proofs; proofs compare byte for byte |
+| Canonical proofs | proofs of sibling hashes and the size witness, no notes | removes 24 malleable bytes per node; node and gateway verifiers accept exactly the same proofs; proofs compare byte for byte |
 | Correct chunk identity | `chunk_key` by position | identical chunks at different offsets no longer collide, as keys made from proof hashes would |
-| Shorter chunk proofs | 32 B per level instead of 96 B | a chunk proof at 5 TiB drops from 2,464 B to 800 B |
+| Shorter chunk proofs | 32 B per level instead of 96 B | a chunk proof at 5 TiB drops from 2,464 B to 832 B |
 | Domain separation | one-byte tags | a leaf can never be read as a node or a size witness |
 | A standard to test against | the RFC 6962 and RFC 9162 tree, proof and check (§4) | the gateway, SDKs and third parties implement a published algorithm; the shape equals today's `build_layer` |
 | Lower builder memory | chunk roots and a node cache instead of every proof | about 51 GB down to about 1.3 GB at 5 TiB |
@@ -179,24 +179,25 @@ data_commitment for 3.5 chunks (917,504 bytes): data tree left, size witness rig
 
 **Example: 3.5 chunks.** `data_size = 917,504`, so `C = 4`. Chunks 0 to 2 are full. Chunk 3 holds segments 0 to 31; segments 32 to 63 are empty, so `R_3 = node(A, empty(5))`, where `A` is the tree over segments 0 to 31. Then `T = node(node(R_0, R_1), node(R_2, R_3))` and `data_commitment = node(T, size_witness(917504))`.
 
-**Non-power-of-two.** With `C = 5`, `T = node(node(node(R_0, R_1), node(R_2, R_3)), R_4)`. The proof for `c = 4` has one sibling; the proof for `c = 0` has three.
+**Non-power-of-two.** With `C = 5`, `T = node(node(node(R_0, R_1), node(R_2, R_3)), R_4)`. The chunk proof for `c = 4` has one sibling, then the size witness. The chunk proof for `c = 0` has three siblings, then the size witness.
 
-**Building.** A streaming builder keeps a stack of at most `log2(C) + 1` subtree roots, plus the chunk roots. To serve proofs it also caches the `C − 1` internal nodes: 64 B per chunk in all (256 KiB per GiB, about 1.3 GB at 5 TiB). `path()` below defines a chunk proof. An implementation reads the values from the node cache and does not recompute subtrees:
+**Building.** A streaming builder keeps a stack of at most `log2(C) + 1` subtree roots, plus the chunk roots. To serve proofs it also caches the `C − 1` internal nodes: 64 B per chunk in all (256 KiB per GiB, about 1.3 GB at 5 TiB). `path()` below is the sibling list. The chunk proof is that list and then `size_witness(n)`. An implementation reads the siblings from the node cache and does not recompute subtrees:
 
 ```
-path(c, R[0..C]):                         // chunk proof, leaf to root (RFC 6962 audit path)
+path(c, R[0..C]):                         // siblings of chunk c, leaf to root (RFC 6962 audit path)
     if C == 1: return []
     k = largest power of two < C
     if c < k: return path(c, R[0..k]) ++ [T(R[k..C])]
     else:     return path(c − k, R[k..C]) ++ [T(R[0..k])]
 ```
 
-- A segment proof is the `h` in-chunk siblings, built from the chunk bytes, then `path(c)`.
-- The proof length is `depth(c, C)` (§5). Do not read it from the streaming builder's stack: after the final merges, a stack height is not the height of the subtree it holds.
+- The chunk proof is `path(c) ++ [size_witness(n)]`.
+- A segment proof is the `h` in-chunk siblings, built from the chunk bytes, then the chunk proof.
+- `path` is empty when `C = 1`. The chunk proof is not: it is the size witness. The sibling count is `depth(c, C)` (§5). Do not read the proof length from the streaming builder's stack: after the final merges, a stack height is not the height of the subtree it holds.
 
 ## 5. Proofs and verification
 
-A proof is concatenated 32-byte sibling hashes: no header, no leaf hash, no witness, no notes. The order is leaf to root. Leaf to root is the default order for every proof in the protocol, including data-tree proofs and a future tagged `tx_path`. Storage keeps a proof in the order it arrived. Why the order changes from v1: a v1 proof holds both children of every node plus an offset note, so a verifier can check it from the root down. A v2 proof holds only the sibling at each level, so the check must start at the leaf and climb, because a parent's hash cannot be computed before the child's. Leaf to root stores the hashes in the order the check uses them; root to leaf would store the same hashes reversed, and every verifier would read the list backwards. The verifier computes the exact length from `(data_size, c[, j])` and rejects any other length.
+A proof is concatenated 32-byte hashes: the sibling hashes, leaf to root, then `size_witness(n)`. No header, no leaf hash, no notes. The order is leaf to root, so the witness is the last hash. Leaf to root is the default order for every proof in the protocol, including data-tree proofs and a future tagged `tx_path`. Storage keeps a proof in the order it arrived. Why the order changes from v1: a v1 proof holds both children of every node plus an offset note, so a verifier can check it from the root down. A v2 proof holds only the sibling at each level, so the check must start at the leaf and climb, because a parent's hash cannot be computed before the child's. Leaf to root stores the hashes in the order the check uses them; root to leaf would store the same hashes reversed, and every verifier would read the list backwards. The verifier computes the exact length from `(data_size, c[, j])` and rejects any other length. It then computes `size_witness(n)` from that `data_size` and requires the last hash to equal it. Only then does it climb the siblings. A supplied witness that was not checked must not be climbed: a false `data_size` would pass with the true witness attached.
 
 ```
 depth(c, C):                              // chunk-level siblings in the proof of chunk c
@@ -210,7 +211,7 @@ depth(c, C):                              // chunk-level siblings in the proof o
 
 | `C` | `depth(c, C)` |
 | --- | --- |
-| 1 | 0 (the proof is empty) |
+| 1 | 0 (the chunk proof is the size witness alone) |
 | 3 | `c` = 0, 1: 2; `c` = 2: 1 |
 | 5 | `c` = 0 to 3: 3; `c` = 4: 1 |
 | 4,096 (1 GiB) | 12 |
@@ -218,9 +219,9 @@ depth(c, C):                              // chunk-level siblings in the proof o
 
 | Proof | Content | Hashes |
 | --- | --- | --- |
-| Chunk (`data_path`) | chunk-level siblings | `depth(c, C)`; empty if and only if `C = 1` |
-| Segment | `h` in-chunk siblings (level 0 first), then the chunk proof | `h + depth(c, C)` |
-| Multi-segment (`m` segments of one chunk) | `m` independent segment proofs that share one chunk proof. Each segment carries its `h` in-chunk siblings. The chunk proof is sent once | `m × h + depth(c, C)` |
+| Chunk (`data_path`) | chunk-level siblings, then `size_witness(n)` | `depth(c, C) + 1`; the witness alone when `C = 1` |
+| Segment | `h` in-chunk siblings (level 0 first), then the chunk proof | `h + depth(c, C) + 1` |
+| Multi-segment (`m` segments of one chunk) | `m` independent segment proofs that share one chunk proof. Each segment carries its `h` in-chunk siblings. The shared chunk proof ends with `size_witness(n)`, and for `C = 1` it is that witness alone. A segment's full proof is its in-chunk siblings concatenated with the chunk proof. That concatenation is the full proof in every case, including one chunk | `m × h + depth(c, C) + 1` |
 | Size | `data_tree_root` | 1 |
 
 ```
@@ -230,20 +231,25 @@ A proof is a byte string of 32 × k bytes; proof[i] is its i-th 32-byte hash.
 verify_chunk(D, n, c, bytes, proof):      // D: an anchored data_commitment (§6)
     require 1 ≤ n ≤ max; C = ceil(n / chunk_size); require c < C
     require len(bytes) == chunk_len(n, c)
-    require len(proof) == 32 × depth(c, C)
-    r = climb(chunk_root(bytes), c, C, proof)
-    require node(r, size_witness(n)) == D
+    require len(proof) == 32 × (depth(c, C) + 1)
+    w = size_witness(n)                    // computed here, from this n
+    require the last hash of proof == w   // else stop; do not climb
+    r = climb(chunk_root(bytes), c, C, proof without its last hash)
+    require node(r, w) == D
 
 verify_segment(D, n, c, j, bytes, proof):
     require 1 ≤ n ≤ max; C = ceil(n / chunk_size); require c < C and j < SPC
     require len(bytes) == segment_len(n, c, j)
-    require len(proof) == 32 × (h + depth(c, C))
+    require len(proof) == 32 × (h + depth(c, C) + 1)
+    w = size_witness(n)                    // computed here, from this n
+    require the last hash of proof == w   // else stop; do not climb
+    siblings = proof without its last hash
     r = leaf(bytes); i = j
     for level in 0 .. h:                  // bit `level` of j picks the side
-        r = node(r, proof[level]) if i is even else node(proof[level], r)
+        r = node(r, siblings[level]) if i is even else node(siblings[level], r)
         i = i >> 1
-    r = climb(r, c, C, proof[h ..])
-    require node(r, size_witness(n)) == D
+    r = climb(r, c, C, siblings[h ..])
+    require node(r, w) == D
 
 climb(r, c, C, hashes):                   // RFC 9162 §2.1.3.2 inclusion walk, node() as the hash
     fn = c; sn = C − 1
@@ -263,20 +269,20 @@ climb(r, c, C, hashes):                   // RFC 9162 §2.1.3.2 inclusion walk, 
 
 - **Size proof:** `require node(data_tree_root, size_witness(n)) == D`.
 - **Packed bytes:** unpack, then trim to `chunk_len` or `segment_len` before hashing. The segment-PoA spec also requires the trimmed tail to unpack to zero.
-- **Empty proof:** valid only when `C = 1`. In storage, `None` means "no proof written" and an empty value is a present proof. Never treat an empty proof as missing.
+- **No proof is empty.** Every proof ends with its size witness. For `C = 1` the chunk proof is `[size_witness(n)]`. A missing proof and a present proof differ in length, so a container does not have to tell an empty value from an absent one (§15 Q10). A last hash that is not `size_witness(n)` fails (`SizeWitnessMismatch`) before the climb.
 - **Compact multiproof:** a possible future format, not the multi-segment encoding above. Its design is in Appendix B.
 
 | Upload | `C` | Max depth | v1 chunk path | Chunk proof | Segment proof | 4 segments of one chunk (option B / compact form) |
 | --- | --- | --- | --- | --- | --- | --- |
-| ≤ 1 chunk | 1 | 0 | 64 | **0** | 192 | 768 / 512 |
-| 1 GiB | 4,096 | 12 | 1,216 | **384** | 576 | 1,152 / 896 |
-| 5 TiB (max) | 20,971,520 | 25 | 2,464 | **800** (736 for `c ≥ 2^24`) | 992 | 1,568 / 1,312 |
+| ≤ 1 chunk | 1 | 0 | 64 | **32** | 224 | 800 / 544 |
+| 1 GiB | 4,096 | 12 | 1,216 | **416** | 608 | 1,184 / 928 |
+| 5 TiB (max) | 20,971,520 | 25 | 2,464 | **832** (768 for `c ≥ 2^24`) | 1,024 | 1,600 / 1,344 |
 
 All sizes are in bytes and exclude the segment and chunk bytes. The last column is option B (`4 × h` in-chunk siblings plus one chunk proof), then a compact multiproof at most. The compact form is a possible future format, designed in Appendix B.
 
 ## 6. Trust anchor rule
 
-Verify chunks and segments only against an **anchored** `data_commitment`: one derived from a header whose signature was checked, or from a `tx_root` leaf that was proven. A commitment that a verifier derives from an unauthenticated `(data_tree_root, data_size)` pair binds nothing, because the last step only repeats the verifier's own derivation. A chunk proof then passes for any size under which its path has the same shape: the same `C`, or a larger `C` for chunks in a left subtree. The reference implementation confirms it: with the anchored commitment a wrong size fails; with a re-derived one it passes.
+Verify chunks and segments only against an **anchored** `data_commitment`: one derived from a header whose signature was checked, or from a `tx_root` leaf that was proven. A commitment that a verifier derives from an unauthenticated `(data_tree_root, data_size)` pair binds nothing. The witness is not a secret. An attacker can write `size_witness` of the claimed size as the proof's last hash. The climb then passes for any claimed size under which the path has the same shape: the same `C`, or a larger `C` for chunks in a left subtree. `node(root, size_witness(claimed n))` equals the re-derived commitment, so that proof passes against it and fails against the anchored commitment. A proof that still carries the true witness fails earlier, before the climb: the last hash is not `size_witness` of the claimed size. The reference implementation confirms both. The true witness is rejected for a wrong size. The claimed-size witness passes only against the re-derived commitment, and only when the path shape matches.
 
 | Consumer | Anchor |
 | --- | --- |
@@ -304,9 +310,9 @@ The data tx header keeps its layout and gets no new version tag (decided). From 
 | Chunk message field (gossip, `POST /v1/chunk`, gateway batches) | Size | Note |
 | --- | --- | --- |
 | `data_commitment` | 32 B | the anchor; the receiver looks it up (L1: from tx headers) |
-| `data_size` | 8 B | a separate field; the proof's last step checks it |
+| `data_size` | 8 B | a separate field; the proof's last hash is `size_witness(data_size)`, checked before the climb |
 | `tx_offset` | 4 B | the chunk index `c` |
-| `data_path` | `32 × depth(c, C)` | chunk-level siblings only; empty when `C = 1` |
+| `data_path` | `32 × (depth(c, C) + 1)` | chunk-level siblings, then the size witness; 32 B when `C = 1` |
 | `bytes` | `chunk_len(data_size, c)` | any other length is invalid before hashing |
 
 **Chunk identity.** A validated chunk is identified by `chunk_key(data_commitment, c)`, not by `H(data_path)`. Identical chunks at different indices of one upload (all-zero data is common) can have identical proofs, so a proof cannot be an identity. Table and type names (decided): `ChunkPathHash` → `ChunkKey`, `ChunkDataPathByPathHash` → `ChunkDataPathByChunkKey`, `ChunkPathHashesByOffset` → `ChunkKeysByOffset`, field `data_path_hash` → `chunk_key`, and `GossipCacheKey::Chunk` keyed by `ChunkKey`.
@@ -333,7 +339,7 @@ c = L − P_k, and require 0 ≤ c < C_k
 - The whole-chunk offset mapping above must land before v2: today's mapping uses raw-size byte ranges and drifts after any tx that does not end on a chunk boundary.
 - The PoA rule itself (which segment, the ticket, the forms) is in the segment-PoA spec.
 
-**Segments per chunk.** The tree allows 1 ≤ SPC ≤ 256 (§2). Wherever the segment-PoA rule runs, the irys node's consensus config rejects SPC < 2 at load time. With SPC = 1, a one-chunk upload has an empty segment proof, and an empty optional RLP field signs like an absent one (segment-PoA spec §6.3 rule 3). That bound is on this use of the tree. The tree stays general.
+**Segments per chunk.** The tree allows 1 ≤ SPC ≤ 256 (§2). Wherever the segment-PoA rule runs, the irys node's consensus config rejects SPC < 2 at load time (segment-PoA spec §6.3 rule 3, §15 Q9). That bound is on this use of the tree. The tree stays general. A segment proof is never empty: when `h = 0` and `C = 1` it is the size witness (§5, §15 Q10).
 
 **Other verifiers.** Mining (winning chunks), chunk migration, storage-module serving and ingress-proof checks use `verify_chunk` or the v2 builder against the header commitment. A storage module derives `c` from the placement (partition offset minus the tx's start), never from proof bytes.
 
@@ -365,10 +371,10 @@ Rates measured with openssl speed -evp sha256 -bytes N on one core of an Intel i
 | Property | How it holds |
 | --- | --- |
 | Positional binding | The shape is a function of `(data_size, chunk_size, SPC)`. The verifier derives every direction bit from `(c, j)` and requires the exact proof length. Known attacks on RFC 6962-style proofs (an inner node shown as a leaf, or a proof checked against another leaf count) need a verifier that does not know the leaf count; here `C` is fixed before any hashing. A proof for position `i` shown as position `k` fails unless the bytes at both positions are identical, and then the claim is true |
-| Size binding | The last step of every proof checks `size_witness(data_size)` against an anchored commitment (§6). A wrong size fails, so v1's acceptance of a prefix chunk under a larger size cannot happen |
+| Size binding | The verifier computes `size_witness(data_size)` itself and requires the proof's last hash to equal it, before the climb (§5). It then checks `node(root, size_witness(data_size))` against an anchored commitment (§6). A wrong size fails. A proof that carries the true witness fails the witness check even when a re-derived commitment would match that witness |
 | Domain separation | Distinct tags and fixed widths (§3). A 64-byte segment equal to `l ‖ r` hashes as a leaf, never as `node(l, r)`. A v1 root and a v2 root can collide only by a SHA-256 collision. Caveat: while tx_root and the ingress-proof tree stay untagged, a crafted 63 B or 95 B segment (about 2^8 tries) can hash to the value of a tx_root leaf or branch. No exploit is known, because the roots come from different header fields (§14 Q3) |
 | One hash per node | v1 hashes each part of a node first, then the concatenation (4 SHA-256 calls per node). v2 hashes once: H(0x01 ‖ l ‖ r), the RFC 6962 construction. The inner hashes add no security: l and r are already 32-byte hashes, and forging any proof still needs a SHA-256 collision at the first node where the honest and forged inputs differ (about 2^128 work). Fixed widths make 0x01 ‖ l ‖ r readable only one way, and the tags replace v1's leaf and node separation by part count. Length extension does not apply: the tree has no secrets, and every node input is fixed-width |
-| No malleability | A proof is only sibling hashes. For a fixed `(data_commitment, data_size, c[, j])` the valid proof is unique up to SHA-256 collisions |
+| No malleability | A proof is the sibling hashes and then the size witness. The witness must equal the verifier's own `size_witness(data_size)`. For a fixed `(data_commitment, data_size, c[, j])` the valid proof is unique up to SHA-256 collisions |
 | Padding | Segments hash at their true length. `n` bytes and `n` bytes plus zeros differ in a leaf and in the size witness. Packed storage pads with entropy; verifiers trim before hashing |
 | Identical data | Identity is `chunk_key`, never proof bytes (§7) |
 | Denial of service | Length checks run before any hashing. Work per proof is bounded. A wrong-length chunk is a peer fault, not a silent drop |
@@ -409,11 +415,11 @@ v2 ships at Estuary's activation, together with the partition resize and the seg
 | `crates/types/src/transaction.rs` | field `data_root` becomes `data_tree_root` at the same position; a `data_commitment()` accessor derives the commitment; `data_chunks()` builds chunks with the v2 builder |
 | client builder (`irys.rs` merklize, api-client chunk upload) | v2 tree and chunk proofs; chunk messages carry `data_commitment` |
 | `crates/types/src/chunk.rs`, gossip types | `ChunkKey`; the root field of `UnpackedChunk` holds `data_commitment` |
-| consensus config | `segments_per_chunk`: a power of two, 1 ≤ SPC ≤ 256, `chunk_size % SPC == 0`, checked at load (§2). Where the segment-PoA rule runs, also reject SPC < 2 at load. An empty segment proof signs like an absent optional RLP field (segment-PoA spec §6.3 rule 3). The tree stays general |
+| consensus config | `segments_per_chunk`: a power of two, 1 ≤ SPC ≤ 256, `chunk_size % SPC == 0`, checked at load (§2). Where the segment-PoA rule runs, also reject SPC < 2 at load (segment-PoA spec §6.3 rule 3, §15 Q9). The tree stays general. Every proof ends with the size witness, so none is empty (§5, §15 Q10) |
 | chunk ingress | `verify_chunk`, `InvalidChunkSize`, deletion of the v1 size machinery (§8); ingress-proof readiness becomes `!block_set.is_empty()` |
 | p2p | `InvalidChunkSize` is a peer fault; chunk gossip is keyed by `ChunkKey` |
 | database | chunk-key tables (§7); rows keyed by `data_commitment`; size-confirmation state deleted; the chunk backfill verifies with `verify_chunk`; database version bump |
-| storage modules | keys by `chunk_key` and `data_commitment`; `c` from the placement. Offset rows accept an empty proof and keep it distinct from no proof (`None`) (§5). Flags and the format byte sit directly after the proof and before the CRC: `[proof][flags][format][crc]` (Appendix A.1). Stored proofs stay leaf to root, as received |
+| storage modules | keys by `chunk_key` and `data_commitment`; `c` from the placement. No empty-proof handling is needed: every proof ends with the size witness, and that witness is the same for every chunk of one upload (§5, §15 Q10). Flags and the format byte sit directly after the proof and before the CRC: `[proof][flags][format][crc]` (Appendix A.1). Stored proofs stay leaf to root, as received |
 | mempool, block validation and discovery | reject every data tx in blocks up to and including E (§8). PoA data form per the segment-PoA spec; whole-chunk offset mapping (§8); activation rules (§8). From activation, the PoA `tx_path` check rejects non-zero note padding (§14). `InvalidPromotionDataSizeMismatch` and the `tx_selector` size filter deleted |
 | release freeze | scan mainnet for any data tx or data-chunk PoA (§11). Expect none. One found means the §8 refusal does not hold, and nodes that sync from genesis keep today's data verifier for those blocks, gated by height |
 | mining, chunk migration | `verify_chunk` against the header commitment |
@@ -427,7 +433,7 @@ v2 ships at Estuary's activation, together with the partition resize and the seg
 | `bundle_items_root` | leaves use `data_tree_root` and the item's exact byte span, as `tx_root` does (§7) |
 | Custody framing | multi-segment answers use independent segment proofs that share one chunk proof (§5). The custody spec defines the framing |
 
-**Gateway, SDKs, simulator.** One gateway library serves the data tree, `tx_root` and the bundle index trees; only the data-tree code changes. The gateway table is that change. Other changes: receipts, relay, bundler, upload service, SDK, wasm build and node simulator. Receipt header bindings shrink from up to 529,216 B (1 to 2 full chunks with paths) to at most 10,176 B (1 to 2 segments with proofs). The joint L1 and gateway proposal lists every file. Gateway state resets with the testnet reset.
+**Gateway, SDKs, simulator.** One gateway library serves the data tree, `tx_root` and the bundle index trees; only the data-tree code changes. The gateway table is that change. Other changes: receipts, relay, bundler, upload service, SDK, wasm build and node simulator. Receipt header bindings shrink from up to 529,216 B (1 to 2 full chunks with paths) to at most 10,240 B (1 to 2 segments with proofs). The joint L1 and gateway proposal lists every file. Gateway state resets with the testnet reset.
 
 ## 13. Test vectors
 
@@ -438,7 +444,7 @@ The reference implementation (Python, standard library only) generated these val
 - these negative cases: wrong size with the same and with another `C`, `c ≥ C`, a proof one hash too long and too short, a flipped sibling bit, a zero-padded chunk, a 64 B segment equal to `l ‖ r`, and an unanchored commitment;
 - the depths 25 and 23 at the maximum size.
 
-Data is `b[i] = i mod 251`. Proofs are leaf to root.
+Data is `b[i] = i mod 251`. Proofs are leaf to root and end with `size_witness(data_size)`.
 
 ```
 leaf("")              6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d
@@ -461,14 +467,17 @@ n    C  data_tree_root                                                    data_c
 112  4  7fd698c547deb0bbb8f8ab7db08dd34616a496f141167252487509cb74824564  cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5
 157  5  81e7a996cd2ba141815aa48a1afe4f9c3d5c0ca450f12c9a605c20a0c3037c95  f8ba5215b628deec40d735d6cdf825016fca443f0f8cbff3eb5361de59e8ab03
 
+The reference printed the sibling hashes. The last line of each proof is size_witness(112).
 n = 112, chunk proof c = 2:
   dbc3c2433981a503f8ffa38629a9ec5d41501618b2afd860af52d6a93e06e8b6
   50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84
+  f127eb7779eafb7f0f10fd2f7fa512d89e862c71b77e4424f40f02ccc6220945
 n = 112, segment proof (c = 3, j = 1):
   82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5
   fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072a
   f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65
   50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84
+  f127eb7779eafb7f0f10fd2f7fa512d89e862c71b77e4424f40f02ccc6220945
 n = 112, chunk_key(c = 3):
   b541f01b947453085184d77f79e23e48acd6d3f0ff773843392ab4dafad1b425
 ```
@@ -495,26 +504,17 @@ n        C  data_tree_root                                                    da
 | Primitives | `leaf` of 0, 1, 4,095 and 4,096 B; `node`; `size_witness` of 1, 4,096, 262,144, 917,504, `2^40` and 5 TiB; `empty(0..=6)`; `chunk_key` at `c` = 0, 1, `2^24` |
 | Roots, mainnet geometry | `data_size` 1; 4,095; 4,096; 4,097; 262,143; 262,144; 262,145; 524,288; 786,432; 917,504; 1,310,720; `C` = 8, 9, 16, 17; 1 GiB; 1 GiB + 1. Each with `i mod 251` bytes and with all-zero bytes. Output: chunk roots, `data_tree_root`, `size_witness`, `data_commitment` |
 | Roots, test geometry | `chunk_size` 32, SPC 4: `data_size` 1, 8, 9, 32, 33, 112, 157 |
-| Chunk proofs | every chunk for `C ≤ 17`; chunks 0, 2,047 and 4,095 of 1 GiB; `C = 5`, `c = 4` (one sibling) |
+| Chunk proofs | every chunk for `C ≤ 17`; chunks 0, 2,047 and 4,095 of 1 GiB; `C = 5`, `c = 4` (one sibling, then the size witness) |
 | Segment proofs | every segment for `C ≤ 2`; for 917,504: `(3, 5)`, `(3, 31)` (last full), `(3, 32)` (first empty), `(3, 63)`; the partial segment `(0, 1)` of 4,097 B |
-| Multi-segment | option B. In one chunk, `m` = 1, 2, 4 and 64: each case is `m` segment proofs (the `h` in-chunk siblings each) and one shared chunk proof. An adjacent pair in one chunk. A pair in two chunks, which is two chunk proofs |
+| Multi-segment | option B. In one chunk, `m` = 1, 2, 4 and 64: each case is `m` segment proofs (the `h` in-chunk siblings each) and one shared chunk proof. The full segment proof is those siblings concatenated with the chunk proof, including when `C = 1`. An adjacent pair in one chunk. A pair in two chunks, which is two chunk proofs |
 | Receipt header binding (gateway) | a 100 B span inside one segment, across two segments of one chunk, and across a chunk boundary |
 | `tx_root` | leaf value `fold(data_tree_root, prefix_hash)`, span note the exact `data_size` (§7). If §14 adopts tagged 8-byte notes, add those vectors, with leaves of size 1 and a run that does not end on a chunk boundary |
 | Negative | wrong `data_size` with the same `C` and with another `C`; `c ≥ C`; proof one hash too long and too short; empty proof for `C > 1`; chunk length ±1; one flipped bit per sibling; a zero-padded segment; `data_size = 0`; a valid proof shown at another index with different bytes; a 64 B segment equal to `l ‖ r`; a commitment re-derived from an unauthenticated pair (§6) |
 | Wire | the tx header with `data_tree_root`; the chunk message JSON; the `/internal/chunks` response; the gateway item envelope (signs `data_tree_root` and `data_size`) and receipt |
 
-## 14. Open and deferred decisions
+## 14. Deferred decisions
 
-Q1, Q2 and Q4 to Q9 are decided (§15). Q10 is open and changes the proof bytes of every tree, so it must close before this format is released and the shared proof vectors are final. Q3 is deferred and does not change the data-tree wire format or vectors.
-
-**Q10, open: proof form.** A proof today is sibling hashes only (§5), as in RFC 9162. For a one-leaf tree, such as a one-chunk upload, the sibling list is empty. That is correct, but every container that stores or signs a proof must then keep an empty proof distinct from no proof: an optional RLP field signs the same either way, and a storage row must not read empty as missing.
-
-| Option | Proof bytes | Cost | Risk |
-| --- | --- | --- | --- |
-| Sibling-only (today) | `siblings`, empty for a one-leaf tree | none | every container must encode a proof with its index and count and an explicit length, never as a bare optional byte string |
-| Leaf-first (owner leaning) | `leaf ‖ siblings`, never empty. The verifier computes the leaf from the data and requires `proof[0]` to equal it, then climbs | 32 B per proof | none of the above: no proof is ever empty |
-
-Leaf-first would change proof generation, verification and length rules (§5), the §13 proof vectors and printed proof lists, and Appendix B. Roots, commitments, chunk keys and the §13 root tables would not change. The choice is meant to apply to every tree in the protocol, `tx_root` included, so all proofs have one form.
+Q1, Q2, Q4, Q5, Q6, Q7, Q8, Q9 and Q10 are decided (§15). Q3 is deferred and does not change the data-tree wire format or vectors.
 
 **Q3, deferred:**
 
@@ -536,6 +536,7 @@ The data root is external: clients, SDKs and the gateway commit to it. It lands 
 | 2026-10-21 | Q7. The gateway item envelope signs `data_tree_root` and `data_size`, and `data_commitment` is derived, as the L1 header does. This anchors the size and keeps one format for L1, the gateway and SDKs. Owner decision; the gateway team signed off on 2026-10-21 |
 | 2026-10-21 | Q8. Every data tx in a block up to and including Estuary's activation block E is refused. Mainnet stores no data and test networks reset, so no pre-activation data tx can exist, and the fork release needs no v1 data code and no anchor rule |
 | 2026-10-21 | Q9. The tree's rule is 1 ≤ SPC ≤ 256, a power of two, and it sets no tighter protocol floor. A bound is a property of how the tree is used, not of the tree. The irys node rejects SPC < 2 wherever the segment-PoA rule runs, because an empty segment proof signs like an absent optional RLP field |
+| 2026-10-21 | Q10. Every proof ends with `size_witness(n)`, leaf to root, so the witness is the last hash. A chunk proof is the chunk-level siblings then the witness: `32 × (depth(c, C) + 1)` bytes, and for `C = 1` it is `[size_witness(n)]`. A segment proof is the `h` in-chunk siblings then that chunk proof. Plain concatenation is the full segment proof in every case, including one chunk. The verifier checks the length, requires the last hash to equal `size_witness` computed from the `data_size` it is checking, and does not climb until that matches. It then climbs the siblings and requires `node(root, size_witness(n))` to equal the commitment. A sibling-only proof of a one-leaf tree is empty, and containers that store or sign proofs confuse empty with missing: a header binding with empty lists becomes absent, nested inner proofs are skipped when empty, and `ChunkWithProof.proof` defaults to empty. Witness-last costs 32 B per proof on the wire. In a storage-module row the witness is the same for every chunk of an upload, so LZ4 shares it. Rejected: leaf-first for every proof, which adds 32 B per proof and per storage row, and the leaf differs per row so LZ4 cannot share it; and a leaf only when the proof would otherwise be empty, which is a special-case branch |
 | 2026-10-21 | The data root is external: clients, SDKs and the gateway commit to it, so it lands first and is hard to change later. `tx_root` is internal to the protocol and can change in any fork |
 | 2026-10-19 | Tag registry `0x00` to `0x04` (`0x04` is the mining ticket) and `segments_per_chunk ≤ 256` (segment-PoA spec, ticket encoding) |
 | 2026-10-19 | The fork release deletes the old data-PoA verifier and keeps the capacity PoA path bit-exact |
@@ -557,7 +558,9 @@ Proposed with the approved design, not decided on their own: the last chunk is a
 
 This measures the stored size of leaf-to-root and root-to-leaf chunk proofs under LZ4, and the effect of the row trailer.
 
-**Rows.** 65,536 proofs, mainnet geometry (`chunk_size` 262,144, SPC 64). The one-upload case is one 16 GiB upload. Every proof has depth 16, so the proof is 512 bytes. A raw row is that proof plus a 6-byte trailer: 518 bytes. Value-only LZ4 stores that row at about 80 bytes.
+**Rows.** 65,536 proofs, mainnet geometry (`chunk_size` 262,144, SPC 64). The one-upload case is one 16 GiB upload. Every proof has depth 16. The measured sibling list, without the size witness, is 512 bytes. A raw row is that proof plus a 6-byte trailer: 518 bytes. Value-only LZ4 stores that row at about 80 bytes.
+
+These measurements used proofs without the size witness (§15 Q10). The witness is identical for every row of an upload, so LZ4 shares it. The tables were not re-run.
 
 **Production settings, as of this writing.** `ChunkMetaByOffset` uses `RocksTuning::baseline` (`crates/database/src/submodule/rocks.rs:172-192`) through `column_options` (`rocks.rs:3617-3696`). Compression is LZ4 (`rocks.rs:3646-3658`). The block size is `BLOCK_BYTES`, 64 KiB (`rocks.rs:60`). `encode_offset_meta` (`crates/database/src/submodule/records.rs:30-54`) writes a non-empty proof, then the CRC little-endian when present (`records.rs:48-50`), then the flags byte (`records.rs:44-47`). `HAS_PROOF | CRC_PRESENT` is `0x03` (`records.rs:16-18`). The format byte is `1` (`records.rs:14`, `records.rs:53`). An empty proof returns an error (`records.rs:37-39`).
 
@@ -593,11 +596,11 @@ Value-only table. One upload, id 1, 65,536 chunks. Three trailers, each 6 bytes:
 
 Pack the rows in order into groups of at most 64 KiB. Split only between rows. Compress each group with `LZ4_compress_default`. The `lz4` 1.28.1 crate calls this `lz4::block::compress` with `CompressionMode::DEFAULT` and the size prefix off. Sum the compressed lengths and divide by 65,536.
 
-SST table. Today's trailer only. A non-empty value is the byte string `encode_offset_meta` writes for a proof and a CRC. One-chunk rows are the 6-byte trailer and no proof bytes. `encode_offset_meta` returns an error for an empty proof (`records.rs:37-39`), so the measurement writes those six bytes directly.
+SST table. Today's trailer only. A non-empty value is the byte string `encode_offset_meta` writes for a proof and a CRC. One-chunk rows in this measurement are the 6-byte trailer and no proof bytes: the measured proof is the sibling list, and that list is empty for one chunk. `encode_offset_meta` returns an error for an empty proof (`records.rs:37-39`), so the measurement writes those six bytes directly.
 
 - One 16 GiB upload: upload id 1, every proof 512 bytes.
 - Mixed uploads: each upload is its own tree. Lengths are log-uniform on 1..=4,096 chunks, seed `0xA11CE`, and the last upload is clipped to the chunks left in the 65,536 span. Upload ids start at 1. Draw with xorshift64 (`x ^= x << 13`, `x ^= x >> 7`, `x ^= x << 17`). Bucket `draw % 13` selects the size class: bucket 0 is 1 chunk, and bucket `k` (1..=12) is `2^(k-1)+1 ..= 2^k`. The size inside the class is uniform in the draw. This draw yields 96 uploads.
-- One-chunk uploads: 65,536 trees of one chunk. The chunk proof is empty, so the order does not change a byte.
+- One-chunk uploads: 65,536 trees of one chunk. The measured one-chunk proof is empty, so the order does not change a byte.
 - Key: the offset as 4 big-endian bytes. Offsets are `0..=65535`.
 - Open `ChunkMetaByOffset` with the baseline options cited above. Write one batch, flush the family, then compact the whole key range with bottommost compaction forced. The SST size is the sum of live file sizes for that family.
 
@@ -616,7 +619,7 @@ The one-chunk SST matches to the byte in either order. The blobs preset sends a 
 | 4 | 24 | 4 to 16 |
 | 64 (whole chunk) | 384 | 0 |
 
-At 4 segments the compact form saves at least 8 hashes (256 B): about 1.4% of an answer that carries 4 × 4 KiB of segment bytes. The chunk proof is the same in both forms and is sent once.
+At 4 segments the compact form saves at least 8 hashes (256 B): about 1.4% of an answer that carries 4 × 4 KiB of segment bytes. The chunk proof is the same in both forms and is sent once. It ends with the size witness (§5).
 
 **Example.** `SPC = 8` (`h = 3`), segments 1 and 6 of one chunk. Option B sends `[L0, A23, B4567]` and `[L7, A45, B0123]`: six hashes. The compact form sends `[L0, L7, A23, A45]`: four hashes. `B0123` and `B4567` are dropped, because the climbs from segments 1 and 6 compute them.
 
@@ -637,7 +640,7 @@ compact_proof = be16(m) ‖ j_1 ‖ … ‖ j_m ‖ aux[0] ‖ … ‖ aux[a−1
     m          number of revealed segments, 1 ≤ m ≤ SPC
     j_i        one byte each (SPC ≤ 256), strictly increasing, j_i < SPC
     aux        a 32-byte hashes, in the canonical order below; a = aux_count(J)
-    chunk_proof  32 × depth(c, C) bytes, leaf to root, as in §5
+    chunk_proof  32 × (depth(c, C) + 1) bytes, leaf to root, ending with size_witness(n), as in §5
 ```
 
 The revealed segment bytes travel next to the proof in index order; each length is `segment_len(n, c, j_i)`, so no lengths are encoded.
@@ -661,7 +664,7 @@ verify_compact(D, n, c, proof, segment_bytes):
     require 1 ≤ n ≤ max; C = ceil(n / chunk_size); require c < C
     require len(segment_bytes[i]) == segment_len(n, c, j_i) for every i
     a = aux_count(J)
-    require len(proof) == 2 + m + 32 × (a + depth(c, C))      // exact, before any hashing
+    require len(proof) == 2 + m + 32 × (a + depth(c, C) + 1)  // exact, before any hashing
     known = [(j_i, leaf(segment_bytes[i])) for i in 1..m]; next_aux = 0
     for level in 0 .. h:
         next = []
@@ -672,7 +675,8 @@ verify_compact(D, n, c, proof, segment_bytes):
             append (p >> 1, parent) to next
         known = next
     require next_aux == a and known == [(0, r)]               // every hash used, one root
-    r = climb(r, c, C, chunk_proof)
+    require the last hash of chunk_proof == size_witness(n)   // before the climb
+    r = climb(r, c, C, chunk_proof without its last hash)
     require node(r, size_witness(n)) == D
 ```
 
