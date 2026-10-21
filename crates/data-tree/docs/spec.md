@@ -503,9 +503,20 @@ n        C  data_tree_root                                                    da
 | Negative | wrong `data_size` with the same `C` and with another `C`; `c ≥ C`; proof one hash too long and too short; empty proof for `C > 1`; chunk length ±1; one flipped bit per sibling; a zero-padded segment; `data_size = 0`; a valid proof shown at another index with different bytes; a 64 B segment equal to `l ‖ r`; a commitment re-derived from an unauthenticated pair (§6) |
 | Wire | the tx header with `data_tree_root`; the chunk message JSON; the `/internal/chunks` response; the gateway item envelope (signs `data_tree_root` and `data_size`) and receipt |
 
-## 14. Deferred decisions
+## 14. Open and deferred decisions
 
-Q1, Q2 and Q4 to Q9 are decided (§15). They are closed, as §11 step 2 requires before the shared vectors are generated. One item stays deferred. It does not change the data-tree wire format or those vectors.
+Q1, Q2 and Q4 to Q9 are decided (§15). Q10 is open and changes the proof bytes of every tree, so it must close before this format is released and the shared proof vectors are final. Q3 is deferred and does not change the data-tree wire format or vectors.
+
+**Q10, open: proof form.** A proof today is sibling hashes only (§5), as in RFC 9162. For a one-leaf tree, such as a one-chunk upload, the sibling list is empty. That is correct, but every container that stores or signs a proof must then keep an empty proof distinct from no proof: an optional RLP field signs the same either way, and a storage row must not read empty as missing.
+
+| Option | Proof bytes | Cost | Risk |
+| --- | --- | --- | --- |
+| Sibling-only (today) | `siblings`, empty for a one-leaf tree | none | every container must encode a proof with its index and count and an explicit length, never as a bare optional byte string |
+| Leaf-first (owner leaning) | `leaf ‖ siblings`, never empty. The verifier computes the leaf from the data and requires `proof[0]` to equal it, then climbs | 32 B per proof | none of the above: no proof is ever empty |
+
+Leaf-first would change proof generation, verification and length rules (§5), the §13 proof vectors and printed proof lists, and Appendix B. Roots, commitments, chunk keys and the §13 root tables would not change. The choice is meant to apply to every tree in the protocol, `tx_root` included, so all proofs have one form.
+
+**Q3, deferred:**
 
 | # | Baseline | Open option |
 | --- | --- | --- |
