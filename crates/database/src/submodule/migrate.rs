@@ -9,7 +9,10 @@
 //! Each batch is one MDBX transaction. The schema row holds the resume point
 //! until the last batch writes [`SUBMODULE_SCHEMA`]. Open does not return
 //! until that row is current, so a caller never reads a half-migrated index.
+//! Before the migration, the data file is read once from start to end so random
+//! row lookups hit the page cache instead of a cold HDD.
 
+use std::io::Read as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -258,6 +261,9 @@ fn run_migration(
     if let Some(hook) = DURING_MIGRATION.with(|cell| cell.borrow_mut().take()) {
         hook(path);
     }
+    // Fresh copy and a resumed copy or drop both enter here. v2, empty, and
+    // foreign schemas never call `run_migration`.
+    pre_read_index_file(path);
     log_started(path, &progress, &totals);
     set_migration_gauge(path, migration_fraction(&progress, &totals));
     let ctx = MigrateCtx {
@@ -681,6 +687,55 @@ pub(super) fn migration_required(env: &DatabaseEnv) -> eyre::Result<bool> {
         SchemaRow::Absent => path_hash_rows > 0 || legacy_rows > 0,
         SchemaRow::Current | SchemaRow::Foreign | SchemaRow::ConvertIncomplete => false,
     })
+}
+
+/// Bytes per `read` while warming the index. A large buffer keeps the pass sequential.
+const PRE_READ_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
+/// Read `mdbx.dat` once so the copy's random lookups hit the page cache.
+///
+/// `DatabaseEnv::open` leaves `MDBX_NOSUBDIR` unset, so the data file is
+/// `mdbx.dat` inside the directory passed to open. A missing file or a
+/// permission error is only a warning: the migration still runs.
+fn pre_read_index_file(dir: &Path) {
+    let path = dir.join("mdbx.dat");
+    let started = Instant::now();
+    match read_file_bytes(&path) {
+        Ok(bytes) => {
+            let elapsed = started.elapsed();
+            let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+            let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX).max(1);
+            // Decimal MB/s: bytes/s divided by 1_000_000.
+            let mb_per_sec = bytes.saturating_mul(1_000) / nanos;
+            tracing::info!(
+                path = %path.display(),
+                bytes,
+                elapsed_ms,
+                mb_per_sec,
+                "submodule index pre-read"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "submodule index pre-read failed"
+            );
+        }
+    }
+}
+
+fn read_file_bytes(path: &Path) -> std::io::Result<u64> {
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = vec![0_u8; PRE_READ_BUFFER_BYTES];
+    let mut bytes = 0_u64;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            return Ok(bytes);
+        }
+        bytes = bytes.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+    }
 }
 
 fn log_open(path: &Path, stats: &MigrationStats) {
@@ -2532,6 +2587,80 @@ mod tests {
             resume_done,
             resume_elapsed_ms,
         }
+    }
+
+    /// A v1 open reads `mdbx.dat` once before the copy starts. A later v2
+    /// open of the same directory does not. The byte count is the file
+    /// length at the hook, which runs before any migration write.
+    #[test]
+    fn v1_migration_pre_reads_the_index_and_v2_open_does_not() -> eyre::Result<()> {
+        const ROWS: u32 = 4;
+        let dir = temp("sm-v1-preread");
+        let args = testing_args()?;
+        write_contiguous(dir.path(), ROWS)?;
+        let size = std::sync::Arc::new(std::sync::Mutex::new(0_u64));
+        let recorded = size.clone();
+        super::DURING_MIGRATION.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(move |path| {
+                let len = std::fs::metadata(path.join("mdbx.dat"))
+                    .expect("mdbx.dat")
+                    .len();
+                *recorded.lock().expect("size") = len;
+            }));
+        });
+
+        let capture = LogCapture::default();
+        let (env, stats) = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(
+                dir.path(),
+                args.clone(),
+                SubmoduleMigrationOptions::default(),
+            )
+        })?;
+        assert!(stats.migrated);
+        drop(env);
+        let events = capture.events.lock().expect("events");
+        let pre = find_message(&events, "submodule index pre-read");
+        let file_bytes = *size.lock().expect("size");
+        assert!(file_bytes > 0, "hook did not see mdbx.dat");
+        assert_eq!(u64_field(pre, "bytes"), file_bytes);
+        assert!(
+            str_field(pre, "path").ends_with("mdbx.dat"),
+            "{}",
+            str_field(pre, "path")
+        );
+        assert!(has_field(pre, "elapsed_ms"));
+        assert!(has_field(pre, "mb_per_sec"));
+        let pre_at = events
+            .iter()
+            .position(|event| event.message == "submodule index pre-read")
+            .expect("pre-read");
+        let start_at = events
+            .iter()
+            .position(|event| event.message == "submodule index migration started")
+            .expect("started");
+        assert!(
+            pre_at < start_at,
+            "pre-read must log before migration starts"
+        );
+        drop(events);
+
+        let capture = LogCapture::default();
+        let (_env, stats) = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(dir.path(), args, SubmoduleMigrationOptions::default())
+        })?;
+        assert_eq!(stats.detected, DetectedSubmoduleSchema::V2);
+        assert!(!stats.migrated);
+        let events = capture.events.lock().expect("events");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.message != "submodule index pre-read"),
+            "{events:?}"
+        );
+        Ok(())
     }
 
     /// A 4-row copy is far below the old 100_000-row log. The start line still
