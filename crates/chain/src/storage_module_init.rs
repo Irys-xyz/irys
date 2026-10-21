@@ -1,9 +1,9 @@
 //! Open every storage module before the node serves traffic.
 //!
-//! Each module migrates its own index. The migration is limited by that
-//! module's disk. The infos do not name a device, so this uses one thread
-//! per module. A CPU cap would leave the other disks idle. Threads join
-//! before the function returns. A failure does not cancel the others.
+//! Each module migrates its own index, limited by that module's disk. Every
+//! open runs on the tokio blocking pool at once, so the disks work in
+//! parallel and no async worker blocks on a migration. A failure does not
+//! cancel the others.
 
 use std::sync::Arc;
 #[cfg(test)]
@@ -12,50 +12,43 @@ use std::time::Duration;
 use irys_domain::{StorageModule, StorageModuleInfo};
 use irys_types::Config;
 
-pub(super) fn open_storage_modules(
+pub(super) async fn open_storage_modules(
     config: &Config,
     infos: Vec<StorageModuleInfo>,
     #[cfg(test)] open_delay: Duration,
 ) -> eyre::Result<Vec<Arc<StorageModule>>> {
-    if infos.is_empty() {
-        return Ok(Vec::new());
-    }
-    std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(infos.len());
-        for info in &infos {
-            // `info` and `config` are shared for the scope. `move` copies the
-            // references into the thread. The infos do not name a device.
-            handles.push(scope.spawn(move || {
-                #[cfg(test)]
-                if !open_delay.is_zero() {
-                    std::thread::sleep(open_delay);
-                }
-                StorageModule::new(info, config).map(Arc::new)
-            }));
-        }
-        let mut opened = Vec::with_capacity(infos.len());
-        let mut failures = Vec::new();
-        for (info, handle) in infos.iter().zip(handles) {
-            match handle.join() {
-                Ok(Ok(module)) => opened.push(module),
-                Ok(Err(err)) => {
-                    failures.push(format!("{}: {err:#}", module_label(info)));
-                }
-                Err(_) => {
-                    failures.push(format!("{}: panicked while opening", module_label(info)));
-                }
+    let labels: Vec<String> = infos.iter().map(module_label).collect();
+    let opens = infos.into_iter().map(|info| {
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if !open_delay.is_zero() {
+                std::thread::sleep(open_delay);
             }
+            StorageModule::new(&info, &config).map(Arc::new)
+        })
+    });
+    let results = futures::future::join_all(opens).await;
+
+    let mut opened = Vec::with_capacity(results.len());
+    let mut failures = Vec::new();
+    for (label, result) in labels.iter().zip(results) {
+        match result {
+            Ok(Ok(module)) => opened.push(module),
+            Ok(Err(err)) => failures.push(format!("{label}: {err:#}")),
+            Err(err) if err.is_panic() => failures.push(format!("{label}: panicked while opening")),
+            Err(err) => failures.push(format!("{label}: {err}")),
         }
-        if failures.is_empty() {
-            Ok(opened)
-        } else {
-            Err(eyre::eyre!(
-                "failed to open {} storage module(s): {}",
-                failures.len(),
-                failures.join("; ")
-            ))
-        }
-    })
+    }
+    if failures.is_empty() {
+        Ok(opened)
+    } else {
+        Err(eyre::eyre!(
+            "failed to open {} storage module(s): {}",
+            failures.len(),
+            failures.join("; ")
+        ))
+    }
 }
 
 fn module_label(info: &StorageModuleInfo) -> String {
@@ -172,8 +165,8 @@ mod tests {
 
     /// Opens several v1 modules together. The break this catches is a serial
     /// loop, a reordered result, or an error that names only the first failure.
-    #[test]
-    fn parallel_v1_open_keeps_order_reports_every_failure_and_overlaps() -> eyre::Result<()> {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parallel_v1_open_keeps_order_reports_every_failure_and_overlaps() -> eyre::Result<()> {
         let tmp = TempDirBuilder::new().prefix("sm-open-parallel").build();
         let base = tmp.path();
         let config = config(base);
@@ -183,7 +176,7 @@ mod tests {
         }
         let infos = vec![info(10, "good-0"), info(20, "good-1"), info(30, "good-2")];
         let started = Instant::now();
-        let opened = open_storage_modules(&config, infos, DELAY)?;
+        let opened = open_storage_modules(&config, infos, DELAY).await?;
         let elapsed = started.elapsed();
         let ids: Vec<_> = opened.iter().map(|module| module.id).collect();
         assert_eq!(ids, vec![10, 20, 30]);
@@ -219,6 +212,7 @@ mod tests {
             ],
             Duration::ZERO,
         )
+        .await
         .expect_err("two modules have a foreign schema");
         let text = format!("{err:#}");
         assert!(

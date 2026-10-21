@@ -1911,7 +1911,7 @@ impl IrysNode {
         let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
 
-        let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
+        let storage_modules = Self::init_storage_modules(&config, storage_module_infos).await?;
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
         let ingress_proof_generation_state =
             irys_actors::chunk_ingress_service::IngressProofGenerationState::default();
@@ -2727,7 +2727,7 @@ impl IrysNode {
         )
     }
 
-    fn init_storage_modules(
+    async fn init_storage_modules(
         config: &Config,
         storage_module_infos: Vec<StorageModuleInfo>,
     ) -> eyre::Result<Arc<RwLock<Vec<Arc<StorageModule>>>>> {
@@ -2736,7 +2736,8 @@ impl IrysNode {
             storage_module_infos,
             #[cfg(test)]
             Duration::ZERO,
-        )?;
+        )
+        .await?;
         Ok(Arc::new(RwLock::new(storage_modules)))
     }
 
