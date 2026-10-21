@@ -4,7 +4,7 @@
 
 This file is the source of truth for the Data Tree v2 spec. The code in this crate cites its sections as "spec §N". Change the spec here, in the same commit as the code that implements the change.
 
-Data tree v2 replaces the v1 `data_root` tree for uploaded data. It drops offset notes, adds 4 KiB segment leaves inside each 256 KiB chunk, and binds `data_size` into the commitment. Status: proposed for adoption at the Estuary activation (the partition-resize hardfork). §14 lists the decisions still open, and §15 logs the decisions made. A reference implementation generated the vectors in §13, and §13 lists what it checked.
+Data tree v2 replaces the v1 `data_root` tree for uploaded data. It drops offset notes, adds 4 KiB segment leaves inside each 256 KiB chunk, and binds `data_size` into the commitment. Status: proposed for adoption at the Estuary activation (the partition-resize hardfork). §14 lists the deferred decision, and §15 logs the decisions made. A reference implementation generated the vectors in §13, and §13 lists what it checked.
 
 ## 1. Summary
 
@@ -83,10 +83,12 @@ The price: about 11% more hashing per chunk and 3% per chunk-proof check (§9), 
 | Parameter | Mainnet and testnet | `testing()` | Rule |
 | --- | --- | --- | --- |
 | `chunk_size` | 262,144 | 32 | unchanged consensus field |
-| `segments_per_chunk` (SPC) | 64 | 4 | NEW consensus config field: a power of two, `1`` ≤ SPC ≤ 256`, `chunk_size % SPC == 0`, checked at config load. The lower bound, 1 or 2, is open (§14 Q9) |
+| `segments_per_chunk` (SPC) | 64 | 4 | NEW consensus config field: a power of two, 1 ≤ SPC ≤ 256 in the tree; consumers may require more. `chunk_size % SPC == 0`, checked at config load |
 | `segment_size` | 4,096 | 8 | `chunk_size / SPC` |
 | `h` | 6 | 2 | `log2(SPC)`, the height of a chunk subtree |
 | `max_data_tx_chunks` | 20,971,520 (`2^24 + 2^22`, 5 TiB) | same | unchanged |
+
+The tree is a general primitive. A bound tighter than the rule above belongs to the consumer, not to the tree. The irys node's consensus config rejects SPC < 2 wherever the segment-PoA rule runs (§8).
 
 | Name | Value |
 | --- | --- |
@@ -194,7 +196,7 @@ path(c, R[0..C]):                         // chunk proof, leaf to root (RFC 6962
 
 ## 5. Proofs and verification
 
-A proof is concatenated 32-byte sibling hashes: no header, no leaf hash, no witness, no notes. The order is leaf to root (proposed, §14 Q1). Why the order changes from v1: a v1 proof holds both children of every node plus an offset note, so a verifier can check it from the root down. A v2 proof holds only the sibling at each level, so the check must start at the leaf and climb, because a parent's hash cannot be computed before the child's. Leaf to root stores the hashes in the order the check uses them; root to leaf would store the same hashes reversed, and every verifier would read the list backwards. The verifier computes the exact length from `(data_size, c[, j])` and rejects any other length.
+A proof is concatenated 32-byte sibling hashes: no header, no leaf hash, no witness, no notes. The order is leaf to root. Leaf to root is the default order for every proof in the protocol, including data-tree proofs and a future tagged `tx_path`. Storage keeps a proof in the order it arrived. Why the order changes from v1: a v1 proof holds both children of every node plus an offset note, so a verifier can check it from the root down. A v2 proof holds only the sibling at each level, so the check must start at the leaf and climb, because a parent's hash cannot be computed before the child's. Leaf to root stores the hashes in the order the check uses them; root to leaf would store the same hashes reversed, and every verifier would read the list backwards. The verifier computes the exact length from `(data_size, c[, j])` and rejects any other length.
 
 ```
 depth(c, C):                              // chunk-level siblings in the proof of chunk c
@@ -218,7 +220,7 @@ depth(c, C):                              // chunk-level siblings in the proof o
 | --- | --- | --- |
 | Chunk (`data_path`) | chunk-level siblings | `depth(c, C)`; empty if and only if `C = 1` |
 | Segment | `h` in-chunk siblings (level 0 first), then the chunk proof | `h + depth(c, C)` |
-| Multi-segment (`m` segments of one chunk) | sorted distinct indices, the segments, the in-chunk part, then the chunk proof once | encoding open (§14 Q2) |
+| Multi-segment (`m` segments of one chunk) | `m` independent segment proofs that share one chunk proof. Each segment carries its `h` in-chunk siblings. The chunk proof is sent once | `m × h + depth(c, C)` |
 | Size | `data_tree_root` | 1 |
 
 ```
@@ -262,15 +264,15 @@ climb(r, c, C, hashes):                   // RFC 9162 §2.1.3.2 inclusion walk, 
 - **Size proof:** `require node(data_tree_root, size_witness(n)) == D`.
 - **Packed bytes:** unpack, then trim to `chunk_len` or `segment_len` before hashing. The segment-PoA spec also requires the trimmed tail to unpack to zero.
 - **Empty proof:** valid only when `C = 1`. In storage, `None` means "no proof written" and an empty value is a present proof. Never treat an empty proof as missing.
-- **Multi-segment, if the compact form is chosen:** indices must be distinct, sorted and `< SPC`; every supplied hash must be used; the walk must end with one node. Cap the encoded length before parsing.
+- **Compact multiproof:** a possible future format, not the multi-segment encoding above. This spec defines no rules for it.
 
-| Upload | `C` | Max depth | v1 chunk path | Chunk proof | Segment proof | 4 segments of one chunk (independent / compact, at most) |
+| Upload | `C` | Max depth | v1 chunk path | Chunk proof | Segment proof | 4 segments of one chunk (option B / compact form) |
 | --- | --- | --- | --- | --- | --- | --- |
 | ≤ 1 chunk | 1 | 0 | 64 | **0** | 192 | 768 / 512 |
 | 1 GiB | 4,096 | 12 | 1,216 | **384** | 576 | 1,152 / 896 |
 | 5 TiB (max) | 20,971,520 | 25 | 2,464 | **800** (736 for `c ≥ 2^24`) | 992 | 1,568 / 1,312 |
 
-All sizes are in bytes and exclude the segment and chunk bytes.
+All sizes are in bytes and exclude the segment and chunk bytes. The last column is option B (`4 × h` in-chunk siblings plus one chunk proof), then a compact multiproof at most. The compact form is a possible future format. It is not defined here.
 
 ## 6. Trust anchor rule
 
@@ -279,8 +281,8 @@ Verify chunks and segments only against an **anchored** `data_commitment`: one d
 | Consumer | Anchor |
 | --- | --- |
 | L1 chunk ingress, PoA, mining, migration | the signed tx header |
-| Gateway receipt verifier | a `tx_root` proof: the leaf binds the root value (§14 Q4) and the leaf span gives `data_size` |
-| Gateway staging ingest | the item envelope signature |
+| Gateway receipt verifier | a proven `tx_root` leaf. Re-derive the commitment: the leaf value is `fold(data_tree_root, prefix_hash)` and the span note is the exact byte span, so the anchor is `node(data_tree_root, size_witness(span))` (§7) |
+| Gateway staging ingest | the item envelope, which signs `data_tree_root` and `data_size`. `data_commitment` is derived. Owner decision; gateway team sign-off pending (§15) |
 | Gateway relay | its payload-quorum attestation of the tx |
 | Gateway data service | tx records from the Indexer are not authenticated today. They need the signed header or a `tx_root` proof before the service deletes its size checks |
 
@@ -296,7 +298,8 @@ The data tx header keeps its layout and gets no new version tag (decided). From 
 
 - Both inputs are signed and the commitment is derived from them, so the size is bound to the commitment. Only chunk proofs show that the data matches it.
 - A tx whose `data_tree_root` was built for another size cannot have its last chunk proven under the signed size. Its data never verifies in full, so it never completes and expires like any unsupplied upload.
-- `tx_root` keeps its v1 format (offset notes) unless §14 Q3 changes it. Its leaf input is open (§14 Q4; proposed: `data_tree_root`, which leaves the `tx_root` code unchanged).
+- `tx_root` keeps its current format (32-byte offset notes). From activation, the PoA `tx_path` check rejects non-zero note padding (§14). A move to tagged 8-byte notes is open and may land with Estuary or a later fork (§14).
+- The leaf value is `fold(data_tree_root, prefix_hash) = H(H(data_tree_root) ‖ H(prefix_hash))`, with no domain tag. This is the same fold as today, on the renamed field. `prefix_hash` is the existing header field. The leaf span note is the exact `data_size`. A proven leaf authenticates both, so a verifier re-derives `node(data_tree_root, size_witness(span))`. The `tx_root` code is unchanged. Gateway `bundle_items_root` leaves use `data_tree_root` and the item's exact byte span.
 
 | Chunk message field (gossip, `POST /v1/chunk`, gateway batches) | Size | Note |
 | --- | --- | --- |
@@ -330,12 +333,13 @@ c = L − P_k, and require 0 ≤ c < C_k
 - The whole-chunk offset mapping above must land before v2: today's mapping uses raw-size byte ranges and drifts after any tx that does not end on a chunk boundary.
 - The PoA rule itself (which segment, the ticket, the forms) is in the segment-PoA spec.
 
+**Segments per chunk.** The tree allows 1 ≤ SPC ≤ 256 (§2). Wherever the segment-PoA rule runs, the irys node's consensus config rejects SPC < 2 at load time. With SPC = 1, a one-chunk upload has an empty segment proof, and an empty optional RLP field signs like an absent one (segment-PoA spec §6.3 rule 3). That bound is on this use of the tree. The tree stays general.
+
 **Other verifiers.** Mining (winning chunks), chunk migration, storage-module serving and ingress-proof checks use `verify_chunk` or the v2 builder against the header commitment. A storage module derives `c` from the placement (partition offset minus the tx's start), never from proof bytes.
 
 **Activation.** Let E be Estuary's activation block: the first epoch block whose timestamp is at or after the activation time. The v2 rules apply from the first child of E; E itself uses the old rules.
 
-- **Data txs before activation** (proposed, §14 Q8): no block up to and including E carries a data tx. Mainnet refuses data txs until then, and test networks restart from a reset. No pre-activation data tx can exist, and the fork release needs no v1 data code.
-- **If the team instead accepts data txs before activation**, two rules are needed. The fork release keeps v1 data verification for those blocks. An anchor rule makes a data tx invalid from the first child of E when its anchor block's height is below E's height on the same chain. Without the anchor rule, a reorg can return a pre-activation tx to the mempool, and a later block can include it with the v2 meaning.
+- **Data txs up to activation.** No block up to and including E carries a data tx. Mainnet refuses data txs in those blocks, and test networks restart from a reset. The header's root field changes meaning at E and has no version tag. Refusing these txs means none can carry the v1 meaning into v2, so the fork release needs no v1 data code and no anchor rule. The release-freeze mainnet scan (§11) is the precondition.
 
 ## 9. Cost
 
@@ -383,12 +387,12 @@ v2 ships at Estuary's activation, together with the partition resize and the seg
 **Preconditions.**
 
 - At release freeze, scan mainnet for any block with a data-chunk PoA and any tx whose data was stored. Expect none. If one exists, nodes that sync from genesis need today's verifier for those blocks, gated by height.
-- Keep it that way until activation (§8, §14 Q8). The fork release keeps the old capacity PoA path bit-exact, because mainnet sync from genesis needs it.
+- Keep it that way until activation (§8). The fork release keeps the old capacity PoA path bit-exact, because mainnet sync from genesis needs it.
 - The no-version-tag header decision depends on the reset happening at this same activation. If v2 misses Estuary, it needs its own fork and another testnet reset.
 
 **Order of work.**
 
-1. The L1 and gateway teams sign off this spec and close §14 Q1 to Q8, which fix wire formats, signed messages and the vectors.
+1. The wire-format decisions are closed (§15). Q3 stays deferred (§14) and does not change the data-tree vectors. The gateway team signs off the item envelope (§15).
 2. Generate the shared vectors (§13) from one reference implementation and check them into both repos. Each implementation passes them before it merges.
 3. Implement L1 and gateway in parallel. The gateway node simulator emits v2 proofs.
 4. Run a joint devnet: the gateway test harness against a node with the partition-resize migration, and the multiversion harness across the activation as a cutover.
@@ -405,22 +409,29 @@ v2 ships at Estuary's activation, together with the partition resize and the seg
 | `crates/types/src/transaction.rs` | field `data_root` becomes `data_tree_root` at the same position; a `data_commitment()` accessor derives the commitment; `data_chunks()` builds chunks with the v2 builder |
 | client builder (`irys.rs` merklize, api-client chunk upload) | v2 tree and chunk proofs; chunk messages carry `data_commitment` |
 | `crates/types/src/chunk.rs`, gossip types | `ChunkKey`; the root field of `UnpackedChunk` holds `data_commitment` |
-| consensus config | `segments_per_chunk` with load-time validation |
+| consensus config | `segments_per_chunk`: a power of two, 1 ≤ SPC ≤ 256, `chunk_size % SPC == 0`, checked at load (§2). Where the segment-PoA rule runs, also reject SPC < 2 at load. An empty segment proof signs like an absent optional RLP field (segment-PoA spec §6.3 rule 3). The tree stays general |
 | chunk ingress | `verify_chunk`, `InvalidChunkSize`, deletion of the v1 size machinery (§8); ingress-proof readiness becomes `!block_set.is_empty()` |
 | p2p | `InvalidChunkSize` is a peer fault; chunk gossip is keyed by `ChunkKey` |
 | database | chunk-key tables (§7); rows keyed by `data_commitment`; size-confirmation state deleted; the chunk backfill verifies with `verify_chunk`; database version bump |
-| storage modules | keys by `chunk_key` and `data_commitment`; `c` from the placement |
-| block validation and discovery | PoA data form per the segment-PoA spec; whole-chunk offset mapping (§8); activation rules (§8); `InvalidPromotionDataSizeMismatch` and the `tx_selector` size filter deleted |
+| storage modules | keys by `chunk_key` and `data_commitment`; `c` from the placement. Offset rows accept an empty proof and keep it distinct from no proof (`None`) (§5). Flags and the format byte sit directly after the proof and before the CRC: `[proof][flags][format][crc]` (Appendix A.1). Stored proofs stay leaf to root, as received |
+| mempool, block validation and discovery | reject every data tx in blocks up to and including E (§8). PoA data form per the segment-PoA spec; whole-chunk offset mapping (§8); activation rules (§8). From activation, the PoA `tx_path` check rejects non-zero note padding (§14). `InvalidPromotionDataSizeMismatch` and the `tx_selector` size filter deleted |
+| release freeze | scan mainnet for any data tx or data-chunk PoA (§11). Expect none. One found means the §8 refusal does not hold, and nodes that sync from genesis keep today's data verifier for those blocks, gated by height |
 | mining, chunk migration | `verify_chunk` against the header commitment |
-| ingress proofs | `verify_ingress_proof` rebuilds with the v2 builder; what a proof signs is §14 Q6 |
+| ingress proofs | the signed message is `data_commitment`. `verify_ingress_proof` rebuilds with the v2 builder and compares the commitment. Rows and gossip are keyed by `data_commitment`, so one proof covers one (data, size). A planned range-scoped proof signs `data_commitment` and the chunk range `[first, last]` (chunk indices, never byte offsets). A contiguous range could reuse this tree (subtree roots plus the boundary siblings). That API needs its own section and vectors |
 | API | `/internal/chunks` returns the v2 `data_path` with no version field (one format). JSON: the header key `dataRoot` becomes `dataTreeRoot`, chunk messages carry `dataCommitment`, and the chunk-by-root route is keyed by the commitment. Agree the names and the route with the gateway team |
 | tests | the shared vectors (§13), a shape lock for `C` from 1 to 4,097, property tests over random sizes, the negative cases |
 
-**Gateway, SDKs, simulator.** One gateway library serves the data tree, `tx_root` and the bundle index trees; only the data-tree code changes. Other changes: the item envelope and bundle roots (§14 Q7), receipts, relay, bundler, upload service, SDK, wasm build and node simulator. Receipt header bindings shrink from up to 529,216 B (1 to 2 full chunks with paths) to at most 10,176 B (1 to 2 segments with proofs). The joint L1 and gateway proposal lists every file. Gateway state resets with the testnet reset.
+| Gateway area | Change |
+| --- | --- |
+| Item envelope | signs `data_tree_root` and `data_size`. `data_commitment` is derived, as on the L1 header (§6). Owner decision; gateway team sign-off pending (§15) |
+| `bundle_items_root` | leaves use `data_tree_root` and the item's exact byte span, as `tx_root` does (§7) |
+| Custody framing | multi-segment answers use independent segment proofs that share one chunk proof (§5). The custody spec defines the framing |
+
+**Gateway, SDKs, simulator.** One gateway library serves the data tree, `tx_root` and the bundle index trees; only the data-tree code changes. The gateway table is that change. Other changes: receipts, relay, bundler, upload service, SDK, wasm build and node simulator. Receipt header bindings shrink from up to 529,216 B (1 to 2 full chunks with paths) to at most 10,176 B (1 to 2 segments with proofs). The joint L1 and gateway proposal lists every file. Gateway state resets with the testnet reset.
 
 ## 13. Test vectors
 
-The reference implementation (Python, standard library only) generated these values, assuming §14 Q1 = leaf to root and Q5 = data_size only. It also checked:
+The reference implementation (Python, standard library only) generated these values. Proof order is leaf to root (§5). The size witness covers `data_size` only: `H(0x02 ‖ be64(data_size))` (§3). It also checked:
 
 - the streaming builder against the recursive definition for every `C` from 1 to 299;
 - that every chunk proof and segment proof verifies, for every `data_size` from 1 to 199 in test geometry;
@@ -486,32 +497,35 @@ n        C  data_tree_root                                                    da
 | Roots, test geometry | `chunk_size` 32, SPC 4: `data_size` 1, 8, 9, 32, 33, 112, 157 |
 | Chunk proofs | every chunk for `C ≤ 17`; chunks 0, 2,047 and 4,095 of 1 GiB; `C = 5`, `c = 4` (one sibling) |
 | Segment proofs | every segment for `C ≤ 2`; for 917,504: `(3, 5)`, `(3, 31)` (last full), `(3, 32)` (first empty), `(3, 63)`; the partial segment `(0, 1)` of 4,097 B |
-| Multi-segment | after §14 Q2 closes: `m` = 1, 2, 4, 64 in one chunk; an adjacent pair; a pair across a chunk boundary (two proofs) |
+| Multi-segment | option B. In one chunk, `m` = 1, 2, 4 and 64: each case is `m` segment proofs (the `h` in-chunk siblings each) and one shared chunk proof. An adjacent pair in one chunk. A pair in two chunks, which is two chunk proofs |
 | Receipt header binding (gateway) | a 100 B span inside one segment, across two segments of one chunk, and across a chunk boundary |
-| `tx_root` | the leaf input chosen in Q4; if Q3 adopts notes and tags, their vectors, with leaves of size 1 and a run that does not end on a chunk boundary |
+| `tx_root` | leaf value `fold(data_tree_root, prefix_hash)`, span note the exact `data_size` (§7). If §14 adopts tagged 8-byte notes, add those vectors, with leaves of size 1 and a run that does not end on a chunk boundary |
 | Negative | wrong `data_size` with the same `C` and with another `C`; `c ≥ C`; proof one hash too long and too short; empty proof for `C > 1`; chunk length ±1; one flipped bit per sibling; a zero-padded segment; `data_size = 0`; a valid proof shown at another index with different bytes; a 64 B segment equal to `l ‖ r`; a commitment re-derived from an unauthenticated pair (§6) |
-| Wire | the tx header with `data_tree_root`; the chunk message JSON; the `/internal/chunks` response; the gateway item envelope and receipt |
+| Wire | the tx header with `data_tree_root`; the chunk message JSON; the `/internal/chunks` response; the gateway item envelope (signs `data_tree_root` and `data_size`) and receipt |
 
-## 14. Open team decisions
+## 14. Deferred decisions
 
-Q1 to Q8 change wire formats, signed messages or the §13 vectors, so they close before the shared vectors are generated (§11, step 2).
+Q1, Q2 and Q4 to Q9 are decided (§15). They are closed, as §11 step 2 requires before the shared vectors are generated. One item stays deferred. It does not change the data-tree wire format or those vectors.
 
-| # | Decision | Options | Recommendation | Depends on or affects |
-| --- | --- | --- | --- | --- |
-| Q1 | Proof order | Leaf to root (the order the RFC 9162 inclusion check reads, §5; a verifier can hash while it reads) or root to leaf (matches today's `data_path` and `tx_path`) | Leaf to root | The segment-PoA spec's decided `PoaData` layout already puts the segment proof in leaf-to-root order. Root to leaf changes that spec too |
-| Q2 | Multi-segment proof encoding | A: one compact multiproof (saves at least 256 B per 4-segment answer, about 1.4%; needs one canonical sibling order everywhere). B: independent segment proofs that share one chunk proof (no new code) | B, unless the custody spec needs the bytes | Custody answers only: under the segment-PoA spec a PoA reveals one segment |
-| Q3 | `tx_root` format | Adopt 8-byte notes and domain tags in this fork (removes 24 malleable bytes per node, `tx_path` about 25% smaller, node and gateway verifiers agree), or keep today's format | Team call: adopting touches block production, validation, PoA and gateway receipts | If kept, the PoA `tx_path` check rejects non-zero note padding from activation (decided fallback), and the cross-tree caveat in §10 stays. New tags must avoid `0x00` to `0x04` |
-| Q4 | `tx_root` leaf input | `fold(data_tree_root, prefix_hash)` or `fold(data_commitment, prefix_hash)` | `data_tree_root`: the `tx_root` code stays as it is and Q3 stays independent | The gateway's `bundle_items_root` leaves follow the same choice |
-| Q5 | Geometry in the size witness | `data_size` only, or also `be32(chunk_size) ‖ be16(SPC)` | Team call. The geometry form makes a commitment self-describing for tools that read several networks; it costs 6 bytes in one hash input and no proof bytes | Changes `size_witness` and every vector |
-| Q6 | What an ingress proof signs | `data_commitment`, or `data_tree_root` until the custody claims of the data custody proposal replace ingress proofs | `data_commitment`: it fixes the size, so one proof cannot serve two sizes | The custody redesign replaces ingress proofs later |
-| Q7 | Gateway item envelope | Sign `data_tree_root` and `data_size` with the commitment derived, as the L1 header does | Recommended; the gateway team decides | The one-format premise for L1 and gateway needs it |
-| Q8 | Data txs before activation | Refuse every data tx up to and including the activation block (mainnet has none today), or accept them with the v1 meaning | Refuse: no pre-activation data tx then exists, and the fork release needs no v1 data code and no anchor rule | If accepted: the fork release keeps v1 data verification for those blocks and adds the anchor rule (§8) |
-| Q9 | Lower bound of segments_per_chunk | (1) SPC ≥ 2 wherever the segment-PoA rule runs, and move tests that use a chunk size of 1 or 5 to chunk size 32 with SPC 4. (2) Allow SPC = 1 only in test configs that never run the segment-PoA rule | Owner decision, raised 2026-10-19 | With SPC = 1 (h = 0), a one-chunk upload has an empty segment proof. An empty optional field signs like an absent one in RLP, which brings back PoA malleability (segment-PoA spec §6.3 rule 3). A chunk size of 5 has no power-of-two divisor above 1 |
+| # | Baseline | Open option |
+| --- | --- | --- |
+| Q3, `tx_root` format | Keep today's format. From activation the PoA `tx_path` check rejects non-zero note padding. The cross-tree caveat in §10 stays | Tagged 8-byte notes. This removes 24 malleable bytes per node, makes `tx_path` about 25% smaller, and closes the §10 caveat. It may land with Estuary or a later fork. New tags must avoid `0x00` to `0x04` |
+
+The data root is external: clients, SDKs and the gateway commit to it. It lands first, and it is hard to change later. `tx_root` is internal to the protocol, so its format can change in any fork. That is why the data tree is fixed now and the `tx_root` format can wait.
 
 ## 15. Decision log
 
 | Date | Decision |
 | --- | --- |
+| 2026-10-21 | Q1. Proof order is leaf to root, and leaf to root is the default order for every proof in the protocol. Compression is not a reason to pick an order: the measured gap comes from where the constant row bytes sit, not from the order (Appendix A.1) |
+| 2026-10-21 | Q2. A multi-segment answer is independent segment proofs that share one chunk proof. A compact multiproof saves about 1.4% and needs a second consensus verifier, so it is not this format. It can be a later format if custody needs it |
+| 2026-10-21 | Q4. A `tx_root` leaf value is `fold(data_tree_root, prefix_hash)` and the span note is the exact `data_size`. A proven leaf authenticates both, so a verifier re-derives `node(data_tree_root, size_witness(span))`. The `tx_root` code stays unchanged |
+| 2026-10-21 | Q5. The size witness covers `data_size` only: `H(0x02 ‖ be64(data_size))`. Geometry is already on the consensus surface a client needs before it can verify, so the commitment does not repeat it |
+| 2026-10-21 | Q6. An ingress proof signs `data_commitment`, so one proof covers exactly one (data, size). A planned proof of a chunk range binds `data_commitment` and that range for the same reason |
+| 2026-10-21 | Q7. The gateway item envelope signs `data_tree_root` and `data_size`, and `data_commitment` is derived, as the L1 header does. This anchors the size and keeps one format for L1, the gateway and SDKs. Owner decision; gateway team sign-off pending |
+| 2026-10-21 | Q8. Every data tx in a block up to and including Estuary's activation block E is refused. Mainnet stores no data and test networks reset, so no pre-activation data tx can exist, and the fork release needs no v1 data code and no anchor rule |
+| 2026-10-21 | Q9. The tree's rule is 1 ≤ SPC ≤ 256, a power of two, and it sets no tighter protocol floor. A bound is a property of how the tree is used, not of the tree. The irys node rejects SPC < 2 wherever the segment-PoA rule runs, because an empty segment proof signs like an absent optional RLP field |
+| 2026-10-21 | The data root is external: clients, SDKs and the gateway commit to it, so it lands first and is hard to change later. `tx_root` is internal to the protocol and can change in any fork |
 | 2026-10-19 | Tag registry `0x00` to `0x04` (`0x04` is the mining ticket) and `segments_per_chunk ≤ 256` (segment-PoA spec, ticket encoding) |
 | 2026-10-19 | The fork release deletes the old data-PoA verifier and keeps the capacity PoA path bit-exact |
 | 2026-10-19 | `tx_path` note padding: if `tx_root` keeps its format, the PoA check rejects non-zero padding from activation |
@@ -525,3 +539,55 @@ Q1 to Q8 change wire formats, signed messages or the §13 vectors, so they close
 | 2026-10-18 | Witness layout: `data_commitment = node(data_tree_root, size_witness)`, the size witness as the root's right child |
 
 Proposed with the approved design, not decided on their own: the last chunk is a perfect subtree with empty leaves, and the chunk level keeps today's RFC 6962 shape.
+
+## Appendix A. Measurements
+
+### A.1 Proof order and RocksDB compression
+
+This measures the stored size of leaf-to-root and root-to-leaf chunk proofs under LZ4, and the effect of the row trailer.
+
+**Rows.** 65,536 proofs, mainnet geometry (`chunk_size` 262,144, SPC 64). The one-upload case is one 16 GiB upload. Every proof has depth 16, so the proof is 512 bytes. A raw row is that proof plus a 6-byte trailer: 518 bytes. Value-only LZ4 stores that row at about 80 bytes.
+
+**Production settings, as of this writing.** `ChunkMetaByOffset` uses `RocksTuning::baseline` (`crates/database/src/submodule/rocks.rs:172-192`) through `column_options` (`rocks.rs:3617-3696`). Compression is LZ4 (`rocks.rs:3646-3658`). The block size is `BLOCK_BYTES`, 64 KiB (`rocks.rs:60`). `encode_offset_meta` (`crates/database/src/submodule/records.rs:30-54`) writes a non-empty proof, then the CRC little-endian when present (`records.rs:48-50`), then the flags byte (`records.rs:44-47`). `HAS_PROOF | CRC_PRESENT` is `0x03` (`records.rs:16-18`). The format byte is `1` (`records.rs:14`, `records.rs:53`). An empty proof returns an error (`records.rs:37-39`).
+
+**Value-only LZ4.** Consecutive row values, no keys, packed on row boundaries into groups of at most 64 KiB. Each group is one LZ4 default block with no size prefix. 65,536 rows of the one upload:
+
+| Row trailer layout | leaf to root | root to leaf |
+| --- | --- | --- |
+| today: `[proof][CRC 4 B][flags 0x03][format 0x01]` | 80.04 B/row | 77.90 B/row |
+| `[proof][flags][format][CRC]` | 77.65 B/row | 79.81 B/row |
+| 6 random trailer bytes | 80.02 B/row | 79.82 B/row |
+
+**RocksDB SST.** The same proof bytes, today's trailer only, and the production `ChunkMetaByOffset` options above (LZ4, 64 KiB blocks). The size is the live SST after one batch, a flush, and a full compaction with bottommost compaction forced.
+
+| Upload mix | leaf to root | root to leaf |
+| --- | --- | --- |
+| one 16 GiB upload | 5,616,187 B | 5,422,387 B (-3.45%) |
+| mixed uploads | 5,459,663 B | 5,264,187 B (-3.58%) |
+| one-chunk uploads | 651,429 B | 651,429 B |
+
+**Why.** LZ4 copies the run of upper siblings that neighbouring proofs share, in either order. Leaf to root puts that run at the end of the proof. Root to leaf puts it at the start. A match extends only over bytes that are equal in both copies, and a match needs 4 bytes to start. The two constant trailer bytes (`0x03`, `0x01`) therefore help only the order in which they touch the shared run. A per-row CRC between the run and those bytes blocks the extension. With six trailer bytes that vary per row, the orders tie: 80.02 B/row and 79.82 B/row, a 0.25% gap. Proof order itself does not change compressibility.
+
+**Conclusion.** There is no storage reason to prefer an order. Place the constant row bytes next to the shared run. Leaf to root is the protocol default (§5), so that run is a suffix: the flags and the format byte go directly after the proof, and the CRC goes last (§12).
+
+**Rebuilding the measurement.** The bench code is not in this repo. Two programs produced the tables. Both use `Geometry::MAINNET` and the streaming builder: `push_chunk_root(leaf(preimage), chunk_size)`, then `finish`, then `chunk_proof`. The preimage is 12 bytes: a `u64` upload id in little-endian, then the chunk index as a `u32` in little-endian. Leaf to root is the proof the builder returns. Root to leaf lists those 32-byte hashes from the last hash back to the first.
+
+The per-row CRC is `splitmix32` of the offset, as a wrapping `u32`. Start from `offset + 0x9E3779B9`. Then `x = (x xor (x >> 16)) * 0x85EBCA6B`, `x = (x xor (x >> 13)) * 0xC2B2AE35`, and the result is `x xor (x >> 16)`. This is not a checksum of a chunk. It makes four trailer bytes differ per row. The same CRC is used for both orders.
+
+Value-only table. One upload, id 1, 65,536 chunks. Three trailers, each 6 bytes:
+
+- today: CRC little-endian, then `0x03`, then `0x01`
+- constants first: `0x03`, `0x01`, then the CRC little-endian
+- 6 random bytes: CRC little-endian, then the low 2 bytes of `splitmix32(offset xor 0xFFFF)`. Every one of those six bytes can differ per row. None is constant
+
+Pack the rows in order into groups of at most 64 KiB. Split only between rows. Compress each group with `LZ4_compress_default`. The `lz4` 1.28.1 crate calls this `lz4::block::compress` with `CompressionMode::DEFAULT` and the size prefix off. Sum the compressed lengths and divide by 65,536.
+
+SST table. Today's trailer only. A non-empty value is the byte string `encode_offset_meta` writes for a proof and a CRC. One-chunk rows are the 6-byte trailer and no proof bytes. `encode_offset_meta` returns an error for an empty proof (`records.rs:37-39`), so the measurement writes those six bytes directly.
+
+- One 16 GiB upload: upload id 1, every proof 512 bytes.
+- Mixed uploads: each upload is its own tree. Lengths are log-uniform on 1..=4,096 chunks, seed `0xA11CE`, and the last upload is clipped to the chunks left in the 65,536 span. Upload ids start at 1. Draw with xorshift64 (`x ^= x << 13`, `x ^= x >> 7`, `x ^= x << 17`). Bucket `draw % 13` selects the size class: bucket 0 is 1 chunk, and bucket `k` (1..=12) is `2^(k-1)+1 ..= 2^k`. The size inside the class is uniform in the draw. This draw yields 96 uploads.
+- One-chunk uploads: 65,536 trees of one chunk. The chunk proof is empty, so the order does not change a byte.
+- Key: the offset as 4 big-endian bytes. Offsets are `0..=65535`.
+- Open `ChunkMetaByOffset` with the baseline options cited above. Write one batch, flush the family, then compact the whole key range with bottommost compaction forced. The SST size is the sum of live file sizes for that family.
+
+The one-chunk SST matches to the byte in either order. The blobs preset sends a value to a blob file at or above 2,048 bytes (`BLOB_MIN_BYTES`, `rocks.rs` line 67). Every row here is 6 to 518 bytes, so that preset writes the same SST and no blob file. Block-cache size does not change these SST bytes.
