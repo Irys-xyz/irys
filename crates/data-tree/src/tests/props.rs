@@ -157,30 +157,19 @@ fn check_proof_mutation(
     proof: Vec<u8>,
     check: impl Fn(&[u8]) -> Result<(), VerifyError>,
 ) -> Result<(), TestCaseError> {
-    if proof.is_empty() {
-        // `C = 1` chunk proofs are empty. Junk of 1 byte or one hash is the wrong length.
-        let err = check(&[0]).unwrap_err();
-        prop_assert_eq!(
-            err,
-            VerifyError::InvalidProofLength {
-                expected: 0,
-                actual: 1
-            }
-        );
-        let err = check(&[0_u8; HASH_SIZE]).unwrap_err();
-        prop_assert_eq!(
-            err,
-            VerifyError::InvalidProofLength {
-                expected: 0,
-                actual: HASH_SIZE
-            }
-        );
-        return Ok(());
+    // Every proof ends with the size witness, so the last hash is never absent.
+    prop_assert!(proof.len() >= HASH_SIZE);
+    let mut wrong_witness = proof.clone();
+    let last = wrong_witness.len() - 1;
+    wrong_witness[last] ^= 1;
+    let err = check(&wrong_witness).unwrap_err();
+    prop_assert_eq!(err, VerifyError::SizeWitnessMismatch);
+    if proof.len() > HASH_SIZE {
+        let mut flipped_sibling = proof;
+        flipped_sibling[0] ^= 1;
+        let err = check(&flipped_sibling).unwrap_err();
+        prop_assert_eq!(err, VerifyError::CommitmentMismatch);
     }
-    let mut flipped_proof = proof;
-    flipped_proof[0] ^= 1;
-    let err = check(&flipped_proof).unwrap_err();
-    prop_assert_eq!(err, VerifyError::CommitmentMismatch);
     Ok(())
 }
 

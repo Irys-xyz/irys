@@ -298,11 +298,25 @@ fn assert_spec_chunk_proof(file: &VectorFile<ChunkProofCase>) {
             case.data_size == 112 && case.chunk_index == 2 && case.geometry.chunk_size == 32
         })
         .expect("spec §13 chunk proof");
-    let proof = concat!(
+    // spec §13: the reference printed the siblings. The last hash is the witness.
+    let siblings = concat!(
         "dbc3c2433981a503f8ffa38629a9ec5d41501618b2afd860af52d6a93e06e8b6",
         "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
     );
-    assert_eq!(case.proof, proof, "spec §13 n=112 chunk proof");
+    assert!(
+        case.proof.starts_with(siblings),
+        "spec §13 n=112 chunk proof siblings"
+    );
+    assert_eq!(
+        case.proof.len(),
+        siblings.len() + HASH_SIZE * 2,
+        "spec §13 n=112 chunk proof length"
+    );
+    assert_eq!(
+        &case.proof[siblings.len()..],
+        hex_of(size_witness(112).as_bytes()),
+        "spec §13 n=112 chunk proof size witness"
+    );
     assert_eq!(
         case.data_commitment,
         "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5"
@@ -320,13 +334,27 @@ fn assert_spec_segment_proof(file: &VectorFile<SegmentProofCase>) {
                 && case.geometry.chunk_size == 32
         })
         .expect("spec §13 segment proof");
-    let proof = concat!(
+    // spec §13: the reference printed the siblings. The last hash is the witness.
+    let siblings = concat!(
         "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5",
         "fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072a",
         "f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65",
         "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
     );
-    assert_eq!(case.proof, proof, "spec §13 n=112 segment proof");
+    assert!(
+        case.proof.starts_with(siblings),
+        "spec §13 n=112 segment proof siblings"
+    );
+    assert_eq!(
+        case.proof.len(),
+        siblings.len() + HASH_SIZE * 2,
+        "spec §13 n=112 segment proof length"
+    );
+    assert_eq!(
+        &case.proof[siblings.len()..],
+        hex_of(size_witness(112).as_bytes()),
+        "spec §13 n=112 segment proof size witness"
+    );
 }
 
 fn assert_spec_chunk_key(file: &VectorFile<PrimitiveCase>) {
@@ -701,7 +729,9 @@ fn check_one_multi_segment(
             let segment_proof = tree
                 .segment_proof(chunk.chunk_index, segment_index, chunk_bytes)
                 .unwrap_or_else(|err| panic!("{segment_label}: {err}"));
-            // spec §5: h in-chunk siblings, then the chunk proof.
+            // spec §5: in-chunk siblings concatenated with the chunk proof.
+            // The chunk proof ends with the size witness, so this is the whole
+            // proof in every case, including one chunk.
             let in_chunk_len = usize::try_from(geometry.height()).expect("height fits") * HASH_SIZE;
             assert_eq!(
                 segment_proof.len(),
@@ -781,7 +811,14 @@ fn check_chunk_mutation(geometry: &Geometry, case: &NegativeCase) {
     let honest = tree
         .chunk_proof(case.chunk_index)
         .unwrap_or_else(|err| panic!("{}: {err}", case.name));
-    let proof = mutate_chunk_proof(&honest, case.mutation);
+    let mut proof = mutate_chunk_proof(&honest, case.mutation);
+    if case.unanchored_commitment.is_some() {
+        // spec §6: the proof's last hash is size_witness of the claimed size.
+        // The true witness is rejected before the climb (spec §5).
+        let witness = size_witness(case.data_size);
+        let start = proof.len() - HASH_SIZE;
+        proof[start..].copy_from_slice(witness.as_bytes());
+    }
     let bytes = mutate_chunk_bytes(chunk, case.mutation);
     assert_eq!(hex_of(&proof), case.proof, "{}", case.name);
     assert_eq!(
@@ -899,8 +936,13 @@ fn check_two_digest_segment(geometry: &Geometry, case: &NegativeCase) {
         "{}",
         case.name
     );
-    assert!(case.proof.is_empty(), "{}", case.name);
     let tree = DataTree::from_bytes(*geometry, &bytes).expect("two digests are one chunk");
+    // `h = 0` and `C = 1`: the segment proof is the size witness (spec §5).
+    let proof = tree
+        .segment_proof(0, 0, &bytes)
+        .expect("one segment of one chunk");
+    assert_eq!(proof.as_slice(), size_witness(data_size).as_bytes());
+    assert_eq!(hex_of(&proof), case.proof, "{}", case.name);
     verify_segment(
         geometry,
         &tree.data_commitment(),
@@ -908,10 +950,10 @@ fn check_two_digest_segment(geometry: &Geometry, case: &NegativeCase) {
         0,
         0,
         &bytes,
-        &[],
+        &proof,
     )
     .unwrap_or_else(|err| panic!("{} honest leaf: {err}", case.name));
-    expect_segment_error(geometry, &mistaken, case, &bytes, &[]);
+    expect_segment_error(geometry, &mistaken, case, &bytes, &proof);
 }
 
 fn expect_chunk_error(
@@ -962,15 +1004,21 @@ fn mutate_chunk_proof(honest: &[u8], mutation: Mutation) -> Vec<u8> {
     match mutation {
         Mutation::AppendOneZeroHash => {
             let mut proof = honest.to_vec();
+            // One extra hash before the witness. The length check rejects it (spec §5).
+            let witness = proof.split_off(proof.len() - HASH_SIZE);
             proof.extend_from_slice(&[0_u8; HASH_SIZE]);
+            proof.extend_from_slice(&witness);
             proof
         }
         Mutation::DropLastHash => {
             assert!(
-                honest.len() > HASH_SIZE,
-                "one hash too short leaves a proof"
+                honest.len() >= 2 * HASH_SIZE,
+                "one hash too short drops a sibling and keeps the size witness"
             );
-            honest[..honest.len() - HASH_SIZE].to_vec()
+            let witness_start = honest.len() - HASH_SIZE;
+            let mut proof = honest[..witness_start - HASH_SIZE].to_vec();
+            proof.extend_from_slice(&honest[witness_start..]);
+            proof
         }
         Mutation::EmptyProof => {
             assert!(
@@ -1182,6 +1230,7 @@ fn error_kind(err: &VerifyError) -> &'static str {
         VerifyError::InvalidChunkLength { .. } => "InvalidChunkLength",
         VerifyError::InvalidSegmentLength { .. } => "InvalidSegmentLength",
         VerifyError::InvalidProofLength { .. } => "InvalidProofLength",
+        VerifyError::SizeWitnessMismatch => "SizeWitnessMismatch",
         VerifyError::CommitmentMismatch => "CommitmentMismatch",
     }
 }

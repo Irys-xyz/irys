@@ -198,8 +198,8 @@ pub(super) fn edge_biased_segment_index(segments_per_chunk: u32) -> impl Strateg
 /// `(chunk_index, chunk_count)` with `chunk_count >= 1` and
 /// `chunk_index < chunk_count`. That is `depth`'s precondition (spec §5).
 pub(super) fn chunk_index_below_count() -> impl Strategy<Value = (u32, u32)> {
-    // `edge_biased_u32` draws 0 often. Map it to 1 so `C = 1` (an empty chunk
-    // proof, spec §5) stays an edge instead of being dropped.
+    // `edge_biased_u32` draws 0 often. Map it to 1 so `C = 1` (a proof that is
+    // only the size witness, spec §5) stays an edge instead of being dropped.
     edge_biased_u32()
         .prop_map(|chunk_count| if chunk_count == 0 { 1 } else { chunk_count })
         .prop_flat_map(|chunk_count| {
@@ -644,9 +644,10 @@ fn proof_length_choices(geometry: Geometry, data_size: u64, chunk_index: u32) ->
     {
         let chunk_depth =
             usize::try_from(depth(chunk_index, chunk_count)).expect("depth fits usize");
-        push_hash_count_near(&mut lengths, chunk_depth);
+        // The proof is the siblings plus the size witness (spec §5).
+        push_hash_count_near(&mut lengths, chunk_depth + 1);
         let segment_hashes =
-            usize::try_from(geometry.height()).expect("height fits usize") + chunk_depth;
+            usize::try_from(geometry.height()).expect("height fits usize") + chunk_depth + 1;
         push_hash_count_near(&mut lengths, segment_hashes);
     }
     lengths.retain(|length| *length <= UNTRUSTED_INPUT_BYTE_CAP);

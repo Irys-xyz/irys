@@ -1,6 +1,7 @@
 use crate::error::{GeometryError, SizeError, VerifyError};
 use crate::geometry::{Geometry, MAX_SEGMENTS_PER_CHUNK};
 use crate::shape::depth;
+use crate::size_witness;
 use crate::types::{DataCommitment, HASH_SIZE};
 use crate::verify_segment;
 use rstest::rstest;
@@ -232,8 +233,12 @@ fn verify_segment_does_not_panic_on_the_extreme_geometries() {
         .unwrap();
     let segment_bytes = usize::try_from(segment_length).unwrap();
     let bytes = vec![0_u8; segment_bytes];
-    let hash_count = geometry.height() + depth(chunk_index, chunk_count);
-    let proof = vec![0_u8; usize::try_from(hash_count).unwrap() * HASH_SIZE];
+    let hash_count = geometry.height() + depth(chunk_index, chunk_count) + 1;
+    let mut proof = vec![0_u8; usize::try_from(hash_count).unwrap() * HASH_SIZE];
+    // The last hash is the witness, so the climb runs and the dummy commitment fails.
+    let witness = size_witness(data_size);
+    let witness_start = proof.len() - HASH_SIZE;
+    proof[witness_start..].copy_from_slice(witness.as_bytes());
     assert_eq!(
         verify_segment(
             &geometry,

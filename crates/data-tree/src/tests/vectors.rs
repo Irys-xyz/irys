@@ -5,7 +5,7 @@ use super::{assert_hex, concat_hex, pattern};
 use crate::DataTree;
 use crate::MAX_SUBTREE_HEIGHT;
 use crate::geometry::Geometry;
-use crate::hash::{self, empty, leaf};
+use crate::hash::{self, empty, leaf, size_witness};
 use crate::types::DataTreeRoot;
 use crate::types::HASH_SIZE;
 use crate::verify::{verify_chunk, verify_segment};
@@ -172,25 +172,34 @@ fn testing_n112_proof_vectors() {
 
     let chunk2 = chunk_bytes(&geometry, &data, data_size, 2);
     let chunk_proof = tree.chunk_proof(2).unwrap();
+    // spec §13: the reference printed the siblings. The last hash is the witness.
+    let chunk_siblings = concat_hex(&[
+        "dbc3c2433981a503f8ffa38629a9ec5d41501618b2afd860af52d6a93e06e8b6",
+        "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
+    ]);
+    assert_eq!(chunk_proof[..chunk_proof.len() - HASH_SIZE], chunk_siblings);
     assert_eq!(
-        chunk_proof,
-        concat_hex(&[
-            "dbc3c2433981a503f8ffa38629a9ec5d41501618b2afd860af52d6a93e06e8b6",
-            "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
-        ])
+        &chunk_proof[chunk_proof.len() - HASH_SIZE..],
+        size_witness(data_size).as_bytes()
     );
     verify_chunk(&geometry, &commitment, data_size, 2, &chunk2, &chunk_proof).unwrap();
 
     let chunk3 = chunk_bytes(&geometry, &data, data_size, 3);
     let segment_proof = tree.segment_proof(3, 1, &chunk3).unwrap();
+    // spec §13: the reference printed the siblings. The last hash is the witness.
+    let segment_siblings = concat_hex(&[
+        "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5",
+        "fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072a",
+        "f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65",
+        "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
+    ]);
     assert_eq!(
-        segment_proof,
-        concat_hex(&[
-            "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5",
-            "fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072a",
-            "f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65",
-            "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
-        ])
+        segment_proof[..segment_proof.len() - HASH_SIZE],
+        segment_siblings
+    );
+    assert_eq!(
+        &segment_proof[segment_proof.len() - HASH_SIZE..],
+        size_witness(data_size).as_bytes()
     );
     let segment_length = usize::try_from(geometry.segment_len(data_size, 3, 1).unwrap()).unwrap();
     let segment_offset = usize::try_from(geometry.segment_size()).unwrap();

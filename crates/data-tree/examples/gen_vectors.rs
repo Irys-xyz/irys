@@ -463,8 +463,8 @@ fn push_chunk_indexes(
         let sibling_count = depth(chunk_index, chunk_count);
         assert_eq!(
             proof.len(),
-            usize::try_from(sibling_count).expect("depth fits") * HASH_SIZE,
-            "proof length is 32 * depth (spec §5)"
+            (usize::try_from(sibling_count).expect("depth fits") + 1) * HASH_SIZE,
+            "proof length is 32 * (depth + 1) (spec §5)"
         );
         if chunk_count == 5 && chunk_index == 4 {
             assert_eq!(
@@ -576,11 +576,11 @@ fn push_segment_pairs_with_tree(
                     "segment proof {data_size} chunk {chunk_index} segment {segment_index}: {err}"
                 )
             });
-        let hash_count = geometry.height() + depth(chunk_index, chunk_count);
+        let hash_count = geometry.height() + depth(chunk_index, chunk_count) + 1;
         assert_eq!(
             proof.len(),
             usize::try_from(hash_count).expect("hash count fits") * HASH_SIZE,
-            "segment proof length is 32 * (h + depth) (spec §5)"
+            "segment proof length is 32 * (h + depth + 1) (spec §5)"
         );
         let segment_length = geometry
             .segment_len(data_size, chunk_index, segment_index)
@@ -703,7 +703,9 @@ fn multi_segment_case(
                         "segment proof {data_size} chunk {chunk_index} segment {segment_index}: {err}"
                     )
                 });
-            // spec §5: the segment proof is the h in-chunk siblings, then the chunk proof.
+            // spec §5: in-chunk siblings concatenated with the chunk proof. The
+            // chunk proof ends with the size witness, so this is the whole proof
+            // in every case, including a one-chunk upload.
             let in_chunk = in_chunk_sibling_bytes(&geometry, &segment_proof, &chunk_proof);
             let segment = segment_slice(&geometry, data, data_size, *chunk_index, segment_index);
             let mut proof = in_chunk.to_vec();
@@ -747,7 +749,7 @@ fn multi_segment_case(
     }
 }
 
-/// The `h` in-chunk siblings: the prefix of a segment proof (spec §5).
+/// The `h` in-chunk siblings: the prefix before the chunk proof (spec §5).
 fn in_chunk_sibling_bytes<'a>(
     geometry: &Geometry,
     segment_proof: &'a [u8],
@@ -777,7 +779,7 @@ fn negative_cases() -> Vec<NegativeCase> {
             2 * chunk_size + chunk_size / 2,
             0,
             Mutation::HonestChunk,
-            "CommitmentMismatch",
+            "SizeWitnessMismatch",
         ),
         draft(
             "wrong_data_size_other_chunk_count",
@@ -950,9 +952,12 @@ fn flip_sibling_cases(geometry: Geometry) -> Vec<NegativeCase> {
     let proof = tree
         .segment_proof(3, 1, &chunk)
         .expect("printed segment proof");
-    // The printed proof is four hashes (spec §13). One flipped bit per sibling.
-    let sibling_count = proof.len() / HASH_SIZE;
-    assert_eq!(sibling_count, 4, "spec §13 printed segment proof");
+    // Four reference siblings, then the size witness (spec §13). One flipped bit
+    // per sibling. The witness flip is a unit test, not one of these cases.
+    let hash_count = proof.len() / HASH_SIZE;
+    assert_eq!(hash_count, 5, "spec §13 printed segment proof");
+    let sibling_count = hash_count - 1;
+    assert_eq!(sibling_count, 4, "spec §13 printed siblings");
     (0..sibling_count)
         .map(|sibling_index| {
             let sibling_index = u32::try_from(sibling_index).expect("sibling count fits");
@@ -997,7 +1002,15 @@ fn realize(draft: NegativeDraft) -> NegativeCase {
     let geometry = draft.geometry.unwrap_or(Geometry::TESTING);
     let pattern = draft.pattern.expect("data pattern");
     let (data, tree) = build_upload(geometry, pattern, draft.source_data_size);
-    let (bytes, proof) = mutated_input(&geometry, &data, &tree, &draft);
+    let (bytes, mut proof) = mutated_input(&geometry, &data, &tree, &draft);
+    if draft.record_unanchored {
+        // spec §6: the re-derived commitment repeats size_witness of the claimed
+        // size. The proof's last hash is that witness, so the climb can pass.
+        // The true witness is rejected before the climb (spec §5).
+        let witness = size_witness(draft.data_size);
+        let start = proof.len() - HASH_SIZE;
+        proof[start..].copy_from_slice(witness.as_bytes());
+    }
     let commitment = tree.data_commitment();
     let unanchored_commitment = unanchored_commitment(&geometry, &tree, &draft, &bytes, &proof);
     reject(&geometry, &draft, &commitment, &bytes, &proof);
@@ -1113,16 +1126,21 @@ fn mutate_chunk_proof(honest: &[u8], mutation: Mutation) -> Vec<u8> {
     match mutation {
         Mutation::AppendOneZeroHash => {
             let mut proof = honest.to_vec();
-            // One extra hash-sized block. The length check rejects it before hashing (spec §5).
+            // One extra hash before the witness. The length check rejects it (spec §5).
+            let witness = proof.split_off(proof.len() - HASH_SIZE);
             proof.extend_from_slice(&[0_u8; HASH_SIZE]);
+            proof.extend_from_slice(&witness);
             proof
         }
         Mutation::DropLastHash => {
             assert!(
-                honest.len() > HASH_SIZE,
-                "one hash too short leaves a non-empty proof"
+                honest.len() >= 2 * HASH_SIZE,
+                "one hash too short drops a sibling and keeps the size witness"
             );
-            honest[..honest.len() - HASH_SIZE].to_vec()
+            let witness_start = honest.len() - HASH_SIZE;
+            let mut proof = honest[..witness_start - HASH_SIZE].to_vec();
+            proof.extend_from_slice(&honest[witness_start..]);
+            proof
         }
         Mutation::EmptyProof => {
             assert!(
@@ -1307,6 +1325,11 @@ fn two_digest_case() -> NegativeCase {
     );
     let data_size = u64::try_from(bytes.len()).expect("two digests fit");
     let tree = DataTree::from_bytes(geometry, &bytes).expect("two digests are one chunk");
+    // `h = 0` and `C = 1`: the segment proof is the size witness (spec §5).
+    let proof = tree
+        .segment_proof(0, 0, &bytes)
+        .expect("one segment of one chunk");
+    assert_eq!(proof.as_slice(), size_witness(data_size).as_bytes());
     verify_segment(
         &geometry,
         &tree.data_commitment(),
@@ -1314,7 +1337,7 @@ fn two_digest_case() -> NegativeCase {
         0,
         0,
         &bytes,
-        &[],
+        &proof,
     )
     .expect("the segment verifies as a leaf");
     let mistaken = data_commitment(&DataTreeRoot(*node_hash.as_bytes()), data_size);
@@ -1333,7 +1356,7 @@ fn two_digest_case() -> NegativeCase {
         expected_error: "CommitmentMismatch",
         record_unanchored: false,
     };
-    reject(&geometry, &draft, &mistaken, &bytes, &[]);
+    reject(&geometry, &draft, &mistaken, &bytes, &proof);
     NegativeCase {
         name: draft.name,
         check: draft.check,
@@ -1352,7 +1375,7 @@ fn two_digest_case() -> NegativeCase {
         node_hash: Some(hex_of(node_hash.as_bytes())),
         commitment: hex_of(mistaken.as_bytes()),
         unanchored_commitment: None,
-        proof: String::new(),
+        proof: hex_of(&proof),
         expected_error: draft.expected_error,
     }
 }
@@ -1442,6 +1465,7 @@ fn error_kind(err: &VerifyError) -> &'static str {
         VerifyError::InvalidChunkLength { .. } => "InvalidChunkLength",
         VerifyError::InvalidSegmentLength { .. } => "InvalidSegmentLength",
         VerifyError::InvalidProofLength { .. } => "InvalidProofLength",
+        VerifyError::SizeWitnessMismatch => "SizeWitnessMismatch",
         VerifyError::CommitmentMismatch => "CommitmentMismatch",
     }
 }

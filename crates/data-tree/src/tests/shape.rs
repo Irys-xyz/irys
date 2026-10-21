@@ -1,5 +1,5 @@
 use crate::geometry::Geometry;
-use crate::hash::node;
+use crate::hash::{node, size_witness};
 use crate::shape::{climb, depth};
 use crate::types::{HASH_SIZE, NodeHash};
 use crate::{DataTree, DataTreeBuilder};
@@ -59,10 +59,10 @@ fn builder_layers_and_root_match_spec_for_every_chunk_count() {
 /// Chunk proofs against recursive `path` (spec §4, §5, §13).
 ///
 /// For every chunk count from 1 through [`PROOF_EVERY_CHUNK_MAX_CHUNK_COUNT`],
-/// every chunk proof must equal `path`, the byte length must equal `depth`,
-/// and `climb` must return the root from `T`. Spec §13 records a reference
-/// check for every count from 1 to 299. This test goes one count further, so
-/// that range is included.
+/// every chunk proof must equal `path` then `size_witness`, the byte length
+/// must equal `depth + 1` hashes, and `climb` of the siblings must return the
+/// root from `T`. Spec §13 records a reference check for every count from 1 to
+/// 299. This test goes one count further, so that range is included.
 ///
 /// The same check also runs for each power of two from 512 through 4,096, for
 /// the count on each side of that power, and for 4,097. 512 is the next power
@@ -158,19 +158,22 @@ fn assert_chunk_proof(
     let proof = tree
         .chunk_proof(chunk_index)
         .expect("chunk index is inside this tree");
+    let mut expect_proof = concatenated_path(expect_path);
+    expect_proof.extend_from_slice(size_witness(tree.data_size()).as_bytes());
     assert_eq!(
-        proof,
-        concatenated_path(expect_path),
-        "path C={chunk_count} c={chunk_index}"
+        proof, expect_proof,
+        "path ‖ size_witness C={chunk_count} c={chunk_index}"
     );
+    let hash_count = depth(chunk_index, chunk_count) + 1;
     assert_eq!(
         proof.len(),
-        usize::try_from(depth(chunk_index, chunk_count)).expect("depth fits usize") * HASH_SIZE,
-        "depth C={chunk_count} c={chunk_index}"
+        usize::try_from(hash_count).expect("depth fits usize") * HASH_SIZE,
+        "depth + witness C={chunk_count} c={chunk_index}"
     );
+    let siblings = &proof[..proof.len() - HASH_SIZE];
     let leaf_index = usize::try_from(chunk_index).expect("chunk index fits usize");
     assert_eq!(
-        climb(leaves[leaf_index], chunk_index, chunk_count, &proof),
+        climb(leaves[leaf_index], chunk_index, chunk_count, siblings),
         Some(expect_root),
         "climb C={chunk_count} c={chunk_index}"
     );

@@ -13,7 +13,7 @@
       "chunks": [
         {
           "chunk_index": 0,
-          "chunk_proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035d4eb2dc59dbc6727208b59f75604a1677de33a4b40a5316df1c7e029dcdf7843",
+          "chunk_proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035d4eb2dc59dbc6727208b59f75604a1677de33a4b40a5316df1c7e029dcdf784342bb7029ceeb50156a1b044c1af62a0d78207b52708ff5c31a78ed81c2bd595b",
           "segments": [
             {
               "segment_index": 0,
@@ -30,7 +30,7 @@
       "chunks": [
         {
           "chunk_index": 0,
-          "chunk_proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035d4eb2dc59dbc6727208b59f75604a1677de33a4b40a5316df1c7e029dcdf7843",
+          "chunk_proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035d4eb2dc59dbc6727208b59f75604a1677de33a4b40a5316df1c7e029dcdf784342bb7029ceeb50156a1b044c1af62a0d78207b52708ff5c31a78ed81c2bd595b",
           "segments": [
             {
               "segment_index": 0,
@@ -51,7 +51,7 @@
       "chunks": [
         {
           "chunk_index": 0,
-          "chunk_proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035d4eb2dc59dbc6727208b59f75604a1677de33a4b40a5316df1c7e029dcdf7843",
+          "chunk_proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035d4eb2dc59dbc6727208b59f75604a1677de33a4b40a5316df1c7e029dcdf784342bb7029ceeb50156a1b044c1af62a0d78207b52708ff5c31a78ed81c2bd595b",
           "segments": [
             {
               "segment_index": 0,
@@ -80,7 +80,7 @@
       "chunks": [
         {
           "chunk_index": 0,
-          "chunk_proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035d4eb2dc59dbc6727208b59f75604a1677de33a4b40a5316df1c7e029dcdf7843",
+          "chunk_proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035d4eb2dc59dbc6727208b59f75604a1677de33a4b40a5316df1c7e029dcdf784342bb7029ceeb50156a1b044c1af62a0d78207b52708ff5c31a78ed81c2bd595b",
           "segments": [
             {
               "segment_index": 0,
@@ -349,7 +349,7 @@
       "chunks": [
         {
           "chunk_index": 3,
-          "chunk_proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985",
+          "chunk_proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e3398542bb7029ceeb50156a1b044c1af62a0d78207b52708ff5c31a78ed81c2bd595b",
           "segments": [
             {
               "segment_index": 31,
@@ -370,7 +370,7 @@
       "chunks": [
         {
           "chunk_index": 2,
-          "chunk_proof": "5ef2221fc8a5a532e1488ae0c69870c53f222035d3fd0e6b8983247abe4750cde2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985",
+          "chunk_proof": "5ef2221fc8a5a532e1488ae0c69870c53f222035d3fd0e6b8983247abe4750cde2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e3398542bb7029ceeb50156a1b044c1af62a0d78207b52708ff5c31a78ed81c2bd595b",
           "segments": [
             {
               "segment_index": 0,
@@ -380,7 +380,7 @@
         },
         {
           "chunk_index": 3,
-          "chunk_proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985",
+          "chunk_proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e3398542bb7029ceeb50156a1b044c1af62a0d78207b52708ff5c31a78ed81c2bd595b",
           "segments": [
             {
               "segment_index": 0,

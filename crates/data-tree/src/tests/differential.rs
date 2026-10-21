@@ -10,6 +10,7 @@
 use super::strategies::{self, HonestUpload};
 use crate::error::VerifyError;
 use crate::geometry::Geometry;
+use crate::size_witness;
 use crate::types::{DataCommitment, HASH_SIZE};
 use crate::verify::{verify_chunk, verify_segment};
 use crate::{DataTree, depth};
@@ -77,11 +78,11 @@ fn check_data_size_changes(
             .unwrap_or_else(|err| panic!("segment proof {chunk_index}: {err}"));
         for alternate in alternate_data_sizes(geometry, data_size) {
             // Same chunk count keeps `depth` and, for every chunk but the last,
-            // `chunk_len`. The size witness still changes, so the last check is
-            // `CommitmentMismatch` (spec §6, §10). The last chunk's length
-            // usually changes inside that window, and the length check fails
-            // first (spec §5). A different chunk count fails at the first check
-            // in that same order.
+            // `chunk_len`. The proof carries `size_witness` of the real size, so
+            // a different size fails `SizeWitnessMismatch` when the length matches
+            // (spec §5, §6). The last chunk's length usually changes inside that
+            // window, and the length check fails first (spec §5). A different
+            // chunk count fails at the first check in that same order.
             require_chunk_rejection(geometry, commitment, alternate, chunk_index, chunk, &proof);
             require_segment_rejection(
                 geometry,
@@ -152,7 +153,7 @@ fn check_chunk(
         chunk,
         &with_extra_hash(&proof),
     );
-    // An empty proof (`C = 1`, spec §5) has no hash to remove.
+    // Dropping the last hash removes the size witness. The length check rejects it.
     if let Some(shorter) = without_last_hash(&proof) {
         require_chunk_rejection(
             geometry,
@@ -387,7 +388,7 @@ fn require_segment_rejection(
     );
 }
 
-/// Spec §5 order: range, byte length, proof length, then the commitment.
+/// Spec §5 order: range, byte length, proof length, size witness, then the commitment.
 fn expected_chunk_rejection(
     geometry: &Geometry,
     data_size: u64,
@@ -409,19 +410,22 @@ fn expected_chunk_rejection(
     let chunk_count = geometry
         .chunk_count(data_size)
         .expect("chunk_len proved data_size is in range");
-    let expected_proof =
-        usize::try_from(depth(chunk_index, chunk_count)).expect("depth fits usize") * HASH_SIZE;
+    let hash_count = depth(chunk_index, chunk_count) + 1;
+    let expected_proof = usize::try_from(hash_count).expect("depth fits usize") * HASH_SIZE;
     if proof.len() != expected_proof {
         return VerifyError::InvalidProofLength {
             expected: expected_proof,
             actual: proof.len(),
         };
     }
+    if !witness_matches(proof, data_size) {
+        return VerifyError::SizeWitnessMismatch;
+    }
     VerifyError::CommitmentMismatch
 }
 
-/// Spec §5 order for a segment: range, byte length, `h + depth` hashes, then
-/// the commitment.
+/// Spec §5 order for a segment: range, byte length, `h + depth + 1` hashes
+/// (the last is the size witness), then the commitment.
 fn expected_segment_rejection(
     geometry: &Geometry,
     data_size: u64,
@@ -444,7 +448,7 @@ fn expected_segment_rejection(
     let chunk_count = geometry
         .chunk_count(data_size)
         .expect("segment_len proved data_size is in range");
-    let hash_count = geometry.height() + depth(chunk_index, chunk_count);
+    let hash_count = geometry.height() + depth(chunk_index, chunk_count) + 1;
     let expected_proof = usize::try_from(hash_count).expect("hash count fits usize") * HASH_SIZE;
     if proof.len() != expected_proof {
         return VerifyError::InvalidProofLength {
@@ -452,7 +456,15 @@ fn expected_segment_rejection(
             actual: proof.len(),
         };
     }
+    if !witness_matches(proof, data_size) {
+        return VerifyError::SizeWitnessMismatch;
+    }
     VerifyError::CommitmentMismatch
+}
+
+fn witness_matches(proof: &[u8], data_size: u64) -> bool {
+    let start = proof.len() - HASH_SIZE;
+    proof[start..] == *size_witness(data_size).as_bytes()
 }
 
 fn alternate_data_sizes(geometry: &Geometry, data_size: u64) -> Vec<u64> {

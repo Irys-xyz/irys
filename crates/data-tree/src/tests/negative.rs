@@ -40,7 +40,7 @@ fn range_checks_fail_before_hashing() {
             max_data_size
         })
     );
-    // `C = 1`, so index 1 is past the tree. The empty proof is not hashed.
+    // `C = 1`, so index 1 is past the tree. The proof is not hashed.
     assert_eq!(
         verify_chunk(&geometry, &commitment, data_size, 1, &data, &[]).unwrap_err(),
         VerifyError::Size(SizeError::ChunkIndexOutOfRange {
@@ -78,7 +78,8 @@ fn proof_length_is_checked_before_hashing() {
     let chunk = data[..chunk_bytes].to_vec();
     let proof = tree.chunk_proof(0).unwrap();
     assert_eq!(depth(0, 3), 2);
-    assert_eq!(proof.len(), 2 * HASH_SIZE);
+    // Two siblings and the size witness (spec §5).
+    assert_eq!(proof.len(), 3 * HASH_SIZE);
     verify_chunk(&geometry, &commitment, data_size, 0, &chunk, &proof).unwrap();
 
     let mut too_long = proof.clone();
@@ -86,10 +87,11 @@ fn proof_length_is_checked_before_hashing() {
     assert_eq!(
         verify_chunk(&geometry, &commitment, data_size, 0, &chunk, &too_long).unwrap_err(),
         VerifyError::InvalidProofLength {
-            expected: 2 * HASH_SIZE,
-            actual: 3 * HASH_SIZE
+            expected: 3 * HASH_SIZE,
+            actual: 4 * HASH_SIZE
         }
     );
+    // The old form is the siblings without the witness: one hash too short.
     assert_eq!(
         verify_chunk(
             &geometry,
@@ -97,12 +99,12 @@ fn proof_length_is_checked_before_hashing() {
             data_size,
             0,
             &chunk,
-            &proof[..HASH_SIZE]
+            &proof[..proof.len() - HASH_SIZE]
         )
         .unwrap_err(),
         VerifyError::InvalidProofLength {
-            expected: 2 * HASH_SIZE,
-            actual: HASH_SIZE
+            expected: 3 * HASH_SIZE,
+            actual: 2 * HASH_SIZE
         }
     );
     let mut not_aligned = proof;
@@ -110,12 +112,12 @@ fn proof_length_is_checked_before_hashing() {
     assert_eq!(
         verify_chunk(&geometry, &commitment, data_size, 0, &chunk, &not_aligned).unwrap_err(),
         VerifyError::InvalidProofLength {
-            expected: 2 * HASH_SIZE,
-            actual: 2 * HASH_SIZE + 1
+            expected: 3 * HASH_SIZE,
+            actual: 3 * HASH_SIZE + 1
         }
     );
 
-    // `C = 2`: an empty proof is one hash too short (spec §5).
+    // `C = 2`: an empty proof is two hashes too short (one sibling and the witness).
     let data_size = 2 * geometry.chunk_size();
     let data = pattern(usize::try_from(data_size).unwrap());
     let tree = DataTree::from_bytes(geometry, &data).unwrap();
@@ -132,9 +134,110 @@ fn proof_length_is_checked_before_hashing() {
         )
         .unwrap_err(),
         VerifyError::InvalidProofLength {
+            expected: 2 * HASH_SIZE,
+            actual: 0
+        }
+    );
+}
+
+#[test]
+fn an_empty_proof_is_rejected_for_one_chunk() {
+    // `C = 1`: the chunk proof is `[size_witness(n)]`. Empty is the old form.
+    let geometry = Geometry::TESTING;
+    let data_size = geometry.chunk_size();
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
+    let proof = tree.chunk_proof(0).unwrap();
+    assert_eq!(proof.len(), HASH_SIZE);
+    assert_eq!(depth(0, 1), 0);
+    verify_chunk(
+        &geometry,
+        &tree.data_commitment(),
+        data_size,
+        0,
+        &data,
+        &proof,
+    )
+    .unwrap();
+    assert_eq!(
+        verify_chunk(&geometry, &tree.data_commitment(), data_size, 0, &data, &[]).unwrap_err(),
+        VerifyError::InvalidProofLength {
             expected: HASH_SIZE,
             actual: 0
         }
+    );
+    let segment = &data[..testing_segment_bytes()];
+    let segment_proof = tree.segment_proof(0, 0, &data).unwrap();
+    let segment_hashes = geometry.height() + 1;
+    assert_eq!(
+        segment_proof.len(),
+        usize::try_from(segment_hashes).unwrap() * HASH_SIZE
+    );
+    assert_eq!(
+        verify_segment(
+            &geometry,
+            &tree.data_commitment(),
+            data_size,
+            0,
+            0,
+            segment,
+            &[]
+        )
+        .unwrap_err(),
+        VerifyError::InvalidProofLength {
+            expected: segment_proof.len(),
+            actual: 0
+        }
+    );
+}
+
+#[test]
+fn a_wrong_size_witness_is_rejected() {
+    // The last hash is `size_witness(n + 1)`, not `size_witness(n)` (spec §5).
+    let geometry = Geometry::TESTING;
+    let data_size = 3 * geometry.chunk_size();
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
+    let commitment = tree.data_commitment();
+    let chunk = &data[..testing_chunk_bytes()];
+    let mut proof = tree.chunk_proof(0).unwrap();
+    verify_chunk(&geometry, &commitment, data_size, 0, chunk, &proof).unwrap();
+    let wrong_witness = hash::size_witness(data_size + 1);
+    let witness_start = proof.len() - HASH_SIZE;
+    proof[witness_start..].copy_from_slice(wrong_witness.as_bytes());
+    assert_eq!(
+        verify_chunk(&geometry, &commitment, data_size, 0, chunk, &proof).unwrap_err(),
+        VerifyError::SizeWitnessMismatch
+    );
+
+    let chunk3_len = testing_chunk_bytes();
+    let chunk3 = &data[2 * chunk3_len..3 * chunk3_len];
+    let mut segment_proof = tree.segment_proof(2, 0, chunk3).unwrap();
+    let segment = &chunk3[..testing_segment_bytes()];
+    verify_segment(
+        &geometry,
+        &commitment,
+        data_size,
+        2,
+        0,
+        segment,
+        &segment_proof,
+    )
+    .unwrap();
+    let witness_start = segment_proof.len() - HASH_SIZE;
+    segment_proof[witness_start..].copy_from_slice(wrong_witness.as_bytes());
+    assert_eq!(
+        verify_segment(
+            &geometry,
+            &commitment,
+            data_size,
+            2,
+            0,
+            segment,
+            &segment_proof
+        )
+        .unwrap_err(),
+        VerifyError::SizeWitnessMismatch
     );
 }
 
@@ -284,8 +387,10 @@ fn a_proof_for_another_index_does_not_verify() {
 }
 
 #[test]
-fn wrong_size_with_the_same_chunk_count_mismatches() {
+fn a_wrong_data_size_with_the_true_witness_is_rejected() {
     // Three full chunks and two and a half chunks are both `C = 3`. Chunk 0 is full.
+    // The proof carries `size_witness` of the real size. The length matches, so
+    // the witness check rejects the claim before the climb (spec §5, §15 Q10).
     let geometry = Geometry::TESTING;
     let data_size = 3 * geometry.chunk_size();
     let data = pattern(usize::try_from(data_size).unwrap());
@@ -311,7 +416,7 @@ fn wrong_size_with_the_same_chunk_count_mismatches() {
             &proof
         )
         .unwrap_err(),
-        VerifyError::CommitmentMismatch
+        VerifyError::SizeWitnessMismatch
     );
 }
 
@@ -325,7 +430,8 @@ fn wrong_size_with_another_chunk_count_rejects_the_proof_length() {
     let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let chunk = &data[2 * chunk_bytes..3 * chunk_bytes];
     let proof = tree.chunk_proof(2).unwrap();
-    assert_eq!(proof.len(), HASH_SIZE);
+    // One sibling and the size witness (spec §5).
+    assert_eq!(proof.len(), 2 * HASH_SIZE);
     assert_eq!(depth(2, 3), 1);
     assert_eq!(depth(2, 4), 2);
     let wrong_data_size = 4 * geometry.chunk_size();
@@ -340,8 +446,8 @@ fn wrong_size_with_another_chunk_count_rejects_the_proof_length() {
         )
         .unwrap_err(),
         VerifyError::InvalidProofLength {
-            expected: 2 * HASH_SIZE,
-            actual: HASH_SIZE
+            expected: 3 * HASH_SIZE,
+            actual: 2 * HASH_SIZE
         }
     );
 }
@@ -394,14 +500,25 @@ fn assert_every_bit_flip_mismatches(
     proof: &[u8],
     check: impl Fn(&[u8]) -> Result<(), VerifyError>,
 ) {
-    assert!(!proof.is_empty());
+    assert!(
+        proof.len() >= HASH_SIZE,
+        "a proof ends with the size witness"
+    );
+    let witness_start = proof.len() - HASH_SIZE;
     for byte_index in 0..proof.len() {
+        // A flipped witness fails the witness check. A flipped sibling fails
+        // the commitment check (spec §5).
+        let expected = if byte_index >= witness_start {
+            VerifyError::SizeWitnessMismatch
+        } else {
+            VerifyError::CommitmentMismatch
+        };
         for bit in 0..u8::BITS {
             let mut flipped_proof = proof.to_vec();
             flipped_proof[byte_index] ^= 1 << bit;
             assert_eq!(
                 check(&flipped_proof).unwrap_err(),
-                VerifyError::CommitmentMismatch,
+                expected,
                 "byte {byte_index} bit {bit}"
             );
         }
@@ -450,8 +567,9 @@ fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
     // has the same shape, and the anchored commitment does not.
     //
     // Test geometry, three full chunks (`C = 3`), `c = 0`, `depth = 2`.
-    // One byte more is `C = 4`, and `depth(0, 4) = 2` as well. The two-hash proof
-    // climbs to the original root under `C = 4`.
+    // One byte more is `C = 4`, and `depth(0, 4) = 2` as well. The sibling list
+    // climbs to the original root under `C = 4` when the proof's witness is
+    // `size_witness` of the claimed size. The true witness does not.
     let geometry = Geometry::TESTING;
     let chunk_bytes = testing_chunk_bytes();
     let data_size = 3 * geometry.chunk_size();
@@ -463,13 +581,44 @@ fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
     let proof = tree.chunk_proof(0).unwrap();
     assert_eq!(depth(0, 3), 2);
     assert_eq!(depth(0, 4), 2);
+    assert_eq!(proof.len(), 3 * HASH_SIZE);
     verify_chunk(&geometry, &anchored, data_size, 0, chunk, &proof).unwrap();
 
     let wrong_data_size = data_size + 1;
     let rederived = hash::data_commitment(&root, wrong_data_size);
-    verify_chunk(&geometry, &rederived, wrong_data_size, 0, chunk, &proof).unwrap();
+    // Same depth, so the length matches. The true witness is not the claimed size.
+    assert_eq!(
+        verify_chunk(&geometry, &rederived, wrong_data_size, 0, chunk, &proof).unwrap_err(),
+        VerifyError::SizeWitnessMismatch
+    );
     assert_eq!(
         verify_chunk(&geometry, &anchored, wrong_data_size, 0, chunk, &proof).unwrap_err(),
+        VerifyError::SizeWitnessMismatch
+    );
+
+    let mut claimed_witness = proof;
+    let witness = hash::size_witness(wrong_data_size);
+    let witness_start = claimed_witness.len() - HASH_SIZE;
+    claimed_witness[witness_start..].copy_from_slice(witness.as_bytes());
+    verify_chunk(
+        &geometry,
+        &rederived,
+        wrong_data_size,
+        0,
+        chunk,
+        &claimed_witness,
+    )
+    .unwrap();
+    assert_eq!(
+        verify_chunk(
+            &geometry,
+            &anchored,
+            wrong_data_size,
+            0,
+            chunk,
+            &claimed_witness
+        )
+        .unwrap_err(),
         VerifyError::CommitmentMismatch
     );
 
@@ -477,7 +626,7 @@ fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
     let right = &data[2 * chunk_bytes..3 * chunk_bytes];
     let right_proof = tree.chunk_proof(2).unwrap();
     assert_eq!(depth(2, 3), 1);
-    assert_eq!(right_proof.len(), HASH_SIZE);
+    assert_eq!(right_proof.len(), 2 * HASH_SIZE);
     assert_eq!(
         verify_chunk(
             &geometry,
@@ -489,8 +638,8 @@ fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
         )
         .unwrap_err(),
         VerifyError::InvalidProofLength {
-            expected: 2 * HASH_SIZE,
-            actual: HASH_SIZE
+            expected: 3 * HASH_SIZE,
+            actual: 2 * HASH_SIZE
         }
     );
 }

@@ -143,9 +143,10 @@ pub enum VerifyError {
         /// Length of the supplied slice.
         actual: u64,
     },
-    /// The proof is not `32 * k` bytes for the `k` the geometry requires (spec §5).
+    /// The proof is not `32 * (k + 1)` bytes, where `k` is the sibling count (spec §5).
     ///
-    /// A length that is not a multiple of 32 fails here, before any hashing (spec §5, §10).
+    /// The extra hash is the size witness. A length that is not a multiple of 32
+    /// fails here, before any hashing (spec §5, §10).
     #[error("proof length {actual} does not match {expected}")]
     InvalidProofLength {
         /// Byte length required by `(data_size, c[, j])`.
@@ -153,6 +154,12 @@ pub enum VerifyError {
         /// Byte length of the supplied proof.
         actual: usize,
     },
+    /// The proof's last hash is not `size_witness(data_size)` (spec §5, §15 Q10).
+    ///
+    /// The verifier computes the witness from the `data_size` it is checking.
+    /// A supplied witness is not climbed until it matches that value.
+    #[error("size witness does not match")]
+    SizeWitnessMismatch,
     /// The climbed root and `size_witness(data_size)` are not the commitment.
     #[error("commitment does not match")]
     CommitmentMismatch,

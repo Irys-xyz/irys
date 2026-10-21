@@ -9,8 +9,9 @@
 //! The stack is `build_layer` kept between pushes, not a fresh recursive `path`
 //! (spec §4). A `path` recomputes each sibling subtree; this cache stores those
 //! subtrees, so `layers[l][i ^ 1]` is the sibling `path` would append. A missing
-//! slot is a node that was carried up. The proof length is `depth(c, C)`, never
-//! the height of the stack (spec §4).
+//! slot is a node that was carried up. The sibling count is `depth(c, C)`. The
+//! proof is those siblings and then the size witness, never the height of the
+//! stack (spec §4, §5).
 
 use crate::chunk::{chunk_root, segment_siblings};
 use crate::error::{BuildError, ChunkLengthError, ProofError, SizeError};
@@ -365,7 +366,10 @@ impl DataTree {
         Ok(hash::chunk_key(&self.data_commitment(), chunk_index))
     }
 
-    /// Chunk proof for index `c`: `32 * depth(c, C)` bytes, leaf to root (spec §5).
+    /// Chunk proof for index `c`: siblings, then `size_witness` (spec §5).
+    ///
+    /// `32 * (depth(c, C) + 1)` bytes, leaf to root. For one chunk the proof is
+    /// the witness alone.
     ///
     /// `c` is `chunk_index`.
     pub fn chunk_proof(&self, chunk_index: u32) -> Result<Vec<u8>, ProofError> {
@@ -376,14 +380,20 @@ impl DataTree {
                 proof.extend_from_slice(sibling.as_bytes());
             }
         }
+        proof.extend_from_slice(self.size_witness().as_bytes());
         debug_assert_eq!(
             proof.len(),
-            usize::try_from(depth(chunk_index, chunk_count)).expect("depth fits usize") * HASH_SIZE
+            usize::try_from(depth(chunk_index, chunk_count) + 1).expect("depth fits usize")
+                * HASH_SIZE
         );
         Ok(proof)
     }
 
     /// Segment proof: `h` in-chunk siblings, then the chunk proof (spec §4, §5).
+    ///
+    /// The chunk proof ends with `size_witness`, so this concatenation is the
+    /// whole segment proof. That includes a one-chunk upload, whose chunk proof
+    /// is only the witness.
     ///
     /// `chunk_bytes` must be exactly `chunk_len` and must hash to the stored
     /// chunk root. Those checks run before the sibling hashes are built.
@@ -419,8 +429,8 @@ impl DataTree {
         proof.extend(self.chunk_proof(chunk_index)?);
         debug_assert_eq!(
             proof.len() / HASH_SIZE,
-            // `h + depth(c, C)` fits `u32`: `h` is at most `MAX_SUBTREE_HEIGHT`.
-            usize::try_from(self.geometry.height() + depth(chunk_index, chunk_count))
+            // `h + depth(c, C) + 1` fits `u32`: `h` is at most `MAX_SUBTREE_HEIGHT`.
+            usize::try_from(self.geometry.height() + depth(chunk_index, chunk_count) + 1)
                 .expect("proof hash count fits usize")
         );
         Ok(proof)

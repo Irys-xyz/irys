@@ -15,8 +15,8 @@
       "chunk_index": 0,
       "mutation": "honest_chunk",
       "commitment": "30f2c57aaed1cb16cd4411d3e58b66e9811eb207232d9582d18135afa7f57ac5",
-      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65",
-      "expected_error": "CommitmentMismatch"
+      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb655a4d43221cf3e2c9e89761b3f0ec3bb9d79e6250d79107ec1cd5d8a4b3b89fee",
+      "expected_error": "SizeWitnessMismatch"
     },
     {
       "name": "wrong_data_size_other_chunk_count",
@@ -27,7 +27,7 @@
       "chunk_index": 2,
       "mutation": "honest_chunk",
       "commitment": "30f2c57aaed1cb16cd4411d3e58b66e9811eb207232d9582d18135afa7f57ac5",
-      "proof": "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
+      "proof": "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd845a4d43221cf3e2c9e89761b3f0ec3bb9d79e6250d79107ec1cd5d8a4b3b89fee",
       "expected_error": "InvalidProofLength"
     },
     {
@@ -51,7 +51,7 @@
       "chunk_index": 0,
       "mutation": "append_one_zero_hash",
       "commitment": "0f4d20067ffd10e9936ff015a9898349d8767deacf6a3dabc0ace11a437a7f46",
-      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a7973500000000000000000000000000000000000000000000000000000000000000000",
+      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a7973500000000000000000000000000000000000000000000000000000000000000000453513b0890fcbc70aaee24491fd3922d7e1fd88c41051ec2396f493dbacf7b0",
       "expected_error": "InvalidProofLength"
     },
     {
@@ -63,7 +63,7 @@
       "chunk_index": 0,
       "mutation": "drop_last_hash",
       "commitment": "30f2c57aaed1cb16cd4411d3e58b66e9811eb207232d9582d18135afa7f57ac5",
-      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350",
+      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a7973505a4d43221cf3e2c9e89761b3f0ec3bb9d79e6250d79107ec1cd5d8a4b3b89fee",
       "expected_error": "InvalidProofLength"
     },
     {
@@ -87,7 +87,7 @@
       "chunk_index": 0,
       "mutation": "drop_last_chunk_byte",
       "commitment": "00f0535265357690ad8c75c88235490e7340e4cef3a81157c2c473861866d8d7",
-      "proof": "",
+      "proof": "be6ba773aea847ed679825b754f051572f67dbac1ba82099b498778358eb0b8c",
       "expected_error": "InvalidChunkLength"
     },
     {
@@ -99,7 +99,7 @@
       "chunk_index": 0,
       "mutation": "append_zero_chunk_byte",
       "commitment": "00f0535265357690ad8c75c88235490e7340e4cef3a81157c2c473861866d8d7",
-      "proof": "",
+      "proof": "be6ba773aea847ed679825b754f051572f67dbac1ba82099b498778358eb0b8c",
       "expected_error": "InvalidChunkLength"
     },
     {
@@ -124,7 +124,7 @@
       "mutation": "proof_from_other_chunk",
       "proof_chunk_index": 0,
       "commitment": "30f2c57aaed1cb16cd4411d3e58b66e9811eb207232d9582d18135afa7f57ac5",
-      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65",
+      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb655a4d43221cf3e2c9e89761b3f0ec3bb9d79e6250d79107ec1cd5d8a4b3b89fee",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -137,7 +137,7 @@
       "mutation": "honest_chunk",
       "commitment": "30f2c57aaed1cb16cd4411d3e58b66e9811eb207232d9582d18135afa7f57ac5",
       "unanchored_commitment": "8439566c93867ebebdcfaa6f4c9319a45fdfe29d765b8db4073caae06f85fcfd",
-      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65",
+      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb651148c334e14435416f451da4504ec4402c45ed8d082effe0ac440c42bdbf2c78",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -150,7 +150,7 @@
       "segment_index": 0,
       "mutation": "zero_pad_segment",
       "commitment": "ca888a5334e649c2c8a6ddece5b132464e67b1f59f0b5b5d02433070cce02fcf",
-      "proof": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01dfe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072ad3e81f198d6bd3782d1941172c89e49721d8f5e33cc709d4f6ba3f54b9e35f82",
+      "proof": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01dfe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072ad3e81f198d6bd3782d1941172c89e49721d8f5e33cc709d4f6ba3f54b9e35f82aab0eee074a7d257d74359ca85ae10a5f3d16b6428f88e450694a75a82477a4b",
       "expected_error": "InvalidSegmentLength"
     },
     {
@@ -164,7 +164,7 @@
       "mutation": "flip_sibling_bit0",
       "sibling_index": 0,
       "commitment": "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5",
-      "proof": "83bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
+      "proof": "83bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84f127eb7779eafb7f0f10fd2f7fa512d89e862c71b77e4424f40f02ccc6220945",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -178,7 +178,7 @@
       "mutation": "flip_sibling_bit0",
       "sibling_index": 1,
       "commitment": "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5",
-      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5ff43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
+      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5ff43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84f127eb7779eafb7f0f10fd2f7fa512d89e862c71b77e4424f40f02ccc6220945",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -192,7 +192,7 @@
       "mutation": "flip_sibling_bit0",
       "sibling_index": 2,
       "commitment": "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5",
-      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af9e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
+      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af9e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84f127eb7779eafb7f0f10fd2f7fa512d89e862c71b77e4424f40f02ccc6220945",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -206,7 +206,7 @@
       "mutation": "flip_sibling_bit0",
       "sibling_index": 3,
       "commitment": "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5",
-      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6551cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
+      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6551cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84f127eb7779eafb7f0f10fd2f7fa512d89e862c71b77e4424f40f02ccc6220945",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -227,7 +227,7 @@
       "leaf_hash": "32fb2d4416067c5bff06423e18714ad3884365d7b816d34a77b33527d8438624",
       "node_hash": "b331da6ec49d4547d9942a6727e5123f69bed5a0b97ac171cfbfd6201431fcfa",
       "commitment": "baff1be1959b8da9ca5e410abb07a7a15c88f655209c78355aff5f1b31dfd29d",
-      "proof": "",
+      "proof": "453513b0890fcbc70aaee24491fd3922d7e1fd88c41051ec2396f493dbacf7b0",
       "expected_error": "CommitmentMismatch"
     }
   ]
