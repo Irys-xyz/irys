@@ -899,7 +899,7 @@ fn phase_name(phase: Phase) -> &'static str {
     }
 }
 
-fn percent_done(done: u64, total: u64) -> u64 {
+pub(super) fn percent_done(done: u64, total: u64) -> u64 {
     if total == 0 {
         return 100;
     }
@@ -907,14 +907,14 @@ fn percent_done(done: u64, total: u64) -> u64 {
     capped.saturating_mul(100) / total
 }
 
-fn per_sec(rows: u64, elapsed_ms: u64) -> u64 {
+pub(super) fn per_sec(rows: u64, elapsed_ms: u64) -> u64 {
     if rows == 0 || elapsed_ms == 0 {
         return 0;
     }
     rows.saturating_mul(1000) / elapsed_ms
 }
 
-fn eta_ms(done: u64, total: u64, elapsed_ms: u64) -> u64 {
+pub(super) fn eta_ms(done: u64, total: u64, elapsed_ms: u64) -> u64 {
     if done == 0 || elapsed_ms == 0 {
         return 0;
     }

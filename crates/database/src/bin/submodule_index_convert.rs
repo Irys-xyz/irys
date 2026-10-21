@@ -8,8 +8,8 @@ use std::process::ExitCode;
 use std::str::FromStr as _;
 
 use irys_database::submodule::{
-    ConvertOptions, PackingRecord, convert_mdbx_to_rocks, convert_rocks_to_mdbx,
-    verify_mdbx_and_rocks, verify_rocks_records,
+    ConvertOptions, PackingRecord, convert_mdbx_to_rocks, convert_mdbx_to_rocks_and_verify,
+    convert_rocks_to_mdbx, verify_mdbx_and_rocks, verify_rocks_records,
 };
 use irys_database::{consensus_db_args, submodule_db_args};
 use irys_types::IrysAddress;
@@ -55,6 +55,11 @@ optional:
                                  orphans and a reset that would write an empty index.
                                  Does not create the target and does not write
                                  CONVERTING. Illegal on verify and verify-rocks.
+                                 Illegal with --verify.
+  --verify                       mdbx-to-rocks only. Warm and pin the MDBX source,
+                                 run the dry-run checks, convert, then verify in
+                                 this process. Prints the convert counts and the
+                                 verify report. Exits 1 when a compared value differs.
   --allow-unresolved             write the target even when the consensus database
                                  does not cover every placement. Those placements
                                  are omitted and counted as skipped_frontier.
@@ -112,8 +117,9 @@ RocksDB v1 only. The node migrates a schema v1 db/ (release 4.0.x) to
 MDBX schema v2 in place. Release 4.0.x cannot read the result.
 There is no rollback from 4.1.0 to 4.0.x.
 
-verify and verify-rocks exit 1 when a compared value differs or when a placement
-was skipped because the consensus database does not cover it.
+verify, verify-rocks, and mdbx-to-rocks --verify exit 1 when a compared value
+differs or when a placement was skipped because the consensus database does not
+cover it.
 ";
 
 fn main() -> ExitCode {
@@ -145,6 +151,16 @@ fn run() -> eyre::Result<ExitCode> {
         command => {
             let options = consensus_options(&tool)?;
             match command {
+                Command::MdbxToRocks if tool.verify_after => {
+                    init_info_tracing();
+                    let (stats, report) =
+                        convert_mdbx_to_rocks_and_verify(&tool.left, &tool.right, &options)?;
+                    print!("{stats}");
+                    print!("{report}");
+                    if report.has_mismatch() {
+                        eyre::bail!("read equivalence mismatch");
+                    }
+                }
                 Command::MdbxToRocks => {
                     let stats = convert_mdbx_to_rocks(&tool.left, &tool.right, &options)?;
                     print!("{stats}");
@@ -224,6 +240,7 @@ struct ToolArgs {
     command: Command,
     replace_incomplete: bool,
     dry_run: bool,
+    verify_after: bool,
     allow_unresolved: bool,
     rollback: bool,
     consensus_db: Option<PathBuf>,
@@ -263,6 +280,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
     let raw: Vec<String> = args.collect();
     let mut replace_incomplete = false;
     let mut dry_run = false;
+    let mut verify_after = false;
     let mut allow_unresolved = false;
     let mut rollback = false;
     let mut consensus_db = None;
@@ -285,6 +303,10 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
             }
             "--dry-run" => {
                 dry_run = true;
+                index += 1;
+            }
+            "--verify" => {
+                verify_after = true;
                 index += 1;
             }
             "--allow-unresolved" => {
@@ -344,6 +366,16 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         std::process::exit(2);
     }
     let verify = matches!(command, Command::Verify | Command::VerifyRocks);
+    if verify_after && !matches!(command, Command::MdbxToRocks) {
+        eprintln!("error: --verify is only valid for mdbx-to-rocks");
+        eprintln!("{USAGE}");
+        std::process::exit(2);
+    }
+    if verify_after && dry_run {
+        eprintln!("error: --dry-run is not valid with --verify");
+        eprintln!("{USAGE}");
+        std::process::exit(2);
+    }
     if (replace_incomplete || dry_run || allow_unresolved) && verify {
         eprintln!(
             "error: --replace-incomplete, --dry-run, and --allow-unresolved are not valid for verify or verify-rocks"
@@ -372,6 +404,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         command,
         replace_incomplete,
         dry_run,
+        verify_after,
         allow_unresolved,
         rollback,
         consensus_db,
@@ -399,6 +432,13 @@ fn parse_u32_flag(flag: &str, text: &str) -> eyre::Result<u32> {
 fn parse_u64(flag: &str, text: &str) -> eyre::Result<u64> {
     text.parse::<u64>()
         .map_err(|err| eyre::eyre!("{flag} {text}: {err}"))
+}
+
+fn init_info_tracing() {
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+        .from_env_lossy();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
 fn paths_are_same(left: &Path, right: &Path) -> bool {
