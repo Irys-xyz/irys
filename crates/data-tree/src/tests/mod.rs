@@ -1,5 +1,6 @@
 mod builder;
 mod depth;
+mod differential;
 mod geometry;
 mod geometry_props;
 mod negative;
