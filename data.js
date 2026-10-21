@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792550868391,
+  "lastUpdate": 1792596897425,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -18187,6 +18187,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000117,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f0e9d4ec277b9412445c711a039aadad95f91043",
+          "message": "perf(data-sync): pipeline peer fetches past ingress and share one fdatasync per batch (#1660)\n\nChunkCompleted frees the peer slot and hands the body to a spawned task\n(unpack off the loop, data-path check, bounded ingress). A fresh peer may\nfill 20 slots. Ingress-priority writes after an idle interval open a\ngather window instead of syncing alone.",
+          "timestamp": "2026-10-21T08:19:44-07:00",
+          "tree_id": "2d9d6d50c0b28681fb8227fbcf8ef71eaf7615e5",
+          "url": "https://github.com/Irys-xyz/irys/commit/f0e9d4ec277b9412445c711a039aadad95f91043"
+        },
+        "date": 1792596895563,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015798,
+            "range": "± 0.000951",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.155655,
+            "range": "± 0.008317",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.629692,
+            "range": "± 0.053078",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.507759,
+            "range": "± 0.532605",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083711,
+            "range": "± 0.002889",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 839.044996,
+            "range": "± 15.788811",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1089.907178,
+            "range": "± 20.919644",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.151181,
+            "range": "± 0.009435",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1485.031671,
+            "range": "± 27.405926",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1892.401378,
+            "range": "± 125.219116",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.191849,
+            "range": "± 0.063861",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 223.643122,
+            "range": "± 5.441002",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 311.445764,
+            "range": "± 22.8972",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000148,
+            "range": "± 0.000009",
             "unit": "ms/iter"
           }
         ]
