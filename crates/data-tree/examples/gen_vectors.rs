@@ -1,9 +1,11 @@
 //! Shared vectors for the data tree (spec §11 step 2, §13).
 //!
 //! One JSON file per group under `<out_dir>`. Data bytes are not stored: a case
-//! names `mod251` (`b[i] = i mod 251`) or `zeros`, and the byte length. Groups
-//! that wait on an open question (multi-segment, receipt header binding,
-//! `tx_root`, wire) are omitted (spec §14).
+//! names `mod251` (`b[i] = i mod 251`) or `zeros`, and the byte length.
+//!
+//! Spec §13 groups not generated here: multi-segment (defined for option B,
+//! not yet added), receipt header binding (gateway formats), `tx_root` (waits
+//! on the deferred §14 Q3), and wire (L1 and gateway message formats).
 //!
 //! Run: `cargo run -p irys-data-tree --example gen_vectors -- <out_dir>`.
 
