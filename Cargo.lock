@@ -5280,6 +5280,7 @@ dependencies = [
  "test-log",
  "tokio",
  "tracing",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
