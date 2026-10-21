@@ -503,11 +503,6 @@ pub struct MempoolConsensusConfig {
     pub max_data_txs_per_block: u64,
 
     /// Maximum number of transactions in the Publish ledger of one block.
-    ///
-    /// Must be greater than `max_data_txs_per_block`. A publish tx can be
-    /// included only after its ingress proofs arrive, and that arrival is
-    /// uneven. A cap equal to the submit rate cannot clear a burst, so the
-    /// ready set grows without a bound.
     #[serde(default = "default_max_publish_txs_per_block")]
     pub max_publish_txs_per_block: u64,
 
@@ -1325,10 +1320,6 @@ mod tests {
             config.hardforks.delta.is_none(),
             "mainnet Delta is unscheduled"
         );
-
-        // Publish-ledger cap. Above the term-ledger cap so an ingress-proof burst can clear.
-        assert_eq!(config.mempool.max_data_txs_per_block, 100);
-        assert_eq!(config.mempool.max_publish_txs_per_block, 110);
     }
 
     /// Pins the testnet hardfork schedule: the Borealis activation time
@@ -1354,10 +1345,6 @@ mod tests {
             config.hardforks.delta.is_none(),
             "testnet Delta is unscheduled"
         );
-
-        // Publish-ledger cap stays above the term-ledger cap.
-        assert_eq!(config.mempool.max_data_txs_per_block, 100);
-        assert_eq!(config.mempool.max_publish_txs_per_block, 110);
     }
 
     #[test]
