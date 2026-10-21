@@ -399,6 +399,49 @@ async fn test_prevalidation_rejects_too_many_publish_txs() -> Result<()> {
     Ok(())
 }
 
+/// A Publish ledger at exactly the cap passes the cap check, and Submit-ledger txs
+/// in the same block do not count toward it.
+#[tokio::test]
+async fn test_prevalidation_publish_cap_ignores_submit_txs() -> Result<()> {
+    let ctx = PrevalidationTestContext::new().await?;
+
+    let max = ctx
+        .config
+        .consensus_config()
+        .mempool
+        .max_publish_txs_per_block as usize;
+    let mut publish_txs = mock_data_txs(max + 1);
+    let submit_tx = publish_txs.pop().expect("max + 1 mock txs");
+
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions = publish_txs.clone();
+    body.data_transactions.push(submit_tx.clone());
+
+    let mut header = (**ctx.block.header()).clone();
+    for ledger in header.data_ledgers.iter_mut() {
+        if ledger.ledger_id == DataLedger::Publish as u32 {
+            ledger.tx_ids = irys_types::H256List(publish_txs.iter().map(|tx| tx.id).collect());
+        } else if ledger.ledger_id == DataLedger::Submit as u32 {
+            ledger.tx_ids = irys_types::H256List(vec![submit_tx.id]);
+        }
+    }
+
+    ctx.config.signer().sign_block_header(&mut header)?;
+    body.block_hash = header.block_hash;
+
+    // The mock txs fail a later check. Only the cap result matters here.
+    let block = Arc::new(SealedBlock::new(header, body)?);
+    let result = ctx.prevalidate(&block).await;
+    assert!(
+        !matches!(result, Err(PreValidationError::TooManyPublishTxs { .. })),
+        "Publish cap must count only Publish txs, got {:?}",
+        result
+    );
+
+    ctx.stop().await;
+    Ok(())
+}
+
 /// A block whose ledger `tx_root` does not match the folded `(data_root, prefix_hash)`
 /// recompute of its included transactions must be rejected with `TxRootMismatch`. This is
 /// the consensus enforcement that authenticates each tx's `prefix_hash` via the
