@@ -508,14 +508,66 @@ fn sibling_at(layer: &[NodeHash], chunk_index: u32, level: usize) -> Option<Node
     // At level `l`, the node index is `c >> l` and the sibling flips that bit
     // (`i ^ 1`). A missing slot is a carried unpaired node (spec §4).
     //
-    // A shift of a `u32` by `u32::BITS` or more is 0. Rust panics on that shift.
-    // Only a tree of `u32::MAX` chunks reaches that level, and the level is the
-    // root, which has no sibling.
-    let index = match u32::try_from(level) {
-        Ok(shift) if shift < u32::BITS => chunk_index >> shift,
-        _ => 0,
-    };
+    // A level at or above `u32::BITS` is the root layer of a tree with more than
+    // 2^31 chunks, and the root has no sibling.
+    let shift = u32::try_from(level)
+        .ok()
+        .filter(|shift| *shift < u32::BITS)?;
+    let index = chunk_index >> shift;
     let sibling_index = index ^ 1;
     let sibling_index = usize::try_from(sibling_index).expect("sibling index fits usize");
     layer.get(sibling_index).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sibling_at;
+    use crate::types::{HASH_SIZE, NodeHash};
+
+    fn node_hash(byte: u8) -> NodeHash {
+        NodeHash([byte; HASH_SIZE])
+    }
+
+    /// A level at or above `u32::BITS` has no sibling. The one-node layer is that
+    /// root and builds no tree. A second node sits at index 1 so a rewrite of the
+    /// index to 0 would return that node.
+    #[test]
+    fn root_layer_at_or_above_u32_bits_has_no_sibling() {
+        let root_level = usize::try_from(u32::BITS).expect("bit width fits usize");
+        let level_above_the_root = root_level + 1;
+        let chunk_index = u32::MAX;
+        let one_node_layer = [node_hash(1)];
+        assert_eq!(sibling_at(&one_node_layer, chunk_index, root_level), None);
+        assert_eq!(
+            sibling_at(&one_node_layer, chunk_index, level_above_the_root),
+            None
+        );
+
+        let layer_with_index_one = [node_hash(1), node_hash(2)];
+        assert_eq!(
+            sibling_at(&layer_with_index_one, chunk_index, root_level),
+            None
+        );
+        assert_eq!(
+            sibling_at(&layer_with_index_one, chunk_index, level_above_the_root),
+            None
+        );
+    }
+
+    /// Level `u32::BITS - 1` is still a valid shift. A sibling that is present is returned.
+    #[test]
+    fn sibling_at_the_highest_valid_shift_is_still_found() {
+        let left = node_hash(1);
+        let right = node_hash(2);
+        let layer = [left, right];
+        let highest_valid_level = usize::try_from(u32::BITS - 1).expect("bit width fits usize");
+        // The high bit is clear: the node index is 0, so the sibling is index 1.
+        assert_eq!(sibling_at(&layer, 0, highest_valid_level), Some(right));
+        let high_chunk_index = 1_u32 << (u32::BITS - 1);
+        // The high bit is set: the node index is 1, so the sibling is index 0.
+        assert_eq!(
+            sibling_at(&layer, high_chunk_index, highest_valid_level),
+            Some(left)
+        );
+    }
 }
