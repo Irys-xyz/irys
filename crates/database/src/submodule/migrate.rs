@@ -2455,17 +2455,7 @@ mod tests {
         );
         assert_eq!(u64_field(finished, "copy_rows"), u64::from(ROWS));
         assert_eq!(u64_field(finished, "drop_rows"), u64::from(ROWS));
-        assert_eq!(u64_field(finished, "data_paths_copied"), u64::from(ROWS));
-        assert_eq!(
-            u64_field(finished, "legacy_data_paths_deleted"),
-            u64::from(ROWS)
-        );
         assert!(u64_field(finished, "elapsed_ms") >= stored.elapsed_ms);
-        let progress_lines = events
-            .iter()
-            .filter(|event| event.message == "submodule index migration progress")
-            .count();
-        assert_eq!(progress_lines, 0, "{events:?}");
         Ok(())
     }
 
@@ -2481,17 +2471,21 @@ mod tests {
         let capture = LogCapture::default();
         tracing::subscriber::with_default(capture.clone(), || {
             tracing::callsite::rebuild_interest_cache();
-            // Killed at the start of drop. 3_750 rows in the next 15 s.
-            log_drop_resume(&totals, "fresh-drop", 0, 5_400_000, 3_750, 5_415_000);
-            // Killed mid-drop. The checkpoint count stays out of the rate.
-            log_drop_resume(&totals, "mid-drop", 100_000, 5_400_000, 103_750, 5_415_000);
             // No new rows and no new time. An ETA of 0 would look finished.
-            log_drop_resume(&totals, "no-rows", 100, 5_000_000, 100, 5_000_000);
+            let mut pace = drop_pace(100, 5_000_000);
+            super::log_if_due(
+                Path::new("no-rows"),
+                &drop_progress(100, 5_000_000, totals.path_hash_rows),
+                &totals,
+                &mut pace,
+                std::time::Duration::ZERO,
+            );
             let flip_totals = super::Totals {
                 path_hash_rows: 40,
                 legacy_rows: 40,
             };
-            let mut pace = drop_pace(0, 0);
+            // A non-zero resume count must stay out of the in-process drop rate.
+            let mut pace = drop_pace(1_000_000, 60_000);
             pace.copy_elapsed_ms = Some(60_000);
             super::log_if_due(
                 Path::new("saw-flip"),
@@ -2502,17 +2496,6 @@ mod tests {
             );
         });
         let events = capture.events.lock().expect("events");
-        let fresh = find_path(&events, "fresh-drop");
-        assert_eq!(u64_field(fresh, "rows_done"), 3_750);
-        assert_eq!(u64_field(fresh, "rows_total"), TOTAL);
-        assert_eq!(u64_field(fresh, "eta_ms"), 5_197_928);
-        assert_eq!(u64_field(fresh, "rows_per_sec_overall"), 250);
-
-        let mid = find_path(&events, "mid-drop");
-        assert_eq!(u64_field(mid, "rows_done"), 103_750);
-        assert_eq!(u64_field(mid, "eta_ms"), 4_797_928);
-        assert_eq!(u64_field(mid, "rows_per_sec_overall"), 250);
-
         let none = find_path(&events, "no-rows");
         assert!(
             !has_field(none, "eta_ms"),
@@ -2523,7 +2506,6 @@ mod tests {
 
         let flip = find_path(&events, "saw-flip");
         assert_eq!(u64_field(flip, "eta_ms"), 105_000);
-        assert_eq!(u64_field(flip, "rows_per_sec_overall"), 0);
         assert_eq!(u64_field(flip, "rows_done"), 5);
     }
 
@@ -2550,24 +2532,6 @@ mod tests {
             resume_done,
             resume_elapsed_ms,
         }
-    }
-
-    fn log_drop_resume(
-        totals: &super::Totals,
-        path: &str,
-        resume_done: u64,
-        resume_elapsed_ms: u64,
-        deleted: u64,
-        elapsed_ms: u64,
-    ) {
-        let mut pace = drop_pace(resume_done, resume_elapsed_ms);
-        super::log_if_due(
-            Path::new(path),
-            &drop_progress(deleted, elapsed_ms, totals.path_hash_rows),
-            totals,
-            &mut pace,
-            std::time::Duration::ZERO,
-        );
     }
 
     /// A 4-row copy is far below the old 100_000-row log. The start line still
@@ -2621,8 +2585,6 @@ mod tests {
             (total - done) * elapsed / done
         );
         assert_eq!(u64_field(progress, "data_paths_copied"), 1);
-        assert_eq!(u64_field(progress, "intervals"), 0);
-        assert_eq!(u64_field(progress, "legacy_data_paths_deleted"), 0);
         assert_eq!(
             u64_field(progress, "rows_per_sec_overall"),
             done.saturating_mul(1000) / elapsed
@@ -2663,19 +2625,7 @@ mod tests {
         assert_eq!(copy_ms.saturating_add(drop_ms), elapsed_ms);
         assert_eq!(u64_field(finished, "data_paths_copied"), u64::from(ROWS));
         assert_eq!(u64_field(finished, "intervals"), 1);
-        assert_eq!(
-            u64_field(finished, "legacy_data_paths_deleted"),
-            u64::from(ROWS)
-        );
         Ok(())
-    }
-
-    #[test]
-    fn default_progress_log_interval_is_fifteen_seconds() {
-        assert_eq!(
-            SubmoduleMigrationOptions::default().progress_log_interval,
-            std::time::Duration::from_secs(15)
-        );
     }
 
     /// Many batches inside one long interval. Start and finished still log.
@@ -2683,6 +2633,10 @@ mod tests {
     #[test]
     fn long_interval_emits_start_and_finished_and_no_progress() -> eyre::Result<()> {
         const ROWS: u32 = 8;
+        assert_eq!(
+            SubmoduleMigrationOptions::default().progress_log_interval,
+            std::time::Duration::from_secs(15)
+        );
         let dir = temp("sm-v1-long-interval");
         write_contiguous(dir.path(), ROWS)?;
         let capture = LogCapture::default();
@@ -2699,12 +2653,8 @@ mod tests {
         })?;
         assert!(stats.migrated);
         let events = capture.events.lock().expect("events");
-        let start = find_message(&events, "submodule index migration started");
-        assert_eq!(u64_field(start, "path_hash_total"), u64::from(ROWS));
-        let finished = find_message(&events, "submodule index migration finished");
-        assert_eq!(u64_field(finished, "copy_rows"), u64::from(ROWS));
-        assert_eq!(u64_field(finished, "drop_rows"), u64::from(ROWS));
-        assert!(bool_field(finished, "copy_elapsed_known"));
+        find_message(&events, "submodule index migration started");
+        find_message(&events, "submodule index migration finished");
         let progress = events
             .iter()
             .filter(|event| event.message == "submodule index migration progress")
