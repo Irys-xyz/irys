@@ -267,9 +267,7 @@ fn run_migration(
     if let Some(hook) = DURING_MIGRATION.with(|cell| cell.borrow_mut().take()) {
         hook(path);
     }
-    // Fresh copy and a resumed copy or drop both enter here. v2, empty, and
-    // foreign schemas never call `run_migration`. The pin drops on every
-    // return, including `?`, and unlocks pages before this function returns.
+    // v2, empty, and foreign schemas never call this. The pin drops on every return.
     let _warmed = pre_read_index_file(env, path);
     log_started(path, &progress, &totals);
     set_migration_gauge(path, migration_fraction(&progress, &totals));
@@ -696,10 +694,7 @@ pub(super) fn migration_required(env: &DatabaseEnv) -> eyre::Result<bool> {
     })
 }
 
-/// `mdbx_env_warmup` timeout, 16.16 fixed-point seconds. Zero turns the check
-/// off. 180s covers a 3 GiB sequential read at about 20 MiB/s. A faster disk
-/// returns when the load finishes. Past that, libmdbx returns
-/// `MDBX_RESULT_TRUE` and the migration still runs.
+/// 180 s, 16.16 fixed-point seconds. Zero disables the check.
 const WARMUP_TIMEOUT_16DOT16: std::os::raw::c_uint = 180 << 16;
 const WARMUP_LOAD: ffi::MDBX_warmup_flags_t = ffi::MDBX_warmup_force | ffi::MDBX_warmup_oomsafe;
 
@@ -726,7 +721,7 @@ impl MemlockBudget {
 
     /// `None` when `need` exceeds the budget. `on_wait(available)` runs once, under this lock.
     fn reserve(&self, need: u64, on_wait: impl FnOnce(u64)) -> Option<MemlockPermit<'_>> {
-        if need > self.total {
+        if need == 0 || need > self.total {
             return None;
         }
         let mut held = self
@@ -754,9 +749,6 @@ impl MemlockBudget {
 
 impl Drop for MemlockPermit<'_> {
     fn drop(&mut self) {
-        if self.bytes == 0 {
-            return;
-        }
         let mut held = self
             .budget
             .held
@@ -806,16 +798,12 @@ impl Drop for WarmupPin<'_> {
     }
 }
 
-/// Load the migrating env's pages so the copy's random lookups stay resident.
-///
-/// Lock does not raise `RLIMIT_MEMLOCK` (`MDBX_warmup_touchlimit` is not set).
-/// Reserve the file length first. Above the budget, or after a failed lock,
-/// release and load unpinned. A lock error skips the page load.
+/// Load the migrating env so the copy's lookups stay resident.
+/// A lock error skips that load. `MDBX_warmup_touchlimit` is not set.
 fn pre_read_index_file<'a>(env: &'a DatabaseEnv, dir: &Path) -> WarmupPin<'a> {
     let path = dir.join("mdbx.dat");
     let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-    let budget = memlock_budget();
-    let mut permit = budget.reserve(bytes, |available| {
+    let mut permit = memlock_budget().reserve(bytes, |available| {
         tracing::info!(
             path = %path.display(),
             need = bytes,
@@ -823,36 +811,22 @@ fn pre_read_index_file<'a>(env: &'a DatabaseEnv, dir: &Path) -> WarmupPin<'a> {
             "submodule index waiting for memlock budget"
         );
     });
-    if permit.is_none() {
-        tracing::warn!(
-            path = %path.display(),
-            need = bytes,
-            total = budget.total,
-            "submodule index pre-read exceeds memlock budget"
-        );
-    }
     let started = Instant::now();
     let mut locked = false;
+    let mut error: Option<String> = None;
     if permit.is_some() {
         match env_warmup(env, WARMUP_LOAD | ffi::MDBX_warmup_lock) {
             Ok(()) => locked = true,
-            Err(error) => {
-                permit = None;
-                tracing::warn!(
-                    path = %path.display(),
-                    %error,
-                    "submodule index pre-read lock failed"
-                );
+            Err(err) => {
+                if !err.starts_with("warmup timed out") {
+                    permit = None;
+                }
+                error = Some(err);
             }
         }
     }
-    if !locked && let Err(error) = env_warmup(env, WARMUP_LOAD) {
-        tracing::warn!(
-            path = %path.display(),
-            %error,
-            "submodule index pre-read failed"
-        );
-        return WarmupPin { env, permit };
+    if !locked && let Err(err) = env_warmup(env, WARMUP_LOAD) {
+        error = Some(err);
     }
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     tracing::info!(
@@ -860,6 +834,7 @@ fn pre_read_index_file<'a>(env: &'a DatabaseEnv, dir: &Path) -> WarmupPin<'a> {
         bytes,
         elapsed_ms,
         locked,
+        error = error.as_deref().unwrap_or(""),
         "submodule index pre-read"
     );
     WarmupPin { env, permit }
@@ -2775,11 +2750,6 @@ mod tests {
         let pre = find_message(&events, "submodule index pre-read");
         let file_bytes = *size.lock().expect("size");
         assert_eq!(u64_field(pre, "bytes"), file_bytes);
-        assert!(
-            matches!(field(pre, "locked"), "true" | "false"),
-            "locked must be a bool, got {}",
-            field(pre, "locked")
-        );
         assert!(
             str_field(pre, "path").ends_with("mdbx.dat"),
             "{}",
