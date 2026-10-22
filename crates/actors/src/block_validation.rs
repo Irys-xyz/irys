@@ -32,13 +32,13 @@ use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
-    SealedBlock, SendTraced as _, SystemLedger, U256, UnixTimestamp,
+    SealedBlock, SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
     app_state::DatabaseProvider,
-    calculate_difficulty, ensure_proof_layout,
+    calculate_difficulty, ensure_proof_layout, expected_chunk_byte_range,
     hardfork_config::{Cascade, ForEpoch},
     next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    validate_path,
+    validate_path, validate_path_byte_range,
 };
 use irys_types::{CommitmentTypeV2, IrysTransactionCommon, VersionDiscriminant as _};
 use irys_types::{IngressProof, LedgerChunkOffset, get_ingress_proofs};
@@ -187,8 +187,13 @@ pub enum PreValidationError {
         limit: usize,
         got: usize,
     },
-    #[error("PoA chunk length {got} is shorter than the proof span {span}")]
-    PoAChunkTooShort { span: usize, got: usize },
+    #[error("PoA chunk length {got} is shorter than {expected}")]
+    PoAChunkTooShort { expected: usize, got: usize },
+    /// Unpacked bytes after a short last chunk's data must be zero, as honest
+    /// packing leaves them. Free padding would let a miner grind the solution
+    /// hash, which covers the whole packed chunk.
+    #[error("PoA chunk padding after byte {span} is not zero")]
+    PoAChunkPaddingNotZero { span: usize },
     #[error("PoA chunk offset out of tx's data chunks bounds")]
     PoAChunkOffsetOutOfDataChunksBounds,
     #[error("PoA chunk offset out of block bounds")]
@@ -640,6 +645,7 @@ impl PreValidationError {
             | Self::PoAChunkMissing
             | Self::PoAChunkTooLong { .. }
             | Self::PoAChunkTooShort { .. }
+            | Self::PoAChunkPaddingNotZero { .. }
             | Self::PoAChunkOffsetOutOfBlockBounds
             | Self::PoAChunkOffsetOutOfDataChunksBounds
             | Self::PoAChunkOffsetOutOfTxBounds
@@ -722,6 +728,7 @@ impl PreValidationError {
             Self::PoAChunkMissing => "poa_chunk_missing",
             Self::PoAChunkTooLong { .. } => "poa_chunk_too_long",
             Self::PoAChunkTooShort { .. } => "poa_chunk_too_short",
+            Self::PoAChunkPaddingNotZero { .. } => "poa_chunk_padding_not_zero",
             Self::PoAChunkOffsetOutOfDataChunksBounds => "poa_chunk_offset_out_of_data_bounds",
             Self::PoAChunkOffsetOutOfBlockBounds => "poa_chunk_offset_out_of_block_bounds",
             Self::PoALedgerInactive { .. } => "poa_ledger_inactive",
@@ -2865,10 +2872,18 @@ mod prevalidation_error_classification_tests {
         assert!(!too_long.is_node_fault());
         assert_eq!(too_long.metric_reason(), "poa_chunk_too_long");
 
-        let too_short = PreValidationError::PoAChunkTooShort { span: 8, got: 7 };
+        let too_short = PreValidationError::PoAChunkTooShort {
+            expected: 8,
+            got: 7,
+        };
         assert_eq!(too_short.classify(), ErrorClass::Consensus);
         assert!(!too_short.is_node_fault());
         assert_eq!(too_short.metric_reason(), "poa_chunk_too_short");
+
+        let padding = PreValidationError::PoAChunkPaddingNotZero { span: 8 };
+        assert_eq!(padding.classify(), ErrorClass::Consensus);
+        assert!(!padding.is_node_fault());
+        assert_eq!(padding.metric_reason(), "poa_chunk_padding_not_zero");
     }
 
     /// `PoAOffCanonicalAncestor` is raised when the PoA-bounds walk falls off
@@ -4639,15 +4654,6 @@ fn poa_chunk_within_configured_len(
     reject_poa_chunk_longer_than(chunk, chunk_size, limit)
 }
 
-/// Same index as the previous `split_at` expression.
-/// `as u64` kept the low 64 bits of the proof span; the mask does that without a cast.
-fn poa_split_index(chunk_size: u64, max_byte_range: u128, min_byte_range: u128) -> usize {
-    let span = max_byte_range.saturating_sub(min_byte_range);
-    let span_low = u64::try_from(span & u128::from(u64::MAX)).unwrap_or(u64::MAX);
-    let trim = chunk_size.min(span_low);
-    usize::try_from(trim).unwrap_or(usize::MAX)
-}
-
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
 #[tracing::instrument(level = "trace", skip_all, fields(
     block.miner_address = ?miner_address,
@@ -4799,11 +4805,23 @@ pub fn poa_is_valid(
         let data_path_result = validate_path(owning_tx.data_root.0, &data_path, tx_chunk_offset)
             .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
-        if !(data_path_result.min_byte_range..=data_path_result.max_byte_range)
-            .contains(&tx_chunk_offset)
-        {
-            return Err(PreValidationError::PoAChunkOffsetOutOfDataChunksBounds);
+        // The tx author builds the data tree, and PoA is the only check of its
+        // shape for a tx without ingress proofs. Require the leaf to cover
+        // exactly this chunk, as chunk ingress does. A wider, shifted, or empty
+        // leaf would let the PoA leave chunk bytes unchecked.
+        fn out_of_chunk<E>(_: E) -> PreValidationError {
+            PreValidationError::PoAChunkOffsetOutOfDataChunksBounds
         }
+        let chunk_index =
+            u32::try_from(tx_chunk_offset / u128::from(config.chunk_size)).map_err(out_of_chunk)?;
+        let (chunk_start, chunk_end) = expected_chunk_byte_range(
+            TxChunkOffset(chunk_index),
+            owning_tx.data_size,
+            config.chunk_size,
+        )
+        .map_err(out_of_chunk)?;
+        validate_path_byte_range(&data_path_result, (chunk_start, chunk_end))
+            .map_err(out_of_chunk)?;
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
@@ -4816,25 +4834,25 @@ pub fn poa_is_valid(
             config.chain_id,
         );
 
+        // The solution hash covers every packed byte, so every byte must be
+        // fixed: the chunk is exactly `chunk_size`, and the unpacked bytes after
+        // a short last chunk's data are the zeros honest packing leaves.
         reject_poa_chunk_longer_than(&poa_chunk, config.chunk_size, entropy_chunk.len())?;
-        xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
-
-        // Because all chunks are packed as config.chunk_size, if the proof chunk is
-        // smaller we need to trim off the excess padding introduced by packing ?
-        let trim_index = poa_split_index(
-            config.chunk_size,
-            data_path_result.max_byte_range,
-            data_path_result.min_byte_range,
-        );
-        if poa_chunk.len() < trim_index {
+        if poa_chunk.len() < entropy_chunk.len() {
             return Err(PreValidationError::PoAChunkTooShort {
-                span: trim_index,
+                expected: entropy_chunk.len(),
                 got: poa_chunk.len(),
             });
         }
-        let (poa_chunk_pad_trimmed, _) = poa_chunk.split_at(trim_index);
+        xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
 
-        let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
+        let span = usize::try_from(chunk_end - chunk_start).map_err(out_of_chunk)?;
+        let (chunk_data, padding) = poa_chunk.split_at(span);
+        if padding.iter().any(|byte| *byte != 0) {
+            return Err(PreValidationError::PoAChunkPaddingNotZero { span });
+        }
+
+        let poa_chunk_hash = sha::sha256(chunk_data);
 
         if poa_chunk_hash != data_path_result.leaf_hash {
             return Err(PreValidationError::PoAChunkHashMismatch {
@@ -8257,6 +8275,8 @@ mod tests {
             let mut poa_chunk: Vec<u8> = data[poa_chunk_num * (chunk_size)
                 ..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())]
                 .to_vec();
+            // Honest packing zero-pads the 8-byte tail to a whole chunk.
+            poa_chunk.resize(chunk_size, 0);
             let poa_valid = poa_test(
                 &mut context,
                 &txs,
@@ -8271,44 +8291,174 @@ mod tests {
         }
     }
 
+    /// The honest PoA for a 40-byte tx's 8-byte tail, at ledger offset 1.
+    async fn tail_chunk_poa() -> (TempDir, TestContext, IndexedSubmit, IndexedChunkPoa) {
+        let (tmp, mut context) = init().await;
+        let built = index_submit_poas(&mut context, &[vec![3_u8; 40]]);
+        let tail = built.poas[1].clone();
+        assert_eq!(tail.block_offset, 1);
+        assert!(validate_indexed_poa(&context, &built, &tail).is_ok());
+        (tmp, context, built, tail)
+    }
+
     #[tokio::test]
-    async fn poa_truncated_below_proof_span_is_too_short() {
-        let (_tmp, mut context) = init().await;
-        let signer = IrysSigner::random_signer(&context.consensus_config);
-        let data = vec![3_u8; 40];
-        let tx = signer
-            .create_transaction(data.clone(), H256::zero())
-            .expect("create transaction");
-        let tx = signer.sign_transaction(tx).expect("sign transaction");
-        let txs = vec![tx];
-        let chunk_size = usize::try_from(context.consensus_config.chunk_size).unwrap();
-        let poa_chunk_num = 1;
-        let mut poa_chunk = data[poa_chunk_num * chunk_size..].to_vec();
-        assert_eq!(
-            poa_chunk.len(),
-            8,
-            "40-byte tx tail against a 32-byte chunk"
-        );
-        poa_chunk.pop();
+    async fn poa_shorter_than_chunk_size_is_too_short() {
+        let (_tmp, context, built, mut tail) = tail_chunk_poa().await;
+        let chunk = tail.poa.chunk.as_mut().expect("packed chunk");
+        // Keep the 8 data bytes. Only the zero padding is dropped.
+        chunk.0.truncate(8);
 
-        let result = poa_test(
-            &mut context,
-            &txs,
-            &mut poa_chunk,
-            0,
-            poa_chunk_num,
-            poa_chunk_num,
-            2,
-            chunk_size,
-        );
-
-        match result {
-            Err(PreValidationError::PoAChunkTooShort { span, got }) => {
-                assert_eq!(span, 8);
-                assert_eq!(got, 7);
+        match validate_indexed_poa(&context, &built, &tail) {
+            Err(PreValidationError::PoAChunkTooShort { expected, got }) => {
+                assert_eq!(expected, 32);
+                assert_eq!(got, 8);
             }
             other => panic!("expected PoAChunkTooShort, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn poa_tail_padding_must_unpack_to_zero() {
+        let (_tmp, context, built, mut tail) = tail_chunk_poa().await;
+        let chunk = tail.poa.chunk.as_mut().expect("packed chunk");
+        chunk.0[20] ^= 1;
+
+        match validate_indexed_poa(&context, &built, &tail) {
+            Err(PreValidationError::PoAChunkPaddingNotZero { span }) => assert_eq!(span, 8),
+            other => panic!("expected PoAChunkPaddingNotZero, got {other:?}"),
+        }
+    }
+
+    fn data_leaf_id(data_hash: &[u8; 32], max_byte: usize) -> [u8; 32] {
+        use irys_types::Helpers as _;
+        irys_types::hash_all_sha256(vec![data_hash, &max_byte.to_note_vec()])
+    }
+
+    fn data_leaf_proof(data_hash: &[u8; 32], max_byte: usize) -> Vec<u8> {
+        use irys_types::Helpers as _;
+        let mut proof = data_hash.to_vec();
+        proof.extend(max_byte.to_note_vec());
+        proof
+    }
+
+    /// Index one Submit tx whose author built its own data tree, `data_root`,
+    /// with one PoA per chunk slot. Every PoA carries `data_path`.
+    fn index_authored_data_tree(
+        context: &mut TestContext,
+        data_size: u64,
+        data_root: [u8; 32],
+        chunks: &[&[u8]],
+        data_path: &[u8],
+    ) -> IndexedSubmit {
+        let mut header = DataTransactionHeader::new(&context.consensus_config);
+        header.id = H256([0xA1; 32]);
+        header.ledger_id = DataLedger::Submit as u32;
+        header.data_size = data_size;
+        header.data_root = H256(data_root);
+        let (tx_root, tx_paths) =
+            DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&header));
+        let poas = chunks
+            .iter()
+            .enumerate()
+            .map(|(offset, chunk)| {
+                let mut poa =
+                    pack_chunk_poa(context, chunk, &tx_paths[0].proof, data_path, offset as u64);
+                poa.chunk_index = offset;
+                poa
+            })
+            .collect();
+        index_headers_and_poas(
+            context,
+            tx_root,
+            std::slice::from_ref(&header),
+            poas,
+            chunks.len() as u64,
+        )
+    }
+
+    fn assert_data_leaf_rejected(result: Result<(), PreValidationError>, what: &str) {
+        assert!(
+            matches!(
+                result,
+                Err(PreValidationError::PoAChunkOffsetOutOfDataChunksBounds)
+            ),
+            "{what}: expected PoAChunkOffsetOutOfDataChunksBounds, got {result:?}"
+        );
+    }
+
+    /// One data leaf spans the whole two-chunk tx, hashed over the first chunk.
+    #[tokio::test]
+    async fn poa_rejects_a_data_leaf_wider_than_its_chunk() {
+        let (_tmp, mut context) = init().await;
+        let chunk_len = context.consensus_config.chunk_size as usize;
+        let first = vec![0xAB_u8; chunk_len];
+        let data_size = chunk_len * 2;
+        let leaf_hash = hash_sha256(&first);
+        let built = index_authored_data_tree(
+            &mut context,
+            data_size as u64,
+            data_leaf_id(&leaf_hash, data_size),
+            &[&first, &first],
+            &data_leaf_proof(&leaf_hash, data_size),
+        );
+        for poa in &built.poas {
+            assert_data_leaf_rejected(
+                validate_indexed_poa(&context, &built, poa),
+                &format!("wide leaf at offset {}", poa.block_offset),
+            );
+        }
+    }
+
+    /// The branch pivot sits one byte past the left leaf's max, so the second
+    /// chunk's first byte still resolves to the left leaf.
+    #[tokio::test]
+    async fn poa_rejects_a_data_leaf_behind_a_shifted_pivot() {
+        use irys_types::Helpers as _;
+
+        let (_tmp, mut context) = init().await;
+        let chunk_len = context.consensus_config.chunk_size as usize;
+        let first = vec![0x11_u8; chunk_len];
+        let left_hash = hash_sha256(&first);
+        let right_hash = hash_sha256(&vec![0x22_u8; chunk_len]);
+        let pivot = chunk_len + 1;
+        let left = data_leaf_id(&left_hash, chunk_len);
+        let right = data_leaf_id(&right_hash, chunk_len * 2);
+        let root = irys_types::hash_all_sha256(vec![&left, &right, &pivot.to_note_vec()]);
+        let mut proof = left.to_vec();
+        proof.extend(right);
+        proof.extend(pivot.to_note_vec());
+        proof.extend(data_leaf_proof(&left_hash, chunk_len));
+
+        let built = index_authored_data_tree(
+            &mut context,
+            (chunk_len * 2) as u64,
+            root,
+            &[&first, &first],
+            &proof,
+        );
+        assert_data_leaf_rejected(
+            validate_indexed_poa(&context, &built, &built.poas[1]),
+            "first chunk's leaf at the second chunk's offset",
+        );
+    }
+
+    /// A zero-width leaf would check no chunk bytes at all.
+    #[tokio::test]
+    async fn poa_rejects_a_zero_width_data_leaf() {
+        let (_tmp, mut context) = init().await;
+        let chunk_len = context.consensus_config.chunk_size as usize;
+        let empty_hash = hash_sha256(&[]);
+        let built = index_authored_data_tree(
+            &mut context,
+            chunk_len as u64,
+            data_leaf_id(&empty_hash, 0),
+            &[&vec![0xFF_u8; chunk_len]],
+            &data_leaf_proof(&empty_hash, 0),
+        );
+        assert_data_leaf_rejected(
+            validate_indexed_poa(&context, &built, &built.poas[0]),
+            "zero-width leaf",
+        );
     }
 
     #[test]
@@ -8547,6 +8697,7 @@ mod tests {
     }
 
     /// One entropy-packed chunk PoA, addressed by its place in the indexed block.
+    #[derive(Clone)]
     struct IndexedChunkPoa {
         tx_index: usize,
         chunk_index: usize,
@@ -8584,7 +8735,9 @@ mod tests {
         block_offset: u64,
     ) -> IndexedChunkPoa {
         let chunk_size = context.consensus_config.chunk_size as usize;
+        // Honest packing zero-pads a short last chunk to `chunk_size`.
         let mut packed = chunk.to_vec();
+        packed.resize(chunk_size, 0);
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(
             context.miner_address,
