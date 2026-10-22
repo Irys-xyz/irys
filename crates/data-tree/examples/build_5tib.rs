@@ -32,8 +32,16 @@ fn main() {
     #[cfg(target_os = "linux")]
     let (vm_rss_kib, vm_hwm_kib) = resident_kib();
 
-    // One root per chunk, plus one internal node per pair-or-carry (spec §4).
-    let node_count = u64::from(tree.chunk_count()) * 2 - 1;
+    // Layer `l` stores `ceil(C / 2^l)` hashes, from the chunk roots through the
+    // root. A carried node is copied into each layer it passes through, so the
+    // stored count is that sum and a proof lookup is a plain index (spec §4).
+    // The loop is that rule; it is not a closed form.
+    let mut layer_length = u64::from(tree.chunk_count());
+    let mut node_count = layer_length;
+    while layer_length > 1 {
+        layer_length = layer_length.div_ceil(2);
+        node_count += layer_length;
+    }
     let node_cache_bytes = node_count * u64::try_from(HASH_SIZE).expect("hash width fits u64");
 
     println!("chunk_count={}", tree.chunk_count());

@@ -209,7 +209,7 @@ data_commitment for 3.5 chunks (917,504 bytes): data tree left, size witness rig
 
 **Non-power-of-two.** With `C = 5`, `T = node(node(node(R_0, R_1), node(R_2, R_3)), R_4)`. The chunk proof for `c = 4` has one sibling, then the size witness. The chunk proof for `c = 0` has three siblings, then the size witness.
 
-**Building.** A streaming builder keeps a stack of at most `log2(C) + 1` subtree roots, plus the chunk roots. To serve proofs it also caches the `C − 1` internal nodes: 64 B per chunk in all (256 KiB per GiB, about 1.3 GB at 5 TiB). `path()` below is the sibling list. The chunk proof is that list and then `size_witness(n)`. An implementation reads the siblings from the node cache and does not recompute subtrees:
+**Building.** A streaming builder keeps a stack of at most `log2(C) + 1` subtree roots, plus the chunk roots. To serve proofs it caches every layer. Layer `l` stores `ceil(C / 2^l)` hashes, from the chunk roots (`l = 0`) through the single root. The stored count is `Σ_l ceil(C / 2^l)`, at most about `2C + log2(C)` hashes: 64 B per chunk in all (256 KiB per GiB, about 1.3 GB at 5 TiB). A carried node is copied into each layer it passes through, so a proof lookup is a plain index in that layer. `path()` below is the sibling list. The chunk proof is that list and then `size_witness(n)`. An implementation reads the siblings from the node cache and does not recompute subtrees:
 
 ```
 path(c, R[0..C]):                         // siblings of chunk c, leaf to root (RFC 6962 audit path)
