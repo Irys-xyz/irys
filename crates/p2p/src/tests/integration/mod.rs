@@ -1,3 +1,5 @@
+mod chunk_announce;
+
 use super::util::{
     GossipServiceTestFixture, create_test_chunks, generate_test_tx, poll_until,
     wait_until_listening,

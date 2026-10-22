@@ -1857,6 +1857,77 @@ where
         }
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_chunk_announce_v2(
+        server: Data<Self>,
+        request: web::Json<wire_types::GossipRequestV2<wire_types::ChunkAnnouncement>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let request = request.into_inner();
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
+        if let Err(error_response) = Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            request.peer_id,
+            request.miner_address,
+        ) {
+            return error_response;
+        }
+        match server
+            .data_handler
+            .handle_chunk_announcement(request.peer_id, request.data)
+        {
+            Ok(()) => HttpResponse::Ok().json(GossipResponse::Accepted(())),
+            Err(GossipError::RateLimited) => HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited)),
+            Err(error) => {
+                // A seen-cache write error after admission. The claim, if
+                // any, already has its task, so the announcement is owned.
+                warn!(%error, "chunk announcement bookkeeping failed");
+                HttpResponse::Ok().json(GossipResponse::Accepted(()))
+            }
+        }
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_chunk_fetch_v2(
+        server: Data<Self>,
+        request: web::Json<wire_types::GossipRequestV2<wire_types::ChunkAnnouncement>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let request = request.into_inner();
+        if let Err(error_response) = Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            request.peer_id,
+            request.miner_address,
+        ) {
+            return error_response;
+        }
+        match server.data_handler.handle_chunk_fetch(&request.data) {
+            Ok(maybe) => HttpResponse::Ok().json(GossipResponse::Accepted(
+                maybe.map(wire_types::UnpackedChunk::from),
+            )),
+            Err(GossipError::RateLimited) => HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited)),
+            Err(error) => {
+                warn!(%error, "chunk fetch failed");
+                HttpResponse::Ok()
+                    .json(GossipResponse::<Option<wire_types::UnpackedChunk>>::Accepted(None))
+            }
+        }
+    }
+
     pub fn routes() -> impl HttpServiceFactory {
         web::scope("/gossip")
             .service(
@@ -1896,6 +1967,14 @@ where
                     .route(
                         GossipRoutes::PullData.as_str(),
                         web::post().to(Self::handle_pull_data),
+                    )
+                    .route(
+                        GossipRoutes::ChunkFetch.as_str(),
+                        web::post().to(Self::handle_chunk_fetch_v2),
+                    )
+                    .route(
+                        GossipRoutes::ChunkAnnounce.as_str(),
+                        web::post().to(Self::handle_chunk_announce_v2),
                     )
                     .route(
                         GossipRoutes::Handshake.as_str(),

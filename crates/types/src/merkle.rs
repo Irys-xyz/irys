@@ -55,6 +55,36 @@ pub fn expected_chunk_byte_range(
     Ok((min, max))
 }
 
+/// Check that an unpacked chunk is self-consistent: its data path proves
+/// `data_root` at `tx_offset`, the body length matches the proven range,
+/// and the body hashes to the proven leaf. Ingress can return `Ok` without
+/// this check (a recent-chunk hit keys only the path hash, and a wrong
+/// length returns `Ok` before the leaf hash is compared), so peer-supplied
+/// bodies must pass it first.
+pub fn validate_unpacked_chunk(chunk: &crate::UnpackedChunk, chunk_size: u64) -> eyre::Result<()> {
+    let (min_byte, max_byte) =
+        expected_chunk_byte_range(chunk.tx_offset, chunk.data_size, chunk_size)
+            .map_err(|error| eyre!("peer chunk data path range: {error}"))?;
+    let target = u128::from(max_byte - 1);
+    let path = validate_path(chunk.data_root.0, &chunk.data_path, target)
+        .map_err(|error| eyre!("peer chunk data path: {error}"))?;
+    let chunk_len =
+        u64::try_from(chunk.bytes.len()).map_err(|_| eyre!("peer chunk length exceeds u64"))?;
+    let expected_len = max_byte - min_byte;
+    eyre::ensure!(
+        chunk_len == expected_len,
+        "peer chunk length {chunk_len} does not match the data path range {expected_len}"
+    );
+    validate_path_byte_range(&path, (min_byte, max_byte))
+        .map_err(|error| eyre!("peer chunk data path range: {error}"))?;
+    let hash = hash_sha256(&chunk.bytes.0);
+    eyre::ensure!(
+        path.leaf_hash == hash,
+        "peer chunk hash does not match the data path leaf"
+    );
+    Ok(())
+}
+
 /// Verifies that a validated Merkle path identifies exactly the expected chunk
 /// range. Rightmost status is checked separately because provisional
 /// transaction metadata may understate the size committed by the data root.
@@ -1065,6 +1095,46 @@ mod tests {
             err.contains("At least one data node is required"),
             "unexpected error: {err}"
         );
+    }
+
+    fn single_chunk(bytes: Vec<u8>) -> crate::UnpackedChunk {
+        let chunk_size = bytes.len();
+        let leaves =
+            generate_leaves(std::iter::once(Ok(bytes.clone())), chunk_size).expect("leaves");
+        let root = generate_data_root(leaves).expect("root");
+        let data_root = H256(root.id);
+        let proof = resolve_proofs(root, None)
+            .expect("proofs")
+            .into_iter()
+            .next()
+            .expect("one proof");
+        crate::UnpackedChunk {
+            data_root,
+            data_size: u64::try_from(chunk_size).expect("chunk length fits u64"),
+            data_path: proof.proof.into(),
+            bytes: bytes.into(),
+            tx_offset: TxChunkOffset::from(0),
+        }
+    }
+
+    #[test]
+    fn validate_unpacked_chunk_accepts_a_consistent_chunk() {
+        let chunk = single_chunk(vec![7_u8; 32]);
+        validate_unpacked_chunk(&chunk, 32).expect("valid chunk");
+    }
+
+    #[test]
+    fn validate_unpacked_chunk_rejects_a_wrong_length_body() {
+        let mut chunk = single_chunk(vec![7_u8; 32]);
+        chunk.bytes = vec![7_u8; 31].into();
+        assert!(validate_unpacked_chunk(&chunk, 32).is_err());
+    }
+
+    #[test]
+    fn validate_unpacked_chunk_rejects_a_body_that_does_not_hash_to_the_leaf() {
+        let mut chunk = single_chunk(vec![7_u8; 32]);
+        chunk.bytes = vec![8_u8; 32].into();
+        assert!(validate_unpacked_chunk(&chunk, 32).is_err());
     }
 }
 

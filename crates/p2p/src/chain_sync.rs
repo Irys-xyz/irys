@@ -432,7 +432,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     info!(
                         local_height = status.local_height,
                         best_trusted_height,
-                        peer = %best_peer_address,
+                        peer.address = %best_peer_address,
                         "Periodic sync check: We're behind the network, starting sync"
                     );
                     self.spawn_chain_sync_task(None, false);
@@ -440,7 +440,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     error!(
                         local_height = status.local_height,
                         best_trusted_height,
-                        peer = %best_peer_address,
+                        peer.address = %best_peer_address,
                         "Periodic sync check: local index is behind trusted peers but no trusted peer that answered as not syncing is active; not starting a sync"
                     );
                     warn_if_behind_syncing_trusted_peer(migration_depth, &status);
@@ -1965,7 +1965,7 @@ fn warn_if_behind_syncing_trusted_peer(migration_depth: u64, status: &TrustedPee
         warn!(
             local_height = status.local_height,
             best_syncing_height,
-            peer = %best_syncing_peer_address,
+            peer.address = %best_syncing_peer_address,
             "Periodic sync check: local index is behind a trusted peer that is syncing; not starting a sync"
         );
     }

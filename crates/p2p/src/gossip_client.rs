@@ -7,6 +7,7 @@ use crate::metrics::record_gossip_outbound_error;
 use crate::types::{GossipError, GossipResult, GossipRoutes};
 use crate::wire_types::{self, GossipResponse, RejectionReason};
 use core::time::Duration;
+use dashmap::DashMap;
 use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
@@ -14,7 +15,7 @@ use irys_types::{
     BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, DATA_REQUEST_RETRIES, GossipCacheKey,
     H256, HandshakeRequest, HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2,
     IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress,
-    PeerListItem, PeerNetworkError, PeerResponse, ProtocolVersion, SealedBlock,
+    PeerListItem, PeerNetworkError, PeerResponse, ProtocolVersion, SealedBlock, UnpackedChunk,
 };
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use opentelemetry::propagation::Injector;
@@ -37,6 +38,9 @@ const MAX_PROTOCOL_VERSIONS: usize = 20;
 const PUSH_BACKPRESSURE_RETRIES: u32 = 3;
 /// First wait between rate-limited push attempts. Later waits double.
 const PUSH_BACKPRESSURE_BACKOFF: Duration = Duration::from_millis(250);
+
+/// How long a 404 on `chunk_announce` marks a peer as an old version.
+const ANNOUNCE_UNSUPPORTED_TTL: Duration = Duration::from_secs(600);
 
 fn push_response_accepted<T>(result: &GossipResult<GossipResponse<T>>) -> bool {
     matches!(result, Ok(GossipResponse::Accepted(_)))
@@ -243,6 +247,8 @@ pub struct GossipClient {
     /// Held for the duration of a hydration pass; carries when the last one
     /// finished. Serialises passes and backs the freshness skip.
     hydrate_pass: Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
+    /// Peers whose `chunk_announce` route 404'd, until [`ANNOUNCE_UNSUPPORTED_TTL`].
+    announce_unsupported: Arc<DashMap<IrysPeerId, std::time::Instant>>,
 }
 
 /// What a `/gossip/health` probe learned about a peer.
@@ -274,6 +280,15 @@ fn gossip_error_type(err: &GossipError) -> &'static str {
         GossipError::Advisory(_) => "advisory",
         GossipError::CircuitBreakerOpen(_) => "circuit_breaker_open",
     }
+}
+
+/// Result of offering a chunk announcement to one peer.
+#[derive(Debug)]
+pub(crate) enum AnnounceOutcome {
+    /// The peer answered (accepted, rejected) or the transport failed.
+    Answered(GossipResult<GossipResponse<()>>),
+    /// HTTP 404: the peer predates chunk announcements; push the body.
+    RouteMissing,
 }
 
 impl GossipClient {
@@ -343,6 +358,7 @@ impl GossipClient {
             runtime_handle,
             hydrate_cursor: Arc::new(AtomicUsize::new(0)),
             hydrate_pass: Arc::new(tokio::sync::Mutex::new(None)),
+            announce_unsupported: Arc::default(),
         }
     }
 
@@ -391,7 +407,7 @@ impl GossipClient {
         if self.circuit_breaker.is_available(peer) {
             return Ok(());
         }
-        tracing::debug!(?peer, "circuit breaker open, skipping request");
+        tracing::debug!(peer.id = ?peer, "circuit breaker open, skipping request");
         Err(GossipError::CircuitBreakerOpen(*peer))
     }
 
@@ -408,7 +424,7 @@ impl GossipClient {
         if allowed {
             return Ok(());
         }
-        tracing::debug!(?peer, probe, "circuit breaker open, skipping request");
+        tracing::debug!(peer.id = ?peer, probe, "circuit breaker open, skipping request");
         Err(GossipError::CircuitBreakerOpen(*peer))
     }
 
@@ -1277,26 +1293,7 @@ impl GossipClient {
         let status = response.status();
 
         match status {
-            StatusCode::OK => {
-                let bytes = self.read_capped_bytes(response).await.map_err(|e| {
-                    GossipError::Network(format!("Failed to read response from {url}: {e}"))
-                })?;
-                let text = String::from_utf8(bytes).map_err(|_| {
-                    GossipError::Network(format!("peer response from {url} is not valid utf-8"))
-                })?;
-
-                if text.trim().is_empty() {
-                    return Err(GossipError::Network(format!("Empty response from {}", url)));
-                }
-
-                let parsed = serde_json::from_str(&text).map_err(|e| {
-                    GossipError::Network(format!(
-                        "{}: Failed to parse JSON: {} - Response: {}",
-                        url, e, text
-                    ))
-                })?;
-                Ok(parsed)
-            }
+            StatusCode::OK => self.parse_gossip_response(&url, response).await,
             _ => {
                 let error_text = match self.read_capped_bytes(response).await {
                     Ok(bytes) => String::from_utf8(bytes)
@@ -1313,6 +1310,31 @@ impl GossipClient {
                 )))
             }
         }
+    }
+
+    async fn parse_gossip_response<R: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        response: reqwest::Response,
+    ) -> GossipResult<R> {
+        let bytes = self.read_capped_bytes(response).await.map_err(|e| {
+            GossipError::Network(format!("Failed to read response from {url}: {e}"))
+        })?;
+        let text = String::from_utf8(bytes).map_err(|_| {
+            GossipError::Network(format!("peer response from {url} is not valid utf-8"))
+        })?;
+
+        if text.trim().is_empty() {
+            return Err(GossipError::Network(format!("Empty response from {}", url)));
+        }
+
+        let parsed = serde_json::from_str(&text).map_err(|e| {
+            GossipError::Network(format!(
+                "{}: Failed to parse JSON: {} - Response: {}",
+                url, e, text
+            ))
+        })?;
+        Ok(parsed)
     }
 
     /// Spawns a detached task that sends pre-serialized data, updates peer score, and records cache seen.
@@ -1901,6 +1923,165 @@ impl GossipClient {
         wire_types::GossipRequestV1 {
             miner_address: self.mining_address,
             data,
+        }
+    }
+
+    pub(crate) fn peer_lacks_announce(&self, peer_id: &IrysPeerId) -> bool {
+        let expired = match self.announce_unsupported.get(peer_id) {
+            Some(at) if at.elapsed() < ANNOUNCE_UNSUPPORTED_TTL => return true,
+            Some(_) => true,
+            None => false,
+        };
+        if expired {
+            self.announce_unsupported.remove(peer_id);
+        }
+        false
+    }
+
+    /// Offer an announcement. On 404, remember the peer and push the body.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors send_preserialized_detached"
+    )]
+    pub(crate) fn send_chunk_announcement_detached(
+        &self,
+        peer: (&IrysPeerId, &PeerListItem),
+        announcement: crate::wire_types::ChunkAnnouncement,
+        push_route: GossipRoutes,
+        push_body: bytes::Bytes,
+        peer_list: &PeerList,
+        cache: Arc<GossipCache>,
+        gossip_cache_key: GossipCacheKey,
+    ) {
+        let client = self.clone();
+        let peer_list = peer_list.clone();
+        let peer_id = *peer.0;
+        let address = peer.1.address.gossip;
+        let span = tracing::Span::current();
+        self.runtime_handle.spawn(
+            async move {
+                let result = match client.check_circuit_breaker(&peer_id) {
+                    Err(error) => Err(error),
+                    Ok(()) => {
+                        match client
+                            .send_chunk_announcement(&address, &announcement)
+                            .await
+                        {
+                            AnnounceOutcome::Answered(result) => result,
+                            AnnounceOutcome::RouteMissing => {
+                                client
+                                    .announce_unsupported
+                                    .insert(peer_id, std::time::Instant::now());
+                                client
+                                    .push_preserialized_with_backoff(
+                                        &peer_id, &address, push_route, push_body,
+                                    )
+                                    .await
+                            }
+                        }
+                    }
+                };
+                Self::complete_push(
+                    &peer_list,
+                    &result,
+                    &peer_id,
+                    &client.circuit_breaker,
+                    &cache,
+                    gossip_cache_key,
+                    "chunk announcement",
+                );
+            }
+            .instrument(span),
+        );
+    }
+
+    pub(crate) async fn send_chunk_announcement(
+        &self,
+        address: &SocketAddr,
+        announcement: &crate::wire_types::ChunkAnnouncement,
+    ) -> AnnounceOutcome {
+        let url = format!(
+            "{}{}",
+            gossip_base_url(address, ProtocolVersion::V2),
+            GossipRoutes::ChunkAnnounce.as_str()
+        );
+        let body = self.create_request_v2(*announcement);
+        let response = match self
+            .client
+            .post(&url)
+            .headers(traced_headers())
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return AnnounceOutcome::Answered(Err(GossipError::Network(format!(
+                    "Failed to send chunk announcement to {url}: {error}"
+                ))));
+            }
+        };
+        match response.status() {
+            StatusCode::NOT_FOUND => AnnounceOutcome::RouteMissing,
+            StatusCode::OK => {
+                AnnounceOutcome::Answered(self.parse_gossip_response(&url, response).await)
+            }
+            status => AnnounceOutcome::Answered(Err(GossipError::Network(format!(
+                "chunk announcement to {url} failed with status {status}"
+            )))),
+        }
+    }
+
+    /// Fetch an announced chunk from one source. Breaker-gated and scored
+    /// like any pull. `Ok(None)`: the source no longer has the body.
+    pub(crate) async fn fetch_chunk(
+        &self,
+        peer_id: &IrysPeerId,
+        address: &SocketAddr,
+        announcement: &crate::wire_types::ChunkAnnouncement,
+        peer_list: &PeerList,
+    ) -> GossipResult<Option<UnpackedChunk>> {
+        self.admit_pull(peer_id, false)?;
+        let url = format!(
+            "{}{}",
+            gossip_base_url(address, ProtocolVersion::V2),
+            GossipRoutes::ChunkFetch.as_str()
+        );
+        let started = std::time::Instant::now();
+        let body = self.create_request_v2(*announcement);
+        let result: GossipResult<GossipResponse<Option<crate::wire_types::UnpackedChunk>>> =
+            match self
+                .client
+                .post(&url)
+                .headers(traced_headers())
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(response) if response.status() == StatusCode::OK => {
+                    self.parse_gossip_response(&url, response).await
+                }
+                Ok(response) => Err(GossipError::Network(format!(
+                    "chunk fetch from {url} failed with status {}",
+                    response.status()
+                ))),
+                Err(error) => Err(GossipError::Network(format!(
+                    "chunk fetch from {url} failed: {error}"
+                ))),
+            };
+        Self::handle_data_retrieval_score(
+            peer_list,
+            &result,
+            peer_id,
+            started.elapsed(),
+            &self.circuit_breaker,
+        );
+        match result? {
+            GossipResponse::Accepted(maybe) => Ok(maybe.map(Into::into)),
+            GossipResponse::Rejected(RejectionReason::RateLimited) => Err(GossipError::RateLimited),
+            GossipResponse::Rejected(reason) => Err(GossipError::Network(format!(
+                "chunk fetch rejected: {reason:?}"
+            ))),
         }
     }
 
