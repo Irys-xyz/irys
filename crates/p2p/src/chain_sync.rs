@@ -755,17 +755,20 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
 
             if !err.is_advisory() {
                 self.block_pool.remove_requested_block(&block_hash).await;
-                // A block another path already stored stays in the cache.
-                if !self.block_pool.is_block_known_locally(&block_hash).await {
-                    self.block_pool
-                        .remove_block_from_cache(
-                            &block_hash,
-                            BlockRemovalReason::FailedToProcess(FailureReason::FailedToPull(
-                                err.clone(),
-                            )),
-                        )
-                        .await;
-                }
+                // Test seam before the removal decision. Production does
+                // not pause. A block stored here is visible to that decision.
+                #[cfg(test)]
+                parent_pull_cleanup_window().await;
+                // One cache lock covers the known-locally check and the
+                // remove, so a block stored in that window stays.
+                self.block_pool
+                    .remove_block_from_cache_unless_known_locally(
+                        &block_hash,
+                        BlockRemovalReason::FailedToProcess(FailureReason::FailedToPull(
+                            err.clone(),
+                        )),
+                    )
+                    .await;
             }
 
             Err(ChainSyncError::Internal(format!(
@@ -776,6 +779,32 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             Ok(())
         }
     }
+}
+
+/// Pauses a test after a failed pull and before the removal decision, so
+/// the test can store a block another path just delivered. No-op unless
+/// that test set the window.
+#[cfg(test)]
+async fn parent_pull_cleanup_window() {
+    let window = PARENT_PULL_CLEANUP_WINDOW
+        .try_with(|slot| slot.lock().expect("cleanup window").take())
+        .ok()
+        .flatten();
+    if let Some(window) = window {
+        let _ = window.reached.send(());
+        let _ = window.resume.await;
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static PARENT_PULL_CLEANUP_WINDOW: std::sync::Mutex<Option<ParentPullCleanupWindow>>;
+}
+
+#[cfg(test)]
+struct ParentPullCleanupWindow {
+    reached: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
 }
 
 impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
@@ -4082,6 +4111,106 @@ mod tests {
         assert!(
             handler.block_pool.contains_block(&block_hash).await,
             "a failed parent request must not delete a block another path stored"
+        );
+    }
+
+    /// A block stored after the pull fails and before the cache cleanup
+    /// stays in the cache. The store is injected at the cleanup window,
+    /// not with a sleep.
+    #[tokio::test]
+    async fn failed_parent_request_keeps_a_block_stored_during_cleanup() {
+        use crate::tests::util::data_handler_stub;
+        use irys_domain::PeerList;
+        use irys_domain::chain_sync_state::ChainSyncState;
+        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            BlockBody, Config, DatabaseProvider, DbSyncMode, H256, NodeConfig, SealedBlock,
+        };
+        use irys_vdf::state::VdfController;
+        use std::sync::atomic::AtomicBool;
+
+        let dir = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = dir.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(
+                &config.node_config.base_directory,
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("open test db"),
+        ));
+        let peer_list = PeerList::test_mock().expect("peer list");
+        let handler = data_handler_stub(&config, &peer_list, db, ChainSyncState::new(false, false));
+
+        let mut header = irys_testing_utils::new_mock_signed_header();
+        header.height = 1;
+        header.previous_block_hash = H256::random();
+        header.test_sign();
+        let block_hash = header.block_hash;
+        let sealed = Arc::new(
+            SealedBlock::new(
+                header,
+                BlockBody {
+                    block_hash,
+                    data_transactions: vec![],
+                    commitment_transactions: vec![],
+                },
+            )
+            .expect("sealed block"),
+        );
+
+        let service = ChainSyncServiceInner::new(
+            handler.sync_state.clone(),
+            handler.peer_list.clone(),
+            handler.config.clone(),
+            handler.block_index.clone(),
+            Arc::clone(&handler.block_pool),
+            Arc::clone(&handler),
+            None,
+            VdfController::new(&Arc::new(AtomicBool::new(false))),
+            tokio::runtime::Handle::current(),
+        );
+
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let request = PARENT_PULL_CLEANUP_WINDOW.scope(
+            std::sync::Mutex::new(Some(ParentPullCleanupWindow {
+                reached: reached_tx,
+                resume: resume_rx,
+            })),
+            service.request_block_from_the_network(block_hash),
+        );
+
+        tokio::pin!(request);
+        tokio::select! {
+            biased;
+            reached = reached_rx => {
+                reached.expect("cleanup window opened");
+                handler
+                    .block_pool
+                    .test_insert_block_into_cache(sealed, false)
+                    .await;
+                resume_tx.send(()).expect("resume cleanup");
+            }
+            _ = &mut request => {
+                panic!("parent pull finished before the cleanup window");
+            }
+        }
+
+        let err = request
+            .await
+            .expect_err("a parent pull with no peers fails");
+        let _ = err;
+        assert!(
+            !handler.block_pool.is_block_requested(&block_hash).await,
+            "a failed request clears the requested bit"
+        );
+        assert!(
+            handler.block_pool.contains_block(&block_hash).await,
+            "a block stored before the cache removal stays in the cache"
         );
     }
 }
