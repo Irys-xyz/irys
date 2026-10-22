@@ -270,8 +270,11 @@ verify_segment(D, n, c, j, bytes, proof):
     w = size_witness(n)                    // computed here, from this n
     require the last hash of proof == w   // else stop; do not climb
     siblings = proof without its last hash
+    s = ceil(chunk_len(n, c) / segment_size)   // a segment at or past s is empty
     r = leaf(bytes); i = j
     for level in 0 .. h:                  // bit `level` of j picks the side
+        start = ((j >> level) ^ 1) << level    // first segment of the sibling subtree
+        if start ≥ s: require siblings[level] == empty(level)
         r = node(r, siblings[level]) if i is even else node(siblings[level], r)
         i = i >> 1
     r = climb(r, c, C, siblings[h ..])
@@ -295,6 +298,7 @@ climb(r, c, C, hashes):                   // RFC 9162 §2.1.3.2 inclusion walk, 
 
 - **Size proof:** `require node(data_tree_root, size_witness(n)) == D`.
 - **Packed bytes:** unpack, then trim to `chunk_len` or `segment_len` before hashing. The segment-PoA spec also requires the trimmed tail to unpack to zero.
+- **Empty in-chunk siblings.** At level `ℓ` the sibling subtree starts at `start = ((j >> ℓ) ^ 1) << ℓ`. Let `s = ceil(chunk_len(n, c) / segment_size)`. A segment at or past `s` is empty (`segment_len` is 0). If `start ≥ s`, that subtree is entirely past the data, and the sibling must be `empty(ℓ)`. `(n, c, j)` fixes `start` and `s` before the climb. An honest proof already carries `empty(ℓ)`. Any other hash fails, the same way a bad climb fails. A last chunk that puts some other hash where an empty subtree must be then fails every data segment of that chunk. No bytes of that chunk pass `verify_chunk` either.
 - **No proof is empty.** Every proof ends with its size witness. For `C = 1` the chunk proof is `[size_witness(n)]`. A missing proof and a present proof differ in length, so a container does not have to tell an empty value from an absent one (§15 Q10). A last hash that is not `size_witness(n)` fails (`SizeWitnessMismatch`) before the climb.
 - **Compact multiproof:** a possible future format, not the multi-segment encoding above. Its design is in Appendix B.
 
@@ -420,7 +424,7 @@ Rates measured with openssl speed -evp sha256 -bytes N on one core of an Intel i
 | Identical data | Identity is `chunk_key`, never proof bytes (§7) |
 | Denial of service | Length checks run before any hashing. Work per proof is bounded. A wrong-length chunk is a peer fault, not a silent drop |
 | Determinism | Integers and bytes only, checked arithmetic, no map iteration order |
-| Availability | Not proven by any root. A dishonest builder can commit to a tree with no preimage for some chunks; storage proofs (PoA, ingress proofs, custody) detect that, and the upload never completes |
+| Availability | Not proven by any root. A dishonest builder can commit to a tree with no preimage for some chunks. Storage proofs (PoA, ingress proofs, custody) detect that, and the upload never completes. A segment proof pins every in-chunk sibling that lies entirely past the data to `empty(ℓ)` (§5), so this holds for segment proofs too: a malformed last chunk fails them |
 
 ## 11. Rollout
 
@@ -590,6 +594,7 @@ The log is append-only. A row is not reworded. The first table binds the data tr
 | 2026-10-18 | `segments_per_chunk` is a validated consensus config field (64 on mainnet and testnet, 4 in `testing()`) |
 | 2026-10-18 | Names: `data_tree_root`, `size_witness`, `data_commitment`; `data_root` means v1 only; a newtype per value |
 | 2026-10-18 | Witness layout: `data_commitment = node(data_tree_root, size_witness)`, the size witness as the root's right child |
+| 2026-10-22 | A segment proof pins each in-chunk sibling whose subtree lies entirely past the data to `empty(ℓ)` (§5). The subtree starts at `start = ((j >> ℓ) ^ 1) << ℓ`. It is pinned when `start ≥ ceil(chunk_len(n, c) / segment_size)`. Those indexes follow from `(n, c, j)` before the climb. Honest proofs already carry `empty(ℓ)` there. Without the pin, a last chunk can put another hash in that position: every data segment of the chunk verifies, and no bytes pass `verify_chunk`. Segment proofs would then miss a chunk with no preimage |
 
 Status: binding. The leaf rules in the next sentence are part of the confirmed data tree. They are not a separate log row.
 

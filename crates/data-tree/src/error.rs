@@ -160,7 +160,10 @@ pub enum VerifyError {
     /// A supplied witness is not climbed until it matches that value.
     #[error("size witness does not match")]
     SizeWitnessMismatch,
-    /// The climbed root and `size_witness(data_size)` are not the commitment.
+    /// The proof does not open the anchored commitment (spec §5).
+    ///
+    /// A bad climb, a climbed root that does not match the commitment, and an
+    /// in-chunk sibling that must be `empty(ℓ)` but is not, all fail here.
     #[error("commitment does not match")]
     CommitmentMismatch,
 }

@@ -3,12 +3,14 @@
 //! The order is fixed: range, byte length, proof length, the size witness, then
 //! the climb. The expected proof length is `32 × (k + 1)` bytes: `k` sibling
 //! hashes and `size_witness` (spec §5). A length that is not a multiple of 32
-//! fails that check. Length checks run before any hashing (spec §10).
+//! fails that check. Length checks run before any hashing (spec §10). While
+//! `verify_segment` climbs the chunk, a sibling subtree that lies entirely past
+//! the data must be `empty(ℓ)` (spec §5, §10).
 
 use crate::chunk::chunk_root;
 use crate::error::VerifyError;
 use crate::geometry::Geometry;
-use crate::hash::{self, leaf, node, size_witness};
+use crate::hash::{self, empty, leaf, node, size_witness};
 use crate::shape::{climb, depth};
 use crate::types::{DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash};
 
@@ -61,6 +63,10 @@ pub fn verify_chunk(
 /// siblings another revealed segment computes was designed and not adopted
 /// (spec §5).
 ///
+/// An in-chunk sibling whose subtree lies entirely past the data must be
+/// `empty(ℓ)`. The first segment of that subtree follows from `(n, c, j)`
+/// before the climb (spec §5, §10).
+///
 /// `c` is `chunk_index`. `j` is `segment_index`.
 pub fn verify_segment(
     geometry: &Geometry,
@@ -93,19 +99,37 @@ pub fn verify_segment(
     }
     // Check the witness before the climb (spec §5, §15 Q10).
     let siblings = require_size_witness(proof, data_size)?;
-    let in_chunk_bytes = usize::try_from(geometry.height()).expect("height fits usize") * HASH_SIZE;
+    let subtree_height = geometry.height();
+    let in_chunk_bytes = usize::try_from(subtree_height).expect("height fits usize") * HASH_SIZE;
     // The length check guarantees the siblings cover the `h` in-chunk hashes.
     let (in_chunk, chunk_siblings) = siblings
         .split_at_checked(in_chunk_bytes)
         .expect("proof covers the in-chunk siblings");
+    // `s = ceil(chunk_len(n, c) / segment_size)`. A segment at or past `s` is
+    // empty. `(n, c)` fixes this before the climb (spec §5).
+    let chunk_length = geometry
+        .chunk_len(data_size, chunk_index)
+        .expect("segment_len already accepted this chunk");
+    let data_segments = u32::try_from(chunk_length.div_ceil(geometry.segment_size()))
+        .expect("ceil(chunk_len / segment_size) is at most segments_per_chunk");
     let mut root = leaf(bytes);
     let mut segment_index = segment_index;
-    for sibling in in_chunk.chunks_exact(HASH_SIZE) {
+    for (level, sibling) in in_chunk.chunks_exact(HASH_SIZE).enumerate() {
         let bytes = <[u8; HASH_SIZE]>::try_from(sibling)
             .expect("chunks_exact yields HASH_SIZE-byte slices");
         let sibling = NodeHash(bytes);
-        // Bit `level` of `j`, after the shifts above, picks the side (spec §5).
-        // Even: this segment is the left child.
+        // `level` is `ℓ`. `segment_index` is `j >> ℓ`. The sibling subtree
+        // starts at `((j >> ℓ) ^ 1) << ℓ` (spec §5). `ℓ < h`, and `h` is at
+        // most `MAX_SUBTREE_HEIGHT`, so the shift fits in `u32`.
+        let level = u32::try_from(level).expect("height fits u32");
+        debug_assert!(level < u32::BITS);
+        let sibling_start = (segment_index ^ 1) << level;
+        // Entirely past the data: the sibling is `empty(ℓ)`. Another hash is a
+        // last chunk with no preimage (spec §5, §10).
+        if sibling_start >= data_segments && sibling != empty(level) {
+            return Err(VerifyError::CommitmentMismatch);
+        }
+        // Bit `ℓ` of `j` picks the side (spec §5). Even: this segment is the left child.
         root = if segment_index & 1 == 0 {
             node(&root, &sibling)
         } else {
