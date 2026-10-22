@@ -419,9 +419,19 @@ pub fn process_ledger_transactions(
     Ok(())
 }
 
+/// Bodies loaded for one migration window.
+struct LoadedMigrationChunks {
+    bodies: Vec<Option<UnpackedChunk>>,
+    /// A Submit replica could not be read and at least one chunk is still
+    /// empty. That chunk may sit on the skipped replica, so the pass is not
+    /// "no local source".
+    submit_unread: bool,
+}
+
 /// Source `count` contiguous transaction offsets starting at `tx_start`.
 /// Cache hits stay per chunk. Each Publish cache miss is resolved on every
-/// Submit replica. A fallback error keeps the chunks already loaded. Term
+/// Submit replica. A replica whose read fails is skipped; the others are
+/// still read. A hard fallback error keeps the chunks already loaded. Term
 /// ledgers do not fall back across ledgers. `None` is a hole.
 fn load_chunks_for_migration(
     storage_modules_guard: &StorageModulesReadGuard,
@@ -432,7 +442,7 @@ fn load_chunks_for_migration(
     tx_start: TxChunkOffset,
     count: usize,
     config: &Config,
-) -> Result<Vec<Option<UnpackedChunk>>, MigrationError> {
+) -> Result<LoadedMigrationChunks, MigrationError> {
     let chunk_size = usize::try_from(config.consensus.chunk_size).map_err(|_| {
         MigrationError::Other(format!(
             "configured chunk size {} does not fit usize",
@@ -472,9 +482,9 @@ fn load_chunks_for_migration(
             }
         }
     }
-    if target_ledger == DataLedger::Publish
-        && !misses.is_empty()
-        && let Err(error) = fill_submit_misses(
+    let mut submit_unread = false;
+    if target_ledger == DataLedger::Publish && !misses.is_empty() {
+        match fill_submit_misses(
             storage_modules_guard,
             data_root,
             data_size,
@@ -482,15 +492,21 @@ fn load_chunks_for_migration(
             &misses,
             &mut bodies,
             chunk_size,
-        )
-    {
-        tracing::warn!(
-            data_root = %data_root,
-            ?error,
-            "Submit fallback failed; keeping chunks already loaded"
-        );
+        ) {
+            Ok(unread) => submit_unread = unread,
+            Err(error) => {
+                tracing::warn!(
+                    data_root = %data_root,
+                    ?error,
+                    "Submit fallback failed; keeping chunks already loaded"
+                );
+            }
+        }
     }
-    Ok(bodies)
+    Ok(LoadedMigrationChunks {
+        bodies,
+        submit_unread,
+    })
 }
 
 fn tx_offset_at(tx_start: TxChunkOffset, step: usize) -> Result<TxChunkOffset, MigrationError> {
@@ -506,7 +522,9 @@ fn tx_offset_at(tx_start: TxChunkOffset, step: usize) -> Result<TxChunkOffset, M
 /// Each still-empty index is resolved on every Submit replica. A tx offset
 /// this replica does not hold is a miss for the next replica. Adding later
 /// indexes to the first placement reads past the partition and fails the
-/// chunks that were in range.
+/// chunks that were in range. A read error skips that replica; later
+/// replicas are still read. `Ok(true)` means a replica could not be read
+/// and a miss is still empty: that chunk may sit on the skipped replica.
 fn fill_submit_misses(
     storage_modules_guard: &StorageModulesReadGuard,
     data_root: DataRoot,
@@ -515,9 +533,10 @@ fn fill_submit_misses(
     misses: &[usize],
     bodies: &mut [Option<UnpackedChunk>],
     chunk_size: usize,
-) -> Result<(), MigrationError> {
+) -> Result<bool, MigrationError> {
     let storage_modules = storage_modules_guard.read().clone();
     let mut pending = misses.to_vec();
+    let mut submit_unread = false;
     for module in &storage_modules {
         if pending.is_empty() {
             break;
@@ -530,14 +549,30 @@ fn fill_submit_misses(
             continue;
         }
         let mut still = Vec::new();
+        let mut skip_module = false;
         for step in pending {
+            if skip_module {
+                still.push(step);
+                continue;
+            }
             let tx_offset = tx_offset_at(tx_start, step)?;
-            let placements = irys_domain::trace_index_read(irys_domain::MIGRATION, || {
+            let placements = match irys_domain::trace_index_read(irys_domain::MIGRATION, || {
                 module.partition_offsets_for_data_root_chunk(data_root, tx_offset)
-            })
-            .map_err(|error| {
-                MigrationError::Other(format!("resolving Submit fallback: {error}"))
-            })?;
+            }) {
+                Ok(placements) => placements,
+                Err(error) => {
+                    tracing::warn!(
+                        data_root = %data_root,
+                        %tx_offset,
+                        storage_module.id = module.id,
+                        ?error,
+                        "Submit module index read failed; skipping module"
+                    );
+                    skip_module = true;
+                    still.push(step);
+                    continue;
+                }
+            };
             let Some(placements) = placements else {
                 still.push(step);
                 continue;
@@ -548,9 +583,21 @@ fn fill_submit_misses(
             }
             let mut filled = false;
             for place in placements {
-                let read = module.read_durable_bodies(place, place).map_err(|error| {
-                    MigrationError::Other(format!("reading durable Submit fallback: {error}"))
-                })?;
+                let read = match module.read_durable_bodies(place, place) {
+                    Ok(read) => read,
+                    Err(error) => {
+                        tracing::warn!(
+                            data_root = %data_root,
+                            %tx_offset,
+                            storage_module.id = module.id,
+                            partition.offset = %place,
+                            ?error,
+                            "Submit module body read failed; skipping module"
+                        );
+                        skip_module = true;
+                        break;
+                    }
+                };
                 let Some(body) = read.into_iter().next().flatten() else {
                     continue;
                 };
@@ -593,9 +640,15 @@ fn fill_submit_misses(
                 still.push(step);
             }
         }
+        if skip_module {
+            // The skipped replica may hold a chunk this pass did not read.
+            submit_unread = true;
+        }
         pending = still;
     }
-    Ok(())
+    // A later replica can fill every miss. Only a miss that is still empty
+    // may sit on the replica this pass could not read.
+    Ok(submit_unread && !pending.is_empty())
 }
 
 /// Ledger offset where `block` starts appending to `ledger`.
@@ -2548,11 +2601,24 @@ mod tests {
     /// Submit module on `slot`. Slot 0 overlaps the fixture tx. A later slot
     /// does not, so indexing leaves its pending table empty.
     fn submit_module(config: &Config, id: usize, slot: usize) -> eyre::Result<Arc<StorageModule>> {
+        assigned_module(config, id, slot, DataLedger::Submit)
+    }
+
+    fn publish_module(config: &Config, id: usize, slot: usize) -> eyre::Result<Arc<StorageModule>> {
+        assigned_module(config, id, slot, DataLedger::Publish)
+    }
+
+    fn assigned_module(
+        config: &Config,
+        id: usize,
+        slot: usize,
+        ledger: DataLedger,
+    ) -> eyre::Result<Arc<StorageModule>> {
         Ok(Arc::new(StorageModule::new(
             &StorageModuleInfo {
                 id,
                 partition_assignment: Some(PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
+                    ledger_id: Some(ledger.into()),
                     slot_index: Some(slot),
                     miner_address: IrysAddress::from([0xBB; 20]),
                     partition_hash: H256::random(),
@@ -2561,6 +2627,57 @@ mod tests {
             },
             config,
         )?))
+    }
+
+    /// Drop body-migration rows. The index and any durable bytes stay.
+    fn clear_pending(module: &StorageModule) -> eyre::Result<()> {
+        for (offset, job) in module.pending_body_migrations()? {
+            module.settle_pending_body_migration(offset, job.data_root, job.block_height)?;
+        }
+        Ok(())
+    }
+
+    /// Shrink `chunks.dat` so the next durable read hits a short file.
+    /// `StorageSubmodule::path` is the directory name under the node base.
+    fn truncate_chunk_file(config: &Config, module: &StorageModule) -> eyre::Result<()> {
+        let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let path = config
+            .node_config
+            .base_directory
+            .join(&submodule.path)
+            .join("chunks.dat");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)?
+            .set_len(0)?;
+        Ok(())
+    }
+
+    /// Height 0 Publish copy of the fixture tx, indexed onto `guard`.
+    fn index_publish(f: &Fixture, guard: &StorageModulesReadGuard) -> Result<(), MigrationError> {
+        f.ensure_block_indexed()
+            .map_err(|err| MigrationError::Other(err.to_string()))?;
+        let mut block = (*f.block).clone();
+        let (tx_root, _) =
+            DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&f.tx.header));
+        {
+            let publish = &mut block.data_ledgers[DataLedger::Publish];
+            publish.tx_root = tx_root;
+            publish.total_chunks =
+                f.tx.header
+                    .data_size
+                    .div_ceil(f.config.consensus.chunk_size);
+            publish.tx_ids = H256List(vec![f.tx.header.id]);
+        }
+        process_ledger_transactions(
+            &Arc::new(block),
+            DataLedger::Publish,
+            std::slice::from_ref(&f.tx.header),
+            &f.block_index,
+            &f.config,
+            guard,
+            &mut Vec::new(),
+        )
     }
 
     fn index_fixture_block(f: &Fixture) -> Result<(), MigrationError> {
@@ -2659,7 +2776,8 @@ mod tests {
             TxChunkOffset::from(18),
             3,
             &f.config,
-        )?;
+        )?
+        .bodies;
         assert_eq!(
             bodies[0].as_ref().map(|chunk| chunk.tx_offset),
             Some(TxChunkOffset::from(18)),
@@ -2742,6 +2860,131 @@ mod tests {
             bodies[1].as_ref().map(|chunk| chunk.tx_offset),
             Some(TxChunkOffset::from(1))
         );
+        Ok(())
+    }
+
+    /// Publish migration, cache empty. The earlier Submit module's durable
+    /// read fails. The later Submit module holds the body. That body is copied
+    /// onto the Publish module.
+    #[tokio::test]
+    async fn submit_fallback_migrates_from_later_module_when_earlier_read_fails() -> eyre::Result<()>
+    {
+        let f = fixture(1, Some(u64::MAX))?;
+        let broken = submit_module(&f.config, 1, 0)?;
+        let healthy = submit_module(&f.config, 2, 0)?;
+        let publish = publish_module(&f.config, 3, 0)?;
+        publish.pack_with_zeros();
+        write_real_entropy(&broken, &f.config)?;
+        write_real_entropy(&healthy, &f.config)?;
+
+        let submit_guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            broken.clone(),
+            healthy.clone(),
+        ])));
+        index_on(&f, &submit_guard)?;
+        let chunk = unpacked_at(&f, 0);
+        broken
+            .write_data_chunk(&chunk)
+            .map_err(|err| eyre::eyre!("write broken replica: {err:?}"))?;
+        healthy
+            .write_data_chunk(&chunk)
+            .map_err(|err| eyre::eyre!("write healthy replica: {err:?}"))?;
+        broken.force_sync_pending_chunks()?;
+        healthy.force_sync_pending_chunks()?;
+        truncate_chunk_file(&f.config, &broken)?;
+        let broken_read = broken
+            .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0));
+        assert!(
+            broken_read.is_err(),
+            "the earlier Submit module's body read must fail, got {broken_read:?}"
+        );
+        assert!(
+            healthy
+                .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?
+                .into_iter()
+                .next()
+                .flatten()
+                .is_some(),
+            "the later Submit module holds the body"
+        );
+        clear_pending(&broken)?;
+        clear_pending(&healthy)?;
+
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            broken.clone(),
+            healthy.clone(),
+            publish.clone(),
+        ])));
+        index_publish(&f, &guard)?;
+        assert_eq!(publish.pending_body_migrations()?.len(), 1);
+        assert_eq!(publish.pending_body_migrations()?[0].1.attempts, 0);
+
+        let pass = worker_for(&f, guard).drain_pass().await;
+        assert_eq!(
+            pass.written, 1,
+            "the body on the later Submit module must migrate"
+        );
+        assert_eq!(pass.retired, 0);
+        assert!(
+            publish.is_data_write_pending_at(PartitionChunkOffset::from(0)),
+            "Publish must queue the body copied from the later Submit module"
+        );
+        assert_eq!(
+            publish.pending_body_migrations()?[0].1.attempts,
+            0,
+            "a copied body is progress, not a stall"
+        );
+        Ok(())
+    }
+
+    /// The only Submit replica cannot be read. That pass is not "no local
+    /// source": the row stays, and the attempt count stays at zero, including
+    /// after `MAX_BODY_MIGRATION_ATTEMPTS` passes.
+    #[tokio::test]
+    async fn unread_submit_replica_does_not_count_toward_retirement() -> eyre::Result<()> {
+        let f = fixture(1, Some(u64::MAX))?;
+        let broken = submit_module(&f.config, 1, 0)?;
+        let publish = publish_module(&f.config, 3, 0)?;
+        publish.pack_with_zeros();
+        write_real_entropy(&broken, &f.config)?;
+        index_on(
+            &f,
+            &StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![broken.clone()]))),
+        )?;
+        broken
+            .write_data_chunk(&unpacked_at(&f, 0))
+            .map_err(|err| eyre::eyre!("write broken replica: {err:?}"))?;
+        broken.force_sync_pending_chunks()?;
+        truncate_chunk_file(&f.config, &broken)?;
+        let broken_read = broken
+            .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0));
+        assert!(
+            broken_read.is_err(),
+            "the Submit module's body read must fail, got {broken_read:?}"
+        );
+        clear_pending(&broken)?;
+
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            broken.clone(),
+            publish.clone(),
+        ])));
+        index_publish(&f, &guard)?;
+        let worker = worker_for(&f, guard);
+        for pass_n in 1..=MAX_BODY_MIGRATION_ATTEMPTS {
+            let pass = worker.drain_pass().await;
+            assert_eq!(pass.written, 0, "pass {pass_n}");
+            assert_eq!(pass.retired, 0, "pass {pass_n}");
+            let rows = publish.pending_body_migrations()?;
+            assert_eq!(
+                rows.len(),
+                1,
+                "pass {pass_n} must keep the row while the Submit replica is unreadable"
+            );
+            assert_eq!(
+                rows[0].1.attempts, 0,
+                "pass {pass_n} must not count an unread Submit replica"
+            );
+        }
         Ok(())
     }
 
