@@ -1,6 +1,7 @@
 use std::{env, ffi::OsString, path::PathBuf};
 
 mod capacity;
+mod cargo_callbacks;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -21,16 +22,6 @@ fn main() {
     for path in &sources {
         let rel = path.strip_prefix(&manifest_dir).unwrap_or(path);
         println!("cargo:rerun-if-changed={}", rel.display());
-    }
-    // bindgen's CargoCallbacks isn't used (it emits absolute paths for every #included
-    // header), so declare the env vars bindgen reads that it would otherwise have watched.
-    let target = env::var("TARGET").unwrap();
-    for var in [
-        "BINDGEN_EXTRA_CLANG_ARGS".to_owned(),
-        format!("BINDGEN_EXTRA_CLANG_ARGS_{target}"),
-        format!("BINDGEN_EXTRA_CLANG_ARGS_{}", target.replace('-', "_")),
-    ] {
-        println!("cargo:rerun-if-env-changed={var}");
     }
 
     let (lib_dir, include_dir) = build_openssl();
