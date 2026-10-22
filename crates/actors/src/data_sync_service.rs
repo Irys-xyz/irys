@@ -497,18 +497,19 @@ fn sync_test_node_config(base: &std::path::Path, num_chunks: u64) -> irys_types:
     }
 }
 
-/// Term-ledger SMs (Submit / OneYear / ThirtyDay) take a turn before Publish
-/// in each inner pass. Publish copies Submit data for promotion; if Submit
-/// replicas stay on the write frontier, Publish has many sources. When shared
-/// peer permits are fewer than the number of SMs, this keeps a busy permanent
-/// backlog from skipping the term write head. Within each group the start
-/// index still rotates so two Submit SMs share fairly.
+/// Term-ledger SMs (Submit / OneYear / ThirtyDay) take one turn before Publish
+/// in each pass, and the pass repeats while any module dispatched. One start
+/// per module per pass: a run of starts on every term module can fill the
+/// shared peer slots before Publish is visited. Publish copies Submit data for
+/// promotion; if Submit replicas stay on the write frontier, Publish has many
+/// sources. When shared peer permits are fewer than the number of SMs,
+/// term-first keeps a busy permanent backlog from skipping the term write head.
+/// Within each group the start index still rotates so two Submit SMs share fairly.
 fn dispatch_term_then_publish<T: Copy>(
     term_ids: &mut [T],
     publish_ids: &mut [T],
     term_cursor: usize,
     publish_cursor: usize,
-    burst: usize,
     mut dispatch: impl FnMut(T) -> bool,
 ) -> (usize, usize) {
     let next_term = if term_ids.is_empty() {
@@ -526,22 +527,15 @@ fn dispatch_term_then_publish<T: Copy>(
         (publish_cursor + 1) % publish_ids.len()
     };
 
-    let burst = burst.max(1);
     loop {
         let mut dispatched = false;
         for id in term_ids.iter().copied() {
-            for _ in 0..burst {
-                if !dispatch(id) {
-                    break;
-                }
+            if dispatch(id) {
                 dispatched = true;
             }
         }
         for id in publish_ids.iter().copied() {
-            for _ in 0..burst {
-                if !dispatch(id) {
-                    break;
-                }
+            if dispatch(id) {
                 dispatched = true;
             }
         }
@@ -597,7 +591,7 @@ mod scheduler_fairness_tests {
         let mut publish = [0_u8, 2_u8, 3_u8];
         let mut permits = 3_usize;
         let mut order = Vec::new();
-        let _ = dispatch_term_then_publish(&mut term, &mut publish, 0, 0, 1, |id| {
+        let _ = dispatch_term_then_publish(&mut term, &mut publish, 0, 0, |id| {
             if permits == 0 {
                 return false;
             }
@@ -616,7 +610,7 @@ mod scheduler_fairness_tests {
         let mut permits = 3_usize;
         let mut order = Vec::new();
         let (next_term, next_publish) =
-            dispatch_term_then_publish(&mut term, &mut publish, 0, 0, 1, |id| {
+            dispatch_term_then_publish(&mut term, &mut publish, 0, 0, |id| {
                 if permits == 0 {
                     return false;
                 }
@@ -633,7 +627,7 @@ mod scheduler_fairness_tests {
         let mut permits = 3_usize;
         let mut order = Vec::new();
         let _ =
-            dispatch_term_then_publish(&mut term, &mut publish, next_term, next_publish, 1, |id| {
+            dispatch_term_then_publish(&mut term, &mut publish, next_term, next_publish, |id| {
                 if permits == 0 {
                     return false;
                 }
@@ -645,12 +639,15 @@ mod scheduler_fairness_tests {
     }
 
     #[test]
-    fn one_storage_module_fills_a_span_before_the_next() {
+    fn each_pass_gives_every_module_one_dispatch() {
+        // Two term modules and one Publish module, five shared permits.
+        // Each pass gives every module one start, term before Publish.
+        // The first term module must not take a run of those permits.
         let mut term = [1_u8, 4_u8];
         let mut publish = [0_u8];
         let mut permits = 5_usize;
         let mut order = Vec::new();
-        let _ = dispatch_term_then_publish(&mut term, &mut publish, 0, 0, 3, |id| {
+        let _ = dispatch_term_then_publish(&mut term, &mut publish, 0, 0, |id| {
             if permits == 0 {
                 return false;
             }
@@ -658,7 +655,27 @@ mod scheduler_fairness_tests {
             order.push(id);
             true
         });
-        assert_eq!(order, vec![1, 1, 1, 4, 4]);
+        assert_eq!(order, vec![1, 4, 0, 1, 4]);
+    }
+
+    #[test]
+    fn publish_gets_a_dispatch_when_three_term_modules_exhaust_the_budget() {
+        // Three term modules with endless work and one Publish module. The
+        // shared budget is a fresh peer's baseline slot count. Publish must
+        // be dispatched before that budget runs out.
+        let mut term = [1_u8, 2_u8, 3_u8];
+        let mut publish = [0_u8];
+        let mut budget = 10_usize;
+        let mut order = Vec::new();
+        let _ = dispatch_term_then_publish(&mut term, &mut publish, 0, 0, |id| {
+            if budget == 0 {
+                return false;
+            }
+            budget -= 1;
+            order.push(id);
+            true
+        });
+        assert_eq!(order, vec![1, 2, 3, 0, 1, 2, 3, 0, 1, 2]);
     }
 }
 
@@ -934,14 +951,6 @@ impl DataSyncServiceInner {
                     publish_ids.push(id);
                 }
             }
-            let chunk = self.config.consensus.chunk_size.max(1);
-            let sweep = self
-                .config
-                .node_config
-                .storage
-                .entropy_sweep_max_bytes
-                .max(chunk);
-            let burst = usize::try_from(sweep / chunk).unwrap_or(1).max(1);
             // Bodies only join the held set in `handle_message`, so one
             // check covers the whole pass.
             let held = self.delivery.held_bodies.load(Ordering::SeqCst);
@@ -956,7 +965,6 @@ impl DataSyncServiceInner {
                     &mut publish_ids,
                     self.term_dispatch_cursor,
                     self.publish_dispatch_cursor,
-                    burst,
                     |id| {
                         self.chunk_orchestrators
                             .get_mut(&id)
