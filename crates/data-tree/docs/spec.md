@@ -123,11 +123,11 @@ Every hash input starts with a one-byte domain tag. This table is the single reg
 | `0x02` | SIZE | `0x02 ‖ be64(data_size)` (9 B) | size witness |
 | `0x03` | CHUNK_KEY | `0x03 ‖ data_commitment ‖ be32(c)` (37 B) | chunk identity key; not part of the tree |
 | `0x04` | TICKET | defined by the segment-PoA spec | mining ticket; not part of the tree |
-| `0x05` | TX_LEAF | `0x05 ‖ data_tree_root ‖ be64(data_size) ‖ prefix_hash ‖ be64(chunk_start)` (81 B) | `tx_root` v2 (Appendix C); not part of the data tree |
+| `0x05` | TX_LEAF | `0x05 ‖ tx_id ‖ data_tree_root ‖ be64(data_size) ‖ prefix_hash ‖ be64(prefix_size) ‖ be64(chunk_start)` (121 B) | `tx_root` v2 (Appendix C); not part of the data tree |
 | `0x06` | TX_NODE | `0x06 ‖ left ‖ right` (65 B) | `tx_root` v2 (Appendix C); not part of the data tree |
 | `0x07` | TX_COUNT | `0x07 ‖ be32(N)` (5 B) | `tx_root` v2 (Appendix C); not part of the data tree |
 
-TX_LEAF, TX_NODE and TX_COUNT are not used by this tree. Whether `prefix_hash` stays in TX_LEAF is open (§14 item 3).
+TX_LEAF, TX_NODE and TX_COUNT are not used by this tree. The TX_LEAF fields are fixed (Appendix C).
 
 ```
 leaf(bytes)     = H(0x00 ‖ bytes)
@@ -292,7 +292,7 @@ Verify chunks and segments only against an **anchored** `data_commitment`: one d
 | Consumer | Anchor |
 | --- | --- |
 | L1 chunk ingress, PoA, mining, migration | the signed tx header |
-| Gateway receipt verifier | a proven `tx_root` v2 leaf. The leaf binds `data_tree_root` and the exact `data_size`, so the anchor is `node(data_tree_root, size_witness(data_size))`. The count witness binds `N` (Appendix C) |
+| Gateway receipt verifier | a proven `tx_root` v2 leaf. The leaf binds `tx_id`, `data_tree_root`, the exact `data_size`, `prefix_hash`, `prefix_size` and `chunk_start`, so the anchor is `node(data_tree_root, size_witness(data_size))`. The count witness binds `N` (Appendix C) |
 | Gateway staging ingest | the item envelope, which signs `data_tree_root` and `data_size`. `data_commitment` is derived (§15 Q7) |
 | Gateway relay | its payload-quorum attestation of the tx |
 | Gateway data service | tx records from the Indexer are not authenticated today. They need the signed header or a `tx_root` proof before the service deletes its size checks |
@@ -309,7 +309,7 @@ The data tx header keeps its layout and gets no new version tag (decided). From 
 
 - Both inputs are signed and the commitment is derived from them, so the size is bound to the commitment. Only chunk proofs show that the data matches it.
 - Some chunks of a tx whose `data_tree_root` was built for another size can verify under the signed size. A chunk can verify at its own index or at another index, including the last. Its chunks never all verify, so the tx never completes and expires like any unsupplied upload. Never treat a last-chunk accept, or any single chunk accept, as a size or completion signal. Completion means every chunk verified.
-- From Estuary, `tx_root` is v2 (Appendix C). The leaf is `H(0x05 ‖ data_tree_root ‖ be64(data_size) ‖ prefix_hash ‖ be64(chunk_start))`. A proven leaf binds `data_tree_root` and the exact `data_size`, so a verifier re-derives `node(data_tree_root, size_witness(data_size))`. Whether `prefix_hash` stays in the leaf is open (Appendix C item 3).
+- From Estuary, `tx_root` is v2 (Appendix C). The leaf is `H(0x05 ‖ tx_id ‖ data_tree_root ‖ be64(data_size) ‖ prefix_hash ‖ be64(prefix_size) ‖ be64(chunk_start))` (121 B). A proven leaf binds those fields. A verifier re-derives `node(data_tree_root, size_witness(data_size))`.
 
 | Chunk message field (gossip, `POST /v1/chunk`, gateway batches) | Size | Note |
 | --- | --- | --- |
@@ -442,7 +442,7 @@ This crate is the data tree and this spec. The rows below are the L1 and gateway
 | Gateway area | Change |
 | --- | --- |
 | Item envelope | signs `data_tree_root` and `data_size`. `data_commitment` is derived, as on the L1 header (§6, §15 Q7) |
-| Receipt verifier | follows `tx_root` v2. A proven leaf binds `data_tree_root`, the exact `data_size` and `chunk_start`. The count witness binds `N`. Placement follows the §8 rule (§6, Appendix C) |
+| Receipt verifier | follows `tx_root` v2. A proven leaf binds `tx_id`, `data_tree_root`, the exact `data_size`, `prefix_hash`, `prefix_size` and `chunk_start`. The count witness binds `N`. Placement follows the §8 rule (§6, Appendix C) |
 | `bundle_items_root` | may adopt the same form as `tx_root` v2, with its own tags. The gateway team decides (Appendix C) |
 | Custody framing | multi-segment answers use independent segment proofs that share one chunk proof (§5). The custody spec defines the framing |
 
@@ -521,16 +521,15 @@ n        C  data_tree_root                                                    da
 | Segment proofs | every segment for `C ≤ 2`; for 917,504: `(3, 5)`, `(3, 31)` (last full), `(3, 32)` (first empty), `(3, 63)`; the partial segment `(0, 1)` of 4,097 B |
 | Multi-segment | option B. In one chunk, `m` = 1, 2, 4 and 64: each case is `m` segment proofs (the `h` in-chunk siblings each) and one shared chunk proof. The full segment proof is those siblings concatenated with the chunk proof, including when `C = 1`. An adjacent pair in one chunk. A pair in two chunks, which is two chunk proofs |
 | Receipt header binding (gateway) | a 100 B span inside one segment, across two segments of one chunk, and across a chunk boundary |
-| `tx_root` v2 (Appendix C) | `N` = 1, 2, 3, 100; every `k` for small `N`; the 40/1/64-byte ledger (Appendix C); negatives: wrong `N`, wrong `k`, wrong witness, a flipped bit per sibling, a wrong `chunk_start`, one hash too many or too few. Not generated yet. Generated when `tx_root` v2 is implemented |
+| `tx_root` v2 (Appendix C) | `N` = 1, 2, 3, 100; every `k` for small `N`; the 40/1/64-byte ledger (Appendix C); negatives: wrong `N`, wrong `k`, wrong witness, a flipped bit per sibling, a wrong `tx_id`, a wrong `prefix_hash`, a wrong `prefix_size`, a wrong `chunk_start`, one hash too many or too few. Not generated yet. Generated when `tx_root` v2 is implemented |
 | Negative | wrong `data_size` with the same `C` and with another `C`; `c ≥ C`; proof one hash too long and too short; empty proof for `C > 1`; chunk length ±1; one flipped bit per sibling; a zero-padded segment; `data_size = 0`; a valid proof shown at another index with different bytes; a 64 B segment equal to `l ‖ r`; a commitment re-derived from an unauthenticated pair (§6) |
 | Wire | the tx header with `data_tree_root`; the chunk message JSON; the `/internal/chunks` response; the gateway item envelope (signs `data_tree_root` and `data_size`) and receipt |
 
 ## 14. Open decisions
 
-Q1 to Q10 are decided (§15). These items stay open. They are numbered as in Appendix C. They do not change the data-tree wire format or the data-tree vectors.
+Q1 to Q10 are decided (§15). These items stay open. They are numbered as in Appendix C. Item 3 is closed (§15). They do not change the data-tree wire format or the data-tree vectors.
 
 2. What a PoA carries: `(k, N, chunk_start)` explicitly, so a validator needs only the owning tx header; or derived from the block's tx headers (smaller PoA, more reads). With the block-validation rule (Appendix C), the option that verifies with only the owning tx header is safe, because the `tx_root` it checks against has passed full validation.
-3. Whether `prefix_hash` stays in the leaf (today's leaf folds it in).
 4. Where the code lives: `irys-data-tree`, which shares `T`, `climb`, `depth` and the tag registry, or a separate crate.
 
 ## 15. Decision log
@@ -539,7 +538,7 @@ Q1 to Q10 are decided (§15). These items stay open. They are numbered as in App
 | --- | --- |
 | 2026-10-21 | Q1. Proof order is leaf to root, and leaf to root is the default order for every proof in the protocol. Compression is not a reason to pick an order: the measured gap comes from where the constant row bytes sit, not from the order (Appendix A.1) |
 | 2026-10-21 | Q2. A multi-segment answer is independent segment proofs that share one chunk proof. A compact multiproof saves about 1.4% and needs a second consensus verifier, so it is not this format. It can be a later format if custody needs it (design: Appendix B) |
-| 2026-10-21 | Q4. A `tx_root` leaf value is `fold(data_tree_root, prefix_hash)` and the span note is the exact `data_size`. A proven leaf authenticates both, so a verifier re-derives `node(data_tree_root, size_witness(span))`. The `tx_root` code stays unchanged |
+| 2026-10-21 | Q4. A `tx_root` leaf value is `fold(data_tree_root, prefix_hash)` and the span note is the exact `data_size`. A proven leaf authenticates both, so a verifier re-derives `node(data_tree_root, size_witness(span))`. The `tx_root` code stays unchanged. Superseded: see Appendix C |
 | 2026-10-21 | Q5. The size witness covers `data_size` only: `H(0x02 ‖ be64(data_size))`. Geometry is already on the consensus surface a client needs before it can verify, so the commitment does not repeat it |
 | 2026-10-21 | Q6. An ingress proof signs `data_commitment`, so one proof covers exactly one (data, size). A planned proof of a chunk range binds `data_commitment` and that range for the same reason |
 | 2026-10-21 | Q7. The gateway item envelope signs `data_tree_root` and `data_size`, and `data_commitment` is derived, as the L1 header does. This anchors the size and keeps one format for L1, the gateway and SDKs. Owner decision; the gateway team signed off on 2026-10-21 |
@@ -547,10 +546,11 @@ Q1 to Q10 are decided (§15). These items stay open. They are numbered as in App
 | 2026-10-21 | Q9. The tree's rule is 1 ≤ SPC ≤ 256, a power of two, and it sets no tighter protocol floor. A bound is a property of how the tree is used, not of the tree. The irys node rejects SPC < 2 wherever the segment-PoA rule runs, because an empty segment proof signs like an absent optional RLP field |
 | 2026-10-21 | Q10. Every proof ends with `size_witness(n)`, leaf to root, so the witness is the last hash. A chunk proof is the chunk-level siblings then the witness: `32 × (depth(c, C) + 1)` bytes, and for `C = 1` it is `[size_witness(n)]`. A segment proof is the `h` in-chunk siblings then that chunk proof. Plain concatenation is the full segment proof in every case, including one chunk. The verifier checks the length, requires the last hash to equal `size_witness` computed from the `data_size` it is checking, and does not climb until that matches. It then climbs the siblings and requires `node(root, size_witness(n))` to equal the commitment. A sibling-only proof of a one-leaf tree is empty, and containers that store or sign proofs confuse empty with missing: a header binding with empty lists becomes absent, nested inner proofs are skipped when empty, and `ChunkWithProof.proof` defaults to empty. Witness-last costs 32 B per proof on the wire. In a storage-module row the witness is the same for every chunk of an upload, so LZ4 shares it. Rejected: leaf-first for every proof, which adds 32 B per proof and per storage row, and the leaf differs per row so LZ4 cannot share it; and a leaf only when the proof would otherwise be empty, which is a special-case branch |
 | 2026-10-21 | The data root is external: clients, SDKs and the gateway commit to it, so it lands first and is hard to change later. `tx_root` is internal to the protocol and can change in any fork |
-| 2026-10-21 | `tx_root` v2, when adopted (Appendix C): it commits to its leaf count with a count witness, and its proofs end with that witness. Gateway receipts are meant to be near self-contained paths from `tx_root` to a chunk, so a verifier holding only `tx_root` must get the count bound |
+| 2026-10-21 | `tx_root` v2 ships at Estuary (Appendix C): it commits to its leaf count with a count witness, and its proofs end with that witness. Gateway receipts are meant to be near self-contained paths from `tx_root` to a chunk, so a verifier holding only `tx_root` must get the count bound |
 | 2026-10-21 | Q3. `tx_root` v2 (Appendix C) ships at Estuary, in the same hardfork as the data tree. Tags `0x05` to `0x07` are in the §3 registry. Estuary already requires a data reset: test networks reset, and mainnet stores no data. Q8 refuses data txs up to and including E, so every pre-activation `tx_root` is `0^32` and no data PoA exists. One format. No dual format. A later fork would need both formats, gated by height. Appendix C items 2 to 4 stay open. L1 integration (§12) is a separate work item |
 | 2026-10-21 | The `tx_root` v2 leaf binds `data_size` directly (Appendix C). This replaces the Q4 mechanism, where the span note is the exact `data_size`, with the leaf field. The intent is the same: a proven leaf authenticates `data_tree_root` and the exact `data_size`, and a verifier re-derives `node(data_tree_root, size_witness(data_size))` |
 | 2026-10-22 | The `tx_root` v2 leaf keeps `chunk_start` (Appendix C). A tx proof shows membership, the committed `data_size`, and which block chunks the tx occupies. Placement follows the §8 rule. Receipts are near self-contained paths from `tx_root` down to a chunk (block header → `tx_root` → tx → `data_commitment` → chunk), so the leaf lets a receipt show that ledger chunk `b` is tx `k`'s chunk `c` without the block's tx list, and lets PoA verify with the owning tx header. Considered and not chosen: membership and committed size only, as v1 `tx_root` means today, with placement recomputed from the block's tx headers with the padded-size helper. A receipt would then need the tx list, or a separate placement proof, to map a ledger chunk |
+| 2026-10-22 | The `tx_root` v2 leaf is one preimage, 121 B (Appendix C): `H(0x05 ‖ tx_id ‖ data_tree_root ‖ be64(data_size) ‖ prefix_hash ‖ be64(prefix_size) ‖ be64(chunk_start))`. `prefix_hash` stays. This closes item 3. The gateway receipt verifier checks the receipt's `prefix_bytes` against `prefix_hash` (`crates/shared/gateway-core/src/verify.rs` in the gateway repo). That hash is authenticated only through this leaf. Dropping it would leave the bundle-header binding unanchored. The network does not check `prefix_hash` against the bytes (`crates/types/src/transaction.rs`). The value is signer-asserted, and the leaf fixes it to the tx. `tx_id` is added. It is keccak256 of the signature bytes (`DataTransactionHeader::sign` and `is_signature_valid` in `crates/types/src/transaction.rs`). The signature covers the signed header: `encode_for_signing` omits `id` and `signature`, and the preimage includes `data_root` (this spec's `data_tree_root`, §7), `data_size`, `prefix_hash`, `prefix_size`, `signer`, `anchor`, the fees, `ledger_id`, `chain_id` and `metadata_format`. One 32-byte field binds that header. A receipt names the exact transaction, and anyone holding the header can link it. Signer, fees, anchor and `chain_id` need no separate field. `ledger_id` is fixed by which per-ledger `tx_root` the leaf is under. `prefix_size` is added. The prefix bytes hash to `prefix_hash`, which fixes their length, but a consumer that does not hold those bytes needs `prefix_size` to locate the bundle header. It costs 8 bytes of hash input and no proof bytes. Items 2 and 4 stay open |
 | 2026-10-19 | Tag registry `0x00` to `0x04` (`0x04` is the mining ticket) and `segments_per_chunk ≤ 256` (segment-PoA spec, ticket encoding) |
 | 2026-10-19 | The fork release deletes the old data-PoA verifier and keeps the capacity PoA path bit-exact |
 | 2026-10-19 | `tx_path` note padding: if `tx_root` keeps its format, the PoA check rejects non-zero padding from activation |
@@ -731,14 +731,16 @@ verify_compact(D, n, c, proof, segment_bytes):
 ```
 N           = number of data txs in this ledger of this block, in tx_ids order k = 0 .. N−1
 chunk_start_k = Σ_{i<k} ceil(data_size_i / chunk_size)          // padded chunk count before tx k (§8)
-leaf_k      = H(0x05 ‖ data_tree_root_k ‖ be64(data_size_k) ‖ prefix_hash_k ‖ be64(chunk_start_k))
+leaf_k      = H(0x05 ‖ tx_id_k ‖ data_tree_root_k ‖ be64(data_size_k) ‖ prefix_hash_k ‖ be64(prefix_size_k) ‖ be64(chunk_start_k))   // 121 B
 tx_root     = H(0x06 ‖ T(leaf_0 .. leaf_{N−1}) ‖ count_witness(N))   for N ≥ 1     // T() of §4 with TX_NODE
 tx_root     = 0^32                                                     for N = 0     // unchanged sentinel
 count_witness(N) = H(0x07 ‖ be32(N))
 ```
 
-- The leaf binds the tx's exact `data_size`, so a proven leaf gives the anchored commitment `node(data_tree_root, size_witness(data_size))` (§6). The leaf field replaces the span note (§15).
-- The leaf binds `chunk_start`, the padded chunk count before the tx. Placement follows the §8 rule.
+- The leaf is 121 B and has one parse. Every field is fixed width: the tag (1 B), `tx_id`, `data_tree_root` and `prefix_hash` (32 B each), and `data_size`, `prefix_size` and `chunk_start` (8 B each).
+- The leaf binds `tx_id`, `data_tree_root`, the exact `data_size`, `prefix_hash`, `prefix_size` and `chunk_start`.
+- A proven leaf gives the anchored commitment `node(data_tree_root, size_witness(data_size))` (§6). The `data_size` field replaces the span note (§15).
+- `chunk_start` is the padded chunk count before the tx. Placement follows the §8 rule.
 - A separate node tag means a ledger-tree node can never be read as a data-tree node.
 
 **Block validation.** The formulas above are how the builder sets `chunk_start`. Block validation must check the same partition, with checked arithmetic. `N` is the ledger's tx count. `verify_tx` is not this check.
@@ -759,24 +761,30 @@ A block that fails is invalid. A sum that does not fit in 64 bits fails the chec
 **Proofs.** Witness-last, like the data tree: the siblings of `leaf_k` in `T`, leaf to root, then `count_witness(N)`. Length `32 × (depth(k, N) + 1)`. Never empty.
 
 ```
-verify_tx(tx_root, N, k, data_tree_root, data_size, prefix_hash, chunk_start, proof):
+verify_tx(tx_root, N, k, tx_id, data_tree_root, data_size, prefix_hash, prefix_size, chunk_start, proof):
     require 1 ≤ N and k < N
     require len(proof) == 32 × (depth(k, N) + 1)                      // before any hashing
     require last hash of proof == H(0x07 ‖ be32(N))                   // own witness; never climb an unchecked one
-    r = climb(H(0x05 ‖ data_tree_root ‖ be64(data_size) ‖ prefix_hash ‖ be64(chunk_start)), k, N, siblings)
-                                                                       // climb() of §5 with TX_NODE
+    r = climb(H(0x05 ‖ tx_id ‖ data_tree_root ‖ be64(data_size) ‖ prefix_hash ‖ be64(prefix_size) ‖ be64(chunk_start)), k, N, siblings)
+                                                                       // climb() of §5 with TX_NODE; 121 B
     require H(0x06 ‖ r ‖ H(0x07 ‖ be32(N))) == tx_root
 ```
 
 **Assumption A4.** A proven `chunk_start` is only as trustworthy as the validation of the block whose `tx_root` anchors it. `verify_tx` shows that the claimed start is in that tree. It does not show that the start is the prefix sum. PoA checks against blocks already validated on chain. A receipt's `tx_root` anchor must come from a validated block.
 
-**What a tx proof proves.** Membership at index `k`, the committed `data_size`, and the claimed `chunk_start`. The count witness binds `N`. The direction bits come from `(k, N)`, so `k` is bound by the proof and is not a separate claim. A receipt does not need the block's tx list to check the index. The proof does not show that `chunk_start` is the prefix sum. Block validation does.
+**What a tx proof proves.** Membership of this signed tx at index `k`: `tx_id`, `data_tree_root`, the exact `data_size`, `prefix_hash`, `prefix_size` and `chunk_start`. The count witness binds `N`. The direction bits come from `(k, N)`, so `k` is bound by the proof and is not a separate claim. A receipt names that `tx_id`. It does not need the block's tx list to check the index. Anyone who holds the header links it by `tx_id`. The proof does not show that `chunk_start` is the prefix sum. Block validation does. The proof does not show that the prefix bytes hash to `prefix_hash`. The signer asserts `prefix_hash`, and the leaf fixes that value to this tx.
 
 **Why `chunk_start` is in the leaf.** A receipt is a path from an anchored `tx_root` down to a chunk: block header → `tx_root` → tx → `data_commitment` → chunk. Under assumption A4, the proven placement shows that ledger chunk `b` is tx `k`'s chunk `c` without that tx list, and PoA verifies with the owning tx header. `c = b − chunk_start`, with `b ≥ chunk_start` and checked subtraction (§8). Membership and committed size alone, which is what v1 `tx_root` proves, was considered and not chosen. Placement would then be recomputed from the block's tx headers with the padded-size helper. A receipt would need the tx list, or a separate placement proof, to map a ledger chunk.
 
+**Why `prefix_hash` stays.** The gateway receipt verifier checks the receipt's `prefix_bytes` against `prefix_hash` (`crates/shared/gateway-core/src/verify.rs` in the gateway repo). That `prefix_hash` is authenticated only through this leaf. Dropping it would leave the bundle-header binding unanchored. The network does not check `prefix_hash` against the bytes (`crates/types/src/transaction.rs`). The value is signer-asserted, and the leaf fixes it to the tx. This closes item 3.
+
+**Why `tx_id` is in the leaf.** `tx_id` is keccak256 of the signature bytes (`DataTransactionHeader::sign` and `is_signature_valid` in `crates/types/src/transaction.rs`). The signature covers the signed header. `encode_for_signing` omits `id` and `signature`. The preimage includes `data_root` (this spec's `data_tree_root`, §7), `data_size`, `prefix_hash`, `prefix_size`, `signer`, `anchor`, the fees, `ledger_id`, `chain_id` and `metadata_format`. One 32-byte field binds that header. A receipt names the exact transaction. Anyone holding the header can link it. Signer, fees, anchor and `chain_id` need no separate field. `ledger_id` is fixed by which per-ledger `tx_root` the leaf is under. A second header that copies the other leaf fields and carries another signer or another tx id hashes to a different leaf, so the same proof does not verify.
+
+**Why `prefix_size` is in the leaf.** The prefix bytes hash to `prefix_hash`, which fixes their length. A consumer that does not hold those bytes, such as an indexer, needs `prefix_size` to locate the bundle header. The field is 8 bytes of hash input and adds no proof bytes.
+
 **Receipts.** The tx index `k` is bound by the proof. A receipt must not carry a byte offset as a placement coordinate. Today's `txByteOffset` is a sum of `data_size`. In v2 that field is dropped, or it is `chunk_start × chunk_size` (§8).
 
-**Sizes.**
+**Sizes.** The leaf preimage is 121 B. A proof is still the sibling hashes plus the count witness, so these sizes do not change.
 
 | Data txs in the ledger | Today's `tx_path` | v2 proof |
 | --- | --- | --- |
@@ -788,7 +796,7 @@ verify_tx(tx_root, N, k, data_tree_root, data_size, prefix_hash, chunk_start, pr
 
 **What changes when it is implemented.** A new encoder. After Estuary, `crates/types/src/merkle.rs` no longer builds `tx_root`. It still builds the ingress-proof tree with the v1 encoder, until the custody redesign, and it is no longer used for data. Block production and migration compute the new `tx_root`. Block validation checks the partition and requires the header's `tx_root` to equal the root of exactly those leaves. A block that fails is invalid. PoA validation verifies with `verify_tx` against a block that already passed that check. `tx_path` derivation (`crates/database/src/tx_path_derive.rs`) builds v2 proofs. The MDBX path tables that parse the last 64 bytes as a v1 leaf, and the RocksDB derive, follow. The gateway receipt verifier follows, and its `tx_root` anchor must come from a validated block (assumption A4). `bundle_items_root` has the same shape (a root plus a size per leaf) and may adopt the same form with its own tags. The gateway team decides.
 
-**Vectors.** One group (§13). `N` = 1, 2, 3, 100. Every `k` for small `N`. Negatives: wrong `N`, wrong `k`, wrong witness, a flipped bit per sibling, a wrong `chunk_start`, one hash too many or too few. Not generated yet.
+**Vectors.** One group (§13). `N` = 1, 2, 3, 100. Every `k` for small `N`. Negatives: wrong `N`, wrong `k`, wrong witness, a flipped bit per sibling, a wrong `tx_id`, a wrong `prefix_hash`, a wrong `prefix_size`, a wrong `chunk_start`, one hash too many or too few. Not generated yet.
 
 One case is the 40/1/64-byte ledger, test geometry (`chunk_size` 32). The `data_size`-sum target and the chunk target name different txs. Only the chunk target is right.
 
@@ -800,8 +808,7 @@ One case is the 40/1/64-byte ledger, test geometry (`chunk_size` 32). The `data_
 
 Block chunk 2 is tx 1, chunk 0. The byte target `2 × chunk_size` is 64. Tx 2 covers bytes 41 to 104, so byte 64 is in tx 2. Tx 2's tx proof and its chunk-0 proof both verify. That selection is the wrong tx.
 
-**Open items.** Same numbers as §14.
+**Open items.** Same numbers as §14. Item 3 is closed (§15).
 
 2. What a PoA carries: `(k, N, chunk_start)` explicitly, so a validator needs only the owning tx header; or derived from the block's tx headers (smaller PoA, more reads). With this rule, the option that verifies with only the owning tx header is safe, because the `tx_root` it checks against has passed full validation.
-3. Whether `prefix_hash` stays in the leaf (today's leaf folds it in).
 4. Where the code lives: `irys-data-tree`, which shares `T`, `climb`, `depth` and the tag registry, or a separate crate.
