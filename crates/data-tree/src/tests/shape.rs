@@ -31,8 +31,10 @@ const PROOF_EVERY_CHUNK_MAX_CHUNK_COUNT: u32 = REFERENCE_CHECK_LAST_CHUNK_COUNT 
 /// every count in the lock.
 ///
 /// The oracle is plain `build_layer` and recursive `T`. It keeps no cache.
-/// Proof checks run in [`builder_proofs_match_spec_path`], so nextest can run
-/// the two tests at the same time.
+/// Proof checks run in
+/// [`builder_proofs_match_spec_path_for_even_chunk_indexes`] and
+/// [`builder_proofs_match_spec_path_for_odd_chunk_indexes`], so nextest can run
+/// this test and the proof tests at the same time.
 #[test]
 fn builder_layers_and_root_match_spec_for_every_chunk_count() {
     let chunk_size = Geometry::TESTING.chunk_size();
@@ -58,32 +60,91 @@ fn builder_layers_and_root_match_spec_for_every_chunk_count() {
     }
 }
 
-/// Chunk proofs against recursive `path` (spec §4, §5, §13).
+/// Even chunk indexes against recursive `path` (spec §4, §5, §13).
 ///
-/// For every chunk count from 1 through [`PROOF_EVERY_CHUNK_MAX_CHUNK_COUNT`],
-/// every chunk proof must equal `path` then `size_witness`, the byte length
-/// must equal `depth + 1` hashes, and `climb` of the siblings must return the
-/// root from `T`. Spec §13 records a reference check for every count from 1 to
-/// 299. This test goes one count further, so that range is included.
+/// See [`assert_proofs_for_chunk_index_half`]. The odd indexes are
+/// [`builder_proofs_match_spec_path_for_odd_chunk_indexes`]. One test that
+/// checked every index sat on nextest's 30 s slow period: each proof calls
+/// `path`, and `path` recomputes every sibling subtree.
+#[test]
+fn builder_proofs_match_spec_path_for_even_chunk_indexes() {
+    assert_proofs_for_chunk_index_half(ChunkIndexHalf::Even);
+}
+
+/// Odd chunk indexes against recursive `path` (spec §4, §5, §13).
 ///
-/// The same check also runs for each power of two from 512 through 4,096, for
-/// the count on each side of that power, and for 4,097. 512 is the next power
-/// of two after 300. 4,096 is the greatest power of two below
-/// [`SHAPE_LOCK_MAX_CHUNK_COUNT`], and 4,096 + 1 is that count. 256 is already
-/// inside 1..=300.
+/// See [`assert_proofs_for_chunk_index_half`]. Index 0 of a one-chunk tree is
+/// even, so this test checks no index there. The even test checks that index.
+#[test]
+fn builder_proofs_match_spec_path_for_odd_chunk_indexes() {
+    assert_proofs_for_chunk_index_half(ChunkIndexHalf::Odd);
+}
+
+/// Even or odd chunk indexes. The two halves are complements.
+enum ChunkIndexHalf {
+    Even,
+    Odd,
+}
+
+/// Every chunk count the proof tests share, each index in one half.
+///
+/// Counts are 1 through [`PROOF_EVERY_CHUNK_MAX_CHUNK_COUNT`], then each power
+/// of two from 512 through 4,096 with the count on each side, through 4,097.
+/// Spec §13 records a reference check for every count from 1 to 299. The range
+/// here goes one count further. 512 is the next power of two after 300. 4,096
+/// is the greatest power of two below [`SHAPE_LOCK_MAX_CHUNK_COUNT`], and
+/// 4,096 + 1 is that count. 256 is already inside 1..=300.
 ///
 /// Each expected proof is one call to `path`. Sibling subtrees are recomputed.
-/// The oracle keeps no cache.
-#[test]
-fn builder_proofs_match_spec_path() {
-    for chunk_count in 1..=PROOF_EVERY_CHUNK_MAX_CHUNK_COUNT {
+/// The oracle keeps no cache. Even and odd indexes are separate tests so each
+/// stays under the nextest slow period. The number of even indexes plus the
+/// number of odd indexes is the chunk count, so the two tests together still
+/// check every chunk.
+fn assert_proofs_for_chunk_index_half(half: ChunkIndexHalf) {
+    for chunk_count in proof_chunk_counts() {
+        let even_index_count = chunk_count.div_ceil(2);
+        let odd_index_count = chunk_count / 2;
+        assert_eq!(
+            even_index_count + odd_index_count,
+            chunk_count,
+            "the two proof tests cover every chunk of C={chunk_count}"
+        );
         let (leaves, tree) = tree_for_chunk_count(chunk_count);
-        assert_every_chunk_proof_matches_path(&tree, &leaves);
+        let expect_root = spec_t(&leaves);
+        let mut checked = 0_u32;
+        for chunk_index in 0..chunk_count {
+            let even_index = chunk_index % 2 == 0;
+            let in_this_half = match half {
+                ChunkIndexHalf::Even => even_index,
+                ChunkIndexHalf::Odd => !even_index,
+            };
+            if !in_this_half {
+                continue;
+            }
+            let expect_path = spec_path(chunk_index, &leaves);
+            assert_chunk_proof(&tree, &leaves, chunk_index, &expect_path, expect_root);
+            checked += 1;
+        }
+        let expect_checked = match half {
+            ChunkIndexHalf::Even => even_index_count,
+            ChunkIndexHalf::Odd => odd_index_count,
+        };
+        assert_eq!(checked, expect_checked, "C={chunk_count}");
     }
-    for chunk_count in large_proof_chunk_counts() {
-        let (leaves, tree) = tree_for_chunk_count(chunk_count);
-        assert_every_chunk_proof_matches_path(&tree, &leaves);
-    }
+}
+
+/// Counts checked by both proof tests: 1..=300, then the large powers.
+fn proof_chunk_counts() -> Vec<u32> {
+    let mut counts: Vec<u32> = (1..=PROOF_EVERY_CHUNK_MAX_CHUNK_COUNT).collect();
+    let large = large_proof_chunk_counts();
+    assert!(
+        large
+            .iter()
+            .all(|chunk_count| *chunk_count > PROOF_EVERY_CHUNK_MAX_CHUNK_COUNT),
+        "large proof counts must sit past the every-chunk range"
+    );
+    counts.extend(large);
+    counts
 }
 
 /// Powers of two from the first one above [`PROOF_EVERY_CHUNK_MAX_CHUNK_COUNT`]
@@ -139,15 +200,6 @@ fn concatenated_path(path: &[NodeHash]) -> Vec<u8> {
         out.extend_from_slice(hash.as_bytes());
     }
     out
-}
-
-fn assert_every_chunk_proof_matches_path(tree: &DataTree, leaves: &[NodeHash]) {
-    let expect_root = spec_t(leaves);
-    let chunk_count = u32::try_from(leaves.len()).expect("chunk count fits u32");
-    for chunk_index in 0..chunk_count {
-        let expect_path = spec_path(chunk_index, leaves);
-        assert_chunk_proof(tree, leaves, chunk_index, &expect_path, expect_root);
-    }
 }
 
 fn assert_chunk_proof(

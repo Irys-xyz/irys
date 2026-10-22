@@ -141,6 +141,18 @@ fn commitment_and_chunk_key_bind_geometry() {
     let wider_tree = DataTree::from_bytes(wider_chunk, short).unwrap();
     assert_eq!(coarse_tree.data_tree_root(), wider_tree.data_tree_root());
     assert_ne!(coarse_tree.data_commitment(), wider_tree.data_commitment());
+    // The trees match. The witness does not, so each proof fails as the other.
+    assert_ne!(
+        coarse_tree.chunk_key(0).unwrap(),
+        wider_tree.chunk_key(0).unwrap()
+    );
+    assert_short_chunk_proofs_fail_across_geometries(
+        coarse,
+        &coarse_tree,
+        wider_chunk,
+        &wider_tree,
+        short,
+    );
 
     // Same root and size. Only the geometry differs, so verify_size rejects the other.
     verify_size(
@@ -159,6 +171,149 @@ fn commitment_and_chunk_key_bind_geometry() {
         )
         .is_err()
     );
+}
+
+/// Same data tree, two geometries. Each honest proof fails under the other.
+///
+/// `bytes` is shorter than both segment sizes, so every segment length matches
+/// and the sibling lists match. The last hash is `size_witness` (spec §3, §5).
+/// Checking the proof under the other geometry uses the other witness and the
+/// other commitment.
+fn assert_short_chunk_proofs_fail_across_geometries(
+    coarse: Geometry,
+    coarse_tree: &DataTree,
+    wider: Geometry,
+    wider_tree: &DataTree,
+    bytes: &[u8],
+) {
+    let data_size = u64::try_from(bytes.len()).unwrap();
+    assert_eq!(coarse.segments_per_chunk(), wider.segments_per_chunk());
+    assert!(
+        data_size < coarse.segment_size() && data_size < wider.segment_size(),
+        "the chunk is shorter than both segment sizes"
+    );
+
+    let coarse_chunk_proof = coarse_tree.chunk_proof(0).unwrap();
+    let wider_chunk_proof = wider_tree.chunk_proof(0).unwrap();
+    assert_sibling_prefix_matches(&coarse_chunk_proof, &wider_chunk_proof);
+    verify_chunk(
+        &coarse,
+        &coarse_tree.data_commitment(),
+        data_size,
+        0,
+        bytes,
+        &coarse_chunk_proof,
+    )
+    .unwrap();
+    verify_chunk(
+        &wider,
+        &wider_tree.data_commitment(),
+        data_size,
+        0,
+        bytes,
+        &wider_chunk_proof,
+    )
+    .unwrap();
+    assert!(
+        verify_chunk(
+            &wider,
+            &wider_tree.data_commitment(),
+            data_size,
+            0,
+            bytes,
+            &coarse_chunk_proof,
+        )
+        .is_err(),
+        "the coarse chunk proof must fail under the wider geometry and commitment"
+    );
+    assert!(
+        verify_chunk(
+            &coarse,
+            &coarse_tree.data_commitment(),
+            data_size,
+            0,
+            bytes,
+            &wider_chunk_proof,
+        )
+        .is_err(),
+        "the wider chunk proof must fail under the coarse geometry and commitment"
+    );
+
+    for segment_index in 0..coarse.segments_per_chunk() {
+        let segment_length = coarse
+            .segment_len(data_size, 0, segment_index)
+            .expect("segment index is inside the chunk");
+        assert_eq!(
+            segment_length,
+            wider
+                .segment_len(data_size, 0, segment_index)
+                .expect("segment index is inside the chunk"),
+            "segment {segment_index}"
+        );
+        let segment_length = usize::try_from(segment_length).expect("segment length fits");
+        let segment = &bytes[..segment_length];
+        let coarse_segment_proof = coarse_tree.segment_proof(0, segment_index, bytes).unwrap();
+        let wider_segment_proof = wider_tree.segment_proof(0, segment_index, bytes).unwrap();
+        assert_sibling_prefix_matches(&coarse_segment_proof, &wider_segment_proof);
+        verify_segment(
+            &coarse,
+            &coarse_tree.data_commitment(),
+            data_size,
+            0,
+            segment_index,
+            segment,
+            &coarse_segment_proof,
+        )
+        .unwrap();
+        verify_segment(
+            &wider,
+            &wider_tree.data_commitment(),
+            data_size,
+            0,
+            segment_index,
+            segment,
+            &wider_segment_proof,
+        )
+        .unwrap();
+        assert!(
+            verify_segment(
+                &wider,
+                &wider_tree.data_commitment(),
+                data_size,
+                0,
+                segment_index,
+                segment,
+                &coarse_segment_proof,
+            )
+            .is_err(),
+            "the coarse segment proof must fail under the wider geometry and commitment"
+        );
+        assert!(
+            verify_segment(
+                &coarse,
+                &coarse_tree.data_commitment(),
+                data_size,
+                0,
+                segment_index,
+                segment,
+                &wider_segment_proof,
+            )
+            .is_err(),
+            "the wider segment proof must fail under the coarse geometry and commitment"
+        );
+    }
+}
+
+/// The sibling hashes match. The last hash, the size witness, does not.
+fn assert_sibling_prefix_matches(left: &[u8], right: &[u8]) {
+    assert_eq!(left.len(), right.len());
+    assert!(
+        left.len() >= HASH_SIZE,
+        "a proof ends with the size witness"
+    );
+    let sibling_len = left.len() - HASH_SIZE;
+    assert_eq!(&left[..sibling_len], &right[..sibling_len]);
+    assert_ne!(&left[sibling_len..], &right[sibling_len..]);
 }
 
 /// Break: two of `(data_size, chunk_size, segments_per_chunk)` share one encoding.

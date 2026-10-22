@@ -3,7 +3,7 @@
 //! `ProptestConfig::with_cases` writes `cases` after `ProptestConfig::default`
 //! has already applied `PROPTEST_CASES` (proptest reads that variable only
 //! while building the process-wide default). [`case_config`] keeps the variable
-//! when it is set, so a soak can raise every new property together:
+//! when it is set, so a soak raises every property test together:
 //!
 //! ```text
 //! cat > /tmp/data-tree-soak-nextest.toml <<'EOF'
@@ -12,14 +12,19 @@
 //! EOF
 //! PROPTEST_CASES=330000 XTASK_NO_PRUNE=1 cargo nextest run -p irys-data-tree \
 //!   --config-file /tmp/data-tree-soak-nextest.toml \
-//!   -E 'test(/::panic_freedom::/) | test(/::differential::/) | test(/::builder_props::/) | test(/::geometry_props::/)'
+//!   -E 'test(/::panic_freedom::/) | test(/::differential::/) | test(/::builder_props::/) | test(/::geometry_props::/) | test(/::empty_siblings::/) | test(/::props::/)'
 //! ```
+//!
+//! That filter is every property module: `panic_freedom`, `differential`,
+//! `builder_props`, `geometry_props`, `empty_siblings`, and `props`. `props`
+//! uses bare `proptest!`, so `PROPTEST_CASES` still scales it through the
+//! process default. A new property module has to be added to the filter.
 //!
 //! The repo's default nextest profile kills a test after two 30 s periods.
 //! The temporary config raises that for the soak only. Nextest runs those
-//! tests in parallel, so the wall clock is the slowest one. That is the
-//! honest-tree test: about 4 seconds at 2000 cases on an opt-level 3 dev
-//! build, so 330000 cases is about ten minutes. An unset variable uses the
+//! tests in parallel, so the wall clock is the slowest one. The honest-tree
+//! test in `differential` is about 4 seconds at 2000 cases on an opt-level 3
+//! dev build, so 330000 cases is about ten minutes. An unset variable uses the
 //! per-test count passed to [`case_config`]. A value proptest cannot parse as
 //! `u32` leaves the built-in default of 256.
 //!

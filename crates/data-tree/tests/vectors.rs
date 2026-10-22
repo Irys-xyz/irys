@@ -38,6 +38,35 @@ const MULTI_SEGMENT_CASES: usize = 6;
 /// spec §13 negative list, with one case per sibling bit of the printed segment proof.
 const NEGATIVE_CASES: usize = 17;
 
+/// Two digests, `l ‖ r`, each [`HASH_SIZE`] (spec §3, §13).
+const TWO_DIGEST_SOURCE_DATA_SIZE: u64 = (HASH_SIZE * 2) as u64;
+
+/// That segment is one chunk, so the recorded maximum is 1 (spec §2, §13).
+///
+/// `max_data_tx_chunks` is not an input to `size_witness` (spec §3).
+const TWO_DIGEST_MAX_DATA_TX_CHUNKS: u32 = 1;
+
+/// spec §13 negative names, in generator order (`examples/gen_vectors.rs`).
+const NEGATIVE_NAMES: [&str; NEGATIVE_CASES] = [
+    "wrong_data_size_same_chunk_count",
+    "wrong_data_size_other_chunk_count",
+    "chunk_index_out_of_range",
+    "proof_one_hash_too_long",
+    "proof_one_hash_too_short",
+    "empty_proof_for_chunk_count_above_one",
+    "chunk_length_minus_one",
+    "chunk_length_plus_one",
+    "data_size_zero",
+    "proof_at_another_index",
+    "unanchored_commitment",
+    "zero_padded_segment",
+    "flip_bit_0_of_sibling_0",
+    "flip_bit_0_of_sibling_1",
+    "flip_bit_0_of_sibling_2",
+    "flip_bit_0_of_sibling_3",
+    "segment_equal_to_two_hashes_is_a_leaf",
+];
+
 const FILE_NAMES: [&str; 7] = [
     "chunk_proofs.json",
     "multi_segment.json",
@@ -66,7 +95,7 @@ fn shared_vectors_match_the_crate_and_spec() {
     assert_eq!(segment_proofs.cases.len(), SEGMENT_PROOF_CASES);
     assert_eq!(multi_segment.cases.len(), MULTI_SEGMENT_CASES);
     assert_eq!(negative.cases.len(), NEGATIVE_CASES);
-    for description in [
+    assert_descriptions(
         &primitives.description,
         &roots_testing.description,
         &roots_mainnet.description,
@@ -74,28 +103,18 @@ fn shared_vectors_match_the_crate_and_spec() {
         &segment_proofs.description,
         &multi_segment.description,
         &negative.description,
-    ] {
-        assert!(description.contains("spec"), "{description}");
-    }
-    assert!(primitives.geometry.is_none(), "primitives have no geometry");
-    let empty_range = format!("heights 0 through {MAX_SUBTREE_HEIGHT}");
-    assert!(
-        primitives.description.contains(&empty_range),
-        "the description states the empty range"
     );
+    assert!(primitives.geometry.is_none(), "primitives have no geometry");
     assert!(chunk_proofs.geometry.is_none());
     assert!(segment_proofs.geometry.is_none());
     assert_same_geometry(roots_testing.geometry.as_ref().unwrap(), Geometry::TESTING);
     assert_same_geometry(roots_mainnet.geometry.as_ref().unwrap(), Geometry::MAINNET);
     assert_same_geometry(multi_segment.geometry.as_ref().unwrap(), Geometry::MAINNET);
     assert_same_geometry(negative.geometry.as_ref().unwrap(), Geometry::TESTING);
-    assert!(
-        multi_segment.description.contains("917504"),
-        "the description states the upload"
-    );
-    assert!(
-        multi_segment.description.contains("partial"),
-        "the description states why this upload"
+    assert_eq!(
+        Geometry::TESTING.max_data_tx_chunks(),
+        Geometry::MAINNET.max_data_tx_chunks(),
+        "testing and mainnet share the spec §2 maximum"
     );
 
     // Printed hex from spec §13. A mismatch is a bug in the crate or the generator.
@@ -114,6 +133,98 @@ fn shared_vectors_match_the_crate_and_spec() {
     check_segment_proofs(&segment_proofs);
     check_multi_segment(&multi_segment);
     check_negative(&negative);
+}
+
+/// Generator description text (`examples/gen_vectors.rs`). A wording change
+/// has to update both. A description is not a hash, so this equality is the pin.
+fn assert_descriptions(
+    primitives: &str,
+    roots_testing: &str,
+    roots_mainnet: &str,
+    chunk_proofs: &str,
+    segment_proofs: &str,
+    multi_segment: &str,
+    negative: &str,
+) {
+    assert_eq!(primitives, primitives_description());
+    assert_eq!(
+        roots_testing,
+        concat!(
+            "Testing-geometry roots (spec §13): chunk_size 32, segments_per_chunk 4. ",
+            "Bytes are mod251, the pattern of the printed root table. ",
+            "The case holds the chunk roots, data_tree_root, size_witness, and data_commitment."
+        )
+    );
+    assert_eq!(
+        roots_mainnet,
+        concat!(
+            "Mainnet roots (spec §4, §13). Each data_size is stored twice: mod251 bytes, then zero bytes. ",
+            "The case holds the chunk roots, data_tree_root, size_witness, and data_commitment. ",
+            "Chunk counts 8, 9, 16, and 17 are full uploads (data_size = chunk_count * chunk_size). ",
+            "1 GiB is 2^30 bytes (4096 chunks). 1 GiB + 1 is the next byte."
+        )
+    );
+    assert_eq!(
+        chunk_proofs,
+        concat!(
+            "Chunk proofs, leaf to root, one lowercase hex string (spec §5, §13). ",
+            "Mainnet geometry, mod251: every chunk of each full upload with chunk count 1 through 17 ",
+            "(chunk count 5, chunk index 4 is the one-sibling proof, spec §4), ",
+            "and chunks 0, 2047, and 4095 of 1 GiB. ",
+            "Testing geometry, mod251: every chunk of the printed 112-byte upload, including chunk 2."
+        )
+    );
+    assert_eq!(
+        segment_proofs,
+        concat!(
+            "Segment proofs: in-chunk siblings, then the chunk proof, one hex string (spec §5, §13). ",
+            "Mainnet geometry, mod251: every segment of every chunk for chunk count 1 and 2 (full uploads); ",
+            "segments (3, 5), (3, 31), (3, 32), and (3, 63) of the 917504-byte upload; ",
+            "and segment (0, 1) of 4097 bytes, which is 1 byte. ",
+            "Testing geometry, mod251: the printed proof at data_size 112, chunk 3, segment 1."
+        )
+    );
+    assert_eq!(
+        multi_segment,
+        concat!(
+            "Multi-segment proofs, option B (spec §5, §13, §15 Q2). ",
+            "Each segment stores its h in-chunk siblings, level 0 first. ",
+            "The chunk proof is one hex string, leaf to root, shared by the segments of that chunk. ",
+            "The upload is mainnet geometry and mod251 bytes, data_size 917504: ",
+            "the spec §4 example of 3.5 chunks, so chunk 3 is partial ",
+            "(segments 0 to 31 hold bytes, segments 32 to 63 are empty). ",
+            "Cases on that upload: m = 1, 2, 4, and 64, the first m segments of chunk 0; ",
+            "an adjacent pair in chunk 3, segments 31 and 32 ",
+            "(the last full segment and the first empty segment); ",
+            "a pair in two chunks, segment 0 of chunk 2 and segment 0 of chunk 3, two chunk proofs."
+        )
+    );
+    assert_eq!(
+        negative,
+        concat!(
+            "Rejected inputs (spec §13). expected_error is the VerifyError or SizeError variant name. ",
+            "A size failure is the SizeError name. source_data_size rebuilds the tree. ",
+            "data_size, chunk_index, segment_index, commitment, and proof are the verifier inputs. ",
+            "The mutation names how those differ from the honest proof. ",
+            "The 64-byte segment is left concatenated with right, checked against the commitment of ",
+            "node(left, right). That segment is a leaf (spec §3). ",
+            "The unanchored case records the re-derived commitment, which verifies, ",
+            "and the anchored commitment, which does not (spec §6)."
+        )
+    );
+}
+
+fn primitives_description() -> String {
+    format!(
+        "Domain-separated hashes (spec §3, §13). \
+         Leaves hash mod251 bytes of length 0, 1, 4095, and 4096. \
+         node hashes the 0-byte leaf with the 1-byte leaf. \
+         size_witness is mainnet geometry and covers 1, 4096, 262144, 917504, 2^40, and 5 TiB. \
+         empty covers heights 0 through {MAX_SUBTREE_HEIGHT}. \
+         chunk_key uses the testing-geometry commitment of 112 mod251 bytes. \
+         Chunk indexes are 0, 1, and 2^24, plus 3 so the printed chunk_key is in this file. \
+         2^24 is an input of the hash, not a chunk of that 112-byte tree."
+    )
 }
 
 fn assert_file_set() {
@@ -482,6 +593,10 @@ fn check_primitives(file: &VectorFile<PrimitiveCase>) {
                 geometry,
                 hash,
             } => {
+                assert_spec_max_data_tx_chunks(
+                    geometry.max_data_tx_chunks,
+                    &format!("size_witness {data_size}"),
+                );
                 let geometry = geometry_of(geometry);
                 assert_eq!(
                     hex_of(size_witness(&geometry, *data_size).as_bytes()),
@@ -504,6 +619,10 @@ fn check_primitives(file: &VectorFile<PrimitiveCase>) {
                 commitment,
                 hash,
             } => {
+                assert_spec_max_data_tx_chunks(
+                    geometry.max_data_tx_chunks,
+                    &format!("chunk_key {chunk_index}"),
+                );
                 let geometry = geometry_of(geometry);
                 let data = data_bytes(pattern, *data_size);
                 let tree = DataTree::from_bytes(geometry, &data)
@@ -571,6 +690,7 @@ fn check_chunk_proofs(file: &VectorFile<ChunkProofCase>) {
         let (data, tree) = build_upload_with_bytes(&key);
         for case in cases {
             let label = format!("chunk {} {}", case.data_size, case.chunk_index);
+            assert_spec_max_data_tx_chunks(case.geometry.max_data_tx_chunks, &label);
             assert_eq!(case.pattern, MOD251, "{label}");
             assert_eq!(tree.chunk_count(), case.chunk_count, "{label}");
             assert_eq!(
@@ -613,6 +733,7 @@ fn check_segment_proofs(file: &VectorFile<SegmentProofCase>) {
                 "segment {} chunk {} segment {}",
                 case.data_size, case.chunk_index, case.segment_index
             );
+            assert_spec_max_data_tx_chunks(case.geometry.max_data_tx_chunks, &label);
             assert_eq!(case.pattern, MOD251, "{label}");
             assert_eq!(tree.chunk_count(), case.chunk_count, "{label}");
             assert_eq!(
@@ -812,8 +933,21 @@ fn check_one_multi_segment(
 }
 
 fn check_negative(file: &VectorFile<NegativeCase>) {
+    let names: Vec<&str> = file.cases.iter().map(|case| case.name.as_str()).collect();
+    assert_eq!(names, NEGATIVE_NAMES);
     let file_geometry = file.geometry.as_ref().expect("negative file geometry");
     for case in &file.cases {
+        if let Some(geometry) = &case.geometry {
+            if case.mutation == Mutation::SegmentEqualsLeftAndRight {
+                assert_eq!(
+                    geometry.max_data_tx_chunks, TWO_DIGEST_MAX_DATA_TX_CHUNKS,
+                    "{}",
+                    case.name
+                );
+            } else {
+                assert_spec_max_data_tx_chunks(geometry.max_data_tx_chunks, &case.name);
+            }
+        }
         let geometry = geometry_of(case.geometry.as_ref().unwrap_or(file_geometry));
         match case.mutation {
             Mutation::SegmentEqualsLeftAndRight => check_two_digest_segment(&geometry, case),
@@ -967,7 +1101,15 @@ fn check_two_digest_segment(geometry: &Geometry, case: &NegativeCase) {
         case.node_hash.as_deref().expect("node hash")
     );
     let data_size = u64::try_from(bytes.len()).expect("two digests fit");
+    assert_eq!(data_size, TWO_DIGEST_SOURCE_DATA_SIZE, "{}", case.name);
+    assert_eq!(case.source_data_size, data_size, "{}", case.name);
     assert_eq!(data_size, case.data_size, "{}", case.name);
+    assert_eq!(
+        geometry.max_data_tx_chunks(),
+        TWO_DIGEST_MAX_DATA_TX_CHUNKS,
+        "{}",
+        case.name
+    );
     let mistaken = data_commitment(
         geometry,
         &DataTreeRoot::from(*node_hash.as_bytes()),
@@ -1260,6 +1402,16 @@ fn geometry_of(json: &GeometryJson) -> Geometry {
         json.max_data_tx_chunks,
     )
     .unwrap_or_else(|err| panic!("vector geometry: {err}"))
+}
+
+/// spec §2 maximum. It is not an input to `size_witness` (spec §3), so a
+/// changed value still matches every hash in the file.
+fn assert_spec_max_data_tx_chunks(max_data_tx_chunks: u32, label: &str) {
+    assert_eq!(
+        max_data_tx_chunks,
+        Geometry::MAINNET.max_data_tx_chunks(),
+        "{label}"
+    );
 }
 
 fn assert_same_geometry(json: &GeometryJson, geometry: Geometry) {
