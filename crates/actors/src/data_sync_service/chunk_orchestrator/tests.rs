@@ -1177,7 +1177,78 @@ fn retry_backoff_is_exponential_jittered_and_capped() {
         .collect();
     assert!(delays.windows(2).all(|pair| pair[1] >= pair[0]));
     assert!(delays[0] >= RETRY_BACKOFF_INITIAL);
-    assert_eq!(*delays.last().unwrap(), RETRY_BACKOFF_MAX);
+    assert!(*delays.last().unwrap() <= RETRY_BACKOFF_MAX);
+}
+
+/// A full delayed set reaches the cap together. If every capped deadline were
+/// the maximum, the whole set would come due in one tick and fill the hot
+/// budget.
+#[test]
+fn capped_retry_deadlines_stay_spread() {
+    let capped: HashSet<_> = (0..64_u32)
+        .map(|value| ChunkOrchestrator::retry_delay(PartitionChunkOffset::from(value), 8))
+        .collect();
+    assert!(
+        capped.iter().all(|delay| *delay <= RETRY_BACKOFF_MAX),
+        "the cap is still the maximum delay"
+    );
+    assert!(
+        capped
+            .iter()
+            .all(|delay| *delay >= RETRY_BACKOFF_MAX * 3 / 4),
+        "jitter at the cap opens below it, not near zero"
+    );
+    assert!(
+        capped.len() > 32,
+        "capped retries must not share one deadline: {capped:?}"
+    );
+}
+
+fn insert_due(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset, now: Instant) {
+    orch.chunk_requests.insert(
+        offset,
+        ChunkRequest {
+            excluded: HashSet::new(),
+            local_cache_miss: true,
+            body_in_ingress: false,
+            request_state: ChunkRequestState::Delayed { retry_at: now },
+            attempt_count: 1,
+            retry_round: 1,
+            ready_since: now,
+        },
+    );
+}
+
+/// Due retries are queued in scan order, so adjacent offsets meet at the queue
+/// head and one cache lookup can cover them.
+#[rstest::rstest]
+#[case::publish(DataLedger::Publish, vec![1, 2, 3, 4, 5])]
+#[case::term_ledger(DataLedger::Submit, vec![5, 4, 3, 2, 1])]
+#[tokio::test]
+async fn due_retries_are_queued_in_scan_order(
+    #[case] ledger: DataLedger,
+    #[case] expected: Vec<u32>,
+) {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 8);
+    let sm = packed_sm_for_ledger(&config, 8, ledger);
+    // No migrated chunks, so the fill promotes retries and does not scan.
+    let mut orch = make_orchestrator_with_ledger_total(sm, &config, ledger, 0);
+    let now = Instant::now();
+    for value in [3_u32, 1, 5, 2, 4] {
+        insert_due(&mut orch, PartitionChunkOffset::from(value), now);
+    }
+
+    orch.populate_request_queue_at(now);
+
+    let queued: Vec<u32> = orch.ready_offsets.iter().map(|offset| offset.0).collect();
+    assert_eq!(queued, expected);
+    assert!(
+        orch.chunk_requests
+            .values()
+            .all(|request| !request.local_cache_miss),
+        "a new attempt cycle reads the cache again"
+    );
 }
 
 #[test_log::test(tokio::test)]
@@ -1737,6 +1808,40 @@ async fn local_cache_contiguous_run_writes_hits_around_a_hole() {
         Some(&PartitionChunkOffset::from(1))
     );
     assert!(metrics::test_fetch_by_source_count("local_cache", "success") >= before + 2);
+}
+
+/// Term ledgers queue offsets high to low. The run must still form, and each
+/// offset must get its own placement: a body written at a mirrored offset
+/// would fail its proof, or land on the wrong chunk.
+#[test_log::test(tokio::test)]
+async fn local_cache_descending_run_is_one_lookup() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let db = open_test_db(&config);
+    let (tx, data) = signed_tx(&config, 3);
+    index_and_settle(&sm, &tx, 2);
+    cache_bodies_at(&db, &tx, &data, &[1, 2]);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
+    add_assigned_peer(&mut orch, &config, 13, 9113);
+    for value in [2_u32, 1, 0] {
+        insert_pending(&mut orch, PartitionChunkOffset::from(value));
+    }
+
+    assert!(orch.dispatch_next());
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(orch.cache_lookups_this_tick, 1);
+    assert!(fetcher.request_log.read().unwrap().is_empty());
+    assert!(sm.is_data_write_pending_at(PartitionChunkOffset::from(2)));
+    assert!(sm.is_data_write_pending_at(PartitionChunkOffset::from(1)));
+    assert!(!sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+    assert!(orch.chunk_requests[&PartitionChunkOffset::from(0)].local_cache_miss);
+    assert_eq!(
+        orch.ready_offsets.front(),
+        Some(&PartitionChunkOffset::from(0))
+    );
 }
 
 #[test_log::test(tokio::test)]

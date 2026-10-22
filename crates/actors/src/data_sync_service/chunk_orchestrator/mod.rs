@@ -726,7 +726,7 @@ impl ChunkOrchestrator {
         // Peer exclusions and the cache-miss memo are cleared here, at the
         // beginning of a new attempt cycle, never in the same transition that
         // handled a 404. The next pop reads the cache once.
-        let due: Vec<_> = self
+        let mut due: Vec<_> = self
             .chunk_requests
             .iter()
             .filter_map(|(&offset, request)| match request.request_state {
@@ -734,6 +734,14 @@ impl ChunkOrchestrator {
                 _ => None,
             })
             .collect();
+        // Map order is arbitrary. Queue the wave in scan order so adjacent
+        // offsets sit together and one cache lookup covers each contiguous
+        // run, instead of one lookup per retried offset.
+        if self.prioritizes_write_frontier() {
+            due.sort_unstable_by(|a, b| b.cmp(a));
+        } else {
+            due.sort_unstable();
+        }
         for offset in due {
             if let Some(request) = self.chunk_requests.get_mut(&offset) {
                 request.excluded.clear();
@@ -1140,17 +1148,17 @@ impl ChunkOrchestrator {
     /// `start` is already popped and Pending. Append following Pending offsets
     /// that continue the run, are not cache-miss memoized, and sit at the queue
     /// head. Stale non-pending heads are dropped, same as [`Self::dispatch_next`].
+    ///
+    /// Term ledgers queue offsets high to low, so a run may descend. The first
+    /// appended offset fixes the direction for the rest of the run.
     fn take_local_cache_run(&mut self, start: PartitionChunkOffset) -> Vec<PartitionChunkOffset> {
         let mut run = vec![start];
+        let mut descending = None;
         let limit = self.local_cache_run_limit();
         while run.len() < limit {
             let Some(last) = run.last().copied() else {
                 break;
             };
-            let Some(next_u32) = last.0.checked_add(1) else {
-                break;
-            };
-            let next_expected = PartitionChunkOffset(next_u32);
             let Some(&front) = self.ready_offsets.front() else {
                 break;
             };
@@ -1168,10 +1176,18 @@ impl ChunkOrchestrator {
                 self.ready_offsets.pop_front();
                 continue;
             }
+            let up = last.0.checked_add(1) == Some(front.0);
+            let down = last.0.checked_sub(1) == Some(front.0);
+            let continues = match descending {
+                None => up || down,
+                Some(true) => down,
+                Some(false) => up,
+            };
             // Stop before an offset a body job still owns. The next pop holds it.
-            if front != next_expected || cache_miss || self.body_worker_owns(front) {
+            if !continues || cache_miss || self.body_worker_owns(front) {
                 break;
             }
+            descending.get_or_insert(down);
             self.ready_offsets.pop_front();
             run.push(front);
         }
@@ -1311,9 +1327,22 @@ impl ChunkOrchestrator {
         let Some(last) = run.last().copied() else {
             return LocalCacheStep::Miss;
         };
+        let descending = last < start;
+        let (low, high) = if descending {
+            (last, start)
+        } else {
+            (start, last)
+        };
         let placements = irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
-            self.storage_module
-                .data_root_and_tx_offset_span(start, last)
+            self.storage_module.data_root_and_tx_offset_span(low, high)
+        });
+        // The span reads low to high. Every later step indexes by run position,
+        // so a descending run must see its placements in run order.
+        let placements = placements.map(|mut placements| {
+            if descending {
+                placements.reverse();
+            }
+            placements
         });
         let placements = match placements {
             Ok(placements) if placements.len() == run.len() => placements,
@@ -1551,6 +1580,11 @@ impl ChunkOrchestrator {
         } else {
             u64::from(*chunk_offset).wrapping_mul(0x9e37_79b9) % (jitter_window_ms + 1)
         };
+        // At the cap, open the window below the maximum. Clamping after the
+        // add would put every capped retry on the same deadline, so a full
+        // delayed set would return as one wave and fill the hot budget.
+        let base =
+            base.min(RETRY_BACKOFF_MAX.saturating_sub(Duration::from_millis(jitter_window_ms)));
         base.saturating_add(Duration::from_millis(jitter_ms))
             .min(RETRY_BACKOFF_MAX)
     }
