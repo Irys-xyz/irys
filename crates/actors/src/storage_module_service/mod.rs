@@ -518,7 +518,10 @@ impl StorageModuleServiceInner {
             if let Some(info_pa) = sm_info.partition_assignment {
                 // The on-disk file can disagree with memory. A mismatch, including
                 // a missing partition hash, is retried. It does not stop the service.
-                self.validate_packing_params(existing, path, sm_info.id)?;
+                if let Err(err) = self.validate_packing_params(existing, path, sm_info.id) {
+                    reset_not_finished.get_or_insert(err);
+                    continue;
+                }
 
                 // Check to see if there's been a change in the ledger assignment for the partition_has
                 // moved from Capacity->LedgerSlot or LedgerSlot->Capacity
@@ -2454,6 +2457,80 @@ mod assignment_reset_tests {
         assert_eq!(
             harness.module.partition_assignment().unwrap().ledger_id,
             None
+        );
+    }
+
+    /// Module 0 changes ledger. Module 1's packing file disagrees with memory.
+    /// Module 0 still commits. The call returns the retryable error and arms
+    /// the heal retry. A later call with a file that matches memory updates
+    /// module 1.
+    #[tokio::test]
+    async fn packing_params_mismatch_still_updates_the_other_module() {
+        let mut harness = open_modules(2, Some(DataLedger::Publish.into()), |_| {});
+        let first = Arc::clone(&harness.modules[0]);
+        let second = Arc::clone(&harness.modules[1]);
+        let miner = first
+            .partition_assignment()
+            .expect("assigned")
+            .miner_address;
+        let update = Arc::new(vec![
+            capacity_assignment(
+                0,
+                &harness.paths[0],
+                first.partition_hash().expect("hash"),
+                miner,
+            ),
+            capacity_assignment(
+                1,
+                &harness.paths[1],
+                second.partition_hash().expect("hash"),
+                miner,
+            ),
+        ]);
+
+        let params_path = harness.paths[1].join(PACKING_PARAMS_FILE_NAME);
+        let mut params = PackingParams::from_toml(&params_path).expect("packing params");
+        let saved = params;
+        params.ledger = None;
+        params.slot = None;
+        params
+            .write_to_disk(&params_path)
+            .expect("store a disagreeing file");
+
+        harness.inner.index_heal_needs_retry = false;
+        let err = harness
+            .inner
+            .handle_partition_assignments_update(Arc::clone(&update), 4)
+            .await
+            .expect_err("a packing-params mismatch is retried");
+        assert!(super::is_reset_not_finished(&err));
+        assert_eq!(
+            first.partition_assignment().unwrap().ledger_id,
+            None,
+            "the earlier module's ledger change commits"
+        );
+        assert_eq!(
+            second.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into()),
+            "a disagreeing file is not applied"
+        );
+        assert!(
+            harness.inner.index_heal_needs_retry,
+            "a retryable mismatch must still arm index heal"
+        );
+
+        saved
+            .write_to_disk(&params_path)
+            .expect("restore a file that matches memory");
+        harness
+            .inner
+            .handle_partition_assignments_update(update, 4)
+            .await
+            .expect("a consistent file updates the later module");
+        assert_eq!(
+            second.partition_assignment().unwrap().ledger_id,
+            None,
+            "the retry applies the later module"
         );
     }
 
