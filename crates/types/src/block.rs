@@ -1500,6 +1500,15 @@ impl SealedBlock {
                     block_header.block_hash
                 )
             })?;
+            // One entry per ledger. A second entry would replace the first in
+            // `result_data_txs`, so checks that read the header entry and checks
+            // that read the ordered txs would see different lists.
+            eyre::ensure!(
+                !result_data_txs.contains_key(&ledger_type),
+                "Malformed block {:?}: duplicate {:?} data ledger",
+                block_header.block_hash,
+                ledger_type,
+            );
 
             let mut ledger_txs = Vec::with_capacity(ledger.tx_ids.0.len());
             for expected_id in &ledger.tx_ids.0 {
@@ -1554,6 +1563,13 @@ impl SealedBlock {
                     block_header.block_hash
                 )
             })?;
+            // One entry per ledger, for the same reason as the data ledgers above.
+            eyre::ensure!(
+                !result_system_txs.contains_key(&ledger_type),
+                "Malformed block {:?}: duplicate {:?} system ledger",
+                block_header.block_hash,
+                ledger_type,
+            );
 
             let mut ledger_txs = Vec::with_capacity(ledger.tx_ids.0.len());
             for expected_id in &ledger.tx_ids.0 {
@@ -2138,6 +2154,62 @@ mod tests {
         assert!(
             err_msg.contains(&format!("{extra_id:?}")),
             "Error should mention the extra commitment tx id, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_order_transactions_rejects_duplicate_data_ledger() {
+        // A long Publish entry followed by an empty one. Without the check, the
+        // empty entry would replace the long one in the ordered txs.
+        let publish_id = H256::random();
+        let mut header = IrysBlockHeader::default();
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers = vec![
+            DataTransactionLedger {
+                ledger_id: DataLedger::Publish.into(),
+                tx_ids: H256List(vec![publish_id]),
+                ..Default::default()
+            },
+            DataTransactionLedger {
+                ledger_id: DataLedger::Publish.into(),
+                ..Default::default()
+            },
+        ];
+        v1.system_ledgers = vec![];
+
+        let mut publish_tx = DataTransactionHeader::default();
+        publish_tx.id = publish_id;
+
+        let err = SealedBlock::order_transactions(&header, vec![publish_tx], vec![])
+            .expect_err("duplicate Publish ledger must be rejected");
+        assert!(
+            err.to_string().contains("duplicate Publish data ledger"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_order_transactions_rejects_duplicate_system_ledger() {
+        let mut header = IrysBlockHeader::default();
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers = vec![];
+        v1.system_ledgers = vec![
+            SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids: H256List(vec![]),
+            },
+            SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids: H256List(vec![]),
+            },
+        ];
+
+        let err = SealedBlock::order_transactions(&header, vec![], vec![])
+            .expect_err("duplicate Commitment ledger must be rejected");
+        assert!(
+            err.to_string()
+                .contains("duplicate Commitment system ledger"),
+            "unexpected error: {err}"
         );
     }
 

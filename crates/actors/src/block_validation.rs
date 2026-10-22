@@ -1699,8 +1699,8 @@ pub async fn prevalidate_block(
     let transactions = sealed_block.transactions();
 
     // Length compare. Reject before PoA, VDF, and ingress-proof signer recovery.
-    // `SealedBlock::new` already pairs header ids with body txs, so this is the
-    // Publish count.
+    // `SealedBlock::new` rejects duplicate ledger entries and pairs header ids
+    // with body txs, so this is the Publish count.
     let max_publish_txs = config
         .node_config
         .consensus_config()
