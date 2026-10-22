@@ -493,13 +493,9 @@ impl StorageModuleServiceInner {
 
             // Validate the in memory storage module against on-disk packing parameters
             if let Some(info_pa) = sm_info.partition_assignment {
-                // Validate the existing storage module info as it exists in our local state
-                // vs. the existing packing params on disk to make sure everything is in sync
-                // before updating the partition assignment
-                match self.validate_packing_params(existing, path, sm_info.id) {
-                    Ok(()) => {}
-                    Err(err) => panic!("{}", err),
-                }
+                // The on-disk file can disagree with memory. A mismatch, including
+                // a missing partition hash, is retried. It does not stop the service.
+                self.validate_packing_params(existing, path, sm_info.id)?;
 
                 // Check to see if there's been a change in the ledger assignment for the partition_has
                 // moved from Capacity->LedgerSlot or LedgerSlot->Capacity
@@ -866,8 +862,9 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
-    /// Validates that a storage module's partition assignment matches the on-disk parameters.
-    /// Reports an error if there's a mismatch.
+    /// The in-memory assignment must match `packing_params.toml`.
+    /// A mismatch, including a missing partition hash, is [`ResetNotFinished`].
+    /// The caller retries that update. A file that cannot be read is skipped.
     #[tracing::instrument(level = "trace", skip_all, err)]
     fn validate_packing_params(
         &self,
@@ -900,8 +897,10 @@ impl StorageModuleServiceInner {
             }
         };
 
-        // Check all parameters
-        let hash_match = assignment.partition_hash == params.partition_hash.unwrap();
+        // A missing disk hash does not match. Unwrapping it would stop the service.
+        let hash_match = params
+            .partition_hash
+            .is_some_and(|hash| hash == assignment.partition_hash);
         let slot_match = assignment.slot_index == params.slot;
         let ledger_match = assignment.ledger_id == params.ledger;
 
@@ -914,7 +913,7 @@ impl StorageModuleServiceInner {
             return Ok(());
         }
 
-        // Collect detailed mismatch information for error message
+        // Collect detailed mismatch information for the retry log
         let mut mismatches = Vec::new();
 
         if !hash_match {
@@ -938,13 +937,13 @@ impl StorageModuleServiceInner {
             ));
         }
 
-        // Return a detailed error with all mismatches
-        Err(eyre::eyre!(
-            "Storage module {:?} at index {} has mismatched parameters: {}",
+        warn!(
+            "Storage module {:?} at index {} has mismatched packing params; the update will be retried: {}",
             &module_path,
             index,
             mismatches.join(", ")
-        ))
+        );
+        Err(ResetNotFinished.into())
     }
 }
 
@@ -2092,6 +2091,105 @@ mod assignment_reset_tests {
         assert!(harness.module.partition_assignment().is_none());
         assert!(!harness.module.reset_incomplete());
         assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// Expiry can store capacity in `packing_params.toml` while memory still
+    /// names the ledger. That disagreement is retried. It does not stop the
+    /// service. A later call with a file that matches memory applies the update.
+    #[tokio::test]
+    async fn packing_params_mismatch_is_retried() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        let params_path = path.join(PACKING_PARAMS_FILE_NAME);
+        let update = capacity_update(&path, hash, miner);
+
+        let mut params = PackingParams::from_toml(&params_path).expect("packing params");
+        params.ledger = None;
+        params.slot = None;
+        params
+            .write_to_disk(&params_path)
+            .expect("store capacity on disk");
+
+        let err = harness
+            .inner
+            .handle_partition_assignments_update(Arc::clone(&update), 4)
+            .await
+            .expect_err("a ledger mismatch is retried");
+        assert!(super::is_reset_not_finished(&err));
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into()),
+            "a mismatch must leave the in-memory assignment unchanged"
+        );
+
+        params.ledger = Some(DataLedger::Publish.into());
+        params.slot = Some(0);
+        params
+            .write_to_disk(&params_path)
+            .expect("restore the ledger file");
+
+        harness
+            .inner
+            .handle_partition_assignments_update(update, 4)
+            .await
+            .expect("a consistent file applies the update");
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        assert!(harness.receivers.packing.try_recv().is_ok());
+    }
+
+    /// A disk file with no partition hash is retried, same as a mismatch.
+    /// A later call with a hash in the file applies the update.
+    #[tokio::test]
+    async fn packing_params_without_a_partition_hash_is_retried() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        let params_path = path.join(PACKING_PARAMS_FILE_NAME);
+        let update = capacity_update(&path, hash, miner);
+
+        let mut params = PackingParams::from_toml(&params_path).expect("packing params");
+        params.partition_hash = None;
+        params
+            .write_to_disk(&params_path)
+            .expect("clear the disk hash");
+
+        let err = harness
+            .inner
+            .handle_partition_assignments_update(Arc::clone(&update), 4)
+            .await
+            .expect_err("a missing disk hash is retried");
+        assert!(super::is_reset_not_finished(&err));
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert_eq!(
+            harness
+                .module
+                .partition_assignment()
+                .unwrap()
+                .partition_hash,
+            hash
+        );
+
+        params.partition_hash = Some(hash);
+        params
+            .write_to_disk(&params_path)
+            .expect("restore the disk hash");
+
+        harness
+            .inner
+            .handle_partition_assignments_update(update, 4)
+            .await
+            .expect("a file with a hash applies the update");
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
     }
 
     fn reset_marker(module: &StorageModule) -> bool {
