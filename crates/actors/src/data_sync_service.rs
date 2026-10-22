@@ -94,33 +94,6 @@ async fn attempt_data_sync_write(
     }
 }
 
-/// The peer body must match its own data path. Ingress can return `Ok`
-/// without this check: a recent-chunk hit keys only the path hash, and a
-/// wrong length returns `Ok` before the leaf hash is compared.
-fn validate_peer_unpacked_chunk(chunk: &UnpackedChunk, chunk_size: u64) -> eyre::Result<()> {
-    let (min_byte, max_byte) =
-        irys_types::expected_chunk_byte_range(chunk.tx_offset, chunk.data_size, chunk_size)
-            .map_err(|error| eyre::eyre!("peer chunk data path range: {error}"))?;
-    let target = u128::from(max_byte - 1);
-    let path = irys_types::validate_path(chunk.data_root.0, &chunk.data_path, target)
-        .map_err(|error| eyre::eyre!("peer chunk data path: {error}"))?;
-    let chunk_len = u64::try_from(chunk.bytes.len())
-        .map_err(|_| eyre::eyre!("peer chunk length exceeds u64"))?;
-    let expected_len = max_byte - min_byte;
-    eyre::ensure!(
-        chunk_len == expected_len,
-        "peer chunk length {chunk_len} does not match the data path range {expected_len}"
-    );
-    irys_types::validate_path_byte_range(&path, (min_byte, max_byte))
-        .map_err(|error| eyre::eyre!("peer chunk data path range: {error}"))?;
-    let hash = irys_types::hash_sha256(&chunk.bytes.0);
-    eyre::ensure!(
-        path.leaf_hash == hash,
-        "peer chunk hash does not match the data path leaf"
-    );
-    Ok(())
-}
-
 fn ingress_error_is_invalid_peer_data(error: &ChunkIngressError) -> bool {
     matches!(
         error,
@@ -238,7 +211,7 @@ fn check_against_placement(
             ),
         });
     }
-    validate_peer_unpacked_chunk(&unpacked, chunk_size)
+    irys_types::validate_unpacked_chunk(&unpacked, chunk_size)
         .map_err(|error| DeliveryError::InvalidBody(error.to_string()))?;
     Ok(unpacked)
 }
@@ -347,7 +320,7 @@ async fn process_delivered_body(
             pipeline.chunk_size,
         );
     }
-    validate_peer_unpacked_chunk(&unpacked, pipeline.chunk_size)
+    irys_types::validate_unpacked_chunk(&unpacked, pipeline.chunk_size)
         .map_err(|error| DeliveryError::InvalidBody(error.to_string()))?;
     let _permit = Arc::clone(&pipeline.ingress_permits)
         .acquire_owned()
@@ -5115,6 +5088,22 @@ mod assignment_follow_tests {
         let _third = t.next_ingress().await;
         t.apply_results(1).await;
         t.wait_held_below(3).await;
+        // An accepted body opens the bandwidth window. Once that window is
+        // past 1ms the allowance ramps to the chunk-size ceiling (30 for
+        // these 32-byte chunks) and the next tick fills 30 slots. A loaded
+        // host crosses that cutoff before this tick; an idle one does not.
+        // Pin the ceiling so the assertion measures the held-body limit.
+        {
+            let mut peers = t
+                .inner
+                .active_peer_bandwidth_managers
+                .write()
+                .expect("peer bandwidth lock");
+            peers
+                .get_mut(&t.assignee)
+                .expect("assignee")
+                .set_max_concurrency(20);
+        }
         t.inner.tick().expect("tick under the limit");
         assert_eq!(t.slots().0, 20, "fetching resumes under the limit");
     }

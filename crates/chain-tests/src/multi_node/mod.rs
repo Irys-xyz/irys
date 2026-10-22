@@ -1,5 +1,6 @@
 pub(crate) mod api_ingress_validation;
 pub(crate) mod cascade_reorg;
+pub(crate) mod chunk_announce;
 pub(crate) mod ema_forks;
 pub(crate) mod epoch_replay;
 pub(crate) mod fork_recovery;

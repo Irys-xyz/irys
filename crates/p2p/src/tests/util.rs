@@ -35,10 +35,11 @@ use irys_types::{
 use irys_utils::circuit_breaker::CircuitBreakerConfig;
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::TaskExecutor;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -245,6 +246,9 @@ pub(crate) struct GossipServiceTestFixture {
     pub gossip_receiver: Option<mpsc::UnboundedReceiver<Traced<GossipBroadcastMessageV2>>>,
     pub _sync_rx: Option<UnboundedReceiver<SyncChainServiceMessage>>,
     pub sync_tx: UnboundedSender<SyncChainServiceMessage>,
+    pub chunk_announce_limits: Option<crate::chunk_announce::ChunkAnnounceLimits>,
+    pub ingest_script: Arc<Mutex<VecDeque<ScriptedIngest>>>,
+    data_handler: Option<Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>>>,
     // needs to be held so the directory is removed correctly
     pub _temp_dir: TempDir,
 }
@@ -254,6 +258,10 @@ impl GossipServiceTestFixture {
     /// Can panic
     #[must_use]
     pub(crate) fn new() -> Self {
+        Self::new_with(|_| {})
+    }
+
+    pub(crate) fn new_with(configure: impl FnOnce(&mut NodeConfig)) -> Self {
         let temp_dir = TempDirBuilder::new()
             .prefix("gossip_test_fixture")
             .with_tracing()
@@ -270,6 +278,7 @@ impl GossipServiceTestFixture {
         node_config.http.bind_port = gossip_port;
         let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
         node_config.mining_key = random_signer.signer;
+        configure(&mut node_config);
         // Generate a distinct peer_id for this test fixture
         // peer_id is separate from mining_address in V2
         let config = Config::new_with_random_peer_id(node_config);
@@ -369,8 +378,16 @@ impl GossipServiceTestFixture {
             debug!("BlockTreeServiceMessage channel closed");
         });
 
-        // Consume chunk ingress messages, storing received chunks
-        spawn_test_chunk_ingress_consumer(chunk_ingress_rx, Some(Arc::clone(&mempool_chunks)));
+        let ingest_script: Arc<Mutex<VecDeque<ScriptedIngest>>> = Arc::default();
+        spawn_test_chunk_ingress_consumer(
+            chunk_ingress_rx,
+            Some(Arc::clone(&mempool_chunks)),
+            Some(TestIngestStore {
+                db: db.clone(),
+                chunk_size: config.consensus.chunk_size,
+            }),
+            Arc::clone(&ingest_script),
+        );
 
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
 
@@ -397,6 +414,9 @@ impl GossipServiceTestFixture {
             gossip_receiver: Some(gossip_broadcast_rx),
             sync_tx,
             _sync_rx: Some(sync_rx),
+            chunk_announce_limits: None,
+            ingest_script,
+            data_handler: None,
         }
     }
 
@@ -408,13 +428,18 @@ impl GossipServiceTestFixture {
         ServiceHandleWithShutdownSignal,
         mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     ) {
-        let gossip_service = P2PService::new(
+        let mut gossip_service = P2PService::new(
             self.mining_address,
             self.config.peer_id(),
             self.gossip_receiver.take().expect("to take receiver"),
             tokio::runtime::Handle::current(),
             self.config.node_config.max_peer_response_bytes,
         );
+        if let Some(limits) = self.chunk_announce_limits {
+            gossip_service = gossip_service.with_chunk_announce_state(Arc::new(
+                crate::chunk_announce::ChunkAnnounceState::with_limits(limits),
+            ));
+        }
         info!("Starting gossip service on port {}", self.gossip_port);
         // Reuse the listener bound at construction rather than re-binding the
         // port number, which races other parallel tests (see
@@ -439,7 +464,7 @@ impl GossipServiceTestFixture {
 
         let genesis = self.block_status_provider.genesis_header();
         gossip_service.sync_state.finish_sync();
-        let (server, server_handle, broadcast_task_handle, _block_pool, _data_handler) =
+        let (server, server_handle, broadcast_task_handle, _block_pool, data_handler) =
             gossip_service
                 .run(
                     mempool_stub,
@@ -463,6 +488,7 @@ impl GossipServiceTestFixture {
                     tokio_util::sync::CancellationToken::new(),
                 )
                 .expect("failed to run the gossip service");
+        self.data_handler = Some(data_handler);
 
         let service_handle = crate::spawn_p2p_server_watcher_task(
             server,
@@ -472,6 +498,20 @@ impl GossipServiceTestFixture {
         );
 
         (service_handle, gossip_broadcast)
+    }
+
+    pub(crate) fn data_handler(
+        &self,
+    ) -> Option<Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>>> {
+        self.data_handler.clone()
+    }
+
+    /// Queue ingest results; each `IngestChunk` pops one before the default.
+    pub(crate) fn script_chunk_ingest(&self, results: Vec<ScriptedIngest>) {
+        self.ingest_script
+            .lock()
+            .expect("ingest script lock")
+            .extend(results);
     }
 
     #[must_use]
@@ -592,6 +632,12 @@ struct FakeGossipDataHandler {
     on_info_request: Box<dyn Fn() -> GossipResponse<NodeInfo> + Send + Sync>,
     on_block_index_request:
         Box<dyn Fn(BlockIndexQuery) -> GossipResponse<Vec<BlockIndexItem>> + Send + Sync>,
+    on_chunk_fetch: Box<
+        dyn Fn(crate::wire_types::ChunkAnnouncement) -> GossipResponse<Option<UnpackedChunk>>
+            + Send
+            + Sync,
+    >,
+    chunk_pushes: Option<Arc<AtomicUsize>>,
     protocol_versions: Vec<u32>,
 }
 
@@ -602,6 +648,8 @@ impl FakeGossipDataHandler {
             on_pull_data_request: Box::new(|_| GossipResponse::Accepted(None)),
             on_info_request: Box::new(|| GossipResponse::Accepted(NodeInfo::default())),
             on_block_index_request: Box::new(|_| GossipResponse::Accepted(Vec::new())),
+            on_chunk_fetch: Box::new(|_| GossipResponse::Accepted(None)),
+            chunk_pushes: None,
             protocol_versions: vec![1, 2],
         }
     }
@@ -727,6 +775,30 @@ impl FakeGossipServer {
             .set_on_info_request(Box::new(on_info_request));
     }
 
+    pub(crate) fn set_on_chunk_fetch(
+        &self,
+        on_chunk_fetch: impl Fn(
+            crate::wire_types::ChunkAnnouncement,
+        ) -> GossipResponse<Option<UnpackedChunk>>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        self.handler
+            .write()
+            .expect("to unlock handler")
+            .on_chunk_fetch = Box::new(on_chunk_fetch);
+    }
+
+    /// Count `POST /gossip/v2/chunk` bodies. An old peer has no announce route,
+    /// so a fallback push is the only request this counter should see.
+    pub(crate) fn record_chunk_pushes(&self, counter: Arc<AtomicUsize>) {
+        self.handler
+            .write()
+            .expect("to unlock handler")
+            .chunk_pushes = Some(counter);
+    }
+
     pub(crate) fn set_on_block_index_request(
         &self,
         on_block_index_request: impl Fn(BlockIndexQuery) -> GossipResponse<Vec<BlockIndexItem>>
@@ -757,6 +829,13 @@ impl FakeGossipServer {
                 .service(
                     web::resource("/gossip/v2/pull_data")
                         .route(web::post().to(handle_pull_data_v2)),
+                )
+                .service(
+                    web::resource("/gossip/v2/chunk_fetch")
+                        .route(web::post().to(handle_chunk_fetch_v2)),
+                )
+                .service(
+                    web::resource("/gossip/v2/chunk").route(web::post().to(handle_chunk_push_v2)),
                 )
                 .service(web::resource("/gossip/info").route(web::get().to(handle_info)))
                 .service(
@@ -851,6 +930,39 @@ async fn handle_get_data(
         data: v2_data_request,
     };
     handle_get_data_v2(handler, web::Json(v2_request), req).await
+}
+
+async fn handle_chunk_push_v2(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    _body: web::Bytes,
+) -> HttpResponse {
+    if let Some(counter) = handler
+        .read()
+        .expect("to unlock handler")
+        .chunk_pushes
+        .as_ref()
+    {
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .json(GossipResponse::Accepted(()))
+}
+
+async fn handle_chunk_fetch_v2(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    request: web::Json<crate::wire_types::GossipRequestV2<crate::wire_types::ChunkAnnouncement>>,
+) -> HttpResponse {
+    let reply = (handler.read().expect("handler lock").on_chunk_fetch)(request.data);
+    let wire = match reply {
+        GossipResponse::Accepted(maybe) => {
+            GossipResponse::Accepted(maybe.map(crate::wire_types::UnpackedChunk::from))
+        }
+        GossipResponse::Rejected(reason) => GossipResponse::Rejected(reason),
+    };
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .json(wire)
 }
 
 async fn handle_pull_data_v2(
@@ -984,34 +1096,89 @@ async fn handle_block_index(
     }
 }
 
-/// Spawn a task that consumes chunk ingress messages from a receiver.
-/// If `chunk_store` is `Some`, received chunks are pushed into it.
-/// Replies `Ok(())` on any oneshot channel present in the message.
+/// One scripted reply for the test chunk-ingress consumer.
+pub(crate) enum ScriptedIngest {
+    /// Reply with this result and store nothing (Ok here acts like a park).
+    Reply(Result<(), irys_actors::ChunkIngressError>),
+    /// Never reply; the sender is kept alive so the caller waits.
+    Stall,
+}
+
+pub(crate) struct TestIngestStore {
+    pub db: DatabaseProvider,
+    pub chunk_size: u64,
+}
+
+fn send_test_reply<T>(reply: Option<tokio::sync::oneshot::Sender<T>>, value: T) {
+    if let Some(reply) = reply
+        && reply.send(value).is_err()
+    {
+        debug!("test chunk ingress caller dropped the reply");
+    }
+}
+
+/// Spawn a task that consumes chunk ingress messages.
+/// - `chunk_store`: every received chunk is pushed into it.
+/// - `store`: on the default path, a body that validates and whose data
+///   root is cached gets a `CachedChunks` row, as real ingress would.
+/// - `script`: popped once per `IngestChunk`; when empty, the default
+///   path replies `Ok(())`.
 fn spawn_test_chunk_ingress_consumer(
     mut rx: UnboundedReceiver<Traced<irys_actors::ChunkIngressMessage>>,
     chunk_store: Option<Arc<RwLock<Vec<UnpackedChunk>>>>,
+    store: Option<TestIngestStore>,
+    script: Arc<Mutex<VecDeque<ScriptedIngest>>>,
 ) {
     tokio::spawn(async move {
         use irys_actors::ChunkIngressMessage;
+        use irys_database::db::IrysDatabaseExt as _;
+        let mut stalled = Vec::new();
         while let Some(traced) = rx.recv().await {
             let (message, _parent_span) = traced.into_parts();
             match message {
                 ChunkIngressMessage::IngestChunk(chunk, reply, _) => {
-                    if let Some(ref store) = chunk_store {
-                        store.write().expect("to unlock chunk store").push(chunk);
+                    if let Some(ref chunks) = chunk_store {
+                        // clone: the store keeps a copy and the default path still validates
+                        chunks
+                            .write()
+                            .expect("to unlock chunk store")
+                            .push(chunk.clone());
                     }
-                    if let Some(reply) = reply {
-                        let _ = reply.send(Ok(()));
+                    let scripted = script.lock().expect("ingest script lock").pop_front();
+                    match scripted {
+                        Some(ScriptedIngest::Reply(result)) => {
+                            send_test_reply(reply, result);
+                        }
+                        Some(ScriptedIngest::Stall) => stalled.push(reply),
+                        None => {
+                            if let Some(ref ingest_store) = store
+                                && irys_types::validate_unpacked_chunk(
+                                    &chunk,
+                                    ingest_store.chunk_size,
+                                )
+                                .is_ok()
+                            {
+                                // Fails without a cached data root: the chunk is
+                                // then parked, with no row.
+                                if let Err(error) = ingest_store.db.update_eyre(|tx| {
+                                    irys_database::cache_chunk(tx, &chunk).map(|_| ())
+                                }) {
+                                    debug!(%error, "test ingress left the chunk uncached");
+                                }
+                            }
+                            send_test_reply(reply, Ok(()));
+                        }
                     }
                 }
                 ChunkIngressMessage::IngestIngressProof(_proof, reply) => {
-                    let _ = reply.send(Ok(()));
+                    send_test_reply(Some(reply), Ok(()));
                 }
                 ChunkIngressMessage::ProcessPendingChunks(_)
                 | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_)
                 | ChunkIngressMessage::ProcessPendingIngressProofs(_) => {}
             }
         }
+        drop(stalled);
     });
 }
 
@@ -1099,7 +1266,7 @@ pub(crate) fn data_handler_stub_with_sync(
     let chunk_ingress =
         irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(&service_senders);
     // Keep the chunk_ingress receiver alive so the channel remains open.
-    spawn_test_chunk_ingress_consumer(service_receivers.chunk_ingress, None);
+    spawn_test_chunk_ingress_consumer(service_receivers.chunk_ingress, None, None, Arc::default());
     let block_pool_stub = Arc::new(BlockPool::new(
         db,
         block_discovery_stub,
@@ -1154,6 +1321,7 @@ pub(crate) fn data_handler_stub_with_sync(
         started_at: std::time::Instant::now(),
         consensus_config_hash,
         runtime_handle: tokio::runtime::Handle::current(),
+        chunk_announce: Arc::new(crate::chunk_announce::ChunkAnnounceState::new()),
     });
     (handler, sync_rx)
 }
@@ -1194,7 +1362,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
     let chunk_ingress =
         irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(&service_senders);
     // Keep the chunk_ingress receiver alive so the channel remains open.
-    spawn_test_chunk_ingress_consumer(service_receivers.chunk_ingress, None);
+    spawn_test_chunk_ingress_consumer(service_receivers.chunk_ingress, None, None, Arc::default());
     let consensus_config_hash = config.consensus.keccak256_hash();
     Arc::new(GossipDataHandler {
         mempool: mempool_stub,
@@ -1227,6 +1395,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
         started_at: std::time::Instant::now(),
         consensus_config_hash,
         runtime_handle: tokio::runtime::Handle::current(),
+        chunk_announce: Arc::new(crate::chunk_announce::ChunkAnnounceState::new()),
     })
 }
 
