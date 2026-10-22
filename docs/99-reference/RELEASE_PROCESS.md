@@ -218,11 +218,12 @@ This is the fastest rollback path — it re-uses the existing tested image.
 
 > **Rollback from 4.1.x to 4.0.x on an MDBX submodule index.** The first 4.1.x
 > open migrates each submodule `db/` in place and drops the old path-hash table.
-> 4.0.x still starts on that index, but the data-path rows it writes go into the
-> dropped table, which 4.1.x does not read. After a later upgrade those rows are
-> missing and must be re-synced. Nodes on the RocksDB index are not affected:
-> the conversion leaves `db/` unchanged, and 4.0.x refuses a config that sets
-> `submodule_index`.
+> After that drop commits, 4.0.x starts, but it returns no data-path proof for a
+> migrated offset whose proof lived in the dropped table. A later 4.1.x start
+> still serves the copied offset rows. It does not import rows 4.0.x wrote into
+> the dropped table. Data sync does not refetch those chunks while the interval
+> is `Data`. Nodes on the RocksDB index are not affected: the conversion leaves
+> `db/` unchanged, and 4.0.x refuses a config that sets `submodule_index`.
 
 > **If a release is in flight, cancel it first.** `release.yml`, `docker.yml`,
 > and `docker-retag.yml` share the `release` concurrency group (with
