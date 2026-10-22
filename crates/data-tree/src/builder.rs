@@ -362,14 +362,14 @@ impl DataTree {
         DataTreeRoot::from_hash(self.root_hash())
     }
 
-    /// Size witness for this tree's `data_size`.
+    /// Size and geometry witness for this tree (spec §3).
     pub fn size_witness(&self) -> SizeWitness {
-        hash::size_witness(self.data_size)
+        hash::size_witness(&self.geometry, self.data_size)
     }
 
-    /// `node(data_tree_root, size_witness)` (spec §4).
+    /// `node(data_tree_root, size_witness(G, n))` (spec §4).
     pub fn data_commitment(&self) -> DataCommitment {
-        hash::data_commitment(&self.data_tree_root(), self.data_size)
+        hash::data_commitment(&self.geometry, &self.data_tree_root(), self.data_size)
     }
 
     /// Chunk identity key for index `c` (spec §7).

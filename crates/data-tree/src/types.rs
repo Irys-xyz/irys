@@ -84,7 +84,9 @@ impl DataTreeRoot {
 }
 
 hash_id!(
-    /// Size witness over `data_size` only (spec §3).
+    /// Size and geometry witness (spec §3).
+    ///
+    /// `H(0x02 ‖ be64(data_size) ‖ be64(chunk_size) ‖ be16(segments_per_chunk))`.
     SizeWitness
 );
 
@@ -94,7 +96,8 @@ hash_id!(
     /// Verify a chunk or a segment only against an anchored commitment (spec §6).
     /// An anchored commitment is derived from a header whose signature was checked,
     /// or from a `tx_root` leaf that was proven. A commitment derived from an
-    /// unauthenticated `(data_tree_root, data_size)` pair binds nothing. The
+    /// unauthenticated `(data_tree_root, data_size)` pair under a chosen geometry
+    /// binds nothing. The
     /// attacker chooses the claimed size (smaller or larger) and the claimed
     /// index. An honest proof for `(c, C)` passes as `(c', C')` when, and only
     /// when, the left/right step sequence matches at every level and `chunk_len`

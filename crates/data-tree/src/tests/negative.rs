@@ -202,7 +202,7 @@ fn a_wrong_size_witness_is_rejected() {
     let chunk = &data[..testing_chunk_bytes()];
     let mut proof = tree.chunk_proof(0).unwrap();
     verify_chunk(&geometry, &commitment, data_size, 0, chunk, &proof).unwrap();
-    let wrong_witness = hash::size_witness(data_size + 1);
+    let wrong_witness = hash::size_witness(&geometry, data_size + 1);
     let witness_start = proof.len() - HASH_SIZE;
     proof[witness_start..].copy_from_slice(wrong_witness.as_bytes());
     assert_eq!(
@@ -542,23 +542,23 @@ fn a_64_byte_segment_equal_to_two_hashes_is_a_leaf() {
 
 #[test]
 fn verify_size_rejects_a_different_size_with_no_range_check() {
-    // spec §5: `verify_size` takes `(data_commitment, data_tree_root, data_size)`
+    // spec §5: `verify_size` takes `(G, data_commitment, data_tree_root, data_size)`
     // and no proof bytes. Any `u64` `data_size` is taken as input, including 0.
-    // There is no range check and no geometry. The comparison fails unless
-    // `data_size` is the committed size.
+    // There is no range check. The comparison fails unless `data_size` and the
+    // geometry are the committed ones.
     let geometry = Geometry::TESTING;
     let data_size = geometry.chunk_size();
     let tree =
         DataTree::from_bytes(geometry, &pattern(usize::try_from(data_size).unwrap())).unwrap();
     let commitment = tree.data_commitment();
     let root = tree.data_tree_root();
-    verify_size(&commitment, &root, data_size).unwrap();
+    verify_size(&geometry, &commitment, &root, data_size).unwrap();
     assert_eq!(
-        verify_size(&commitment, &root, 0).unwrap_err(),
+        verify_size(&geometry, &commitment, &root, 0).unwrap_err(),
         VerifyError::CommitmentMismatch
     );
     assert_eq!(
-        verify_size(&commitment, &root, data_size - 1).unwrap_err(),
+        verify_size(&geometry, &commitment, &root, data_size - 1).unwrap_err(),
         VerifyError::CommitmentMismatch
     );
 }
@@ -589,7 +589,7 @@ fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
     verify_chunk(&geometry, &anchored, data_size, 0, chunk, &proof).unwrap();
 
     let wrong_data_size = data_size + 1;
-    let rederived = hash::data_commitment(&root, wrong_data_size);
+    let rederived = hash::data_commitment(&geometry, &root, wrong_data_size);
     // Same depth, so the length matches. The true witness is not the claimed size.
     assert_eq!(
         verify_chunk(&geometry, &rederived, wrong_data_size, 0, chunk, &proof).unwrap_err(),
@@ -601,7 +601,7 @@ fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
     );
 
     let mut claimed_witness = proof;
-    let witness = hash::size_witness(wrong_data_size);
+    let witness = hash::size_witness(&geometry, wrong_data_size);
     let witness_start = claimed_witness.len() - HASH_SIZE;
     claimed_witness[witness_start..].copy_from_slice(witness.as_bytes());
     verify_chunk(
@@ -684,8 +684,8 @@ fn an_unanchored_commitment_passes_for_a_smaller_count_and_a_moved_index() {
         &honest,
     )
     .unwrap();
-    let proof = proof_ending_with_size_witness(honest, claimed_data_size);
-    let rederived = hash::data_commitment(&tree.data_tree_root(), claimed_data_size);
+    let proof = proof_ending_with_size_witness(&geometry, honest, claimed_data_size);
+    let rederived = hash::data_commitment(&geometry, &tree.data_tree_root(), claimed_data_size);
     verify_chunk(&geometry, &rederived, claimed_data_size, 0, chunk, &proof).unwrap();
     assert_eq!(
         verify_chunk(
@@ -724,8 +724,8 @@ fn an_unanchored_commitment_passes_for_a_smaller_count_and_a_moved_index() {
         &honest,
     )
     .unwrap();
-    let proof = proof_ending_with_size_witness(honest, claimed_data_size);
-    let rederived = hash::data_commitment(&tree.data_tree_root(), claimed_data_size);
+    let proof = proof_ending_with_size_witness(&geometry, honest, claimed_data_size);
+    let rederived = hash::data_commitment(&geometry, &tree.data_tree_root(), claimed_data_size);
     verify_chunk(&geometry, &rederived, claimed_data_size, 1, chunk, &proof).unwrap();
     assert_eq!(
         verify_chunk(
@@ -741,9 +741,13 @@ fn an_unanchored_commitment_passes_for_a_smaller_count_and_a_moved_index() {
     );
 }
 
-/// Replace the proof's last hash with `size_witness(data_size)` (spec §6).
-fn proof_ending_with_size_witness(mut proof: Vec<u8>, data_size: u64) -> Vec<u8> {
-    let witness = hash::size_witness(data_size);
+/// Replace the proof's last hash with `size_witness(G, data_size)` (spec §6).
+fn proof_ending_with_size_witness(
+    geometry: &Geometry,
+    mut proof: Vec<u8>,
+    data_size: u64,
+) -> Vec<u8> {
+    let witness = hash::size_witness(geometry, data_size);
     let witness_start = proof.len() - HASH_SIZE;
     proof[witness_start..].copy_from_slice(witness.as_bytes());
     proof

@@ -44,9 +44,9 @@ fn malformed_last_chunk_of_the_published_attack_is_rejected() {
     proof.extend_from_slice(empty(0).as_bytes());
     proof.extend_from_slice(garbage.as_bytes());
     proof.extend_from_slice(chunk_zero.as_bytes());
-    proof.extend_from_slice(size_witness(data_size).as_bytes());
+    proof.extend_from_slice(size_witness(&geometry, data_size).as_bytes());
     let root = node(&chunk_zero, &bad_chunk_root);
-    let commitment = data_commitment(&DataTreeRoot::from_hash(root), data_size);
+    let commitment = data_commitment(&geometry, &DataTreeRoot::from_hash(root), data_size);
     assert_eq!(
         verify_segment(&geometry, &commitment, data_size, 1, 0, segment, &proof),
         Err(VerifyError::CommitmentMismatch)
@@ -393,7 +393,7 @@ fn commitment_from_segment_proof(
     }
     let climbed = climb(root, chunk_index, chunk_count, chunk_siblings)
         .expect("the modified proof is one hash per level");
-    data_commitment(&DataTreeRoot::from_hash(climbed), data_size)
+    data_commitment(geometry, &DataTreeRoot::from_hash(climbed), data_size)
 }
 
 fn hash_other_than(required: NodeHash, level: u32, segment: &[u8], probe: u64) -> NodeHash {

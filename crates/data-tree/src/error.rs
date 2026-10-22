@@ -154,7 +154,7 @@ pub enum VerifyError {
         /// Byte length of the supplied proof.
         actual: usize,
     },
-    /// The proof's last hash is not `size_witness(data_size)` (spec §5, §15 Q10).
+    /// The proof's last hash is not `size_witness(G, data_size)` (spec §5, §15 Q10).
     ///
     /// The verifier computes the witness from the `data_size` it is checking.
     /// A supplied witness is not climbed until it matches that value.

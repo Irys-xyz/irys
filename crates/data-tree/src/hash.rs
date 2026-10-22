@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 use sha2::{Digest as _, Sha256};
 
-use crate::geometry::MAX_SUBTREE_HEIGHT;
+use crate::geometry::{Geometry, MAX_SUBTREE_HEIGHT};
 use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash, SizeWitness};
 
 /// `empty(0) ..= empty(MAX_SUBTREE_HEIGHT)` (spec §3, §9).
@@ -25,7 +25,7 @@ pub enum TreeDomainTag {
     Leaf = 0x00,
     /// `0x01 ‖ left ‖ right` (one tag byte plus two digests).
     Node = 0x01,
-    /// `0x02 ‖ be64(data_size)` (one tag byte plus a `u64`).
+    /// `0x02 ‖ be64(data_size) ‖ be64(chunk_size) ‖ be16(segments_per_chunk)` (19 B).
     Size = 0x02,
     /// `0x03 ‖ data_commitment ‖ be32(c)` (one tag byte, one digest, and a `u32`).
     ChunkKey = 0x03,
@@ -61,11 +61,22 @@ pub fn node(left: &NodeHash, right: &NodeHash) -> NodeHash {
     ))
 }
 
-/// `H(Size ‖ be64(data_size))` (spec §3). The witness covers `data_size` only.
-pub fn size_witness(data_size: u64) -> SizeWitness {
+/// `H(0x02 ‖ be64(data_size) ‖ be64(chunk_size) ‖ be16(segments_per_chunk))` (spec §3).
+///
+/// The witness binds the size and the geometry. `Geometry::new` keeps
+/// `chunk_size` in `u64` and `segments_per_chunk` at most
+/// [`MAX_SEGMENTS_PER_CHUNK`](crate::geometry::MAX_SEGMENTS_PER_CHUNK), so the
+/// `be16` write does not truncate.
+pub fn size_witness(geometry: &Geometry, data_size: u64) -> SizeWitness {
+    let segments_per_chunk = u16::try_from(geometry.segments_per_chunk())
+        .expect("segments_per_chunk fits be16: Geometry::new caps it at MAX_SEGMENTS_PER_CHUNK");
     SizeWitness::from(digest(
         TreeDomainTag::Size.as_byte(),
-        &[&data_size.to_be_bytes()],
+        &[
+            &data_size.to_be_bytes(),
+            &geometry.chunk_size().to_be_bytes(),
+            &segments_per_chunk.to_be_bytes(),
+        ],
     ))
 }
 
@@ -103,9 +114,9 @@ pub fn empty(empty_height: u32) -> NodeHash {
     TABLE[empty_height as usize]
 }
 
-/// `node(data_tree_root, size_witness(data_size))` (spec §4).
-pub fn data_commitment(root: &DataTreeRoot, data_size: u64) -> DataCommitment {
+/// `node(data_tree_root, size_witness(G, data_size))` (spec §4).
+pub fn data_commitment(geometry: &Geometry, root: &DataTreeRoot, data_size: u64) -> DataCommitment {
     let root_hash = NodeHash::from(*root.as_bytes());
-    let witness = NodeHash::from(*size_witness(data_size).as_bytes());
+    let witness = NodeHash::from(*size_witness(geometry, data_size).as_bytes());
     DataCommitment::from(*node(&root_hash, &witness).as_bytes())
 }

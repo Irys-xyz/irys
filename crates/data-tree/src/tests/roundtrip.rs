@@ -12,7 +12,7 @@ fn every_proof_verifies_for_n_up_to_199() {
         let data = pattern(usize::try_from(data_size).unwrap());
         let tree = DataTree::from_bytes(geometry, &data).unwrap();
         let commitment = tree.data_commitment();
-        verify_size(&commitment, &tree.data_tree_root(), data_size)
+        verify_size(&geometry, &commitment, &tree.data_tree_root(), data_size)
             .unwrap_or_else(|err| panic!("verify_size n={data_size}: {err}"));
         assert_eq!(tree.chunk_count(), geometry.chunk_count(data_size).unwrap());
         for chunk_index in 0..tree.chunk_count() {

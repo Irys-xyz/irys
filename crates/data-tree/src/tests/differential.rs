@@ -419,7 +419,7 @@ fn expected_chunk_rejection(
             actual: proof.len(),
         };
     }
-    if !witness_matches(proof, data_size) {
+    if !witness_matches(geometry, proof, data_size) {
         return VerifyError::SizeWitnessMismatch;
     }
     VerifyError::CommitmentMismatch
@@ -459,15 +459,15 @@ fn expected_segment_rejection(
             actual: proof.len(),
         };
     }
-    if !witness_matches(proof, data_size) {
+    if !witness_matches(geometry, proof, data_size) {
         return VerifyError::SizeWitnessMismatch;
     }
     VerifyError::CommitmentMismatch
 }
 
-fn witness_matches(proof: &[u8], data_size: u64) -> bool {
+fn witness_matches(geometry: &Geometry, proof: &[u8], data_size: u64) -> bool {
     let start = proof.len() - HASH_SIZE;
-    proof[start..] == *size_witness(data_size).as_bytes()
+    proof[start..] == *size_witness(geometry, data_size).as_bytes()
 }
 
 fn alternate_data_sizes(geometry: &Geometry, data_size: u64) -> Vec<u64> {

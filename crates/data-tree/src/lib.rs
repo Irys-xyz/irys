@@ -1,7 +1,8 @@
 //! Data tree v2.
 //!
-//! One tree commits to uploaded bytes and to `data_size`: chunk proofs, segment
-//! proofs, and the size witness (spec §1–§5). This crate has no L1 types.
+//! One tree commits to uploaded bytes, to `data_size`, and to the geometry:
+//! chunk proofs, segment proofs, and the size witness (spec §1–§5). This crate
+//! has no L1 types.
 //! Only the normative sections of `docs/spec.md` bind this crate; proposal
 //! sections describe planned integration.
 //!

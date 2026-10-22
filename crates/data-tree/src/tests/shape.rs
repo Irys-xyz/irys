@@ -162,7 +162,7 @@ fn assert_chunk_proof(
         .chunk_proof(chunk_index)
         .expect("chunk index is inside this tree");
     let mut expect_proof = concatenated_path(expect_path);
-    expect_proof.extend_from_slice(size_witness(tree.data_size()).as_bytes());
+    expect_proof.extend_from_slice(size_witness(&Geometry::TESTING, tree.data_size()).as_bytes());
     assert_eq!(
         proof, expect_proof,
         "path ‖ size_witness C={chunk_count} c={chunk_index}"

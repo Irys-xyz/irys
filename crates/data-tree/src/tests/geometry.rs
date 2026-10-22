@@ -238,7 +238,7 @@ fn verify_segment_does_not_panic_on_the_extreme_geometries() {
         + 1;
     let mut proof = vec![0_u8; usize::try_from(hash_count).unwrap() * HASH_SIZE];
     // The last hash is the witness, so the climb runs and the dummy commitment fails.
-    let witness = size_witness(data_size);
+    let witness = size_witness(&geometry, data_size);
     let witness_start = proof.len() - HASH_SIZE;
     proof[witness_start..].copy_from_slice(witness.as_bytes());
     assert_eq!(

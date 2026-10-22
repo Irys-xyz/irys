@@ -54,7 +54,7 @@ const PRIMITIVES_DESCRIPTION: &str = concat!(
     "Domain-separated hashes (spec §3, §13). ",
     "Leaves hash mod251 bytes of length 0, 1, 4095, and 4096. ",
     "node hashes the 0-byte leaf with the 1-byte leaf. ",
-    "size_witness covers 1, 4096, 262144, 917504, 2^40, and 5 TiB. ",
+    "size_witness is mainnet geometry and covers 1, 4096, 262144, 917504, 2^40, and 5 TiB. ",
     // 8 is MAX_SUBTREE_HEIGHT (spec §2: SPC ≤ 256). The loop uses that constant.
     "empty covers heights 0 through 8. ",
     "chunk_key uses the testing-geometry commitment of 112 mod251 bytes. ",
@@ -264,7 +264,8 @@ fn primitive_cases() -> Vec<PrimitiveCase> {
     for data_size in size_witness_data_sizes(geometry) {
         cases.push(PrimitiveCase::SizeWitness {
             data_size,
-            hash: hex_of(size_witness(data_size).as_bytes()),
+            geometry: geometry.into(),
+            hash: hex_of(size_witness(&geometry, data_size).as_bytes()),
         });
     }
 
@@ -1013,7 +1014,7 @@ fn realize(draft: NegativeDraft) -> NegativeCase {
         // spec §6: the re-derived commitment repeats size_witness of the claimed
         // size. The proof's last hash is that witness, so the climb can pass.
         // The true witness is rejected before the climb (spec §5).
-        let witness = size_witness(draft.data_size);
+        let witness = size_witness(&geometry, draft.data_size);
         let start = proof.len() - HASH_SIZE;
         proof[start..].copy_from_slice(witness.as_bytes());
     }
@@ -1269,7 +1270,7 @@ fn unanchored_commitment(
     }
     // spec §6: a commitment derived from the real root and the wrong size passes
     // when the path shape matches. The anchored commitment does not.
-    let rederived = data_commitment(&tree.data_tree_root(), draft.data_size);
+    let rederived = data_commitment(geometry, &tree.data_tree_root(), draft.data_size);
     verify_chunk(
         geometry,
         &rederived,
@@ -1335,7 +1336,10 @@ fn two_digest_case() -> NegativeCase {
     let proof = tree
         .segment_proof(0, 0, &bytes)
         .expect("one segment of one chunk");
-    assert_eq!(proof.as_slice(), size_witness(data_size).as_bytes());
+    assert_eq!(
+        proof.as_slice(),
+        size_witness(&geometry, data_size).as_bytes()
+    );
     verify_segment(
         &geometry,
         &tree.data_commitment(),
@@ -1346,7 +1350,11 @@ fn two_digest_case() -> NegativeCase {
         &proof,
     )
     .expect("the segment verifies as a leaf");
-    let mistaken = data_commitment(&DataTreeRoot::from(*node_hash.as_bytes()), data_size);
+    let mistaken = data_commitment(
+        &geometry,
+        &DataTreeRoot::from(*node_hash.as_bytes()),
+        data_size,
+    );
     let draft = NegativeDraft {
         name: "segment_equal_to_two_hashes_is_a_leaf",
         check: Check::VerifySegment,
@@ -1522,6 +1530,7 @@ enum PrimitiveCase {
     },
     SizeWitness {
         data_size: u64,
+        geometry: GeometryJson,
         hash: String,
     },
     Empty {

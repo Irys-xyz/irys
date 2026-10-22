@@ -14,8 +14,8 @@
       "data_size": 80,
       "chunk_index": 0,
       "mutation": "honest_chunk",
-      "commitment": "30f2c57aaed1cb16cd4411d3e58b66e9811eb207232d9582d18135afa7f57ac5",
-      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb655a4d43221cf3e2c9e89761b3f0ec3bb9d79e6250d79107ec1cd5d8a4b3b89fee",
+      "commitment": "d4d12af60c93b37ff699bfd1879f4fe5feba4019b72b1c4010f67c40107e6538",
+      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6506bcb4c6f5089a276f447a1dad79d46dd20f20ff83d32f271b85f651e2510941",
       "expected_error": "SizeWitnessMismatch"
     },
     {
@@ -26,8 +26,8 @@
       "data_size": 128,
       "chunk_index": 2,
       "mutation": "honest_chunk",
-      "commitment": "30f2c57aaed1cb16cd4411d3e58b66e9811eb207232d9582d18135afa7f57ac5",
-      "proof": "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd845a4d43221cf3e2c9e89761b3f0ec3bb9d79e6250d79107ec1cd5d8a4b3b89fee",
+      "commitment": "d4d12af60c93b37ff699bfd1879f4fe5feba4019b72b1c4010f67c40107e6538",
+      "proof": "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd8406bcb4c6f5089a276f447a1dad79d46dd20f20ff83d32f271b85f651e2510941",
       "expected_error": "InvalidProofLength"
     },
     {
@@ -38,7 +38,7 @@
       "data_size": 32,
       "chunk_index": 1,
       "mutation": "index_out_of_range",
-      "commitment": "00f0535265357690ad8c75c88235490e7340e4cef3a81157c2c473861866d8d7",
+      "commitment": "aa774e6e5029925d0c43c6f019c56222cb4f220bad6626bb37bdf17180f5d6ea",
       "proof": "",
       "expected_error": "ChunkIndexOutOfRange"
     },
@@ -50,8 +50,8 @@
       "data_size": 64,
       "chunk_index": 0,
       "mutation": "append_one_zero_hash",
-      "commitment": "0f4d20067ffd10e9936ff015a9898349d8767deacf6a3dabc0ace11a437a7f46",
-      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a7973500000000000000000000000000000000000000000000000000000000000000000453513b0890fcbc70aaee24491fd3922d7e1fd88c41051ec2396f493dbacf7b0",
+      "commitment": "cae4eae10cea22845dd0486dd93e90679179ee0caac7756923158947ad42f738",
+      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350000000000000000000000000000000000000000000000000000000000000000006fadcceece62e2fe53069573f2f11976784f3640f2741058a5fd2c6bf39b84c",
       "expected_error": "InvalidProofLength"
     },
     {
@@ -62,8 +62,8 @@
       "data_size": 96,
       "chunk_index": 0,
       "mutation": "drop_last_hash",
-      "commitment": "30f2c57aaed1cb16cd4411d3e58b66e9811eb207232d9582d18135afa7f57ac5",
-      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a7973505a4d43221cf3e2c9e89761b3f0ec3bb9d79e6250d79107ec1cd5d8a4b3b89fee",
+      "commitment": "d4d12af60c93b37ff699bfd1879f4fe5feba4019b72b1c4010f67c40107e6538",
+      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a79735006bcb4c6f5089a276f447a1dad79d46dd20f20ff83d32f271b85f651e2510941",
       "expected_error": "InvalidProofLength"
     },
     {
@@ -74,7 +74,7 @@
       "data_size": 64,
       "chunk_index": 0,
       "mutation": "empty_proof",
-      "commitment": "0f4d20067ffd10e9936ff015a9898349d8767deacf6a3dabc0ace11a437a7f46",
+      "commitment": "cae4eae10cea22845dd0486dd93e90679179ee0caac7756923158947ad42f738",
       "proof": "",
       "expected_error": "InvalidProofLength"
     },
@@ -86,8 +86,8 @@
       "data_size": 32,
       "chunk_index": 0,
       "mutation": "drop_last_chunk_byte",
-      "commitment": "00f0535265357690ad8c75c88235490e7340e4cef3a81157c2c473861866d8d7",
-      "proof": "be6ba773aea847ed679825b754f051572f67dbac1ba82099b498778358eb0b8c",
+      "commitment": "aa774e6e5029925d0c43c6f019c56222cb4f220bad6626bb37bdf17180f5d6ea",
+      "proof": "7794019bb4546df6e4fef536d63c217772a202227fcc0adfae4c7986b6c21e90",
       "expected_error": "InvalidChunkLength"
     },
     {
@@ -98,8 +98,8 @@
       "data_size": 32,
       "chunk_index": 0,
       "mutation": "append_zero_chunk_byte",
-      "commitment": "00f0535265357690ad8c75c88235490e7340e4cef3a81157c2c473861866d8d7",
-      "proof": "be6ba773aea847ed679825b754f051572f67dbac1ba82099b498778358eb0b8c",
+      "commitment": "aa774e6e5029925d0c43c6f019c56222cb4f220bad6626bb37bdf17180f5d6ea",
+      "proof": "7794019bb4546df6e4fef536d63c217772a202227fcc0adfae4c7986b6c21e90",
       "expected_error": "InvalidChunkLength"
     },
     {
@@ -110,7 +110,7 @@
       "data_size": 0,
       "chunk_index": 0,
       "mutation": "data_size_zero",
-      "commitment": "00f0535265357690ad8c75c88235490e7340e4cef3a81157c2c473861866d8d7",
+      "commitment": "aa774e6e5029925d0c43c6f019c56222cb4f220bad6626bb37bdf17180f5d6ea",
       "proof": "",
       "expected_error": "DataSizeOutOfRange"
     },
@@ -123,8 +123,8 @@
       "chunk_index": 1,
       "mutation": "proof_from_other_chunk",
       "proof_chunk_index": 0,
-      "commitment": "30f2c57aaed1cb16cd4411d3e58b66e9811eb207232d9582d18135afa7f57ac5",
-      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb655a4d43221cf3e2c9e89761b3f0ec3bb9d79e6250d79107ec1cd5d8a4b3b89fee",
+      "commitment": "d4d12af60c93b37ff699bfd1879f4fe5feba4019b72b1c4010f67c40107e6538",
+      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6506bcb4c6f5089a276f447a1dad79d46dd20f20ff83d32f271b85f651e2510941",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -135,9 +135,9 @@
       "data_size": 97,
       "chunk_index": 0,
       "mutation": "honest_chunk",
-      "commitment": "30f2c57aaed1cb16cd4411d3e58b66e9811eb207232d9582d18135afa7f57ac5",
-      "unanchored_commitment": "8439566c93867ebebdcfaa6f4c9319a45fdfe29d765b8db4073caae06f85fcfd",
-      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb651148c334e14435416f451da4504ec4402c45ed8d082effe0ac440c42bdbf2c78",
+      "commitment": "d4d12af60c93b37ff699bfd1879f4fe5feba4019b72b1c4010f67c40107e6538",
+      "unanchored_commitment": "16668d044ec056c146f5d2d15922db8f97896ed9a5786f1910d0c741cf9cd4b0",
+      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65e9b58b9b365c0413b0cc4152402468219ff726b99916c0d9bcfbb00461516beb",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -149,8 +149,8 @@
       "chunk_index": 1,
       "segment_index": 0,
       "mutation": "zero_pad_segment",
-      "commitment": "ca888a5334e649c2c8a6ddece5b132464e67b1f59f0b5b5d02433070cce02fcf",
-      "proof": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01dfe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072ad3e81f198d6bd3782d1941172c89e49721d8f5e33cc709d4f6ba3f54b9e35f82aab0eee074a7d257d74359ca85ae10a5f3d16b6428f88e450694a75a82477a4b",
+      "commitment": "074db04f4bc2e5cf84f47d2772cf100c0c09d372e15c28264f9edf9187645d00",
+      "proof": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01dfe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072ad3e81f198d6bd3782d1941172c89e49721d8f5e33cc709d4f6ba3f54b9e35f82bb0f138c586b530efb0a7f7f6fc9d6cf2aaf335db46f775c532e841d55089a47",
       "expected_error": "InvalidSegmentLength"
     },
     {
@@ -163,8 +163,8 @@
       "segment_index": 1,
       "mutation": "flip_sibling_bit0",
       "sibling_index": 0,
-      "commitment": "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5",
-      "proof": "83bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84f127eb7779eafb7f0f10fd2f7fa512d89e862c71b77e4424f40f02ccc6220945",
+      "commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "proof": "83bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd8480a98067aa92e3bf32b45c5afa5ff2bf38640d51a0e4e338b938bf735f99b0e9",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -177,8 +177,8 @@
       "segment_index": 1,
       "mutation": "flip_sibling_bit0",
       "sibling_index": 1,
-      "commitment": "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5",
-      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5ff43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84f127eb7779eafb7f0f10fd2f7fa512d89e862c71b77e4424f40f02ccc6220945",
+      "commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5ff43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd8480a98067aa92e3bf32b45c5afa5ff2bf38640d51a0e4e338b938bf735f99b0e9",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -191,8 +191,8 @@
       "segment_index": 1,
       "mutation": "flip_sibling_bit0",
       "sibling_index": 2,
-      "commitment": "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5",
-      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af9e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84f127eb7779eafb7f0f10fd2f7fa512d89e862c71b77e4424f40f02ccc6220945",
+      "commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af9e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd8480a98067aa92e3bf32b45c5afa5ff2bf38640d51a0e4e338b938bf735f99b0e9",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -205,8 +205,8 @@
       "segment_index": 1,
       "mutation": "flip_sibling_bit0",
       "sibling_index": 3,
-      "commitment": "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5",
-      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6551cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84f127eb7779eafb7f0f10fd2f7fa512d89e862c71b77e4424f40f02ccc6220945",
+      "commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6551cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd8480a98067aa92e3bf32b45c5afa5ff2bf38640d51a0e4e338b938bf735f99b0e9",
       "expected_error": "CommitmentMismatch"
     },
     {
@@ -226,8 +226,8 @@
       "right": "0202020202020202020202020202020202020202020202020202020202020202",
       "leaf_hash": "32fb2d4416067c5bff06423e18714ad3884365d7b816d34a77b33527d8438624",
       "node_hash": "b331da6ec49d4547d9942a6727e5123f69bed5a0b97ac171cfbfd6201431fcfa",
-      "commitment": "baff1be1959b8da9ca5e410abb07a7a15c88f655209c78355aff5f1b31dfd29d",
-      "proof": "453513b0890fcbc70aaee24491fd3922d7e1fd88c41051ec2396f493dbacf7b0",
+      "commitment": "89b5ea68d900a17b5b87eba18609fec2375d1384b43637ca89688bf7cbf69ea5",
+      "proof": "737beac2ccddf6ee33b366d5e539e7322ad8bf04293c5ddd2f6ede4578be10f7",
       "expected_error": "CommitmentMismatch"
     }
   ]

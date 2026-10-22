@@ -160,22 +160,22 @@ fn assert_printed_spec(
     assert_size_witness(
         primitives,
         1,
-        "f83f60940c1ec44c0f1e90f694c6cae7c99b4b6d1507d60ad5a3282a7750d0ee",
+        "e677df7f858cd910622cfd5c6ac7bbf6200e7829c3e4a7325590a6b6309c0597",
     );
     assert_size_witness(
         primitives,
         4_096,
-        "719e72af15abf7c6f95ea297c02cd24b41b6b3467a78583a7103dbb19d45571f",
+        "c0c06f04b271e626a424dad90c9ad30189e210d4b9690f231d9147cdeca448f0",
     );
     assert_size_witness(
         primitives,
         262_144,
-        "313eba86534a86e9270cfa6cb7cee900b753358a0c5ef61330202481653d22eb",
+        "86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49",
     );
     assert_size_witness(
         primitives,
         917_504,
-        "42bb7029ceeb50156a1b044c1af62a0d78207b52708ff5c31a78ed81c2bd595b",
+        "438a131aaf3445c16ab8b8f66374f8ec253f8bce7acc9efd91f722e2409ef89e",
     );
     assert_spec_roots(roots_testing, TESTING_ROOT_ROWS);
     assert_spec_roots(roots_mainnet, MAINNET_ROOT_ROWS);
@@ -190,43 +190,43 @@ const TESTING_ROOT_ROWS: &[(u64, u32, &str, &str)] = &[
         1,
         1,
         "8521b87ff724236722cfb6d6306ad59bceb4aee3e35ae73c41326cd31915e13e",
-        "a107920f86fd22b8f786cace824308964a955e019625b0246a2caf3cdd122eb6",
+        "594c8b3b9cff69e0b5dd50c7465a7b2f7dc722d445f0ac2952d135c04b79f2b6",
     ),
     (
         8,
         1,
         "2239889b93ac82ead2db9605f2584a25255c90206c1fccaddf54caa75b7fc1a1",
-        "87bbfb2c56ebf02b55bd51d32633445fe986f4031be1a3d04d09fac9d447106e",
+        "6e9c94693cb2fea535b79bb9938982db61ff23ade48119a60340e9a680423469",
     ),
     (
         9,
         1,
         "3ba2878285288e004dcd35a73e9a3df4a19f5fe5acccaf8d84b50fc7254e6ddb",
-        "55100cd7d0c2bdbc9d03808eebcde5d5d144f27e021e3477c8a84834d5a0de94",
+        "245a5af1aa8e606cb4e8878d93449d7872f68de9bb8b1db696c13ea81c393728",
     ),
     (
         32,
         1,
         "d3e81f198d6bd3782d1941172c89e49721d8f5e33cc709d4f6ba3f54b9e35f82",
-        "00f0535265357690ad8c75c88235490e7340e4cef3a81157c2c473861866d8d7",
+        "aa774e6e5029925d0c43c6f019c56222cb4f220bad6626bb37bdf17180f5d6ea",
     ),
     (
         33,
         2,
         "bf98e27c471bfda3de1d44b4eb420f528238aa75e6e002fe1636c04a431713a9",
-        "ca888a5334e649c2c8a6ddece5b132464e67b1f59f0b5b5d02433070cce02fcf",
+        "074db04f4bc2e5cf84f47d2772cf100c0c09d372e15c28264f9edf9187645d00",
     ),
     (
         112,
         4,
         "7fd698c547deb0bbb8f8ab7db08dd34616a496f141167252487509cb74824564",
-        "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5",
+        "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
     ),
     (
         157,
         5,
         "81e7a996cd2ba141815aa48a1afe4f9c3d5c0ca450f12c9a605c20a0c3037c95",
-        "f8ba5215b628deec40d735d6cdf825016fca443f0f8cbff3eb5361de59e8ab03",
+        "8eb9e426d13ab02def39117e53b838110f8cebfdfb7d0b9c1726e05001c00e0d",
     ),
 ];
 
@@ -236,55 +236,55 @@ const MAINNET_ROOT_ROWS: &[(u64, u32, &str, &str)] = &[
         1,
         1,
         "2438dc9c444ab818a41197dfd3aa6502bc3e2fb03895b7ed79ab275539b7972b",
-        "719863e12c1e714b1df22d0600ed93ad96486cbc7920f565a5e434574463d013",
+        "9029711cdb35496538bd4e91ac809a8abe2e3bb94376d44595e097478a4a8698",
     ),
     (
         4_095,
         1,
         "851d7b0214e05f85e581de8dd408f5a4b0c31d8baad3f42986f056949ee1d575",
-        "e773c7e0780a33fca2cbb91aae23fc0ba476ea86eb156ee79e93df35d1dda5be",
+        "267ff99c8c7c3580124a730ee7e7c28781d3969a5e52ea164a8fc5fcfa78416b",
     ),
     (
         4_096,
         1,
         "be58572dcfba33df3201cdbeda2799dd0c5b508a0df41a47912cb008896f9195",
-        "be251ef52dcd4fd580211d8fb5eb451be18a3e02c16d4512b56953d9a3c1e748",
+        "7f3301e487d66e71bbb39ab1ae67d6c3ce37fee25eab9daf8259a3713cd4d47c",
     ),
     (
         4_097,
         1,
         "f516d84903ce88d9d1d80d4071ce945dc53707bd4ed60346a3ba6392412c9134",
-        "ce4a935a089dd36beb84501e6813bf4e328bb0ed15307ac3c4a6ab246d04c3c6",
+        "3262c546bc4db11e05171d083d33fef98a36ddbb18f56ee64fcc2b5f3bb0aade",
     ),
     (
         262_143,
         1,
         "b6dd65dde53181e3443d128d05b7cbf57c5f4352caa8216ed365d716896335bd",
-        "7db8ca90c9fab87dc8577252f4ac084bfbc12f491ff049318352623ae715a83c",
+        "5ab3d70ba6f6ef25d19d456d9d4bfa57ed26796d10339b4ba95f34bfd41d0f83",
     ),
     (
         262_144,
         1,
         "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5f",
-        "97c9ecd15caca57f3f74198a5a456d583fedd22ed267f951cce1cd14998b6e4f",
+        "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
     ),
     (
         262_145,
         2,
         "dcc4ac982c84bdf0d6df5c16d2728b65bb4bae355b078b5a22e47a6a3e518825",
-        "75f80cf9008e5f4c65a847f036fccd0c10176cc9840f82a4f0d6b846404d6326",
+        "ff03453747ac366f182de34614fef6816feda7428fc7d5b00f931561eaa8fc04",
     ),
     (
         917_504,
         4,
         "3d86c811acf3356576cbe00b28814ad89ee42bd5aa36b755cea977620366de67",
-        "472cfc752f2aacd4662235abe756da1e2079db705736ad22a6db9db6f6d6cc9c",
+        "683b214b4775ab4fbe5baa64cf193f50a1ecb06ea3a90f3b3e85a60639c3c91f",
     ),
     (
         1_310_720,
         5,
         "1d5501730df0426a6f2b223d3fc31703d5eb6e64bae166736c920ccd23594ac0",
-        "027fba531187d84813dd203d3e03dda3a3898cde1bbfd2675b54e46c230d6e89",
+        "36c380c4cb361fe958b443d27656130e5f57e58b9fd8c80af9a0130a390b83ab",
     ),
 ];
 
@@ -330,12 +330,12 @@ fn assert_spec_chunk_proof(file: &VectorFile<ChunkProofCase>) {
     );
     assert_eq!(
         &case.proof[siblings.len()..],
-        hex_of(size_witness(112).as_bytes()),
+        hex_of(size_witness(&geometry_of(&case.geometry), 112).as_bytes()),
         "spec §13 n=112 chunk proof size witness"
     );
     assert_eq!(
         case.data_commitment,
-        "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5"
+        "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4"
     );
 }
 
@@ -368,7 +368,7 @@ fn assert_spec_segment_proof(file: &VectorFile<SegmentProofCase>) {
     );
     assert_eq!(
         &case.proof[siblings.len()..],
-        hex_of(size_witness(112).as_bytes()),
+        hex_of(size_witness(&geometry_of(&case.geometry), 112).as_bytes()),
         "spec §13 n=112 segment proof size witness"
     );
 }
@@ -391,11 +391,11 @@ fn assert_spec_chunk_key(file: &VectorFile<PrimitiveCase>) {
     assert_eq!(*chunk_index, 3);
     assert_eq!(
         *commitment,
-        "cf1fcae00134fbb7e7317da641c092740b22136c469ae46b6d1db03c4f01dbe5"
+        "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4"
     );
     assert_eq!(
         *hash,
-        "b541f01b947453085184d77f79e23e48acd6d3f0ff773843392ab4dafad1b425"
+        "91ff543f909c38411b53d65ef72e411ed81721af90f8f88f6b49450688b32674"
     );
 }
 
@@ -476,9 +476,14 @@ fn check_primitives(file: &VectorFile<PrimitiveCase>) {
                     "node"
                 );
             }
-            PrimitiveCase::SizeWitness { data_size, hash } => {
+            PrimitiveCase::SizeWitness {
+                data_size,
+                geometry,
+                hash,
+            } => {
+                let geometry = geometry_of(geometry);
                 assert_eq!(
-                    hex_of(size_witness(*data_size).as_bytes()),
+                    hex_of(size_witness(&geometry, *data_size).as_bytes()),
                     *hash,
                     "size_witness {data_size}"
                 );
@@ -848,7 +853,7 @@ fn check_chunk_mutation(geometry: &Geometry, case: &NegativeCase) {
     if case.unanchored_commitment.is_some() {
         // spec §6: the proof's last hash is size_witness of the claimed size.
         // The true witness is rejected before the climb (spec §5).
-        let witness = size_witness(case.data_size);
+        let witness = size_witness(geometry, case.data_size);
         let start = proof.len() - HASH_SIZE;
         proof[start..].copy_from_slice(witness.as_bytes());
     }
@@ -862,7 +867,7 @@ fn check_chunk_mutation(geometry: &Geometry, case: &NegativeCase) {
     );
     if let Some(rederived_hex) = &case.unanchored_commitment {
         // spec §6: the re-derived commitment passes. The anchored one does not.
-        let rederived = data_commitment(&tree.data_tree_root(), case.data_size);
+        let rederived = data_commitment(geometry, &tree.data_tree_root(), case.data_size);
         assert_eq!(
             hex_of(rederived.as_bytes()),
             *rederived_hex,
@@ -962,7 +967,11 @@ fn check_two_digest_segment(geometry: &Geometry, case: &NegativeCase) {
     );
     let data_size = u64::try_from(bytes.len()).expect("two digests fit");
     assert_eq!(data_size, case.data_size, "{}", case.name);
-    let mistaken = data_commitment(&DataTreeRoot::from(*node_hash.as_bytes()), data_size);
+    let mistaken = data_commitment(
+        geometry,
+        &DataTreeRoot::from(*node_hash.as_bytes()),
+        data_size,
+    );
     assert_eq!(
         hex_of(mistaken.as_bytes()),
         case.commitment,
@@ -974,7 +983,10 @@ fn check_two_digest_segment(geometry: &Geometry, case: &NegativeCase) {
     let proof = tree
         .segment_proof(0, 0, &bytes)
         .expect("one segment of one chunk");
-    assert_eq!(proof.as_slice(), size_witness(data_size).as_bytes());
+    assert_eq!(
+        proof.as_slice(),
+        size_witness(geometry, data_size).as_bytes()
+    );
     assert_eq!(hex_of(&proof), case.proof, "{}", case.name);
     verify_segment(
         geometry,
@@ -1331,6 +1343,7 @@ enum PrimitiveCase {
     },
     SizeWitness {
         data_size: u64,
+        geometry: GeometryJson,
         hash: String,
     },
     Empty {

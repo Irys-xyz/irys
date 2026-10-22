@@ -4,6 +4,7 @@ mod depth;
 mod differential;
 mod empty_siblings;
 mod geometry;
+mod geometry_binding;
 mod geometry_props;
 mod negative;
 mod panic_freedom;

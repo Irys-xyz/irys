@@ -46,12 +46,12 @@ pub fn verify_chunk(
     }
     // Check the witness before the climb. A false `data_size` must not pass on
     // the true witness (spec §5, §15 Q10).
-    let siblings = require_size_witness(proof, data_size)?;
+    let siblings = require_size_witness(geometry, proof, data_size)?;
     // The length check enforces `1..=chunk_size`, which is `chunk_root`'s precondition.
     let root = chunk_root(geometry, bytes).expect("chunk length is in 1..=chunk_size");
     let climbed =
         climb(root, chunk_index, chunk_count, siblings).ok_or(VerifyError::CommitmentMismatch)?;
-    commitment_matches(commitment, climbed, data_size)
+    commitment_matches(geometry, commitment, climbed, data_size)
 }
 
 /// Check one segment against an anchored commitment (spec §5, §6).
@@ -101,7 +101,7 @@ pub fn verify_segment(
         });
     }
     // Check the witness before the climb (spec §5, §15 Q10).
-    let siblings = require_size_witness(proof, data_size)?;
+    let siblings = require_size_witness(geometry, proof, data_size)?;
     let subtree_height = geometry.height();
     let in_chunk_bytes = usize::try_from(subtree_height).expect("height fits usize") * HASH_SIZE;
     // The length check guarantees the siblings cover the `h` in-chunk hashes.
@@ -142,34 +142,40 @@ pub fn verify_segment(
     }
     let climbed = climb(root, chunk_index, chunk_count, chunk_siblings)
         .ok_or(VerifyError::CommitmentMismatch)?;
-    commitment_matches(commitment, climbed, data_size)
+    commitment_matches(geometry, commitment, climbed, data_size)
 }
 
-/// `node(data_tree_root, size_witness(n)) == commitment` (spec §5).
+/// `node(data_tree_root, size_witness(G, n)) == commitment` (spec §5).
 ///
-/// `n` is `data_size`.
+/// `n` is `data_size`. The geometry is the one the caller is checking under.
+/// Any `u64` `data_size` is accepted: this check does not range-check it.
 pub fn verify_size(
+    geometry: &Geometry,
     commitment: &DataCommitment,
     root: &DataTreeRoot,
     data_size: u64,
 ) -> Result<(), VerifyError> {
-    if hash::data_commitment(root, data_size) == *commitment {
+    if hash::data_commitment(geometry, root, data_size) == *commitment {
         Ok(())
     } else {
         Err(VerifyError::CommitmentMismatch)
     }
 }
 
-/// Last hash equals `size_witness(data_size)`. Returns the sibling hashes.
+/// Last hash equals `size_witness(G, data_size)`. Returns the sibling hashes.
 ///
 /// The witness is not a sibling. Climbing it would let a false `data_size`
 /// pass when the proof carries the true witness (spec §5, §15 Q10).
-fn require_size_witness(proof: &[u8], data_size: u64) -> Result<&[u8], VerifyError> {
+fn require_size_witness<'a>(
+    geometry: &Geometry,
+    proof: &'a [u8],
+    data_size: u64,
+) -> Result<&'a [u8], VerifyError> {
     let sibling_len = proof.len() - HASH_SIZE;
     let (siblings, witness) = proof
         .split_at_checked(sibling_len)
         .expect("proof length includes the size witness");
-    if witness == size_witness(data_size).as_bytes() {
+    if witness == size_witness(geometry, data_size).as_bytes() {
         Ok(siblings)
     } else {
         Err(VerifyError::SizeWitnessMismatch)
@@ -177,12 +183,13 @@ fn require_size_witness(proof: &[u8], data_size: u64) -> Result<&[u8], VerifyErr
 }
 
 fn commitment_matches(
+    geometry: &Geometry,
     commitment: &DataCommitment,
     root: NodeHash,
     data_size: u64,
 ) -> Result<(), VerifyError> {
     let root = DataTreeRoot::from_hash(root);
-    if hash::data_commitment(&root, data_size) == *commitment {
+    if hash::data_commitment(geometry, &root, data_size) == *commitment {
         Ok(())
     } else {
         Err(VerifyError::CommitmentMismatch)

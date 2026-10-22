@@ -123,7 +123,12 @@ fn check_untrusted(input: &strategies::UntrustedVerifierInput) {
         segment.is_err(),
         "verify_segment accepted a commitment that was not built from these bytes (spec §6, §10)"
     );
-    let size = verify_size(&input.commitment, &input.data_tree_root, input.data_size);
+    let size = verify_size(
+        &geometry,
+        &input.commitment,
+        &input.data_tree_root,
+        input.data_size,
+    );
     assert!(
         size.is_err(),
         "verify_size accepted a commitment that was not built from this root (spec §5, §10)"
