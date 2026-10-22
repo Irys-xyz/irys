@@ -216,6 +216,14 @@ To roll back testnet or mainnet to a previous version, use the **Docker Retag** 
 
 This is the fastest rollback path — it re-uses the existing tested image.
 
+> **Rollback from 4.1.x to 4.0.x on an MDBX submodule index.** The first 4.1.x
+> open migrates each submodule `db/` in place and drops the old path-hash table.
+> 4.0.x still starts on that index, but the data-path rows it writes go into the
+> dropped table, which 4.1.x does not read. After a later upgrade those rows are
+> missing and must be re-synced. Nodes on the RocksDB index are not affected:
+> the conversion leaves `db/` unchanged, and 4.0.x refuses a config that sets
+> `submodule_index`.
+
 > **If a release is in flight, cancel it first.** `release.yml`, `docker.yml`,
 > and `docker-retag.yml` share the `release` concurrency group (with
 > `cancel-in-progress: false`) so they can never race each other over `:latest`
