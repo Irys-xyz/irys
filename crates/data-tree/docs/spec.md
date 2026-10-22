@@ -29,6 +29,7 @@ When a proposal and the normative text disagree, the normative text wins. Propos
 | Appendix A.2 consequence lines | Proposal — not binding until L1 integration |
 | Ingress proofs, in any section | Proposal — not binding until L1 integration |
 | Appendix B | Designed, not adopted |
+| Appendix D, tree salt | Designed, not adopted |
 | Appendix A, measurements, other than the A.2 consequence lines | Informative |
 
 ## 1. Summary
@@ -618,6 +619,8 @@ Q1 to Q10 are decided (§15). These items stay open. They are integration propos
 
 **Segments per chunk.** The node still rejects SPC < 2 wherever the segment-PoA rule runs (§8). The original reason (an empty segment proof) no longer applies since §15 Q10. Whether segment-PoA needs SPC ≥ 2 for another reason is open. Settle it against the segment-PoA spec during integration. The tree's rule is unchanged (§2).
 
+Tree salt (Appendix D): design for team discussion — whether to adopt it, the L1 opt-in carrier, the anchor rule, the type name.
+
 ## 15. Decision log
 
 The log is append-only. Each table keeps the order in which its rows were added. A new row goes at the end of that table. Dates are not re-sorted. A row is not reworded. The first table binds the data tree. The second table is integration planning.
@@ -932,3 +935,60 @@ Ledger chunk 7 is tx 1, chunk 0 (`c = 7 − 7`). The byte target measured from t
 
 2. What a PoA carries: `(k, N, chunk_start)` explicitly, so a validator needs only the owning tx header; or derived from the block's tx headers (smaller PoA, more reads). `chunk_start` is the absolute ledger chunk index (§8). `b` is the PoA's absolute ledger chunk, so `c = b − chunk_start` needs no block ledger range. The owning-header option is sufficient. With this rule, that option is safe, because the `tx_root` it checks against has passed full validation.
 4. Where the code lives: `irys-data-tree`, which shares `T`, `climb`, `depth` and the tag registry, or a separate crate.
+
+## Appendix D. Tree salt (designed, not adopted)
+
+**Design only — not adopted, not binding, not implemented.** Recorded for team discussion. Nothing in this crate, the node or the gateway uses it. If adopted, it changes every hash of the data tree, so it must be decided before the data-tree format is released.
+
+**Goal.** An emergency escape from a hash collision when the stored bytes cannot change. Today an uploader whose data hits a collision (accidental, or precomputed by an attacker) has no degree of freedom: the same bytes, size and geometry always give the same tree. The L1 `anchor` makes tx ids unique and blocks replay, but it never enters the data hashes.
+
+**Construction.** A 32-byte salt enters every hash of the tree, not only the top:
+
+```
+leaf(bytes)        = H(0x00 ‖ salt ‖ bytes)
+node(l, r)         = H(0x01 ‖ salt ‖ l ‖ r)
+size_witness(G, n) = H(0x02 ‖ salt ‖ be64(n) ‖ be64(chunk_size) ‖ be16(segments_per_chunk))
+empty(k)           = computed with the same salt
+salt = 0^32 unless the upload opts in
+```
+
+- Salting only the top (the size witness) would change the commitment but leave every leaf and chunk root unchanged, so a collision between two chunks or segments would survive. The salt must be in every hash.
+- With a salt the attacker does not choose, the scheme relies on randomized hashing (Halevi–Krawczyk): a collision must hold under a salt fixed after the attacker's precomputation.
+- `chunk_key(D, c)` needs no salt: it hashes the commitment, which already depends on the salt.
+- Every preimage stays fixed-width fields plus at most one variable field (the segment bytes), so each still has one parse.
+
+**Cost.** None in proof bytes: the salt is one value per upload, known to the verifier, never in a proof. None in SHA-256 work at 32 bytes:
+
+| Hash | Today | Salted | SHA-256 blocks |
+| --- | --- | --- | --- |
+| node | 65 B | 97 B | 2 → 2 |
+| size witness | 19 B | 51 B | 1 → 1 |
+| full 4 KiB segment leaf | 4,097 B | 4,129 B | 65 → 65 |
+
+A 1-byte salt would give only 256 re-rolls, which an attacker can enumerate; 32 bytes costs the same.
+
+**Opt-in, so deduplication stays the default.** In nearly every case, identical data should give an identical `data_commitment`, so storage can deduplicate. The salt is therefore `0^32` by default and set only when an upload opts in. Always keeping the salt field in the preimage (zero when unused) gives one hash format instead of two.
+
+**Where the salt comes from: the anchor.** A salted upload uses its signed `anchor` as the salt:
+
+- The anchor is already a signed 32-byte field of every data tx header, so no new 32-byte field is needed.
+- It must be recent, so it is not freely chosen, and nobody can precompute collisions against future anchors.
+- A different recent anchor gives a fresh salt (a re-roll).
+
+**The opt-in flag (L1).** The L1 data tx header has no flags byte today (fields: `id`, `anchor`, `signer`, `data_root`, `data_size`, `prefix_size`, `prefix_hash`, `term_fee`, `ledger_id`, `chain_id`, `signature`, `metadata_format`, `perm_fee`; `crates/types/src/transaction.rs`). The design adds a signed `flags: u8` to the header at Estuary, bit 0 = salted; the other bits are reserved and must be zero. This reverses the 2026-10-19 decision "the data tx header keeps its layout; no version tag"; that decision relied on the Estuary reset, which this change would share. Overloading `metadata_format` was considered and rejected (it describes the prefix format; mixing meanings in one signed byte invites errors).
+
+**The gateway.** The v2 item envelope already has a `flags: u8` with reserved bits (gateway `crates/shared/bundle-format-v2/src/item/envelope.rs`). A reserved bit can carry "salted" there with no layout change; the item's anchor (present when envelope bit 0 is set) would be its salt.
+
+**Consequences.**
+
+- The crate stays anchor-agnostic: the builder, the verifiers and the hash functions take a 32-byte salt like they take the geometry. "Salt = anchor when flagged" is an L1 and gateway rule.
+- A salted upload is tied to its anchor. The client picks the anchor before hashing the data; anchors expire, so if a salted tx is not included in time, resubmitting with a new anchor means rehashing all of the data. Acceptable for a rare emergency; not suitable as a default.
+- The L1 anchor may be "a recent transaction id from the signer" as well as a recent block hash. A tx id is `keccak256(signature)`, so a signer can generate many candidate anchors; for a salted upload that partly lets the uploader choose its salt.
+- Every vector changes if adopted (the zero salt adds bytes to every preimage), including the roots, so the §13 root tables would be re-derived from independent references.
+
+**Open questions for the team.**
+
+1. Adopt the salt at all, given that a SHA-256 collision on stored data is not expected?
+2. L1 opt-in: a new signed `flags: u8` header field (this design), or another carrier?
+3. Must a salted upload use a block-hash anchor (not a signer tx id), so that the uploader cannot choose its salt?
+4. Name of the salt type in the crate (proposed: `TreeSalt`, with `TreeSalt::NONE` for the zero salt).
