@@ -1,5 +1,5 @@
 //! An in-chunk sibling whose subtree lies entirely past the data is `empty(ℓ)`
-//! (spec §5, §10).
+//! (spec §5, §9).
 //!
 //! The pin does not open a sibling that is only partly past the data. A bad
 //! hash in an empty leaf of that mixed sibling leaves the other data segments
@@ -126,7 +126,7 @@ fn empty_region_sibling_replaced_by_another_hash_is_rejected() {
     reject_substitute(&geometry, data_size, 0, level, empty(level + 1));
 }
 
-/// spec §13 sweeps `1..=199`. `n = 200` is the next size. Every height is
+/// spec §10 sweeps `1..=199`. `n = 200` is the next size. Every height is
 /// included, with segments past the data on the partial last chunk.
 #[test]
 fn honest_segment_proofs_verify_past_the_data_and_at_every_height() {

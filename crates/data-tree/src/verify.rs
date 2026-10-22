@@ -4,9 +4,9 @@
 //! the climb. A chunk proof is `32 × (depth(c, C) + 1)` bytes. A segment proof
 //! is `32 × (h + depth(c, C) + 1)` bytes (spec §5). A length that is not a
 //! multiple of 32 fails that check. Length checks run before any hashing
-//! (spec §10). The empty-sibling pin runs in `verify_segment`'s in-chunk loop,
+//! (spec §9). The empty-sibling pin runs in `verify_segment`'s in-chunk loop,
 //! before `climb`: a sibling subtree that lies entirely past the data must be
-//! `empty(ℓ)` (spec §5, §10).
+//! `empty(ℓ)` (spec §5, §9).
 
 use crate::chunk::chunk_root;
 use crate::error::VerifyError;
@@ -46,7 +46,7 @@ pub fn verify_chunk(
         });
     }
     // Check the witness before the climb. A false `data_size` must not pass on
-    // the true witness (spec §5, §15 Q10).
+    // the true witness (spec §5, §11 Q10).
     let siblings = require_size_witness(geometry, proof, data_size)?;
     // The length check enforces `1..=chunk_size`, which is `chunk_root`'s precondition.
     let root = chunk_root(geometry, bytes).expect("chunk length is in 1..=chunk_size");
@@ -58,16 +58,14 @@ pub fn verify_chunk(
 /// Check one segment against an anchored commitment (spec §5, §6).
 ///
 /// Several segments of one chunk are checked one by one: each carries its own
-/// `h` in-chunk siblings and they share one chunk proof (spec §5, §15 Q2).
+/// `h` in-chunk siblings and they share one chunk proof (spec §5, §11 Q2).
 /// A segment's proof is those siblings concatenated with the chunk proof. The
 /// chunk proof ends with the size witness, so the concatenation is the whole
-/// proof in every case, including one chunk. A compact multiproof that drops
-/// siblings another revealed segment computes was designed and not adopted
-/// (spec §5).
+/// proof in every case, including one chunk.
 ///
 /// An in-chunk sibling whose subtree lies entirely past the data must be
 /// `empty(ℓ)`. The first segment of that subtree follows from `(n, c, j)`
-/// before the climb (spec §5, §10). The pin does not open a sibling that is
+/// before the climb (spec §5, §9). The pin does not open a sibling that is
 /// only partly past the data. A bad empty leaf inside it does not fail every
 /// data segment.
 ///
@@ -103,7 +101,7 @@ pub fn verify_segment(
             actual: proof.len(),
         });
     }
-    // Check the witness before the climb (spec §5, §15 Q10).
+    // Check the witness before the climb (spec §5, §11 Q10).
     let siblings = require_size_witness(geometry, proof, data_size)?;
     let subtree_height = geometry.height();
     let in_chunk_bytes = usize::try_from(subtree_height).expect("height fits usize") * HASH_SIZE;
@@ -132,7 +130,7 @@ pub fn verify_segment(
         let sibling_start = (segment_index ^ 1) << level;
         // Entirely past the data: the sibling must be `empty(ℓ)`. Any other hash
         // fails. A sibling that still holds a data segment is not opened
-        // (spec §5, §10).
+        // (spec §5, §9).
         if sibling_start >= data_segments && sibling != empty(level) {
             return Err(VerifyError::CommitmentMismatch);
         }
@@ -169,7 +167,7 @@ pub fn verify_size(
 /// Last hash equals `size_witness(G, data_size)`. Returns the sibling hashes.
 ///
 /// The witness is not a sibling. Climbing it would let a false `data_size`
-/// pass when the proof carries the true witness (spec §5, §15 Q10).
+/// pass when the proof carries the true witness (spec §5, §11 Q10).
 fn require_size_witness<'a>(
     geometry: &Geometry,
     proof: &'a [u8],

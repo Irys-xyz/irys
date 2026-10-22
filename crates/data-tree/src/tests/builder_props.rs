@@ -1,5 +1,5 @@
 //! Push sequences do not panic, and a rejected push leaves the accepted tree
-//! (spec §4, §10).
+//! (spec §4, §9).
 //!
 //! The finished tree matches plain sequential `push_chunk` of the bytes those
 //! pushes accepted. See `strategies` for the `PROPTEST_CASES` soak command.
@@ -101,7 +101,7 @@ fn apply_chunk_root(
         },
         Err(_) => {
             // The length is illegal. `push_chunk_root` rejects it before it
-            // uses the root (spec §4, §10). The root value must not matter.
+            // uses the root (spec §4, §9). The root value must not matter.
             let ignored = NodeHash::from([0_u8; HASH_SIZE]);
             match builder.push_chunk_root(ignored, chunk_length) {
                 Ok(()) => panic!("push_chunk_root accepted a length chunk_root rejected"),

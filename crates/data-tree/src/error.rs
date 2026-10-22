@@ -1,7 +1,7 @@
 //! Failures for geometry, building, proofs, and verification.
 //!
 //! Verifiers return these instead of panicking. Length checks run before any
-//! hashing (spec §10).
+//! hashing (spec §9).
 
 use thiserror::Error;
 
@@ -127,10 +127,6 @@ pub enum VerifyError {
     #[error(transparent)]
     Size(#[from] SizeError),
     /// `bytes` is not `chunk_len(data_size, c)`.
-    ///
-    /// Planned L1 mapping, not implemented in this crate: a peer fault
-    /// `InvalidChunkSize` (integration-proposal.md §4). Today's ingress drops a chunk
-    /// whose length does not match.
     #[error("chunk length {actual} does not match {expected}")]
     InvalidChunkLength {
         /// Length required by `(data_size, c)`.
@@ -150,7 +146,7 @@ pub enum VerifyError {
     /// `32 × (h + depth(c, C) + 1)` bytes for a segment (spec §5).
     ///
     /// The extra hash is the size witness. A length that is not a multiple of 32
-    /// fails here, before any hashing (spec §5, §10).
+    /// fails here, before any hashing (spec §5, §9).
     #[error("proof length {actual} does not match {expected}")]
     InvalidProofLength {
         /// Byte length required by `(data_size, c[, j])`.
@@ -158,7 +154,7 @@ pub enum VerifyError {
         /// Byte length of the supplied proof.
         actual: usize,
     },
-    /// The proof's last hash is not `size_witness(G, data_size)` (spec §5, §15 Q10).
+    /// The proof's last hash is not `size_witness(G, data_size)` (spec §5, §11 Q10).
     ///
     /// The verifier computes `size_witness(G, n)` from `G` and `n`.
     /// A supplied witness is not climbed until it matches that value.

@@ -66,7 +66,7 @@ const BIASED_LENGTH_WEIGHT: u32 = 5;
 
 /// Longest `bytes` or `proof` slice the untrusted-input properties allocate.
 ///
-/// Verifiers compare the length before they hash (spec §5, §10). A length above
+/// Verifiers compare the length before they hash (spec §5, §9). A length above
 /// this cap is omitted from the edge list, and the case still passes a short
 /// slice, so the length check runs. When the interesting length fits, it is a
 /// candidate and the hasher runs.
@@ -77,7 +77,7 @@ const UNTRUSTED_INPUT_BYTE_CAP: usize = 4 * 1024;
 pub(super) const HONEST_TREE_MAX_CHUNKS: u32 = 64;
 
 /// Byte cap for one honest upload. Hashing stays on a few kilobytes per case
-/// (spec §9: the bytes dominate the time).
+/// (spec §8: the bytes dominate the time).
 pub(super) const HONEST_TREE_MAX_BYTES: u64 = 16 * 1024;
 
 /// Case count for one property.
@@ -784,7 +784,7 @@ fn owned_bytes(
 
 fn repeated_full_chunks(max_bytes: usize, chunk_size: usize) -> BoxedStrategy<Vec<u8>> {
     // Two copies of one full chunk, when they fit. Equal bytes at two indexes
-    // are the case spec §10 allows: the claim at the other index is true.
+    // are the case spec §9 allows: the claim at the other index is true.
     let pair = chunk_size.saturating_mul(2);
     if chunk_size == 0 || pair > max_bytes {
         let length = chunk_size.clamp(1, max_bytes.max(1));

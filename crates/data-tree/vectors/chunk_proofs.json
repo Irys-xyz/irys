@@ -1,5 +1,5 @@
 {
-  "description": "Chunk proofs, leaf to root, one lowercase hex string (spec §5, §13). Mainnet geometry, mod251: every chunk of each full upload with chunk count 1 through 17 (chunk count 5, chunk index 4 is the one-sibling proof, spec §4), and chunks 0, 2047, and 4095 of 1 GiB. Testing geometry, mod251: every chunk of the printed 112-byte upload, including chunk 2.",
+  "description": "Chunk proofs, leaf to root, one lowercase hex string (spec §5, §10). Mainnet geometry, mod251: every chunk of each full upload with chunk count 1 through 17 (chunk count 5, chunk index 4 is the one-sibling proof, spec §4), and chunks 0, 2047, and 4095 of 1 GiB. Testing geometry, mod251: every chunk of the printed 112-byte upload, including chunk 2.",
   "cases": [
     {
       "geometry": {

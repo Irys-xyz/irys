@@ -8,13 +8,13 @@ use crate::{DataTree, DataTreeBuilder};
 /// and recursive `T` (spec §4).
 const SHAPE_LOCK_MAX_CHUNK_COUNT: u32 = 4_097;
 
-/// Spec §13: the reference implementation checked the builder against the
+/// Spec §10: the reference implementation checked the builder against the
 /// recursive definition for every chunk count from 1 to this count.
 const REFERENCE_CHECK_LAST_CHUNK_COUNT: u32 = 299;
 
 /// Proofs are checked for every chunk through this count.
 ///
-/// One past [`REFERENCE_CHECK_LAST_CHUNK_COUNT`], so the spec §13 range sits
+/// One past [`REFERENCE_CHECK_LAST_CHUNK_COUNT`], so the spec §10 range sits
 /// inside the checked counts.
 const PROOF_EVERY_CHUNK_MAX_CHUNK_COUNT: u32 = REFERENCE_CHECK_LAST_CHUNK_COUNT + 1;
 
@@ -60,7 +60,7 @@ fn builder_layers_and_root_match_spec_for_every_chunk_count() {
     }
 }
 
-/// Even chunk indexes against recursive `path` (spec §4, §5, §13).
+/// Even chunk indexes against recursive `path` (spec §4, §5, §10).
 ///
 /// See [`assert_proofs_for_chunk_index_half`]. The odd indexes are
 /// [`builder_proofs_match_spec_path_for_odd_chunk_indexes`]. One test that
@@ -71,7 +71,7 @@ fn builder_proofs_match_spec_path_for_even_chunk_indexes() {
     assert_proofs_for_chunk_index_half(ChunkIndexHalf::Even);
 }
 
-/// Odd chunk indexes against recursive `path` (spec §4, §5, §13).
+/// Odd chunk indexes against recursive `path` (spec §4, §5, §10).
 ///
 /// See [`assert_proofs_for_chunk_index_half`]. Index 0 of a one-chunk tree is
 /// even, so this test checks no index there. The even test checks that index.
@@ -90,7 +90,7 @@ enum ChunkIndexHalf {
 ///
 /// Counts are 1 through [`PROOF_EVERY_CHUNK_MAX_CHUNK_COUNT`], then each power
 /// of two from 512 through 4,096 with the count on each side, through 4,097.
-/// Spec §13 records a reference check for every count from 1 to 299. The range
+/// Spec §10 records a reference check for every count from 1 to 299. The range
 /// here goes one count further. 512 is the next power of two after 300. 4,096
 /// is the greatest power of two below [`SHAPE_LOCK_MAX_CHUNK_COUNT`], and
 /// 4,096 + 1 is that count. 256 is already inside 1..=300.

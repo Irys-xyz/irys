@@ -1,8 +1,8 @@
-//! Honest proofs verify. One changed field is rejected (spec §5, §10).
+//! Honest proofs verify. One changed field is rejected (spec §5, §9).
 //!
 //! A proof for index `i` shown as index `k` fails when the bytes differ. When
 //! the bytes match it can still fail: the verifier also requires the depth and
-//! the left/right steps (spec §10). An accept is an explicit branch. It is not
+//! the left/right steps (spec §9). An accept is an explicit branch. It is not
 //! dropped with `prop_assume`.
 //!
 //! See `strategies` for the `PROPTEST_CASES` soak command. The check functions
@@ -22,7 +22,7 @@ const HONEST_CASES: u32 = 256;
 
 /// Low bit of the first byte of a changed buffer.
 ///
-/// Any one bit changes that hash input (spec §10, no malleability).
+/// Any one bit changes that hash input (spec §9, no malleability).
 const FLIPPED_BIT: u8 = 0b0000_0001;
 
 proptest::proptest! {
@@ -329,7 +329,7 @@ fn expect_rejection_or_identical_bytes(
     match actual {
         Ok(()) => assert!(
             bytes_match,
-            "{what}: verify returned Ok and the bytes at that index differ (spec §10)"
+            "{what}: verify returned Ok and the bytes at that index differ (spec §9)"
         ),
         Err(error) => assert_eq!(error, expected, "{what}"),
     }

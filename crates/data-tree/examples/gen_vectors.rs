@@ -1,12 +1,11 @@
-//! Shared vectors for the data tree (spec §13).
+//! Shared vectors for the data tree (spec §10).
 //!
 //! One JSON file per group under `<out_dir>`. Data bytes are not stored: a case
 //! names `mod251` (`b[i] = i mod 251`) or `zeros`, and the byte length.
 //!
-//! Multi-segment (option B, spec §5 and §15 Q2) is generated.
-//! Groups not generated here are in integration-proposal.md §8: receipt header
-//! binding (gateway formats), `tx_root` v2, and wire (L1 and gateway message
-//! formats).
+//! Groups: primitives, mainnet roots, testing roots, chunk proofs, segment
+//! proofs, multi-segment proofs (option B, spec §5 and §11 Q2), and negative
+//! cases.
 //!
 //! Run: `cargo run -p irys-data-tree --example gen_vectors -- <out_dir>`.
 
@@ -22,37 +21,37 @@ use irys_data_tree::{
 };
 use serde::Serialize;
 
-/// spec §13: `b[i] = i mod 251`.
+/// spec §10: `b[i] = i mod 251`.
 const MOD251_MODULUS: usize = 251;
 const MOD251: &str = "mod251";
 const ZEROS: &str = "zeros";
 
-/// spec §13: `size_witness` of `2^40`.
+/// spec §10: `size_witness` of `2^40`.
 const TWO_TO_THE_40: u64 = 1 << 40;
 
-/// spec §13: 1 GiB is `2^30` bytes, 4,096 mainnet chunks.
+/// spec §10: 1 GiB is `2^30` bytes, 4,096 mainnet chunks.
 const ONE_GIBIBYTE: u64 = 1 << 30;
 
-/// spec §13: every chunk for chunk counts through 17.
+/// spec §10: every chunk for chunk counts through 17.
 const EVERY_CHUNK_UP_TO: u32 = 17;
 
-/// spec §13: every segment for chunk counts through 2.
+/// spec §10: every segment for chunk counts through 2.
 const EVERY_SEGMENT_UP_TO: u32 = 2;
 
-/// spec §13: in one chunk, `m` = 1, 2, 4, and 64.
+/// spec §10: in one chunk, `m` = 1, 2, 4, and 64.
 const ONE_CHUNK_SEGMENT_COUNTS: [u32; 4] = [1, 2, 4, 64];
 
-/// spec §13: chunk counts listed beside the mainnet root sizes.
+/// spec §10: chunk counts listed beside the mainnet root sizes.
 const MAINNET_SHAPE_CHUNK_COUNTS: [u32; 4] = [8, 9, 16, 17];
 
-/// spec §13: chunks 0, 2,047, and 4,095 of the 1 GiB upload.
+/// spec §10: chunks 0, 2,047, and 4,095 of the 1 GiB upload.
 const ONE_GIBIBYTE_CHUNK_INDEXES: [u32; 3] = [0, 2_047, 4_095];
 
-/// Printed testing upload (spec §13). Chunk count 4.
+/// Printed testing upload (spec §10). Chunk count 4.
 const PRINTED_DATA_SIZE: u64 = 112;
 
 const PRIMITIVES_DESCRIPTION: &str = concat!(
-    "Domain-separated hashes (spec §3, §13). ",
+    "Domain-separated hashes (spec §3, §10). ",
     "Leaves hash mod251 bytes of length 0, 1, 4095, and 4096. ",
     "node hashes the 0-byte leaf with the 1-byte leaf. ",
     "size_witness is mainnet geometry and covers 1, 4096, 262144, 917504, 2^40, and 5 TiB. ",
@@ -64,20 +63,20 @@ const PRIMITIVES_DESCRIPTION: &str = concat!(
 );
 
 const ROOTS_MAINNET_DESCRIPTION: &str = concat!(
-    "Mainnet roots (spec §4, §13). Each data_size is stored twice: mod251 bytes, then zero bytes. ",
+    "Mainnet roots (spec §4, §10). Each data_size is stored twice: mod251 bytes, then zero bytes. ",
     "The case holds the chunk roots, data_tree_root, size_witness, and data_commitment. ",
     "Chunk counts 8, 9, 16, and 17 are full uploads (data_size = chunk_count * chunk_size). ",
     "1 GiB is 2^30 bytes (4096 chunks). 1 GiB + 1 is the next byte."
 );
 
 const ROOTS_TESTING_DESCRIPTION: &str = concat!(
-    "Testing-geometry roots (spec §13): chunk_size 32, segments_per_chunk 4. ",
+    "Testing-geometry roots (spec §10): chunk_size 32, segments_per_chunk 4. ",
     "Bytes are mod251, the pattern of the printed root table. ",
     "The case holds the chunk roots, data_tree_root, size_witness, and data_commitment."
 );
 
 const CHUNK_PROOFS_DESCRIPTION: &str = concat!(
-    "Chunk proofs, leaf to root, one lowercase hex string (spec §5, §13). ",
+    "Chunk proofs, leaf to root, one lowercase hex string (spec §5, §10). ",
     "Mainnet geometry, mod251: every chunk of each full upload with chunk count 1 through 17 ",
     "(chunk count 5, chunk index 4 is the one-sibling proof, spec §4), ",
     "and chunks 0, 2047, and 4095 of 1 GiB. ",
@@ -85,7 +84,7 @@ const CHUNK_PROOFS_DESCRIPTION: &str = concat!(
 );
 
 const SEGMENT_PROOFS_DESCRIPTION: &str = concat!(
-    "Segment proofs: in-chunk siblings, then the chunk proof, one hex string (spec §5, §13). ",
+    "Segment proofs: in-chunk siblings, then the chunk proof, one hex string (spec §5, §10). ",
     "Mainnet geometry, mod251: every segment of every chunk for chunk count 1 and 2 (full uploads); ",
     "segments (3, 5), (3, 31), (3, 32), and (3, 63) of the 917504-byte upload; ",
     "and segment (0, 1) of 4097 bytes, which is 1 byte. ",
@@ -93,7 +92,7 @@ const SEGMENT_PROOFS_DESCRIPTION: &str = concat!(
 );
 
 const MULTI_SEGMENT_DESCRIPTION: &str = concat!(
-    "Multi-segment proofs, option B (spec §5, §13, §15 Q2). ",
+    "Multi-segment proofs, option B (spec §5, §10, §11 Q2). ",
     "Each segment stores its h in-chunk siblings, level 0 first. ",
     "The chunk proof is one hex string, leaf to root, shared by the segments of that chunk. ",
     "The upload is mainnet geometry and mod251 bytes, data_size 917504: ",
@@ -106,7 +105,7 @@ const MULTI_SEGMENT_DESCRIPTION: &str = concat!(
 );
 
 const NEGATIVE_DESCRIPTION: &str = concat!(
-    "Rejected inputs (spec §13). expected_error is the VerifyError or SizeError variant name. ",
+    "Rejected inputs (spec §10). expected_error is the VerifyError or SizeError variant name. ",
     "A size failure is the SizeError name. source_data_size rebuilds the tree. ",
     "data_size, chunk_index, segment_index, commitment, and proof are the verifier inputs. ",
     "The mutation names how those differ from the honest proof. ",
@@ -256,7 +255,7 @@ fn primitive_cases() -> Vec<PrimitiveCase> {
     });
 
     let geometry = Geometry::MAINNET;
-    // 5 TiB is the mainnet maximum (spec §2, §13).
+    // 5 TiB is the mainnet maximum (spec §2, §10).
     assert_eq!(
         geometry.max_data_size(),
         5 * TWO_TO_THE_40,
@@ -271,7 +270,7 @@ fn primitive_cases() -> Vec<PrimitiveCase> {
     }
 
     // empty(0) through empty(MAX_SUBTREE_HEIGHT). SPC 128 and 256 use heights
-    // 7 and 8. Mainnet SPC 64 stops at empty(6) (spec §2, §13).
+    // 7 and 8. Mainnet SPC 64 stops at empty(6) (spec §2, §10).
     for empty_height in 0..=MAX_SUBTREE_HEIGHT {
         cases.push(PrimitiveCase::Empty {
             empty_height,
@@ -282,7 +281,7 @@ fn primitive_cases() -> Vec<PrimitiveCase> {
     let testing = Geometry::TESTING;
     let (_data, tree) = build_upload(testing, MOD251, PRINTED_DATA_SIZE);
     let commitment = tree.data_commitment();
-    // Spec §13: c = 0, 1, and 2^24, plus the printed key at c = 3.
+    // Spec §10: c = 0, 1, and 2^24, plus the printed key at c = 3.
     for chunk_index in [0_u32, 1, 1 << 24, 3] {
         let key = chunk_key(&commitment, chunk_index);
         cases.push(PrimitiveCase::ChunkKey {
@@ -298,7 +297,7 @@ fn primitive_cases() -> Vec<PrimitiveCase> {
 }
 
 fn leaf_lengths() -> [u64; 4] {
-    // 4095 and 4096 are one below and equal to the mainnet segment size (spec §13).
+    // 4095 and 4096 are one below and equal to the mainnet segment size (spec §10).
     let segment_size = Geometry::MAINNET.segment_size();
     [0, 1, segment_size - 1, segment_size]
 }
@@ -330,7 +329,7 @@ fn testing_root_cases() -> Vec<RootCase> {
 fn testing_root_data_sizes(geometry: Geometry) -> [u64; 7] {
     let chunk_size = geometry.chunk_size();
     let segment_size = geometry.segment_size();
-    // 112 and 157 are the printed rows that are not a one-byte step off a full chunk (spec §13).
+    // 112 and 157 are the printed rows that are not a one-byte step off a full chunk (spec §10).
     let data_sizes = [
         1,
         segment_size,
@@ -343,9 +342,9 @@ fn testing_root_data_sizes(geometry: Geometry) -> [u64; 7] {
     assert_eq!(
         geometry.chunk_count(PRINTED_DATA_SIZE).unwrap(),
         4,
-        "spec §13"
+        "spec §10"
     );
-    assert_eq!(geometry.chunk_count(157).unwrap(), 5, "spec §13");
+    assert_eq!(geometry.chunk_count(157).unwrap(), 5, "spec §10");
     data_sizes
 }
 
@@ -367,14 +366,14 @@ fn assert_mainnet_numbers(geometry: Geometry) {
     let segment_size = geometry.segment_size();
     assert_eq!(chunk_size, 262_144, "spec §2");
     assert_eq!(segment_size, 4_096, "spec §2");
-    assert_eq!(2 * chunk_size, 524_288, "spec §13");
-    assert_eq!(3 * chunk_size, 786_432, "spec §13");
-    assert_eq!(3 * chunk_size + chunk_size / 2, 917_504, "spec §13");
-    assert_eq!(5 * chunk_size, 1_310_720, "spec §13");
+    assert_eq!(2 * chunk_size, 524_288, "spec §10");
+    assert_eq!(3 * chunk_size, 786_432, "spec §10");
+    assert_eq!(3 * chunk_size + chunk_size / 2, 917_504, "spec §10");
+    assert_eq!(5 * chunk_size, 1_310_720, "spec §10");
     assert_eq!(
         ONE_GIBIBYTE / chunk_size,
         4_096,
-        "spec §13: 1 GiB is 4096 chunks"
+        "spec §10: 1 GiB is 4096 chunks"
     );
     assert_eq!(geometry.chunk_count(ONE_GIBIBYTE).unwrap(), 4_096);
     assert_eq!(geometry.chunk_count(ONE_GIBIBYTE + 1).unwrap(), 4_097);
@@ -508,7 +507,7 @@ fn segment_proof_cases() -> Vec<SegmentProofCase> {
         push_every_segment(&mut cases, mainnet, chunk_count);
     }
     push_mainnet_boundary_segments(&mut cases, mainnet);
-    // Printed segment proof: testing geometry, outside the chunk-count-2 sweep (spec §13).
+    // Printed segment proof: testing geometry, outside the chunk-count-2 sweep (spec §10).
     push_segment_pairs(&mut cases, Geometry::TESTING, PRINTED_DATA_SIZE, &[(3, 1)]);
     cases
 }
@@ -528,8 +527,8 @@ fn push_every_segment(cases: &mut Vec<SegmentProofCase>, geometry: Geometry, chu
 
 fn push_mainnet_boundary_segments(cases: &mut Vec<SegmentProofCase>, geometry: Geometry) {
     let three_and_a_half = 3 * geometry.chunk_size() + geometry.chunk_size() / 2;
-    assert_eq!(three_and_a_half, 917_504, "spec §13");
-    // (3, 31) is the last full segment, (3, 32) the first empty (spec §4, §13).
+    assert_eq!(three_and_a_half, 917_504, "spec §10");
+    // (3, 31) is the last full segment, (3, 32) the first empty (spec §4, §10).
     assert_eq!(
         geometry.segment_len(three_and_a_half, 3, 5).unwrap(),
         geometry.segment_size()
@@ -548,7 +547,7 @@ fn push_mainnet_boundary_segments(cases: &mut Vec<SegmentProofCase>, geometry: G
     );
 
     let one_past_segment = geometry.segment_size() + 1;
-    assert_eq!(one_past_segment, 4_097, "spec §13");
+    assert_eq!(one_past_segment, 4_097, "spec §10");
     assert_eq!(geometry.segment_len(one_past_segment, 0, 1).unwrap(), 1);
     push_segment_pairs(cases, geometry, one_past_segment, &[(0, 1)]);
 }
@@ -638,7 +637,7 @@ fn multi_segment_cases() -> Vec<MultiSegmentCase> {
     assert_eq!(
         *ONE_CHUNK_SEGMENT_COUNTS.last().expect("four counts"),
         geometry.segments_per_chunk(),
-        "spec §13: m = 64 is every segment of one mainnet chunk"
+        "spec §10: m = 64 is every segment of one mainnet chunk"
     );
 
     let mut shapes = Vec::new();
@@ -912,7 +911,7 @@ fn assert_negative_shape(geometry: Geometry) {
     let chunk_size = geometry.chunk_size();
     let three_chunks = 3 * chunk_size;
     let same_count = 2 * chunk_size + chunk_size / 2;
-    // Same chunk count, and a chunk count whose proof length differs (spec §5, §13).
+    // Same chunk count, and a chunk count whose proof length differs (spec §5, §10).
     assert_eq!(geometry.chunk_count(three_chunks).unwrap(), 3);
     assert_eq!(geometry.chunk_count(same_count).unwrap(), 3);
     assert_eq!(geometry.chunk_count(4 * chunk_size).unwrap(), 4);
@@ -960,12 +959,12 @@ fn flip_sibling_cases(geometry: Geometry) -> Vec<NegativeCase> {
     let proof = tree
         .segment_proof(3, 1, &chunk)
         .expect("printed segment proof");
-    // Four reference siblings, then the size witness (spec §13). One flipped bit
+    // Four reference siblings, then the size witness (spec §10). One flipped bit
     // per sibling. The witness flip is a unit test, not one of these cases.
     let hash_count = proof.len() / HASH_SIZE;
-    assert_eq!(hash_count, 5, "spec §13 printed segment proof");
+    assert_eq!(hash_count, 5, "spec §10 printed segment proof");
     let sibling_count = hash_count - 1;
-    assert_eq!(sibling_count, 4, "spec §13 printed siblings");
+    assert_eq!(sibling_count, 4, "spec §10 printed siblings");
     (0..sibling_count)
         .map(|sibling_index| {
             let sibling_index = u32::try_from(sibling_index).expect("sibling count fits");
@@ -1121,7 +1120,7 @@ fn other_chunk_input(
     let proof_chunk_index = draft.proof_chunk_index.expect("proof chunk index");
     let bytes = chunk_slice(geometry, data, draft.source_data_size, draft.chunk_index).to_vec();
     let other = chunk_slice(geometry, data, draft.source_data_size, proof_chunk_index);
-    // spec §13: a valid proof shown at another index, with different bytes.
+    // spec §10: a valid proof shown at another index, with different bytes.
     assert_ne!(bytes.as_slice(), other, "{}", draft.name);
     assert_eq!(bytes.len(), other.len(), "{}", draft.name);
     let proof = chunk_proof_bytes(tree, proof_chunk_index);
@@ -1153,7 +1152,7 @@ fn mutate_chunk_proof(honest: &[u8], mutation: Mutation) -> Vec<u8> {
         Mutation::EmptyProof => {
             assert!(
                 !honest.is_empty(),
-                "spec §13: the empty proof is for a chunk count above 1"
+                "spec §10: the empty proof is for a chunk count above 1"
             );
             Vec::new()
         }
@@ -1247,7 +1246,7 @@ fn mutate_segment_bytes(geometry: &Geometry, segment: &[u8], mutation: Mutation)
     }
 }
 
-/// Bit 0 of the sibling's first byte. One flipped bit per sibling (spec §13).
+/// Bit 0 of the sibling's first byte. One flipped bit per sibling (spec §10).
 fn flip_sibling_bit_0(honest: &[u8], sibling_index: u32) -> Vec<u8> {
     let mut proof = honest.to_vec();
     let offset = usize::try_from(sibling_index).expect("sibling index fits") * HASH_SIZE;
@@ -1317,7 +1316,7 @@ fn reject(
 }
 
 fn two_digest_case() -> NegativeCase {
-    // spec §3, §13: a 64-byte segment equal to `l ‖ r` is a leaf, never `node(l, r)`.
+    // spec §3, §10: a 64-byte segment equal to `l ‖ r` is a leaf, never `node(l, r)`.
     let geometry = two_digest_geometry();
     let left = NodeHash::from([1_u8; HASH_SIZE]);
     let right = NodeHash::from([2_u8; HASH_SIZE]);

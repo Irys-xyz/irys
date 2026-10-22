@@ -58,7 +58,7 @@ impl DataTreeBuilder {
     /// same as [`Self::new`].
     ///
     /// The hint does not change the bytes stored. A full mainnet upload is
-    /// 41,943,041 node hashes, 1,342,177,312 bytes (1.34 GB, spec §9).
+    /// 41,943,041 node hashes, 1,342,177,312 bytes (1.34 GB, spec §8).
     pub fn with_capacity(geometry: Geometry, data_size: u64) -> Result<Self, SizeError> {
         let chunk_count = geometry.chunk_count(data_size)?;
         let layer_capacities = layer_capacities(chunk_count);
@@ -73,7 +73,7 @@ impl DataTreeBuilder {
 
     /// Hash `bytes` with `chunk_root` and append that root.
     ///
-    /// The length is checked before hashing (spec §10).
+    /// The length is checked before hashing (spec §9).
     pub fn push_chunk(&mut self, bytes: &[u8]) -> Result<(), BuildError> {
         // A slice length fits `u64` on every supported target.
         let chunk_length = u64::try_from(bytes.len()).expect("byte length fits u64");
@@ -101,9 +101,9 @@ impl DataTreeBuilder {
     /// fails, as with [`Self::push_chunk`].
     ///
     /// The batch is checked before any hashing, and a failed check does not
-    /// change the builder (spec §10). The appended roots match
+    /// change the builder (spec §9). The appended roots match
     /// [`Self::push_chunk`] on each piece in order. Chunk roots do not depend
-    /// on each other (spec §9), but the tree must stay deterministic (spec §10):
+    /// on each other (spec §8), but the tree must stay deterministic (spec §9):
     /// the piece index selects the slice, and the collected vector is that
     /// index order, not the order workers finish.
     ///
@@ -162,7 +162,7 @@ impl DataTreeBuilder {
         Ok(())
     }
 
-    /// Check every piece before hashing. On error the builder is unchanged (spec §10).
+    /// Check every piece before hashing. On error the builder is unchanged (spec §9).
     ///
     /// Returns the split width and the number of pieces. A `chunk_size` that
     /// does not fit `usize` cannot repeat in this slice, so the split is the
@@ -284,8 +284,8 @@ impl DataTree {
     ///
     /// Empty `data` is `BuildError::Empty`. A length above the geometry maximum
     /// is `BuildError::TooManyChunks`. With the `parallel` feature the chunk
-    /// roots are hashed as one batch (spec §9). The tree matches the sequential
-    /// pushes either way (spec §10).
+    /// roots are hashed as one batch (spec §8). The tree matches the sequential
+    /// pushes either way (spec §9).
     pub fn from_bytes(geometry: Geometry, data: &[u8]) -> Result<Self, BuildError> {
         let mut builder = DataTreeBuilder::new(geometry);
         if data.is_empty() {
@@ -513,7 +513,7 @@ fn piece_bounds(byte_length: usize, split: usize, piece_index: usize) -> (usize,
     (start, end)
 }
 
-/// Chunk root of each piece. The output index is the piece index (spec §9, §10).
+/// Chunk root of each piece. The output index is the piece index (spec §8, §9).
 #[cfg(feature = "parallel")]
 fn hash_chunk_pieces(
     geometry: &Geometry,
