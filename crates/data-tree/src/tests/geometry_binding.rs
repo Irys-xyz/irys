@@ -1,4 +1,4 @@
-//! The size witness binds `data_size` and the geometry (spec §3, §10).
+//! The size witness binds `data_size` and the geometry (spec §3, §9).
 //!
 //! A commitment and a `chunk_key` are specific to one `(data_size, chunk_size,
 //! segments_per_chunk)`. `max_data_tx_chunks` is not in the preimage.
@@ -26,7 +26,7 @@ const GRID_MAX_CHUNKS: u32 = 64;
 ///
 /// Then one commitment is valid under two geometries that split the same bytes
 /// differently, `chunk_key` aliases, and a segment proof under one geometry
-/// verifies as a chunk proof under the other (spec §3, §7, §10).
+/// verifies as a chunk proof under the other (spec §3, §7, §9).
 #[test]
 fn commitment_and_chunk_key_bind_geometry() {
     let wide = Geometry::new(8, 2, 10).unwrap();

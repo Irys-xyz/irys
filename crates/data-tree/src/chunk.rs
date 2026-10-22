@@ -2,7 +2,7 @@
 //!
 //! A segment hashes at its exact length. A segment past the bytes is `empty(0)`.
 //! A fully empty right subtree is `empty(k)` from the fixed table, not a walk
-//! over empty leaves (spec §9).
+//! over empty leaves (spec §8).
 
 use crate::error::ChunkLengthError;
 use crate::geometry::{Geometry, MAX_SUBTREE_HEIGHT};
@@ -62,7 +62,7 @@ fn subtree(geometry: &Geometry, bytes: &[u8], start_leaf: u32, subtree_height: u
         .checked_mul(geometry.segment_size())
         .expect("segment start fits u64");
     if range_start >= chunk_length {
-        // Past the bytes: `empty(k)` (spec §4, §9). `subtree_height` is at most
+        // Past the bytes: `empty(k)` (spec §4, §8). `subtree_height` is at most
         // `MAX_SUBTREE_HEIGHT`; `empty` panics above that.
         debug_assert!(subtree_height <= MAX_SUBTREE_HEIGHT);
         return empty(subtree_height);

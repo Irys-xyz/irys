@@ -1,5 +1,5 @@
 //! Verifiers, lengths, and `depth` return on untrusted input (spec §5).
-//! Length checks run before any hashing (spec §10).
+//! Length checks run before any hashing (spec §9).
 //!
 //! A panic fails the test. These functions take plain values so a later fuzzer
 //! can call them. See `strategies` for the `PROPTEST_CASES` soak command.
@@ -71,7 +71,7 @@ fn length_input() -> impl Strategy<Value = (Geometry, u64, u32)> {
 }
 
 /// Calls every untrusted entry point. The commitment is not a tree root, so
-/// `Ok` would be a SHA-256 preimage (spec §3, §10).
+/// `Ok` would be a SHA-256 preimage (spec §3, §9).
 fn check_untrusted(input: &strategies::UntrustedVerifierInput) {
     let geometry = input.geometry;
     let _ = geometry.chunk_count(input.data_size);
@@ -109,7 +109,7 @@ fn check_untrusted(input: &strategies::UntrustedVerifierInput) {
     );
     assert!(
         chunk.is_err(),
-        "verify_chunk accepted a commitment that was not built from these bytes (spec §6, §10)"
+        "verify_chunk accepted a commitment that was not built from these bytes (spec §6, §9)"
     );
     let segment = verify_segment(
         &geometry,
@@ -122,7 +122,7 @@ fn check_untrusted(input: &strategies::UntrustedVerifierInput) {
     );
     assert!(
         segment.is_err(),
-        "verify_segment accepted a commitment that was not built from these bytes (spec §6, §10)"
+        "verify_segment accepted a commitment that was not built from these bytes (spec §6, §9)"
     );
     let size = verify_size(
         &geometry,
@@ -132,7 +132,7 @@ fn check_untrusted(input: &strategies::UntrustedVerifierInput) {
     );
     assert!(
         size.is_err(),
-        "verify_size accepted a commitment that was not built from this root (spec §5, §10)"
+        "verify_size accepted a commitment that was not built from this root (spec §5, §9)"
     );
 }
 

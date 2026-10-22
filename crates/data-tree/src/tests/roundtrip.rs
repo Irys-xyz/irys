@@ -1,4 +1,4 @@
-//! Every chunk proof and every segment proof for `n` in `1..=199` (spec §13).
+//! Every chunk proof and every segment proof for `n` in `1..=199` (spec §10).
 
 use super::pattern;
 use crate::DataTree;

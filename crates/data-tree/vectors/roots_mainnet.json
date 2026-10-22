@@ -1,5 +1,5 @@
 {
-  "description": "Mainnet roots (spec §4, §13). Each data_size is stored twice: mod251 bytes, then zero bytes. The case holds the chunk roots, data_tree_root, size_witness, and data_commitment. Chunk counts 8, 9, 16, and 17 are full uploads (data_size = chunk_count * chunk_size). 1 GiB is 2^30 bytes (4096 chunks). 1 GiB + 1 is the next byte.",
+  "description": "Mainnet roots (spec §4, §10). Each data_size is stored twice: mod251 bytes, then zero bytes. The case holds the chunk roots, data_tree_root, size_witness, and data_commitment. Chunk counts 8, 9, 16, and 17 are full uploads (data_size = chunk_count * chunk_size). 1 GiB is 2^30 bytes (4096 chunks). 1 GiB + 1 is the next byte.",
   "geometry": {
     "chunk_size": 262144,
     "segments_per_chunk": 64,

@@ -1,7 +1,7 @@
-//! Shared vectors (spec §13).
+//! Shared vectors (spec §10).
 //!
 //! Each JSON file is regenerated from its pattern. Positive proofs must verify.
-//! Negative cases must fail with the recorded error kind. Printed spec §13 hex is
+//! Negative cases must fail with the recorded error kind. Printed spec §10 hex is
 //! compared to the files and is not adjusted to match a mismatch.
 //!
 //! Mutations match `examples/gen_vectors.rs`.
@@ -17,36 +17,36 @@ use irys_data_tree::{
 };
 use serde::Deserialize;
 
-/// spec §13: `b[i] = i mod 251`.
+/// spec §10: `b[i] = i mod 251`.
 const MOD251_MODULUS: usize = 251;
 const MOD251: &str = "mod251";
 const ZEROS: &str = "zeros";
 
-/// spec §13 primitive group: 4 leaves, node, 6 size witnesses, empty(0..=8),
+/// spec §10 primitive group: 4 leaves, node, 6 size witnesses, empty(0..=8),
 /// 3 spec chunk keys plus the printed key at c = 3.
 const PRIMITIVE_CASES: usize = 24;
-/// spec §13 testing root rows.
+/// spec §10 testing root rows.
 const TESTING_ROOT_CASES: usize = 7;
-/// spec §13 mainnet sizes, each as mod251 and as zeros.
+/// spec §10 mainnet sizes, each as mod251 and as zeros.
 const MAINNET_ROOT_CASES: usize = 34;
 /// Chunk counts 1..=17, plus 3 chunks of 1 GiB, plus the 4 chunks of the printed upload.
 const CHUNK_PROOF_CASES: usize = 160;
 /// Mainnet segments for chunk counts 1 and 2, four boundary segments, one partial, one printed.
 const SEGMENT_PROOF_CASES: usize = 198;
-/// spec §13 multi-segment group: m = 1, 2, 4, 64, one adjacent pair, one two-chunk pair.
+/// spec §10 multi-segment group: m = 1, 2, 4, 64, one adjacent pair, one two-chunk pair.
 const MULTI_SEGMENT_CASES: usize = 6;
-/// spec §13 negative list, with one case per sibling bit of the printed segment proof.
+/// spec §10 negative list, with one case per sibling bit of the printed segment proof.
 const NEGATIVE_CASES: usize = 17;
 
-/// Two digests, `l ‖ r`, each [`HASH_SIZE`] (spec §3, §13).
+/// Two digests, `l ‖ r`, each [`HASH_SIZE`] (spec §3, §10).
 const TWO_DIGEST_SOURCE_DATA_SIZE: u64 = (HASH_SIZE * 2) as u64;
 
-/// That segment is one chunk, so the recorded maximum is 1 (spec §2, §13).
+/// That segment is one chunk, so the recorded maximum is 1 (spec §2, §10).
 ///
 /// `max_data_tx_chunks` is not an input to `size_witness` (spec §3).
 const TWO_DIGEST_MAX_DATA_TX_CHUNKS: u32 = 1;
 
-/// spec §13 negative names, in generator order (`examples/gen_vectors.rs`).
+/// spec §10 negative names, in generator order (`examples/gen_vectors.rs`).
 const NEGATIVE_NAMES: [&str; NEGATIVE_CASES] = [
     "wrong_data_size_same_chunk_count",
     "wrong_data_size_other_chunk_count",
@@ -117,7 +117,7 @@ fn shared_vectors_match_the_crate_and_spec() {
         "testing and mainnet share the spec §2 maximum"
     );
 
-    // Printed hex from spec §13. A mismatch is a bug in the crate or the generator.
+    // Printed hex from spec §10. A mismatch is a bug in the crate or the generator.
     assert_printed_spec(
         &primitives,
         &roots_testing,
@@ -150,7 +150,7 @@ fn assert_descriptions(
     assert_eq!(
         roots_testing,
         concat!(
-            "Testing-geometry roots (spec §13): chunk_size 32, segments_per_chunk 4. ",
+            "Testing-geometry roots (spec §10): chunk_size 32, segments_per_chunk 4. ",
             "Bytes are mod251, the pattern of the printed root table. ",
             "The case holds the chunk roots, data_tree_root, size_witness, and data_commitment."
         )
@@ -158,7 +158,7 @@ fn assert_descriptions(
     assert_eq!(
         roots_mainnet,
         concat!(
-            "Mainnet roots (spec §4, §13). Each data_size is stored twice: mod251 bytes, then zero bytes. ",
+            "Mainnet roots (spec §4, §10). Each data_size is stored twice: mod251 bytes, then zero bytes. ",
             "The case holds the chunk roots, data_tree_root, size_witness, and data_commitment. ",
             "Chunk counts 8, 9, 16, and 17 are full uploads (data_size = chunk_count * chunk_size). ",
             "1 GiB is 2^30 bytes (4096 chunks). 1 GiB + 1 is the next byte."
@@ -167,7 +167,7 @@ fn assert_descriptions(
     assert_eq!(
         chunk_proofs,
         concat!(
-            "Chunk proofs, leaf to root, one lowercase hex string (spec §5, §13). ",
+            "Chunk proofs, leaf to root, one lowercase hex string (spec §5, §10). ",
             "Mainnet geometry, mod251: every chunk of each full upload with chunk count 1 through 17 ",
             "(chunk count 5, chunk index 4 is the one-sibling proof, spec §4), ",
             "and chunks 0, 2047, and 4095 of 1 GiB. ",
@@ -177,7 +177,7 @@ fn assert_descriptions(
     assert_eq!(
         segment_proofs,
         concat!(
-            "Segment proofs: in-chunk siblings, then the chunk proof, one hex string (spec §5, §13). ",
+            "Segment proofs: in-chunk siblings, then the chunk proof, one hex string (spec §5, §10). ",
             "Mainnet geometry, mod251: every segment of every chunk for chunk count 1 and 2 (full uploads); ",
             "segments (3, 5), (3, 31), (3, 32), and (3, 63) of the 917504-byte upload; ",
             "and segment (0, 1) of 4097 bytes, which is 1 byte. ",
@@ -187,7 +187,7 @@ fn assert_descriptions(
     assert_eq!(
         multi_segment,
         concat!(
-            "Multi-segment proofs, option B (spec §5, §13, §15 Q2). ",
+            "Multi-segment proofs, option B (spec §5, §10, §11 Q2). ",
             "Each segment stores its h in-chunk siblings, level 0 first. ",
             "The chunk proof is one hex string, leaf to root, shared by the segments of that chunk. ",
             "The upload is mainnet geometry and mod251 bytes, data_size 917504: ",
@@ -202,7 +202,7 @@ fn assert_descriptions(
     assert_eq!(
         negative,
         concat!(
-            "Rejected inputs (spec §13). expected_error is the VerifyError or SizeError variant name. ",
+            "Rejected inputs (spec §10). expected_error is the VerifyError or SizeError variant name. ",
             "A size failure is the SizeError name. source_data_size rebuilds the tree. ",
             "data_size, chunk_index, segment_index, commitment, and proof are the verifier inputs. ",
             "The mutation names how those differ from the honest proof. ",
@@ -216,7 +216,7 @@ fn assert_descriptions(
 
 fn primitives_description() -> String {
     format!(
-        "Domain-separated hashes (spec §3, §13). \
+        "Domain-separated hashes (spec §3, §10). \
          Leaves hash mod251 bytes of length 0, 1, 4095, and 4096. \
          node hashes the 0-byte leaf with the 1-byte leaf. \
          size_witness is mainnet geometry and covers 1, 4096, 262144, 917504, 2^40, and 5 TiB. \
@@ -258,7 +258,7 @@ fn assert_printed_spec(
         6,
         "2be3cf0551cc6936d461e3dc43f3c4bf50cbee1bc091925254e879f4e7665e94",
     );
-    // SPC 128 and SPC 256: heights 7 and 8, the top of the empty table (spec §2, §13).
+    // SPC 128 and SPC 256: heights 7 and 8, the top of the empty table (spec §2, §10).
     assert_empty(
         primitives,
         MAX_SUBTREE_HEIGHT - 1,
@@ -296,7 +296,7 @@ fn assert_printed_spec(
     assert_spec_chunk_key(primitives);
 }
 
-/// `(data_size, chunk_count, data_tree_root, data_commitment)` from spec §13. mod251.
+/// `(data_size, chunk_count, data_tree_root, data_commitment)` from spec §10. mod251.
 const TESTING_ROOT_ROWS: &[(u64, u32, &str, &str)] = &[
     (
         1,
@@ -342,7 +342,7 @@ const TESTING_ROOT_ROWS: &[(u64, u32, &str, &str)] = &[
     ),
 ];
 
-/// `(data_size, chunk_count, data_tree_root, data_commitment)` from spec §13. mod251.
+/// `(data_size, chunk_count, data_tree_root, data_commitment)` from spec §10. mod251.
 const MAINNET_ROOT_ROWS: &[(u64, u32, &str, &str)] = &[
     (
         1,
@@ -405,15 +405,15 @@ fn assert_spec_roots(file: &VectorFile<RootCase>, rows: &[(u64, u32, &str, &str)
         let case = find_root(file, MOD251, data_size);
         assert_eq!(
             case.chunk_count, chunk_count,
-            "spec §13 chunk count {data_size}"
+            "spec §10 chunk count {data_size}"
         );
         assert_eq!(
             case.data_tree_root, root,
-            "spec §13 data_tree_root {data_size}"
+            "spec §10 data_tree_root {data_size}"
         );
         assert_eq!(
             case.data_commitment, commitment,
-            "spec §13 data_commitment {data_size}"
+            "spec §10 data_commitment {data_size}"
         );
     }
 }
@@ -425,25 +425,25 @@ fn assert_spec_chunk_proof(file: &VectorFile<ChunkProofCase>) {
         .find(|case| {
             case.data_size == 112 && case.chunk_index == 2 && case.geometry.chunk_size == 32
         })
-        .expect("spec §13 chunk proof");
-    // spec §13: the reference printed the siblings. The last hash is the witness.
+        .expect("spec §10 chunk proof");
+    // spec §10: the reference printed the siblings. The last hash is the witness.
     let siblings = concat!(
         "dbc3c2433981a503f8ffa38629a9ec5d41501618b2afd860af52d6a93e06e8b6",
         "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
     );
     assert!(
         case.proof.starts_with(siblings),
-        "spec §13 n=112 chunk proof siblings"
+        "spec §10 n=112 chunk proof siblings"
     );
     assert_eq!(
         case.proof.len(),
         siblings.len() + HASH_SIZE * 2,
-        "spec §13 n=112 chunk proof length"
+        "spec §10 n=112 chunk proof length"
     );
     assert_eq!(
         &case.proof[siblings.len()..],
         hex_of(size_witness(&geometry_of(&case.geometry), 112).as_bytes()),
-        "spec §13 n=112 chunk proof size witness"
+        "spec §10 n=112 chunk proof size witness"
     );
     assert_eq!(
         case.data_commitment,
@@ -461,8 +461,8 @@ fn assert_spec_segment_proof(file: &VectorFile<SegmentProofCase>) {
                 && case.segment_index == 1
                 && case.geometry.chunk_size == 32
         })
-        .expect("spec §13 segment proof");
-    // spec §13: the reference printed the siblings. The last hash is the witness.
+        .expect("spec §10 segment proof");
+    // spec §10: the reference printed the siblings. The last hash is the witness.
     let siblings = concat!(
         "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5",
         "fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072a",
@@ -471,17 +471,17 @@ fn assert_spec_segment_proof(file: &VectorFile<SegmentProofCase>) {
     );
     assert!(
         case.proof.starts_with(siblings),
-        "spec §13 n=112 segment proof siblings"
+        "spec §10 n=112 segment proof siblings"
     );
     assert_eq!(
         case.proof.len(),
         siblings.len() + HASH_SIZE * 2,
-        "spec §13 n=112 segment proof length"
+        "spec §10 n=112 segment proof length"
     );
     assert_eq!(
         &case.proof[siblings.len()..],
         hex_of(size_witness(&geometry_of(&case.geometry), 112).as_bytes()),
-        "spec §13 n=112 segment proof size witness"
+        "spec §10 n=112 segment proof size witness"
     );
 }
 
@@ -497,7 +497,7 @@ fn assert_spec_chunk_key(file: &VectorFile<PrimitiveCase>) {
         .iter()
         .find(|case| matches!(case, PrimitiveCase::ChunkKey { chunk_index: 3, .. }))
     else {
-        panic!("spec §13 chunk_key");
+        panic!("spec §10 chunk_key");
     };
     assert_eq!(*data_size, 112);
     assert_eq!(*chunk_index, 3);
@@ -520,10 +520,10 @@ fn assert_leaf(file: &VectorFile<PrimitiveCase>, data_size: u64, hash: &str) {
         |case| matches!(case, PrimitiveCase::Leaf { data_size: size, .. } if *size == data_size),
     )
     else {
-        panic!("spec §13 leaf {data_size}");
+        panic!("spec §10 leaf {data_size}");
     };
     assert_eq!(pattern, MOD251);
-    assert_eq!(actual, hash, "spec §13 leaf {data_size}");
+    assert_eq!(actual, hash, "spec §10 leaf {data_size}");
 }
 
 fn assert_empty_heights(file: &VectorFile<PrimitiveCase>) {
@@ -538,7 +538,7 @@ fn assert_empty_heights(file: &VectorFile<PrimitiveCase>) {
     let expected: Vec<u32> = (0..=MAX_SUBTREE_HEIGHT).collect();
     assert_eq!(
         heights, expected,
-        "spec §13 pins empty(0) through empty(MAX_SUBTREE_HEIGHT)"
+        "spec §10 pins empty(0) through empty(MAX_SUBTREE_HEIGHT)"
     );
 }
 
@@ -546,18 +546,18 @@ fn assert_empty(file: &VectorFile<PrimitiveCase>, empty_height: u32, hash: &str)
     let Some(PrimitiveCase::Empty { hash: actual, .. }) = file.cases.iter().find(
         |case| matches!(case, PrimitiveCase::Empty { empty_height: height, .. } if *height == empty_height),
     ) else {
-        panic!("spec §13 empty {empty_height}");
+        panic!("spec §10 empty {empty_height}");
     };
-    assert_eq!(actual, hash, "spec §13 empty {empty_height}");
+    assert_eq!(actual, hash, "spec §10 empty {empty_height}");
 }
 
 fn assert_size_witness(file: &VectorFile<PrimitiveCase>, data_size: u64, hash: &str) {
     let Some(PrimitiveCase::SizeWitness { hash: actual, .. }) = file.cases.iter().find(
         |case| matches!(case, PrimitiveCase::SizeWitness { data_size: size, .. } if *size == data_size),
     ) else {
-        panic!("spec §13 size_witness {data_size}");
+        panic!("spec §10 size_witness {data_size}");
     };
-    assert_eq!(actual, hash, "spec §13 size_witness {data_size}");
+    assert_eq!(actual, hash, "spec §10 size_witness {data_size}");
 }
 
 fn find_root<'a>(file: &'a VectorFile<RootCase>, pattern: &str, data_size: u64) -> &'a RootCase {
@@ -628,7 +628,7 @@ fn check_primitives(file: &VectorFile<PrimitiveCase>) {
                 let tree = DataTree::from_bytes(geometry, &data)
                     .unwrap_or_else(|err| panic!("chunk_key tree: {err}"));
                 assert_eq!(hex_of(tree.data_commitment().as_bytes()), *commitment);
-                // `2^24` is a hash input. It is not an index in the 112-byte tree (spec §3, §13).
+                // `2^24` is a hash input. It is not an index in the 112-byte tree (spec §3, §10).
                 let key = chunk_key(&tree.data_commitment(), *chunk_index);
                 assert_eq!(hex_of(key.as_bytes()), *hash, "chunk_key {chunk_index}");
             }
@@ -810,12 +810,12 @@ fn half_past_three_chunks(geometry: &Geometry) -> u64 {
     data_size
 }
 
-/// The six spec §13 shapes, in generator order.
+/// The six spec §10 shapes, in generator order.
 fn multi_segment_shapes(geometry: &Geometry, data_size: u64) -> Vec<Vec<(u32, Vec<u32>)>> {
     assert_eq!(
         geometry.segments_per_chunk(),
         64,
-        "spec §13: m = 64 is every segment of one mainnet chunk"
+        "spec §10: m = 64 is every segment of one mainnet chunk"
     );
     let chunk_count = geometry.chunk_count(data_size).expect("data size in range");
     let last_chunk_index = chunk_count - 1;
@@ -1262,7 +1262,7 @@ fn zero_pad_segment(geometry: &Geometry, segment: &[u8]) -> Vec<u8> {
     bytes
 }
 
-/// Bit 0 of the sibling's first byte (spec §13).
+/// Bit 0 of the sibling's first byte (spec §10).
 fn flip_sibling_bit_0(honest: &[u8], sibling_index: u32) -> Vec<u8> {
     let mut proof = honest.to_vec();
     let offset = usize::try_from(sibling_index).expect("sibling index fits") * HASH_SIZE;

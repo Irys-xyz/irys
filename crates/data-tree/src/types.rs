@@ -99,10 +99,11 @@ hash_id!(
     /// Identity of a v2 upload: `node(data_tree_root, size_witness)` (spec §4).
     ///
     /// Verify a chunk or a segment only against an anchored commitment (spec §6).
-    /// An anchored commitment is derived from a header whose signature was checked,
-    /// or from a `tx_root` v2 leaf that was proven. A commitment derived from an
-    /// unauthenticated `(data_tree_root, data_size)` pair under a chosen geometry
-    /// binds nothing. The witness is not a secret. The attacker chooses the claimed
+    /// An anchored commitment is one taken from a source the verifier already
+    /// trusts, for example a signature-checked header, and never one re-derived
+    /// from an unauthenticated `(data_tree_root, data_size)`. A commitment derived
+    /// that way, under a chosen geometry, binds nothing. The witness is not a
+    /// secret. The attacker chooses the claimed
     /// size (smaller or larger) and the claimed index, and writes
     /// `size_witness(G, claimed n)` as the proof's last hash.
     ///

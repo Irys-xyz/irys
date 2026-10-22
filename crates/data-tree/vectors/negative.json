@@ -1,5 +1,5 @@
 {
-  "description": "Rejected inputs (spec §13). expected_error is the VerifyError or SizeError variant name. A size failure is the SizeError name. source_data_size rebuilds the tree. data_size, chunk_index, segment_index, commitment, and proof are the verifier inputs. The mutation names how those differ from the honest proof. The 64-byte segment is left concatenated with right, checked against the commitment of node(left, right). That segment is a leaf (spec §3). The unanchored case records the re-derived commitment, which verifies, and the anchored commitment, which does not (spec §6).",
+  "description": "Rejected inputs (spec §10). expected_error is the VerifyError or SizeError variant name. A size failure is the SizeError name. source_data_size rebuilds the tree. data_size, chunk_index, segment_index, commitment, and proof are the verifier inputs. The mutation names how those differ from the honest proof. The 64-byte segment is left concatenated with right, checked against the commitment of node(left, right). That segment is a leaf (spec §3). The unanchored case records the re-derived commitment, which verifies, and the anchored commitment, which does not (spec §6).",
   "geometry": {
     "chunk_size": 32,
     "segments_per_chunk": 4,

@@ -169,7 +169,7 @@ fn with_capacity_reserves_the_final_layer_lengths() {
     assert_eq!(spec_layer_lengths(5), vec![5, 3, 2, 1]);
 
     let geometry = Geometry::TESTING;
-    // Same exhaustive range as the proof roundtrip (spec §13).
+    // Same exhaustive range as the proof roundtrip (spec §10).
     for data_size in 1_u64..=199 {
         let bytes = pattern(usize::try_from(data_size).unwrap());
         let mut builder = DataTreeBuilder::with_capacity(geometry, data_size).unwrap();
@@ -403,8 +403,8 @@ fn assert_parallel_matches_sequential(geometry: Geometry, data_size: u64) {
 #[test]
 fn parallel_batches_match_sequential_pushes_on_testing_geometry() {
     // Catches a split, an index order, or a `from_bytes` path that differs
-    // from `push_chunk`. Chunk roots are independent (spec §9) and the tree
-    // must stay deterministic (spec §10). The range is spec §13.
+    // from `push_chunk`. Chunk roots are independent (spec §8) and the tree
+    // must stay deterministic (spec §9). The range is spec §10.
     let geometry = Geometry::TESTING;
     for data_size in 1_u64..=199 {
         assert_parallel_matches_sequential(geometry, data_size);
@@ -414,7 +414,7 @@ fn parallel_batches_match_sequential_pushes_on_testing_geometry() {
 #[cfg(feature = "parallel")]
 #[test]
 fn parallel_batches_match_sequential_pushes_on_mainnet_geometry() {
-    // Spec §13 mainnet rows: one byte, one chunk, one chunk plus one byte,
+    // Spec §10 mainnet rows: one byte, one chunk, one chunk plus one byte,
     // and five chunks.
     let geometry = Geometry::MAINNET;
     let chunk_size = geometry.chunk_size();

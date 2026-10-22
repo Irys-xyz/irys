@@ -1,7 +1,7 @@
 //! Domain-separated SHA-256 (spec §3).
 //!
 //! Each function finalizes one hasher. Parts are not hashed on their own and then
-//! hashed again: v1 did that, and the inner hashes add no binding (spec §10).
+//! hashed again: v1 did that, and the inner hashes add no binding (spec §9).
 
 use std::sync::LazyLock;
 
@@ -10,14 +10,12 @@ use sha2::{Digest as _, Sha256};
 use crate::geometry::{Geometry, MAX_SUBTREE_HEIGHT};
 use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash, SizeWitness};
 
-/// `empty(0) ..= empty(MAX_SUBTREE_HEIGHT)` (spec §3, §9).
+/// `empty(0) ..= empty(MAX_SUBTREE_HEIGHT)` (spec §3, §8).
 const EMPTY_TABLE_LEN: usize = MAX_SUBTREE_HEIGHT as usize + 1;
 
 /// Data-tree domain tags (spec §3).
 ///
-/// Every data-tree preimage starts with one of these bytes. The registry
-/// assigns `0x05` to `0x07` outside this tree (spec §3). This enum does not
-/// include them. Any later tag set must avoid `0x00` to `0x07`.
+/// Every data-tree preimage starts with one of these bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TreeDomainTag {
@@ -91,7 +89,7 @@ pub fn chunk_key(commitment: &DataCommitment, chunk_index: u32) -> ChunkKey {
     ))
 }
 
-/// Root of an empty perfect subtree of height `k` (spec §3, §9).
+/// Root of an empty perfect subtree of height `k` (spec §3, §8).
 ///
 /// `empty(0)` is `leaf("")`. `empty(k)` is `node(empty(k - 1), empty(k - 1))`.
 /// Panics if `k > MAX_SUBTREE_HEIGHT`. A chunk subtree never asks for more:

@@ -2,7 +2,7 @@
 //!
 //! `Geometry::MAINNET` allows `max_data_tx_chunks` chunks, 5 TiB at the mainnet
 //! chunk size (spec §2). Hashing those chunk bytes dominates a real upload
-//! (spec §9). This example pushes synthetic chunk roots, so it times only the
+//! (spec §8). This example pushes synthetic chunk roots, so it times only the
 //! chunk-level tree. `with_capacity` reserves each layer at its final
 //! `build_layer` length, carried node included (spec §4).
 
@@ -36,7 +36,7 @@ fn main() {
     // root. A carried node is copied into each layer it passes through, so the
     // stored count is that sum and a proof lookup is a plain index (spec §4).
     // The loop is that rule; it is not a closed form. At 5 TiB the sum is
-    // 41,943,041 hashes, 1,342,177,312 bytes (spec §4, §9).
+    // 41,943,041 hashes, 1,342,177,312 bytes (spec §4, §8).
     let mut layer_length = u64::from(tree.chunk_count());
     let mut node_count = layer_length;
     while layer_length > 1 {

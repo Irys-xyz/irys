@@ -1,5 +1,5 @@
 {
-  "description": "Testing-geometry roots (spec §13): chunk_size 32, segments_per_chunk 4. Bytes are mod251, the pattern of the printed root table. The case holds the chunk roots, data_tree_root, size_witness, and data_commitment.",
+  "description": "Testing-geometry roots (spec §10): chunk_size 32, segments_per_chunk 4. Bytes are mod251, the pattern of the printed root table. The case holds the chunk roots, data_tree_root, size_witness, and data_commitment.",
   "geometry": {
     "chunk_size": 32,
     "segments_per_chunk": 4,

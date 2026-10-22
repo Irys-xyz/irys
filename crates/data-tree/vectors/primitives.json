@@ -1,5 +1,5 @@
 {
-  "description": "Domain-separated hashes (spec §3, §13). Leaves hash mod251 bytes of length 0, 1, 4095, and 4096. node hashes the 0-byte leaf with the 1-byte leaf. size_witness is mainnet geometry and covers 1, 4096, 262144, 917504, 2^40, and 5 TiB. empty covers heights 0 through 8. chunk_key uses the testing-geometry commitment of 112 mod251 bytes. Chunk indexes are 0, 1, and 2^24, plus 3 so the printed chunk_key is in this file. 2^24 is an input of the hash, not a chunk of that 112-byte tree.",
+  "description": "Domain-separated hashes (spec §3, §10). Leaves hash mod251 bytes of length 0, 1, 4095, and 4096. node hashes the 0-byte leaf with the 1-byte leaf. size_witness is mainnet geometry and covers 1, 4096, 262144, 917504, 2^40, and 5 TiB. empty covers heights 0 through 8. chunk_key uses the testing-geometry commitment of 112 mod251 bytes. Chunk indexes are 0, 1, and 2^24, plus 3 so the printed chunk_key is in this file. 2^24 is an input of the hash, not a chunk of that 112-byte tree.",
   "cases": [
     {
       "kind": "leaf",

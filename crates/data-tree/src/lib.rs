@@ -4,9 +4,7 @@
 //! chunk proofs, segment proofs, and the size witness (spec §1–§5). This crate
 //! has no L1 types.
 //! Only `docs/spec.md` binds this crate. Everything in that file is implemented
-//! here. `docs/integration-proposal.md` is the planned L1 and gateway integration
-//! (not ratified, not implemented). `docs/designs-not-adopted.md` records designs
-//! considered and not adopted.
+//! here.
 //!
 //! In this crate, "spec §N" means section N of `../docs/spec.md`.
 

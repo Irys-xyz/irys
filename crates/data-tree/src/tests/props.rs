@@ -1,4 +1,4 @@
-//! Random uploads: honest proofs verify, one changed byte does not (spec §13).
+//! Random uploads: honest proofs verify, one changed byte does not (spec §10).
 
 use proptest::prelude::*;
 
@@ -173,7 +173,7 @@ fn check_proof_mutation(
     Ok(())
 }
 
-/// Eight testing chunks. Enough uploads to cross several tree shapes (spec §13).
+/// Eight testing chunks. Enough uploads to cross several tree shapes (spec §10).
 const RANDOM_UPLOAD_CHUNKS: usize = 8;
 
 const RANDOM_UPLOAD_BYTES: usize = RANDOM_UPLOAD_CHUNKS * Geometry::TESTING.chunk_size() as usize;

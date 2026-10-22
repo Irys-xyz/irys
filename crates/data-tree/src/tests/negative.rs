@@ -1,4 +1,4 @@
-//! Rejected proofs (spec §5, §6, §13). Length checks run before any hash.
+//! Rejected proofs (spec §5, §6, §10). Length checks run before any hash.
 
 use super::pattern;
 use crate::DataTree;
@@ -390,7 +390,7 @@ fn a_proof_for_another_index_does_not_verify() {
 fn a_wrong_data_size_with_the_true_witness_is_rejected() {
     // Three full chunks and two and a half chunks are both `C = 3`. Chunk 0 is full.
     // The proof carries `size_witness` of the real size. The length matches, so
-    // the witness check rejects the claim before the climb (spec §5, §15 Q10).
+    // the witness check rejects the claim before the climb (spec §5, §11 Q10).
     let geometry = Geometry::TESTING;
     let data_size = 3 * geometry.chunk_size();
     let data = pattern(usize::try_from(data_size).unwrap());
@@ -530,7 +530,7 @@ fn a_64_byte_segment_equal_to_two_hashes_is_a_leaf() {
     // spec §3: a segment of `l ‖ r` is `leaf`, never `node(l, r)`.
     let left = NodeHash::from([1_u8; HASH_SIZE]);
     let right = NodeHash::from([2_u8; HASH_SIZE]);
-    // A segment equal to `l ‖ r`: two digests (spec §10).
+    // A segment equal to `l ‖ r`: two digests (spec §9).
     let mut bytes = [0_u8; HASH_SIZE * 2];
     bytes[..HASH_SIZE].copy_from_slice(left.as_bytes());
     bytes[HASH_SIZE..].copy_from_slice(right.as_bytes());
