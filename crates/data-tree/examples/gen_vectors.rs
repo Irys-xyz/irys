@@ -15,8 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use irys_data_tree::{
-    DataTree, DataTreeRoot, Geometry, HASH_SIZE, NodeHash, SizeError, VerifyError, chunk_key,
-    data_commitment, depth, empty, leaf, node, size_witness, verify_chunk, verify_segment,
+    DataTree, DataTreeRoot, Geometry, HASH_SIZE, MAX_SUBTREE_HEIGHT, NodeHash, SizeError,
+    VerifyError, chunk_key, data_commitment, depth, empty, leaf, node, size_witness, verify_chunk,
+    verify_segment,
 };
 use serde::Serialize;
 
@@ -54,7 +55,8 @@ const PRIMITIVES_DESCRIPTION: &str = concat!(
     "Leaves hash mod251 bytes of length 0, 1, 4095, and 4096. ",
     "node hashes the 0-byte leaf with the 1-byte leaf. ",
     "size_witness covers 1, 4096, 262144, 917504, 2^40, and 5 TiB. ",
-    "empty covers heights 0 through 6. ",
+    // 8 is MAX_SUBTREE_HEIGHT (spec §2: SPC ≤ 256). The loop uses that constant.
+    "empty covers heights 0 through 8. ",
     "chunk_key uses the testing-geometry commitment of 112 mod251 bytes. ",
     "Chunk indexes are 0, 1, and 2^24, plus 3 so the printed chunk_key is in this file. ",
     "2^24 is an input of the hash, not a chunk of that 112-byte tree."
@@ -266,8 +268,9 @@ fn primitive_cases() -> Vec<PrimitiveCase> {
         });
     }
 
-    // spec §13 stops at empty(6), the mainnet chunk height. Taller empties are out of this set.
-    for empty_height in 0..=6 {
+    // empty(0) through empty(MAX_SUBTREE_HEIGHT). SPC 128 and 256 use heights
+    // 7 and 8. Mainnet SPC 64 stops at empty(6) (spec §2, §13).
+    for empty_height in 0..=MAX_SUBTREE_HEIGHT {
         cases.push(PrimitiveCase::Empty {
             empty_height,
             hash: hex_of(empty(empty_height).as_bytes()),

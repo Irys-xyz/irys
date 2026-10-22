@@ -1,5 +1,5 @@
 {
-  "description": "Domain-separated hashes (spec §3, §13). Leaves hash mod251 bytes of length 0, 1, 4095, and 4096. node hashes the 0-byte leaf with the 1-byte leaf. size_witness covers 1, 4096, 262144, 917504, 2^40, and 5 TiB. empty covers heights 0 through 6. chunk_key uses the testing-geometry commitment of 112 mod251 bytes. Chunk indexes are 0, 1, and 2^24, plus 3 so the printed chunk_key is in this file. 2^24 is an input of the hash, not a chunk of that 112-byte tree.",
+  "description": "Domain-separated hashes (spec §3, §13). Leaves hash mod251 bytes of length 0, 1, 4095, and 4096. node hashes the 0-byte leaf with the 1-byte leaf. size_witness covers 1, 4096, 262144, 917504, 2^40, and 5 TiB. empty covers heights 0 through 8. chunk_key uses the testing-geometry commitment of 112 mod251 bytes. Chunk indexes are 0, 1, and 2^24, plus 3 so the printed chunk_key is in this file. 2^24 is an input of the hash, not a chunk of that 112-byte tree.",
   "cases": [
     {
       "kind": "leaf",
@@ -101,6 +101,16 @@
       "kind": "empty",
       "empty_height": 6,
       "hash": "2be3cf0551cc6936d461e3dc43f3c4bf50cbee1bc091925254e879f4e7665e94"
+    },
+    {
+      "kind": "empty",
+      "empty_height": 7,
+      "hash": "12db5262a5500d2516b8f82362d2a87278d20f712ff1fce2019d42ecba17241d"
+    },
+    {
+      "kind": "empty",
+      "empty_height": 8,
+      "hash": "1a1a9265f869676c206824aa7bfc2fe8c7fe34691dddfb35797b6a321f977dfc"
     },
     {
       "kind": "chunk_key",

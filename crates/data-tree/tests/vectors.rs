@@ -11,9 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use irys_data_tree::{
-    DataCommitment, DataTree, DataTreeRoot, Geometry, HASH_SIZE, NodeHash, SizeError, VerifyError,
-    chunk_key, data_commitment, depth, empty, leaf, node, size_witness, verify_chunk,
-    verify_segment,
+    DataCommitment, DataTree, DataTreeRoot, Geometry, HASH_SIZE, MAX_SUBTREE_HEIGHT, NodeHash,
+    SizeError, VerifyError, chunk_key, data_commitment, depth, empty, leaf, node, size_witness,
+    verify_chunk, verify_segment,
 };
 use serde::Deserialize;
 
@@ -22,8 +22,8 @@ const MOD251_MODULUS: usize = 251;
 const MOD251: &str = "mod251";
 const ZEROS: &str = "zeros";
 
-/// spec §13 primitive group: 4 leaves, node, 6 size witnesses, empty(0..=6), 4 chunk keys.
-const PRIMITIVE_CASES: usize = 22;
+/// spec §13 primitive group: 4 leaves, node, 6 size witnesses, empty(0..=8), 4 chunk keys.
+const PRIMITIVE_CASES: usize = 24;
 /// spec §13 testing root rows.
 const TESTING_ROOT_CASES: usize = 7;
 /// spec §13 mainnet sizes, each as mod251 and as zeros.
@@ -77,6 +77,11 @@ fn shared_vectors_match_the_crate_and_spec() {
         assert!(description.contains("spec"), "{description}");
     }
     assert!(primitives.geometry.is_none(), "primitives have no geometry");
+    let empty_range = format!("heights 0 through {MAX_SUBTREE_HEIGHT}");
+    assert!(
+        primitives.description.contains(&empty_range),
+        "the description states the empty range"
+    );
     assert!(chunk_proofs.geometry.is_none());
     assert!(segment_proofs.geometry.is_none());
     assert_same_geometry(roots_testing.geometry.as_ref().unwrap(), Geometry::TESTING);
@@ -140,6 +145,17 @@ fn assert_printed_spec(
         primitives,
         6,
         "2be3cf0551cc6936d461e3dc43f3c4bf50cbee1bc091925254e879f4e7665e94",
+    );
+    // SPC 128 and SPC 256: heights 7 and 8, the top of the empty table (spec §2, §13).
+    assert_empty(
+        primitives,
+        MAX_SUBTREE_HEIGHT - 1,
+        "12db5262a5500d2516b8f82362d2a87278d20f712ff1fce2019d42ecba17241d",
+    );
+    assert_empty(
+        primitives,
+        MAX_SUBTREE_HEIGHT,
+        "1a1a9265f869676c206824aa7bfc2fe8c7fe34691dddfb35797b6a321f977dfc",
     );
     assert_size_witness(
         primitives,
@@ -398,6 +414,22 @@ fn assert_leaf(file: &VectorFile<PrimitiveCase>, data_size: u64, hash: &str) {
     assert_eq!(actual, hash, "spec §13 leaf {data_size}");
 }
 
+fn assert_empty_heights(file: &VectorFile<PrimitiveCase>) {
+    let heights: Vec<u32> = file
+        .cases
+        .iter()
+        .filter_map(|case| match case {
+            PrimitiveCase::Empty { empty_height, .. } => Some(*empty_height),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<u32> = (0..=MAX_SUBTREE_HEIGHT).collect();
+    assert_eq!(
+        heights, expected,
+        "spec §13 pins empty(0) through empty(MAX_SUBTREE_HEIGHT)"
+    );
+}
+
 fn assert_empty(file: &VectorFile<PrimitiveCase>, empty_height: u32, hash: &str) {
     let Some(PrimitiveCase::Empty { hash: actual, .. }) = file.cases.iter().find(
         |case| matches!(case, PrimitiveCase::Empty { empty_height: height, .. } if *height == empty_height),
@@ -424,6 +456,7 @@ fn find_root<'a>(file: &'a VectorFile<RootCase>, pattern: &str, data_size: u64) 
 }
 
 fn check_primitives(file: &VectorFile<PrimitiveCase>) {
+    assert_empty_heights(file);
     for case in &file.cases {
         match case {
             PrimitiveCase::Leaf {
