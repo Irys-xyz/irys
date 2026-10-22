@@ -638,12 +638,13 @@ fn byte_length_choices(
 fn proof_length_choices(geometry: Geometry, data_size: u64, chunk_index: u32) -> Vec<usize> {
     // One byte off a single hash, and the hash width itself (spec §5: `32 × k`).
     let mut lengths = vec![0, HASH_SIZE - 1, HASH_SIZE, HASH_SIZE + 1];
-    // `depth` panics in debug builds when `chunk_index >= chunk_count` (spec §5).
+    // `depth` is `None` when `chunk_index >= chunk_count` (spec §5).
     if let Ok(chunk_count) = geometry.chunk_count(data_size)
         && chunk_index < chunk_count
     {
         let chunk_depth =
-            usize::try_from(depth(chunk_index, chunk_count)).expect("depth fits usize");
+            usize::try_from(depth(chunk_index, chunk_count).expect("chunk_index < chunk_count"))
+                .expect("depth fits usize");
         // The proof is the siblings plus the size witness (spec §5).
         push_hash_count_near(&mut lengths, chunk_depth + 1);
         let segment_hashes =

@@ -397,7 +397,12 @@ impl DataTree {
         proof.extend_from_slice(self.size_witness().as_bytes());
         debug_assert_eq!(
             proof.len(),
-            usize::try_from(depth(chunk_index, chunk_count) + 1).expect("depth fits usize")
+            usize::try_from(
+                depth(chunk_index, chunk_count)
+                    .expect("ensure_chunk requires chunk_index < chunk_count")
+                    + 1
+            )
+            .expect("depth fits usize")
                 * HASH_SIZE
         );
         Ok(proof)
@@ -444,8 +449,13 @@ impl DataTree {
         debug_assert_eq!(
             proof.len() / HASH_SIZE,
             // `h + depth(c, C) + 1` fits `u32`: `h` is at most `MAX_SUBTREE_HEIGHT`.
-            usize::try_from(self.geometry.height() + depth(chunk_index, chunk_count) + 1)
-                .expect("proof hash count fits usize")
+            usize::try_from(
+                self.geometry.height()
+                    + depth(chunk_index, chunk_count)
+                        .expect("ensure_chunk requires chunk_index < chunk_count")
+                    + 1
+            )
+            .expect("proof hash count fits usize")
         );
         Ok(proof)
     }

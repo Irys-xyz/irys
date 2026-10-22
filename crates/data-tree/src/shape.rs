@@ -16,12 +16,15 @@ fn largest_power_of_two_below(chunk_count: u32) -> u32 {
 
 /// Chunk-level siblings in the proof of chunk `c` (spec §5).
 ///
-/// The caller guarantees `c < chunk_count`. The length of a proof comes from
-/// this function, not from a builder stack (spec §4).
+/// Defined for `c < C`. Returns `None` when `chunk_count` is 0 or
+/// `chunk_index >= chunk_count`. The length of a proof comes from this
+/// function, not from a builder stack (spec §4).
 ///
-/// `c` is `chunk_index`.
-pub fn depth(chunk_index: u32, chunk_count: u32) -> u32 {
-    debug_assert!(chunk_index < chunk_count);
+/// `c` is `chunk_index`. `C` is `chunk_count`.
+pub fn depth(chunk_index: u32, chunk_count: u32) -> Option<u32> {
+    if chunk_count == 0 || chunk_index >= chunk_count {
+        return None;
+    }
     let mut chunk_index = chunk_index;
     let mut chunk_count = chunk_count;
     let mut sibling_count = 0_u32;
@@ -29,13 +32,13 @@ pub fn depth(chunk_index: u32, chunk_count: u32) -> u32 {
         let left_subtree_size = largest_power_of_two_below(chunk_count);
         if chunk_index < left_subtree_size {
             // `k` is a power of two, so `trailing_zeros` is `log2(k)` (spec §5).
-            return sibling_count + 1 + left_subtree_size.trailing_zeros();
+            return Some(sibling_count + 1 + left_subtree_size.trailing_zeros());
         }
         chunk_index -= left_subtree_size;
         chunk_count -= left_subtree_size;
         sibling_count += 1;
     }
-    sibling_count
+    Some(sibling_count)
 }
 
 /// RFC 9162 §2.1.3.2 inclusion walk. `node` is the parent hash (spec §5).

@@ -77,7 +77,7 @@ fn proof_length_is_checked_before_hashing() {
     let commitment = tree.data_commitment();
     let chunk = data[..chunk_bytes].to_vec();
     let proof = tree.chunk_proof(0).unwrap();
-    assert_eq!(depth(0, 3), 2);
+    assert_eq!(depth(0, 3), Some(2));
     // Two siblings and the size witness (spec §5).
     assert_eq!(proof.len(), 3 * HASH_SIZE);
     verify_chunk(&geometry, &commitment, data_size, 0, &chunk, &proof).unwrap();
@@ -122,7 +122,7 @@ fn proof_length_is_checked_before_hashing() {
     let data = pattern(usize::try_from(data_size).unwrap());
     let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let chunk = data[..chunk_bytes].to_vec();
-    assert_eq!(depth(0, 2), 1);
+    assert_eq!(depth(0, 2), Some(1));
     assert_eq!(
         verify_chunk(
             &geometry,
@@ -149,7 +149,7 @@ fn an_empty_proof_is_rejected_for_one_chunk() {
     let tree = DataTree::from_bytes(geometry, &data).unwrap();
     let proof = tree.chunk_proof(0).unwrap();
     assert_eq!(proof.len(), HASH_SIZE);
-    assert_eq!(depth(0, 1), 0);
+    assert_eq!(depth(0, 1), Some(0));
     verify_chunk(
         &geometry,
         &tree.data_commitment(),
@@ -432,8 +432,8 @@ fn wrong_size_with_another_chunk_count_rejects_the_proof_length() {
     let proof = tree.chunk_proof(2).unwrap();
     // One sibling and the size witness (spec §5).
     assert_eq!(proof.len(), 2 * HASH_SIZE);
-    assert_eq!(depth(2, 3), 1);
-    assert_eq!(depth(2, 4), 2);
+    assert_eq!(depth(2, 3), Some(1));
+    assert_eq!(depth(2, 4), Some(2));
     let wrong_data_size = 4 * geometry.chunk_size();
     assert_eq!(
         verify_chunk(
@@ -583,8 +583,8 @@ fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
     let root = tree.data_tree_root();
     let chunk = &data[..chunk_bytes];
     let proof = tree.chunk_proof(0).unwrap();
-    assert_eq!(depth(0, 3), 2);
-    assert_eq!(depth(0, 4), 2);
+    assert_eq!(depth(0, 3), Some(2));
+    assert_eq!(depth(0, 4), Some(2));
     assert_eq!(proof.len(), 3 * HASH_SIZE);
     verify_chunk(&geometry, &anchored, data_size, 0, chunk, &proof).unwrap();
 
@@ -629,10 +629,10 @@ fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
     // Under this claimed size the count is 4. Chunk 2's proof is shorter than
     // `depth(2, 4) + 1`, so the length check rejects it. That is this `C'`
     // only: the same proof matches chunk 1 of `C' = 2` (the next test).
-    assert_eq!(depth(2, 4), 2);
+    assert_eq!(depth(2, 4), Some(2));
     let right = &data[2 * chunk_bytes..3 * chunk_bytes];
     let right_proof = tree.chunk_proof(2).unwrap();
-    assert_eq!(depth(2, 3), 1);
+    assert_eq!(depth(2, 3), Some(1));
     assert_eq!(right_proof.len(), 2 * HASH_SIZE);
     assert_eq!(
         verify_chunk(

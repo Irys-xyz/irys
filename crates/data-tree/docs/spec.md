@@ -237,6 +237,8 @@ depth(c, C):                              // chunk-level siblings in the proof o
     return d
 ```
 
+`depth` is defined for `c < C`, and an implementation rejects any other input.
+
 | `C` | `depth(c, C)` |
 | --- | --- |
 | 1 | 0 (the chunk proof is the size witness alone) |

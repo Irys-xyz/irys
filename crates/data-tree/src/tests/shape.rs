@@ -167,7 +167,7 @@ fn assert_chunk_proof(
         proof, expect_proof,
         "path ‖ size_witness C={chunk_count} c={chunk_index}"
     );
-    let hash_count = depth(chunk_index, chunk_count) + 1;
+    let hash_count = depth(chunk_index, chunk_count).expect("chunk_index is below chunk_count") + 1;
     assert_eq!(
         proof.len(),
         usize::try_from(hash_count).expect("depth fits usize") * HASH_SIZE,

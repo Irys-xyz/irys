@@ -460,7 +460,8 @@ fn push_chunk_indexes(
     let commitment = tree.data_commitment();
     for &chunk_index in chunk_indexes {
         let proof = chunk_proof_bytes(&tree, chunk_index);
-        let sibling_count = depth(chunk_index, chunk_count);
+        let sibling_count =
+            depth(chunk_index, chunk_count).expect("the case index is below chunk_count");
         assert_eq!(
             proof.len(),
             (usize::try_from(sibling_count).expect("depth fits") + 1) * HASH_SIZE,
@@ -576,7 +577,9 @@ fn push_segment_pairs_with_tree(
                     "segment proof {data_size} chunk {chunk_index} segment {segment_index}: {err}"
                 )
             });
-        let hash_count = geometry.height() + depth(chunk_index, chunk_count) + 1;
+        let hash_count = geometry.height()
+            + depth(chunk_index, chunk_count).expect("the case index is below chunk_count")
+            + 1;
         assert_eq!(
             proof.len(),
             usize::try_from(hash_count).expect("hash count fits") * HASH_SIZE,
@@ -914,10 +917,10 @@ fn assert_negative_shape(geometry: Geometry) {
         depth(0, 4),
         "spec §6: the left chunk keeps its depth"
     );
-    assert_eq!(depth(0, 3), 2, "spec §5");
-    assert_eq!(depth(2, 3), 1, "spec §5");
-    assert_eq!(depth(2, 4), 2, "spec §5");
-    assert_eq!(depth(0, 2), 1, "spec §5");
+    assert_eq!(depth(0, 3), Some(2), "spec §5");
+    assert_eq!(depth(2, 3), Some(1), "spec §5");
+    assert_eq!(depth(2, 4), Some(2), "spec §5");
+    assert_eq!(depth(0, 2), Some(1), "spec §5");
 }
 
 fn draft(

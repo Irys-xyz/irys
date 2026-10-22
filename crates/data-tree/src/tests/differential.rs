@@ -410,7 +410,8 @@ fn expected_chunk_rejection(
     let chunk_count = geometry
         .chunk_count(data_size)
         .expect("chunk_len proved data_size is in range");
-    let hash_count = depth(chunk_index, chunk_count) + 1;
+    let hash_count =
+        depth(chunk_index, chunk_count).expect("chunk_len requires chunk_index < chunk_count") + 1;
     let expected_proof = usize::try_from(hash_count).expect("depth fits usize") * HASH_SIZE;
     if proof.len() != expected_proof {
         return VerifyError::InvalidProofLength {
@@ -448,7 +449,9 @@ fn expected_segment_rejection(
     let chunk_count = geometry
         .chunk_count(data_size)
         .expect("segment_len proved data_size is in range");
-    let hash_count = geometry.height() + depth(chunk_index, chunk_count) + 1;
+    let hash_count = geometry.height()
+        + depth(chunk_index, chunk_count).expect("segment_len requires chunk_index < chunk_count")
+        + 1;
     let expected_proof = usize::try_from(hash_count).expect("hash count fits usize") * HASH_SIZE;
     if proof.len() != expected_proof {
         return VerifyError::InvalidProofLength {

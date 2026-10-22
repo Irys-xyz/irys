@@ -35,7 +35,8 @@ pub fn verify_chunk(
     }
     let chunk_count = geometry.chunk_count(data_size)?;
     // `depth(c, C) + 1`: the chunk-level siblings and the size witness (spec §5).
-    let hash_count = depth(chunk_index, chunk_count) + 1;
+    let hash_count =
+        depth(chunk_index, chunk_count).expect("chunk_len requires chunk_index < chunk_count") + 1;
     let expected_proof = proof_byte_length(hash_count);
     if proof.len() != expected_proof {
         return Err(VerifyError::InvalidProofLength {
@@ -89,7 +90,9 @@ pub fn verify_segment(
     // `h + depth(c, C) + 1` (spec §5): in-chunk siblings, chunk-level siblings,
     // and the size witness. `h` is at most `MAX_SUBTREE_HEIGHT` and `depth`
     // fits the bit width of a chunk count, so the sum fits `u32`.
-    let hash_count = geometry.height() + depth(chunk_index, chunk_count) + 1;
+    let hash_count = geometry.height()
+        + depth(chunk_index, chunk_count).expect("segment_len requires chunk_index < chunk_count")
+        + 1;
     let expected_proof = proof_byte_length(hash_count);
     if proof.len() != expected_proof {
         return Err(VerifyError::InvalidProofLength {

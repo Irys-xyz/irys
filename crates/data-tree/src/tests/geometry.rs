@@ -233,7 +233,9 @@ fn verify_segment_does_not_panic_on_the_extreme_geometries() {
         .unwrap();
     let segment_bytes = usize::try_from(segment_length).unwrap();
     let bytes = vec![0_u8; segment_bytes];
-    let hash_count = geometry.height() + depth(chunk_index, chunk_count) + 1;
+    let hash_count = geometry.height()
+        + depth(chunk_index, chunk_count).expect("segment_len requires chunk_index < chunk_count")
+        + 1;
     let mut proof = vec![0_u8; usize::try_from(hash_count).unwrap() * HASH_SIZE];
     // The last hash is the witness, so the climb runs and the dummy commitment fails.
     let witness = size_witness(data_size);

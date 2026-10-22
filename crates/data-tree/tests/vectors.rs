@@ -536,7 +536,7 @@ fn check_chunk_proofs(file: &VectorFile<ChunkProofCase>) {
             assert_eq!(tree.chunk_count(), case.chunk_count, "{label}");
             assert_eq!(
                 depth(case.chunk_index, case.chunk_count),
-                case.depth,
+                Some(case.depth),
                 "{label}"
             );
             assert_eq!(

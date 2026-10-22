@@ -55,7 +55,7 @@ proptest! {
     ) {
         // Precondition: `chunk_index < chunk_count` (spec §5). `chunk_count >= 1`.
         assert!(chunk_index < chunk_count);
-        let _ = depth(chunk_index, chunk_count);
+        let _ = depth(chunk_index, chunk_count).expect("chunk_index < chunk_count");
     }
 }
 
@@ -93,8 +93,8 @@ fn check_untrusted(input: &strategies::UntrustedVerifierInput) {
     if let Ok(chunk_count) = geometry.chunk_count(input.data_size)
         && input.chunk_index < chunk_count
     {
-        // `depth` panics in debug builds when `chunk_index >= chunk_count` (spec §5).
-        let _ = depth(input.chunk_index, chunk_count);
+        // This input is in range. `depth` is `None` outside it (spec §5).
+        let _ = depth(input.chunk_index, chunk_count).expect("chunk_index < chunk_count");
     }
     let _ = chunk_key(&input.commitment, input.chunk_index);
 
