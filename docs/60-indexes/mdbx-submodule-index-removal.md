@@ -43,7 +43,6 @@ Production enables group commit only when the engine is RocksDB. `MDBX_SAFE_NOSY
 - `TxPathSource::Stored(None)` and the tx-path derive.
 - `index_wal_backstop_ms` (RocksDB WAL backstop).
 - RocksDB arms where `stores_offset_crc()` is true.
-- The index drain. Only its MDBX test opener is marked.
 - `group.rs`, except the `note_visible` marker.
 
 ## Ansible
@@ -277,10 +276,6 @@ Guards outside those plays:
 - L746: delete this MDBX case and keep the RocksDB case.
 - L790: delete this MDBX case and keep the RocksDB case.
 - L834: this test opens only MDBX. Retarget it at RocksDB.
-
-#### `crates/domain/src/models/index_drain.rs`
-
-- L576: these tests open only MDBX. Retarget them at RocksDB. The drain itself serves both engines and stays.
 
 #### `crates/domain/src/models/storage_module.rs`
 
