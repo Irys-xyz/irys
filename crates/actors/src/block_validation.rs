@@ -228,6 +228,25 @@ pub enum PreValidationError {
         "Invalid data PoA, partition hash {partition_hash} is not a data partition, it may have expired"
     )]
     PoADataPartitionExpired { partition_hash: H256 },
+    /// The PoA partition is not assigned to the block's miner in the parent
+    /// epoch snapshot. `owner` is `None` when no miner has the partition.
+    #[error("PoA partition {partition_hash} is assigned to {owner:?}, not block miner {miner}")]
+    PoAPartitionNotOwned {
+        partition_hash: H256,
+        miner: IrysAddress,
+        owner: Option<IrysAddress>,
+    },
+    /// A data PoA's `ledger_id` must be the ledger its partition is assigned to;
+    /// otherwise the assignment's `slot_index` would resolve offsets in a ledger
+    /// the partition does not store.
+    #[error(
+        "PoA ledger {poa_ledger_id} does not match partition {partition_hash} ledger {assigned_ledger_id:?}"
+    )]
+    PoALedgerMismatch {
+        partition_hash: H256,
+        poa_ledger_id: u32,
+        assigned_ledger_id: Option<u32>,
+    },
     #[error("Invalid previous_cumulative_diff (expected {expected} got {got})")]
     PreviousCumulativeDifficultyMismatch { expected: U256, got: U256 },
     #[error("Invalid previous_solution_hash - expected {expected} got {got}")]
@@ -644,6 +663,8 @@ impl PreValidationError {
             | Self::PoAChunkOffsetOutOfTxBounds
             | Self::PoADataPartitionExpired { .. }
             | Self::PoALedgerInactive { .. }
+            | Self::PoALedgerMismatch { .. }
+            | Self::PoAPartitionNotOwned { .. }
             | Self::PoAOffCanonicalAncestor { .. }
             | Self::PreviousCumulativeDifficultyMismatch { .. }
             | Self::PreviousSolutionHashMismatch { .. }
@@ -730,6 +751,8 @@ impl PreValidationError {
             Self::PartitionAssignmentSlotIndexMissing { .. } => "partition_slot_index_missing",
             Self::PartitionAssignmentSlotIndexTooLarge { .. } => "partition_slot_index_too_large",
             Self::PoADataPartitionExpired { .. } => "poa_data_partition_expired",
+            Self::PoAPartitionNotOwned { .. } => "poa_partition_not_owned",
+            Self::PoALedgerMismatch { .. } => "poa_ledger_mismatch",
             Self::PreviousCumulativeDifficultyMismatch { .. } => "prev_cumulative_diff_mismatch",
             Self::PreviousSolutionHashMismatch { .. } => "prev_solution_hash_mismatch",
             Self::RewardCurveError(_) => "reward_curve_error",
@@ -1766,6 +1789,16 @@ pub async fn prevalidate_block(
     check_poa_data_expiration(&block.poa, parent_epoch_snapshot.clone())?;
     debug!("poa data not expired");
 
+    // Cheap ownership check before the expensive entropy work in `poa_is_valid`
+    poa_partition_is_owned_by_miner(&block.poa, block.miner_address, &parent_epoch_snapshot)?;
+    // Here as well as in `poa_is_valid`, which trusted sync skips
+    poa_ledger_matches_assignment(&block.poa, &parent_epoch_snapshot)?;
+    debug!(
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
+        "poa_partition_is_owned_by_miner",
+    );
+
     // Check the solution_hash
     solution_hash_is_valid(block, previous_block)?;
     debug!(
@@ -2364,6 +2397,58 @@ pub fn check_poa_data_expiration(
             partition_hash: poa.partition_hash,
         });
     };
+    Ok(())
+}
+
+/// A PoA proves the block's miner stores the partition it names, so the
+/// partition must be assigned (data or capacity) to that miner in the parent
+/// epoch snapshot. Entropy is a public function of (miner, partition, offset),
+/// so without this check any address could mine any partition hash, pledged or
+/// not.
+pub fn poa_partition_is_owned_by_miner(
+    poa: &PoaData,
+    miner_address: IrysAddress,
+    epoch_snapshot: &EpochSnapshot,
+) -> Result<(), PreValidationError> {
+    // `get_assignment` covers data and capacity partitions: honest miners also
+    // submit entropy-chunk PoAs from data partitions.
+    let owner = epoch_snapshot
+        .partition_assignments
+        .get_assignment(poa.partition_hash)
+        .map(|assignment| assignment.miner_address);
+    if owner != Some(miner_address) {
+        return Err(PreValidationError::PoAPartitionNotOwned {
+            partition_hash: poa.partition_hash,
+            miner: miner_address,
+            owner,
+        });
+    }
+    Ok(())
+}
+
+/// A data PoA's `ledger_id` must be the ledger its partition is assigned to in
+/// the parent epoch snapshot: the partition's `slot_index` is only meaningful
+/// within that ledger. Entropy PoAs (no `data_path`/`tx_path`) are not bound to
+/// a ledger.
+pub fn poa_ledger_matches_assignment(
+    poa: &PoaData,
+    epoch_snapshot: &EpochSnapshot,
+) -> Result<(), PreValidationError> {
+    let (Some(_), Some(_), Some(poa_ledger_id)) = (&poa.data_path, &poa.tx_path, poa.ledger_id)
+    else {
+        return Ok(());
+    };
+    let assigned_ledger_id = epoch_snapshot
+        .partition_assignments
+        .get_assignment(poa.partition_hash)
+        .and_then(|assignment| assignment.ledger_id);
+    if assigned_ledger_id != Some(poa_ledger_id) {
+        return Err(PreValidationError::PoALedgerMismatch {
+            partition_hash: poa.partition_hash,
+            poa_ledger_id,
+            assigned_ledger_id,
+        });
+    }
     Ok(())
 }
 
@@ -4621,6 +4706,8 @@ pub fn poa_is_valid(
         None => return Err(PreValidationError::PoAChunkMissing),
     };
     poa_chunk_within_configured_len(poa_chunk_bytes, config.chunk_size)?;
+    poa_partition_is_owned_by_miner(poa, *miner_address, epoch_snapshot)?;
+    poa_ledger_matches_assignment(poa, epoch_snapshot)?;
     let mut poa_chunk: Vec<u8> = poa_chunk_bytes.to_vec();
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_id)) =

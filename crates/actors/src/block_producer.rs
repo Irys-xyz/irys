@@ -670,6 +670,36 @@ pub trait BlockProdStrategy {
             return Ok(None);
         }
 
+        // Validators reject a PoA over a partition the parent epoch snapshot does
+        // not assign to this miner (`PoAPartitionNotOwned`). A solution can go
+        // stale this way when an epoch block unpledges the partition, so discard
+        // it rather than build a block that fails our own pre-validation.
+        let partition_owner = self
+            .inner()
+            .block_tree_guard
+            .read()
+            .get_epoch_snapshot(&prev_block_header.block_hash)
+            .ok_or_else(|| {
+                eyre!(
+                    "parent epoch snapshot missing for {}",
+                    prev_block_header.block_hash
+                )
+            })?
+            .partition_assignments
+            .get_assignment(solution.partition_hash)
+            .map(|assignment| assignment.miner_address);
+        if partition_owner != Some(solution.mining_address) {
+            warn!(
+                "Skipping solution {} over partition {} assigned to {:?}, not miner {} on parent {}",
+                solution.solution_hash,
+                solution.partition_hash,
+                partition_owner,
+                solution.mining_address,
+                prev_block_header.block_hash
+            );
+            return Ok(None);
+        }
+
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp =
             current_timestamp(&prev_block_header, irys_types::global_clock()).await;

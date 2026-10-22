@@ -1,6 +1,8 @@
 use crate::utils::{IrysNodeTest, assert_reorg_event_lca_contract};
 use irys_chain::IrysNodeCtx;
-use irys_types::{DataLedger, DataTransaction, H256, NodeConfig, U256, UnixTimestamp};
+use irys_types::{
+    DataLedger, DataTransaction, H256, NodeConfig, U256, UnixTimestamp, irys::IrysSigner,
+};
 use reth::rpc::types::BlockNumberOrTag;
 use std::sync::Arc;
 use tracing::debug;
@@ -620,7 +622,15 @@ async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()
     // signers
     let b_signer = genesis_config.new_random_signer();
     let c_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&b_signer, &c_signer]);
+    // Users whose commitments node_b and node_c each mine on their own fork
+    let b_user_signer = genesis_config.new_random_signer();
+    let c_user_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![
+        &b_signer,
+        &c_signer,
+        &b_user_signer,
+        &c_user_signer,
+    ]);
 
     // genesis node / node_a
     let node_a = IrysNodeTest::new_genesis(genesis_config.clone())
@@ -653,14 +663,21 @@ async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()
         .wait_until_height(current_height, seconds_to_wait)
         .await?;
 
+    // node_b and node_c mine their own forks, which validators only accept
+    // from miners that own a partition. Heights below are relative to this
+    // epoch block, so the forks stay inside the next epoch.
+    let base = node_a
+        .stake_and_pledge_peers(&[&node_b, &node_c], seconds_to_wait)
+        .await?;
+
     //
     // Stage 2: MINE BLOCK
     //
 
     // mine a single block, and let everyone sync so future txs start at block height 1.
     node_a.mine_block().await?; // mine block a1
-    node_a.wait_until_height(1, seconds_to_wait).await?;
-    let block_height_1 = node_a.get_block_by_height(1).await?; // get block a1
+    node_a.wait_until_height(base + 1, seconds_to_wait).await?;
+    let block_height_1 = node_a.get_block_by_height(base + 1).await?; // get block a1
     node_b
         .wait_for_block(&block_height_1.block_hash, seconds_to_wait)
         .await?;
@@ -688,20 +705,20 @@ async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()
     //
 
     let anchor = node_a.get_anchor().await?;
-    // node_b generates txs in isolation for inclusion in block 2
+    // node_b receives txs in isolation for inclusion in block 2
     let peer_b_b2_stake_tx = node_b
-        .post_stake_commitment_without_gossip(Some(anchor))
+        .post_stake_commitment_signed_by(&b_user_signer, Some(anchor))
         .await?;
     let peer_b_b2_pledge_tx = node_b
-        .post_pledge_commitment_without_gossip(Some(anchor))
+        .post_pledge_commitment_signed_by(&b_user_signer, Some(anchor))
         .await?;
 
-    // node_c generates txs in isolation for inclusion block 2
+    // node_c receives txs in isolation for inclusion block 2
     let peer_c_b2_stake_tx = node_c
-        .post_stake_commitment_without_gossip(Some(anchor))
+        .post_stake_commitment_signed_by(&c_user_signer, Some(anchor))
         .await?;
     let peer_c_b2_pledge_tx = node_c
-        .post_pledge_commitment_without_gossip(Some(anchor))
+        .post_pledge_commitment_signed_by(&c_user_signer, Some(anchor))
         .await?;
 
     //
@@ -727,7 +744,7 @@ async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()
     assert_eq!(
         b_block2.system_ledgers.len(),
         1,
-        "Expect 1 of the 2 isolated txs on peer B to be in this block. The stake tx and not the pledge tx."
+        "peer B's block has one system ledger (the commitment ledger)"
     );
     assert_eq!(
         a_block2.system_ledgers.len(),
@@ -785,7 +802,7 @@ async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()
     // Node C mines on top of B's chain and does not gossip it back to B
     // Node C has the non canon txs from it's now non canon block 2.
     // Node C will choose to include these txs in block C4
-    if let Err(does_not_reach_height) = node_c.wait_until_height(3, seconds_to_wait).await {
+    if let Err(does_not_reach_height) = node_c.wait_until_height(base + 3, seconds_to_wait).await {
         tracing::error!(
             "Node C Failed to reach block height 3: {:?}",
             does_not_reach_height
@@ -793,13 +810,17 @@ async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()
         Err(does_not_reach_height)?
     }
     let (c_block4, _c_block4_payload, _c_block4_txs) = node_c.mine_block_without_gossip().await?;
-    if let Err(does_not_reach_height) = node_c.wait_until_height(4, seconds_to_wait).await {
+    if let Err(does_not_reach_height) = node_c.wait_until_height(base + 4, seconds_to_wait).await {
         tracing::error!(
             "Node C Failed to reach block height 4: {:?}",
             does_not_reach_height
         );
     }
-    assert_eq!(c_block4.height, 4, "Node C Failed to reach block height 4"); // block c4
+    assert_eq!(
+        c_block4.height,
+        base + 4,
+        "Node C Failed to reach block height 4"
+    ); // block c4
 
     //
     // Stage 7: FINAL SYNC / RE-ORGs
@@ -884,39 +905,39 @@ async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()
         }
 
         // check correct txs made it into specific canon blocks, that are now synced across every node
-        assert_eq!(sorted_commitments_at(&node_a, 1).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_a, base + 1).await?, vec![]);
         assert_eq!(
-            sorted_commitments_at(&node_a, 2).await?,
+            sorted_commitments_at(&node_a, base + 2).await?,
             peer_b_commitment_txs
         ); // expect only the two txs included in Peer B B2
-        assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_a, base + 3).await?, vec![]);
         // Expect txs that were mined in both c2 (non canonical) and c4 (now canonical)
         // The reason for them being in the 4th block, is that peer C sees them as non canon when it re-orgs after receiving B2 and B3. Therefore then returns as eligible txs
         // To reiterate. These were previously mined in non canon block C2. They were then mined again in canon block C4
         assert_eq!(
-            sorted_commitments_at(&node_a, 4).await?,
+            sorted_commitments_at(&node_a, base + 4).await?,
             peer_c_commitment_txs
         );
 
-        assert_eq!(sorted_commitments_at(&node_b, 1).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_b, base + 1).await?, vec![]);
         assert_eq!(
-            sorted_commitments_at(&node_b, 2).await?,
+            sorted_commitments_at(&node_b, base + 2).await?,
             peer_b_commitment_txs
         );
-        assert_eq!(sorted_commitments_at(&node_b, 3).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_b, base + 3).await?, vec![]);
         assert_eq!(
-            sorted_commitments_at(&node_b, 4).await?,
+            sorted_commitments_at(&node_b, base + 4).await?,
             peer_c_commitment_txs
         );
 
-        assert_eq!(sorted_commitments_at(&node_c, 1).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_c, base + 1).await?, vec![]);
         assert_eq!(
-            sorted_commitments_at(&node_c, 2).await?,
+            sorted_commitments_at(&node_c, base + 2).await?,
             peer_b_commitment_txs
         );
-        assert_eq!(sorted_commitments_at(&node_c, 3).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_c, base + 3).await?, vec![]);
         assert_eq!(
-            sorted_commitments_at(&node_c, 4).await?,
+            sorted_commitments_at(&node_c, base + 4).await?,
             peer_c_commitment_txs
         );
     }
@@ -931,9 +952,11 @@ async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()
 /// lookup below the reorg floor).
 ///
 /// Spins up a 3-node cluster (node_a genesis + node_b/node_c peers) on
-/// `num_blocks_in_epoch`'s epoch schedule, syncs all three to height 0, mines
-/// one common block so future txs anchor at height 1 on all nodes, then
-/// disables gossip so node_b and node_c can be driven onto diverging forks.
+/// `num_blocks_in_epoch`'s epoch schedule, stakes and pledges node_b and
+/// node_c so they can mine, mines one common block past that epoch so future
+/// txs anchor on it on all nodes, then disables gossip so node_b and node_c can
+/// be driven onto diverging forks. Also returns a funded, unstaked user signer
+/// whose commitments the tests track across the reorg.
 /// Shared scaffolding for the commitment/reorg tests below.
 async fn setup_diverging_fork_nodes(
     num_blocks_in_epoch: usize,
@@ -942,6 +965,7 @@ async fn setup_diverging_fork_nodes(
     IrysNodeTest<IrysNodeCtx>,
     IrysNodeTest<IrysNodeCtx>,
     IrysNodeTest<IrysNodeCtx>,
+    IrysSigner,
 )> {
     let block_migration_depth = num_blocks_in_epoch - 1;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -950,7 +974,8 @@ async fn setup_diverging_fork_nodes(
 
     let b_signer = genesis_config.new_random_signer();
     let c_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&b_signer, &c_signer]);
+    let user_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&b_signer, &c_signer, &user_signer]);
 
     let node_a = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("NODE_A", seconds_to_wait)
@@ -976,22 +1001,30 @@ async fn setup_diverging_fork_nodes(
         .wait_until_height(current_height, seconds_to_wait)
         .await?;
 
-    // Mine a common block so future txs anchor at height 1 on all nodes.
+    // Both peers mine their own forks, which validators only accept from
+    // miners that own a partition.
+    let base_height = node_a
+        .stake_and_pledge_peers(&[&node_b, &node_c], seconds_to_wait)
+        .await?;
+
+    // Mine a common block so future txs anchor on it on all nodes.
     node_a.mine_block().await?;
-    node_a.wait_until_height(1, seconds_to_wait).await?;
-    let block_height_1 = node_a.get_block_by_height(1).await?;
+    node_a
+        .wait_until_height(base_height + 1, seconds_to_wait)
+        .await?;
+    let common_block = node_a.get_block_by_height(base_height + 1).await?;
     node_b
-        .wait_for_block(&block_height_1.block_hash, seconds_to_wait)
+        .wait_for_block(&common_block.block_hash, seconds_to_wait)
         .await?;
     node_c
-        .wait_for_block(&block_height_1.block_hash, seconds_to_wait)
+        .wait_for_block(&common_block.block_hash, seconds_to_wait)
         .await?;
 
     node_a.gossip_disable();
     node_b.gossip_disable();
     node_c.gossip_disable();
 
-    Ok((node_a, node_b, node_c))
+    Ok((node_a, node_b, node_c, user_signer))
 }
 
 /// A commitment whose ONLY prior inclusion was on a branch that gets reorged
@@ -1011,16 +1044,17 @@ async fn setup_diverging_fork_nodes(
 async fn heavy_commitment_reorged_out_stays_includable() -> eyre::Result<()> {
     let num_blocks_in_epoch = 5;
     let seconds_to_wait = 15;
-    let (node_a, node_b, node_c) =
+    let (node_a, node_b, node_c, user_signer) =
         setup_diverging_fork_nodes(num_blocks_in_epoch, seconds_to_wait).await?;
 
-    // node_b posts a stake + pledge commitment kept local to its own fork.
+    // node_b receives a user's stake + pledge commitment kept local to its own
+    // fork (gossip is disabled).
     let anchor = node_a.get_anchor().await?;
     let stake_tx = node_b
-        .post_stake_commitment_without_gossip(Some(anchor))
+        .post_stake_commitment_signed_by(&user_signer, Some(anchor))
         .await?;
     let pledge_tx = node_b
-        .post_pledge_commitment_without_gossip(Some(anchor))
+        .post_pledge_commitment_signed_by(&user_signer, Some(anchor))
         .await?;
 
     // node_b mines the commitments into its own (soon-to-be-orphaned) branch.
@@ -1143,7 +1177,7 @@ async fn heavy_commitment_reorged_out_stays_includable() -> eyre::Result<()> {
 async fn heavy_orphan_anchored_commitment_does_not_block_production() -> eyre::Result<()> {
     let num_blocks_in_epoch = 5;
     let seconds_to_wait = 15;
-    let (node_a, node_b, node_c) =
+    let (node_a, node_b, node_c, user_signer) =
         setup_diverging_fork_nodes(num_blocks_in_epoch, seconds_to_wait).await?;
 
     // node_b mines its own block 2, becoming node_b's canonical tip.
@@ -1152,10 +1186,11 @@ async fn heavy_orphan_anchored_commitment_does_not_block_production() -> eyre::R
         .wait_until_height(b_block2.height, seconds_to_wait)
         .await?;
 
-    // node_b posts a stake commitment anchored at its own tip (b2); ingress
-    // accepts it since b2 is canonical on node_b right now. Left unmined.
+    // node_b receives a user's stake commitment anchored at its own tip (b2);
+    // ingress accepts it since b2 is canonical on node_b right now. Left
+    // unmined, and kept local since gossip is disabled.
     let stake_tx = node_b
-        .post_stake_commitment_without_gossip(Some(b_block2.block_hash))
+        .post_stake_commitment_signed_by(&user_signer, Some(b_block2.block_hash))
         .await?;
 
     // node_c mines a longer competing chain without this commitment.
@@ -1973,7 +2008,9 @@ async fn heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
 
     // signers
     let b_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&b_signer]);
+    // User whose commitments node_b mines on its own fork
+    let user_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&b_signer, &user_signer]);
 
     // genesis node / node_a
     let node_a = IrysNodeTest::new_genesis(genesis_config.clone())
@@ -1999,15 +2036,25 @@ async fn heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
         .wait_for_block_at_height(current_height, seconds_to_wait)
         .await?;
 
+    // node_b mines its own fork, which validators only accept from a miner
+    // that owns a partition. Heights below are relative to this epoch block.
+    let base = node_a
+        .stake_and_pledge_peers(&[&node_b], seconds_to_wait)
+        .await?;
+
     //
     // Stage 2: MINE BLOCK
     //
 
     // mine a single block, and let everyone sync so future txs start at block height 1.
     node_a.mine_block().await?; // mine block a1
-    node_a.wait_for_block_at_height(1, seconds_to_wait).await?;
-    let block_height_1 = node_a.get_block_by_height(1).await?; // get block a1
-    node_b.wait_for_block_at_height(1, seconds_to_wait).await?;
+    node_a
+        .wait_for_block_at_height(base + 1, seconds_to_wait)
+        .await?;
+    let block_height_1 = node_a.get_block_by_height(base + 1).await?; // get block a1
+    node_b
+        .wait_for_block_at_height(base + 1, seconds_to_wait)
+        .await?;
 
     assert_eq!(
         block_height_1.system_ledgers.len(),
@@ -2028,12 +2075,12 @@ async fn heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     //
 
     let anchor = node_b.get_anchor().await?;
-    // node_b generates txs in isolation for inclusion in block 2
+    // node_b receives txs in isolation for inclusion in block 2
     let peer_b_b2_stake_tx = node_b
-        .post_stake_commitment_without_gossip(Some(anchor))
+        .post_stake_commitment_signed_by(&user_signer, Some(anchor))
         .await?;
     let peer_b_b2_pledge_tx = node_b
-        .post_pledge_commitment_without_gossip(Some(anchor))
+        .post_pledge_commitment_signed_by(&user_signer, Some(anchor))
         .await?;
 
     //
@@ -2097,7 +2144,7 @@ async fn heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     assert_eq!(
         b_block2.system_ledgers.len(),
         1,
-        "Expect 1 of the 2 isolated txs on peer B to be in this block. The stake tx and not the pledge tx."
+        "peer B's block has one system ledger (the commitment ledger)"
     );
     assert_eq!(
         a_block2.system_ledgers.len(),
@@ -2184,18 +2231,18 @@ async fn heavy3_reorg_upto_block_migration_depth() -> eyre::Result<()> {
         }
 
         // check correct txs made it into specific canon blocks, that are now synced across every node
-        assert_eq!(sorted_commitments_at(&node_a, 1).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_a, base + 1).await?, vec![]);
         assert_eq!(
-            sorted_commitments_at(&node_a, 2).await?,
+            sorted_commitments_at(&node_a, base + 2).await?,
             peer_b_commitment_txs
         );
-        assert_eq!(sorted_commitments_at(&node_a, 3).await?, vec![]);
-        assert_eq!(sorted_commitments_at(&node_b, 1).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_a, base + 3).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_b, base + 1).await?, vec![]);
         assert_eq!(
-            sorted_commitments_at(&node_b, 2).await?,
+            sorted_commitments_at(&node_b, base + 2).await?,
             peer_b_commitment_txs
         );
-        assert_eq!(sorted_commitments_at(&node_b, 3).await?, vec![]);
+        assert_eq!(sorted_commitments_at(&node_b, base + 3).await?, vec![]);
         //also check final blocks for good measure, they should have no txs as we didn't post any after block 2
         assert_eq!(
             sorted_commitments_at(&node_a, a_final.height).await?,
