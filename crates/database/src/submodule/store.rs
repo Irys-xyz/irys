@@ -471,9 +471,12 @@ pub trait SubmoduleStore: Send + Sync {
     ///
     /// Presence is the offset path-hash row and the offset data-path row.
     /// An empty list, or spans that hold no presence row, does not commit.
-    /// One commit covers every span that has a row. One cursor per presence
-    /// family seeks across the gaps, plus the rows removed. RocksDB deletes the offset
-    /// rows with `DeleteRange`. RocksDB v1 reads the data-proof values in each
+    /// A RocksDB span is one synced batch per `presence_subspans` piece,
+    /// each coalesced span and each wider slice of `DELETE_SUBRANGE_OFFSETS`.
+    /// An error on RocksDB can follow a durable prefix. MDBX still commits
+    /// every span that has a row in one transaction. One cursor per presence
+    /// family seeks across the gaps, plus the rows removed. RocksDB deletes
+    /// the offset rows with `DeleteRange`. RocksDB v1 reads the data-proof values in each
     /// span that has rows and point-deletes the matching content-hash keys in
     /// that same batch. A span with no row does not read values. MDBX walks
     /// a cursor inside each span.

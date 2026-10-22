@@ -2740,7 +2740,8 @@ impl ChunkOrchestrator {
                     ChunkRequestState::Completed => (r, a, w, c + 1, d, b),
                     ChunkRequestState::Delayed { .. } => (r, a, w, c, d + 1, b),
                     ChunkRequestState::Blocked(_) => (r, a, w, c, d, b + 1),
-                    // Held work is neither ready nor blocked. Discovery continues.
+                    // Held work is left out of the ready and blocked counters.
+                    // Discovery counts it toward `max_pending_chunk_requests`.
                     ChunkRequestState::HeldByBodyWorker => (r, a, w, c, d, b),
                 },
             );
