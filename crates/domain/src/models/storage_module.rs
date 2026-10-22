@@ -15,7 +15,7 @@ use irys_database::submodule::db::placement_overlaps_inclusive_span;
 #[cfg(test)]
 use irys_database::submodule::tables::{SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_ROCKS_V1};
 use irys_database::submodule::{
-    PackingRecord, SubmoduleIndex, SubmoduleRead, SubmoduleStore as _,
+    DELETE_SUBRANGE_OFFSETS, PackingRecord, SubmoduleIndex, SubmoduleRead, SubmoduleStore as _,
     install_process_rocks_resources, packing_params_valid_for_module,
     tables::{
         DataRootInfo, DataRootInfos, OffsetMeta, PackedOffsetRow, PendingBodyMigration, Placement,
@@ -7680,8 +7680,8 @@ impl StorageModule {
     ///
     /// Used by network-partition rollback alongside
     /// [`Self::clear_data_root_infos_in_range`]. Walks each submodule covering
-    /// the range once, clearing its slice of the range in a single write
-    /// transaction.
+    /// the range once. Each commit covers at most [`DELETE_SUBRANGE_OFFSETS`]
+    /// offsets of that submodule's slice.
     pub fn clear_offset_index_in_range(
         &self,
         start: PartitionChunkOffset,
@@ -7695,14 +7695,26 @@ impl StorageModule {
                 self.get_submodule_for_offset(PartitionChunkOffset::from(cursor))?;
             let submodule_end = *interval.end();
             let slice_end = submodule_end.min(range_end);
-            submodule.db.update(|tx| {
-                // Removing coverage makes heal see a hole. Deleting the path
-                // rows makes a later read miss the data path.
-                tx.clear_paths_in_inclusive_range(
-                    PartitionChunkOffset::from(cursor),
-                    PartitionChunkOffset::from(slice_end),
-                )
-            })?;
+            let mut piece = cursor;
+            while piece <= slice_end {
+                let piece_end = if slice_end - piece >= DELETE_SUBRANGE_OFFSETS {
+                    piece + (DELETE_SUBRANGE_OFFSETS - 1)
+                } else {
+                    slice_end
+                };
+                submodule.db.update(|tx| {
+                    // Removing coverage makes heal see a hole. Deleting the path
+                    // rows makes a later read miss the data path.
+                    tx.clear_paths_in_inclusive_range(
+                        PartitionChunkOffset::from(piece),
+                        PartitionChunkOffset::from(piece_end),
+                    )
+                })?;
+                if piece_end == slice_end {
+                    break;
+                }
+                piece = piece_end + 1;
+            }
             // Advance to the next submodule covering the range.
             if submodule_end >= range_end {
                 break;
@@ -15938,6 +15950,35 @@ mod tests {
             "cleared [3,5] inclusive must be a half-open [3,6) gap"
         );
 
+        Ok(())
+    }
+
+    /// A slice of three sub-ranges is three index transactions. One transaction
+    /// would hold every content key in the slice.
+    #[test]
+    fn clear_offset_index_commits_once_per_subrange() -> eyre::Result<()> {
+        let limit = irys_database::submodule::DELETE_SUBRANGE_OFFSETS;
+        let chunks = u64::from(limit) * 3;
+        let last = u32::try_from(chunks - 1).expect("span fits u32");
+        let tmp = TempDirBuilder::new()
+            .prefix("clear_offset_subrange")
+            .build();
+        let config = testing_config_tuned(tmp.path(), 32, chunks, |node| {
+            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
+            node.storage.index_wal_backstop_ms = 60_000;
+        });
+        let storage = StorageModule::new(&one_span(last, "sub", None), &config)?;
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let before = submodule.db.wal_sync_count();
+        storage.clear_offset_index_in_range(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(last),
+        )?;
+        let commits = submodule.db.wal_sync_count() - before;
+        assert_eq!(
+            commits, 3,
+            "clear of 3 * {limit} offsets used {commits} commits"
+        );
         Ok(())
     }
 
