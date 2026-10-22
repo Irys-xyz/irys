@@ -1,8 +1,11 @@
-//! In-chunk siblings past the data are `empty(ℓ)` (spec §5, §10).
+//! An in-chunk sibling whose subtree lies entirely past the data is `empty(ℓ)`
+//! (spec §5, §10).
 //!
-//! A dishonest last chunk can put another hash where that subtree must be
-//! empty. Every data segment of the chunk then fails `verify_segment`. Honest
-//! proofs already carry `empty(ℓ)`, so they still verify.
+//! The pin does not open a sibling that is only partly past the data. A bad
+//! hash in an empty leaf of that mixed sibling leaves the other data segments
+//! verifying. The rightmost data segment's proof fails, and `verify_chunk`
+//! fails for every byte string of length `chunk_len`. Honest proofs already
+//! carry `empty(ℓ)`, so they still verify.
 
 use proptest::prelude::*;
 use rstest::rstest;
@@ -13,7 +16,7 @@ use crate::geometry::{Geometry, MAX_SUBTREE_HEIGHT};
 use crate::shape::climb;
 use crate::types::{DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash};
 use crate::verify::{verify_chunk, verify_segment};
-use crate::{DataTree, data_commitment, empty, leaf, node, size_witness};
+use crate::{DataTree, chunk_root, data_commitment, empty, leaf, node, size_witness};
 
 /// Byte repeated through the garbage hash in the published attack.
 const GARBAGE_BYTE: u8 = 0xAB;
@@ -75,6 +78,28 @@ fn malformed_only_chunk_rejects_its_data_segment() {
     let geometry = Geometry::new(8, 8, 2).unwrap();
     let data_size = 1;
     reject_malformed_right_half(&geometry, data_size, 1);
+}
+
+/// Test geometry, `n = 20` (spec §5). Leaf 3 is `G` instead of `empty(0)`.
+/// `s = 3`. Segments 0 and 1 verify. Segments 2 and 3 fail.
+/// Segment 2 is the rightmost data segment. `verify_chunk` fails.
+#[test]
+fn mixed_empty_leaf_of_twenty_bytes_lets_segments_0_and_1_verify() {
+    assert_mixed_empty_leaf(&Geometry::TESTING, 20, &[true, true, false, false]);
+}
+
+/// Eight segments, one byte each, `n = 5` (spec §5). Leaf 7 is `G` instead of
+/// `empty(0)`. `s = 5`. Segments 0, 1, 2 and 3 verify. Segment 4, the rightmost
+/// data segment, fails. Segments 5, 6 and 7 are past the data and fail.
+/// `verify_chunk` fails.
+#[test]
+fn mixed_empty_leaf_of_five_bytes_lets_segments_0_through_3_verify() {
+    let geometry = Geometry::new(8, 8, 2).unwrap();
+    assert_mixed_empty_leaf(
+        &geometry,
+        5,
+        &[true, true, true, true, false, false, false, false],
+    );
 }
 
 /// `empty(ℓ+1)` and a real data node both look like hashes. Neither is `empty(ℓ)`.
@@ -475,6 +500,253 @@ fn chunk_bytes(geometry: &Geometry, data: &[u8], data_size: u64, chunk_index: u3
     let chunk_length =
         usize::try_from(geometry.chunk_len(data_size, chunk_index).unwrap()).unwrap();
     data[start..start + chunk_length].to_vec()
+}
+
+/// One chunk. Leaf `segments_per_chunk - 1` is `G` instead of `empty(0)`.
+///
+/// `segment_verifies[j]` is the spec §5 result for that segment: `true` is
+/// `Ok(())`, `false` is `CommitmentMismatch`. The bad leaf shares a subtree
+/// with a data segment, so the segments that verify meet it only through a
+/// mixed sibling. The rightmost data segment meets it through a sibling that
+/// lies entirely past the data.
+fn assert_mixed_empty_leaf(geometry: &Geometry, data_size: u64, segment_verifies: &[bool]) {
+    let segments_per_chunk = geometry.segments_per_chunk();
+    assert_eq!(
+        segment_verifies.len(),
+        usize::try_from(segments_per_chunk).unwrap()
+    );
+    assert_eq!(geometry.chunk_count(data_size).unwrap(), 1, "one chunk");
+    let chunk_index = 0;
+    let chunk_length = geometry.chunk_len(data_size, chunk_index).unwrap();
+    let data_segments = u32::try_from(chunk_length.div_ceil(geometry.segment_size()))
+        .expect("ceil(chunk_len / segment_size) fits segments_per_chunk");
+    let bad_leaf = segments_per_chunk - 1;
+    assert_eq!(
+        geometry
+            .segment_len(data_size, chunk_index, bad_leaf)
+            .unwrap(),
+        0,
+        "the replaced leaf is past the data"
+    );
+    // The bad leaf starts at or past `chunk_len`, so `chunk_root` is `empty(0)`
+    // there for every string of this length (spec §4, §5).
+    assert!(u64::from(bad_leaf) * geometry.segment_size() >= chunk_length);
+
+    let data = tree_bytes(data_size);
+    let bad_root = subtree_with_bad_leaf(
+        geometry,
+        &data,
+        chunk_length,
+        0,
+        geometry.height(),
+        Some(bad_leaf),
+    );
+    let canonical =
+        subtree_with_bad_leaf(geometry, &data, chunk_length, 0, geometry.height(), None);
+    assert_eq!(
+        chunk_root(geometry, &data).unwrap(),
+        canonical,
+        "the oracle matches chunk_root when no leaf is replaced"
+    );
+    assert_ne!(bad_root, canonical, "G is not empty(0)");
+    let commitment = data_commitment(geometry, &DataTreeRoot::from_hash(bad_root), data_size);
+
+    let rightmost_data_segment = (0..segments_per_chunk)
+        .rev()
+        .find(|segment_index| {
+            geometry
+                .segment_len(data_size, chunk_index, *segment_index)
+                .unwrap()
+                > 0
+        })
+        .expect("the chunk has a data segment");
+    let rightmost = usize::try_from(rightmost_data_segment).unwrap();
+    assert!(
+        !segment_verifies[rightmost],
+        "the rightmost data segment fails"
+    );
+    assert!(
+        meets_bad_leaf_through_pinned_sibling(
+            geometry,
+            data_segments,
+            rightmost_data_segment,
+            bad_leaf
+        ),
+        "the rightmost data segment meets the bad leaf through an entirely empty sibling"
+    );
+
+    for (segment_index, verifies) in segment_verifies.iter().copied().enumerate() {
+        let segment_index = u32::try_from(segment_index).unwrap();
+        let segment = segment_bytes(geometry, &data, data_size, chunk_index, segment_index);
+        let proof = segment_proof_with_bad_leaf(
+            geometry,
+            &data,
+            data_size,
+            chunk_length,
+            segment_index,
+            bad_leaf,
+        );
+        let result = verify_segment(
+            geometry,
+            &commitment,
+            data_size,
+            chunk_index,
+            segment_index,
+            &segment,
+            &proof,
+        );
+        if verifies {
+            assert_eq!(result, Ok(()), "segment {segment_index} verifies");
+            assert!(
+                meets_bad_leaf_through_mixed_sibling(
+                    geometry,
+                    data_segments,
+                    segment_index,
+                    bad_leaf
+                ),
+                "segment {segment_index} meets the bad leaf only through a mixed sibling"
+            );
+        } else {
+            assert_eq!(
+                result,
+                Err(VerifyError::CommitmentMismatch),
+                "segment {segment_index} fails"
+            );
+        }
+    }
+
+    let chunk_proof = DataTree::from_bytes(*geometry, &data)
+        .unwrap()
+        .chunk_proof(chunk_index)
+        .unwrap();
+    let length = usize::try_from(chunk_length).unwrap();
+    for bytes in [data, vec![0x00; length], vec![0xFF; length]] {
+        assert_ne!(chunk_root(geometry, &bytes).unwrap(), bad_root);
+        assert_eq!(
+            verify_chunk(
+                geometry,
+                &commitment,
+                data_size,
+                chunk_index,
+                &bytes,
+                &chunk_proof
+            ),
+            Err(VerifyError::CommitmentMismatch),
+            "verify_chunk fails for a string of length chunk_len"
+        );
+    }
+}
+
+/// `true` when some sibling of `segment_index` contains `bad_leaf` and starts
+/// before the first empty segment. The pin does not apply to that sibling.
+fn meets_bad_leaf_through_mixed_sibling(
+    geometry: &Geometry,
+    data_segments: u32,
+    segment_index: u32,
+    bad_leaf: u32,
+) -> bool {
+    let mut walked_index = segment_index;
+    for level in 0..geometry.height() {
+        let start = (walked_index ^ 1) << level;
+        if sibling_covers(start, level, bad_leaf) && start < data_segments {
+            return true;
+        }
+        walked_index >>= 1;
+    }
+    false
+}
+
+/// `true` when some sibling of `segment_index` contains `bad_leaf` and lies
+/// entirely past the data. The pin requires that sibling to be `empty(ℓ)`.
+fn meets_bad_leaf_through_pinned_sibling(
+    geometry: &Geometry,
+    data_segments: u32,
+    segment_index: u32,
+    bad_leaf: u32,
+) -> bool {
+    let mut walked_index = segment_index;
+    for level in 0..geometry.height() {
+        let start = (walked_index ^ 1) << level;
+        if sibling_covers(start, level, bad_leaf) && start >= data_segments {
+            return true;
+        }
+        walked_index >>= 1;
+    }
+    false
+}
+
+fn sibling_covers(start: u32, level: u32, leaf: u32) -> bool {
+    let width = 1_u32 << level;
+    let end = start.checked_add(width).expect("sibling end fits");
+    leaf >= start && leaf < end
+}
+
+/// Spec §4 subtree. `bad_leaf` is `G` instead of `empty(0)`. A subtree that
+/// does not contain that leaf, and that starts at or past the bytes, is
+/// `empty(k)`.
+fn subtree_with_bad_leaf(
+    geometry: &Geometry,
+    data: &[u8],
+    chunk_length: u64,
+    start_leaf: u32,
+    subtree_height: u32,
+    bad_leaf: Option<u32>,
+) -> NodeHash {
+    let width = 1_u32 << subtree_height;
+    let end_leaf = start_leaf.checked_add(width).expect("subtree end fits");
+    let contains_bad = bad_leaf.is_some_and(|leaf| leaf >= start_leaf && leaf < end_leaf);
+    let range_start = u64::from(start_leaf) * geometry.segment_size();
+    if !contains_bad && range_start >= chunk_length {
+        return empty(subtree_height);
+    }
+    if subtree_height == 0 {
+        if contains_bad {
+            return NodeHash::from([GARBAGE_BYTE; HASH_SIZE]);
+        }
+        let end = (range_start + geometry.segment_size()).min(chunk_length);
+        let start = usize::try_from(range_start).unwrap();
+        let end = usize::try_from(end).unwrap();
+        return leaf(&data[start..end]);
+    }
+    let left_width = width / 2;
+    let left = subtree_with_bad_leaf(
+        geometry,
+        data,
+        chunk_length,
+        start_leaf,
+        subtree_height - 1,
+        bad_leaf,
+    );
+    let right = subtree_with_bad_leaf(
+        geometry,
+        data,
+        chunk_length,
+        start_leaf + left_width,
+        subtree_height - 1,
+        bad_leaf,
+    );
+    node(&left, &right)
+}
+
+fn segment_proof_with_bad_leaf(
+    geometry: &Geometry,
+    data: &[u8],
+    data_size: u64,
+    chunk_length: u64,
+    segment_index: u32,
+    bad_leaf: u32,
+) -> Vec<u8> {
+    let mut proof = Vec::new();
+    let mut walked_index = segment_index;
+    for level in 0..geometry.height() {
+        let start = (walked_index ^ 1) << level;
+        let sibling =
+            subtree_with_bad_leaf(geometry, data, chunk_length, start, level, Some(bad_leaf));
+        proof.extend_from_slice(sibling.as_bytes());
+        walked_index >>= 1;
+    }
+    proof.extend_from_slice(size_witness(geometry, data_size).as_bytes());
+    proof
 }
 
 fn segment_bytes(

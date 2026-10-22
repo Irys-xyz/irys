@@ -66,7 +66,9 @@ pub fn verify_chunk(
 ///
 /// An in-chunk sibling whose subtree lies entirely past the data must be
 /// `empty(ℓ)`. The first segment of that subtree follows from `(n, c, j)`
-/// before the climb (spec §5, §10).
+/// before the climb (spec §5, §10). The pin does not open a sibling that is
+/// only partly past the data. A bad empty leaf inside it does not fail every
+/// data segment.
 ///
 /// `c` is `chunk_index`. `j` is `segment_index`.
 pub fn verify_segment(
@@ -127,8 +129,8 @@ pub fn verify_segment(
         let level = u32::try_from(level).expect("height fits u32");
         debug_assert!(level < u32::BITS);
         let sibling_start = (segment_index ^ 1) << level;
-        // Entirely past the data: the sibling is `empty(ℓ)`. Another hash is a
-        // last chunk with no preimage (spec §5, §10).
+        // Entirely past the data: this sibling must be `empty(ℓ)` (spec §5, §10).
+        // A sibling that still holds a data segment is not opened.
         if sibling_start >= data_segments && sibling != empty(level) {
             return Err(VerifyError::CommitmentMismatch);
         }
