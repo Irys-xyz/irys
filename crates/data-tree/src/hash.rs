@@ -29,11 +29,12 @@ pub enum TreeDomainTag {
     Size = 0x02,
     /// `0x03 ‖ data_commitment ‖ be32(c)` (one tag byte, one digest, and a `u32`).
     ChunkKey = 0x03,
-    /// Reserved: defined by the segment-PoA spec; not used by the tree.
+    /// Mining ticket. Defined by the segment-PoA spec. Not used by this tree (spec §3).
     Ticket = 0x04,
 }
 
 impl TreeDomainTag {
+    /// The tag byte this variant hashes (spec §3).
     pub const fn as_byte(self) -> u8 {
         self as u8
     }
@@ -48,12 +49,12 @@ fn digest(tag: u8, parts: &[&[u8]]) -> [u8; HASH_SIZE] {
     hasher.finalize().into()
 }
 
-/// `H(Leaf ‖ bytes)`. `bytes` is hashed at its exact length: no padding (spec §3).
+/// `H(0x00 ‖ bytes)`. `bytes` is hashed at its exact length: no padding (spec §3).
 pub fn leaf(bytes: &[u8]) -> NodeHash {
     NodeHash::from(digest(TreeDomainTag::Leaf.as_byte(), &[bytes]))
 }
 
-/// `H(Node ‖ left ‖ right)` (spec §3).
+/// `H(0x01 ‖ left ‖ right)` (spec §3).
 pub fn node(left: &NodeHash, right: &NodeHash) -> NodeHash {
     NodeHash::from(digest(
         TreeDomainTag::Node.as_byte(),
@@ -80,7 +81,7 @@ pub fn size_witness(geometry: &Geometry, data_size: u64) -> SizeWitness {
     ))
 }
 
-/// `H(ChunkKey ‖ data_commitment ‖ be32(c))` (spec §3).
+/// `H(0x03 ‖ data_commitment ‖ be32(c))` (spec §3).
 ///
 /// `c` is `chunk_index`.
 pub fn chunk_key(commitment: &DataCommitment, chunk_index: u32) -> ChunkKey {

@@ -135,20 +135,15 @@ impl Geometry {
             });
         }
         let count = data_size.div_ceil(self.chunk_size);
-        // `TryFrom` is not a const trait yet. `count` fits `u32` whenever
-        // `data_size` fits this geometry: `C <= max_data_tx_chunks`.
-        if count > u32::MAX as u64 {
-            return Err(SizeError::DataSizeOutOfRange {
-                data_size,
-                max_data_size,
-            });
-        }
+        // `TryFrom` is not a const trait yet. The cast is safe: after the range
+        // check, `C = ceil(n / chunk_size) <= max_data_tx_chunks`, which fits `u32`.
+        debug_assert!(count <= self.max_data_tx_chunks as u64);
         Ok(count as u32)
     }
 
     /// Number of data bytes in chunk `c` (spec §2 `chunk_len`): `chunk_size` for
     /// every chunk but the last, `1..=chunk_size` for the last. Not a count of
-    /// segments. Requires `c < chunk_count(n)`.
+    /// segments. Returns an error unless `c < chunk_count(n)`.
     ///
     /// `n` is `data_size`. `c` is `chunk_index`.
     pub fn chunk_len(&self, data_size: u64, chunk_index: u32) -> Result<u64, SizeError> {
@@ -175,14 +170,15 @@ impl Geometry {
         })
     }
 
-    /// Number of data bytes in segment `j` of chunk `c` (spec §2 `segment_len`):
-    /// `segment_size` for a full segment, fewer for the segment holding the last
-    /// data byte, 0 for a segment past the data. This is the exact length a
-    /// segment hashes at; no padding is hashed (spec §3).
+    /// Number of data bytes in segment `j` of chunk `c` (spec §2 `segment_len`).
     ///
-    /// Requires `c < chunk_count(n)` and `j < segments_per_chunk`. Returns 0 when
-    /// the segment starts at or past `n` (spec §2). The subtraction runs only
-    /// when the start is strictly below `n`.
+    /// `0` if `seg_start(c, j) ≥ n`, otherwise `min(segment_size, n − seg_start)`.
+    /// A short segment exists only when `n` is not a multiple of `segment_size`.
+    /// This is the exact length a segment hashes at; no padding is hashed (spec §3).
+    ///
+    /// Returns an error unless `c < chunk_count(n)` and `j < segments_per_chunk`.
+    /// Returns 0 when the segment starts at or past `n` (spec §2). The subtraction
+    /// runs only when the start is strictly below `n`.
     ///
     /// `n` is `data_size`. `c` is `chunk_index`. `j` is `segment_index`.
     pub fn segment_len(

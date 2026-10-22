@@ -1,15 +1,16 @@
 //! Failures for geometry, building, proofs, and verification.
 //!
-//! Verifiers return these instead of panicking (spec §10).
+//! Verifiers return these instead of panicking. Length checks run before any
+//! hashing (spec §10).
 
 use thiserror::Error;
 
 /// `Geometry::new` rejected a parameter set (spec §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum GeometryError {
-    /// `segments_per_chunk` is not a power of two in `1..=MAX_SEGMENTS_PER_CHUNK`.
+    /// `segments_per_chunk` must be a power of two in `1..=MAX_SEGMENTS_PER_CHUNK`.
     #[error(
-        "segments_per_chunk {segments_per_chunk} is not a power of two in 1..={max_segments_per_chunk}",
+        "segments_per_chunk {segments_per_chunk} must be a power of two in 1..={max_segments_per_chunk}",
         max_segments_per_chunk = crate::geometry::MAX_SEGMENTS_PER_CHUNK
     )]
     SegmentsPerChunk {
@@ -127,7 +128,9 @@ pub enum VerifyError {
     Size(#[from] SizeError),
     /// `bytes` is not `chunk_len(data_size, c)`.
     ///
-    /// L1 maps this to the peer fault `InvalidChunkSize`.
+    /// Planned L1 mapping, not implemented in this crate: a peer fault
+    /// `InvalidChunkSize` (spec §8, proposal). Today's ingress drops a chunk
+    /// whose length does not match.
     #[error("chunk length {actual} does not match {expected}")]
     InvalidChunkLength {
         /// Length required by `(data_size, c)`.
@@ -143,7 +146,8 @@ pub enum VerifyError {
         /// Length of the supplied slice.
         actual: u64,
     },
-    /// The proof is not `32 * (k + 1)` bytes, where `k` is the sibling count (spec §5).
+    /// The proof is not `32 × (depth(c, C) + 1)` bytes for a chunk, or
+    /// `32 × (h + depth(c, C) + 1)` bytes for a segment (spec §5).
     ///
     /// The extra hash is the size witness. A length that is not a multiple of 32
     /// fails here, before any hashing (spec §5, §10).

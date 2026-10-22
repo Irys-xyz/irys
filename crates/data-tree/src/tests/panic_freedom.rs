@@ -1,4 +1,5 @@
-//! Verifiers, lengths, and `depth` return on untrusted input (spec §5, §10).
+//! Verifiers, lengths, and `depth` return on untrusted input (spec §5).
+//! Length checks run before any hashing (spec §10).
 //!
 //! A panic fails the test. These functions take plain values so a later fuzzer
 //! can call them. See `strategies` for the `PROPTEST_CASES` soak command.

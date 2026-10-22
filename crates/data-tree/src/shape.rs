@@ -41,17 +41,19 @@ pub fn depth(chunk_index: u32, chunk_count: u32) -> Option<u32> {
     Some(sibling_count)
 }
 
-/// RFC 9162 §2.1.3.2 inclusion walk. `node` is the parent hash (spec §5).
+/// RFC 9162 §2.1.3.2 inclusion walk. `node()` is the hash (spec §5).
 ///
 /// `node_index` is the RFC's `fn`. `last_index` is the RFC's `sn`.
+/// `running_hash` starts as the chunk-level leaf (`r` in spec §5).
 ///
-/// Returns `None` when the proof is too long, too short, or not a sequence of
-/// `HASH_SIZE`-byte hashes. A verifier checks the proof length before calling
-/// this, so `None` here means the bytes do not walk to a root.
+/// Returns `None` for a bad index (`chunk_count` is 0 or `chunk_index` is not
+/// below `chunk_count`), a length that is not a multiple of [`HASH_SIZE`], or
+/// a sibling count other than `depth`. A sibling list of that length returns
+/// `Some`. The caller compares that hash with the anchored commitment.
 ///
 /// `c` is `chunk_index`.
 pub(crate) fn climb(
-    mut root: NodeHash,
+    mut running_hash: NodeHash,
     chunk_index: u32,
     chunk_count: u32,
     proof: &[u8],
@@ -71,14 +73,14 @@ pub(crate) fn climb(
         let sibling = NodeHash::from(bytes);
         // `fn` is odd, or it is the last index: the sibling is on the left (spec §5).
         if node_index & 1 == 1 || node_index == last_index {
-            root = node(&sibling, &root);
+            running_hash = node(&sibling, &running_hash);
             // While `fn` is even and not zero, both indices move up one level (spec §5).
             while node_index & 1 == 0 && node_index != 0 {
                 node_index >>= 1;
                 last_index >>= 1;
             }
         } else {
-            root = node(&root, &sibling);
+            running_hash = node(&running_hash, &sibling);
         }
         node_index >>= 1;
         last_index >>= 1;
@@ -86,5 +88,5 @@ pub(crate) fn climb(
     if last_index != 0 {
         return None;
     }
-    Some(root)
+    Some(running_hash)
 }

@@ -57,10 +57,8 @@ impl DataTreeBuilder {
     /// A failed reservation is ignored, and the layer then grows on demand, the
     /// same as [`Self::new`].
     ///
-    /// On Linux with glibc the hint does not measurably change resident memory
-    /// or time for a large upload: a 5 TiB tree used about 1.31 GB peak RSS and
-    /// about 5–6 s both with the hint and without it, because a large
-    /// allocation grows without touching the unused pages.
+    /// The hint does not change the bytes stored. A full mainnet upload is
+    /// 41,943,041 node hashes, 1,342,177,312 bytes (1.34 GB, spec §9).
     pub fn with_capacity(geometry: Geometry, data_size: u64) -> Result<Self, SizeError> {
         let chunk_count = geometry.chunk_count(data_size)?;
         let layer_capacities = layer_capacities(chunk_count);
@@ -111,7 +109,10 @@ impl DataTreeBuilder {
     ///
     /// Hashing uses the rayon global pool. A caller may run this inside their
     /// own `ThreadPool::install` to bound the threads.
+    ///
+    /// Requires feature `parallel`.
     #[cfg(feature = "parallel")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
     pub fn push_chunks_parallel(&mut self, bytes: &[u8]) -> Result<(), BuildError> {
         let (split, piece_count) = self.validate_chunk_batch(bytes)?;
         let roots = hash_chunk_pieces(&self.geometry, bytes, split, piece_count)?;
@@ -191,17 +192,9 @@ impl DataTreeBuilder {
                 None => bytes.len(),
             };
             let chunk_length = u64::try_from(end - offset).expect("piece length fits u64");
-            // Same length rule as `prepare_push`. The split makes every piece
-            // but the last full, and the last piece `1..=chunk_size`.
-            if chunk_length == 0 {
-                return Err(BuildError::ChunkLength(ChunkLengthError::Empty));
-            }
-            if chunk_length > chunk_size {
-                return Err(BuildError::ChunkLength(ChunkLengthError::TooLong {
-                    chunk_length,
-                    chunk_size,
-                }));
-            }
+            // The split makes every piece but the last a full chunk, and the
+            // last piece `1..=chunk_size`.
+            debug_assert!(chunk_length >= 1 && chunk_length <= chunk_size);
             if pushed >= self.geometry.max_data_tx_chunks() {
                 return Err(BuildError::TooManyChunks {
                     max_data_tx_chunks: self.geometry.max_data_tx_chunks(),
@@ -240,7 +233,7 @@ impl DataTreeBuilder {
             // (spec §4). A missing hint, or a hint that is too small, grows the
             // layer on demand.
             //
-            // Fail soft. `with_capacity` aborts the process when the allocator
+            // Fail soft. `Vec::with_capacity` aborts the process when the allocator
             // refuses the reservation or the byte size exceeds `isize::MAX`.
             // A hint is not a checked allocation: `try_reserve_exact` returns
             // that failure, and the empty layer grows on demand, the same as
@@ -266,7 +259,7 @@ impl DataTreeBuilder {
             let layer_length = self.layers[level].len();
             if !layer_length.is_multiple_of(2) {
                 // A single node on the highest layer is the root. Carrying it
-                // again would hash the root with itself.
+                // creates another one-node layer, and finish does not stop.
                 if layer_length == 1 && level + 1 == self.layers.len() {
                     break;
                 }
@@ -436,8 +429,10 @@ impl DataTree {
         if actual != expected {
             return Err(ProofError::InvalidChunkLength { expected, actual });
         }
-        let computed = chunk_root(&self.geometry, chunk_bytes)
-            .map_err(|_| ProofError::InvalidChunkLength { expected, actual })?;
+        // The length check above is the untrusted-input gate. `chunk_len` for
+        // `c < C` is in `1..=chunk_size`, which is `chunk_root`'s precondition.
+        let computed =
+            chunk_root(&self.geometry, chunk_bytes).expect("chunk length is in 1..=chunk_size");
         if computed != self.chunk_root(chunk_index)? {
             return Err(ProofError::ChunkRootMismatch);
         }

@@ -18,15 +18,17 @@ fn write_lower_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8; HASH_SIZE]) -> fmt::
         out[byte_index * 2] = HEX_ALPHABET[usize::from(byte >> 4)];
         out[byte_index * 2 + 1] = HEX_ALPHABET[usize::from(byte & 0x0f)];
     }
-    match core::str::from_utf8(&out) {
-        Ok(text) => f.write_str(text),
-        Err(_) => Err(fmt::Error),
-    }
+    // Every output byte is taken from the ASCII hex alphabet.
+    let text = core::str::from_utf8(&out).expect("hex alphabet is ASCII");
+    f.write_str(text)
 }
 
 macro_rules! hash_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
+        ///
+        /// `Display` is lowercase hex of the 32 bytes, with no `0x` prefix.
+        /// `Debug` is the type name and that hex in parentheses.
         #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name([u8; HASH_SIZE]);
 
@@ -57,7 +59,10 @@ macro_rules! hash_id {
 
         impl fmt::Debug for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                fmt::Display::fmt(self, f)
+                f.write_str(stringify!($name))?;
+                f.write_str("(")?;
+                write_lower_hex(f, &self.0)?;
+                f.write_str(")")
             }
         }
     };

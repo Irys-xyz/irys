@@ -1,11 +1,12 @@
 //! Proof checks (spec §5).
 //!
 //! The order is fixed: range, byte length, proof length, the size witness, then
-//! the climb. The expected proof length is `32 × (k + 1)` bytes: `k` sibling
-//! hashes and `size_witness` (spec §5). A length that is not a multiple of 32
-//! fails that check. Length checks run before any hashing (spec §10). While
-//! `verify_segment` climbs the chunk, a sibling subtree that lies entirely past
-//! the data must be `empty(ℓ)` (spec §5, §10).
+//! the climb. A chunk proof is `32 × (depth(c, C) + 1)` bytes. A segment proof
+//! is `32 × (h + depth(c, C) + 1)` bytes (spec §5). A length that is not a
+//! multiple of 32 fails that check. Length checks run before any hashing
+//! (spec §10). The empty-sibling pin runs in `verify_segment`'s in-chunk loop,
+//! before `climb`: a sibling subtree that lies entirely past the data must be
+//! `empty(ℓ)` (spec §5, §10).
 
 use crate::chunk::chunk_root;
 use crate::error::VerifyError;
@@ -129,8 +130,9 @@ pub fn verify_segment(
         let level = u32::try_from(level).expect("height fits u32");
         debug_assert!(level < u32::BITS);
         let sibling_start = (segment_index ^ 1) << level;
-        // Entirely past the data: this sibling must be `empty(ℓ)` (spec §5, §10).
-        // A sibling that still holds a data segment is not opened.
+        // Entirely past the data: the sibling must be `empty(ℓ)`. Any other hash
+        // fails. A sibling that still holds a data segment is not opened
+        // (spec §5, §10).
         if sibling_start >= data_segments && sibling != empty(level) {
             return Err(VerifyError::CommitmentMismatch);
         }
@@ -199,15 +201,16 @@ fn commitment_matches(
 }
 
 fn exact_byte_length(bytes: &[u8], expected: u64) -> Result<(), u64> {
-    match u64::try_from(bytes.len()) {
-        Ok(actual) if actual == expected => Ok(()),
-        Ok(actual) => Err(actual),
-        // A length that does not fit `u64` is not the expected length. Fail closed.
-        Err(_) => Err(u64::MAX),
+    // A slice length fits `u64` on every supported target.
+    let actual = u64::try_from(bytes.len()).expect("byte length fits u64");
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(actual)
     }
 }
 
 fn proof_byte_length(hash_count: u32) -> usize {
-    // `32 × (k + 1)` (spec §5). `k + 1` here is at most `h + depth + 1`.
+    // `32 × (depth(c, C) + 1)` or `32 × (h + depth(c, C) + 1)` (spec §5).
     usize::try_from(hash_count).expect("hash count fits usize") * HASH_SIZE
 }
