@@ -886,6 +886,9 @@ pub struct StorageModule {
     reset_incomplete: AtomicBool,
     #[cfg(any(test, feature = "test-utils"))]
     reset_fail_next: AtomicBool,
+    /// `partition_offsets_for_data_root_chunk` fails while this is set.
+    #[cfg(any(test, feature = "test-utils"))]
+    fail_data_root_index_read: AtomicBool,
     #[cfg(test)]
     fail_entropy_read_nth: AtomicU64,
     #[cfg(test)]
@@ -2481,6 +2484,8 @@ impl StorageModule {
             reset_incomplete: AtomicBool::new(false),
             #[cfg(any(test, feature = "test-utils"))]
             reset_fail_next: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-utils"))]
+            fail_data_root_index_read: AtomicBool::new(false),
             #[cfg(test)]
             fail_entropy_read_nth: AtomicU64::new(0),
             #[cfg(test)]
@@ -3102,6 +3107,12 @@ impl StorageModule {
         self.reset_fail_next.store(true, Ordering::SeqCst);
     }
 
+    /// `partition_offsets_for_data_root_chunk` returns an error while `fail` is set.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn fail_data_root_index_reads(&self, fail: bool) {
+        self.fail_data_root_index_read.store(fail, Ordering::SeqCst);
+    }
+
     /// The next lane `pwrite` panics once, before the kernel write.
     #[cfg(test)]
     fn panic_next_pwrite_for_test(&self) {
@@ -3302,6 +3313,10 @@ impl StorageModule {
         data_root: DataRoot,
         tx_offset: TxChunkOffset,
     ) -> eyre::Result<Option<Vec<PartitionChunkOffset>>> {
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.fail_data_root_index_read.load(Ordering::SeqCst) {
+            return Err(eyre::eyre!("data root index read failed"));
+        }
         let infos = self.collect_data_root_infos(data_root)?;
         if infos.0.is_empty() {
             return Ok(None);
