@@ -50,12 +50,12 @@ fn digest(tag: u8, parts: &[&[u8]]) -> [u8; HASH_SIZE] {
 
 /// `H(Leaf ‖ bytes)`. `bytes` is hashed at its exact length: no padding (spec §3).
 pub fn leaf(bytes: &[u8]) -> NodeHash {
-    NodeHash(digest(TreeDomainTag::Leaf.as_byte(), &[bytes]))
+    NodeHash::from(digest(TreeDomainTag::Leaf.as_byte(), &[bytes]))
 }
 
 /// `H(Node ‖ left ‖ right)` (spec §3).
 pub fn node(left: &NodeHash, right: &NodeHash) -> NodeHash {
-    NodeHash(digest(
+    NodeHash::from(digest(
         TreeDomainTag::Node.as_byte(),
         &[left.as_bytes(), right.as_bytes()],
     ))
@@ -63,7 +63,7 @@ pub fn node(left: &NodeHash, right: &NodeHash) -> NodeHash {
 
 /// `H(Size ‖ be64(data_size))` (spec §3). The witness covers `data_size` only.
 pub fn size_witness(data_size: u64) -> SizeWitness {
-    SizeWitness(digest(
+    SizeWitness::from(digest(
         TreeDomainTag::Size.as_byte(),
         &[&data_size.to_be_bytes()],
     ))
@@ -73,7 +73,7 @@ pub fn size_witness(data_size: u64) -> SizeWitness {
 ///
 /// `c` is `chunk_index`.
 pub fn chunk_key(commitment: &DataCommitment, chunk_index: u32) -> ChunkKey {
-    ChunkKey(digest(
+    ChunkKey::from(digest(
         TreeDomainTag::ChunkKey.as_byte(),
         &[commitment.as_bytes(), &chunk_index.to_be_bytes()],
     ))
@@ -89,7 +89,7 @@ pub fn chunk_key(commitment: &DataCommitment, chunk_index: u32) -> ChunkKey {
 /// `k` is `empty_height`.
 pub fn empty(empty_height: u32) -> NodeHash {
     static TABLE: LazyLock<[NodeHash; EMPTY_TABLE_LEN]> = LazyLock::new(|| {
-        let mut table = [NodeHash([0; HASH_SIZE]); EMPTY_TABLE_LEN];
+        let mut table = [NodeHash::from([0; HASH_SIZE]); EMPTY_TABLE_LEN];
         table[0] = leaf(b"");
         for height in 1..table.len() {
             table[height] = node(&table[height - 1], &table[height - 1]);
@@ -105,7 +105,7 @@ pub fn empty(empty_height: u32) -> NodeHash {
 
 /// `node(data_tree_root, size_witness(data_size))` (spec §4).
 pub fn data_commitment(root: &DataTreeRoot, data_size: u64) -> DataCommitment {
-    let root_hash = NodeHash(*root.as_bytes());
-    let witness = NodeHash(*size_witness(data_size).as_bytes());
-    DataCommitment(*node(&root_hash, &witness).as_bytes())
+    let root_hash = NodeHash::from(*root.as_bytes());
+    let witness = NodeHash::from(*size_witness(data_size).as_bytes());
+    DataCommitment::from(*node(&root_hash, &witness).as_bytes())
 }

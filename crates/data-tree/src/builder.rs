@@ -549,7 +549,7 @@ mod tests {
     use crate::types::{HASH_SIZE, NodeHash};
 
     fn node_hash(byte: u8) -> NodeHash {
-        NodeHash([byte; HASH_SIZE])
+        NodeHash::from([byte; HASH_SIZE])
     }
 
     /// A level at or above `u32::BITS` has no sibling. The one-node layer is that

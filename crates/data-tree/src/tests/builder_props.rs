@@ -102,7 +102,7 @@ fn apply_chunk_root(
         Err(_) => {
             // The length is illegal. `push_chunk_root` rejects it before it
             // uses the root (spec §4, §10). The root value must not matter.
-            let ignored = NodeHash([0_u8; HASH_SIZE]);
+            let ignored = NodeHash::from([0_u8; HASH_SIZE]);
             match builder.push_chunk_root(ignored, chunk_length) {
                 Ok(()) => panic!("push_chunk_root accepted a length chunk_root rejected"),
                 Err(_) => Err(()),

@@ -49,8 +49,8 @@ fn primitive_vectors() {
     let root = DataTreeRoot::from([9_u8; HASH_SIZE]);
     let data_size = 123_u64;
     let via_node = hash::node(
-        &crate::types::NodeHash(*root.as_bytes()),
-        &crate::types::NodeHash(*hash::size_witness(data_size).as_bytes()),
+        &crate::types::NodeHash::from(*root.as_bytes()),
+        &crate::types::NodeHash::from(*hash::size_witness(data_size).as_bytes()),
     );
     assert_eq!(
         hash::data_commitment(&root, data_size).as_bytes(),

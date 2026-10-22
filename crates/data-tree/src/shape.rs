@@ -65,7 +65,7 @@ pub(crate) fn climb(
         }
         let bytes = <[u8; HASH_SIZE]>::try_from(sibling)
             .expect("chunks_exact yields HASH_SIZE-byte slices");
-        let sibling = NodeHash(bytes);
+        let sibling = NodeHash::from(bytes);
         // `fn` is odd, or it is the last index: the sibling is on the left (spec §5).
         if node_index & 1 == 1 || node_index == last_index {
             root = node(&sibling, &root);

@@ -264,8 +264,8 @@ pub(super) fn untrusted_verifier_input() -> impl Strategy<Value = UntrustedVerif
                                 })
                                 .prop_map(move |(bytes, proof)| UntrustedVerifierInput {
                                     geometry,
-                                    commitment: DataCommitment(commitment),
-                                    data_tree_root: DataTreeRoot(root),
+                                    commitment: DataCommitment::from(commitment),
+                                    data_tree_root: DataTreeRoot::from(root),
                                     data_size,
                                     chunk_index,
                                     segment_index,

@@ -104,7 +104,7 @@ fn synthetic(chunk_index: u32) -> NodeHash {
     let mut bytes = [0_u8; HASH_SIZE];
     let chunk_index_bytes = chunk_index.to_be_bytes();
     bytes[..chunk_index_bytes.len()].copy_from_slice(&chunk_index_bytes);
-    NodeHash(bytes)
+    NodeHash::from(bytes)
 }
 
 /// Final length of each cache layer (spec §4 `build_layer`).

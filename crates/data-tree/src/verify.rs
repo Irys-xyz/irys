@@ -117,7 +117,7 @@ pub fn verify_segment(
     for (level, sibling) in in_chunk.chunks_exact(HASH_SIZE).enumerate() {
         let bytes = <[u8; HASH_SIZE]>::try_from(sibling)
             .expect("chunks_exact yields HASH_SIZE-byte slices");
-        let sibling = NodeHash(bytes);
+        let sibling = NodeHash::from(bytes);
         // `level` is `ℓ`. `segment_index` is `j >> ℓ`. The sibling subtree
         // starts at `((j >> ℓ) ^ 1) << ℓ` (spec §5). `ℓ < h`, and `h` is at
         // most `MAX_SUBTREE_HEIGHT`, so the shift fits in `u32`.

@@ -118,7 +118,7 @@ The tree is a general primitive. A bound tighter than the rule above belongs to 
 | `data_commitment` | `node(data_tree_root, size_witness)`: the identity of a v2 upload |
 | `data_root` | the v1 value only. A v2 value is never called `data_root` |
 
-Each value has its own newtype in code, so one cannot be passed as another.
+Each value has its own newtype in code, so a function signature rejects the wrong one; a deliberate conversion through raw bytes is a decode, not a proof.
 
 ```
 n = data_size, with 1 ≤ n ≤ max_data_tx_chunks × chunk_size

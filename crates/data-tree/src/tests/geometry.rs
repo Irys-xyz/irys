@@ -200,7 +200,7 @@ fn segment_len_holds_for_the_last_segment_of_the_extreme_geometries() {
 
 #[test]
 fn verify_segment_does_not_panic_on_the_extreme_geometries() {
-    let commitment = DataCommitment([0x11; HASH_SIZE]);
+    let commitment = DataCommitment::from([0x11; HASH_SIZE]);
 
     let geometry = largest_accepted_geometry();
     let (data_size, chunk_index, segment_index) = last_indexes(&geometry);

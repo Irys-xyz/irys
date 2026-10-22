@@ -528,8 +528,8 @@ fn assert_every_bit_flip_mismatches(
 #[test]
 fn a_64_byte_segment_equal_to_two_hashes_is_a_leaf() {
     // spec §3: a segment of `l ‖ r` is `leaf`, never `node(l, r)`.
-    let left = NodeHash([1_u8; HASH_SIZE]);
-    let right = NodeHash([2_u8; HASH_SIZE]);
+    let left = NodeHash::from([1_u8; HASH_SIZE]);
+    let right = NodeHash::from([2_u8; HASH_SIZE]);
     // A segment equal to `l ‖ r`: two digests (spec §10).
     let mut bytes = [0_u8; HASH_SIZE * 2];
     bytes[..HASH_SIZE].copy_from_slice(left.as_bytes());

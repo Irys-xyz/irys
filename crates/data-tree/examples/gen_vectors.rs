@@ -1311,8 +1311,8 @@ fn reject(
 fn two_digest_case() -> NegativeCase {
     // spec §3, §13: a 64-byte segment equal to `l ‖ r` is a leaf, never `node(l, r)`.
     let geometry = two_digest_geometry();
-    let left = NodeHash([1_u8; HASH_SIZE]);
-    let right = NodeHash([2_u8; HASH_SIZE]);
+    let left = NodeHash::from([1_u8; HASH_SIZE]);
+    let right = NodeHash::from([2_u8; HASH_SIZE]);
     let mut bytes = Vec::with_capacity(HASH_SIZE * 2);
     bytes.extend_from_slice(left.as_bytes());
     bytes.extend_from_slice(right.as_bytes());
@@ -1340,7 +1340,7 @@ fn two_digest_case() -> NegativeCase {
         &proof,
     )
     .expect("the segment verifies as a leaf");
-    let mistaken = data_commitment(&DataTreeRoot(*node_hash.as_bytes()), data_size);
+    let mistaken = data_commitment(&DataTreeRoot::from(*node_hash.as_bytes()), data_size);
     let draft = NegativeDraft {
         name: "segment_equal_to_two_hashes_is_a_leaf",
         check: Check::VerifySegment,

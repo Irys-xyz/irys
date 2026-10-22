@@ -36,7 +36,7 @@ fn malformed_last_chunk_of_the_published_attack_is_rejected() {
     let bytes = tree_bytes(data_size);
     let chunk = chunk_bytes(&geometry, &bytes, data_size, 1);
     let segment = &chunk[..];
-    let garbage = NodeHash([GARBAGE_BYTE; HASH_SIZE]);
+    let garbage = NodeHash::from([GARBAGE_BYTE; HASH_SIZE]);
     let left = node(&leaf(segment), &empty(0));
     let bad_chunk_root = node(&left, &garbage);
     let chunk_zero = tree.chunk_root(0).unwrap();
@@ -148,7 +148,7 @@ fn reject_malformed_right_half(geometry: &Geometry, data_size: u64, data_segment
     let chunk_index = tree.chunk_count() - 1;
     let chunk = chunk_bytes(geometry, &bytes, data_size, chunk_index);
     let level = geometry.height() - 1;
-    let garbage = NodeHash([GARBAGE_BYTE; HASH_SIZE]);
+    let garbage = NodeHash::from([GARBAGE_BYTE; HASH_SIZE]);
     assert_ne!(garbage, empty(level));
 
     let mut checked = 0_u32;
@@ -383,7 +383,7 @@ fn commitment_from_segment_proof(
     let mut walked_index = segment_index;
     for sibling in in_chunk.chunks_exact(HASH_SIZE) {
         let bytes = <[u8; HASH_SIZE]>::try_from(sibling).unwrap();
-        let sibling = NodeHash(bytes);
+        let sibling = NodeHash::from(bytes);
         root = if walked_index & 1 == 0 {
             node(&root, &sibling)
         } else {
@@ -399,7 +399,7 @@ fn commitment_from_segment_proof(
 fn hash_other_than(required: NodeHash, level: u32, segment: &[u8], probe: u64) -> NodeHash {
     let choices = [
         empty(level + 1),
-        NodeHash([GARBAGE_BYTE; HASH_SIZE]),
+        NodeHash::from([GARBAGE_BYTE; HASH_SIZE]),
         leaf(segment),
     ];
     let start = usize::try_from(probe % u64::try_from(choices.len()).unwrap()).unwrap();
@@ -415,7 +415,7 @@ fn hash_other_than(required: NodeHash, level: u32, segment: &[u8], probe: u64) -
 fn sibling_at(proof: &[u8], level: u32) -> NodeHash {
     let offset = usize::try_from(level).unwrap() * HASH_SIZE;
     let bytes = <[u8; HASH_SIZE]>::try_from(&proof[offset..offset + HASH_SIZE]).unwrap();
-    NodeHash(bytes)
+    NodeHash::from(bytes)
 }
 
 fn replace_sibling(proof: &[u8], level: u32, sibling: &NodeHash) -> Vec<u8> {

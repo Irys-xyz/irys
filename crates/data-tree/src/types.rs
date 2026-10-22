@@ -1,4 +1,6 @@
-//! One newtype per hash so a caller cannot pass one where another is required (spec §2).
+//! One newtype per hash (spec §2). The newtypes stop accidental mix-ups in
+//! function signatures. They do not stop a deliberate conversion through raw
+//! bytes, which is a decode, not a proof.
 
 use core::fmt;
 
@@ -26,7 +28,7 @@ macro_rules! hash_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
         #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-        pub struct $name(pub [u8; HASH_SIZE]);
+        pub struct $name([u8; HASH_SIZE]);
 
         impl $name {
             /// Raw digest bytes.
@@ -69,14 +71,15 @@ hash_id!(
 hash_id!(
     /// Root over the data only. The builder is what produces one (spec §2, §4).
     ///
-    /// There is no `From<NodeHash>`: a node hash is not a data-tree root until
-    /// the chunk tree says so.
+    /// There is no `From<NodeHash>`. The newtypes stop accidental mix-ups in
+    /// function signatures. They do not stop a deliberate conversion through
+    /// raw bytes, which is a decode, not a proof.
     DataTreeRoot
 );
 
 impl DataTreeRoot {
     pub(crate) const fn from_hash(hash: NodeHash) -> Self {
-        Self(hash.0)
+        Self(*hash.as_bytes())
     }
 }
 

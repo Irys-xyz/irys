@@ -130,7 +130,7 @@ fn tree_for_chunk_count(chunk_count: u32) -> (Vec<NodeHash>, DataTree) {
 fn chunk_root_for_index(chunk_index: u32) -> NodeHash {
     let mut bytes = [0_u8; HASH_SIZE];
     bytes[..4].copy_from_slice(&chunk_index.to_be_bytes());
-    NodeHash(bytes)
+    NodeHash::from(bytes)
 }
 
 fn concatenated_path(path: &[NodeHash]) -> Vec<u8> {

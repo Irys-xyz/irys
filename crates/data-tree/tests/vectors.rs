@@ -910,8 +910,8 @@ fn check_segment_mutation(geometry: &Geometry, case: &NegativeCase) {
 }
 
 fn check_two_digest_segment(geometry: &Geometry, case: &NegativeCase) {
-    let left = NodeHash(decode_hash(case.left.as_deref().expect("left")));
-    let right = NodeHash(decode_hash(case.right.as_deref().expect("right")));
+    let left = NodeHash::from(decode_hash(case.left.as_deref().expect("left")));
+    let right = NodeHash::from(decode_hash(case.right.as_deref().expect("right")));
     let mut bytes = Vec::with_capacity(HASH_SIZE * 2);
     bytes.extend_from_slice(left.as_bytes());
     bytes.extend_from_slice(right.as_bytes());
@@ -929,7 +929,7 @@ fn check_two_digest_segment(geometry: &Geometry, case: &NegativeCase) {
     );
     let data_size = u64::try_from(bytes.len()).expect("two digests fit");
     assert_eq!(data_size, case.data_size, "{}", case.name);
-    let mistaken = data_commitment(&DataTreeRoot(*node_hash.as_bytes()), data_size);
+    let mistaken = data_commitment(&DataTreeRoot::from(*node_hash.as_bytes()), data_size);
     assert_eq!(
         hex_of(mistaken.as_bytes()),
         case.commitment,
