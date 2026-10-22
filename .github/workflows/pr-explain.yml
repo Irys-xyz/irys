@@ -119,14 +119,42 @@ jobs:
             MODE="$MODE_OPENED"
           fi
 
+          # SHAs are commit ids used later as a checkout ref. Reject anything
+          # else before publishing them.
+          HEX40='^[0-9a-fA-F]{40}$'
+          if ! [[ "$EXPLAIN_SHA" =~ $HEX40 ]]; then
+            echo "::error::explain sha is not 40 hex characters"
+            exit 1
+          fi
+          if ! [[ "$BASE_SHA" =~ $HEX40 ]]; then
+            echo "::error::base sha is not 40 hex characters"
+            exit 1
+          fi
+          if ! [[ "$HEAD_SHA" =~ $HEX40 ]]; then
+            echo "::error::head sha is not 40 hex characters"
+            exit 1
+          fi
+
+          # The title is untrusted and may contain newlines. A `key=value`
+          # line inside it would replace number, stage, or a sha: the runner
+          # keeps the last assignment of each key. A heredoc delimiter that
+          # does not occur in the title keeps the title a single output.
+          TITLE=$(jq -r '.title' <<<"$PR_JSON")
+          DELIM="title_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          while [[ "$TITLE" == *"$DELIM"* ]]; do
+            DELIM="title_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          done
+
           {
-            echo "number=${PR_NUMBER}"
-            echo "stage=${STAGE}"
-            echo "mode=${MODE}"
-            echo "explain_sha=${EXPLAIN_SHA}"
-            echo "base_sha=${BASE_SHA}"
-            echo "head_sha=${HEAD_SHA}"
-            echo "title=$(jq -r '.title' <<<"$PR_JSON")"
+            printf 'number=%s\n' "$PR_NUMBER"
+            printf 'stage=%s\n' "$STAGE"
+            printf 'mode=%s\n' "$MODE"
+            printf 'explain_sha=%s\n' "$EXPLAIN_SHA"
+            printf 'base_sha=%s\n' "$BASE_SHA"
+            printf 'head_sha=%s\n' "$HEAD_SHA"
+            printf 'title<<%s\n' "$DELIM"
+            printf '%s\n' "$TITLE"
+            printf '%s\n' "$DELIM"
           } >> "$GITHUB_OUTPUT"
 
           # The PR body is untrusted, multi-line input for the model prompt;
