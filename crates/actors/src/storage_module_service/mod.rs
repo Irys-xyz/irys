@@ -792,11 +792,16 @@ impl StorageModuleServiceInner {
                     while_uninitialized: false,
                 }),
         );
+        // A failed pack left these spans uninitialized. Resend only the part
+        // that still is.
         waiting.extend(
             module
                 .take_packing_ranges()
                 .into_iter()
-                .map(PartitionChunkRange),
+                .map(|interval| PendingSpan {
+                    range: PartitionChunkRange(interval),
+                    while_uninitialized: true,
+                }),
         );
         let mut deferred = Vec::new();
         for span in waiting {
