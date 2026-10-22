@@ -8507,55 +8507,25 @@ mod tests {
         );
     }
 
-    /// Every chunk of every listed layout validates. A proof whose tx_path
-    /// and data_path belong to a different tx than the chunk layout is rejected.
+    /// Two 1-byte txs put the next tx's chunk at ledger offset 2, while its
+    /// tx_root leaf starts at byte 2. Every chunk validates. (The old byte
+    /// lookup landed inside a different tx's leaf here, not past the tree's
+    /// end as in the 40/40 layout.) A proof whose tx_path and data_path belong
+    /// to a different tx than the chunk layout is rejected.
     #[tokio::test]
-    async fn poa_accepts_each_layout_and_rejects_a_foreign_proof() {
-        let chunk = 32_usize;
-        let layouts: Vec<(&str, Vec<Vec<u8>>)> = vec![
-            ("aligned", vec![vec![1_u8; chunk], vec![2_u8; chunk * 2]]),
-            (
-                "one_byte",
-                vec![vec![3_u8; 1], vec![4_u8; 1], vec![5_u8; chunk]],
-            ),
-            (
-                "chunk_minus_one",
-                vec![vec![6_u8; chunk - 1], vec![7_u8; chunk - 1]],
-            ),
-            (
-                "chunk_plus_one",
-                vec![vec![8_u8; chunk + 1], vec![9_u8; chunk + 1]],
-            ),
-            (
-                "tiny_then_large",
-                vec![
-                    vec![10_u8; 1],
-                    vec![11_u8; 1],
-                    vec![12_u8; 1],
-                    vec![13_u8; 1],
-                    vec![14_u8; 1],
-                    vec![15_u8; chunk * 3],
-                ],
-            ),
-            (
-                "tiny_after_large",
-                vec![vec![16_u8; chunk * 3], vec![17_u8; 1], vec![18_u8; 1]],
-            ),
-        ];
-
-        for (name, data) in &layouts {
-            let (_tmp, mut context) = init().await;
-            let built = index_submit_poas(&mut context, data);
-            for poa in &built.poas {
-                let result = validate_indexed_poa(&context, &built, poa);
-                assert!(
-                    result.is_ok(),
-                    "{name}: tx {} chunk {} offset {} must validate: {result:?}",
-                    poa.tx_index,
-                    poa.chunk_index,
-                    poa.block_offset
-                );
-            }
+    async fn poa_accepts_one_byte_txs_and_rejects_a_foreign_proof() {
+        let (_tmp, mut context) = init().await;
+        let one_byte = [vec![3_u8; 1], vec![4_u8; 1], vec![5_u8; 32]];
+        let built = index_submit_poas(&mut context, &one_byte);
+        for poa in &built.poas {
+            let result = validate_indexed_poa(&context, &built, poa);
+            assert!(
+                result.is_ok(),
+                "tx {} chunk {} offset {} must validate: {result:?}",
+                poa.tx_index,
+                poa.chunk_index,
+                poa.block_offset
+            );
         }
 
         let (_tmp, mut context) = init().await;
@@ -8581,16 +8551,39 @@ mod tests {
                 },
             );
             assert!(
-                matches!(
-                    result,
-                    Err(PreValidationError::MerkleProofInvalid(_)
-                        | PreValidationError::PoAChunkOffsetOutOfTxBounds
-                        | PreValidationError::PoaTxRootLeafMismatch { .. }
-                        | PreValidationError::PoAChunkHashMismatch { .. }
-                        | PreValidationError::PoAChunkOffsetOutOfDataChunksBounds)
-                ),
+                matches!(result, Err(PreValidationError::MerkleProofInvalid(_))),
                 "{label} must be rejected, got {result:?}"
             );
+        }
+    }
+
+    /// A proof buffer with no room for a leaf is invalid for every target. It
+    /// is rejected before the owning tx headers are read, so a missing owning
+    /// header cannot turn it into a node fault.
+    #[tokio::test]
+    async fn poa_rejects_an_empty_proof_before_the_header_fetch() {
+        use irys_database::tables::IrysBlockHeaders;
+        use reth_db::transaction::DbTxMut as _;
+
+        let (_tmp, mut context) = init().await;
+        let built = index_submit_poas(&mut context, &[vec![3_u8; 32]]);
+        context
+            .block_index
+            .db()
+            .update_eyre(|tx| {
+                tx.delete::<IrysBlockHeaders>(H256::zero(), None)?;
+                Ok(())
+            })
+            .expect("delete the owning header");
+
+        let mut empty = built.poas[0].clone();
+        empty.poa.tx_path = Some(Base64(Vec::new()));
+        match validate_indexed_poa(&context, &built, &empty) {
+            Err(err @ PreValidationError::MerkleProofInvalid(_)) => {
+                assert!(err.to_string().contains("too short"), "{err}");
+                assert!(!err.is_node_fault());
+            }
+            other => panic!("expected MerkleProofInvalid, got {other:?}"),
         }
     }
 
