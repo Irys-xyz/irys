@@ -9,13 +9,17 @@ fn main() {
     // Watch individual files instead of the directory.
     // Directory-level watches use mtime which can change even when rsync
     // doesn't modify any files, triggering unnecessary full rebuilds.
-    for entry in std::fs::read_dir(&c_src).unwrap() {
-        let entry = entry.unwrap();
-        // Relative to the package root (cargo resolves it there): an absolute path
-        // makes the fingerprint differ per checkout, so a target/ copied between
-        // worktrees reruns this script and rebuilds everything that depends on irys-c.
-        let path = entry.path();
-        let rel = path.strip_prefix(&manifest_dir).unwrap_or(&path);
+    // Emit them sorted and relative to the package root (cargo resolves them there):
+    // cargo fingerprints this list in order, and both read_dir order and absolute
+    // paths differ between checkouts, so a target/ copied between worktrees would
+    // rerun this script and rebuild everything that depends on irys-c.
+    let mut sources: Vec<PathBuf> = std::fs::read_dir(&c_src)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    sources.sort();
+    for path in &sources {
+        let rel = path.strip_prefix(&manifest_dir).unwrap_or(path);
         println!("cargo:rerun-if-changed={}", rel.display());
     }
 
