@@ -332,11 +332,15 @@ The data tx header keeps its layout and gets no new version tag (decided). From 
 - Deleted for v2: provisional size raises; parking on a larger size claim and its rescue; the `layout_data_size` fallback; the rightmost-chunk position check; confirmation on the rightmost chunk; size re-checks from storage modules; the consensus rule `InvalidPromotionDataSizeMismatch` and the `tx_selector` size filter (both read node-local size state); the `data_size_confirmed` field and `confirm_data_size_for_data_root`. Every v2 size is final when the header arrives.
 - Kept: parking chunks that arrive before their header. Parking handles arrival order, not size. Once the header arrives, a parked chunk is verified in full.
 
-**PoA offset mapping.** A data PoA names a partition and an offset, which give a block-relative chunk index `b`. Txs fill a ledger in whole chunks, in order. Chunk placement comes only from padded chunk counts (`chunk_start`), never from sums of `data_size`. A byte offset, where one is needed, is `chunk_start × chunk_size`. The `tx_root` v2 leaf binds `chunk_start`, the padded chunk count before the tx. That count is the block-relative chunk index where the tx starts (Appendix C):
+**PoA offset mapping.** A data PoA names a partition and an offset, which give a block-relative chunk index `b`. Txs fill a ledger in whole chunks, in order. Chunk placement comes only from padded chunk counts (`chunk_start`), never from sums of `data_size`. A byte offset, where one is needed, is `chunk_start × chunk_size`. The `tx_root` v2 leaf binds `chunk_start`, the padded chunk count before the tx. Block validation checks that those counts are the prefix sums (Appendix C). That count is the block-relative chunk index where the tx starts:
 
 ```
-c = b − chunk_start, and require 0 ≤ c < ceil(data_size / chunk_size)
+require b ≥ chunk_start                                          // before the subtraction
+c = b − chunk_start                                              // checked arithmetic
+require c < ceil(data_size / chunk_size)
 ```
+
+A check that fails makes the PoA invalid. Checked subtraction rejects a `chunk_start` above `b`. An unsigned wrap of `b − chunk_start` is not a chunk index.
 
 - Each tx starts on a chunk boundary, so segment `j` of the packed chunk at `b` is segment `j` of the tx's chunk `c`.
 - The PoA verifies the owning tx with `verify_tx` (Appendix C). Which fields the PoA carries is open (Appendix C item 2).
@@ -418,7 +422,7 @@ This crate is the data tree and this spec. The rows below are the L1 and gateway
 | --- | --- |
 | `crates/types`: new data-tree module | geometry, tags, `leaf` / `node` / `size_witness`, the `empty` table, `chunk_root`, the streaming builder with its node cache, chunk and segment proofs, verifiers, `chunk_key`; a newtype for each value |
 | `crates/types/src/merkle.rs` | after Estuary it no longer builds `tx_root`. It still builds the ingress-proof tree with the v1 encoder, until the custody redesign, and it is no longer used for data |
-| `tx_root` | new v2 encoder (Appendix C). Block production, block validation and migration compute the new `tx_root`. Not implemented in this crate |
+| `tx_root` | new v2 encoder (Appendix C). Block production and migration compute the new `tx_root`. Block validation checks the partition and rejects a mismatch (Appendix C). Not implemented in this crate |
 | `crates/types/src/transaction.rs` | field `data_root` becomes `data_tree_root` at the same position; a `data_commitment()` accessor derives the commitment; `data_chunks()` builds chunks with the v2 builder |
 | client builder (`irys.rs` merklize, api-client chunk upload) | v2 tree and chunk proofs; chunk messages carry `data_commitment` |
 | `crates/types/src/chunk.rs`, gossip types | `ChunkKey`; the root field of `UnpackedChunk` holds `data_commitment` |
@@ -428,7 +432,7 @@ This crate is the data tree and this spec. The rows below are the L1 and gateway
 | database | chunk-key tables (§7); rows keyed by `data_commitment`; size-confirmation state deleted; the chunk backfill verifies with `verify_chunk`; database version bump. The MDBX path tables that parse the last 64 bytes as a v1 leaf, and the RocksDB derive, follow `tx_root` v2 (Appendix C) |
 | `crates/database/src/tx_path_derive.rs` | builds v2 `tx_path` proofs (Appendix C). One format from Estuary (§15) |
 | storage modules | keys by `chunk_key` and `data_commitment`; `c` from the placement. No empty-proof handling is needed: every proof ends with the size witness, and that witness is the same for every chunk of one upload (§5, §15 Q10). Flags and the format byte sit directly after the proof and before the CRC: `[proof][flags][format][crc]` (Appendix A.1). Stored proofs stay leaf to root, as received |
-| mempool, block validation and discovery | reject every data tx in blocks up to and including E (§8). PoA data form per the segment-PoA spec; whole-chunk offset mapping (§8); activation rules (§8). PoA validation verifies the owning tx with `verify_tx` (Appendix C). Which fields a PoA carries is open (Appendix C item 2). `InvalidPromotionDataSizeMismatch` and the `tx_selector` size filter deleted |
+| mempool, block validation and discovery | reject every data tx in blocks up to and including E (§8). Block validation checks `chunk_start_0 = 0` and `chunk_start_{k+1} = chunk_start_k + ceil(data_size_k / chunk_size)` with checked arithmetic, and that the header's `tx_root` equals the root of exactly those leaves with `count_witness(N)`, where `N` is the ledger's tx count (Appendix C). A block that fails is invalid. PoA data form per the segment-PoA spec; whole-chunk offset mapping (§8); activation rules (§8). PoA validation verifies the owning tx with `verify_tx` (Appendix C). Which fields a PoA carries is open (Appendix C item 2). `InvalidPromotionDataSizeMismatch` and the `tx_selector` size filter deleted |
 | release freeze | scan mainnet for any data tx or data-chunk PoA (§11). Expect none. One found means the §8 refusal does not hold, and nodes that sync from genesis keep today's data verifier for those blocks, gated by height |
 | mining, chunk migration | `verify_chunk` against the header commitment |
 | ingress proofs | the signed message is `data_commitment`. `verify_ingress_proof` rebuilds with the v2 builder and compares the commitment. Rows and gossip are keyed by `data_commitment`, so one proof covers one (data, size). A planned range-scoped proof signs `data_commitment` and the chunk range `[first, last]` (chunk indices, never byte offsets). A contiguous range could reuse this tree (subtree roots plus the boundary siblings). That API needs its own section and vectors |
@@ -525,7 +529,7 @@ n        C  data_tree_root                                                    da
 
 Q1 to Q10 are decided (§15). These items stay open. They are numbered as in Appendix C. They do not change the data-tree wire format or the data-tree vectors.
 
-2. What a PoA carries: `(k, N, chunk_start)` explicitly, so a validator needs only the owning tx header; or derived from the block's tx headers (smaller PoA, more reads).
+2. What a PoA carries: `(k, N, chunk_start)` explicitly, so a validator needs only the owning tx header; or derived from the block's tx headers (smaller PoA, more reads). With the block-validation rule (Appendix C), the option that verifies with only the owning tx header is safe, because the `tx_root` it checks against has passed full validation.
 3. Whether `prefix_hash` stays in the leaf (today's leaf folds it in).
 4. Where the code lives: `irys-data-tree`, which shares `T`, `climb`, `depth` and the tag registry, or a separate crate.
 
@@ -737,6 +741,21 @@ count_witness(N) = H(0x07 ‖ be32(N))
 - The leaf binds `chunk_start`, the padded chunk count before the tx. Placement follows the §8 rule.
 - A separate node tag means a ledger-tree node can never be read as a data-tree node.
 
+**Block validation.** The formulas above are how the builder sets `chunk_start`. Block validation must check the same partition, with checked arithmetic. `N` is the ledger's tx count. `verify_tx` is not this check.
+
+```
+when N = 0:
+    require the header's tx_root = 0^32
+when N ≥ 1:
+    require chunk_start_0 = 0
+    require chunk_start_{k+1} = chunk_start_k + ceil(data_size_k / chunk_size)
+                                                                       // checked addition; every k with k + 1 < N
+    require the header's tx_root = H(0x06 ‖ T(leaf_0 .. leaf_{N−1}) ‖ count_witness(N))
+                                                                       // leaf_k from the hashing section, with these starts
+```
+
+A block that fails is invalid. A sum that does not fit in 64 bits fails the check. The two equations reject an overlap and a gap.
+
 **Proofs.** Witness-last, like the data tree: the siblings of `leaf_k` in `T`, leaf to root, then `count_witness(N)`. Length `32 × (depth(k, N) + 1)`. Never empty.
 
 ```
@@ -749,9 +768,11 @@ verify_tx(tx_root, N, k, data_tree_root, data_size, prefix_hash, chunk_start, pr
     require H(0x06 ‖ r ‖ H(0x07 ‖ be32(N))) == tx_root
 ```
 
-**What a tx proof proves.** Membership at index `k`, the committed `data_size`, and the placement `chunk_start`. The count witness binds `N`. The direction bits come from `(k, N)`, so `k` is bound by the proof and is not a separate claim. A receipt does not need the block's tx list to check the index.
+**Assumption A4.** A proven `chunk_start` is only as trustworthy as the validation of the block whose `tx_root` anchors it. `verify_tx` shows that the claimed start is in that tree. It does not show that the start is the prefix sum. PoA checks against blocks already validated on chain. A receipt's `tx_root` anchor must come from a validated block.
 
-**Why `chunk_start` is in the leaf.** A receipt is a path from an anchored `tx_root` down to a chunk: block header → `tx_root` → tx → `data_commitment` → chunk. The proven placement shows that ledger chunk `b` is tx `k`'s chunk `c` without that tx list, and PoA verifies with the owning tx header. `c = b − chunk_start` (§8). Membership and committed size alone, which is what v1 `tx_root` proves, was considered and not chosen. Placement would then be recomputed from the block's tx headers with the padded-size helper. A receipt would need the tx list, or a separate placement proof, to map a ledger chunk.
+**What a tx proof proves.** Membership at index `k`, the committed `data_size`, and the claimed `chunk_start`. The count witness binds `N`. The direction bits come from `(k, N)`, so `k` is bound by the proof and is not a separate claim. A receipt does not need the block's tx list to check the index. The proof does not show that `chunk_start` is the prefix sum. Block validation does.
+
+**Why `chunk_start` is in the leaf.** A receipt is a path from an anchored `tx_root` down to a chunk: block header → `tx_root` → tx → `data_commitment` → chunk. Under assumption A4, the proven placement shows that ledger chunk `b` is tx `k`'s chunk `c` without that tx list, and PoA verifies with the owning tx header. `c = b − chunk_start`, with `b ≥ chunk_start` and checked subtraction (§8). Membership and committed size alone, which is what v1 `tx_root` proves, was considered and not chosen. Placement would then be recomputed from the block's tx headers with the padded-size helper. A receipt would need the tx list, or a separate placement proof, to map a ledger chunk.
 
 **Receipts.** The tx index `k` is bound by the proof. A receipt must not carry a byte offset as a placement coordinate. Today's `txByteOffset` is a sum of `data_size`. In v2 that field is dropped, or it is `chunk_start × chunk_size` (§8).
 
@@ -765,7 +786,7 @@ verify_tx(tx_root, N, k, data_tree_root, data_size, prefix_hash, chunk_start, pr
 
 **Activation.** Estuary, with the data tree. One format from that activation. No dual format. Test networks reset, and mainnet stores no data. §15 Q8 refuses every data tx up to and including E, so every pre-activation `tx_root` is `0^32` and no data PoA exists. A v1 `tx_path` verifier is not needed. A later fork would need both formats, gated by height, because `tx_root` and the PoA `tx_path` are signed.
 
-**What changes when it is implemented.** A new encoder. After Estuary, `crates/types/src/merkle.rs` no longer builds `tx_root`. It still builds the ingress-proof tree with the v1 encoder, until the custody redesign, and it is no longer used for data. Block production, block validation and migration compute the new `tx_root`. PoA validation verifies with `verify_tx`. `tx_path` derivation (`crates/database/src/tx_path_derive.rs`) builds v2 proofs. The MDBX path tables that parse the last 64 bytes as a v1 leaf, and the RocksDB derive, follow. The gateway receipt verifier follows. `bundle_items_root` has the same shape (a root plus a size per leaf) and may adopt the same form with its own tags. The gateway team decides.
+**What changes when it is implemented.** A new encoder. After Estuary, `crates/types/src/merkle.rs` no longer builds `tx_root`. It still builds the ingress-proof tree with the v1 encoder, until the custody redesign, and it is no longer used for data. Block production and migration compute the new `tx_root`. Block validation checks the partition and requires the header's `tx_root` to equal the root of exactly those leaves. A block that fails is invalid. PoA validation verifies with `verify_tx` against a block that already passed that check. `tx_path` derivation (`crates/database/src/tx_path_derive.rs`) builds v2 proofs. The MDBX path tables that parse the last 64 bytes as a v1 leaf, and the RocksDB derive, follow. The gateway receipt verifier follows, and its `tx_root` anchor must come from a validated block (assumption A4). `bundle_items_root` has the same shape (a root plus a size per leaf) and may adopt the same form with its own tags. The gateway team decides.
 
 **Vectors.** One group (§13). `N` = 1, 2, 3, 100. Every `k` for small `N`. Negatives: wrong `N`, wrong `k`, wrong witness, a flipped bit per sibling, a wrong `chunk_start`, one hash too many or too few. Not generated yet.
 
@@ -781,6 +802,6 @@ Block chunk 2 is tx 1, chunk 0. The byte target `2 × chunk_size` is 64. Tx 2 co
 
 **Open items.** Same numbers as §14.
 
-2. What a PoA carries: `(k, N, chunk_start)` explicitly, so a validator needs only the owning tx header; or derived from the block's tx headers (smaller PoA, more reads).
+2. What a PoA carries: `(k, N, chunk_start)` explicitly, so a validator needs only the owning tx header; or derived from the block's tx headers (smaller PoA, more reads). With this rule, the option that verifies with only the owning tx header is safe, because the `tx_root` it checks against has passed full validation.
 3. Whether `prefix_hash` stays in the leaf (today's leaf folds it in).
 4. Where the code lives: `irys-data-tree`, which shares `T`, `climb`, `depth` and the tag registry, or a separate crate.
