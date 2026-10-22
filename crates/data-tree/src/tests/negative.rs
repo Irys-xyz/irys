@@ -142,7 +142,7 @@ fn proof_length_is_checked_before_hashing() {
 
 #[test]
 fn an_empty_proof_is_rejected_for_one_chunk() {
-    // `C = 1`: the chunk proof is `[size_witness(n)]`. Empty is the old form.
+    // `C = 1`: the chunk proof is `[size_witness(G, n)]`. Empty is the old form.
     let geometry = Geometry::TESTING;
     let data_size = geometry.chunk_size();
     let data = pattern(usize::try_from(data_size).unwrap());
@@ -193,7 +193,7 @@ fn an_empty_proof_is_rejected_for_one_chunk() {
 
 #[test]
 fn a_wrong_size_witness_is_rejected() {
-    // The last hash is `size_witness(n + 1)`, not `size_witness(n)` (spec §5).
+    // The last hash is `size_witness(G, n + 1)`, not `size_witness(G, n)` (spec §5).
     let geometry = Geometry::TESTING;
     let data_size = 3 * geometry.chunk_size();
     let data = pattern(usize::try_from(data_size).unwrap());

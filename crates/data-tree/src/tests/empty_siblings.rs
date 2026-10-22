@@ -29,7 +29,7 @@ const MAX_SUBTREE_HEIGHT_SEGMENTS: u32 = 1 << MAX_SUBTREE_HEIGHT;
 
 /// Test geometry, `n = 40`: chunk 1 holds segment 0 only. The bad chunk root is
 /// `node(node(leaf(seg0), empty(0)), G)` with `G = 0xAB × 32`. The segment proof
-/// is `[empty(0), G, R0, size_witness(40)]`.
+/// is `[empty(0), G, R0, size_witness(G, 40)]`.
 #[test]
 fn malformed_last_chunk_of_the_published_attack_is_rejected() {
     let geometry = Geometry::TESTING;

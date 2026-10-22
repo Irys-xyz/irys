@@ -156,7 +156,7 @@ pub enum VerifyError {
     },
     /// The proof's last hash is not `size_witness(G, data_size)` (spec §5, §15 Q10).
     ///
-    /// The verifier computes the witness from the `data_size` it is checking.
+    /// The verifier computes `size_witness(G, n)` from `G` and `n`.
     /// A supplied witness is not climbed until it matches that value.
     #[error("size witness does not match")]
     SizeWitnessMismatch,
