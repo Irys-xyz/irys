@@ -431,15 +431,26 @@ impl StorageModuleServiceInner {
             }
         }
 
+        // One module's reset error must not decide the assignment of the
+        // others. Remember the failure and keep going. Return it after both
+        // passes so this same update is retried. A module already at its
+        // target takes neither reset branch on that retry.
+        let mut reset_not_finished: Option<eyre::Report> = None;
+
         for (module_id, module) in local_modules_by_id.iter() {
             match update_info_by_id.get(module_id) {
                 None => {
                     // storage module is present locally, not present in the update
-                    self.clear_assignment_if_outdated(
+                    if let Err(err) = self.clear_assignment_if_outdated(
                         module,
                         update_height,
                         "missing_from_update",
-                    )?;
+                    ) {
+                        if !is_reset_not_finished(&err) {
+                            return Err(err);
+                        }
+                        reset_not_finished.get_or_insert(err);
+                    }
                 }
                 Some(sm_info) => {
                     if sm_info.submodules.is_empty() {
@@ -457,11 +468,16 @@ impl StorageModuleServiceInner {
 
                     if sm_info.partition_assignment.is_none() {
                         // storage module is present locally, present in the incoming update, but it has no partition assignment
-                        self.clear_assignment_if_outdated(
+                        if let Err(err) = self.clear_assignment_if_outdated(
                             module,
                             update_height,
                             "explicitly_unassigned",
-                        )?;
+                        ) {
+                            if !is_reset_not_finished(&err) {
+                                return Err(err);
+                            }
+                            reset_not_finished.get_or_insert(err);
+                        }
                     }
                 }
             }
@@ -480,7 +496,14 @@ impl StorageModuleServiceInner {
                 // Reset and install the assignment under one write lock. A
                 // failed reset leaves the module unassigned, so the next
                 // update takes this branch again.
-                let range = self.reset_and_install(existing, Some(assignment), update_height)?;
+                let range = match self.reset_and_install(existing, Some(assignment), update_height)
+                {
+                    Ok(range) => range,
+                    Err(err) => {
+                        reset_not_finished.get_or_insert(err);
+                        continue;
+                    }
+                };
                 // The protocol assigns a new partition to capacity for one epoch.
                 self.enqueue_packing(existing, range);
 
@@ -512,9 +535,12 @@ impl StorageModuleServiceInner {
                     // assignment, so the next update still sees the change.
                     // Capacity→ledger does not reset: index repair runs below.
                     if ledger_before.is_some() {
-                        let range =
-                            self.reset_and_install(existing, Some(info_pa), update_height)?;
-                        self.enqueue_packing(existing, range);
+                        match self.reset_and_install(existing, Some(info_pa), update_height) {
+                            Ok(range) => self.enqueue_packing(existing, range),
+                            Err(err) => {
+                                reset_not_finished.get_or_insert(err);
+                            }
+                        }
                     } else {
                         // Capacity→ledger does not reset. Entropy and Data stay
                         // unless a durable marker says the wipe already started.
@@ -530,7 +556,13 @@ impl StorageModuleServiceInner {
                         // channel has not accepted that is still Uninitialized.
                         // Do not pack offsets that are already Entropy or Data.
                         let wiped = if existing.reset_incomplete() {
-                            self.settle_incomplete_reset(existing)?
+                            match self.settle_incomplete_reset(existing) {
+                                Ok(wiped) => wiped,
+                                Err(err) => {
+                                    reset_not_finished.get_or_insert(err);
+                                    continue;
+                                }
+                            }
                         } else {
                             None
                         };
@@ -547,7 +579,8 @@ impl StorageModuleServiceInner {
                                 storage_module.id = existing.id,
                                 "capacity-to-ledger assignment was not stored; the update will be retried: {err:#}"
                             );
-                            return Err(ResetNotFinished.into());
+                            reset_not_finished.get_or_insert(ResetNotFinished.into());
+                            continue;
                         }
                         if wiped.is_none() {
                             self.enqueue_deferred_uninitialized(existing);
@@ -560,13 +593,25 @@ impl StorageModuleServiceInner {
                     // started, so finish it. `reset` does not write the
                     // assignment. The partition is still assigned, so the
                     // span is packed. A full channel keeps it.
-                    if let Some(range) = self.settle_incomplete_reset(existing)?
-                        && existing.partition_assignment().is_some()
-                    {
-                        self.enqueue_packing(existing, range);
+                    match self.settle_incomplete_reset(existing) {
+                        Ok(Some(range)) if existing.partition_assignment().is_some() => {
+                            self.enqueue_packing(existing, range);
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            reset_not_finished.get_or_insert(err);
+                        }
                     }
                 }
             }
+        }
+
+        if let Some(err) = reset_not_finished {
+            // A later module may already be on its new ledger. Heal did not
+            // run. The periodic pass covers that module until this retry
+            // completes and heal runs for the settled set.
+            self.index_heal_needs_retry = true;
+            return Err(err);
         }
 
         // After assignments settle: best-effort gap-scan + index backfill for every
@@ -1150,6 +1195,8 @@ mod assignment_reset_tests {
         inner: StorageModuleServiceInner,
         module: Arc<StorageModule>,
         path: std::path::PathBuf,
+        modules: Vec<Arc<StorageModule>>,
+        paths: Vec<std::path::PathBuf>,
     }
 
     fn harness(ledger_id: Option<u32>) -> Harness {
@@ -1157,6 +1204,14 @@ mod assignment_reset_tests {
     }
 
     fn open_harness(ledger_id: Option<u32>, configure: impl FnOnce(&mut NodeConfig)) -> Harness {
+        open_modules(1, ledger_id, configure)
+    }
+
+    fn open_modules(
+        module_count: usize,
+        ledger_id: Option<u32>,
+        configure: impl FnOnce(&mut NodeConfig),
+    ) -> Harness {
         let tmp = TempDirBuilder::new().build();
         let mut node_config = NodeConfig::testing();
         node_config.node_mode = NodeMode::Miner;
@@ -1167,23 +1222,32 @@ mod assignment_reset_tests {
             ..ConsensusConfig::testing()
         });
         configure(&mut node_config);
-        let submodules = StorageSubmodulesConfig::load_for_test(tmp.path().to_path_buf(), 1)
-            .expect("submodules");
-        let path = submodules.submodule_paths[0].clone();
+        let submodules =
+            StorageSubmodulesConfig::load_for_test(tmp.path().to_path_buf(), module_count)
+                .expect("submodules");
         let config = Config::new_with_random_peer_id(node_config);
+        let miner = config.node_config.miner_address();
 
-        let partition_hash = H256::repeat_byte(0x21);
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment {
-                partition_hash,
-                miner_address: config.node_config.miner_address(),
-                ledger_id,
-                slot_index: ledger_id.map(|_| 0),
-            }),
-            submodules: vec![(partition_chunk_offset_ie!(0, 10), path.clone())],
-        };
-        let module = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+        let mut modules = Vec::with_capacity(module_count);
+        for id in 0..module_count {
+            let path = submodules.submodule_paths[id].clone();
+            let info = StorageModuleInfo {
+                id,
+                partition_assignment: Some(PartitionAssignment {
+                    partition_hash: H256::repeat_byte(0x21 + u8::try_from(id).expect("id")),
+                    miner_address: miner,
+                    ledger_id,
+                    slot_index: ledger_id.map(|_| id),
+                }),
+                submodules: vec![(partition_chunk_offset_ie!(0, 10), path)],
+            };
+            modules.push(Arc::new(
+                StorageModule::new(&info, &config).expect("storage module"),
+            ));
+        }
+        let module = Arc::clone(&modules[0]);
+        let paths = submodules.submodule_paths;
+        let path = paths[0].clone();
 
         let db_env = open_or_create_db(
             tmp.path().join("chain-db"),
@@ -1198,7 +1262,7 @@ mod assignment_reset_tests {
         let (service_senders, receivers) = ServiceSenders::new();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let inner = StorageModuleServiceInner::new(
-            Arc::new(RwLock::new(vec![Arc::clone(&module)])),
+            Arc::new(RwLock::new(modules.clone())),
             block_index_guard,
             block_tree_guard,
             service_senders,
@@ -1212,6 +1276,8 @@ mod assignment_reset_tests {
             inner,
             module,
             path,
+            modules,
+            paths,
         }
     }
 
@@ -1275,6 +1341,192 @@ mod assignment_reset_tests {
         );
         assert!(!harness.module.reset_incomplete());
         assert!(harness.receivers.packing.try_recv().is_ok());
+    }
+
+    fn capacity_assignment(
+        id: usize,
+        path: &std::path::Path,
+        hash: H256,
+        miner: irys_types::IrysAddress,
+    ) -> StorageModuleInfo {
+        StorageModuleInfo {
+            id,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: hash,
+                miner_address: miner,
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), path.to_path_buf())],
+        }
+    }
+
+    /// The first module's reset fails. The later module still moves to the
+    /// target. The stored update retries the first module and does not reset
+    /// the module that is already there.
+    #[tokio::test]
+    async fn reset_failure_still_updates_later_modules() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = open_modules(2, Some(DataLedger::Publish.into()), |_| {});
+        let first = Arc::clone(&harness.modules[0]);
+        let second = Arc::clone(&harness.modules[1]);
+        let miner = first
+            .partition_assignment()
+            .expect("assigned")
+            .miner_address;
+        let update = Arc::new(vec![
+            capacity_assignment(
+                0,
+                &harness.paths[0],
+                first.partition_hash().expect("hash"),
+                miner,
+            ),
+            capacity_assignment(
+                1,
+                &harness.paths[1],
+                second.partition_hash().expect("hash"),
+                miner,
+            ),
+        ]);
+
+        first.fail_next_reset_for_test();
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: Arc::clone(&update),
+                update_height: 4,
+            })
+            .await
+            .expect("a reset failure is stored for retry");
+
+        assert_eq!(
+            first.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into()),
+            "the module whose reset failed keeps its assignment"
+        );
+        assert!(first.reset_incomplete());
+        assert_eq!(
+            second.partition_assignment().unwrap().ledger_id,
+            None,
+            "a later module is updated even though the earlier reset failed"
+        );
+        assert!(!second.reset_incomplete());
+        assert!(harness.inner.pending_assignment.is_some());
+
+        let offset = PartitionChunkOffset::from(0);
+        assert!(second.write_chunk(offset, vec![0xAB; 32], ChunkType::Entropy));
+        second.force_sync_pending_chunks().expect("sync entropy");
+        assert_eq!(second.get_chunk_type(&offset), Some(ChunkType::Entropy));
+
+        let queued = drain_packing(&mut harness);
+        assert_eq!(queued.len(), 1, "only the module that reset is packed");
+        assert_eq!(queued[0].storage_module().id, second.id);
+        drop(queued);
+
+        let pending = harness
+            .inner
+            .pending_assignment
+            .clone()
+            .expect("retry message");
+        harness
+            .inner
+            .apply_assignment(pending)
+            .await
+            .expect("retry finishes the first module");
+
+        assert_eq!(first.partition_assignment().unwrap().ledger_id, None);
+        assert!(!first.reset_incomplete());
+        assert_eq!(second.partition_assignment().unwrap().ledger_id, None);
+        assert_eq!(
+            second.get_chunk_type(&offset),
+            Some(ChunkType::Entropy),
+            "a retry must not reset a module that is already at the target"
+        );
+        assert!(harness.inner.pending_assignment.is_none());
+
+        let queued = drain_packing(&mut harness);
+        assert_eq!(
+            queued.len(),
+            1,
+            "the retry packs only the module that reset"
+        );
+        assert_eq!(queued[0].storage_module().id, first.id);
+    }
+
+    /// An unassign whose reset fails must not freeze the other module in the
+    /// same update. The retry clears the first module and leaves the second.
+    #[tokio::test]
+    async fn failed_unassign_still_updates_the_other_module() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = open_modules(2, Some(DataLedger::Publish.into()), |_| {});
+        let first = Arc::clone(&harness.modules[0]);
+        let second = Arc::clone(&harness.modules[1]);
+        let miner = first
+            .partition_assignment()
+            .expect("assigned")
+            .miner_address;
+        let update = Arc::new(vec![
+            StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ie!(0, 10), harness.paths[0].clone())],
+            },
+            capacity_assignment(
+                1,
+                &harness.paths[1],
+                second.partition_hash().expect("hash"),
+                miner,
+            ),
+        ]);
+
+        first.fail_next_reset_for_test();
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: Arc::clone(&update),
+                update_height: 4,
+            })
+            .await
+            .expect("a reset failure is stored for retry");
+
+        assert_eq!(
+            first.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into()),
+            "the module whose reset failed keeps its assignment"
+        );
+        assert!(first.reset_incomplete());
+        assert_eq!(
+            second.partition_assignment().unwrap().ledger_id,
+            None,
+            "the other module is updated even though the unassign reset failed"
+        );
+
+        let offset = PartitionChunkOffset::from(0);
+        assert!(second.write_chunk(offset, vec![0xCD; 32], ChunkType::Entropy));
+        second.force_sync_pending_chunks().expect("sync entropy");
+
+        let pending = harness
+            .inner
+            .pending_assignment
+            .clone()
+            .expect("retry message");
+        harness
+            .inner
+            .apply_assignment(pending)
+            .await
+            .expect("retry clears the first module");
+
+        assert!(first.partition_assignment().is_none());
+        assert!(!first.reset_incomplete());
+        assert_eq!(second.partition_assignment().unwrap().ledger_id, None);
+        assert_eq!(
+            second.get_chunk_type(&offset),
+            Some(ChunkType::Entropy),
+            "a retry must not reset a module that is already at the target"
+        );
+        assert!(harness.inner.pending_assignment.is_none());
     }
 
     fn write_synced_data(module: &StorageModule, byte: u8) {
