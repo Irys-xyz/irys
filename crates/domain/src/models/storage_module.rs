@@ -4251,9 +4251,9 @@ impl StorageModule {
     /// `coalesce` sorts a reorder buffer and joins adjacent chunks up to the
     /// write cap. The no-lane path passes false and keeps the entropy cap.
     ///
-    /// A recall flush holds the owed flag across this call. An unlimited sync
-    /// that observes the flag returns without writing, so the recall waits
-    /// only for the window and not for the rest of the batch.
+    /// A recall flush holds the owed flag across its window. An unlimited sync
+    /// that sees the flag writes nothing and returns an error, so the recall
+    /// waits only for that window. The caller retries once the flag drops.
     fn commit_pending_runs(
         &self,
         force: bool,
@@ -4265,7 +4265,9 @@ impl StorageModule {
         let _sync_guard = self.lock_sync();
 
         if max_runs.is_none() && self.disk.recall_flush_is_owed() {
-            return Ok(());
+            return Err(eyre!(
+                "recall flush is owed; an unlimited sync did not write"
+            ));
         }
 
         let then = Instant::now();
