@@ -33,7 +33,9 @@ const DURABILITY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Retry an offset only after other ready work has had an opportunity to run.
 /// While its in-memory request record is retained, the delay is monotonic,
 /// doubles after each exhausted peer cycle, and is capped so data that appears
-/// later is eventually rediscovered.
+/// later is eventually rediscovered. Jitter adds up to a quarter of each step.
+/// At the cap the window opens below it, so a capped retry waits 45 to 60
+/// seconds.
 const RETRY_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
@@ -638,6 +640,7 @@ impl ChunkOrchestrator {
         // Held offsets are not hot. Promoting all of them would skip the
         // pending budget and bury the write head. The rest stay Held and this
         // function takes another batch when a slot is free.
+        self.sort_in_scan_order(&mut promote);
         let mut slots = self.free_hot_slots();
         for offset in promote {
             if slots == 0 {
@@ -685,7 +688,21 @@ impl ChunkOrchestrator {
                 );
             }
         }
+        // A stalled batch shares one fdatasync and returns as a run.
+        self.sort_in_scan_order(&mut ready);
         self.ready_offsets.extend(ready);
+    }
+
+    /// Order offsets the way the entropy scan visits them: high to low on term
+    /// ledgers, low to high on Publish. Requeued neighbours then meet at the
+    /// queue head and one cache lookup covers the run, instead of one lookup
+    /// per offset in map order.
+    fn sort_in_scan_order(&self, offsets: &mut [PartitionChunkOffset]) {
+        if self.prioritizes_write_frontier() {
+            offsets.sort_unstable_by(|a, b| b.cmp(a));
+        } else {
+            offsets.sort_unstable();
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -734,14 +751,12 @@ impl ChunkOrchestrator {
                 _ => None,
             })
             .collect();
-        // Map order is arbitrary. Queue the wave in scan order so adjacent
-        // offsets sit together and one cache lookup covers each contiguous
-        // run, instead of one lookup per retried offset.
-        if self.prioritizes_write_frontier() {
-            due.sort_unstable_by(|a, b| b.cmp(a));
-        } else {
-            due.sort_unstable();
-        }
+        self.sort_in_scan_order(&mut due);
+        // A wave of offsets that 404 on every peer must not take the whole
+        // hot budget, or the entropy scan below never runs and never reaches
+        // a range a peer can serve. Retries take at most half of the free
+        // slots. The rest stay Delayed, already due, and go first next tick.
+        due.truncate(self.free_hot_slots().div_ceil(2));
         for offset in due {
             if let Some(request) = self.chunk_requests.get_mut(&offset) {
                 request.excluded.clear();
@@ -1327,25 +1342,19 @@ impl ChunkOrchestrator {
         let Some(last) = run.last().copied() else {
             return LocalCacheStep::Miss;
         };
-        let descending = last < start;
-        let (low, high) = if descending {
-            (last, start)
-        } else {
-            (start, last)
-        };
         let placements = irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
-            self.storage_module.data_root_and_tx_offset_span(low, high)
-        });
-        // The span reads low to high. Every later step indexes by run position,
-        // so a descending run must see its placements in run order.
-        let placements = placements.map(|mut placements| {
-            if descending {
-                placements.reverse();
-            }
-            placements
+            self.storage_module
+                .data_root_and_tx_offset_span(start.min(last), start.max(last))
         });
         let placements = match placements {
-            Ok(placements) if placements.len() == run.len() => placements,
+            Ok(mut placements) if placements.len() == run.len() => {
+                // The span reads low to high. Every later step indexes by run
+                // position, so a descending run needs its placements reversed.
+                if last < start {
+                    placements.reverse();
+                }
+                placements
+            }
             Ok(_) => {
                 warn!(
                     chunk.offset = %start,
@@ -1567,18 +1576,26 @@ impl ChunkOrchestrator {
         applied
     }
 
-    fn retry_delay(chunk_offset: PartitionChunkOffset, retry_round: u32) -> Duration {
+    /// `jitter_bucket` is the local-cache run length. Offsets in one aligned
+    /// bucket share a deadline, so a contiguous hole comes due in one tick and
+    /// its retries still form one cache run. Different buckets spread out.
+    fn retry_delay(
+        chunk_offset: PartitionChunkOffset,
+        retry_round: u32,
+        jitter_bucket: u64,
+    ) -> Duration {
         let exponent = retry_round.saturating_sub(1).min(6);
         let base = RETRY_BACKOFF_INITIAL
             .saturating_mul(1_u32 << exponent)
             .min(RETRY_BACKOFF_MAX);
-        // Stable per-offset jitter avoids synchronized retry waves without a
+        // Stable per-bucket jitter avoids synchronized retry waves without a
         // random generator or wall-clock dependency. Keep the capped maximum.
         let jitter_window_ms = (base.as_millis() / 4) as u64;
+        let bucket = u64::from(*chunk_offset) / jitter_bucket.max(1);
         let jitter_ms = if jitter_window_ms == 0 {
             0
         } else {
-            u64::from(*chunk_offset).wrapping_mul(0x9e37_79b9) % (jitter_window_ms + 1)
+            bucket.wrapping_mul(0x9e37_79b9) % (jitter_window_ms + 1)
         };
         // At the cap, open the window below the maximum. Clamping after the
         // add would put every capped retry on the same deadline, so a full
@@ -1590,12 +1607,13 @@ impl ChunkOrchestrator {
     }
 
     fn delay_request(&mut self, chunk_offset: PartitionChunkOffset, now: Instant) {
+        let jitter_bucket = u64::try_from(self.local_cache_run_limit()).unwrap_or(1);
         let Some(request) = self.chunk_requests.get_mut(&chunk_offset) else {
             return;
         };
         request.retry_round = request.retry_round.saturating_add(1);
         let retry_round = request.retry_round;
-        let delay = Self::retry_delay(chunk_offset, retry_round);
+        let delay = Self::retry_delay(chunk_offset, retry_round, jitter_bucket);
         request.request_state = ChunkRequestState::Delayed {
             retry_at: now + delay,
         };

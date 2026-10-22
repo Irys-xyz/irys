@@ -190,6 +190,17 @@ fn make_orchestrator_with_ledger_total(
     ledger: DataLedger,
     total_chunks: u64,
 ) -> ChunkOrchestrator {
+    let db = open_test_db(config);
+    make_orchestrator_with_ledger_total_and_db(sm, config, ledger, total_chunks, db)
+}
+
+fn make_orchestrator_with_ledger_total_and_db(
+    sm: Arc<StorageModule>,
+    config: &Config,
+    ledger: DataLedger,
+    total_chunks: u64,
+    db: DatabaseProvider,
+) -> ChunkOrchestrator {
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
 
     let mut genesis = irys_testing_utils::new_mock_signed_header();
@@ -198,7 +209,6 @@ fn make_orchestrator_with_ledger_total(
     let block_tree = BlockTree::new(&genesis, config.consensus.clone());
     let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
     let (service_senders, _receivers) = build_test_service_senders();
-    let db = open_test_db(config);
     ChunkOrchestrator::new(
         sm,
         Arc::new(RwLock::new(HashMap::new())),
@@ -230,36 +240,54 @@ fn store_durable_data(sm: &StorageModule, offset: PartitionChunkOffset, chunk_si
     );
 }
 
-fn insert_requested(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset, peer: IrysAddress) {
+/// Track `offset` in `state`. A Pending offset also joins the FIFO tail.
+fn insert_request(
+    orch: &mut ChunkOrchestrator,
+    offset: PartitionChunkOffset,
+    request_state: ChunkRequestState,
+    local_cache_miss: bool,
+) {
+    let pending = matches!(request_state, ChunkRequestState::Pending);
+    let delayed = matches!(request_state, ChunkRequestState::Delayed { .. });
     orch.chunk_requests.insert(
         offset,
         ChunkRequest {
             excluded: HashSet::new(),
-            local_cache_miss: false,
+            local_cache_miss,
             body_in_ingress: false,
-            request_state: ChunkRequestState::Requested(peer, Instant::now()),
-            attempt_count: 1,
-            retry_round: 0,
+            request_state,
+            attempt_count: u32::from(!pending),
+            retry_round: u32::from(delayed),
             ready_since: Instant::now(),
         },
+    );
+    if pending {
+        orch.ready_offsets.push_back(offset);
+    }
+}
+
+fn insert_requested(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset, peer: IrysAddress) {
+    insert_request(
+        orch,
+        offset,
+        ChunkRequestState::Requested(peer, Instant::now()),
+        false,
     );
 }
 
 fn insert_pending(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset) {
-    let now = Instant::now();
-    orch.chunk_requests.insert(
+    insert_request(orch, offset, ChunkRequestState::Pending, false);
+}
+
+/// A retry whose deadline is `now`. The memo is set so the test can see the
+/// new attempt cycle clear it.
+fn insert_due(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset, now: Instant) {
+    insert_request(
+        orch,
         offset,
-        ChunkRequest {
-            excluded: HashSet::new(),
-            local_cache_miss: false,
-            body_in_ingress: false,
-            request_state: ChunkRequestState::Pending,
-            attempt_count: 0,
-            retry_round: 0,
-            ready_since: now,
-        },
+        ChunkRequestState::Delayed { retry_at: now },
+        true,
     );
-    orch.ready_offsets.push_back(offset);
 }
 
 fn add_assigned_peer(
@@ -1173,50 +1201,48 @@ async fn delayed_prefix_frees_discovery_budget_for_later_entropy() {
 fn retry_backoff_is_exponential_jittered_and_capped() {
     let offset = PartitionChunkOffset::from(17_u32);
     let delays: Vec<_> = (1..=8)
-        .map(|round| ChunkOrchestrator::retry_delay(offset, round))
+        .map(|round| ChunkOrchestrator::retry_delay(offset, round, 16))
         .collect();
     assert!(delays.windows(2).all(|pair| pair[1] >= pair[0]));
     assert!(delays[0] >= RETRY_BACKOFF_INITIAL);
-    assert!(*delays.last().unwrap() <= RETRY_BACKOFF_MAX);
+    let capped = *delays.last().unwrap();
+    assert!(
+        capped >= RETRY_BACKOFF_MAX * 3 / 4 && capped <= RETRY_BACKOFF_MAX,
+        "the backoff reaches the capped tier: {capped:?}"
+    );
 }
 
-/// A full delayed set reaches the cap together. If every capped deadline were
-/// the maximum, the whole set would come due in one tick and fill the hot
-/// budget.
+/// A full delayed set reaches the cap together. Different runs must not share
+/// one deadline, or the whole set comes due in one tick. One run must share
+/// its deadline, or its retries come due one offset per tick and each costs
+/// a cache lookup.
 #[test]
-fn capped_retry_deadlines_stay_spread() {
-    let capped: HashSet<_> = (0..64_u32)
-        .map(|value| ChunkOrchestrator::retry_delay(PartitionChunkOffset::from(value), 8))
-        .collect();
+fn capped_retry_deadlines_spread_runs_and_keep_each_run_together() {
+    const BUCKET: u32 = 16;
+    let delay = |value: u32, round: u32| {
+        ChunkOrchestrator::retry_delay(PartitionChunkOffset::from(value), round, u64::from(BUCKET))
+    };
+    let per_run: HashSet<_> = (0..64_u32).map(|run| delay(run * BUCKET, 8)).collect();
     assert!(
-        capped.iter().all(|delay| *delay <= RETRY_BACKOFF_MAX),
+        per_run.iter().all(|delay| *delay <= RETRY_BACKOFF_MAX),
         "the cap is still the maximum delay"
     );
     assert!(
-        capped
+        per_run
             .iter()
             .all(|delay| *delay >= RETRY_BACKOFF_MAX * 3 / 4),
         "jitter at the cap opens below it, not near zero"
     );
     assert!(
-        capped.len() > 32,
-        "capped retries must not share one deadline: {capped:?}"
+        per_run.len() > 32,
+        "capped runs must not share one deadline: {per_run:?}"
     );
-}
-
-fn insert_due(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset, now: Instant) {
-    orch.chunk_requests.insert(
-        offset,
-        ChunkRequest {
-            excluded: HashSet::new(),
-            local_cache_miss: true,
-            body_in_ingress: false,
-            request_state: ChunkRequestState::Delayed { retry_at: now },
-            attempt_count: 1,
-            retry_round: 1,
-            ready_since: now,
-        },
-    );
+    for round in 1..=8 {
+        let run: HashSet<_> = (BUCKET * 5..BUCKET * 6)
+            .map(|value| delay(value, round))
+            .collect();
+        assert_eq!(run.len(), 1, "round {round}: one run, one deadline");
+    }
 }
 
 /// Due retries are queued in scan order, so adjacent offsets meet at the queue
@@ -1249,6 +1275,51 @@ async fn due_retries_are_queued_in_scan_order(
             .all(|request| !request.local_cache_miss),
         "a new attempt cycle reads the cache again"
     );
+}
+
+/// A wave that comes due together takes at most half of the free hot slots.
+/// The scan keeps the rest, and the leftover retries go first next tick.
+#[tokio::test]
+async fn a_due_retry_wave_leaves_half_the_hot_budget_to_the_scan() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 32, 8);
+    let sm = packed_sm(&config, 32);
+    let mut orch = make_orchestrator_with_ledger_chunks(sm, &config, 32);
+    let now = Instant::now();
+    for value in 0..10_u32 {
+        insert_due(&mut orch, PartitionChunkOffset::from(value), now);
+    }
+
+    orch.populate_request_queue_at(now);
+
+    let retried: Vec<u32> = (0..10_u32)
+        .filter(|value| {
+            matches!(
+                orch.chunk_requests[&PartitionChunkOffset::from(*value)].request_state,
+                ChunkRequestState::Pending
+            )
+        })
+        .collect();
+    assert_eq!(
+        retried,
+        vec![0, 1, 2, 3],
+        "half of 8 free slots, in scan order"
+    );
+    assert_eq!(
+        count_state(&orch, &ChunkRequestState::Pending),
+        8,
+        "the scan filled the other half"
+    );
+    assert!(
+        (10..32_u32).any(|value| orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(value))),
+        "the scan queued entropy past the retry wave"
+    );
+    assert!(matches!(
+        orch.chunk_requests[&PartitionChunkOffset::from(4_u32)].request_state,
+        ChunkRequestState::Delayed { .. }
+    ));
 }
 
 #[test_log::test(tokio::test)]
@@ -1842,6 +1913,82 @@ async fn local_cache_descending_run_is_one_lookup() {
         orch.ready_offsets.front(),
         Some(&PartitionChunkOffset::from(0))
     );
+}
+
+/// The term-ledger tick itself: the write head goes to the front and the
+/// scan queues the rest high to low. One lookup covers all of it.
+#[test_log::test(tokio::test)]
+async fn term_ledger_tick_writes_the_frontier_run_in_one_lookup() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm_for_ledger(&config, 4, DataLedger::Submit);
+    let db = open_test_db(&config);
+    let (tx, data) = signed_tx(&config, 4);
+    index_and_settle(&sm, &tx, 3);
+    cache_bodies_at(&db, &tx, &data, &[0, 1, 2, 3]);
+    let mut orch =
+        make_orchestrator_with_ledger_total_and_db(sm.clone(), &config, DataLedger::Submit, 4, db);
+    add_assigned_peer(&mut orch, &config, 14, 9114);
+
+    orch.populate_request_queue_at(Instant::now());
+    let queued: Vec<u32> = orch.ready_offsets.iter().map(|offset| offset.0).collect();
+    assert_eq!(queued, vec![3, 2, 1, 0]);
+
+    assert!(orch.dispatch_next());
+    assert_eq!(orch.cache_lookups_this_tick, 1);
+    for value in 0..4_u32 {
+        assert!(
+            sm.is_data_write_pending_at(PartitionChunkOffset::from(value)),
+            "offset {value}"
+        );
+    }
+}
+
+/// A descending run that crosses a submodule boundary. The span joins two
+/// index groups before the reversal; each offset must keep its own placement.
+#[test_log::test(tokio::test)]
+async fn local_cache_descending_run_crosses_a_submodule_boundary() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let info = StorageModuleInfo {
+        id: 0,
+        partition_assignment: Some(PartitionAssignment {
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(0),
+            miner_address: IrysAddress::from([1_u8; 20]),
+            partition_hash: H256::random(),
+        }),
+        submodules: vec![
+            (partition_chunk_offset_ie!(0, 2), "chunks_low".into()),
+            (partition_chunk_offset_ie!(2, 4), "chunks_high".into()),
+        ],
+    };
+    let sm = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+    sm.pack_with_zeros();
+    let db = open_test_db(&config);
+    let (tx, data) = signed_tx(&config, 4);
+    index_and_settle(&sm, &tx, 3);
+    cache_bodies_at(&db, &tx, &data, &[1, 2, 3]);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
+    add_assigned_peer(&mut orch, &config, 15, 9115);
+    for value in [3_u32, 2, 1, 0] {
+        insert_pending(&mut orch, PartitionChunkOffset::from(value));
+    }
+
+    assert!(orch.dispatch_next());
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(orch.cache_lookups_this_tick, 1);
+    assert!(fetcher.request_log.read().unwrap().is_empty());
+    for value in 1..4_u32 {
+        assert!(
+            sm.is_data_write_pending_at(PartitionChunkOffset::from(value)),
+            "offset {value}"
+        );
+    }
+    assert!(!sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+    assert!(orch.chunk_requests[&PartitionChunkOffset::from(0)].local_cache_miss);
 }
 
 #[test_log::test(tokio::test)]
