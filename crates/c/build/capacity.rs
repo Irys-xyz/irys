@@ -42,10 +42,6 @@ pub(crate) fn build_capacity(c_src: &Path, _ssl_inc_dir: &Path) {
 pub(crate) fn bind_capacity(c_src: &Path) {
     let bindings = bindgen::Builder::default()
         .header(c_src.join("capacity.h").to_string_lossy())
-        .parse_callbacks(Box::new(
-            // c_src/* is already watched (relatively) in main.rs
-            bindgen::CargoCallbacks::new().rerun_on_header_files(false),
-        ))
         .wrap_unsafe_ops(true)
         .generate()
         .expect("Unable to generate bindings");
@@ -111,10 +107,6 @@ pub(crate) fn bind_capacity_cuda(c_src: &Path) {
     let bindings = bindgen::Builder::default()
         .header(c_src.join("capacity_cuda.h").to_string_lossy())
         .rustified_enum("entropy_chunk_errors")
-        .parse_callbacks(Box::new(
-            // c_src/* is already watched (relatively) in main.rs
-            bindgen::CargoCallbacks::new().rerun_on_header_files(false),
-        ))
         .wrap_unsafe_ops(true)
         .generate()
         .expect("Unable to generate bindings");

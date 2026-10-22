@@ -22,6 +22,16 @@ fn main() {
         let rel = path.strip_prefix(&manifest_dir).unwrap_or(path);
         println!("cargo:rerun-if-changed={}", rel.display());
     }
+    // bindgen's CargoCallbacks isn't used (it emits absolute paths for every #included
+    // header), so declare the env vars bindgen reads that it would otherwise have watched.
+    let target = env::var("TARGET").unwrap();
+    for var in [
+        "BINDGEN_EXTRA_CLANG_ARGS".to_owned(),
+        format!("BINDGEN_EXTRA_CLANG_ARGS_{target}"),
+        format!("BINDGEN_EXTRA_CLANG_ARGS_{}", target.replace('-', "_")),
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
 
     let (lib_dir, include_dir) = build_openssl();
     let pkgconfig_dir = lib_dir.join("pkgconfig");
