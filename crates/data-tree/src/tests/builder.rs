@@ -223,6 +223,138 @@ fn with_capacity_hint_does_not_change_the_tree() {
     assert_same_tree(&plain, &high_hint.finish().unwrap());
 }
 
+#[test]
+fn with_capacity_enormous_hint_matches_new() {
+    // Catches a hint that aborts when the reservation cannot be allocated.
+    // `Vec::with_capacity` aborts the process. A failed `try_reserve_exact`
+    // must leave the same tree as `new`.
+    //
+    // The hint is `u32::MAX` one-byte chunks (`Geometry::new(1, 1, u32::MAX)`).
+    // Layer 0 would hold `u32::MAX` node hashes, about 128 GiB. When that byte
+    // size exceeds `isize::MAX`, `try_reserve_exact` fails before the allocator.
+    // When the size fits, a successful reservation would map it. This test then
+    // runs in a child whose address space is capped below that size, so the
+    // allocator refuses and nothing is mapped.
+    if reservation_fails_before_the_allocator(u32::MAX) {
+        assert_enormous_hint_matches_new();
+        return;
+    }
+    if std::env::var_os("IRYS_DATA_TREE_CAPPED_ADDRESS_SPACE").is_some() {
+        assert_enormous_hint_matches_new();
+        println!("capped-hint-ok");
+        return;
+    }
+    assert_capped_child_matches_new();
+}
+
+/// `ulimit -v` ceiling for the child, in KiB. 16 GiB fits this test process.
+/// It sits below the ~128 GiB layer-0 reservation of a `u32::MAX` hint.
+const CAPPED_ADDRESS_SPACE_KIB: u128 = 16 * 1024 * 1024;
+
+fn assert_enormous_hint_matches_new() {
+    assert!(
+        reservation_is_refused(u32::MAX),
+        "refusing the hint; a successful reservation would map the whole layer"
+    );
+    let geometry = Geometry::new(1, 1, u32::MAX).expect("one-byte chunks are a valid geometry");
+    let hinted_data_size = u64::from(u32::MAX);
+    let bytes = [1_u8, 2, 3];
+    let mut reserved = DataTreeBuilder::with_capacity(geometry, hinted_data_size)
+        .expect("u32::MAX bytes is inside this geometry");
+    push_bytes(&mut reserved, geometry, &bytes);
+    let mut plain = DataTreeBuilder::new(geometry);
+    push_bytes(&mut plain, geometry, &bytes);
+    let reserved = reserved.finish().unwrap();
+    assert_eq!(reserved.chunk_count(), 3);
+    assert_eq!(reserved.data_size(), 3);
+    // A refused reservation does not stay allocated. `u32::MAX` slots would
+    // mean the hint was mapped.
+    assert!(reserved.layers()[0].capacity() < usize::try_from(u32::MAX).expect("chunk count fits"));
+    assert_same_tree(&reserved, &plain.finish().unwrap());
+}
+
+fn assert_capped_child_matches_new() {
+    let reservation_bytes = node_reservation_bytes(u32::MAX);
+    let cap_bytes = CAPPED_ADDRESS_SPACE_KIB * 1024;
+    assert!(
+        cap_bytes < reservation_bytes,
+        "address-space cap ({cap_bytes} bytes) must sit below the hinted reservation ({reservation_bytes} bytes)"
+    );
+    let exe = std::env::current_exe().expect("test executable");
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg("ulimit -v \"$1\" && exec \"$2\" --exact \"$3\" --test-threads=1 --nocapture")
+        .arg("bash")
+        .arg(CAPPED_ADDRESS_SPACE_KIB.to_string())
+        .arg(&exe)
+        .arg("tests::builder::with_capacity_enormous_hint_matches_new")
+        .env("IRYS_DATA_TREE_CAPPED_ADDRESS_SPACE", "1")
+        .output()
+        .expect("spawn the capped test process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "capped child status {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
+    assert!(
+        stdout.contains("capped-hint-ok"),
+        "capped child did not finish the hint check\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// Byte size of a layer-0 reservation of `chunk_count` node hashes.
+fn node_reservation_bytes(chunk_count: u32) -> u128 {
+    let node_bytes = u128::try_from(std::mem::size_of::<NodeHash>()).expect("node hash size fits");
+    u128::from(chunk_count) * node_bytes
+}
+
+/// `try_reserve_exact` rejects this count before it calls the allocator.
+///
+/// The layout byte size must fit in `isize`. A product that overflows `usize`,
+/// or that exceeds `isize::MAX`, never becomes a mapping.
+fn reservation_fails_before_the_allocator(chunk_count: u32) -> bool {
+    let Ok(nodes) = usize::try_from(chunk_count) else {
+        return true;
+    };
+    match nodes.checked_mul(std::mem::size_of::<NodeHash>()) {
+        None => true,
+        Some(bytes) => bytes > isize::MAX as usize,
+    }
+}
+
+/// The reservation cannot be mapped: the layout is impossible, or this
+/// process's address-space ceiling is below the byte size.
+fn reservation_is_refused(chunk_count: u32) -> bool {
+    if reservation_fails_before_the_allocator(chunk_count) {
+        return true;
+    }
+    let Some(limit) = address_space_limit_bytes() else {
+        return false;
+    };
+    limit < node_reservation_bytes(chunk_count)
+}
+
+/// Soft `RLIMIT_AS` in bytes, from `ulimit -v`. `None` when it is unlimited
+/// or cannot be read.
+fn address_space_limit_bytes() -> Option<u128> {
+    let output = std::process::Command::new("bash")
+        .args(["-c", "ulimit -v"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim();
+    if text == "unlimited" {
+        return None;
+    }
+    let kib: u128 = text.parse().ok()?;
+    kib.checked_mul(1024)
+}
+
 #[cfg(feature = "parallel")]
 fn push_varied_parallel_batches(builder: &mut DataTreeBuilder, geometry: Geometry, bytes: &[u8]) {
     let chunk_size = usize::try_from(geometry.chunk_size()).expect("chunk size fits usize");
