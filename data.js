@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792601024438,
+  "lastUpdate": 1792695802886,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -18403,6 +18403,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3fae775927a1a785b3fe2076f20fb26a51f0bf8c",
+          "message": "fix: build tweaks (#1677)\n\n* fix: move binary to dedicated irys-node crate, make irys-c paths relative\n\n* fix: don't rerun\n\n* fix: remove more rerun directives\n\n* chore: remove irys-testing-utils from chain\n\n* feat: add RelativeCargoCallbacks",
+          "timestamp": "2026-10-22T19:47:26+01:00",
+          "tree_id": "075e2b807ed9e15915d364747d338d95420d0635",
+          "url": "https://github.com/Irys-xyz/irys/commit/3fae775927a1a785b3fe2076f20fb26a51f0bf8c"
+        },
+        "date": 1792695801509,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015341,
+            "range": "± 0.001081",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153612,
+            "range": "± 0.012208",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.566928,
+            "range": "± 0.122543",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.235822,
+            "range": "± 0.536603",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.085459,
+            "range": "± 0.002676",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 782.662946,
+            "range": "± 43.978406",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 990.106578,
+            "range": "± 18.225841",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.132351,
+            "range": "± 0.008836",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1487.711558,
+            "range": "± 85.457298",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1702.606109,
+            "range": "± 112.84423",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035081,
+            "range": "± 0.000897",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 219.546523,
+            "range": "± 3.224653",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.353648,
+            "range": "± 3.620662",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
