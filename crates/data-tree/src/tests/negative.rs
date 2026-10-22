@@ -542,7 +542,10 @@ fn a_64_byte_segment_equal_to_two_hashes_is_a_leaf() {
 
 #[test]
 fn verify_size_rejects_a_different_size_with_no_range_check() {
-    // spec §5: `verify_size` takes any `u64`, including 0. No geometry.
+    // spec §5: `verify_size` takes `(data_commitment, data_tree_root, data_size)`
+    // and no proof bytes. Any `u64` `data_size` is taken as input, including 0.
+    // There is no range check and no geometry. The comparison fails unless
+    // `data_size` is the committed size.
     let geometry = Geometry::TESTING;
     let data_size = geometry.chunk_size();
     let tree =
