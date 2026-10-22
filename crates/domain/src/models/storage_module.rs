@@ -997,6 +997,10 @@ pub struct StorageModule {
     /// Settled offsets whose bytes failed the crc check. The storage-module
     /// service drains this into the existing packing queue.
     crc_repairs: Mutex<BTreeSet<PartitionChunkOffset>>,
+    /// Spans a failed pack must try again. One interval per span. The
+    /// storage-module tick sends these. Checksum mismatches stay in
+    /// [`Self::crc_repairs`].
+    packing_retries: Mutex<Vec<Interval<PartitionChunkOffset>>>,
     /// Recall mismatches not yet checked under `sync_in_progress`. The
     /// mining thread must not take that lock: it still holds the recall,
     /// and a durable point waits on the recall while holding the lock.
@@ -2486,6 +2490,7 @@ impl StorageModule {
             #[cfg(test)]
             recall_io: RecallIoAtoms::new(),
             crc_repairs: Mutex::new(BTreeSet::new()),
+            packing_retries: Mutex::new(Vec::new()),
             crc_suspects: Mutex::new(BTreeSet::new()),
             crc_scan_done: AtomicBool::new(false),
             crc_gap_submodule: AtomicU64::new(u64::MAX),
@@ -3561,6 +3566,7 @@ impl StorageModule {
         // Repairs belong to those bytes. The next assignment must not repack them.
         recover_mutex(&self.crc_suspects).clear();
         recover_mutex(&self.crc_repairs).clear();
+        recover_mutex(&self.packing_retries).clear();
         self.fail_queued_sweeps();
         // A body write can occupy after the clear above and before the
         // interval map flips. The test freezes that window here.
@@ -6779,6 +6785,22 @@ impl StorageModule {
             }
             raw = raw.saturating_add(1);
         }
+    }
+
+    /// Queue one span for another pack. Does not expand the span into offsets.
+    pub fn requeue_packing_range(&self, range: Interval<PartitionChunkOffset>) {
+        recover_mutex(&self.packing_retries).push(range);
+    }
+
+    /// Spans waiting for another pack. The storage-module service drains these.
+    pub fn take_packing_ranges(&self) -> Vec<Interval<PartitionChunkOffset>> {
+        std::mem::take(&mut *recover_mutex(&self.packing_retries))
+    }
+
+    /// Offsets in the checksum-repair set.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn crc_repair_len(&self) -> usize {
+        recover_mutex(&self.crc_repairs).len()
     }
 
     /// Clear `crc_complete` and allow the settled scan to run again.

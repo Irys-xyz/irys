@@ -769,13 +769,15 @@ impl StorageModuleServiceInner {
         send_packing_request(&self.service_senders.packing_sender(), module, range)
     }
 
-    /// Hand crc mismatches to the packing queue. A full channel keeps the
-    /// range here, as one interval. An unassigned module drops it.
+    /// Hand checksum mismatches and failed packs to the packing queue. A
+    /// full channel keeps each range here, as one interval. An unassigned
+    /// module drops both.
     fn enqueue_crc_repairs(&mut self, module: &Arc<StorageModule>) {
         if module.partition_assignment().is_none() {
             // The module cannot pack. Leaving the range queued makes every
             // later tick expand it and try again.
             let _dropped = module.take_crc_repair_ranges();
+            let _dropped_packs = module.take_packing_ranges();
             self.pending_ranges.remove(&module.id);
             return;
         }
@@ -789,6 +791,12 @@ impl StorageModuleServiceInner {
                     range: PartitionChunkRange(interval),
                     while_uninitialized: false,
                 }),
+        );
+        waiting.extend(
+            module
+                .take_packing_ranges()
+                .into_iter()
+                .map(PartitionChunkRange),
         );
         let mut deferred = Vec::new();
         for span in waiting {
@@ -3387,6 +3395,9 @@ mod assignment_reset_tests {
         harness
             .module
             .requeue_crc_repair_range(repair_one_to_three().0);
+        harness
+            .module
+            .requeue_packing_range(repair_one_to_three().0);
         harness.inner.tick();
         assert!(
             harness.receivers.packing.try_recv().is_err(),
@@ -3397,12 +3408,38 @@ mod assignment_reset_tests {
             left.is_empty(),
             "unassigned module must drop crc repairs, still queued: {left:?}"
         );
+        let packs = harness.module.take_packing_ranges();
+        assert!(
+            packs.is_empty(),
+            "unassigned module must drop a failed pack, still queued: {packs:?}"
+        );
         harness.inner.tick();
         let left = harness.module.take_crc_repair_ranges();
         assert!(
             left.is_empty(),
             "a later tick must not restore dropped repairs: {left:?}"
         );
+    }
+
+    /// A failed pack is one interval. The tick sends that interval and does
+    /// not insert one checksum repair per chunk.
+    #[tokio::test]
+    async fn tick_sends_a_failed_pack_span_as_one_range() {
+        let mut harness = harness(None);
+        let span = irys_types::partition_chunk_offset_ii!(0, 9);
+        harness.module.requeue_packing_range(span);
+        assert_eq!(harness.module.crc_repair_len(), 0);
+        harness.inner.tick();
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("the tick sends the failed pack as one range");
+        assert_eq!(*request.chunk_range().0.start(), 0);
+        assert_eq!(*request.chunk_range().0.end(), 9);
+        assert!(harness.receivers.packing.try_recv().is_err());
+        assert_eq!(harness.module.crc_repair_len(), 0);
+        assert!(harness.module.take_packing_ranges().is_empty());
     }
 
     /// A module that still has an assignment sends one range and does not
