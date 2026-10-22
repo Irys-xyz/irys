@@ -3624,27 +3624,33 @@ mod assignment_reset_tests {
         assert!(saw, "an entropy checksum span is sent whole");
     }
 
-    /// The assignment path sends deferred spans too. A deferred checksum
-    /// repair over Entropy is sent whole there, not narrowed and dropped.
+    /// A capacity-to-ledger update sends the module's deferred spans. A
+    /// deferred checksum repair over Entropy is sent whole there, not
+    /// narrowed to its `Uninitialized` part and dropped.
     #[tokio::test]
-    async fn assignment_path_sends_a_deferred_crc_repair_whole() {
-        let mut harness = harness(Some(DataLedger::Publish.into()));
+    async fn capacity_to_ledger_sends_a_deferred_crc_repair_whole() {
+        let mut harness = harness(None);
         write_span(&harness.module, 1, 3, irys_domain::ChunkType::Entropy);
         fill_packing_channel(&harness);
         harness
             .module
             .requeue_crc_repair_range(repair_one_to_three().0);
         harness.inner.tick();
-        while harness.receivers.packing.try_recv().is_ok() {}
-        let module = Arc::clone(&harness.module);
-        harness.inner.enqueue_deferred_uninitialized(&module);
-        let request = harness
-            .receivers
-            .packing
-            .try_recv()
-            .expect("the deferred checksum repair is sent");
-        assert_eq!(*request.chunk_range().0.start(), 1);
-        assert_eq!(*request.chunk_range().0.end(), 3);
+        let _fillers = drain_packing(&mut harness);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        apply_update(&mut harness, publish_update(&path, hash, miner), 5).await;
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        let sent = drain_packing(&mut harness);
+        assert!(
+            sent.iter()
+                .any(|request| *request.chunk_range().0.start() == 1
+                    && *request.chunk_range().0.end() == 3),
+            "the deferred checksum repair is sent whole: {sent:?}"
+        );
     }
 
     fn recovery_span() -> PartitionChunkRange {
