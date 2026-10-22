@@ -273,6 +273,53 @@ impl ChunkIngressServiceInner {
         }
     }
 
+    /// Limits on a chunk parked before its proof is checked.
+    /// The missing-header park and the oversized-claim park both use these
+    /// limits: `bytes` at most `chunk_size`, `data_path` at most the configured
+    /// max, and `tx_offset` valid for the claimed size.
+    fn check_unconfirmed_chunk_bounds(
+        &self,
+        chunk: &UnpackedChunk,
+        chunk_size: u64,
+    ) -> Result<(), AdvisoryChunkIngressError> {
+        let chunk_len_u64 = u64::try_from(chunk.bytes.len())
+            .map_err(|_| AdvisoryChunkIngressError::PreHeaderOversizedBytes)?;
+        if chunk_len_u64 > chunk_size {
+            warn!(
+                "Dropping pre-header chunk for {} at offset {}: bytes.len() {} exceeds chunk_size {}",
+                &chunk.data_root,
+                &chunk.tx_offset,
+                chunk.bytes.len(),
+                chunk_size
+            );
+            return Err(AdvisoryChunkIngressError::PreHeaderOversizedBytes);
+        }
+        let preheader_data_path_max_bytes = self.config.mempool.max_preheader_data_path_bytes;
+        if chunk.data_path.0.len() > preheader_data_path_max_bytes {
+            warn!(
+                "Dropping pre-header chunk for {} at offset {}: data_path too large ({} > {})",
+                &chunk.data_root,
+                &chunk.tx_offset,
+                chunk.data_path.0.len(),
+                preheader_data_path_max_bytes
+            );
+            return Err(AdvisoryChunkIngressError::PreHeaderOversizedDataPath);
+        }
+
+        if !chunk.is_valid_offset(chunk_size) {
+            let max_offset = chunk.max_valid_offset(chunk_size);
+            warn!(
+                "Dropping pre-header chunk for {} at offset {}: tx_offset {} exceeds max valid offset {:?} for data_size {}",
+                &chunk.data_root, &chunk.tx_offset, *chunk.tx_offset, max_offset, chunk.data_size
+            );
+            return Err(AdvisoryChunkIngressError::PreHeaderInvalidOffset(format!(
+                "tx_offset {} exceeds max valid offset {:?} for data_size {}",
+                *chunk.tx_offset, max_offset, chunk.data_size
+            )));
+        }
+        Ok(())
+    }
+
     /// Park `chunk` under one write lock.
     ///
     /// `Ok(true)` means the chunk parked while its root was draining. The caller
@@ -590,53 +637,12 @@ impl ChunkIngressServiceInner {
             None => {
                 // We don't have a data_root for this chunk but possibly the transaction containing this
                 // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
-                // Pre-header sanity checks to reduce DoS risk.
-                let chunk_len_u64 = u64::try_from(chunk.bytes.len())
-                    .map_err(|_| AdvisoryChunkIngressError::PreHeaderOversizedBytes)?;
-                if chunk_len_u64 > chunk_size {
-                    warn!(
-                        "Dropping pre-header chunk for {} at offset {}: bytes.len() {} exceeds chunk_size {}",
-                        &chunk.data_root,
-                        &chunk.tx_offset,
-                        chunk.bytes.len(),
-                        chunk_size
-                    );
-                    return Err(AdvisoryChunkIngressError::PreHeaderOversizedBytes.into());
-                }
-                let preheader_data_path_max_bytes =
-                    self.config.mempool.max_preheader_data_path_bytes;
-                let preheader_chunks_per_item_cap =
-                    self.config.mempool.max_preheader_chunks_per_item;
-                if chunk.data_path.0.len() > preheader_data_path_max_bytes {
-                    warn!(
-                        "Dropping pre-header chunk for {} at offset {}: data_path too large ({} > {})",
-                        &chunk.data_root,
-                        &chunk.tx_offset,
-                        chunk.data_path.0.len(),
-                        preheader_data_path_max_bytes
-                    );
-                    return Err(AdvisoryChunkIngressError::PreHeaderOversizedDataPath.into());
-                }
+                self.check_unconfirmed_chunk_bounds(chunk.as_ref(), chunk_size)?;
 
-                if !chunk.is_valid_offset(chunk_size) {
-                    let max_offset = chunk.max_valid_offset(chunk_size);
-                    warn!(
-                        "Dropping pre-header chunk for {} at offset {}: tx_offset {} exceeds max valid offset {:?} for data_size {}",
-                        &chunk.data_root,
-                        &chunk.tx_offset,
-                        *chunk.tx_offset,
-                        max_offset,
-                        chunk.data_size
-                    );
-                    return Err(AdvisoryChunkIngressError::PreHeaderInvalidOffset(format!(
-                        "tx_offset {} exceeds max valid offset {:?} for data_size {}",
-                        *chunk.tx_offset, max_offset, chunk.data_size
-                    ))
-                    .into());
-                }
-
-                let preheader_chunks_per_item =
-                    std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
+                let preheader_chunks_per_item = std::cmp::min(
+                    max_chunks_per_item,
+                    self.config.mempool.max_preheader_chunks_per_item,
+                );
 
                 // The count check and the insert share one write lock so concurrent
                 // ingress cannot exceed the per-item cap.
@@ -686,6 +692,9 @@ impl ChunkIngressServiceInner {
                 // Park the chunk for the time being — same TOCTOU as the
                 // pre-header path if ProcessPendingChunks runs before this put.
                 // Same cap as that path: `put` would LRU-evict an accepted sibling.
+                // Same body, proof, and offset bounds: this branch returns
+                // before those fields are checked.
+                self.check_unconfirmed_chunk_bounds(chunk.as_ref(), chunk_size)?;
                 let data_root = chunk.data_root;
                 let claimed_size = chunk.data_size;
                 let tx_offset = chunk.tx_offset;
@@ -2783,9 +2792,11 @@ mod tests {
                 });
             }
         }
+        // `CLAIMED_DATA_SIZE` covers offset 2 at the test `chunk_size` of 32.
+        // A smaller claim is an invalid offset and never reaches the cap.
         let incoming = UnpackedChunk {
             data_root,
-            data_size: 20,
+            data_size: CLAIMED_DATA_SIZE,
             data_path: Default::default(),
             bytes: vec![9_u8].into(),
             tx_offset: TxChunkOffset::from(2),
@@ -2825,9 +2836,10 @@ mod tests {
             bytes: vec![1_u8].into(),
             tx_offset: TxChunkOffset::from(0),
         });
+        // `CLAIMED_DATA_SIZE` covers offset 1 at the test `chunk_size` of 32.
         let incoming = UnpackedChunk {
             data_root,
-            data_size: 20,
+            data_size: CLAIMED_DATA_SIZE,
             data_path: Default::default(),
             bytes: vec![2_u8].into(),
             tx_offset: TxChunkOffset::from(1),
@@ -2841,6 +2853,138 @@ mod tests {
         assert!(parked.peek(&TxChunkOffset::from(0)).is_some());
         assert!(parked.peek(&TxChunkOffset::from(1)).is_some());
         assert_eq!(parked.len(), 2);
+    }
+
+    /// Unconfirmed cached size, claim one byte larger. The body is not
+    /// proof-checked on this path, so a body over `chunk_size` is rejected
+    /// and not parked.
+    #[tokio::test]
+    async fn oversized_claim_rejects_body_over_chunk_size() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-claim-oversize-bytes")
+            .build();
+        let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        let data_root = H256([0xC2; 32]);
+        insert_unconfirmed_cdr(&inner.irys_db, data_root, 32);
+        let mut incoming = chunk_with(data_root, 0, 0xAB, 33);
+        // Test config `chunk_size` is 32. One byte over must not park.
+        incoming.bytes = vec![1_u8; 33].into();
+
+        let err = inner
+            .handle_chunk_ingress_message(incoming)
+            .await
+            .expect_err("a claim whose body exceeds chunk_size must be rejected");
+        assert!(
+            matches!(
+                err,
+                ChunkIngressError::Advisory(AdvisoryChunkIngressError::PreHeaderOversizedBytes)
+            ),
+            "{err:?}"
+        );
+        assert!(
+            inner.pending_chunks.read().await.get(&data_root).is_none(),
+            "a rejected claim must not be parked"
+        );
+        assert!(receivers.chunk_ingress.try_recv().is_err());
+    }
+
+    /// Same unconfirmed claim, with a proof longer than the pre-header max.
+    #[tokio::test]
+    async fn oversized_claim_rejects_data_path_over_preheader_max() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-claim-oversize-path")
+            .build();
+        let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        let data_root = H256([0xC3; 32]);
+        insert_unconfirmed_cdr(&inner.irys_db, data_root, 32);
+        let mut incoming = chunk_with(data_root, 0, 0xAB, 64);
+        let max_path = inner.config.mempool.max_preheader_data_path_bytes;
+        incoming.data_path = vec![0_u8; max_path + 1].into();
+
+        let err = inner
+            .handle_chunk_ingress_message(incoming)
+            .await
+            .expect_err("a claim whose data_path exceeds the pre-header max must be rejected");
+        assert!(
+            matches!(
+                err,
+                ChunkIngressError::Advisory(AdvisoryChunkIngressError::PreHeaderOversizedDataPath)
+            ),
+            "{err:?}"
+        );
+        assert!(
+            inner.pending_chunks.read().await.get(&data_root).is_none(),
+            "a rejected claim must not be parked"
+        );
+        assert!(receivers.chunk_ingress.try_recv().is_err());
+    }
+
+    /// `chunk_size` 32 and `data_size` 32 admit only offset 0.
+    #[tokio::test]
+    async fn oversized_claim_rejects_offset_past_claimed_size() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-claim-bad-offset")
+            .build();
+        let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        let data_root = H256([0xC4; 32]);
+        insert_unconfirmed_cdr(&inner.irys_db, data_root, 16);
+        let incoming = chunk_with(data_root, 1, 0xAB, 32);
+
+        let err = inner
+            .handle_chunk_ingress_message(incoming)
+            .await
+            .expect_err("a claim whose tx_offset is past the claimed size must be rejected");
+        assert!(
+            matches!(
+                err,
+                ChunkIngressError::Advisory(AdvisoryChunkIngressError::PreHeaderInvalidOffset(_))
+            ),
+            "{err:?}"
+        );
+        assert!(
+            inner.pending_chunks.read().await.get(&data_root).is_none(),
+            "a rejected claim must not be parked"
+        );
+        assert!(receivers.chunk_ingress.try_recv().is_err());
+    }
+
+    /// A claim inside the body, proof, and offset bounds is still parked.
+    /// Bytes equal `chunk_size` and the proof equals the configured max.
+    #[tokio::test]
+    async fn oversized_claim_parks_when_body_path_and_offset_fit() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-claim-bounded")
+            .build();
+        let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        let data_root = H256([0xC5; 32]);
+        insert_unconfirmed_cdr(&inner.irys_db, data_root, 32);
+        // 64 bytes is two chunks of 32, so offset 1 is the last valid offset.
+        let mut incoming = chunk_with(data_root, 1, 0xAB, 64);
+        incoming.bytes = vec![1_u8; 32].into();
+        let max_path = inner.config.mempool.max_preheader_data_path_bytes;
+        incoming.data_path = vec![0_u8; max_path].into();
+
+        inner
+            .handle_chunk_ingress_message(incoming)
+            .await
+            .expect("a bounded oversized claim must still park");
+        let pending = inner.pending_chunks.read().await;
+        let parked = pending.get(&data_root).expect("claim is parked");
+        assert_eq!(parked.len(), 1);
+        assert_eq!(
+            parked
+                .peek(&TxChunkOffset::from(1))
+                .expect("offset 1")
+                .bytes
+                .0
+                .len(),
+            32
+        );
+        drop(pending);
+        assert!(
+            receivers.chunk_ingress.try_recv().is_err(),
+            "cached size is still below the claim, so no drain is scheduled"
+        );
     }
 
     fn test_ingress_inner(
