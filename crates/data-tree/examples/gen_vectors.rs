@@ -281,7 +281,7 @@ fn primitive_cases() -> Vec<PrimitiveCase> {
     let testing = Geometry::TESTING;
     let (_data, tree) = build_upload(testing, MOD251, PRINTED_DATA_SIZE);
     let commitment = tree.data_commitment();
-    // 0, 1, and 2^24 are the spec list. 3 is the printed testing chunk_key (spec §13).
+    // Spec §13: c = 0, 1, and 2^24, plus the printed key at c = 3.
     for chunk_index in [0_u32, 1, 1 << 24, 3] {
         let key = chunk_key(&commitment, chunk_index);
         cases.push(PrimitiveCase::ChunkKey {

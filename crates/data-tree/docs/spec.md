@@ -214,7 +214,7 @@ data_commitment for 3.5 chunks (917,504 bytes): data tree left, size witness rig
 
 **Non-power-of-two.** With `C = 5`, `T = node(node(node(R_0, R_1), node(R_2, R_3)), R_4)`. The chunk proof for `c = 4` has one sibling, then the size witness. The chunk proof for `c = 0` has three siblings, then the size witness.
 
-**Building.** A streaming builder keeps a stack of at most `log2(C) + 1` subtree roots, plus the chunk roots. To serve proofs it caches every layer. Layer `l` stores `ceil(C / 2^l)` hashes, from the chunk roots (`l = 0`) through the single root. The stored count is `Σ_l ceil(C / 2^l)`, at most about `2C + log2(C)` hashes: 64 B per chunk in all (256 KiB per GiB, about 1.3 GB at 5 TiB). A carried node is copied into each layer it passes through, so a proof lookup is a plain index in that layer. `path()` below is the sibling list. The chunk proof is that list and then `size_witness(G, n)`. An implementation reads the siblings from the node cache and does not recompute subtrees:
+**Building.** A streaming builder keeps a stack of at most `log2(C) + 1` subtree roots, plus the chunk roots. To serve proofs it caches every layer. Layer `l` stores `ceil(C / 2^l)` hashes, from the chunk roots (`l = 0`) through the single root. The stored count is `Σ_l ceil(C / 2^l)`, at most about `2C + log2(C)` hashes: 64 B per chunk in all (256 KiB per GiB). At 5 TiB that sum is 41,943,041 hashes, 1,342,177,312 bytes, about 1.3 GB. A carried node is copied into each layer it passes through, so a proof lookup is a plain index in that layer. `path()` below is the sibling list. The chunk proof is that list and then `size_witness(G, n)`. An implementation reads the siblings from the node cache and does not recompute subtrees:
 
 ```
 path(c, R[0..C]):                         // siblings of chunk c, leaf to root (RFC 6962 audit path)
@@ -439,13 +439,13 @@ Each time and each change has three significant figures. A change is the ratio o
 | Hash one chunk (build or verify) | 0.144 ms: one 262,144-byte hash | 0.159 ms: 64 hashes of 4,097 bytes + 63 nodes | +10.6% |
 | Verify one chunk proof at 5 TiB (depth 25) | 0.159 ms: chunk hash + 25 × 4 small hashes | 0.163 ms: chunk hashes + 25 nodes + the size witness | +2.61% |
 | Build the tree of a 1 GiB upload, one core | 0.590 s: 4,096 × the unrounded chunk time | 0.652 s: 4,096 × the unrounded chunk time | +0.0625 s |
-| Verify one segment proof at 5 TiB | — | 7.14 µs: one 4,097-byte leaf + 32 small hashes | new |
+| Verify one segment proof at 5 TiB | — | 7.29 µs: one 4,097-byte leaf + 33 small hashes | new |
 | Builder memory, 1 GiB | every proof up front: 4.98 MB | chunk roots and nodes: 256 KiB | lower |
 | Builder memory, 5 TiB | every proof up front: 50.9 GB | chunk roots and nodes: 1.34 GB, proofs on demand | lower |
 
-The 32 small hashes are 6 in-chunk nodes, 25 climb nodes, and the size witness. A chunk-verify sum that stops after the 25 climb nodes also rounds to 0.163 ms. The final check `node(r, w)` adds one node, 0.15 µs. With that node the chunk-verify time still rounds to 0.163 ms.
+The 33 small hashes are 6 in-chunk nodes, 25 climb nodes, the size witness, and `node(r, w)`. A chunk-verify sum that stops after the 25 climb nodes also rounds to 0.163 ms. Adding `node(r, w)` still rounds that time to 0.163 ms. §5 hashes the size witness once. `data_commitment` hashes that witness again before `node(r, w)`, so a measurement of `verify_segment` is 7.44 µs under the same rate.
 
-Memory uses the same three significant figures. 1 MB is 10^6 bytes and 1 GB is 10^9 bytes. v1 stores every proof at 64 + 96 × depth bytes. 1 GiB is 4,096 × 1,216 = 4,980,736 bytes, 4.98 MB. 5 TiB is 2^24 × 2,464 + 2^22 × 2,272 = 50,868,518,912 bytes, 50.9 GB. v2 stores the chunk roots and the nodes at 32 bytes each, and builds proofs on demand. 1 GiB uses the §4 bound of 64 bytes per chunk: 4,096 × 64 = 262,144 bytes, 256 KiB. 5 TiB is (2 × 20,971,520 − 1) × 32 = 1,342,177,248 bytes, 1.34 GB.
+Memory uses the same three significant figures. 1 MB is 10^6 bytes and 1 GB is 10^9 bytes. v1 stores every proof at 64 + 96 × depth bytes. 1 GiB is 4,096 × 1,216 = 4,980,736 bytes, 4.98 MB. 5 TiB is 2^24 × 2,464 + 2^22 × 2,272 = 50,868,518,912 bytes, 50.9 GB. v2 stores the chunk roots and the nodes at 32 bytes each, and builds proofs on demand. 1 GiB uses the §4 bound of 64 bytes per chunk: 4,096 × 64 = 262,144 bytes, 256 KiB. 5 TiB is the §4 sum, 41,943,041 × 32 = 1,342,177,312 bytes, 1.34 GB.
 
 - Chunk roots are independent, so tree building parallelizes per chunk, as v1's leaf hashes do.
 - The empty-segment hashes of a last chunk come from a fixed table of `h + 1` values.
@@ -531,11 +531,11 @@ This crate is the data tree and this spec. The rows below are the L1 and gateway
 
 ## 13. Test vectors
 
-The printed `data_tree_root` values and the sibling hashes came from an independent Python reference of the tree. That reference uses the Python standard library only. It is not in this repo. The printed `size_witness`, `data_commitment` and `chunk_key` values came from a second independent Python reference of `size_witness(G, n)`. The generator matches both references byte for byte. Proof order is leaf to root (§5). The size witness binds size and geometry: `H(0x02 ‖ be64(data_size) ‖ be64(chunk_size) ‖ be16(segments_per_chunk))` (19 B, §3). The four size-witness lines below use mainnet geometry. The tree reference also checked:
+The printed `data_tree_root` values and the sibling hashes came from an independent Python reference of the tree. That reference uses the Python standard library only. It is not in this repo. The printed `size_witness`, `data_commitment` and `chunk_key` lines came from a second independent Python reference of `size_witness(G, n)`. That reference uses the Python standard library only. It is not in this repo. The generator matches both references byte for byte. Proof order is leaf to root (§5). The size witness binds size and geometry: `H(0x02 ‖ be64(data_size) ‖ be64(chunk_size) ‖ be16(segments_per_chunk))` (19 B, §3). The four size-witness lines below use mainnet geometry. The tree reference also checked:
 
 - the streaming builder against the recursive definition for every `C` from 1 to 299;
 - that every chunk proof and segment proof verifies, for every `data_size` from 1 to 199 in test geometry;
-- these negative cases: wrong size with the same and with another `C`, `c ≥ C`, a proof one hash too long and too short, a flipped sibling bit, a zero-padded chunk, a 64 B segment equal to `l ‖ r`, and an unanchored commitment;
+- these negative cases: wrong size with the same and with another `C`, `c ≥ C`, a proof one hash too long and too short, a flipped sibling bit, a zero-padded segment, a 64 B segment equal to `l ‖ r`, and an unanchored commitment;
 - the depths 25 and 23 at the maximum size.
 
 Data is `b[i] = i mod 251`. Proofs are leaf to root and end with `size_witness(G, data_size)`.
@@ -596,11 +596,11 @@ n        C  data_tree_root                                                    da
 
 | Group | Cases |
 | --- | --- |
-| Primitives | `leaf` of 0, 1, 4,095 and 4,096 B; `node`; `size_witness` of 1, 4,096, 262,144, 917,504, `2^40` and 5 TiB; `empty(0..=8)`; `chunk_key` at `c` = 0, 1, `2^24` |
+| Primitives | `leaf` of 0, 1, 4,095 and 4,096 B; `node`; `size_witness` of 1, 4,096, 262,144, 917,504, `2^40` and 5 TiB; `empty(0..=8)`; `chunk_key` at `c` = 0, 1, `2^24`, and the printed `c` = 3 |
 | Roots, mainnet geometry | `data_size` 1; 4,095; 4,096; 4,097; 262,143; 262,144; 262,145; 524,288; 786,432; 917,504; 1,310,720; `C` = 8, 9, 16, 17; 1 GiB; 1 GiB + 1. Each with `i mod 251` bytes and with all-zero bytes. Output: chunk roots, `data_tree_root`, `size_witness`, `data_commitment` |
 | Roots, test geometry | `chunk_size` 32, SPC 4: `data_size` 1, 8, 9, 32, 33, 112, 157 |
-| Chunk proofs | every chunk for `C ≤ 17`; chunks 0, 2,047 and 4,095 of 1 GiB; `C = 5`, `c = 4` (one sibling, then the size witness) |
-| Segment proofs | every segment for `C ≤ 2`; for 917,504: `(3, 5)`, `(3, 31)` (last full), `(3, 32)` (first empty), `(3, 63)`; the partial segment `(0, 1)` of 4,097 B |
+| Chunk proofs | every chunk for `C ≤ 17`; chunks 0, 2,047 and 4,095 of 1 GiB; `C = 5`, `c = 4` (one sibling, then the size witness); every chunk of the printed testing upload `n` = 112 |
+| Segment proofs | every segment for `C ≤ 2`; for 917,504: `(3, 5)`, `(3, 31)` (last full), `(3, 32)` (first empty), `(3, 63)`; the partial segment `(0, 1)` of 4,097 B; the printed testing proof `(n = 112, c = 3, j = 1)` |
 | Multi-segment | option B. In one chunk, `m` = 1, 2, 4 and 64: each case is `m` segment proofs (the `h` in-chunk siblings each) and one shared chunk proof. The full segment proof is those siblings concatenated with the chunk proof, including when `C = 1`. An adjacent pair in one chunk. A pair in two chunks, which is two chunk proofs |
 | Receipt header binding (gateway) | Proposal — not binding. A 100 B span inside one segment, across two segments of one chunk, and across a chunk boundary. Not generated yet. |
 | `tx_root` v2 (Appendix C) | Proposal — not binding. `N` = 1, 2, 3, 100; every `k` for small `N`; the 40/1/64-byte ledger (Appendix C); negatives: wrong `N`, wrong `k`, wrong witness, a flipped bit per sibling, a wrong `tx_id`, a wrong `prefix_hash`, a wrong `prefix_size`, a wrong `chunk_start`, `data_size = 0`, one hash too many or too few. Not generated yet. Generated when `tx_root` v2 is implemented |
@@ -681,7 +681,7 @@ This measures the stored size of leaf-to-root and root-to-leaf chunk proofs unde
 
 These measurements used proofs without the size witness (§15 Q10). The witness is identical for every row of an upload, so LZ4 shares it. The tables were not re-run.
 
-**Production settings, as of this writing.** `ChunkMetaByOffset` uses `RocksTuning::baseline` (`crates/database/src/submodule/rocks.rs:172-192`) through `column_options` (`rocks.rs:3617-3696`). Compression is LZ4 (`rocks.rs:3646-3658`). The block size is `BLOCK_BYTES`, 64 KiB (`rocks.rs:60`). `encode_offset_meta` (`crates/database/src/submodule/records.rs:30-54`) writes a non-empty proof, then the CRC little-endian when present (`records.rs:48-50`), then the flags byte (`records.rs:44-47`). `HAS_PROOF | CRC_PRESENT` is `0x03` (`records.rs:16-18`). The format byte is `1` (`records.rs:14`, `records.rs:53`). An empty proof returns an error (`records.rs:37-39`).
+**Production settings, as of this writing.** `ChunkMetaByOffset` uses `RocksTuning::baseline` (`crates/database/src/submodule/rocks.rs:172-192`) through `column_options` (`rocks.rs:3617-3696`). Compression is LZ4 (`rocks.rs:3646-3658`). The block size is `BLOCK_BYTES`, 64 KiB (`rocks.rs:60`). `encode_offset_meta` (`crates/database/src/submodule/records.rs:30-54`) writes a non-empty proof, then the CRC little-endian when present (`records.rs:48-50`), then the flags byte (`records.rs:52`). `HAS_PROOF | CRC_PRESENT` is `0x03` (`records.rs:16-18`). The format byte is `1` (`records.rs:14`, `records.rs:53`). An empty proof returns an error (`records.rs:37-39`).
 
 **Value-only LZ4.** Consecutive row values, no keys, packed on row boundaries into groups of at most 64 KiB. Each group is one LZ4 default block with no size prefix. 65,536 rows of the one upload:
 

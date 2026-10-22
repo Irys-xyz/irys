@@ -35,7 +35,8 @@ fn main() {
     // Layer `l` stores `ceil(C / 2^l)` hashes, from the chunk roots through the
     // root. A carried node is copied into each layer it passes through, so the
     // stored count is that sum and a proof lookup is a plain index (spec §4).
-    // The loop is that rule; it is not a closed form.
+    // The loop is that rule; it is not a closed form. At 5 TiB the sum is
+    // 41,943,041 hashes, 1,342,177,312 bytes (spec §4, §9).
     let mut layer_length = u64::from(tree.chunk_count());
     let mut node_count = layer_length;
     while layer_length > 1 {

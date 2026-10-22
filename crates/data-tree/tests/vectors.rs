@@ -22,7 +22,8 @@ const MOD251_MODULUS: usize = 251;
 const MOD251: &str = "mod251";
 const ZEROS: &str = "zeros";
 
-/// spec §13 primitive group: 4 leaves, node, 6 size witnesses, empty(0..=8), 4 chunk keys.
+/// spec §13 primitive group: 4 leaves, node, 6 size witnesses, empty(0..=8),
+/// 3 spec chunk keys plus the printed key at c = 3.
 const PRIMITIVE_CASES: usize = 24;
 /// spec §13 testing root rows.
 const TESTING_ROOT_CASES: usize = 7;
