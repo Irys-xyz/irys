@@ -583,6 +583,9 @@ enum SyncPausePoint {
     /// `generate_full_chunks` has copied the bodies. It has not classified
     /// them against the checksum loaded before that read.
     AfterServeBodyRead,
+    /// The chunk file is dup'd and its mutex is free. `fdatasync` has not
+    /// started, so a recall can dup without waiting for that syscall.
+    AfterChunkFileDup,
 }
 
 /// Test barrier in a registration, after the rows are computed and before
@@ -4101,8 +4104,17 @@ impl StorageModule {
             }
             self.disk.yield_to_recall();
             let file_arc = Arc::clone(&submodule.file);
-            let file = self.disk.lock_chunks(&file_arc);
-            file.sync_data()
+            // fdatasync on a dup'd fd syncs the same open file description, so
+            // durability is unchanged. Recall takes this mutex only to dup.
+            let synced = {
+                let file = self.disk.lock_chunks(&file_arc);
+                file.try_clone()
+                    .map_err(|e| eyre::eyre!("Failed to dup chunks.dat for fdatasync: {}", e))?
+            };
+            #[cfg(test)]
+            self.wait_if_sync_paused(SyncPausePoint::AfterChunkFileDup);
+            synced
+                .sync_data()
                 .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
         }
         Ok(())
@@ -16401,6 +16413,64 @@ mod tests {
         });
         let storage = StorageModule::new(&one_span(10, "sub", None), &config)?;
         Ok((tmp_dir, config, storage))
+    }
+
+    /// A recall locks `chunks.dat` only to dup it. That lock has to succeed
+    /// at the fdatasync pause, and the syscall has to finish on its own fd
+    /// while the recall still holds the mutex.
+    #[test]
+    fn recall_dups_chunks_dat_while_fdatasync_is_pending() -> eyre::Result<()> {
+        let (tmp, _config, storage) = interval_batch_module("recall_during_fsync", 0)?;
+        let storage = Arc::new(storage);
+        let _release = SyncPauseRelease(storage.as_ref());
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage.write_chunk(offset, vec![7_u8; 32], ChunkType::Data));
+        storage.pause_next_sync_at(SyncPausePoint::AfterChunkFileDup);
+
+        let sync_mod = Arc::clone(&storage);
+        let (sync_tx, sync_rx) = std::sync::mpsc::channel();
+        let sync_worker = std::thread::spawn(move || {
+            let _ = sync_tx.send(sync_mod.sync_pending_chunks());
+        });
+        assert!(
+            storage.wait_for_sync_pause(Duration::from_secs(5)),
+            "the durable point did not reach fdatasync"
+        );
+
+        let (_, submodule) = storage
+            .submodules
+            .get_key_value_at_point(offset)
+            .expect("submodule for the written chunk");
+        let file_arc = Arc::clone(&submodule.file);
+        // Same critical section as mining recall: lock, dup, then the
+        // `pread` does not need this mutex. Hold it across the syscall.
+        let guard = match file_arc.try_lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                panic!("recall could not lock chunks.dat before fdatasync: {error}")
+            }
+        };
+        let recall_fd = guard.try_clone().expect("recall dup of chunks.dat");
+        drop(recall_fd);
+
+        storage.release_sync_pause();
+        sync_rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|err| {
+                eyre!("durable point did not finish while recall held chunks.dat: {err}")
+            })??;
+        drop(guard);
+        assert!(
+            storage.is_data_chunk_durable_at(offset),
+            "fdatasync did not make the chunk durable"
+        );
+        sync_worker
+            .join()
+            .map_err(|_| eyre!("durable point thread panicked"))?;
+        drop(_release);
+        drop(storage);
+        drop(tmp);
+        Ok(())
     }
 
     fn file_intervals(module: &StorageModule) -> eyre::Result<StorageIntervals> {
