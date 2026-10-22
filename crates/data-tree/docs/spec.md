@@ -4,6 +4,10 @@ This is the only binding document for the data tree and this crate. Everything h
 
 Code in this crate cites a section of this file as "spec §N".
 
+Data tree v2 replaces the v1 `data_root` tree for uploaded data. It drops offset notes, adds 4 KiB segment leaves inside each 256 KiB chunk, and binds size and geometry into the commitment through `size_witness(G, n)`. §13 names the source of the printed values and of the shared vector files. §15 logs the decisions made.
+
+Change this file in the same commit as the code that implements the change.
+
 ## 1. Summary
 
 Chunks stay 256 KiB for storage and transfer. Segments of 4 KiB exist only inside the tree, for proofs. One tree gives chunk proofs, segment proofs and the size.
@@ -290,8 +294,6 @@ All sizes are in bytes and exclude the segment and chunk bytes. The last column 
 
 ## 6. Trust anchor rule
 
-**Normative.**
-
 Verify chunks and segments only against an **anchored** `data_commitment`. A `data_commitment` is anchored when it is derived from a signature-checked header. It is also anchored when it is derived from a `tx_root` v2 leaf proven against a `tx_root` that is itself anchored. That `tx_root` is taken from a signature-checked block header, or from a trust source the consumer names explicitly. Today's gateway names the relay quorum attestation (integration-proposal.md Appendix A.2). A leaf proven against a `tx_root` the verifier computed itself is the unauthenticated case. A commitment that a verifier derives from an unauthenticated `(data_tree_root, data_size)` pair under a chosen geometry binds nothing. The witness is not a secret. The attacker chooses the claimed size and the claimed chunk index, and writes `size_witness(G, claimed n)` as the proof's last hash. The claimed size may be smaller or larger than the size the tree was built for. The claimed index may differ from the honest index.
 
 The bytes that pass are always honest bytes of that tree. They are never bytes from outside it.
@@ -319,9 +321,7 @@ Test geometry, same geometry. The last chunk holds three segments (`s = 3`). The
 
 The consumer anchor table is not ratified — see integration-proposal.md §2.
 
-## 7. Transaction header, chunk message and chunk identity
-
-**Normative.**
+## 7. Chunk identity and keys
 
 **Chunk identity.** A validated chunk is identified by `chunk_key(data_commitment, c)`, not by `H(data_path)`. Identical chunks at different indices of one upload (all-zero data is common) can have identical proofs, so a proof cannot be an identity. Table and type names (decided): `ChunkPathHash` → `ChunkKey`, `ChunkDataPathByPathHash` → `ChunkDataPathByChunkKey`, `ChunkPathHashesByOffset` → `ChunkKeysByOffset`, field `data_path_hash` → `chunk_key`, and `GossipCacheKey::Chunk` keyed by `ChunkKey`.
 
@@ -469,8 +469,6 @@ Not ratified — see integration-proposal.md §9. The tree-salt item is in desig
 The log is append-only. Each table keeps the order in which its rows were added. A new row goes at the end of that table. Dates are not re-sorted. A row is not reworded. The first table binds the data tree. The second table is integration planning.
 
 **Decided — the data tree (binding).**
-
-**Normative.**
 
 | Date | Decision |
 | --- | --- |
