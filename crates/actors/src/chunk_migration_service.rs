@@ -22,7 +22,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::{Notify, mpsc::UnboundedReceiver, oneshot};
-use tracing::{error, instrument};
+use tracing::{Instrument as _, error, instrument};
 
 mod body_worker;
 
@@ -59,13 +59,15 @@ pub struct ChunkMigrationServiceInner {
     pub service_senders: ServiceSenders,
     /// Wakes the body-migration worker once a block's indexes are durable.
     pub body_wakeup: Arc<Notify>,
-    /// Test-only. Runs after the per-block WAL sync and before side effects.
+    /// Test-only. Runs on the WAL-sync thread after that sync and before side effects.
     #[cfg(test)]
     index_durable_hook: Option<IndexDurableHook>,
 }
 
 /// Observes the moment a block's index registrations are durable.
+/// Called on the thread that performed the sync.
 #[cfg(test)]
+#[derive(Clone)]
 struct IndexDurableHook(Arc<dyn Fn() + Send + Sync>);
 
 #[cfg(test)]
@@ -150,10 +152,10 @@ impl ChunkMigrationServiceInner {
     /// service — and every later block's indexes — down with it. The failure is
     /// logged; index heal re-migrates blocks whose indexes are missing.
     #[tracing::instrument(level = "trace", skip_all)]
-    pub fn handle_message(&mut self, msg: ChunkMigrationServiceMessage) {
+    pub async fn handle_message(&mut self, msg: ChunkMigrationServiceMessage) {
         match msg {
             ChunkMigrationServiceMessage::BlockMigrated(block_header, all_txs) => {
-                if let Err(error) = self.on_block_migrated(block_header.clone(), all_txs) {
+                if let Err(error) = self.on_block_migrated(block_header.clone(), all_txs).await {
                     tracing::error!(
                         block.height = block_header.height,
                         block.hash = %block_header.block_hash,
@@ -166,7 +168,7 @@ impl ChunkMigrationServiceInner {
                 block_hash,
                 receiver,
             } => {
-                let response_value = self.on_update_storage_module_indexes(block_hash);
+                let response_value = self.on_update_storage_module_indexes(block_hash).await;
                 if let Err(e) = receiver.send(response_value) {
                     tracing::error!(
                         "UpdateStorageModuleIndexes receiver.send() error for block {}: {:?}",
@@ -178,7 +180,7 @@ impl ChunkMigrationServiceInner {
         }
     }
 
-    fn on_update_storage_module_indexes(
+    async fn on_update_storage_module_indexes(
         &mut self,
         block_hash: BlockHash,
     ) -> Result<(), MigrationError> {
@@ -217,7 +219,8 @@ impl ChunkMigrationServiceInner {
         }
 
         // Index only. Chunk bytes stay pending rows for the body worker.
-        self.on_block_migrated(Arc::new(block_header), Arc::new(block_tx_map))?;
+        self.on_block_migrated(Arc::new(block_header), Arc::new(block_tx_map))
+            .await?;
 
         Ok(())
     }
@@ -227,7 +230,7 @@ impl ChunkMigrationServiceInner {
         hash = %block_header.block_hash
     ))]
 
-    fn on_block_migrated(
+    async fn on_block_migrated(
         &mut self,
         block_header: Arc<IrysBlockHeader>,
         all_txs: Arc<HashMap<DataLedger, Vec<DataTransactionHeader>>>,
@@ -286,10 +289,32 @@ impl ChunkMigrationServiceInner {
         // One SyncWAL per submodule this block wrote. Per-tx registrations
         // stay unsynced. The wake and `OnBlockMigrated` below treat the rows
         // as durable, so a failed sync must not publish them.
-        self.sync_block_indexes(&touched)?;
+        // RocksDB's WAL flush blocks. Run it on the blocking pool so this
+        // worker can run other tasks, and publish only after it returns.
         #[cfg(test)]
-        if let Some(hook) = &self.index_durable_hook {
-            hook.call();
+        let index_durable_hook = self.index_durable_hook.clone();
+        // The flush runs on another thread, so re-enter the span there.
+        let sync_span = tracing::Span::current();
+        let synced = tokio::task::spawn_blocking(move || {
+            let _entered = sync_span.entered();
+            let result = Self::sync_block_indexes(&touched);
+            #[cfg(test)]
+            if result.is_ok()
+                && let Some(hook) = &index_durable_hook
+            {
+                hook.call();
+            }
+            result
+        })
+        .await;
+        match synced {
+            Ok(result) => result?,
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+            Err(err) => {
+                return Err(MigrationError::Other(format!(
+                    "index sync task ended: {err}"
+                )));
+            }
         }
 
         // The bodies are now owed as `PendingBodyMigrationsByOffset` rows.
@@ -317,7 +342,7 @@ impl ChunkMigrationServiceInner {
     ///
     /// `sync_group` is a no-op on a clean submodule and on an MDBX index
     /// whose group commit is off. A failure returns [`MigrationError::ChunkIndexWrite`].
-    fn sync_block_indexes(&self, touched: &[Arc<StorageModule>]) -> Result<(), MigrationError> {
+    fn sync_block_indexes(touched: &[Arc<StorageModule>]) -> Result<(), MigrationError> {
         let mut seen = HashSet::new();
         for module in touched {
             if !seen.insert(module.id) {
@@ -946,8 +971,8 @@ impl ChunkMigrationService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(traced) => {
-                            let (msg, _entered) = traced.into_inner();
-                            self.inner.handle_message(msg);
+                            let (msg, span) = traced.into_parts();
+                            self.inner.handle_message(msg).instrument(span).await;
                         }
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
@@ -960,8 +985,8 @@ impl ChunkMigrationService {
 
         // Process remaining messages before shutdown
         while let Ok(traced) = self.msg_rx.try_recv() {
-            let (msg, _entered) = traced.into_inner();
-            self.inner.handle_message(msg);
+            let (msg, span) = traced.into_parts();
+            self.inner.handle_message(msg).instrument(span).await;
         }
 
         tracing::info!("shutting down chunk migration service gracefully");
@@ -1316,14 +1341,16 @@ mod tests {
     /// Index heal's `UpdateStorageModuleIndexes` runs the same index-only path:
     /// rows appear, no chunk data moves — so a heal pass can never re-create
     /// the body-write stall it exists to repair.
-    #[test]
-    fn heal_reindex_is_index_only() -> eyre::Result<()> {
+    #[tokio::test]
+    async fn heal_reindex_is_index_only() -> eyre::Result<()> {
         let f = fixture(3, Some(u64::MAX))?;
         f.seed_cache()?;
         f.persist_block()?;
         let mut inner = f.service_inner();
 
-        inner.on_update_storage_module_indexes(f.block.block_hash)?;
+        inner
+            .on_update_storage_module_indexes(f.block.block_hash)
+            .await?;
 
         assert_eq!(f.rows()?.len(), 1);
         assert!(!f.sm.has_pending_writes());
@@ -1341,8 +1368,8 @@ mod tests {
     /// A block whose migration fails is logged and skipped; the next block is
     /// still processed. Previously the error unwound `start()` and killed the
     /// service for the life of the node.
-    #[test]
-    fn failed_block_does_not_stop_later_blocks() -> eyre::Result<()> {
+    #[tokio::test]
+    async fn failed_block_does_not_stop_later_blocks() -> eyre::Result<()> {
         let f = fixture(3, Some(u64::MAX))?;
         f.persist_block()?;
         let mut inner = f.service_inner();
@@ -1350,10 +1377,10 @@ mod tests {
         // Same hash (passes the block-index guard), corrupted tx_root: merklization fails.
         let mut bad = (*f.block).clone();
         bad.data_ledgers[DataLedger::Submit].tx_root = H256::random();
-        inner.handle_message(f.migrated_msg(Arc::new(bad)));
+        inner.handle_message(f.migrated_msg(Arc::new(bad))).await;
         assert!(f.rows()?.is_empty(), "failed block must index nothing");
 
-        inner.handle_message(f.migrated_msg(f.block.clone()));
+        inner.handle_message(f.migrated_msg(f.block.clone())).await;
         assert_eq!(f.rows()?.len(), 1, "later block still migrates");
         Ok(())
     }
@@ -3193,8 +3220,8 @@ mod tests {
 
     /// Registrations in one block stay unsynced until one WAL sync. The body
     /// wake and `OnBlockMigrated` run only after that sync.
-    #[test]
-    fn block_index_sync_precedes_migration_side_effects() -> eyre::Result<()> {
+    #[tokio::test(flavor = "current_thread")]
+    async fn block_index_sync_precedes_migration_side_effects() -> eyre::Result<()> {
         let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb, 20)?;
         f.persist_block()?;
         let db = {
@@ -3233,7 +3260,14 @@ mod tests {
         let hook_db = db.clone();
         let saw = Arc::new(AtomicBool::new(false));
         let hook_saw = Arc::clone(&saw);
+        // The hook runs on the thread that just synced the WAL.
+        let worker_thread = std::thread::current().id();
         inner.set_index_durable_hook(move || {
+            assert_ne!(
+                std::thread::current().id(),
+                worker_thread,
+                "index WAL sync ran on the async worker"
+            );
             assert!(hook_db.wal_sync_count() > syncs_before);
             assert!(hook_db.durable_generation() >= hook_db.published_generation());
             assert!(
@@ -3247,7 +3281,9 @@ mod tests {
             hook_saw.store(true, Ordering::SeqCst);
         });
 
-        inner.on_block_migrated(Arc::clone(&f.block), submit_txs(&f))?;
+        inner
+            .on_block_migrated(Arc::clone(&f.block), submit_txs(&f))
+            .await?;
         assert!(saw.load(Ordering::SeqCst), "sync hook did not run");
         assert_eq!(db.wal_sync_count(), syncs_before + 1);
         assert_eq!(db.wal_backstop_sync_count(), backstop_before + 1);
@@ -3269,8 +3305,8 @@ mod tests {
 
     /// A failed per-block sync is the old registration-sync error, and it
     /// does not wake the body worker or send `OnBlockMigrated`.
-    #[test]
-    fn block_index_sync_failure_does_not_publish() -> eyre::Result<()> {
+    #[tokio::test]
+    async fn block_index_sync_failure_does_not_publish() -> eyre::Result<()> {
         let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb, 20)?;
         f.persist_block()?;
         let db = {
@@ -3298,6 +3334,7 @@ mod tests {
 
         let err = inner
             .on_block_migrated(Arc::clone(&f.block), submit_txs(&f))
+            .await
             .expect_err("sync failure");
         assert!(matches!(err, MigrationError::ChunkIndexWrite));
         assert!(
