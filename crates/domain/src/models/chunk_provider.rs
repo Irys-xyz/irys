@@ -1737,7 +1737,7 @@ mod tests {
         let packed = served
             .as_packed()
             .expect("a storage module returns packed bytes");
-        let unpacked = unpack_packed(&config, &packed);
+        let unpacked = unpack_packed(&config, &packed)?;
         assert_eq!(unpacked.bytes.0, data);
         assert_eq!(unpacked.data_root, tx.header.data_root);
         assert_eq!(*unpacked.tx_offset, 0);
