@@ -6472,8 +6472,12 @@ mod peer_chunk_length_tests {
 /// A cache row with `chunk: None` is a miss. A storage-module body must name
 /// this data root and tx offset, and it must pass the same content checks as
 /// a body copied out of the cache (path, byte range, length, leaf hash).
-/// A mismatch is a miss. `Ok(None)` means both sources missed, so the caller
-/// tries peers.
+/// A mismatch is a miss. `Ok(None)` from a module read is a miss too: the
+/// index can name a chunk before its body is stored.
+///
+/// The bool is set when a placement lookup or chunk read returned an error.
+/// No bytes still means the caller tries peers. A node fault is reported only
+/// when every source missed and this bool is set.
 async fn ingress_proof_chunk_bytes_from_local(
     db: &DatabaseProvider,
     storage_modules: &StorageModulesReadGuard,
@@ -6481,7 +6485,7 @@ async fn ingress_proof_chunk_bytes_from_local(
     data_root: H256,
     data_size: u64,
     tx_offset: irys_types::TxChunkOffset,
-) -> Result<Option<Vec<u8>>, PreValidationError> {
+) -> Result<(Option<Vec<u8>>, bool), PreValidationError> {
     let cached = db
         .view_eyre(|tx| irys_database::cached_chunk_by_chunk_offset(tx, data_root, tx_offset))
         .map_err(|error| PreValidationError::DatabaseError {
@@ -6490,11 +6494,14 @@ async fn ingress_proof_chunk_bytes_from_local(
     if let Some((_meta, cached_chunk)) = cached
         && let Some(bytes) = cached_chunk.chunk
     {
-        return Ok(Some(bytes.0));
+        return Ok((Some(bytes.0), false));
     }
 
     // Copy the module list so the read guard is not held across unpack.
     let modules = storage_modules.read().clone();
+    // Remember a failed read. Another module may still hold the bytes, and a
+    // miss must stay a miss so the caller can try peers.
+    let mut read_failed = false;
     for module in &modules {
         let offsets = match module.partition_offsets_for_data_root_chunk(data_root, tx_offset) {
             Ok(Some(offsets)) => offsets,
@@ -6506,6 +6513,7 @@ async fn ingress_proof_chunk_bytes_from_local(
                     %tx_offset,
                     "storage module placement lookup failed; trying the next module"
                 );
+                read_failed = true;
                 continue;
             }
         };
@@ -6519,6 +6527,7 @@ async fn ingress_proof_chunk_bytes_from_local(
                         partition.offset = offset.0,
                         "storage module chunk read failed; trying the next offset"
                     );
+                    read_failed = true;
                     continue;
                 }
             };
@@ -6554,7 +6563,7 @@ async fn ingress_proof_chunk_bytes_from_local(
                 tx_offset,
                 config.consensus.chunk_size as usize,
             ) {
-                Ok(checked) => return Ok(Some(checked.bytes.0)),
+                Ok(checked) => return Ok((Some(checked.bytes.0), read_failed)),
                 Err(error) => {
                     debug!(
                         error = %error,
@@ -6565,7 +6574,7 @@ async fn ingress_proof_chunk_bytes_from_local(
             }
         }
     }
-    Ok(None)
+    Ok((None, read_failed))
 }
 
 /// Validates that data transactions in a block are correctly placed and have valid properties
@@ -7074,16 +7083,19 @@ pub async fn data_txs_are_valid(
                     let tx_chunk_offset = irys_types::TxChunkOffset::from(tx_offset_u32);
 
                     // Cache body, then a local storage module. An index row with
-                    // no body is a miss. Peers run only when both miss.
-                    let mut chunk_bytes = ingress_proof_chunk_bytes_from_local(
-                        db,
-                        storage_modules,
-                        config,
-                        tx_header.data_root,
-                        tx_header.data_size,
-                        tx_chunk_offset,
-                    )
-                    .await?;
+                    // no body is a miss. A local read error stays a miss too, so
+                    // peers still run. The fault is reported only when every
+                    // source missed.
+                    let (mut chunk_bytes, mut local_read_failed) =
+                        ingress_proof_chunk_bytes_from_local(
+                            db,
+                            storage_modules,
+                            config,
+                            tx_header.data_root,
+                            tx_header.data_size,
+                            tx_chunk_offset,
+                        )
+                        .await?;
 
                     if chunk_bytes.is_none() {
                         for api_addr in api_addrs.iter() {
@@ -7217,7 +7229,7 @@ pub async fn data_txs_are_valid(
 
                             // Ingest writes the body into the cache. An index-only
                             // row is still a miss, so try the next peer.
-                            chunk_bytes = ingress_proof_chunk_bytes_from_local(
+                            let (fetched, read_failed) = ingress_proof_chunk_bytes_from_local(
                                 db,
                                 storage_modules,
                                 config,
@@ -7226,20 +7238,34 @@ pub async fn data_txs_are_valid(
                                 tx_chunk_offset,
                             )
                             .await?;
+                            local_read_failed |= read_failed;
+                            chunk_bytes = fetched;
                             if chunk_bytes.is_some() {
                                 break;
                             }
                         }
                     }
 
-                    let chunk_bytes =
-                        chunk_bytes.ok_or_else(|| PreValidationError::InvalidIngressProof {
-                            tx_id: tx_header.id,
-                            reason: format!(
-                                "Data unavailable: missing chunk at offset {} for data_root {:?}",
-                                i, tx_header.data_root
-                            ),
-                        })?;
+                    let chunk_bytes = match chunk_bytes {
+                        Some(bytes) => bytes,
+                        None if local_read_failed => {
+                            return Err(PreValidationError::DatabaseError {
+                                error: format!(
+                                    "local storage read failed for data_root {:?} at tx offset {i}",
+                                    tx_header.data_root
+                                ),
+                            });
+                        }
+                        None => {
+                            return Err(PreValidationError::InvalidIngressProof {
+                                tx_id: tx_header.id,
+                                reason: format!(
+                                    "Data unavailable: missing chunk at offset {} for data_root {:?}",
+                                    i, tx_header.data_root
+                                ),
+                            });
+                        }
+                    };
                     chunks.push(chunk_bytes);
                 }
 
@@ -10556,7 +10582,8 @@ mod ingress_proof_local_bytes_tests {
     use irys_database::{
         IrysDatabaseArgs as _, cache_chunk, cache_data_root, open_or_create_db, tables::IrysTables,
     };
-    use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
+    use irys_domain::{BlockTree, ChunkType, StorageModule, StorageModuleInfo};
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         Base64, ConsensusConfig, DataTransaction, DataTransactionLedger, LedgerChunkOffset,
@@ -10657,6 +10684,7 @@ mod ingress_proof_local_bytes_tests {
         )
         .await
         .unwrap()
+        .0
     }
 
     #[tokio::test]
@@ -10891,6 +10919,400 @@ mod ingress_proof_local_bytes_tests {
             ran.load(Ordering::SeqCst),
             "unpack ran to completion without letting the async worker poll another task"
         );
-        assert_eq!(got.as_deref(), Some(data.as_slice()));
+        assert_eq!(got.0.as_deref(), Some(data.as_slice()));
+    }
+
+    /// A publish block with one chunk. `peer` serves that chunk over HTTP and
+    /// the ingress handler writes it back into the cache, which is what a
+    /// successful peer fetch does before the second local read.
+    async fn validate_full_ingress(
+        local: LocalBytes,
+        peer: bool,
+    ) -> Result<(), PreValidationError> {
+        let tmp = TempDirBuilder::new()
+            .prefix("ingress-full-validation")
+            .with_tracing()
+            .build();
+        let config = full_validation_config(tmp.path().to_path_buf());
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = 0;
+        let parent_ema = EmaSnapshot::genesis(&header);
+        let timestamp = header.timestamp_secs();
+        let epochs = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            header.height,
+            config.consensus.epoch.num_blocks_in_epoch,
+            config.consensus.epoch.submit_ledger_epoch_length,
+        );
+        let data = vec![7_u8; config.consensus.chunk_size as usize];
+        let term_fee = calculate_term_storage_base_network_fee(
+            data.len() as u64,
+            epochs,
+            &parent_ema,
+            &config,
+            config.number_of_ingress_proofs_total_at(timestamp),
+            timestamp,
+        )
+        .expect("term fee");
+        let perm_fee = calculate_perm_storage_total_fee(
+            data.len() as u64,
+            term_fee,
+            &parent_ema,
+            &config,
+            timestamp,
+        )
+        .expect("perm fee")
+        .amount;
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let tx = signer
+            .create_publish_transaction(
+                data.clone(),
+                H256::zero(),
+                BoundedFee::new(perm_fee),
+                BoundedFee::new(term_fee),
+            )
+            .unwrap();
+        let tx = signer.sign_transaction(tx).unwrap();
+        let proof = irys_types::ingress::generate_ingress_proof(
+            &signer,
+            tx.header.data_root,
+            std::iter::once(Ok(data.as_slice())),
+            config.consensus.chain_id,
+            tx.header.anchor,
+        )
+        .unwrap();
+
+        let publish = DataTransactionLedger {
+            ledger_id: DataLedger::Publish.into(),
+            tx_root: H256::zero(),
+            tx_ids: H256List(vec![tx.header.id]),
+            total_chunks: 0,
+            expires: None,
+            proofs: Some(irys_types::IngressProofsList(vec![proof])),
+            required_proof_count: Some(1),
+        };
+        let submit = DataTransactionLedger {
+            ledger_id: DataLedger::Submit.into(),
+            tx_root: H256::zero(),
+            tx_ids: H256List(vec![tx.header.id]),
+            total_chunks: 0,
+            expires: Some(5),
+            proofs: None,
+            required_proof_count: None,
+        };
+        header.data_ledgers = vec![
+            publish,
+            submit,
+            empty_ledger(DataLedger::OneYear),
+            empty_ledger(DataLedger::ThirtyDay),
+        ];
+        header.test_sign();
+
+        let db = open_db(&tmp.path().join("db"));
+        // The ancestor walk resolves this block from the DB. The tree genesis
+        // stays empty so sealing does not require the publish body.
+        db.update_eyre(|wtx| {
+            irys_database::insert_block_header(wtx, &header)?;
+            Ok(())
+        })
+        .unwrap();
+        cache_body(&db, &tx, &data);
+        strip_body(&db, &tx);
+        let modules = match local {
+            LocalBytes::ReadError => {
+                let module = store_indexed_body(&config, &tx, &data, 0);
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(tmp.path().join("hdd0").join("chunks.dat"))
+                    .unwrap()
+                    .set_len(0)
+                    .unwrap();
+                StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![module])))
+            }
+            LocalBytes::IndexedNoBody => {
+                let module = index_placement(&config, &tx, 0);
+                StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![module])))
+            }
+            LocalBytes::NoModule => empty_modules(),
+        };
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.test_sign();
+        let tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+        let parent_epoch = Arc::new(EpochSnapshot {
+            epoch_block: header.clone(),
+            ..Default::default()
+        });
+
+        let peer_body = serde_json::to_vec(&irys_types::ChunkFormat::Unpacked(UnpackedChunk {
+            data_root: tx.header.data_root,
+            data_size: tx.header.data_size,
+            data_path: Base64(tx.proofs[0].proof.clone()),
+            bytes: Base64(data.clone()),
+            tx_offset: TxChunkOffset::from(0_u32),
+        }))
+        .unwrap();
+        let peers = peer_list(peer.then(|| serve_chunk(peer_body)), &config);
+
+        let (service_senders, mut receivers) = ServiceSenders::new();
+        let tree_guard = block_tree_guard.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = receivers.block_tree.recv().await {
+                if let BlockTreeServiceMessage::GetBlockTreeReadGuard { response } = msg.inner {
+                    let _ = response.send(tree_guard.clone());
+                }
+            }
+        });
+        let active_peers = Arc::clone(&peers);
+        tokio::spawn(async move {
+            while let Some(msg) = receivers.data_sync.recv().await {
+                if let crate::DataSyncServiceMessage::GetActivePeersList(response) = msg.inner {
+                    let _ = response.send(Arc::clone(&active_peers));
+                }
+            }
+        });
+        let cache_db = db.clone();
+        let cached_tx = tx.clone();
+        let cached_data = data.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = receivers.chunk_ingress.recv().await {
+                let crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(
+                    _chunk,
+                    reply,
+                    _,
+                ) = msg.inner
+                else {
+                    continue;
+                };
+                put_cached_body(&cache_db, &cached_tx, &cached_data);
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        });
+
+        let mut data_txs = HashMap::new();
+        data_txs.insert(DataLedger::Publish, vec![tx.header.clone()]);
+        data_txs.insert(DataLedger::Submit, vec![tx.header.clone()]);
+        data_txs_are_valid(
+            &config,
+            &service_senders,
+            &header,
+            &db,
+            &block_tree_guard,
+            &BlockTransactions {
+                data_txs,
+                ..Default::default()
+            },
+            parent_epoch,
+            parent_ema,
+            &modules,
+        )
+        .await
+    }
+
+    fn full_validation_config(base: std::path::PathBuf) -> Config {
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 4,
+                entropy_packing_iterations: 1,
+                enable_full_ingress_proof_validation: true,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: base,
+            ..NodeConfig::testing()
+        };
+        Config::new_with_random_peer_id(node_config)
+    }
+
+    fn empty_ledger(ledger: DataLedger) -> DataTransactionLedger {
+        DataTransactionLedger {
+            ledger_id: ledger.into(),
+            tx_root: H256::zero(),
+            tx_ids: H256List::new(),
+            total_chunks: 0,
+            expires: None,
+            proofs: None,
+            required_proof_count: None,
+        }
+    }
+
+    fn index_placement(config: &Config, tx: &DataTransaction, id: usize) -> Arc<StorageModule> {
+        let assignment = PartitionAssignment {
+            partition_hash: H256::repeat_byte(u8::try_from(id).unwrap_or(1).saturating_add(1)),
+            miner_address: config.node_config.miner_address(),
+            ..PartitionAssignment::default()
+        };
+        let sm = StorageModule::new(
+            &StorageModuleInfo {
+                id,
+                partition_assignment: Some(assignment),
+                submodules: vec![(partition_chunk_offset_ie!(0, 4), format!("hdd{id}").into())],
+            },
+            config,
+        )
+        .unwrap();
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        sm.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )
+        .unwrap();
+        Arc::new(sm)
+    }
+
+    fn put_cached_body(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8]) {
+        use irys_database::db_cache::CachedChunk;
+        use irys_database::tables::CachedChunks;
+        use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+        let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
+        db.update_eyre(|wtx| {
+            let existing = wtx.get::<CachedChunks>(path_hash)?.expect("cached chunk");
+            wtx.put::<CachedChunks>(
+                path_hash,
+                CachedChunk {
+                    chunk: Some(Base64(data.to_vec())),
+                    data_path: existing.data_path,
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn peer_list(
+        api: Option<std::net::SocketAddr>,
+        config: &Config,
+    ) -> Arc<
+        RwLock<
+            HashMap<
+                IrysAddress,
+                crate::data_sync_service::peer_bandwidth_manager::PeerBandwidthManager,
+            >,
+        >,
+    > {
+        use crate::data_sync_service::peer_bandwidth_manager::PeerBandwidthManager;
+        use irys_types::{PeerAddress, PeerListItem};
+
+        let mut map = HashMap::new();
+        if let Some(api) = api {
+            let miner = IrysAddress::from([3_u8; 20]);
+            let item = PeerListItem {
+                mining_address: miner,
+                address: PeerAddress {
+                    api,
+                    gossip: api,
+                    ..Default::default()
+                },
+                is_online: true,
+                ..Default::default()
+            };
+            map.insert(miner, PeerBandwidthManager::new(&miner, &item, config));
+        }
+        Arc::new(RwLock::new(map))
+    }
+
+    fn serve_chunk(body: Vec<u8>) -> std::net::SocketAddr {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let Ok(mut stream) = listener.accept().map(|(stream, _)| stream) else {
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+            let mut buf = Vec::new();
+            let mut tmp = [0_u8; 1024];
+            loop {
+                match stream.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        });
+        addr
+    }
+
+    enum LocalBytes {
+        ReadError,
+        IndexedNoBody,
+        NoModule,
+    }
+
+    /// A local disk error must not stop validation when a peer has the chunk.
+    #[tokio::test]
+    async fn local_read_error_with_peer_chunk_is_valid() {
+        validate_full_ingress(LocalBytes::ReadError, true)
+            .await
+            .expect("a peer chunk is valid when the local read failed");
+    }
+
+    /// A local disk error, and no peer body, is a node fault.
+    #[tokio::test]
+    async fn local_read_error_with_no_peer_is_a_node_fault() {
+        let err = validate_full_ingress(LocalBytes::ReadError, false)
+            .await
+            .expect_err("no source produced the chunk");
+        assert!(
+            err.is_node_fault(),
+            "a failed local read must be a node fault, got {err:?}"
+        );
+        assert!(
+            !matches!(err, PreValidationError::InvalidIngressProof { .. }),
+            "a failed local read must not be a consensus rejection, got {err:?}"
+        );
+    }
+
+    /// No placement and no peer is a completed miss.
+    #[tokio::test]
+    async fn clean_local_miss_with_no_peer_is_invalid_ingress_proof() {
+        let err = validate_full_ingress(LocalBytes::NoModule, false)
+            .await
+            .expect_err("no source produced the chunk");
+        assert!(
+            matches!(err, PreValidationError::InvalidIngressProof { .. }),
+            "a clean miss must stay a consensus rejection, got {err:?}"
+        );
+    }
+
+    /// An indexed path with no body yet is a miss. A peer can still supply it.
+    #[tokio::test]
+    async fn indexed_placement_without_body_and_peer_chunk_is_valid() {
+        validate_full_ingress(LocalBytes::IndexedNoBody, true)
+            .await
+            .expect("a peer chunk is valid when the local body is not migrated");
+    }
+
+    /// That same miss, with no peer, stays a consensus rejection.
+    #[tokio::test]
+    async fn indexed_placement_without_body_and_no_peer_is_invalid_ingress_proof() {
+        let err = validate_full_ingress(LocalBytes::IndexedNoBody, false)
+            .await
+            .expect_err("an unmigrated body with no peer is a miss");
+        assert!(
+            matches!(err, PreValidationError::InvalidIngressProof { .. }),
+            "an unmigrated body must stay a consensus rejection, got {err:?}"
+        );
+        assert!(
+            !err.is_node_fault(),
+            "an unmigrated body must not abort the node, got {err:?}"
+        );
     }
 }
