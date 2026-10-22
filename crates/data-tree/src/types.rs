@@ -95,13 +95,44 @@ hash_id!(
     ///
     /// Verify a chunk or a segment only against an anchored commitment (spec §6).
     /// An anchored commitment is derived from a header whose signature was checked,
-    /// or from a `tx_root` leaf that was proven. A commitment derived from an
+    /// or from a `tx_root` v2 leaf that was proven. A commitment derived from an
     /// unauthenticated `(data_tree_root, data_size)` pair under a chosen geometry
-    /// binds nothing. The
-    /// attacker chooses the claimed size (smaller or larger) and the claimed
-    /// index. An honest proof for `(c, C)` passes as `(c', C')` when, and only
-    /// when, the left/right step sequence matches at every level and `chunk_len`
-    /// matches. The bytes that pass are an honest chunk of that tree.
+    /// binds nothing. The witness is not a secret. The attacker chooses the claimed
+    /// size (smaller or larger) and the claimed index, and writes
+    /// `size_witness(G, claimed n)` as the proof's last hash.
+    ///
+    /// The bytes that pass are always honest bytes of that tree. They are never
+    /// bytes from outside it. The rules below are for that same geometry.
+    ///
+    /// A chunk proof for `(c, C)` passes as `(c', C')` against the re-derived
+    /// commitment when, and only when, the left/right step sequence of `(c', C')`
+    /// equals that of `(c, C)` at every level and `chunk_len(n', c')` equals
+    /// `chunk_len(n, c)`.
+    ///
+    /// A segment proof passes as `(c', j)` against the re-derived commitment when
+    /// the chunk-level left/right steps of `(c', C')` equal those of `(c, C)`,
+    /// `segment_len(n', c', j)` equals `segment_len(n, c, j)`, and every in-chunk
+    /// sibling at or past the claimed data-segment count is already `empty(ℓ)`.
+    /// That count is `s' = ceil(chunk_len(n', c') / segment_size)`. At level `ℓ`
+    /// the sibling subtree starts at `start = ((j >> ℓ) ^ 1) << ℓ`. That sibling
+    /// is at or past the claimed data when `start ≥ s'`. `chunk_len(n', c')` need
+    /// not equal `chunk_len(n, c)`.
+    ///
+    /// `node(data_tree_root, size_witness(G, claimed n))` equals the re-derived
+    /// commitment, so the proof passes against it and fails against the anchored
+    /// commitment. A proof that still carries the true witness fails earlier,
+    /// before the climb: the last hash is not `size_witness(G, claimed n)`.
+    ///
+    /// Across geometries the commitment differs. `size_witness` binds `chunk_size`
+    /// and `segments_per_chunk`, so `node(data_tree_root, size_witness(G', n'))`
+    /// is not the commitment under `G`. Equal steps and an equal `chunk_len` are
+    /// not the accept rule under `G'`.
+    ///
+    /// Test geometry, same geometry. Chunk proofs: `n = 96`, chunk 2, passes as
+    /// chunk 1 of `n' = 64`; `n = 128`, chunk 0, passes as chunk 0 of `C' = 3`
+    /// after the last hash is `size_witness(G, 96)`. Segment proof: `n = 56`,
+    /// chunk 1, segment 0 (`chunk_len = 24`) passes as that segment for every
+    /// `n'` in `49..=64` (`chunk_len` 17 to 32). `n'` in `33..=48` does not pass.
     DataCommitment
 );
 

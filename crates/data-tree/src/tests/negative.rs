@@ -565,10 +565,13 @@ fn verify_size_rejects_a_different_size_with_no_range_check() {
 
 #[test]
 fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
-    // spec §6: a commitment derived from an unauthenticated `(root, n)` repeats
-    // the verifier's last step. This case is one match: chunk 0, whose step
-    // sequence is the same under a larger `C`. The anchored commitment rejects
-    // it. A smaller `C` and a moved index are the next test.
+    // spec §6: a commitment derived from an unauthenticated
+    // `(data_tree_root, data_size)` under a chosen geometry repeats the
+    // verifier's last step. This case is one chunk proof, same geometry:
+    // chunk 0, whose step sequence is the same under a larger `C`, and
+    // `chunk_len` matches. The pass is against the re-derived commitment.
+    // The anchored commitment rejects it. A smaller `C` and a moved index
+    // are the next test.
     //
     // Test geometry, three full chunks (`C = 3`), `c = 0`, `depth = 2`.
     // One byte more is `C = 4`, and `depth(0, 4) = 2` as well. The sibling list
@@ -653,9 +656,11 @@ fn an_unanchored_commitment_passes_only_when_the_path_shape_matches() {
 
 #[test]
 fn an_unanchored_commitment_passes_for_a_smaller_count_and_a_moved_index() {
-    // spec §6: the step sequence and `chunk_len` are the condition. The claimed
-    // size may be smaller, and the claimed index may differ. The bytes are the
-    // honest chunk. The anchored commitment rejects both.
+    // spec §6: for a chunk proof, same geometry, the left/right steps and
+    // `chunk_len(n', c') == chunk_len(n, c)` are the condition. The claimed
+    // size may be smaller, and the claimed index may differ. The bytes are
+    // the honest chunk. The pass is against the re-derived commitment. The
+    // anchored commitment rejects both.
     let geometry = Geometry::TESTING;
     let chunk_bytes = testing_chunk_bytes();
 
@@ -738,6 +743,164 @@ fn an_unanchored_commitment_passes_for_a_smaller_count_and_a_moved_index() {
         )
         .unwrap_err(),
         VerifyError::CommitmentMismatch
+    );
+}
+
+#[test]
+fn an_unanchored_segment_proof_passes_for_the_spec_region() {
+    // spec §6: test geometry, same geometry. Honest `n = 56`, chunk 1, segment 0.
+    // `chunk_len` is 24 and `s` is 3. The rewritten segment proof passes as that
+    // segment for every claimed size in `49..=64` (`chunk_len` 17 to 32). Sizes
+    // in `33..=48` do not. `chunk_len` need not match. The anchored commitment
+    // rejects every claim whose size is not 56. A chunk proof of those bytes
+    // still requires `chunk_len`.
+    let geometry = Geometry::TESTING;
+    let chunk_size = geometry.chunk_size();
+    let segment_size = geometry.segment_size();
+    let chunk_index = 1;
+    let segment_index = 0;
+    // One empty segment at the end of the chunk, so `s = 3`.
+    let data_segments = geometry.segments_per_chunk() - 1;
+    let honest_chunk_len = segment_size * u64::from(data_segments);
+    let data_size = chunk_size + honest_chunk_len;
+    // `C' = 2` starts one byte into the second chunk and ends at two full chunks.
+    let smallest_two_chunks = chunk_size + 1;
+    let two_full_chunks = chunk_size * 2;
+    // Segment 0's in-chunk siblings start at 1 and 2. `s' >= 3` pins neither.
+    let first_accepted = chunk_size + u64::from(data_segments - 1) * segment_size + 1;
+    let first_full_segment = chunk_size + segment_size;
+    assert_eq!(data_size, 56, "spec §6");
+    assert_eq!(honest_chunk_len, 24, "spec §6");
+    assert_eq!(smallest_two_chunks, 33, "spec §6");
+    assert_eq!(first_accepted, 49, "spec §6");
+    assert_eq!(two_full_chunks, 64, "spec §6");
+    assert_eq!(geometry.chunk_count(data_size).unwrap(), 2);
+    assert_eq!(
+        geometry.chunk_len(data_size, chunk_index).unwrap(),
+        honest_chunk_len
+    );
+    assert_eq!(geometry.chunk_len(first_accepted, chunk_index).unwrap(), 17);
+    assert_eq!(
+        geometry.chunk_len(two_full_chunks, chunk_index).unwrap(),
+        32
+    );
+    assert_eq!(
+        geometry
+            .segment_len(data_size, chunk_index, segment_index)
+            .unwrap(),
+        segment_size
+    );
+
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
+    let chunk_start = usize::try_from(chunk_size).unwrap();
+    let chunk_end = chunk_start + usize::try_from(honest_chunk_len).unwrap();
+    let chunk = &data[chunk_start..chunk_end];
+    let segment_end = usize::try_from(segment_size).unwrap();
+    let segment = &chunk[..segment_end];
+    let honest = tree
+        .segment_proof(chunk_index, segment_index, chunk)
+        .unwrap();
+    let anchored = tree.data_commitment();
+    let root = tree.data_tree_root();
+
+    let claimed_full = two_full_chunks;
+    let rederived_full = hash::data_commitment(&geometry, &root, claimed_full);
+    assert_eq!(
+        verify_segment(
+            &geometry,
+            &rederived_full,
+            claimed_full,
+            chunk_index,
+            segment_index,
+            segment,
+            &honest,
+        )
+        .unwrap_err(),
+        VerifyError::SizeWitnessMismatch
+    );
+
+    for claimed in smallest_two_chunks..=two_full_chunks {
+        let proof = proof_ending_with_size_witness(&geometry, honest.clone(), claimed);
+        let rederived = hash::data_commitment(&geometry, &root, claimed);
+        let result = verify_segment(
+            &geometry,
+            &rederived,
+            claimed,
+            chunk_index,
+            segment_index,
+            segment,
+            &proof,
+        );
+        if claimed >= first_accepted {
+            result.unwrap_or_else(|err| panic!("n' = {claimed} should pass: {err}"));
+            assert_eq!(
+                geometry
+                    .segment_len(claimed, chunk_index, segment_index)
+                    .unwrap(),
+                segment_size,
+                "n' = {claimed}"
+            );
+            let anchored_result = verify_segment(
+                &geometry,
+                &anchored,
+                claimed,
+                chunk_index,
+                segment_index,
+                segment,
+                &proof,
+            );
+            if claimed == data_size {
+                anchored_result.unwrap_or_else(|err| panic!("honest size: {err}"));
+            } else {
+                assert_eq!(
+                    anchored_result.unwrap_err(),
+                    VerifyError::CommitmentMismatch,
+                    "n' = {claimed}"
+                );
+                assert_ne!(
+                    geometry.chunk_len(claimed, chunk_index).unwrap(),
+                    honest_chunk_len,
+                    "n' = {claimed} should not have chunk_len {honest_chunk_len}"
+                );
+            }
+        } else {
+            let err = result.unwrap_err();
+            if claimed < first_full_segment {
+                assert_eq!(
+                    err,
+                    VerifyError::InvalidSegmentLength {
+                        expected: claimed - chunk_size,
+                        actual: segment_size,
+                    },
+                    "n' = {claimed}"
+                );
+            } else {
+                assert_eq!(err, VerifyError::CommitmentMismatch, "n' = {claimed}");
+            }
+        }
+    }
+
+    // The same bytes are not a chunk of `n' = 64`. `chunk_len` is 32.
+    let chunk_proof = proof_ending_with_size_witness(
+        &geometry,
+        tree.chunk_proof(chunk_index).unwrap(),
+        claimed_full,
+    );
+    assert_eq!(
+        verify_chunk(
+            &geometry,
+            &rederived_full,
+            claimed_full,
+            chunk_index,
+            chunk,
+            &chunk_proof,
+        )
+        .unwrap_err(),
+        VerifyError::InvalidChunkLength {
+            expected: chunk_size,
+            actual: honest_chunk_len,
+        }
     );
 }
 

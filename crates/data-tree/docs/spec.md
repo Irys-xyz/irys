@@ -321,14 +321,28 @@ All sizes are in bytes and exclude the segment and chunk bytes. The last column 
 
 Verify chunks and segments only against an **anchored** `data_commitment`: one derived from a header whose signature was checked, or from a `tx_root` v2 leaf that was proven. A commitment that a verifier derives from an unauthenticated `(data_tree_root, data_size)` pair under a chosen geometry binds nothing. The witness is not a secret. The attacker chooses the claimed size and the claimed chunk index, and writes `size_witness(G, claimed n)` as the proof's last hash. The claimed size may be smaller or larger than the size the tree was built for. The claimed index may differ from the honest index.
 
-An honest proof for `(c, C)` passes as `(c', C')` against the re-derived commitment when, and only when, two checks hold. The left/right step sequence of `(c', C')` equals that of `(c, C)` at every level. `chunk_len(n', c')` equals `chunk_len(n, c)`. A step is the side `path` and `climb` give the sibling at that level, left or right (§4, §5). The bytes that pass are always some honest chunk of that tree. They are never bytes from outside it. `node(data_tree_root, size_witness(G, claimed n))` equals the re-derived commitment, so the proof passes against it and fails against the anchored commitment. A proof that still carries the true witness fails earlier, before the climb: the last hash is not `size_witness(G, claimed n)`.
+The bytes that pass are always honest bytes of that tree. They are never bytes from outside it.
 
-| Honest proof | Passes against the re-derived commitment as |
+Under the same geometry, a chunk proof for `(c, C)` passes as `(c', C')` against the re-derived commitment when, and only when, two checks hold. The left/right step sequence of `(c', C')` equals that of `(c, C)` at every level. `chunk_len(n', c')` equals `chunk_len(n, c)`. A step is the side `path` and `climb` give the sibling at that level, left or right (§4, §5).
+
+Under the same geometry, a segment proof passes as `(c', j)` against the re-derived commitment when three checks hold. The chunk-level left/right steps of `(c', C')` equal those of `(c, C)`. `segment_len(n', c', j)` equals `segment_len(n, c, j)`. Every in-chunk sibling at or past the claimed data-segment count is already `empty(ℓ)`. `chunk_len(n', c')` need not equal `chunk_len(n, c)`. The claimed data-segment count is `s' = ceil(chunk_len(n', c') / segment_size)`. At level `ℓ` the sibling subtree starts at `start = ((j >> ℓ) ^ 1) << ℓ` (§5). That sibling is at or past the claimed data when `start ≥ s'`.
+
+`node(data_tree_root, size_witness(G, claimed n))` equals the re-derived commitment, so the proof passes against it and fails against the anchored commitment. A proof that still carries the true witness fails earlier, before the climb: the last hash is not `size_witness(G, claimed n)`.
+
+Across geometries the commitment differs. `size_witness` binds `chunk_size` and `segments_per_chunk` (§3), so `node(data_tree_root, size_witness(G', n'))` is not the commitment under `G`. Equal steps and an equal `chunk_len` are not the accept rule under `G'`.
+
+| Honest chunk proof | Passes against the re-derived commitment as |
 | --- | --- |
 | `n = 96` (`C = 3`), chunk 2 | chunk 1 of `n' = 64` (`C' = 2`) |
 | `n = 128` (`C = 4`), chunk 0, last hash `size_witness(G, 96)` | chunk 0 of `C' = 3` |
 
-Test geometry, full chunks. Both proofs fail against the anchored commitment.
+Test geometry, full chunks, same geometry. Both proofs fail against the anchored commitment.
+
+| Honest segment proof | Passes against the re-derived commitment as |
+| --- | --- |
+| `n = 56` (`C = 2`), chunk 1, segment 0, `chunk_len = 24` | segment 0 of chunk 1 for every `n'` in `49..=64` (`C' = 2`). `chunk_len(n', 1)` is 17 to 32. `n'` in `33..=48` does not pass |
+
+Test geometry, same geometry. The last chunk holds three segments (`s = 3`). The anchored commitment rejects each of those claims whose size is not 56.
 
 **Proposal — not binding.** Planned for L1 integration; may change.
 
@@ -435,7 +449,7 @@ Memory uses the same three significant figures. 1 MB is 10^6 bytes and 1 GB is 1
 
 | Property | How it holds |
 | --- | --- |
-| Positional binding | The shape is a function of `(data_size, chunk_size, SPC)`. The verifier derives every direction bit from `(c, j)` and requires the exact proof length. Known attacks on RFC 6962-style proofs (an inner node shown as a leaf, or a proof checked against another leaf count) need a verifier that does not know the leaf count; here `C` is fixed before any hashing. A proof for position `i` shown as position `k` fails unless the bytes at both positions are identical, and then the claim is true |
+| Positional binding | The shape is a function of `(data_size, chunk_size, SPC)`. The verifier derives every direction bit from `(c, j)` and requires the exact proof length. Known attacks on RFC 6962-style proofs (an inner node shown as a leaf, or a proof checked against another leaf count) need a verifier that does not know the leaf count; here `C` is fixed before any hashing. A proof for position `i` shown as position `k` fails when the bytes differ. When the bytes match it can still fail, because the verifier also requires the depth and the left/right steps of `(k, C)`. Identical chunks can share a proof (§7), so identity is `chunk_key` |
 | Size and geometry binding | The verifier computes `size_witness(G, data_size)` itself and requires the proof's last hash to equal it, before the climb (§5). It then checks `node(root, size_witness(G, data_size))` against an anchored commitment (§6). A wrong size fails. A wrong geometry fails the same way. A proof that carries the true witness fails the witness check even when a re-derived commitment would match that witness. The preimage is 19 B and every field is fixed width: `0x02 ‖ be64(data_size) ‖ be64(chunk_size) ‖ be16(segments_per_chunk)`. There is no variable field, so distinct `(data_size, chunk_size, segments_per_chunk)` give distinct preimages. Tag `0x02` at 19 B matches no other registered preimage. `Geometry::new` requires `chunk_size` to fit in `u64` and `segments_per_chunk` ≤ 256, which fits `be16`, so neither field is truncated |
 | Domain separation | Distinct tags and fixed widths (§3). A 64-byte segment equal to `l ‖ r` hashes as a leaf, never as `node(l, r)`. A v2 `data_commitment` and a v1 root can collide only by a SHA-256 collision. A bare `data_tree_root` can equal a v1 leaf or branch id only for a one-leaf tree (SPC = 1, C = 1) of 63 or 95 bytes, found by about 2^8 tries. Key by the commitment, never the bare root (§7). From Estuary, `tx_root` is tagged (Appendix C), so an untagged `tx_root` is not a cross-tree target. The address-bound half of an ingress proof stays on the v1 encoder (§12). A crafted 63 B or 95 B segment (about 2^8 tries) can hash to a leaf or branch of that tree. No exploit is known: those roots come from a different header field |
 | One hash per node | v1 hashes each part of a node first, then the concatenation (4 SHA-256 calls per node). v2 hashes once: H(0x01 ‖ l ‖ r), the RFC 6962 construction. The inner hashes add no security: l and r are already 32-byte hashes, and forging any proof still needs a SHA-256 collision at the first node where the honest and forged inputs differ (about 2^128 work). Fixed widths make 0x01 ‖ l ‖ r readable only one way, and the tags replace v1's leaf and node separation by part count. Length extension does not apply: the tree has no secrets, and every node input is fixed-width |

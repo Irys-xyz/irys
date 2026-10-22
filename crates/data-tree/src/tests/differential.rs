@@ -1,8 +1,9 @@
 //! Honest proofs verify. One changed field is rejected (spec §5, §10).
 //!
-//! A proof for index `i` shown as index `k` may verify when the bytes at both
-//! indexes are identical, because that claim is true (spec §10). That case is
-//! an explicit branch. It is not dropped with `prop_assume`.
+//! A proof for index `i` shown as index `k` fails when the bytes differ. When
+//! the bytes match it can still fail: the verifier also requires the depth and
+//! the left/right steps (spec §10). An accept is an explicit branch. It is not
+//! dropped with `prop_assume`.
 //!
 //! See `strategies` for the `PROPTEST_CASES` soak command. The check functions
 //! take plain values so a later fuzzer can call them.
