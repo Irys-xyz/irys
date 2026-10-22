@@ -180,7 +180,8 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
                 entropy_packing_iterations,
                 chunk_size,
                 chain_id,
-            );
+            )
+            .expect("stored chunk fits the entropy buffer");
             assert_eq!(
                 unpacked_chunk.bytes.0,
                 data_bytes[chunk * chunk_size..(chunk + 1) * chunk_size],

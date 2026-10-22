@@ -2279,8 +2279,10 @@ impl IrysNode {
         );
 
         // Production chunk fetcher is the HTTP chunk fetcher
-        let http_factory: ChunkFetcherFactory =
-            Box::new(|ledger_id| Arc::new(HttpChunkFetcher::new(ledger_id)));
+        let max_peer_response_bytes = config.node_config.max_peer_response_bytes;
+        let http_factory: ChunkFetcherFactory = Box::new(move |ledger_id| {
+            Arc::new(HttpChunkFetcher::new(ledger_id, max_peer_response_bytes))
+        });
 
         let data_sync_handle = DataSyncService::spawn_service(
             receivers.data_sync,

@@ -6280,18 +6280,82 @@ fn validate_term_ledger_expiry(
     Ok(())
 }
 
+/// Why an off-loop unpack did not return a body.
+#[derive(Debug)]
+enum PackedUnpackError {
+    /// The blocking task panicked or was cancelled. A node fault.
+    Task(String),
+    /// The body is longer than the entropy buffer. Bad bytes, not a node fault.
+    BadBody(String),
+}
+
 /// Entropy unpack is sequential hashing. It runs off the async worker.
+/// A body longer than the entropy buffer is [`PackedUnpackError::BadBody`].
 async fn unpack_packed_chunk(
     packed: irys_types::PackedChunk,
     iterations: u32,
     chunk_size: usize,
     chain_id: u64,
-) -> Result<irys_types::UnpackedChunk, PreValidationError> {
-    tokio::task::spawn_blocking(move || {
+) -> Result<irys_types::UnpackedChunk, PackedUnpackError> {
+    match tokio::task::spawn_blocking(move || {
         irys_packing::unpack(&packed, iterations, chunk_size, chain_id)
     })
     .await
-    .map_err(|error| PreValidationError::InternalTaskJoin(format!("unpack: {error}")))
+    {
+        Ok(Ok(unpacked)) => Ok(unpacked),
+        Ok(Err(error)) => Err(PackedUnpackError::BadBody(error.to_string())),
+        Err(error) => Err(PackedUnpackError::Task(format!("unpack: {error}"))),
+    }
+}
+
+fn chunk_body_len(chunk: &irys_types::ChunkFormat) -> usize {
+    match chunk {
+        irys_types::ChunkFormat::Unpacked(unpacked) => unpacked.bytes.0.len(),
+        irys_types::ChunkFormat::Packed(packed) => packed.bytes.0.len(),
+    }
+}
+
+/// A peer body longer than `chunk_size` is that peer's data. Skip it.
+fn peer_chunk_fits(chunk: &irys_types::ChunkFormat, chunk_size: usize) -> bool {
+    chunk_body_len(chunk) <= chunk_size
+}
+
+#[cfg(test)]
+mod peer_chunk_length_tests {
+    use super::{PackedUnpackError, peer_chunk_fits, unpack_packed_chunk};
+
+    /// A packed body one byte past `chunk_size` is bad bytes. It must not
+    /// surface as a task-join fault, which aborts the node.
+    #[tokio::test]
+    async fn oversized_packed_chunk_is_not_an_internal_task_join() {
+        let chunk_size = 32_usize;
+        let packed = irys_types::PackedChunk {
+            data_size: chunk_size as u64,
+            bytes: irys_types::Base64(vec![1_u8; chunk_size + 1]),
+            ..Default::default()
+        };
+        let format = irys_types::ChunkFormat::Packed(packed.clone());
+        assert!(!peer_chunk_fits(&format, chunk_size));
+        let error = unpack_packed_chunk(packed, 1, chunk_size, 1)
+            .await
+            .expect_err("oversized packed body");
+        assert!(matches!(error, PackedUnpackError::BadBody(_)), "{error:?}");
+    }
+
+    #[test]
+    fn unpacked_body_one_byte_past_chunk_size_does_not_fit() {
+        let chunk_size = 32_usize;
+        let format = irys_types::ChunkFormat::Unpacked(irys_types::UnpackedChunk {
+            bytes: irys_types::Base64(vec![1_u8; chunk_size + 1]),
+            ..Default::default()
+        });
+        assert!(!peer_chunk_fits(&format, chunk_size));
+        let fitting = irys_types::ChunkFormat::Unpacked(irys_types::UnpackedChunk {
+            bytes: irys_types::Base64(vec![1_u8; chunk_size]),
+            ..Default::default()
+        });
+        assert!(peer_chunk_fits(&fitting, chunk_size));
+    }
 }
 
 /// Bytes for one ingress-proof chunk from the local cache or a storage module.
@@ -6349,13 +6413,27 @@ async fn ingress_proof_chunk_bytes_from_local(
                     continue;
                 }
             };
-            let unpacked = unpack_packed_chunk(
+            let unpacked = match unpack_packed_chunk(
                 packed,
                 config.consensus.entropy_packing_iterations,
                 config.consensus.chunk_size as usize,
                 config.consensus.chain_id,
             )
-            .await?;
+            .await
+            {
+                Ok(unpacked) => unpacked,
+                Err(PackedUnpackError::Task(error)) => {
+                    return Err(PreValidationError::InternalTaskJoin(error));
+                }
+                Err(PackedUnpackError::BadBody(error)) => {
+                    debug!(
+                        error = %error,
+                        partition.offset = offset.0,
+                        "storage module body does not fit the chunk; trying the next offset"
+                    );
+                    continue;
+                }
+            };
             if unpacked.data_root != data_root || unpacked.tx_offset != tx_offset {
                 continue;
             }
@@ -6923,22 +7001,46 @@ pub async fn data_txs_are_valid(
                                 continue;
                             }
 
-                            // Parse ChunkFormat and convert to UnpackedChunk
-                            let Ok(chunk_format) = resp.json::<irys_types::ChunkFormat>().await
+                            // Cap the body, then reject a chunk longer than chunk_size.
+                            // That length is the peer's bad data: try the next peer.
+                            // A task panic is still a node fault.
+                            let Ok(body) = crate::chunk_fetcher::read_capped_bytes(
+                                resp,
+                                config.node_config.max_peer_response_bytes,
+                            )
+                            .await
                             else {
                                 continue;
                             };
+                            let Ok(chunk_format) =
+                                serde_json::from_slice::<irys_types::ChunkFormat>(&body)
+                            else {
+                                continue;
+                            };
+                            if !peer_chunk_fits(&chunk_format, config.consensus.chunk_size as usize)
+                            {
+                                continue;
+                            }
 
                             let unpacked = match chunk_format {
                                 irys_types::ChunkFormat::Unpacked(u) => u,
                                 irys_types::ChunkFormat::Packed(p) => {
-                                    unpack_packed_chunk(
+                                    match unpack_packed_chunk(
                                         p,
                                         config.consensus.entropy_packing_iterations,
                                         config.consensus.chunk_size as usize,
                                         config.consensus.chain_id,
                                     )
-                                    .await?
+                                    .await
+                                    {
+                                        Ok(unpacked) => unpacked,
+                                        Err(PackedUnpackError::BadBody(_)) => continue,
+                                        Err(PackedUnpackError::Task(error)) => {
+                                            return Err(PreValidationError::InternalTaskJoin(
+                                                error,
+                                            ));
+                                        }
+                                    }
                                 }
                             };
 

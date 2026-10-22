@@ -95,7 +95,7 @@ fn missing_on_disk(error: &eyre::Report) -> bool {
         .contains("Could not find chunk bytes on disk")
 }
 
-fn unpack_packed(config: &Config, packed: &PackedChunk) -> UnpackedChunk {
+fn unpack_packed(config: &Config, packed: &PackedChunk) -> eyre::Result<UnpackedChunk> {
     let consensus = &config.consensus;
     irys_packing::unpack(
         packed,
@@ -283,8 +283,17 @@ impl ChunkProvider {
                     }
                 };
                 if let Some(packed) = packed {
-                    note_chunk_read(SERVE_SPAN, "storage_module", "hit");
-                    out.push((ledger_offset, unpack_packed(&self.config, &packed)));
+                    match unpack_packed(&self.config, &packed) {
+                        Ok(unpacked) => {
+                            note_chunk_read(SERVE_SPAN, "storage_module", "hit");
+                            out.push((ledger_offset, unpacked));
+                        }
+                        Err(error) => {
+                            note_chunk_read(SERVE_SPAN, "storage_module", "error");
+                            read_failures += 1;
+                            last_read_error = Some(error);
+                        }
+                    }
                 } else if let Some(error) = read_failed {
                     match self.cached_unpacked_at(SERVE_SPAN, &module, partition_offset) {
                         Ok(Some(cached)) => out.push((ledger_offset, cached)),
@@ -1028,7 +1037,7 @@ mod tests {
             &packed,
             vec![0_u8; config.consensus.chunk_size as usize],
             config.consensus.chunk_size as usize,
-        );
+        )?;
         let unpacked = UnpackedChunk {
             data_root: packed.data_root,
             data_size: packed.data_size,

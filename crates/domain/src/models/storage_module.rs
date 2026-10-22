@@ -8430,7 +8430,7 @@ impl StorageModule {
             self.config.consensus.entropy_packing_iterations,
             chunk_size,
             self.config.consensus.chain_id,
-        )))
+        )?))
     }
 
     /// One `view` per submodule covering `[start, end]`. Shared tx paths, data
