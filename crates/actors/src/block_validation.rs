@@ -56,7 +56,6 @@ use reth_db::Database as _;
 use reth_db::transaction::DbTx as _;
 use reth_ethereum_primitives::Block;
 use std::{
-    cell::Cell,
     collections::{BTreeMap, HashMap, HashSet},
     ops::ControlFlow,
     sync::Arc,
@@ -4225,9 +4224,8 @@ fn ledger_tx_ids_in(header: &IrysBlockHeader, ledger: DataLedger) -> Option<Vec<
 /// Walk the owning block's ledger txs in `tx_ids` order.
 ///
 /// Recent blocks live in `block_tree` (not yet migrated). Older blocks are read
-/// from the consensus DB, one header at a time. `stop_before` runs before each
-/// fetch so a selector can end the walk without reading the next header. A
-/// missing ledger or tx header on the DB path is a local index inconsistency
+/// from the consensus DB, one header at a time, so a `Break` ends the walk
+/// without reading the next header. A missing ledger or tx header on the DB path is a local index inconsistency
 /// (`BlockBoundsLookupError`), not a consensus reject. When the block is in the
 /// tree, a missing ledger is an empty walk — the same as the historical scan.
 fn visit_owning_ledger_txs<T>(
@@ -4235,16 +4233,12 @@ fn visit_owning_ledger_txs<T>(
     db: &DatabaseProvider,
     owning_block_hash: BlockHash,
     ledger: DataLedger,
-    mut stop_before: impl FnMut() -> bool,
     mut visit: impl FnMut(&DataTransactionHeader) -> ControlFlow<T>,
 ) -> Result<Option<T>, PreValidationError> {
     {
         let tree = block_tree_guard.read();
         if let Some(sealed) = tree.get_sealed_block(&owning_block_hash) {
             for header in sealed.transactions().get_ledger_txs(ledger) {
-                if stop_before() {
-                    return Ok(None);
-                }
                 if let ControlFlow::Break(found) = visit(header) {
                     return Ok(Some(found));
                 }
@@ -4269,9 +4263,6 @@ fn visit_owning_ledger_txs<T>(
             )
         })?;
         for txid in &tx_ids {
-            if stop_before() {
-                return Ok(None);
-            }
             let header = irys_database::tx_header_by_txid(tx, txid)?
                 .ok_or_else(|| eyre::eyre!("missing data tx header {txid:?} for PoA owning-tx"))?;
             if let ControlFlow::Break(found) = visit(&header) {
@@ -4296,10 +4287,8 @@ struct ChunkLayoutPoaTx {
 
 /// Select the tx that owns `block_chunk_offset` under the block-index layout:
 /// tx `i` spans `ceil(data_size_i / chunk_size)` chunks. A zero-size tx spans
-/// no chunks and no bytes, so the walk skips it.
-///
-/// `None` (no tx covers the offset) and an overflowing prefix are both
-/// `PoAChunkOffsetOutOfTxBounds`: the chunk is not inside a tx this rule can name.
+/// no chunks and no bytes, so the walk skips it. An offset no tx covers is
+/// `PoAChunkOffsetOutOfTxBounds`.
 fn select_poa_tx_by_chunk_layout(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
@@ -4309,59 +4298,24 @@ fn select_poa_tx_by_chunk_layout(
     chunk_size: u64,
 ) -> Result<ChunkLayoutPoaTx, PreValidationError> {
     let chunk_size = u128::from(chunk_size);
-    if chunk_size == 0 {
-        return Err(PreValidationError::BlockBoundsLookupError(
-            "chunk_size is zero".to_string(),
-        ));
-    }
-
-    enum Stop {
-        Hit(ChunkLayoutPoaTx),
-        Overflow,
-    }
-
-    let chunk_start = Cell::new(0_u128);
-    let raw_start = Cell::new(0_u128);
-    let stopped = visit_owning_ledger_txs(
-        block_tree_guard,
-        db,
-        owning_block_hash,
-        ledger,
-        || false,
-        |header| {
-            let data_size = u128::from(header.data_size);
-            let chunks = data_size.div_ceil(chunk_size);
-            let Some(chunk_end) = chunk_start.get().checked_add(chunks) else {
-                return ControlFlow::Break(Stop::Overflow);
-            };
-            if (chunk_start.get()..chunk_end).contains(&block_chunk_offset) {
-                let Some(tx_chunk_offset) =
-                    (block_chunk_offset - chunk_start.get()).checked_mul(chunk_size)
-                else {
-                    return ControlFlow::Break(Stop::Overflow);
-                };
-                return ControlFlow::Break(Stop::Hit(ChunkLayoutPoaTx {
-                    tx: header.clone(),
-                    raw_start: raw_start.get(),
-                    tx_chunk_offset,
-                }));
-            }
-            let Some(next_raw) = raw_start.get().checked_add(data_size) else {
-                return ControlFlow::Break(Stop::Overflow);
-            };
-            chunk_start.set(chunk_end);
-            raw_start.set(next_raw);
-            ControlFlow::Continue(())
-        },
-    )?;
-
-    match stopped {
-        Some(Stop::Hit(hit)) => {
-            debug_assert!(hit.tx_chunk_offset < u128::from(hit.tx.data_size));
-            Ok(hit)
+    // Each tx adds at most `u64::MAX` bytes, so the u128 cursors cannot overflow.
+    let mut chunk_start = 0_u128;
+    let mut raw_start = 0_u128;
+    visit_owning_ledger_txs(block_tree_guard, db, owning_block_hash, ledger, |header| {
+        let data_size = u128::from(header.data_size);
+        let chunk_end = chunk_start + data_size.div_ceil(chunk_size);
+        if (chunk_start..chunk_end).contains(&block_chunk_offset) {
+            return ControlFlow::Break(ChunkLayoutPoaTx {
+                tx: header.clone(),
+                raw_start,
+                tx_chunk_offset: (block_chunk_offset - chunk_start) * chunk_size,
+            });
         }
-        Some(Stop::Overflow) | None => Err(PreValidationError::PoAChunkOffsetOutOfTxBounds),
-    }
+        chunk_start = chunk_end;
+        raw_start += data_size;
+        ControlFlow::Continue(())
+    })?
+    .ok_or(PreValidationError::PoAChunkOffsetOutOfTxBounds)
 }
 
 /// Gate a `block_index` lookup on `prev_hash` being the canonical block at
@@ -4752,9 +4706,9 @@ pub fn poa_is_valid(
         // follows that lookup. A buffer that cannot be a proof is invalid for
         // every target. Reject it first, or a missing header turns an empty
         // path into a node fault.
-        ensure_proof_layout(&tx_path)
+        ensure_proof_layout(&tx_path.0)
             .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
-        ensure_proof_layout(&data_path)
+        ensure_proof_layout(&data_path.0)
             .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
         // The block index places each tx on whole chunks, while the tx_root tree
@@ -4768,16 +4722,8 @@ pub fn poa_is_valid(
             block_chunk_offset,
             config.chunk_size,
         )?;
-        let data_size = u128::from(hit.tx.data_size);
-        let raw_end = hit
-            .raw_start
-            .checked_add(data_size)
-            .ok_or(PreValidationError::PoAChunkOffsetOutOfTxBounds)?;
-        let target = hit
-            .raw_start
-            .checked_add(hit.tx_chunk_offset)
-            .ok_or(PreValidationError::PoAChunkOffsetOutOfTxBounds)?;
-        debug_assert!(target < raw_end);
+        let raw_end = hit.raw_start + u128::from(hit.tx.data_size);
+        let target = hit.raw_start + hit.tx_chunk_offset;
         let tx_path_result = validate_path(bb.tx_root.0, &tx_path, target)
             .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
         if tx_path_result.min_byte_range != hit.raw_start
