@@ -120,6 +120,8 @@ The tree is a general primitive. A bound tighter than the rule above belongs to 
 
 Each value has its own newtype in code, so a function signature rejects the wrong one; a deliberate conversion through raw bytes is a decode, not a proof.
 
+A range `a .. b` is half-open `[a, b)`, a range `a ..= b` includes both ends, and a range `a ..` runs from `a` through the last element.
+
 ```
 n = data_size, with 1 ≤ n ≤ max_data_tx_chunks × chunk_size
 C                    = ceil(n / chunk_size)                  // chunk count, C ≥ 1
@@ -175,7 +177,7 @@ T(R[0..C]):
     k = largest power of two < C
     return node(T(R[0..k]), T(R[k..C]))
 
-data_tree_root  = T(R_0 .. R_{C−1})
+data_tree_root  = T(R_0 ..= R_{C−1})
 data_commitment = node(data_tree_root, size_witness(data_size))
 ```
 
@@ -199,7 +201,7 @@ data_commitment for 3.5 chunks (917,504 bytes): data tree left, size witness rig
         /      \         /      \
       R0       R1      R2       R3 = node(A, empty(5))
                                       /          \
-                     A: tree over segments 0..31   empty(5): segments 32..63,
+                     A: tree over segments 0..=31  empty(5): segments 32..=63,
                         (data)                     all leaf("") = H(0x00)
 ```
 
@@ -760,10 +762,10 @@ aux_count(J):                            // from the indices alone; no hashing
 verify_compact(D, n, c, proof, segment_bytes):
     parse m, J; require 1 ≤ m ≤ SPC; require J strictly increasing and every j < SPC
     require 1 ≤ n ≤ max; C = ceil(n / chunk_size); require c < C
-    require len(segment_bytes[i]) == segment_len(n, c, j_i) for every i
+    require len(segment_bytes[i]) == segment_len(n, c, j_i) for every i in 1 ..= m
     a = aux_count(J)
     require len(proof) == 2 + m + 32 × (a + depth(c, C) + 1)  // exact, before any hashing
-    known = [(j_i, leaf(segment_bytes[i])) for i in 1..m]; next_aux = 0
+    known = [(j_i, leaf(segment_bytes[i])) for i in 1 ..= m]; next_aux = 0
     for level in 0 .. h:
         next = []
         for each (p, x) in known, ascending p:
@@ -804,10 +806,10 @@ verify_compact(D, n, c, proof, segment_bytes):
 **Hashing.** Tags `0x05` TX_LEAF, `0x06` TX_NODE and `0x07` TX_COUNT are in the §3 registry. They are not part of the data tree. The code enum gains them when this is implemented.
 
 ```
-N           = number of data txs in this ledger of this block, in tx_ids order k = 0 .. N−1
+N           = number of data txs in this ledger of this block, in tx_ids order k = 0 ..= N−1
 chunk_start_k = Σ_{i<k} ceil(data_size_i / chunk_size)          // padded chunk count before tx k (§8)
 leaf_k      = H(0x05 ‖ tx_id_k ‖ data_tree_root_k ‖ be64(data_size_k) ‖ prefix_hash_k ‖ be64(prefix_size_k) ‖ be64(chunk_start_k))   // 121 B
-tx_root     = H(0x06 ‖ T(leaf_0 .. leaf_{N−1}) ‖ count_witness(N))   for N ≥ 1     // T() of §4 with TX_NODE
+tx_root     = H(0x06 ‖ T(leaf_0 ..= leaf_{N−1}) ‖ count_witness(N))   for N ≥ 1     // T() of §4 with TX_NODE
 tx_root     = 0^32                                                     for N = 0     // unchanged sentinel
 count_witness(N) = H(0x07 ‖ be32(N))
 ```
@@ -830,7 +832,7 @@ when N ≥ 1:
     require chunk_start_0 = 0
     require chunk_start_{k+1} = chunk_start_k + ceil(data_size_k / chunk_size)
                                                                        // checked addition; every k with k + 1 < N
-    require the header's tx_root = H(0x06 ‖ T(leaf_0 .. leaf_{N−1}) ‖ count_witness(N))
+    require the header's tx_root = H(0x06 ‖ T(leaf_0 ..= leaf_{N−1}) ‖ count_witness(N))
                                                                        // leaf_k from the hashing section, with these starts
 ```
 
