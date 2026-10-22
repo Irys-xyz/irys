@@ -4,7 +4,8 @@ use crate::shape::{climb, depth};
 use crate::types::{HASH_SIZE, NodeHash};
 use crate::{DataTree, DataTreeBuilder};
 
-/// Spec §12: the shape lock covers every chunk count from 1 through this count.
+/// Every chunk count from 1 through this count is checked against `build_layer`
+/// and recursive `T` (spec §4).
 const SHAPE_LOCK_MAX_CHUNK_COUNT: u32 = 4_097;
 
 /// Spec §13: the reference implementation checked the builder against the
@@ -17,7 +18,8 @@ const REFERENCE_CHECK_LAST_CHUNK_COUNT: u32 = 299;
 /// inside the checked counts.
 const PROOF_EVERY_CHUNK_MAX_CHUNK_COUNT: u32 = REFERENCE_CHECK_LAST_CHUNK_COUNT + 1;
 
-/// Builder layers and root for every chunk count in the spec §12 shape lock.
+/// Builder layers and root for every chunk count through
+/// [`SHAPE_LOCK_MAX_CHUNK_COUNT`] (spec §4).
 ///
 /// For every chunk count from 1 through [`SHAPE_LOCK_MAX_CHUNK_COUNT`] this
 /// test builds a new tree. The layers must equal `build_layer`. The root must
@@ -66,8 +68,9 @@ fn builder_layers_and_root_match_spec_for_every_chunk_count() {
 ///
 /// The same check also runs for each power of two from 512 through 4,096, for
 /// the count on each side of that power, and for 4,097. 512 is the next power
-/// of two after 300. 4,096 is the greatest power of two below the spec §12
-/// maximum, and 4,096 + 1 is that maximum. 256 is already inside 1..=300.
+/// of two after 300. 4,096 is the greatest power of two below
+/// [`SHAPE_LOCK_MAX_CHUNK_COUNT`], and 4,096 + 1 is that count. 256 is already
+/// inside 1..=300.
 ///
 /// Each expected proof is one call to `path`. Sibling subtrees are recomputed.
 /// The oracle keeps no cache.

@@ -15,10 +15,9 @@ const EMPTY_TABLE_LEN: usize = MAX_SUBTREE_HEIGHT as usize + 1;
 
 /// Data-tree domain tags (spec §3).
 ///
-/// Every data-tree preimage starts with one of these bytes. `tx_root` v2
-/// assigns `0x05` to `0x07` (spec §3, Appendix C). Those tags are not part of
-/// this tree, and this enum does not include them until `tx_root` v2 is
-/// implemented. Any later tag set must avoid `0x00` to `0x07`.
+/// Every data-tree preimage starts with one of these bytes. The registry
+/// assigns `0x05` to `0x07` outside this tree (spec §3). This enum does not
+/// include them. Any later tag set must avoid `0x00` to `0x07`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TreeDomainTag {

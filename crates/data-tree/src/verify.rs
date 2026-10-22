@@ -58,8 +58,8 @@ pub fn verify_chunk(
 /// A segment's proof is those siblings concatenated with the chunk proof. The
 /// chunk proof ends with the size witness, so the concatenation is the whole
 /// proof in every case, including one chunk. A compact multiproof that drops
-/// siblings another revealed segment computes was designed and not adopted;
-/// its design is in spec Appendix B.
+/// siblings another revealed segment computes was designed and not adopted
+/// (spec §5).
 ///
 /// `c` is `chunk_index`. `j` is `segment_index`.
 pub fn verify_segment(
