@@ -104,7 +104,7 @@ The price: about 11% more hashing per chunk and 3% per chunk-proof check (§9), 
 | Parameter | Mainnet and testnet | `testing()` | Rule |
 | --- | --- | --- | --- |
 | `chunk_size` | 262,144 | 32 | unchanged consensus field |
-| `segments_per_chunk` (SPC) | 64 | 4 | NEW consensus config field: a power of two, 1 ≤ SPC ≤ 256 in the tree; consumers may require more. `chunk_size % SPC == 0`, checked at config load |
+| `segments_per_chunk` (SPC) | 64 | 4 | NEW consensus config field: a power of two, 1 ≤ SPC ≤ 256 in the tree; consumers may require more. `chunk_size ≥ 1`, `chunk_size % SPC == 0`, `max_data_tx_chunks ≥ 1`, and `chunk_size × max_data_tx_chunks < 2^64` (no `u64` overflow), checked at config load |
 | `segment_size` | 4,096 | 8 | `chunk_size / SPC` |
 | `h` | 6 | 2 | `log2(SPC)`, the height of a chunk subtree |
 | `max_data_tx_chunks` | 20,971,520 (`2^24 + 2^22`, 5 TiB) | same | unchanged |
