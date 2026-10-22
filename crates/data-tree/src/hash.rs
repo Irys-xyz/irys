@@ -15,7 +15,9 @@ const EMPTY_TABLE_LEN: usize = MAX_SUBTREE_HEIGHT as usize + 1;
 
 /// Data-tree domain tags (spec §3).
 ///
-/// Every data-tree preimage starts with one of these bytes.
+/// Every data-tree preimage starts with one of these bytes. Tags `0x05` to
+/// `0x07` are in use by the design documents on branch `docs/tree-v2-concept`.
+/// Do not assign them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TreeDomainTag {
