@@ -11,6 +11,8 @@ irys_utils::define_metrics! {
     counter PULL_FAILURES("irys.gossip.pull.failures_total", "Gossip pull failures by request kind and reason");
     counter BLOCK_POOL_REJECTIONS("irys.block_pool.rejections_total", "Block pool rejections by reason");
     counter BLOCK_POOL_ORPHAN_RETRIES("irys.block_pool.orphan_retries_total", "Orphan-block reprocessing attempts dispatched by block pool");
+    counter CHUNK_ANNOUNCEMENTS_RECEIVED("irys.gossip.chunk_announcements.received_total", "Chunk announcements received, by decision");
+    counter CHUNK_BODIES_RECEIVED("irys.gossip.chunk_bodies.received_total", "Chunk bodies received, by push or fetch");
 }
 
 pub(crate) fn record_gossip_chunk_received(bytes: u64) {
@@ -55,6 +57,14 @@ pub(crate) fn record_block_pool_rejection(reason: &'static str) {
 /// parent has just arrived.
 pub(crate) fn record_block_pool_orphan_retry() {
     BLOCK_POOL_ORPHAN_RETRIES.add(1, &[]);
+}
+
+pub(crate) fn record_chunk_announcement_received(decision: &'static str) {
+    CHUNK_ANNOUNCEMENTS_RECEIVED.add(1, &[KeyValue::new("decision", decision)]);
+}
+
+pub(crate) fn record_chunk_body_received(via: &'static str) {
+    CHUNK_BODIES_RECEIVED.add(1, &[KeyValue::new("via", via)]);
 }
 
 #[cfg(test)]

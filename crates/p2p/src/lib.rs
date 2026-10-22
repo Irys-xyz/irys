@@ -15,6 +15,7 @@ mod block_pool;
 mod block_status_provider;
 mod cache;
 mod chain_sync;
+mod chunk_announce;
 mod gossip_client;
 mod gossip_data_handler;
 #[cfg(test)]
@@ -36,6 +37,7 @@ pub use chain_sync::{
     ChainSyncError, ChainSyncResult, ChainSyncService, ChainSyncServiceInner,
     SyncChainServiceFacade, SyncChainServiceMessage,
 };
+pub use chunk_announce::{ChunkAnnounceLimits, ChunkAnnounceState, ChunkGossipStatsSnapshot};
 pub use gossip_client::GossipClient;
 pub use gossip_data_handler::GossipDataHandler;
 pub use gossip_service::P2PService;

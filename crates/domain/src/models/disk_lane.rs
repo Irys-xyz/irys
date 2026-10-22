@@ -469,7 +469,7 @@ pub(super) struct DiskGate {
     #[cfg(test)]
     pub(super) span_walk_slots: AtomicU64,
     /// One armed pause in the entropy-copy windows. Production builds omit it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     entropy_pack_pause: super::PauseGate<EntropyPackPause>,
     /// Instants `finish_span_read` uses as the pread return, one per span.
     #[cfg(test)]
@@ -502,7 +502,7 @@ pub(super) struct DiskGate {
 
 /// Test barrier around a copied entropy pad. The slot is not in the sweep
 /// queue at either point, so `fail_sweep_offset` cannot see it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EntropyPackPause {
     /// The pad or pending entropy is copied. `push_occupied` has not run.
@@ -813,7 +813,7 @@ impl DiskGate {
             enqueue_notifies: AtomicU64::new(0),
             #[cfg(test)]
             span_walk_slots: AtomicU64::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             entropy_pack_pause: super::PauseGate::new(),
             #[cfg(test)]
             span_read_done: Mutex::new(Vec::new()),
@@ -832,6 +832,26 @@ impl DiskGate {
             #[cfg(test)]
             pwrite_fail_remaining: AtomicU64::new(0),
         }
+    }
+
+    /// Park the next occupy after the offset is reserved. The sweep has not
+    /// taken the slot, so `has_in_flight_index_for` stays true.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn hold_after_entropy_copied(&self) {
+        self.entropy_pack_pause
+            .arm(EntropyPackPause::AfterEntropyCopied);
+    }
+
+    /// `true` once [`Self::hold_after_entropy_copied`] has stopped a writer.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn after_entropy_copied_arrived(&self, timeout: Duration) -> bool {
+        self.entropy_pack_pause.wait_arrived(timeout)
+    }
+
+    /// Release whichever entropy-copy pause is armed.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn release_entropy_pack_pause(&self) {
+        self.entropy_pack_pause.release();
     }
 
     /// Test drain bound. Production uses `SWEEP_WAIT`.
@@ -1680,7 +1700,7 @@ impl StorageModule {
         }
 
         // Not queued yet. A newer entropy write can durable-point in this gap.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-utils"))]
         self.disk
             .entropy_pack_pause
             .wait_if(EntropyPackPause::AfterEntropyCopied);
@@ -2825,7 +2845,7 @@ impl StorageModule {
             return;
         }
         // Off the queue. A newer entropy write can land during the XOR.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-utils"))]
         self.disk
             .entropy_pack_pause
             .wait_if(EntropyPackPause::BeforePackXor);
@@ -5141,9 +5161,11 @@ mod tests {
                     .expect("a pending retry has time left");
             }
             // The injected error builds a backtrace before the commit returns.
-            // The tight retry is a second commit after that return, not a
-            // commit that is still inside the first failure.
-            if started.elapsed() > Duration::from_secs(10) {
+            // A full nextest run can spend more than 10s inside that backtrace
+            // while the retry is still unarmed. The tight retry is a second
+            // commit after that return, not a commit that is still inside the
+            // first failure.
+            if started.elapsed() > Duration::from_secs(30) {
                 panic!(
                     "failed pwrite did not arm a retry: calls={calls} durable={} idle={} ready={}",
                     module.is_data_chunk_durable_at(PartitionChunkOffset::from(0)),
