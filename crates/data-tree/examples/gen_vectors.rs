@@ -4,8 +4,9 @@
 //! names `mod251` (`b[i] = i mod 251`) or `zeros`, and the byte length.
 //!
 //! Multi-segment (option B, spec §5 and §15 Q2) is generated.
-//! Spec §13 groups not generated here: receipt header binding (gateway formats),
-//! `tx_root` v2, and wire (L1 and gateway message formats).
+//! Groups not generated here are in integration-proposal.md §8: receipt header
+//! binding (gateway formats), `tx_root` v2, and wire (L1 and gateway message
+//! formats).
 //!
 //! Run: `cargo run -p irys-data-tree --example gen_vectors -- <out_dir>`.
 

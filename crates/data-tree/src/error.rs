@@ -129,7 +129,7 @@ pub enum VerifyError {
     /// `bytes` is not `chunk_len(data_size, c)`.
     ///
     /// Planned L1 mapping, not implemented in this crate: a peer fault
-    /// `InvalidChunkSize` (spec §8, proposal). Today's ingress drops a chunk
+    /// `InvalidChunkSize` (integration-proposal.md §4). Today's ingress drops a chunk
     /// whose length does not match.
     #[error("chunk length {actual} does not match {expected}")]
     InvalidChunkLength {
