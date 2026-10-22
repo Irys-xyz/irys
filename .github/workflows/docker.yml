@@ -112,7 +112,7 @@ jobs:
 
       # testnet/mainnet rebuild a tagged release, so the embedded version must
       # match the original (X.Y.Z+irys, has_tag=true). devnet has no release
-      # tag (has_tag=false → X.Y.Z+irys.<sha>). See crates/chain/build.rs.
+      # tag (has_tag=false → X.Y.Z+irys.<sha>). See crates/node/build.rs.
       - name: Build Docker image
         uses: ./.github/actions/docker-build
         with:

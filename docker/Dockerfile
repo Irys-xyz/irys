@@ -23,13 +23,13 @@ ENV GIT_SHA=${GIT_SHA}
 ENV GIT_HAS_TAG=${GIT_HAS_TAG}
 ENV GIT_DIRTY=${GIT_DIRTY}
 
-# Build the binary defined in crates/chain [[bin]] name = "irys"
+# Build the binary defined in crates/node [[bin]] name = "irys"
 # Use the existing debug-release profile to match compose expectations
 # Reduce memory usage: single job, no incremental, minimal debuginfo, fewer codegen units
 # ENV CARGO_BUILD_JOBS=1 \
 # 	CARGO_INCREMENTAL=0 \
 # 	RUSTFLAGS="-C debuginfo=0 -C codegen-units=1"
-RUN cargo build --profile debug-release --bin irys -p irys-chain
+RUN cargo build --profile debug-release --bin irys -p irys-node
 
 # --- Runtime stage: minimal Ubuntu with ufw and tools ---
 FROM ubuntu:24.04
