@@ -407,18 +407,24 @@ The owner of chunk `b` is the one tx whose range contains `b`: `chunk_start ≤ 
 
 ## 9. Cost
 
-v2 adds about 11% to hashing a chunk (tx creation) and about 3% to verifying a chunk proof. This answers the review question "how much time and compute does it add to tx creation and chunk verification?". Both formats spend almost all their time hashing the chunk bytes once; v2 hashes them as 64 segments of 4 KiB instead of one 256 KiB input.
+v2 adds about 11% to hashing a chunk (tx creation) and about 3% to verifying a chunk proof. About 11% is this table's +10.6%. About 3% is this table's +2.61%. This answers the review question "how much time and compute does it add to tx creation and chunk verification?". Both formats spend almost all their time hashing the chunk bytes once. v2 hashes them as 64 segments of 4 KiB instead of one 256 KiB input.
 
-Rates measured with openssl speed -evp sha256 -bytes N on one core of an Intel i9-13900HK with SHA-NI: 1.82 GB/s on 256 KiB inputs, 1.75 GB/s on 4,097-byte inputs, about 0.15 µs per 65-byte node. Every row below is computed from these rates.
+Rates measured with openssl speed -evp sha256 -bytes N on one core of an Intel i9-13900HK with SHA-NI: 1.82 GB/s on 256 KiB inputs, 1.75 GB/s on 4,097-byte inputs, about 0.15 µs per 65-byte node. 1 GB is 10^9 bytes. The sums use 0.15 µs for every small hash. That rate was measured on a 65-byte node. v1 applies it to each 32-byte hash and each 96-byte hash: a v1 node is four hashes, three of 32 bytes and one of 96 bytes (§10). The 9-byte size witness uses the same rate. That is an assumption of this model.
+
+Each time and each change has three significant figures. A change is the ratio or the difference of the unrounded sums. A v2 proof ends with the size witness, and the verifier hashes that witness (§5). The verify rows include it.
 
 | Operation | v1 | v2 | Change |
 | --- | --- | --- | --- |
-| Hash one chunk (build or verify) | 0.144 ms: one 256 KiB hash | 0.160 ms: 64 leaves + 63 nodes | +11% |
-| Verify one chunk proof at 5 TiB (depth 25) | 0.159 ms | 0.164 ms | +3% |
-| Build the tree of a 1 GiB upload, one core | 0.59 s | 0.65 s | +0.06 s |
-| Verify one segment proof at 5 TiB | — | about 7 µs | new |
-| Builder memory, 1 GiB | every proof up front: 5 MB | chunk roots and nodes: 256 KiB | lower |
-| Builder memory, 5 TiB | every proof up front: about 51 GB | chunk roots and nodes: about 1.3 GB, proofs on demand | lower |
+| Hash one chunk (build or verify) | 0.144 ms: one 262,144-byte hash | 0.159 ms: 64 hashes of 4,097 bytes + 63 nodes | +10.6% |
+| Verify one chunk proof at 5 TiB (depth 25) | 0.159 ms: chunk hash + 25 × 4 small hashes | 0.163 ms: chunk hashes + 25 nodes + the size witness | +2.61% |
+| Build the tree of a 1 GiB upload, one core | 0.590 s: 4,096 × the unrounded chunk time | 0.652 s: 4,096 × the unrounded chunk time | +0.0625 s |
+| Verify one segment proof at 5 TiB | — | 7.14 µs: one 4,097-byte leaf + 32 small hashes | new |
+| Builder memory, 1 GiB | every proof up front: 4.98 MB | chunk roots and nodes: 256 KiB | lower |
+| Builder memory, 5 TiB | every proof up front: 50.9 GB | chunk roots and nodes: 1.34 GB, proofs on demand | lower |
+
+The 32 small hashes are 6 in-chunk nodes, 25 climb nodes, and the size witness. A chunk-verify sum that stops after the 25 climb nodes also rounds to 0.163 ms. The final check `node(r, w)` adds one node, 0.15 µs. With that node the chunk-verify time still rounds to 0.163 ms.
+
+Memory uses the same three significant figures. 1 MB is 10^6 bytes and 1 GB is 10^9 bytes. v1 stores every proof at 64 + 96 × depth bytes. 1 GiB is 4,096 × 1,216 = 4,980,736 bytes, 4.98 MB. 5 TiB is 2^24 × 2,464 + 2^22 × 2,272 = 50,868,518,912 bytes, 50.9 GB. v2 stores the chunk roots and the nodes at 32 bytes each, and builds proofs on demand. 1 GiB uses the §4 bound of 64 bytes per chunk: 4,096 × 64 = 262,144 bytes, 256 KiB. 5 TiB is (2 × 20,971,520 − 1) × 32 = 1,342,177,248 bytes, 1.34 GB.
 
 - Chunk roots are independent, so tree building parallelizes per chunk, as v1's leaf hashes do.
 - The empty-segment hashes of a last chunk come from a fixed table of `h + 1` values.
