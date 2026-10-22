@@ -4784,9 +4784,10 @@ pub fn poa_is_valid(
         // fixed: the chunk is exactly `chunk_size`, and the unpacked bytes after
         // a short last chunk's data are the zeros honest packing leaves.
         reject_poa_chunk_longer_than(&poa_chunk, config.chunk_size, entropy_chunk.len())?;
-        if poa_chunk.len() < entropy_chunk.len() {
+        let chunk_len = config.chunk_size as usize;
+        if poa_chunk.len() < chunk_len {
             return Err(PreValidationError::PoAChunkTooShort {
-                expected: entropy_chunk.len(),
+                expected: chunk_len,
                 got: poa_chunk.len(),
             });
         }
@@ -8260,6 +8261,62 @@ mod tests {
                 assert_eq!(got, 8);
             }
             other => panic!("expected PoAChunkTooShort, got {other:?}"),
+        }
+    }
+
+    /// Entropy is built from whole 32-byte hashes, so a chunk size that is not
+    /// a multiple of 32 yields a shorter entropy chunk. Validation must reject
+    /// the PoA, not panic on a data span longer than the chunk.
+    #[tokio::test]
+    async fn poa_with_entropy_shorter_than_the_chunk_is_rejected() {
+        let (_tmp, mut context) = init().await;
+        context.consensus_config.chunk_size = 48;
+        let data = vec![0x33_u8; 48];
+        let tx = sign_data_tx(
+            &IrysSigner::random_signer(&context.consensus_config),
+            data.clone(),
+        );
+        let headers = vec![tx.header.clone()];
+        let (tx_root, tx_paths) = DataTransactionLedger::merklize_tx_root(&headers);
+        let mut entropy = Vec::new();
+        compute_entropy_chunk(
+            context.miner_address,
+            0,
+            context.partition_hash.into(),
+            context.consensus_config.entropy_packing_iterations,
+            48,
+            &mut entropy,
+            context.consensus_config.chain_id,
+        );
+        assert_eq!(entropy.len(), 32);
+        // A chunk as long as the entropy passes the length check.
+        let mut packed = data[..32].to_vec();
+        xor_vec_u8_arrays_in_place(&mut packed, &entropy);
+        let poa = IndexedChunkPoa {
+            tx_index: 0,
+            chunk_index: 0,
+            block_offset: 0,
+            poa: PoaData {
+                tx_path: Some(Base64(tx_paths[0].proof.clone())),
+                data_path: Some(Base64(tx.proofs[0].proof.clone())),
+                chunk: Some(Base64(packed)),
+                ledger_id: Some(DataLedger::Submit.into()),
+                partition_chunk_offset: 0,
+                partition_hash: context.partition_hash,
+            },
+        };
+        let built = index_headers_and_poas(&mut context, tx_root, &headers, vec![poa], 1);
+        let poa = &built.poas[0];
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            validate_indexed_poa(&context, &built, poa)
+        }));
+        match outcome {
+            Ok(Err(PreValidationError::PoAChunkTooShort { expected, got })) => {
+                assert_eq!((expected, got), (48, 32));
+            }
+            Ok(other) => panic!("expected PoAChunkTooShort, got {other:?}"),
+            Err(_) => panic!("poa_is_valid panicked"),
         }
     }
 

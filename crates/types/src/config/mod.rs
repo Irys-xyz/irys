@@ -174,6 +174,15 @@ impl Config {
         // `filter_transactions_by_chunk_range` bails loud. The `div_ceil` below would
         // also panic on a zero recall range. Reject loudly here. (NC-0042)
         ensure!(self.consensus.chunk_size > 0, "chunk_size must be > 0");
+        // Entropy packing emits whole SHA-256 hashes, so a chunk size that is
+        // not a multiple of the hash size leaves the chunk's tail unpacked.
+        ensure!(
+            self.consensus
+                .chunk_size
+                .is_multiple_of(crate::merkle::HASH_SIZE as u64),
+            "chunk_size must be a multiple of {}",
+            crate::merkle::HASH_SIZE
+        );
         ensure!(
             self.consensus.mempool.max_data_tx_chunks > 0,
             "mempool.max_data_tx_chunks must be > 0"
@@ -1750,6 +1759,20 @@ mod tests {
         assert!(
             err.contains("overflows u64"),
             "expected the slot-lifetime overflow guard, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_chunk_size_entropy_cannot_fill() {
+        let mut odd = NodeConfig::testing();
+        odd.consensus.get_mut().chunk_size = 48;
+        let err = Config::new_with_random_peer_id(odd)
+            .validate()
+            .expect_err("entropy is built from whole 32-byte hashes")
+            .to_string();
+        assert!(
+            err.contains("chunk_size"),
+            "expected the chunk size guard, got: {err}"
         );
     }
 
