@@ -314,7 +314,16 @@ All sizes are in bytes and exclude the segment and chunk bytes. The last column 
 
 **Normative.**
 
-Verify chunks and segments only against an **anchored** `data_commitment`: one derived from a header whose signature was checked, or from a `tx_root` v2 leaf that was proven. A commitment that a verifier derives from an unauthenticated `(data_tree_root, data_size)` pair binds nothing. The witness is not a secret. An attacker can write `size_witness` of the claimed size as the proof's last hash. The climb then passes for any claimed size under which the path has the same shape: the same `C`, or a larger `C` for chunks in a left subtree. `node(root, size_witness(claimed n))` equals the re-derived commitment, so that proof passes against it and fails against the anchored commitment. A proof that still carries the true witness fails earlier, before the climb: the last hash is not `size_witness` of the claimed size. The reference implementation confirms both. The true witness is rejected for a wrong size. The claimed-size witness passes only against the re-derived commitment, and only when the path shape matches.
+Verify chunks and segments only against an **anchored** `data_commitment`: one derived from a header whose signature was checked, or from a `tx_root` v2 leaf that was proven. A commitment that a verifier derives from an unauthenticated `(data_tree_root, data_size)` pair binds nothing. The witness is not a secret. The attacker chooses the claimed size and the claimed chunk index, and writes `size_witness` of that size as the proof's last hash. The claimed size may be smaller or larger than the size the tree was built for. The claimed index may differ from the honest index.
+
+An honest proof for `(c, C)` passes as `(c', C')` against the re-derived commitment when, and only when, two checks hold. The left/right step sequence of `(c', C')` equals that of `(c, C)` at every level. `chunk_len(n', c')` equals `chunk_len(n, c)`. A step is the side `path` and `climb` give the sibling at that level, left or right (§4, §5). The bytes that pass are always some honest chunk of that tree. They are never bytes from outside it. `node(data_tree_root, size_witness(claimed n))` equals the re-derived commitment, so the proof passes against it and fails against the anchored commitment. A proof that still carries the true witness fails earlier, before the climb: the last hash is not `size_witness` of the claimed size.
+
+| Honest proof | Passes against the re-derived commitment as |
+| --- | --- |
+| `n = 96` (`C = 3`), chunk 2 | chunk 1 of `n' = 64` (`C' = 2`) |
+| `n = 128` (`C = 4`), chunk 0, last hash `size_witness(96)` | chunk 0 of `C' = 3` |
+
+Test geometry, full chunks. Both proofs fail against the anchored commitment.
 
 **Proposal — not binding.** Planned for L1 integration; may change.
 

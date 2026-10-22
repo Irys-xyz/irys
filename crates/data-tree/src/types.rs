@@ -91,9 +91,11 @@ hash_id!(
     /// Verify a chunk or a segment only against an anchored commitment (spec §6).
     /// An anchored commitment is derived from a header whose signature was checked,
     /// or from a `tx_root` leaf that was proven. A commitment derived from an
-    /// unauthenticated `(data_tree_root, data_size)` pair binds nothing: the last
-    /// step of the proof only repeats that derivation, so the proof passes for any
-    /// size whose path has the same shape.
+    /// unauthenticated `(data_tree_root, data_size)` pair binds nothing. The
+    /// attacker chooses the claimed size (smaller or larger) and the claimed
+    /// index. An honest proof for `(c, C)` passes as `(c', C')` when, and only
+    /// when, the left/right step sequence matches at every level and `chunk_len`
+    /// matches. The bytes that pass are an honest chunk of that tree.
     DataCommitment
 );
 
