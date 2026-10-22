@@ -11,7 +11,12 @@ fn main() {
     // doesn't modify any files, triggering unnecessary full rebuilds.
     for entry in std::fs::read_dir(&c_src).unwrap() {
         let entry = entry.unwrap();
-        println!("cargo:rerun-if-changed={}", entry.path().display());
+        // Relative to the package root (cargo resolves it there): an absolute path
+        // makes the fingerprint differ per checkout, so a target/ copied between
+        // worktrees reruns this script and rebuilds everything that depends on irys-c.
+        let path = entry.path();
+        let rel = path.strip_prefix(&manifest_dir).unwrap_or(&path);
+        println!("cargo:rerun-if-changed={}", rel.display());
     }
 
     let (lib_dir, include_dir) = build_openssl();
