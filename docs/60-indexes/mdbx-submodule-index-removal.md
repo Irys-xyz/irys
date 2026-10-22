@@ -279,66 +279,66 @@ Guards outside those plays:
 
 #### `crates/domain/src/models/storage_module.rs`
 
-- L179: delete the else. MDBX has no checksum on the offset.
-- L190: delete the else. It is the MDBX proof read. RocksDB reads the proof from the offset row.
-- L282: delete this arm. Only MDBX stores tx-path bytes. RocksDB v1 derives them.
-- L1349: delete the Mdbx arm. Open rocks/ only.
-- L1355: delete this arm.
-- L1362: delete this arm. It opens db/ and migrates schema v1 in place.
-- L1396: delete this refusal once db/ is no longer a live index and the rollback window is closed.
-- L1415: delete this log with the kept db/ once rollback is retired.
-- L1443: delete the Mdbx variant. The bench opens rocks/ only.
-- L1499: delete this helper with the MDBX bench open.
-- L2263: delete this engine check and always enable group commit. MDBX is left off because its SAFE_NOSYNC path aborts inside libmdbx.
-- L2388: delete this MDBX bench open.
-- L3196: delete this arm. MDBX treats the interval label as presence because it stores no checksum row.
-- L4311: delete this arm. MDBX stores proofs only and drops an entropy path.
-- L5238: delete this else arm. MDBX drops every non-Data presence row. RocksDB v1 keeps an entropy checksum.
-- L5766: delete this arm. MDBX has no checksum to reject.
-- L5868: delete the else. MDBX has no checksum, so the value is None.
-- L5883: delete this arm. MDBX does not confirm a checksum.
-- L6104: delete this arm. MDBX returns Skip because it stores no checksum.
-- L6279: delete this return. It skips the checksum scan when every submodule index is MDBX.
-- L6304: delete this continue. An MDBX index stores no checksum.
-- L6355: delete this continue. An MDBX index stores no checksum.
-- L6472: delete this continue. An MDBX index stores no checksum.
-- L9796: retarget this bench test at BenchIndex::Rocks. It opens MDBX.
-- L9834: delete this MDBX bench open.
-- L9859: retarget this helper at BenchIndex::Rocks, or delete it with the MDBX bench open.
-- L9898: delete this MDBX bench open.
-- L10098: delete this test with the MDBX open path.
-- L10218: delete this test with the MDBX open path.
-- L10251: delete this helper with the MDBX open tests.
-- L10263: delete this helper with the MDBX open tests.
-- L10307: delete this test with the MDBX open path.
-- L10419: delete the MDBX half of this test. The RocksDB group-commit assertion stays.
-- L10712: drop Mdbx from this list and keep the RocksDB run.
-- L10850: delete the stored_paths arms in this helper. They check the tx path only MDBX keeps.
-- L11277: drop Mdbx from this list and keep the RocksDB run.
-- L11495: drop Mdbx from this list and keep the RocksDB run.
-- L11571: drop Mdbx from this list and keep the RocksDB run.
-- L11652: drop Mdbx from this list and keep the RocksDB run.
-- L11781: drop Mdbx from this list and keep the RocksDB run.
-- L11876: drop Mdbx from this list and keep the RocksDB run.
-- L12148: delete this MDBX case and keep the RocksDB case.
-- L12211: delete this MDBX case and keep the RocksDB case.
-- L12276: delete this MDBX case and keep the RocksDB case.
-- L12333: delete this MDBX case and keep the RocksDB case.
-- L12394: this test opens only MDBX. Retarget it at RocksDB. The interval edit is not MDBX-specific.
-- L12782: delete this MDBX bench open.
-- L15828: delete this MDBX case and keep the RocksDB case.
-- L15874: delete this MDBX case and keep the RocksDB case.
-- L17205: drop Mdbx from this list and keep the RocksDB run.
-- L18523: drop Mdbx from this list and keep the RocksDB run.
-- L19030: drop Mdbx from this list and keep the RocksDB run.
-- L19114: drop Mdbx from this list and keep the RocksDB run.
-- L19189: drop Mdbx from this list and keep the RocksDB run.
-- L19290: drop Mdbx from this list and keep the RocksDB run.
-- L19352: drop Mdbx from this list and keep the RocksDB run.
-- L19750: drop Mdbx from this list and keep the RocksDB run.
-- L19844: this test opens only MDBX. Retarget it at RocksDB.
-- L20416: delete this MDBX case and keep the RocksDB case.
-- L20523: delete this test. It checks the tx path MDBX commits with the bytes.
+- L188: delete the else. MDBX has no checksum on the offset.
+- L199: delete the else. It is the MDBX proof read. RocksDB reads the proof from the offset row.
+- L289: delete this arm. Only MDBX stores tx-path bytes. RocksDB v1 derives them.
+- L1521: delete the Mdbx arm. Open rocks/ only.
+- L1527: delete this arm.
+- L1534: delete this arm. It opens db/ and migrates schema v1 in place.
+- L1568: delete this refusal once db/ is no longer a live index and the rollback window is closed.
+- L1587: delete this log with the kept db/ once rollback is retired.
+- L1615: delete the Mdbx variant. The bench opens rocks/ only.
+- L1715: delete this helper with the MDBX bench open.
+- L2462: delete this engine check and always enable group commit. MDBX is left off because its SAFE_NOSYNC path aborts inside libmdbx.
+- L2587: delete this MDBX bench open.
+- L3387: delete this arm. MDBX treats the interval label as presence because it stores no checksum row.
+- L4586: delete this arm. MDBX stores proofs only and drops an entropy path.
+- L5822: delete this else arm. MDBX drops every non-Data presence row. RocksDB v1 keeps an entropy checksum.
+- L6350: delete this arm. MDBX has no checksum to reject.
+- L6452: delete the else. MDBX has no checksum, so the value is None.
+- L6467: delete this arm. MDBX does not confirm a checksum.
+- L6688: delete this arm. MDBX returns Skip because it stores no checksum.
+- L6883: delete this return. It skips the checksum scan when every submodule index is MDBX.
+- L6908: delete this continue. An MDBX index stores no checksum.
+- L6959: delete this continue. An MDBX index stores no checksum.
+- L7076: delete this continue. An MDBX index stores no checksum.
+- L10499: retarget this bench test at BenchIndex::Rocks. It opens MDBX.
+- L10537: delete this MDBX bench open.
+- L10562: retarget this helper at BenchIndex::Rocks, or delete it with the MDBX bench open.
+- L10601: delete this MDBX bench open.
+- L11086: delete this test with the MDBX open path.
+- L11206: delete this test with the MDBX open path.
+- L11239: delete this helper with the MDBX open tests.
+- L11251: delete this helper with the MDBX open tests.
+- L11295: delete this test with the MDBX open path.
+- L11407: delete the MDBX half of this test. The RocksDB group-commit assertion stays.
+- L11700: drop Mdbx from this list and keep the RocksDB run.
+- L11838: delete the stored_paths arms in this helper. They check the tx path only MDBX keeps.
+- L12265: drop Mdbx from this list and keep the RocksDB run.
+- L12687: drop Mdbx from this list and keep the RocksDB run.
+- L12768: drop Mdbx from this list and keep the RocksDB run.
+- L12849: drop Mdbx from this list and keep the RocksDB run.
+- L12978: drop Mdbx from this list and keep the RocksDB run.
+- L13073: drop Mdbx from this list and keep the RocksDB run.
+- L13345: delete this MDBX case and keep the RocksDB case.
+- L13408: delete this MDBX case and keep the RocksDB case.
+- L13473: delete this MDBX case and keep the RocksDB case.
+- L13530: delete this MDBX case and keep the RocksDB case.
+- L13591: this test opens only MDBX. Retarget it at RocksDB. The interval edit is not MDBX-specific.
+- L13979: delete this MDBX bench open.
+- L17682: delete this MDBX case and keep the RocksDB case.
+- L17727: delete this MDBX case and keep the RocksDB case.
+- L19057: drop Mdbx from this list and keep the RocksDB run.
+- L20557: drop Mdbx from this list and keep the RocksDB run.
+- L21064: drop Mdbx from this list and keep the RocksDB run.
+- L21149: drop Mdbx from this list and keep the RocksDB run.
+- L21224: drop Mdbx from this list and keep the RocksDB run.
+- L21326: drop Mdbx from this list and keep the RocksDB run.
+- L21388: drop Mdbx from this list and keep the RocksDB run.
+- L21869: drop Mdbx from this list and keep the RocksDB run.
+- L21963: this test opens only MDBX. Retarget it at RocksDB.
+- L22532: delete this MDBX case and keep the RocksDB case.
+- L22636: delete this test. It checks the tx path MDBX commits with the bytes.
 
 ### irys-actors
 
