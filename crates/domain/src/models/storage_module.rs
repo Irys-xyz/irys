@@ -1664,6 +1664,50 @@ pub fn refuse_foreign_index(path: &Path, rocks: bool) -> eyre::Result<()> {
     Ok(())
 }
 
+/// True when `path_dev` is not the submodule directory's device.
+///
+/// A bind mount keeps the lexical path and changes `st_dev`.
+#[cfg(feature = "bench")]
+fn bench_index_device_differs(base_dev: u64, path_dev: u64) -> bool {
+    path_dev != base_dev
+}
+
+/// Refuse a symlink, or a different filesystem, at `db`, `rocks`, or
+/// `intervals.json`. A missing path is a new index and is allowed.
+#[cfg(feature = "bench")]
+fn refuse_bench_index_mount(module_dir: &Path) -> eyre::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let base_meta = fs::symlink_metadata(module_dir)
+        .wrap_err_with(|| format!("stat {}", module_dir.display()))?;
+    let base_dev = base_meta.dev();
+    for name in ["db", "rocks", "intervals.json"] {
+        let path = module_dir.join(name);
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).wrap_err_with(|| format!("stat {}", path.display()));
+            }
+        };
+        if meta.file_type().is_symlink() {
+            return Err(eyre!(
+                "refusing to open {}: {} is a symlink",
+                module_dir.display(),
+                path.display()
+            ));
+        }
+        if bench_index_device_differs(base_dev, meta.dev()) {
+            return Err(eyre!(
+                "refusing to open {}: {} is on another device",
+                module_dir.display(),
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "bench")]
 // MDBX-SUBMODULE-INDEX: delete this helper with the MDBX bench open.
 fn open_mdbx_index(path: &Path, config: &Config) -> eyre::Result<SubmoduleIndex> {
@@ -2528,22 +2572,9 @@ impl StorageModule {
             };
             let path = sub_base_path.join(index.dir_name());
             // The bench directory is already under a `loadtest` component.
-            // A symlink must not point the index somewhere else.
-            if path.exists() {
-                let base = sub_base_path
-                    .canonicalize()
-                    .wrap_err_with(|| format!("canonicalize {}", sub_base_path.display()))?;
-                let opened = path
-                    .canonicalize()
-                    .wrap_err_with(|| format!("canonicalize {}", path.display()))?;
-                if !opened.starts_with(&base) {
-                    return Err(eyre!(
-                        "index directory {} is outside {}",
-                        opened.display(),
-                        base.display()
-                    ));
-                }
-            }
+            // A bind keeps that path, so `lstat` and `st_dev` of `db`,
+            // `rocks`, and `intervals.json` decide before either open.
+            refuse_bench_index_mount(sub_base_path)?;
             let rocks = matches!(index, BenchIndex::Rocks(_));
             refuse_foreign_index(&path, rocks)?;
             debug!("submodule index path: {:?}", path);
@@ -13934,6 +13965,128 @@ mod tests {
         let mdbx_err = StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)
             .expect_err("mdbx must refuse a rocks directory");
         assert!(mdbx_err.to_string().contains("RocksDB"), "{mdbx_err}");
+        Ok(())
+    }
+
+    /// Dev numbers stand in for `st_dev`. A bind of another filesystem
+    /// changes the number and keeps the path.
+    #[cfg(feature = "bench")]
+    #[test]
+    fn bench_index_device_differs_compares_the_given_numbers() {
+        assert!(!super::bench_index_device_differs(7, 7));
+        assert!(super::bench_index_device_differs(7, 8));
+        assert!(super::bench_index_device_differs(0, 1));
+    }
+
+    /// Recall and write files for one bench split, then open MDBX.
+    #[cfg(feature = "bench")]
+    fn try_open_split_mdbx(tmp: &Path) -> eyre::Result<StorageModule> {
+        let recall_path = tmp.join("recall");
+        let write_path = tmp.join("write");
+        fs::write(&recall_path, vec![0_u8; 128])?;
+        fs::write(&write_path, vec![0_u8; 128])?;
+        let recall = OpenOptions::new().read(true).open(&recall_path)?;
+        let write = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&write_path)?;
+        let split = Arc::new(SplitBacking::open(recall, write, 0, 4)?);
+        let config = testing_config(tmp, 32, 4);
+        let info = one_span(3, "sub", None);
+        StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)
+    }
+
+    /// `db`, `rocks`, and `intervals.json` must not be symlinks, including
+    /// a link whose target stays inside the submodule directory. Open must
+    /// refuse before it creates `db`.
+    #[cfg(feature = "bench")]
+    #[test]
+    fn open_split_refuses_index_path_symlinks() -> eyre::Result<()> {
+        let mut failures = Vec::new();
+
+        let db_tmp = TempDirBuilder::new()
+            .prefix("split_index_symlink_db")
+            .build();
+        let db_sub = db_tmp.path().join("sub");
+        let live_db = db_sub.join("live-db");
+        fs::create_dir_all(&live_db)?;
+        fs::write(live_db.join("marker"), b"keep")?;
+        // Relative target, so the link stays inside `sub/`.
+        std::os::unix::fs::symlink("live-db", db_sub.join("db"))?;
+        match try_open_split_mdbx(db_tmp.path()) {
+            Ok(_) => failures.push("db symlink inside the module was opened".to_string()),
+            Err(error) => {
+                let message = error.to_string();
+                if !message.contains("symlink") {
+                    failures.push(format!("db symlink: {message}"));
+                }
+            }
+        }
+        if live_db.join("mdbx.dat").exists() {
+            failures.push("db symlink wrote mdbx.dat through the link".to_string());
+        }
+        assert_eq!(fs::read(live_db.join("marker"))?, b"keep");
+
+        let rocks_tmp = TempDirBuilder::new()
+            .prefix("split_index_symlink_rocks")
+            .build();
+        let rocks_sub = rocks_tmp.path().join("sub");
+        fs::create_dir_all(&rocks_sub)?;
+        let live_rocks = rocks_tmp.path().join("outside-rocks");
+        fs::create_dir_all(&live_rocks)?;
+        fs::write(live_rocks.join("marker"), b"keep")?;
+        std::os::unix::fs::symlink(&live_rocks, rocks_sub.join("rocks"))?;
+        match try_open_split_mdbx(rocks_tmp.path()) {
+            Ok(_) => failures.push("rocks symlink was opened".to_string()),
+            Err(error) => {
+                let message = error.to_string();
+                if !message.contains("symlink") {
+                    failures.push(format!("rocks symlink: {message}"));
+                }
+            }
+        }
+        if rocks_sub.join("db").join("mdbx.dat").exists() {
+            failures.push("rocks symlink still created db".to_string());
+        }
+        assert_eq!(fs::read(live_rocks.join("marker"))?, b"keep");
+
+        let intervals_tmp = TempDirBuilder::new()
+            .prefix("split_index_symlink_intervals")
+            .build();
+        let intervals_sub = intervals_tmp.path().join("sub");
+        fs::create_dir_all(&intervals_sub)?;
+        let mut intervals = super::StorageIntervals::new();
+        intervals
+            .insert_merge_touching_if_values_equal(
+                partition_chunk_offset_ii!(0, 3),
+                ChunkType::Uninitialized,
+            )
+            .expect("one span");
+        let interval_bytes = serde_json::to_vec(&intervals)?;
+        let live_intervals = intervals_tmp.path().join("outside-intervals.json");
+        fs::write(&live_intervals, &interval_bytes)?;
+        std::os::unix::fs::symlink(&live_intervals, intervals_sub.join("intervals.json"))?;
+        match try_open_split_mdbx(intervals_tmp.path()) {
+            Ok(_) => failures.push("intervals.json symlink was opened".to_string()),
+            Err(error) => {
+                let message = error.to_string();
+                if !message.contains("symlink") {
+                    failures.push(format!("intervals.json symlink: {message}"));
+                }
+            }
+        }
+        if intervals_sub.join("db").join("mdbx.dat").exists() {
+            failures.push("intervals.json symlink still created db".to_string());
+        }
+        assert_eq!(fs::read(&live_intervals)?, interval_bytes);
+        assert!(
+            fs::symlink_metadata(intervals_sub.join("intervals.json"))?
+                .file_type()
+                .is_symlink(),
+            "intervals.json symlink was replaced"
+        );
+
+        assert!(failures.is_empty(), "{failures:#?}");
         Ok(())
     }
 
