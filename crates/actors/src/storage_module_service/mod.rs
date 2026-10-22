@@ -731,15 +731,23 @@ impl StorageModuleServiceInner {
         }
     }
 
-    /// Send a deferred span that is still `Uninitialized`. A full channel
-    /// keeps that part for `tick`. Entropy and Data are not sent.
+    /// Send the deferred spans. A rollback or assignment repack sends only
+    /// the part that is still `Uninitialized`. A checksum repair is sent
+    /// whole. A full channel keeps the span for `tick`.
     fn enqueue_deferred_uninitialized(&mut self, module: &Arc<StorageModule>) {
         let Some(waiting) = self.pending_ranges.remove(&module.id) else {
             return;
         };
         let mut deferred = Vec::new();
         for span in waiting {
-            self.enqueue_uninitialized_span(module, span.range, &mut deferred);
+            if span.while_uninitialized {
+                self.enqueue_uninitialized_span(module, span.range, &mut deferred);
+            } else if matches!(
+                self.try_enqueue_packing(module, span.range),
+                PackSend::Deferred
+            ) {
+                deferred.push(span);
+            }
         }
         if !deferred.is_empty() {
             self.pending_ranges.insert(module.id, deferred);
@@ -3614,6 +3622,29 @@ mod assignment_reset_tests {
             );
         }
         assert!(saw, "an entropy checksum span is sent whole");
+    }
+
+    /// The assignment path sends deferred spans too. A deferred checksum
+    /// repair over Entropy is sent whole there, not narrowed and dropped.
+    #[tokio::test]
+    async fn assignment_path_sends_a_deferred_crc_repair_whole() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        write_span(&harness.module, 1, 3, irys_domain::ChunkType::Entropy);
+        fill_packing_channel(&harness);
+        harness
+            .module
+            .requeue_crc_repair_range(repair_one_to_three().0);
+        harness.inner.tick();
+        while harness.receivers.packing.try_recv().is_ok() {}
+        let module = Arc::clone(&harness.module);
+        harness.inner.enqueue_deferred_uninitialized(&module);
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("the deferred checksum repair is sent");
+        assert_eq!(*request.chunk_range().0.start(), 1);
+        assert_eq!(*request.chunk_range().0.end(), 3);
     }
 
     fn recovery_span() -> PartitionChunkRange {
