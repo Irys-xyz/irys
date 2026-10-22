@@ -109,7 +109,7 @@ The price: about 11% more hashing per chunk and 3% per chunk-proof check (§9), 
 | `h` | 6 | 2 | `log2(SPC)`, the height of a chunk subtree |
 | `max_data_tx_chunks` | 20,971,520 (`2^24 + 2^22`, 5 TiB) | same | unchanged |
 
-The tree is a general primitive. A bound tighter than the rule above belongs to the consumer, not to the tree. The irys node's consensus config rejects SPC < 2 wherever the segment-PoA rule runs (§8).
+The tree is a general primitive. A bound tighter than the rule above belongs to the consumer, not to the tree. The irys node's consensus config rejects SPC < 2 wherever the segment-PoA rule runs (§8). The original reason (an empty segment proof) no longer applies since §15 Q10. Whether segment-PoA needs SPC ≥ 2 for another reason is open. Settle it against the segment-PoA spec during integration.
 
 | Name | Value |
 | --- | --- |
@@ -393,7 +393,7 @@ The owner of chunk `b` is the one tx whose range contains `b`: `chunk_start ≤ 
 - The whole-chunk offset mapping lands with v2. Today's mapping uses raw-size byte ranges and drifts after any tx that does not end on a chunk boundary.
 - The PoA rule itself (which segment, the ticket, the forms) is in the segment-PoA spec.
 
-**Segments per chunk.** The tree allows 1 ≤ SPC ≤ 256 (§2). Wherever the segment-PoA rule runs, the irys node's consensus config rejects SPC < 2 at load time (segment-PoA spec §6.3 rule 3, §15 Q9). That bound is on this use of the tree. The tree stays general. A segment proof is never empty: when `h = 0` and `C = 1` it is the size witness (§5, §15 Q10).
+**Segments per chunk.** The tree allows 1 ≤ SPC ≤ 256 (§2). Wherever the segment-PoA rule runs, the irys node's consensus config rejects SPC < 2 at load time (segment-PoA spec §6.3 rule 3, §15 Q9). That bound is on this use of the tree. The tree stays general. The original reason (an empty segment proof) no longer applies since §15 Q10. Whether segment-PoA needs SPC ≥ 2 for another reason is open. Settle it against the segment-PoA spec during integration. A segment proof is never empty: when `h = 0` and `C = 1` it is the size witness (§5, §15 Q10).
 
 **Other verifiers.** Mining (winning chunks), chunk migration and storage-module serving use `verify_chunk` or the v2 builder against the header commitment. Ingress-proof checks follow §12. A storage module derives `c` from the placement (partition offset minus the tx's start), never from proof bytes.
 
@@ -476,7 +476,7 @@ This crate is the data tree and this spec. The rows below are the L1 and gateway
 | `crates/types/src/transaction.rs` | field `data_root` becomes `data_tree_root` at the same position; a `data_commitment()` accessor derives the commitment; `data_chunks()` builds chunks with the v2 builder |
 | client builder (`irys.rs` merklize, api-client chunk upload) | v2 tree and chunk proofs; chunk messages carry `data_commitment` |
 | `crates/types/src/chunk.rs`, gossip types | `ChunkKey`; the root field of `UnpackedChunk` holds `data_commitment` |
-| consensus config | `segments_per_chunk`: a power of two, 1 ≤ SPC ≤ 256, `chunk_size % SPC == 0`, checked at load (§2). Where the segment-PoA rule runs, also reject SPC < 2 at load (segment-PoA spec §6.3 rule 3, §15 Q9). The tree stays general. Every proof ends with the size witness, so none is empty (§5, §15 Q10) |
+| consensus config | `segments_per_chunk`: a power of two, 1 ≤ SPC ≤ 256, `chunk_size % SPC == 0`, checked at load (§2). Where the segment-PoA rule runs, also reject SPC < 2 at load (segment-PoA spec §6.3 rule 3, §15 Q9). The tree stays general. The original reason (an empty segment proof) no longer applies since §15 Q10. Whether segment-PoA needs SPC ≥ 2 for another reason is open. Settle it against the segment-PoA spec during integration. Every proof ends with the size witness, so none is empty (§5, §15 Q10) |
 | chunk ingress | `verify_chunk`, `InvalidChunkSize`, deletion of the v1 size machinery (§8); ingress-proof readiness becomes `!block_set.is_empty()` |
 | p2p | `InvalidChunkSize` is a peer fault; chunk gossip is keyed by `ChunkKey` |
 | database | chunk-key tables (§7); rows keyed by `data_commitment`; size-confirmation state deleted; the chunk backfill verifies with `verify_chunk`; database version bump. The MDBX path tables that parse the last 64 bytes as a v1 leaf, and the RocksDB derive, follow `tx_root` v2 (Appendix C) |
@@ -584,6 +584,8 @@ Q1 to Q10 are decided (§15). These items stay open. They are integration propos
 2. What a PoA carries: `(k, N, chunk_start)` explicitly, so a validator needs only the owning tx header; or derived from the block's tx headers (smaller PoA, more reads). With the block-validation rule (Appendix C), the option that verifies with only the owning tx header is safe, because the `tx_root` it checks against has passed full validation.
 4. Where the code lives: `irys-data-tree`, which shares `T`, `climb`, `depth` and the tag registry, or a separate crate.
 
+**Segments per chunk.** The node still rejects SPC < 2 wherever the segment-PoA rule runs (§8). The original reason (an empty segment proof) no longer applies since §15 Q10. Whether segment-PoA needs SPC ≥ 2 for another reason is open. Settle it against the segment-PoA spec during integration. The tree's rule is unchanged (§2).
+
 ## 15. Decision log
 
 The log is append-only. A row is not reworded. The first table binds the data tree. The second table is integration planning.
@@ -619,7 +621,7 @@ Proposed with the approved design, not decided on their own: the last chunk is a
 | 2026-10-21 | Q6. The ingress-proof change is §12. The data half is `data_commitment` from the v2 builder, so one proof covers exactly one (data, size). A planned proof of a chunk range binds `data_commitment` and that range for the same reason |
 | 2026-10-21 | Q7. The gateway item envelope signs `data_tree_root` and `data_size`, and `data_commitment` is derived, as the L1 header does. This anchors the size and keeps one format for L1, the gateway and SDKs. Owner decision; the gateway team signed off on 2026-10-21 |
 | 2026-10-21 | Q8. Every data tx in a block up to and including Estuary's activation block E is refused. Mainnet stores no data and test networks reset, so no pre-activation data tx can exist, and the fork release needs no v1 data code and no anchor rule |
-| 2026-10-21 | Q9. The tree's rule is 1 ≤ SPC ≤ 256, a power of two, and it sets no tighter protocol floor. A bound is a property of how the tree is used, not of the tree. The irys node rejects SPC < 2 wherever the segment-PoA rule runs, because an empty segment proof signs like an absent optional RLP field |
+| 2026-10-21 | Q9. The tree's rule is 1 ≤ SPC ≤ 256, a power of two, and it sets no tighter protocol floor. A bound is a property of how the tree is used, not of the tree. The irys node rejects SPC < 2 wherever the segment-PoA rule runs, because an empty segment proof signs like an absent optional RLP field. Reason void since Q10; see 2026-10-22 row |
 | 2026-10-21 | The data root is external: clients, SDKs and the gateway commit to it, so it lands first and is hard to change later. `tx_root` is internal to the protocol and can change in any fork |
 | 2026-10-21 | `tx_root` v2 ships at Estuary (Appendix C): it commits to its leaf count with a count witness, and its proofs end with that witness. Gateway receipts are meant to be near self-contained paths from `tx_root` to a chunk, so a verifier holding only `tx_root` must get the count bound |
 | 2026-10-21 | Q3. `tx_root` v2 (Appendix C) ships at Estuary, in the same hardfork as the data tree. Tags `0x05` to `0x07` are in the §3 registry. Estuary already requires a data reset: test networks reset, and mainnet stores no data. Q8 refuses data txs up to and including E, so every pre-activation `tx_root` is `0^32` and no data PoA exists. One format. No dual format. A later fork would need both formats, gated by height. Appendix C items 2 to 4 stay open. L1 integration (§12) is a separate work item |
@@ -632,6 +634,7 @@ Proposed with the approved design, not decided on their own: the last chunk is a
 | 2026-10-19 | The data tx header keeps its layout; no version tag. This relies on the testnet reset at the same activation |
 | 2026-10-18 | No v1 and v2 coexistence: test networks reset, and mainnet stores no data |
 | 2026-10-18 | The header stores `data_tree_root` and `data_size`; `data_commitment` is derived, never encoded |
+| 2026-10-22 | Q9's reason is void after Q10, and the node rule is kept. The node still rejects SPC < 2 wherever the segment-PoA rule runs. The original reason (an empty segment proof) no longer applies since Q10. With SPC = 1 and C = 1 the segment proof is `[size_witness(n)]`, 32 bytes, never empty. Whether segment-PoA needs SPC ≥ 2 for another reason is open. Settle it against the segment-PoA spec during integration (§14). The tree's rule is unchanged: 1 ≤ SPC ≤ 256, a power of two |
 
 ## Appendix A. Measurements
 
