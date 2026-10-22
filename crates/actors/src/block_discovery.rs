@@ -407,7 +407,6 @@ impl BlockDiscoveryServiceInner {
             })?;
 
         // Get references to transactions for anchor validation
-        let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
         let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
         let commitment_txs = transactions.get_ledger_system_txs(SystemLedger::Commitment);
         let publish_tx_ids_to_check = publish_ledger.tx_ids.0.clone();
@@ -694,13 +693,27 @@ impl BlockDiscoveryServiceInner {
                 Ok(resolved.is_some_and(|h| h >= min_height && h < map_floor))
             };
 
-        // check anchors for submit ledger (bounded by the tx anchor window)
-        for tx in submit_txs.iter() {
-            if !anchor_valid_for(&tx.anchor, min_tx_anchor_height)? {
-                return Err(BlockDiscoveryError::InvalidAnchor {
-                    item_type: AnchorItemType::DataTransaction { tx_id: tx.id },
-                    anchor: tx.anchor,
-                });
+        // check anchors for data txs (bounded by the tx anchor window).
+        // The prior-inclusion walk only rejects duplicates within the anchor window,
+        // so an unchecked anchor would let a tx be included again past that window.
+        // Iterate every ledger the block carries, in ledger-id order, and match
+        // exhaustively so a new ledger must decide here whether its anchor is checked.
+        let mut data_txs_by_ledger: Vec<_> = transactions.data_txs.iter().collect();
+        data_txs_by_ledger.sort_by_key(|(ledger, _)| ledger.get_id());
+        for (ledger, txs) in data_txs_by_ledger {
+            match ledger {
+                // Promotions: the anchor was checked on Submit inclusion; the
+                // ingress proof anchors are checked below.
+                DataLedger::Publish => continue,
+                DataLedger::Submit | DataLedger::OneYear | DataLedger::ThirtyDay => {}
+            }
+            for tx in txs {
+                if !anchor_valid_for(&tx.anchor, min_tx_anchor_height)? {
+                    return Err(BlockDiscoveryError::InvalidAnchor {
+                        item_type: AnchorItemType::DataTransaction { tx_id: tx.id },
+                        anchor: tx.anchor,
+                    });
+                }
             }
         }
 

@@ -13,9 +13,9 @@ use irys_chain::IrysNodeCtx;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, H256, IngressProofsList, IrysBlockHeader,
-    NodeConfig, SendTraced as _, U256, UnixTimestampMs, ingress::generate_ingress_proof,
-    storage_pricing::Amount,
+    BoundedFee, CommitmentTransaction, DataLedger, DataTransactionHeader, H256, IngressProofsList,
+    IrysBlockHeader, NodeConfig, SendTraced as _, U256, UnixTimestampMs,
+    ingress::generate_ingress_proof, storage_pricing::Amount,
 };
 use reth::payload::EthBuiltPayload;
 use reth_db::transaction::DbTxMut as _;
@@ -629,6 +629,64 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
             anchor: _
         })
     ));
+
+    // 1b.) term ledger txs with incorrect anchors
+    for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
+        let term_price = genesis_node
+            .get_data_price(ledger, data.len() as u64)
+            .await?;
+        let old_term_tx = genesis_signer.create_transaction_with_fees(
+            data.clone(),
+            genesis_hash,
+            ledger,
+            BoundedFee::new(term_price.term_fee),
+            None,
+        )?;
+        let old_term_tx = genesis_signer.sign_transaction(old_term_tx)?;
+
+        {
+            let mut lck = block_prod_strategy.txs.lock().unwrap();
+            *lck = MempoolTxs {
+                commitment_tx: vec![],
+                submit_tx: vec![],
+                publish_tx: PublishLedgerWithTxs::default(),
+                one_year_tx: if ledger == DataLedger::OneYear {
+                    vec![old_term_tx.header.clone()]
+                } else {
+                    vec![]
+                },
+                thirty_day_tx: if ledger == DataLedger::ThirtyDay {
+                    vec![old_term_tx.header.clone()]
+                } else {
+                    vec![]
+                },
+            };
+        }
+
+        genesis_node.gossip_disable();
+        let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+            .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
+            .await?
+            .unwrap();
+
+        genesis_node.gossip_enable();
+        let preval_res = block_prod_strategy
+            .inner()
+            .block_discovery
+            .handle_block(Arc::clone(&block), false)
+            .await;
+
+        assert!(
+            matches!(
+                preval_res,
+                Err(BlockDiscoveryError::InvalidAnchor {
+                    item_type: AnchorItemType::DataTransaction { tx_id },
+                    anchor: _
+                }) if tx_id == old_term_tx.header.id
+            ),
+            "{ledger:?} tx with a stale anchor must be rejected, got: {preval_res:?}"
+        );
+    }
 
     // 2.) commitment tx with incorrectly anchored commitment tx
     {
