@@ -283,20 +283,23 @@ async fn unpack_off_loop(
     chunk: ChunkFormat,
     pipeline: &DeliveryPipeline,
 ) -> Result<UnpackedChunk, DeliveryError> {
+    let chunk_size = usize::try_from(pipeline.chunk_size)
+        .map_err(|_| DeliveryError::Local("chunk size exceeds usize".to_string()))?;
+    // Entropy is `chunk_size` bytes. A longer body is the peer's data, rejected
+    // before the XOR indexes that buffer.
+    let body_len = match &chunk {
+        ChunkFormat::Unpacked(unpacked) => unpacked.bytes.0.len(),
+        ChunkFormat::Packed(packed) => packed.bytes.0.len(),
+    };
+    if body_len > chunk_size {
+        return Err(DeliveryError::InvalidBody(format!(
+            "peer chunk is {body_len} bytes, more than the {chunk_size}-byte chunk size"
+        )));
+    }
     let packed = match chunk {
         ChunkFormat::Unpacked(unpacked) => return Ok(unpacked),
         ChunkFormat::Packed(packed) => packed,
     };
-    let chunk_size = usize::try_from(pipeline.chunk_size)
-        .map_err(|_| DeliveryError::Local("chunk size exceeds usize".to_string()))?;
-    // The XOR indexes entropy by the packed length. A longer body would
-    // panic in release builds, where only a debug assertion checks it.
-    if packed.bytes.0.len() > chunk_size {
-        return Err(DeliveryError::InvalidBody(format!(
-            "packed chunk is {} bytes, more than the {chunk_size}-byte chunk size",
-            packed.bytes.0.len()
-        )));
-    }
     let unpack_failed =
         |error: String| DeliveryError::Local(format!("could not unpack the peer chunk: {error}"));
     // The semaphore is never closed. The permit is held until the blocking
@@ -306,9 +309,11 @@ async fn unpack_off_loop(
         .await
         .map_err(|error| unpack_failed(error.to_string()))?;
     let (iterations, chain_id) = (pipeline.entropy_packing_iterations, pipeline.chain_id);
-    tokio::task::spawn_blocking(move || unpack(&packed, iterations, chunk_size, chain_id))
-        .await
-        .map_err(|error| unpack_failed(error.to_string()))
+    let unpacked =
+        tokio::task::spawn_blocking(move || unpack(&packed, iterations, chunk_size, chain_id))
+            .await
+            .map_err(|error| unpack_failed(error.to_string()))?;
+    unpacked.map_err(|error| DeliveryError::InvalidBody(error.to_string()))
 }
 
 /// Unpack, then check the body. On the direct route it is checked against
@@ -2433,7 +2438,10 @@ mod ingress_handoff_tests {
             data_root: H256::repeat_byte(0x31),
             data_size: chunk_size as u64,
             data_path: Base64(vec![1, 2, 3]),
-            bytes: Base64(irys_packing::packing_xor_vec_u8(entropy, data)),
+            bytes: Base64(
+                irys_packing::packing_xor_vec_u8(entropy, data)
+                    .expect("test data fits the entropy buffer"),
+            ),
             tx_offset: TxChunkOffset::from(0_u32),
             packing_address,
             partition_offset,
@@ -2533,6 +2541,25 @@ mod ingress_handoff_tests {
         assert!(matches!(error, DeliveryError::InvalidBody(_)), "{error}");
         assert!(error.is_peer_fault());
         assert!(!DeliveryError::Local("timeout".to_string()).is_peer_fault());
+    }
+
+    /// An unpacked body longer than a chunk is the peer's fault. It is
+    /// rejected before any unpack work, including when no unpack permit is free.
+    #[tokio::test]
+    async fn oversized_unpacked_body_is_invalid_peer_data() {
+        let chunk_size = 64_usize;
+        let unpacked = UnpackedChunk {
+            bytes: Base64(vec![0_u8; chunk_size + 1]),
+            ..UnpackedChunk::default()
+        };
+        let error = unpack_off_loop(
+            ChunkFormat::Unpacked(unpacked),
+            &pipeline(0, chunk_size as u64),
+        )
+        .await
+        .expect_err("an oversized unpacked body is rejected");
+        assert!(matches!(error, DeliveryError::InvalidBody(_)), "{error}");
+        assert!(error.is_peer_fault());
     }
 
     #[tokio::test]

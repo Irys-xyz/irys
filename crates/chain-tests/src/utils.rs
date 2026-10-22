@@ -3402,7 +3402,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             self.node_ctx.config.consensus.entropy_packing_iterations,
             self.node_ctx.config.consensus.chunk_size as usize,
             self.node_ctx.config.consensus.chain_id,
-        );
+        )
+        .expect("stored chunk fits the entropy buffer");
         if unpacked_chunk.bytes.0 != expected_bytes {
             println!(
                 "ledger_chunk_offset: {}\nfound: {:?}\nexpected: {:?}",
@@ -4695,7 +4696,8 @@ pub async fn verify_published_chunk<T, B>(
             config.consensus.entropy_packing_iterations,
             config.consensus.chunk_size as usize,
             config.consensus.chain_id,
-        );
+        )
+        .expect("stored chunk fits the entropy buffer");
         if unpacked_chunk.bytes.0 != expected_bytes {
             println!(
                 "ledger_chunk_offset: {}\nfound: {:?}\nexpected: {:?}",

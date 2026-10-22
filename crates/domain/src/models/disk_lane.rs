@@ -2839,7 +2839,14 @@ impl StorageModule {
         }
         let pack_started = Instant::now();
         let cache_hit = slot.cached_entropy.is_some();
-        let packed = packing_xor_vec_u8(entropy, &slot.unpacked);
+        let packed = match packing_xor_vec_u8(entropy, &slot.unpacked) {
+            Ok(packed) => packed,
+            Err(error) => {
+                self.fail_slot(slot, WriteDataChunkError::Other(error));
+                self.fail_queued_group(group);
+                return;
+            }
+        };
         let mut disk_compare = Duration::ZERO;
         let inserted = self.commit_packed(
             slot.offset,
@@ -3064,7 +3071,7 @@ impl StorageModule {
             let live = self.entropy_write_epoch.load(Ordering::SeqCst);
             let confirmed = if copied_pad && live != entropy_epoch {
                 let compare_started = Instant::now();
-                let entropy = packing_xor_vec_u8(packed.clone(), unpacked);
+                let entropy = packing_xor_vec_u8(packed.clone(), unpacked)?;
                 let matched = self.stable_disk_matches(offset, &entropy);
                 *disk_compare = disk_compare.saturating_add(compare_started.elapsed());
                 match matched {
