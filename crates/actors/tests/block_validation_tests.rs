@@ -384,7 +384,7 @@ fn empty_poa_guards(
 #[derive(Debug, Clone, Copy)]
 enum UnownedPartition {
     OwnedByOther,
-    AdvisoryZeroHash,
+    ZeroHashUnassigned,
 }
 
 /// `poa_is_valid` enforces ownership on its own, not only via prevalidation.
@@ -392,7 +392,7 @@ enum UnownedPartition {
 /// (`None` when the snapshot has no assignment).
 #[test_log::test(rstest::rstest)]
 #[case::owned_by_other(UnownedPartition::OwnedByOther)]
-#[case::advisory_zero_hash(UnownedPartition::AdvisoryZeroHash)]
+#[case::zero_hash_unassigned(UnownedPartition::ZeroHashUnassigned)]
 fn poa_is_valid_rejects_unowned_partition(#[case] kind: UnownedPartition) {
     let config = ConsensusConfig::testing();
     let tmp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
@@ -408,7 +408,7 @@ fn poa_is_valid_rejects_unowned_partition(#[case] kind: UnownedPartition) {
                 Some(owner),
             )
         }
-        UnownedPartition::AdvisoryZeroHash => (
+        UnownedPartition::ZeroHashUnassigned => (
             entropy_poa(H256::zero(), None),
             EpochSnapshot::default(),
             None,
