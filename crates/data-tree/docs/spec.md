@@ -77,10 +77,12 @@ The price: about 11% more hashing per chunk and 3% per chunk-proof check (§8).
 | Parameter | Mainnet and testnet | `testing()` | Rule |
 | --- | --- | --- | --- |
 | `chunk_size` | 262,144 | 32 | unchanged consensus field |
-| `segments_per_chunk` (SPC) | 64 | 4 | NEW consensus config field: a power of two, 1 ≤ SPC ≤ 256 in the tree; consumers may require more. `chunk_size ≥ 1`, `chunk_size % SPC == 0`, `max_data_tx_chunks ≥ 1`, and `chunk_size × max_data_tx_chunks < 2^64` (no `u64` overflow), checked at config load |
+| `segments_per_chunk` (SPC) | 64 | 4 | NEW consensus config field: a power of two, 1 ≤ SPC ≤ 256 in the tree; consumers may impose tighter rules. `chunk_size ≥ 1`, `chunk_size % SPC == 0`, `1 ≤ max_data_tx_chunks ≤ 2^32 − 1`, and `chunk_size × max_data_tx_chunks < 2^64` (no `u64` overflow), checked at config load |
 | `segment_size` | 4,096 | 8 | `chunk_size / SPC` |
 | `h` | 6 | 2 | `log2(SPC)`, the height of a chunk subtree |
-| `max_data_tx_chunks` | 20,971,520 (`2^24 + 2^22`, 5 TiB) | same | unchanged |
+| `max_data_tx_chunks` | 20,971,520 (`2^24 + 2^22`, 5 TiB) | same | unchanged. At most `2^32 − 1`: `chunk_key` encodes `c` as `be32`, and `Geometry::new` takes `u32` |
+
+`G = (chunk_size, segments_per_chunk, max_data_tx_chunks)`. `size_witness` uses the first two.
 
 The tree is a general primitive. A bound tighter than the rule above belongs to the consumer, not to the tree.
 
@@ -452,9 +454,7 @@ The log is append-only. Each table keeps the order in which its rows were added.
 | 2026-10-22 | The empty-sibling pin does not fail every data segment of a malformed last chunk. It applies only to a sibling whose subtree lies entirely past the data (§5). A bad hash in an empty leaf of a mixed sibling is not opened. Other data segments of that chunk still verify. Test geometry, `n = 20`, SPC 4: segments 0 and 1 verify, and segments 2 and 3 fail. The rightmost data segment's path meets every empty leaf, for every power-of-two `segments_per_chunk` in `1..=256` and every data-segment count, so that proof fails. `verify_chunk` fails for every byte string of length `chunk_len`. Rejecting the mixed sibling would reject an honest proof. The 2026-10-22 empty-sibling row's "every data segment verifies" is the tree with the pin removed. It is not the result of this check |
 | 2026-10-22 | Size-witness formula. The witness in Q10 is `size_witness(G, n)` (19 B). See the row that supersedes Q5. The verifier computes it from `G` and `n`. It checks `node(root, size_witness(G, n)) == data_commitment`. This supersedes that formula. Q10's witness-last rule stays |
 
-Status: binding. The leaf rules in the next sentence are part of the confirmed data tree. They are not a separate log row.
-
-Proposed with the approved design, not decided on their own: the last chunk is a perfect subtree with empty leaves, and the chunk level keeps today's RFC 6962 shape.
+Status: binding. The last chunk is a perfect subtree with empty leaves, and the chunk level keeps today's RFC 6962 shape. Those shape rules are part of the confirmed data tree. They are not a separate log row.
 
 ## Appendix A. Measurements
 
