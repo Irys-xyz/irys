@@ -438,8 +438,9 @@ pub struct DataSyncServiceInner {
     delivery: DeliveryPipeline,
     /// See [`MAX_DELIVERED_BODIES`].
     max_delivered_bodies: usize,
-    /// Dispatch into a slot as soon as its request finishes. Off only in
-    /// tests that count slots across a completion.
+    /// Dispatch into a slot as soon as its request finishes. Tests that count
+    /// slots across a completion turn it off.
+    #[cfg(test)]
     refill_on_release: bool,
 }
 
@@ -737,6 +738,7 @@ impl DataSyncServiceInner {
             publish_dispatch_cursor: 0,
             delivery,
             max_delivered_bodies: MAX_DELIVERED_BODIES,
+            #[cfg(test)]
             refill_on_release: true,
         };
         data_sync.synchronize_peers_and_orchestrators();
@@ -840,9 +842,11 @@ impl DataSyncServiceInner {
     /// starting at its tick cursor) and under the same held-body limit. The
     /// tick still refills each queue and advances the cursors.
     fn dispatch_after_release(&mut self) {
-        if !self.refill_on_release
-            || self.delivery.held_bodies.load(Ordering::SeqCst) >= self.max_delivered_bodies
-        {
+        #[cfg(test)]
+        if !self.refill_on_release {
+            return;
+        }
+        if self.delivery.held_bodies.load(Ordering::SeqCst) >= self.max_delivered_bodies {
             return;
         }
         let mut ids: Vec<_> = self.chunk_orchestrators.keys().copied().collect();

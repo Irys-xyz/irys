@@ -3432,12 +3432,14 @@ async fn dispatch_does_not_ask_an_assignee_that_answered_without_the_offset() {
     assert_eq!(fetcher.request_log.read().unwrap().len(), 1);
 }
 
-/// A signer in the peer set still gets a few unclaimed offsets per tick.
+/// With an ingress-proof signer in the peer set, the scan skips nothing: the
+/// signer may hold what no assignee does. Dispatch still keeps those offsets
+/// away from the assignee that answered without them.
 #[test_log::test(tokio::test)]
-async fn unclaimed_offsets_trickle_to_signers() {
+async fn with_a_signer_unclaimed_offsets_are_queued_for_it() {
     let tmp = TempDirBuilder::new().with_tracing().build();
     let config = test_config(tmp.path().to_path_buf(), 64);
-    let (mut orch, _) = submit_orchestrator_with_hint(&config, (0, 59), vec![(0, 7)]);
+    let (mut orch, assignee) = submit_orchestrator_with_hint(&config, (0, 59), vec![(0, 7)]);
     let other_slot = PartitionAssignment {
         ledger_id: Some(DataLedger::Submit.into()),
         slot_index: Some(9),
@@ -3448,14 +3450,139 @@ async fn unclaimed_offsets_trickle_to_signers() {
 
     orch.populate_request_queue_at(Instant::now());
 
-    assert_eq!(
-        tracked_in(&orch, 8..=59),
-        vec![56, 57, 58, 59],
-        "highest first on a term ledger, a handful per tick"
+    assert_eq!(tracked_in(&orch, 8..=59), (8..=59).collect::<Vec<_>>());
+    assert!(orch.assignee_intervals.excludes(&assignee, 30));
+}
+
+fn fill_peer(orch: &ChunkOrchestrator, peer: IrysAddress) {
+    while peer_accounting(orch, peer).1 > 0 {
+        start_request(orch, peer);
+    }
+}
+
+/// With no free slot on any peer, the offset at the head keeps its place:
+/// dispatch stops without reordering the queue.
+#[test_log::test(tokio::test)]
+async fn with_no_free_slot_the_head_offset_keeps_its_place() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 8);
+    let sm = packed_sm(&config, 8);
+    let mut orch = make_orchestrator(sm, &config);
+    let peer = add_assigned_peer(&mut orch, &config, 71, 9171);
+    fill_peer(&orch, peer);
+    for value in [2_u32, 3, 4] {
+        insert_request(
+            &mut orch,
+            PartitionChunkOffset::from(value),
+            ChunkRequestState::Pending,
+            true,
+        );
+    }
+
+    assert!(!orch.dispatch_next());
+    let queued: Vec<u32> = orch.ready_offsets.iter().map(|offset| offset.0).collect();
+    assert_eq!(queued, vec![2, 3, 4]);
+}
+
+/// An offset only a busy signer may serve does not hold up the next offset an
+/// idle assignee can serve. It waits at the tail.
+#[test_log::test(tokio::test)]
+async fn an_offset_only_a_busy_signer_can_serve_does_not_block_the_queue() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 8);
+    let sm = packed_sm(&config, 8);
+    let db = open_test_db(&config);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm, &config, db);
+    let assignee = add_assigned_peer(&mut orch, &config, 72, 9172);
+    let other_slot = PartitionAssignment {
+        ledger_id: Some(DataLedger::Publish.into()),
+        slot_index: Some(9),
+        miner_address: IrysAddress::from([73_u8; 20]),
+        partition_hash: H256::random(),
+    };
+    let signer = add_peer_with_assignment(&mut orch, &config, 73, 9173, other_slot);
+    fill_peer(&orch, signer);
+    orch.assignee_intervals = AssigneeIntervals::new(0);
+    orch.assignee_intervals
+        .insert_known(assignee, (0, 7), vec![(3, 3)], Instant::now());
+    let (only_signer, claimed) = (PartitionChunkOffset::from(2), PartitionChunkOffset::from(3));
+    insert_request(&mut orch, only_signer, ChunkRequestState::Pending, true);
+    insert_request(&mut orch, claimed, ChunkRequestState::Pending, true);
+
+    assert!(
+        orch.dispatch_next(),
+        "the claimed offset goes to the assignee"
     );
+    wait_for_ledger_requests(&fetcher, 1).await;
+    assert!(matches!(
+        orch.chunk_requests[&claimed].request_state,
+        ChunkRequestState::Requested(peer, _) if peer == assignee
+    ));
+    assert_eq!(
+        orch.ready_offsets.iter().copied().collect::<Vec<_>>(),
+        vec![only_signer]
+    );
+}
+
+/// Hints answer for one slot. A module moved to another slot starts again.
+#[test_log::test(tokio::test)]
+async fn a_slot_change_drops_the_old_slots_hints() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 64);
+    let (mut orch, assignee) = submit_orchestrator_with_hint(&config, (0, 59), vec![(0, 7)]);
+    assert!(orch.assignee_intervals.excludes(&assignee, 30));
+    orch.hint_slot = Some(9);
+
     orch.populate_request_queue_at(Instant::now());
-    assert_eq!(
-        tracked_in(&orch, 8..=59),
-        vec![52, 53, 54, 55, 56, 57, 58, 59]
+
+    assert_eq!(orch.hint_slot, Some(0));
+    assert!(
+        !orch.assignee_intervals.excludes(&assignee, 30),
+        "the old slot's answer no longer applies"
     );
+}
+
+/// The frontier margin applies only while the ledger's head is inside this
+/// partition. A partition the ledger has filled is hinted to its last offset.
+#[test_log::test(tokio::test)]
+async fn a_full_partition_has_no_frontier_margin() {
+    for (total, full) in [(32_u64, false), (200, true)] {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let config = test_config(tmp.path().to_path_buf(), 64);
+        let sm = packed_sm_for_ledger(&config, 64, DataLedger::Submit);
+        let orch = make_orchestrator_with_ledger_total(sm, &config, DataLedger::Submit, total);
+        let (max_offset, ledger_head) = orch.get_max_chunk_offset().expect("max offset");
+        let expected = if full {
+            max_offset.0 + HINT_FRONTIER_MARGIN
+        } else {
+            max_offset.0
+        };
+        assert_eq!(
+            orch.hint_head(max_offset.0, ledger_head),
+            expected,
+            "total {total}"
+        );
+    }
+}
+
+/// A module with no Entropy left stops fetching hints. New Entropy starts it
+/// again.
+#[test_log::test(tokio::test)]
+async fn hints_go_idle_once_the_partition_has_no_entropy() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 8);
+    let chunk_size = usize::try_from(config.consensus.chunk_size).expect("chunk size");
+    let sm = packed_sm_for_ledger(&config, 8, DataLedger::Submit);
+    for offset in 0..8_u32 {
+        write_synced_chunk(&sm, offset, chunk_size, ChunkType::Data);
+    }
+    let mut orch = make_orchestrator_with_ledger_total(sm.clone(), &config, DataLedger::Submit, 8);
+    add_assigned_peer(&mut orch, &config, 74, 9174);
+
+    orch.populate_request_queue_at(Instant::now());
+    assert!(orch.hints_idle, "a full pass found no Entropy");
+
+    write_synced_chunk(&sm, 5, chunk_size, ChunkType::Entropy);
+    orch.populate_request_queue_at(Instant::now());
+    assert!(!orch.hints_idle, "new Entropy resumes the hints");
 }

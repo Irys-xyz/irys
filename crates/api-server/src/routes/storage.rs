@@ -493,6 +493,48 @@ mod tests {
         assert_eq!(parsed, serde_json::json!({"start": 10, "end": 20}));
     }
 
+    /// The data-sync client parses this route's answers with its own copy of
+    /// the wire shape. Renaming `range` or `assigned` here must fail a test,
+    /// not quietly turn every answer into a full list or an unassigned peer.
+    #[actix_web::test]
+    async fn data_sync_parses_what_this_route_serves() {
+        use irys_actors::chunk_fetcher::{IntervalsCoverage, parse_data_intervals};
+
+        let params: StorageIntervalsParams = serde_json::from_value(serde_json::json!({
+            "ledger": "ThirtyDay",
+            "slot_index": 0,
+            "chunk_type": "Data",
+        }))
+        .expect("params");
+        let intervals = || {
+            vec![
+                ChunkInterval { start: 12, end: 14 },
+                ChunkInterval { start: 17, end: 17 },
+            ]
+        };
+
+        let mut windowed = StorageIntervalsResponse::new(&params, intervals());
+        windowed.range = Some(ChunkInterval { start: 10, end: 18 });
+        windowed.assigned = Some(true);
+        let body = serde_json::to_vec(&windowed).expect("serialise");
+        let page = parse_data_intervals(&body, DataLedger::ThirtyDay, 0, 10, 20)
+            .expect("the client parses a windowed answer");
+        assert_eq!(page.intervals, vec![(12, 14), (17, 17)]);
+        assert_eq!(
+            page.coverage,
+            IntervalsCoverage::Window {
+                end: 18,
+                assigned: true
+            }
+        );
+
+        let plain = StorageIntervalsResponse::new(&params, intervals());
+        let body = serde_json::to_vec(&plain).expect("serialise");
+        let page = parse_data_intervals(&body, DataLedger::ThirtyDay, 0, 10, 20)
+            .expect("the client parses a plain answer");
+        assert_eq!(page.coverage, IntervalsCoverage::FullList);
+    }
+
     #[actix_web::test]
     async fn windowed_intervals_clip_merge_and_stop_at_the_cap() {
         let tmp_dir = TempDirBuilder::new().prefix("windowed_intervals").build();

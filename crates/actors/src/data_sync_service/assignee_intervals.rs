@@ -15,8 +15,13 @@ use irys_types::IrysAddress;
 use std::{
     collections::HashMap,
     net::SocketAddr,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
+
+/// Source of [`WindowFetch::seq`]. Process-wide, so an orchestrator rebuilt for
+/// the same module cannot accept a late answer meant for the one it replaced.
+static NEXT_FETCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Chunks requested in one window ahead of the scan cursor when an answer has
 /// not shown how dense the peer's map is.
@@ -29,6 +34,19 @@ const HINT_MIN_WINDOW_CHUNKS: u32 = 1 << 14;
 /// A known answer older than this is asked for again, so a body a peer gains
 /// later is picked up.
 const HINT_REFRESH: Duration = Duration::from_secs(60);
+
+/// Refresh interval for an older peer's full list. Each one is a walk of the
+/// peer's whole interval map and up to 64 MiB on the wire.
+const HINT_FULL_LIST_REFRESH: Duration = Duration::from_secs(5 * 60);
+
+/// Oldest answer kept in use while its refreshes fail.
+const HINT_MAX_STALE: Duration = Duration::from_secs(5 * 60);
+
+/// A complete windowed answer with fewer intervals than this grows the next
+/// window. A quarter of [`HINT_MAX_PAGES`] full pages, at the server's
+/// 32,768 intervals per page, so a window that only just fit is not grown
+/// into one that will be cut.
+const HINT_GROW_BELOW_INTERVALS: usize = 32_768 * HINT_MAX_PAGES / 4;
 
 /// Shortest gap between two fetches for one peer when the scan has moved near
 /// the edge of its window.
@@ -82,6 +100,9 @@ struct Known {
     extendable_high: bool,
     /// An older peer ignored the window and sent its whole list.
     full_list: bool,
+    /// Do not fetch again before this. Set when a refresh failed and this
+    /// older answer was kept.
+    next_attempt: Option<Instant>,
 }
 
 impl Known {
@@ -146,8 +167,16 @@ impl PeerHint {
                 false
             }
             Self::Known(known) => {
+                if known.next_attempt.is_some_and(|next| now < next) {
+                    return false;
+                }
+                let refresh = if known.full_list {
+                    HINT_FULL_LIST_REFRESH
+                } else {
+                    HINT_REFRESH
+                };
                 let age = now.saturating_duration_since(known.fetched_at);
-                age >= HINT_REFRESH || (age >= HINT_MIN_REFETCH && near_edge(known))
+                age >= refresh || (age >= HINT_MIN_REFETCH && near_edge(known))
             }
         }
     }
@@ -199,8 +228,6 @@ pub struct WindowFetch {
 pub(crate) struct AssigneeIntervals {
     peers: HashMap<IrysAddress, PeerState>,
     frontier_margin: u32,
-    /// `seq` of the next planned fetch.
-    next_seq: u64,
 }
 
 impl AssigneeIntervals {
@@ -208,7 +235,6 @@ impl AssigneeIntervals {
         Self {
             peers: HashMap::new(),
             frontier_margin,
-            next_seq: 0,
         }
     }
 
@@ -229,12 +255,7 @@ impl AssigneeIntervals {
             max_offset,
         );
         let mut planned = Vec::new();
-        let mut next_seq = self.next_seq;
-        let mut take_seq = || {
-            let seq = next_seq;
-            next_seq = next_seq.wrapping_add(1);
-            seq
-        };
+        let take_seq = || NEXT_FETCH_SEQ.fetch_add(1, Ordering::Relaxed);
         for &peer in assignees {
             let state = self.peers.entry(peer).or_insert(PeerState {
                 scan: PeerHint::Unknown { retry_at: now },
@@ -272,7 +293,6 @@ impl AssigneeIntervals {
                 });
             }
         }
-        self.next_seq = next_seq;
         planned
     }
 
@@ -294,19 +314,23 @@ impl AssigneeIntervals {
         };
         // Only the fetch this window is waiting for may fill it. A late answer
         // to a fetch that timed out, or one a newer fetch replaced, is dropped.
-        let started = match hint {
-            PeerHint::Fetching { seq, started, .. } if *seq == fetch.seq => *started,
+        let (started, prior) = match hint {
+            PeerHint::Fetching {
+                seq,
+                started,
+                prior,
+            } if *seq == fetch.seq => (*started, prior.take()),
             _ => return,
         };
         if fetch.kind == WindowKind::Scan
             && let Ok(page) = &result
             && let IntervalsCoverage::Window { end, .. } = page.coverage
         {
-            state.window = if end < fetch.end {
-                (state.window / 2).max(HINT_MIN_WINDOW_CHUNKS)
-            } else {
-                state.window.saturating_mul(2).min(HINT_WINDOW_CHUNKS)
-            };
+            if end < fetch.end {
+                state.window = (state.window / 2).max(HINT_MIN_WINDOW_CHUNKS);
+            } else if page.intervals.len() < HINT_GROW_BELOW_INTERVALS {
+                state.window = state.window.saturating_mul(2).min(HINT_WINDOW_CHUNKS);
+            }
         }
         // Date the answer from when its fetch began: a slow answer is that old.
         let known = result
@@ -316,10 +340,20 @@ impl AssigneeIntervals {
             WindowKind::Scan => &mut state.scan,
             WindowKind::Head => &mut state.head,
         };
+        // A failed or unusable answer keeps the previous one while it is not
+        // too old, and waits before asking again. Dropping it would make the
+        // scan probe, and dispatch ask, offsets the peer already answered for.
+        let retry_at = now + HINT_RETRY_AFTER_FAILURE;
         *hint = match known {
             Some(known) => PeerHint::Known(known),
-            None => PeerHint::Unknown {
-                retry_at: now + HINT_RETRY_AFTER_FAILURE,
+            None => match prior
+                .filter(|prior| now.saturating_duration_since(prior.fetched_at) < HINT_MAX_STALE)
+            {
+                Some(mut prior) => {
+                    prior.next_attempt = Some(retry_at);
+                    PeerHint::Known(prior)
+                }
+                None => PeerHint::Unknown { retry_at },
             },
         };
     }
@@ -445,6 +479,7 @@ impl AssigneeIntervals {
             extendable_low: false,
             extendable_high: false,
             full_list: false,
+            next_attempt: None,
         });
         match kind {
             WindowKind::Scan => state.scan = known,
@@ -566,6 +601,7 @@ fn into_known(
         extendable_low,
         extendable_high,
         full_list,
+        next_attempt: None,
     })
 }
 
@@ -804,15 +840,10 @@ mod tests {
         let assignees = [peer(1)];
 
         let first = hints.plan_fetches(&assignees, u32::MAX, 1_000, true, now);
+        assert_eq!(first.len(), 1);
         assert_eq!(
-            first,
-            vec![WindowFetch {
-                peer: peer(1),
-                start: 0,
-                end: 1_000,
-                kind: WindowKind::Scan,
-                seq: 0,
-            }],
+            (first[0].peer, first[0].start, first[0].end, first[0].kind),
+            (peer(1), 0, 1_000, WindowKind::Scan),
             "a reverse scan reads the window below the cursor"
         );
         assert!(
@@ -822,7 +853,7 @@ mod tests {
             "no second fetch while one is in flight"
         );
 
-        hints.on_fetched(first[0], 1_000, Ok(full(vec![(0, 9)])), now);
+        hints.on_fetched(first[0], 1_000, Ok(window(vec![(0, 9)], 1_000, true)), now);
         assert!(
             hints
                 .plan_fetches(&assignees, 1_000, 1_000, true, now)
@@ -904,13 +935,104 @@ mod tests {
         let mut hints = AssigneeIntervals::new(0);
         let fetch = hints.plan_fetches(&[peer(1)], 100, 100, true, now)[0];
         let answered = now + Duration::from_secs(200);
-        hints.on_fetched(fetch, 100, Ok(full(vec![(0, 9)])), answered);
+        hints.on_fetched(fetch, 100, Ok(window(vec![(0, 9)], 100, true)), answered);
         assert_eq!(
             hints
                 .plan_fetches(&[peer(1)], 100, 100, true, now + HINT_REFRESH)
                 .len(),
             1,
             "due one refresh after the fetch began, not after it was answered"
+        );
+    }
+
+    /// An older peer's full list is refreshed every few minutes, not every
+    /// minute.
+    #[test]
+    fn a_full_list_is_refreshed_less_often() {
+        let now = Instant::now();
+        let mut hints = AssigneeIntervals::new(0);
+        let fetch = hints.plan_fetches(&[peer(1)], 100, 100, true, now)[0];
+        hints.on_fetched(fetch, 100, Ok(full(vec![(0, 9)])), now);
+        assert!(
+            hints
+                .plan_fetches(&[peer(1)], 100, 100, true, now + HINT_REFRESH)
+                .is_empty()
+        );
+        assert_eq!(
+            hints
+                .plan_fetches(&[peer(1)], 100, 100, true, now + HINT_FULL_LIST_REFRESH)
+                .len(),
+            1
+        );
+    }
+
+    /// A failed refresh keeps the previous answer, waits before asking again,
+    /// and drops the answer once it is too old.
+    #[test]
+    fn a_failed_refresh_keeps_the_previous_answer_until_it_is_stale() {
+        let now = Instant::now();
+        let mut hints = AssigneeIntervals::new(0);
+        let fetch = hints.plan_fetches(&[peer(1)], 100, 100, true, now)[0];
+        hints.on_fetched(fetch, 100, Ok(window(vec![(0, 9)], 100, true)), now);
+
+        let refresh_at = now + HINT_REFRESH;
+        let refresh = hints.plan_fetches(&[peer(1)], 100, 100, true, refresh_at)[0];
+        hints.on_fetched(refresh, 100, Err(ChunkFetchError::Timeout), refresh_at);
+        assert_eq!(
+            hints.segments(&[peer(1)], 0, 20)[0],
+            (0, 9, Coverage::Claimed),
+            "the previous answer still applies"
+        );
+        assert!(
+            hints
+                .plan_fetches(&[peer(1)], 100, 100, true, refresh_at + HINT_MIN_REFETCH)
+                .is_empty(),
+            "a failed refresh backs off"
+        );
+
+        let stale_at = now + HINT_MAX_STALE;
+        let late = hints.plan_fetches(&[peer(1)], 100, 100, true, stale_at)[0];
+        hints.on_fetched(late, 100, Err(ChunkFetchError::Timeout), stale_at);
+        assert_eq!(
+            hints.segments(&[peer(1)], 0, 20),
+            vec![(0, 20, Coverage::Unknown)],
+            "an answer this old is dropped"
+        );
+    }
+
+    /// A window grows only after an answer well inside the page budget.
+    #[test]
+    fn a_window_grows_only_after_a_light_answer() {
+        let now = Instant::now();
+        let head = 10_000_000;
+        let mut hints = AssigneeIntervals::new(0);
+        let fetch = hints.plan_fetches(&[peer(1)], head, head, true, now)[0];
+        let mid = fetch.start + HINT_WINDOW_CHUNKS / 2;
+        hints.on_fetched(fetch, head, Ok(window(vec![], mid, true)), now);
+        let shrunk = HINT_WINDOW_CHUNKS / 2;
+
+        let soon = now + HINT_MIN_REFETCH;
+        let fetch = hints.plan_fetches(&[peer(1)], head, head, true, soon)[0];
+        assert_eq!(fetch.end - fetch.start + 1, shrunk);
+        let heavy: Vec<(u32, u32)> = (0..u32::try_from(HINT_GROW_BELOW_INTERVALS).unwrap())
+            .map(|i| (fetch.start + 2 * i, fetch.start + 2 * i))
+            .filter(|run| run.1 <= fetch.end)
+            .collect();
+        hints.on_fetched(fetch, head, Ok(window(heavy, fetch.end, true)), soon);
+
+        let later = soon + HINT_REFRESH;
+        let fetch = hints.plan_fetches(&[peer(1)], head, head, true, later)[0];
+        assert_eq!(
+            fetch.end - fetch.start + 1,
+            shrunk,
+            "a complete but dense answer does not grow the window"
+        );
+        hints.on_fetched(fetch, head, Ok(window(vec![], fetch.end, true)), later);
+        let fetch = hints.plan_fetches(&[peer(1)], head, head, true, later + HINT_REFRESH)[0];
+        assert_eq!(
+            fetch.end - fetch.start + 1,
+            HINT_WINDOW_CHUNKS,
+            "a light one does"
         );
     }
 
@@ -1024,7 +1146,7 @@ mod tests {
             hints.on_fetched(fetch, head, Ok(full(vec![(0, 9)])), now);
         }
 
-        let later = now + HINT_REFRESH;
+        let later = now + HINT_FULL_LIST_REFRESH;
         let refresh = hints.plan_fetches(&[peer(1)], 1_000_000, head, true, later);
         assert_eq!(
             refresh.iter().map(|fetch| fetch.kind).collect::<Vec<_>>(),

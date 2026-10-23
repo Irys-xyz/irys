@@ -354,9 +354,9 @@ impl InnerCacheTask {
         Ok(false)
     }
 
-    /// True when the root has at least one tx and every one is included at or
-    /// below `migration_height`. Placements exist only after migration.
-    /// Whether every tx of `data_root` is migrated, and if not, why.
+    /// Whether the root has at least one tx and every one is included at or
+    /// below `migration_height`, and if not, why. Placements exist only after
+    /// migration.
     fn root_migration<T: reth_db::transaction::DbTx>(
         tx: &T,
         data_root: DataRoot,

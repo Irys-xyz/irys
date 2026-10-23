@@ -215,14 +215,6 @@ fn write_error_label(error: &WriteDataChunkError) -> &'static str {
 /// Minimum gap between entropy-interval scans for an orchestrator without peers.
 const ENTROPY_PEER_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Entropy offsets no assignee holds that are queued per tick for the
-/// ingress-proof signers in the peer set. Signers are the only peers that can
-/// serve them, and only for a data root this node has indexed.
-const UNCLAIMED_ENQUEUE_PER_TICK: usize = 4;
-
-/// Chunks of the Entropy map the unclaimed pass visits per tick.
-const UNCLAIMED_SCAN_CHUNKS: usize = 4_096;
-
 /// Orchestrates efficient chunk downloading for a StorageModule's assigned data partition.
 ///
 /// Key responsibilities:
@@ -292,8 +284,13 @@ pub struct ChunkOrchestrator {
     /// claims, and dispatch does not ask an assignee for an offset it answered
     /// without.
     pub(crate) assignee_intervals: AssigneeIntervals,
-    /// Next offset the unclaimed pass looks at, in scan direction.
-    unclaimed_cursor: u32,
+    /// Slot the hints were fetched for. A new slot starts from no hints.
+    hint_slot: Option<usize>,
+    /// The last scan walked the whole partition and found no Entropy. Interval
+    /// hints are not fetched while this holds: there is nothing to skip.
+    hints_idle: bool,
+    /// Set by the scan when it finds an Entropy run this tick.
+    scan_found_entropy: bool,
 }
 impl ChunkOrchestrator {
     pub fn new(
@@ -371,6 +368,9 @@ impl ChunkOrchestrator {
         db: DatabaseProvider,
         ledger_id: u32,
     ) -> Self {
+        let hint_slot = storage_module
+            .partition_assignment()
+            .and_then(|pa| pa.slot_index);
         Self {
             storage_module,
             chunk_requests: Default::default(),
@@ -406,11 +406,9 @@ impl ChunkOrchestrator {
             fail_coverage_read: false,
             cache_lookups_this_tick: 0,
             assignee_intervals: AssigneeIntervals::new(HINT_FRONTIER_MARGIN),
-            unclaimed_cursor: if Self::ledger_prioritizes_write_frontier(ledger_id) {
-                u32::MAX
-            } else {
-                0
-            },
+            hint_slot,
+            hints_idle: false,
+            scan_found_entropy: false,
         }
     }
 
@@ -819,7 +817,7 @@ impl ChunkOrchestrator {
             return;
         };
 
-        let Some((max_chunk_offset, _)) = max_chunk_offset else {
+        let Some((max_chunk_offset, ledger_head)) = max_chunk_offset else {
             // Not requests needed
             tracing::trace!(
                 "No chunk requests needed for ledger:{:?} slot_index:{:?}",
@@ -830,7 +828,18 @@ impl ChunkOrchestrator {
         };
 
         let assignees = self.current_assignees();
-        self.plan_assignee_interval_fetches(&assignees, *max_chunk_offset, now);
+        if !self.hints_idle {
+            let hint_head = self.hint_head(*max_chunk_offset, ledger_head);
+            self.plan_assignee_interval_fetches(&assignees, *max_chunk_offset, hint_head, now);
+        }
+        // An ingress-proof signer in the peer set can serve offsets no assignee
+        // holds. Then the scan skips nothing: those offsets are queued, and
+        // dispatch sends them to the signer alone.
+        let has_signer = self
+            .current_peers
+            .iter()
+            .any(|peer| !assignees.contains(peer));
+        let scan_assignees: &[IrysAddress] = if has_signer { &[] } else { &assignees };
 
         let max_requests = self.config.data_sync.max_pending_chunk_requests as usize;
         let mut requests_to_add = max_requests.saturating_sub(hot_count);
@@ -867,6 +876,8 @@ impl ChunkOrchestrator {
         // eventual reconciliation without falsely marking a 404 synchronized.
         let max_probes = max_requests.saturating_mul(4).max(max_requests);
         let mut probes = 0_usize;
+        self.scan_found_entropy = false;
+        let mut scan_stopped = false;
         if self.prioritizes_write_frontier() {
             // High offsets near the write head are live data; low-offset Entropy
             // on a term ledger is often an abandoned upload. Walk down from the
@@ -883,10 +894,11 @@ impl ChunkOrchestrator {
                 }
                 let budget = max_probes.saturating_sub(probes);
                 if budget == 0 {
+                    scan_stopped = true;
                     break;
                 }
                 if self.consume_entropy_scan(
-                    &assignees,
+                    scan_assignees,
                     range_start,
                     range_end,
                     true,
@@ -897,6 +909,7 @@ impl ChunkOrchestrator {
                     max_probes,
                     &mut requests_to_add,
                 ) {
+                    scan_stopped = true;
                     break 'scan;
                 }
             }
@@ -912,10 +925,11 @@ impl ChunkOrchestrator {
                 }
                 let budget = max_probes.saturating_sub(probes);
                 if budget == 0 {
+                    scan_stopped = true;
                     break;
                 }
                 if self.consume_entropy_scan(
-                    &assignees,
+                    scan_assignees,
                     range_start,
                     range_end,
                     false,
@@ -926,11 +940,12 @@ impl ChunkOrchestrator {
                     max_probes,
                     &mut requests_to_add,
                 ) {
+                    scan_stopped = true;
                     break 'scan;
                 }
             }
         }
-        self.enqueue_unclaimed_slowly(&assignees, max_offset, now, &mut requests_to_add);
+        self.hints_idle = !scan_stopped && !self.scan_found_entropy;
     }
 
     /// Walk one query window. Returns true when this tick must stop.
@@ -960,6 +975,7 @@ impl ChunkOrchestrator {
             reverse,
             budget,
         );
+        self.scan_found_entropy |= !scan.runs.is_empty();
         let mut stop = false;
         'runs: for (start, end) in scan.runs {
             let mut segments = self.assignee_intervals.segments(assignees, start, end);
@@ -1036,90 +1052,20 @@ impl ChunkOrchestrator {
         *probes >= max_probes
     }
 
-    /// Queue a few Entropy offsets no assignee holds, so the ingress-proof
-    /// signers in the peer set are still asked for them. Dispatch does not send
-    /// these to an assignee that answered without them. Runs only while the
-    /// peer set has a peer that is not an assignee.
-    fn enqueue_unclaimed_slowly(
-        &mut self,
-        assignees: &[IrysAddress],
-        max_offset: u32,
-        now: Instant,
-        requests_to_add: &mut usize,
-    ) {
-        if *requests_to_add == 0
-            || !self
-                .current_peers
-                .iter()
-                .any(|peer| !assignees.contains(peer))
-        {
-            return;
-        }
-        let reverse = self.prioritizes_write_frontier();
-        let mut left = UNCLAIMED_ENQUEUE_PER_TICK.min(*requests_to_add);
-        let mut chunks = UNCLAIMED_SCAN_CHUNKS;
-        let cursor = self.unclaimed_cursor.min(max_offset);
-        let ranges = if reverse {
-            [(0, cursor), (cursor.saturating_add(1), max_offset)]
-        } else if cursor == 0 {
-            [(0, max_offset), (1, 0)]
+    /// The write head as interval hints see it. Hints stop
+    /// [`HINT_FRONTIER_MARGIN`] below it, because a peer's map lags chunks
+    /// that are still migrating. A partition the ledger has filled has no such
+    /// chunks, so its hints reach its last offset.
+    fn hint_head(&self, max_offset: u32, ledger_head: LedgerChunkOffset) -> u32 {
+        let head_inside = self
+            .storage_module
+            .get_storage_module_ledger_offsets()
+            .ok()
+            .is_none_or(|range| range.end() > ledger_head);
+        if head_inside {
+            max_offset
         } else {
-            [(cursor, max_offset), (0, cursor - 1)]
-        };
-        for (range_start, range_end) in ranges {
-            if range_start > range_end {
-                continue;
-            }
-            let scan = entropy_scan_runs(
-                &self.storage_module,
-                range_start,
-                range_end,
-                reverse,
-                chunks,
-            );
-            for (start, end) in scan.runs {
-                chunks = chunks.saturating_sub(
-                    usize::try_from(end - start)
-                        .unwrap_or(usize::MAX)
-                        .saturating_add(1),
-                );
-                let mut segments = self.assignee_intervals.segments(assignees, start, end);
-                if reverse {
-                    segments.reverse();
-                }
-                for (segment_start, segment_end, coverage) in segments {
-                    if coverage != Coverage::Unclaimed {
-                        let edge = if reverse { segment_start } else { segment_end };
-                        self.unclaimed_cursor = resume_scan_cursor(edge, max_offset, reverse);
-                        continue;
-                    }
-                    for step in 0..=segment_end - segment_start {
-                        let offset = if reverse {
-                            segment_end - step
-                        } else {
-                            segment_start + step
-                        };
-                        self.unclaimed_cursor = resume_scan_cursor(offset, max_offset, reverse);
-                        let offset = PartitionChunkOffset::from(offset);
-                        if self.is_entropy(offset) && self.enqueue_pending(offset, now, false) {
-                            left -= 1;
-                            *requests_to_add -= 1;
-                            if left == 0 {
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-            if scan.interval_budget_spent
-                && let Some(edge) = scan.visited_edge
-            {
-                self.unclaimed_cursor = resume_scan_cursor(edge, max_offset, reverse);
-                return;
-            }
-            if chunks == 0 {
-                return;
-            }
+            max_offset.saturating_add(HINT_FRONTIER_MARGIN)
         }
     }
 
@@ -1150,6 +1096,7 @@ impl ChunkOrchestrator {
         &mut self,
         assignees: &[IrysAddress],
         max_offset: u32,
+        hint_head: u32,
         now: Instant,
     ) {
         let Some(slot_index) = self
@@ -1159,6 +1106,12 @@ impl ChunkOrchestrator {
         else {
             return;
         };
+        // Answers describe one slot. After a move to another slot of the
+        // same ledger they say nothing about the new one.
+        if self.hint_slot != Some(slot_index) {
+            self.assignee_intervals = AssigneeIntervals::new(HINT_FRONTIER_MARGIN);
+            self.hint_slot = Some(slot_index);
+        }
         let reverse = self.prioritizes_write_frontier();
         let planned = self.assignee_intervals.plan_fetches(
             assignees,
@@ -1176,7 +1129,7 @@ impl ChunkOrchestrator {
             let Some(api) = api else {
                 self.assignee_intervals.on_fetched(
                     fetch,
-                    max_offset,
+                    hint_head,
                     Err(ChunkFetchError::NetworkError {
                         message: "peer left the peer set".to_string(),
                     }),
@@ -1201,7 +1154,7 @@ impl ChunkOrchestrator {
                     let _ = tx.send_traced(DataSyncServiceMessage::AssigneeIntervalsFetched {
                         storage_module_id,
                         fetch,
-                        head: max_offset,
+                        head: hint_head,
                         result,
                     });
                 }
@@ -1334,6 +1287,9 @@ impl ChunkOrchestrator {
             self.reload_pending_body_coverage();
         }
 
+        // Offsets this call may set aside because no peer they may use has a
+        // free slot. Bounded by the queue so a call cannot spin.
+        let mut set_aside_budget = self.ready_offsets.len();
         while let Some(chunk_offset) = self.ready_offsets.pop_front() {
             // An assignee that answered without this offset is not asked for it.
             let absent: Vec<IrysAddress> = self
@@ -1400,10 +1356,18 @@ impl ChunkOrchestrator {
             }
 
             let Some(peer_address) = self.find_best_peer(Some(&excluded)) else {
-                // Eligible peers exist but currently have no concurrency. Keep
-                // FIFO position for the next service tick without spinning.
+                if set_aside_budget == 0 || self.find_best_peer(None).is_none() {
+                    // No peer has a free slot. Keep this offset's place at the
+                    // head; the next released slot or tick takes it.
+                    self.ready_offsets.push_front(chunk_offset);
+                    return false;
+                }
+                // A peer has a free slot, but not one this offset may use, for
+                // example only a busy signer can serve it. Later offsets may use
+                // that slot. This one waits at the tail.
+                set_aside_budget -= 1;
                 self.ready_offsets.push_back(chunk_offset);
-                return false;
+                continue;
             };
 
             match self.dispatch_chunk_request(chunk_offset, peer_address) {
