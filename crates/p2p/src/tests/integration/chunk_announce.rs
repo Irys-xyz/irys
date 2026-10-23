@@ -13,7 +13,7 @@ use irys_types::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// A self-consistent one-chunk body of `chunk_size` bytes filled with `fill`.
@@ -175,24 +175,37 @@ async fn valid_push_is_held_and_counted() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn truncated_push_returns_ok_but_is_not_held() -> eyre::Result<()> {
+async fn truncated_push_is_rejected_and_not_recorded() -> eyre::Result<()> {
     let mut receiver = GossipServiceTestFixture::new();
     let chunk = valid_chunk(chunk_size(&receiver), 4);
     cache_root(&receiver, &chunk);
     let (handle, _) = receiver.run_service();
     wait_until_listening(receiver.gossip_addr()).await;
     let handler = receiver.data_handler().expect("handler");
+    let source = receiver.config.peer_id();
 
     let request = GossipRequestV2 {
-        peer_id: receiver.config.peer_id(),
+        peer_id: source,
         miner_address: receiver.mining_address,
         data: truncated(&chunk),
     };
-    handler.handle_chunk(request).await?;
+    let error = handler
+        .handle_chunk(request)
+        .await
+        .expect_err("a short body must not be accepted");
     assert!(
-        !handler.chunk_is_held(&chunk.chunk_path_hash()),
-        "an Ok without a stored row must not count as possession"
+        matches!(error, crate::GossipError::InvalidData(_)),
+        "got {error:?}"
     );
+    assert!(!handler.chunk_is_held(&chunk.chunk_path_hash()));
+    assert!(
+        !handler
+            .cache
+            .peers_that_have_seen(&irys_types::GossipCacheKey::Chunk(chunk.chunk_path_hash()))?
+            .contains(&source)
+    );
+    assert_eq!(handler.chunk_announce.stats().bodies_push, 0);
+    assert!(!handler.chunk_announce.is_arriving(&chunk.chunk_path_hash()));
     handle.stop().await?;
     Ok(())
 }
@@ -622,13 +635,18 @@ async fn truncated_push_does_not_stop_a_later_fetch() -> eyre::Result<()> {
     let source = add_fake_peer(&receiver, 0x64, spawn_fake(fake).await);
     let handler = receiver.data_handler().expect("handler");
 
-    handler
+    let error = handler
         .handle_chunk(GossipRequestV2 {
             peer_id: source.peer_id,
             miner_address: source.mining_address,
             data: truncated(&chunk),
         })
-        .await?;
+        .await
+        .expect_err("a short body must not be accepted");
+    assert!(
+        matches!(error, crate::GossipError::InvalidData(_)),
+        "got {error:?}"
+    );
     post_announce(
         receiver.gossip_addr(),
         &source,
@@ -653,9 +671,40 @@ async fn failed_push_during_a_fetch_resumes_from_saved_sources() -> eyre::Result
     let source = add_fake_peer(&receiver, 0x65, spawn_fake(fake).await);
     let handler = receiver.data_handler().expect("handler");
 
-    // A push is inside handle_chunk: the task must wait, not fetch or exit.
-    let state = Arc::clone(&handler.chunk_announce);
-    let push = state.begin_arriving(chunk.chunk_path_hash());
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let waiting = Arc::new(AtomicBool::new(false));
+    receiver.script_chunk_ingest(vec![ScriptedIngest::Release {
+        gate: Arc::clone(&gate),
+        waiting: Arc::clone(&waiting),
+        result: Err(irys_actors::ChunkIngressError::Critical(
+            irys_actors::CriticalChunkIngressError::DatabaseError,
+        )),
+    }]);
+    let pushed = {
+        let handler = Arc::clone(&handler);
+        let peer_id = source.peer_id;
+        let miner_address = source.mining_address;
+        // clone: the task owns the body; the announcement still uses `chunk`
+        let body = chunk.clone();
+        tokio::spawn(async move {
+            handler
+                .handle_chunk(GossipRequestV2 {
+                    peer_id,
+                    miner_address,
+                    data: body,
+                })
+                .await
+        })
+    };
+    poll_until(Duration::from_secs(5), "push is inside ingress", || {
+        waiting.load(Ordering::Acquire)
+    })
+    .await?;
+    assert!(
+        handler.chunk_announce.is_arriving(&chunk.chunk_path_hash()),
+        "the arriving guard must cover ingress"
+    );
+
     post_announce(
         receiver.gossip_addr(),
         &source,
@@ -674,8 +723,17 @@ async fn failed_push_during_a_fetch_resumes_from_saved_sources() -> eyre::Result
         "claim and sources kept"
     );
 
-    // The push fails without storing a row.
-    drop(push);
+    gate.notify_one();
+    let error = tokio::time::timeout(Duration::from_secs(2), pushed)
+        .await
+        .expect("push finished after ingress replied")
+        .expect("push task")
+        .expect_err("ingress refused the push");
+    assert!(
+        matches!(error, crate::GossipError::Internal(_)),
+        "got {error:?}"
+    );
+    assert!(!handler.chunk_announce.is_arriving(&chunk.chunk_path_hash()));
     poll_until(
         Duration::from_secs(10),
         "fetched after the failed push",
