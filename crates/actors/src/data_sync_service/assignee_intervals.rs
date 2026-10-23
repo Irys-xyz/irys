@@ -51,6 +51,10 @@ pub(crate) const HINT_MAX_PAGES: usize = 16;
 /// chunks that migrated after it answered.
 pub(crate) const HINT_FRONTIER_MARGIN: u32 = 16_384;
 
+/// Chunks the head window covers below the write head. Wide enough for the
+/// band near the head that every replica may lack while the scan is elsewhere.
+pub(crate) const HINT_HEAD_WINDOW_CHUNKS: u32 = 1 << 17;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Coverage {
     /// At least one assignee holds this span as Data.
@@ -97,20 +101,87 @@ enum PeerHint {
     Known(Known),
 }
 
+/// Which of a peer's two windows an answer fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowKind {
+    /// Follows the scan cursor.
+    Scan,
+    /// Pinned below the write head. The scan moves on, but the retry set and
+    /// a band both replicas lack stay near the head, and dispatch needs an
+    /// answer for them too.
+    Head,
+}
+
+impl PeerHint {
+    fn known(&self) -> Option<&Known> {
+        match self {
+            Self::Known(known)
+            | Self::Fetching {
+                prior: Some(known), ..
+            } => Some(known),
+            Self::Unknown { .. } | Self::Fetching { prior: None, .. } => None,
+        }
+    }
+
+    /// True when this window should be fetched now. A fetch that outlived
+    /// [`HINT_FETCH_TIMEOUT`] is dropped first, keeping its previous answer.
+    fn due(&mut self, now: Instant, near_edge: impl FnOnce(&Known) -> bool) -> bool {
+        match self {
+            Self::Unknown { retry_at } => *retry_at <= now,
+            Self::Fetching { started, prior } => {
+                if now.saturating_duration_since(*started) >= HINT_FETCH_TIMEOUT {
+                    *self = match prior.take() {
+                        Some(known) => Self::Known(known),
+                        None => Self::Unknown {
+                            retry_at: now + HINT_RETRY_AFTER_FAILURE,
+                        },
+                    };
+                }
+                false
+            }
+            Self::Known(known) => {
+                let age = now.saturating_duration_since(known.fetched_at);
+                age >= HINT_REFRESH || (age >= HINT_MIN_REFETCH && near_edge(known))
+            }
+        }
+    }
+
+    /// Mark this window in flight. Its previous answer keeps applying.
+    fn begin_fetch(&mut self, now: Instant) {
+        let prior = match std::mem::replace(self, Self::Unknown { retry_at: now }) {
+            Self::Known(known) => Some(known),
+            Self::Fetching { prior, .. } => prior,
+            Self::Unknown { .. } => None,
+        };
+        *self = Self::Fetching {
+            started: now,
+            prior,
+        };
+    }
+}
+
 #[derive(Debug)]
 struct PeerState {
-    hint: PeerHint,
-    /// Window size for this peer's next fetch. Halves when the pages run out
+    scan: PeerHint,
+    head: PeerHint,
+    /// Size of this peer's next scan window. Halves when the pages run out
     /// before the window does.
     window: u32,
 }
 
-/// One planned fetch: read `start..=end` from `peer`.
+impl PeerState {
+    fn knowns(&self) -> impl Iterator<Item = &Known> {
+        self.scan.known().into_iter().chain(self.head.known())
+    }
+}
+
+/// One planned fetch: read `start..=end` from `peer` into its `kind` window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowFetch {
     pub peer: IrysAddress,
     pub start: u32,
     pub end: u32,
+    pub kind: WindowKind,
 }
 
 #[derive(Debug)]
@@ -127,17 +198,7 @@ impl AssigneeIntervals {
         }
     }
 
-    fn known(&self, peer: &IrysAddress) -> Option<&Known> {
-        match &self.peers.get(peer)?.hint {
-            PeerHint::Known(known)
-            | PeerHint::Fetching {
-                prior: Some(known), ..
-            } => Some(known),
-            PeerHint::Unknown { .. } | PeerHint::Fetching { prior: None, .. } => None,
-        }
-    }
-
-    /// Windows to fetch this tick. Each returned peer is marked in flight.
+    /// Windows to fetch this tick. Each returned window is marked in flight.
     /// Peers that are no longer assignees are forgotten.
     pub(crate) fn plan_fetches(
         &mut self,
@@ -149,47 +210,41 @@ impl AssigneeIntervals {
     ) -> Vec<WindowFetch> {
         self.peers.retain(|peer, _| assignees.contains(peer));
         let cursor = cursor.min(max_offset);
+        let head_window = (
+            max_offset.saturating_sub(HINT_HEAD_WINDOW_CHUNKS - 1),
+            max_offset,
+        );
         let mut planned = Vec::new();
         for &peer in assignees {
             let state = self.peers.entry(peer).or_insert(PeerState {
-                hint: PeerHint::Unknown { retry_at: now },
+                scan: PeerHint::Unknown { retry_at: now },
+                head: PeerHint::Unknown { retry_at: now },
                 window: HINT_WINDOW_CHUNKS,
             });
-            let due = match &mut state.hint {
-                PeerHint::Unknown { retry_at } => *retry_at <= now,
-                PeerHint::Fetching { started, prior } => {
-                    if now.saturating_duration_since(*started) >= HINT_FETCH_TIMEOUT {
-                        state.hint = match prior.take() {
-                            Some(known) => PeerHint::Known(known),
-                            None => PeerHint::Unknown {
-                                retry_at: now + HINT_RETRY_AFTER_FAILURE,
-                            },
-                        };
-                    }
-                    false
-                }
-                PeerHint::Known(known) => {
-                    let age = now.saturating_duration_since(known.fetched_at);
-                    age >= HINT_REFRESH
-                        || (age >= HINT_MIN_REFETCH
-                            && near_window_edge(known, cursor, state.window, reverse))
-                }
-            };
-            if !due {
-                continue;
+            let window = state.window;
+            let (start, end) = window_at(cursor, max_offset, window, reverse);
+            if state.scan.due(now, |known| {
+                near_window_edge(known, cursor, window, reverse)
+            }) {
+                state.scan.begin_fetch(now);
+                planned.push(WindowFetch {
+                    peer,
+                    start,
+                    end,
+                    kind: WindowKind::Scan,
+                });
             }
-            let (start, end) = window_at(cursor, max_offset, state.window, reverse);
-            let prior =
-                match std::mem::replace(&mut state.hint, PeerHint::Unknown { retry_at: now }) {
-                    PeerHint::Known(known) => Some(known),
-                    PeerHint::Fetching { prior, .. } => prior,
-                    PeerHint::Unknown { .. } => None,
-                };
-            state.hint = PeerHint::Fetching {
-                started: now,
-                prior,
-            };
-            planned.push(WindowFetch { peer, start, end });
+            // While the scan window reaches the head it answers for the head
+            // band too.
+            if end < head_window.1 && state.head.due(now, |_| false) {
+                state.head.begin_fetch(now);
+                planned.push(WindowFetch {
+                    peer,
+                    start: head_window.0,
+                    end: head_window.1,
+                    kind: WindowKind::Head,
+                });
+            }
         }
         planned
     }
@@ -206,11 +261,16 @@ impl AssigneeIntervals {
         let Some(state) = self.peers.get_mut(&fetch.peer) else {
             return;
         };
-        if !matches!(state.hint, PeerHint::Fetching { .. }) {
-            // A late answer after a timeout already settled this peer.
+        let hint = match fetch.kind {
+            WindowKind::Scan => &mut state.scan,
+            WindowKind::Head => &mut state.head,
+        };
+        if !matches!(hint, PeerHint::Fetching { .. }) {
+            // A late answer after a timeout already settled this window.
             return;
         }
-        if let Ok(page) = &result
+        if fetch.kind == WindowKind::Scan
+            && let Ok(page) = &result
             && let IntervalsCoverage::Window { end, .. } = page.coverage
         {
             state.window = if end < fetch.end {
@@ -222,7 +282,11 @@ impl AssigneeIntervals {
         let known = result
             .ok()
             .and_then(|page| into_known(page, fetch.start, head, self.frontier_margin, now));
-        state.hint = match known {
+        let hint = match fetch.kind {
+            WindowKind::Scan => &mut state.scan,
+            WindowKind::Head => &mut state.head,
+        };
+        *hint = match known {
             Some(known) => PeerHint::Known(known),
             None => PeerHint::Unknown {
                 retry_at: now + HINT_RETRY_AFTER_FAILURE,
@@ -230,8 +294,12 @@ impl AssigneeIntervals {
         };
     }
 
-    /// Split `start..=end` by what `assignees` claim, ascending. Spans no
-    /// answer covers are [`Coverage::Unknown`].
+    /// Split `start..=end` by what `assignees` claim, ascending. Spans some
+    /// assignee has no answer for are [`Coverage::Unknown`].
+    ///
+    /// The range is cut at every window edge, so each piece is either inside
+    /// or outside each window. A piece is answered when every assignee has a
+    /// window over all of it.
     pub(crate) fn segments(
         &self,
         assignees: &[IrysAddress],
@@ -242,71 +310,77 @@ impl AssigneeIntervals {
         if assignees.is_empty() || start > end {
             return unknown;
         }
-        let mut knowns = Vec::with_capacity(assignees.len());
-        let (mut low, mut high) = (start, end);
+        let mut per_peer: Vec<Vec<&Known>> = Vec::with_capacity(assignees.len());
+        let mut cuts = vec![start];
         for peer in assignees {
-            let Some(known) = self.known(peer) else {
+            let knowns: Vec<&Known> = self
+                .peers
+                .get(peer)
+                .map(|state| state.knowns().collect())
+                .unwrap_or_default();
+            if knowns.is_empty() {
                 return unknown;
-            };
-            low = low.max(known.covers.0);
-            high = high.min(known.covers.1);
-            knowns.push(known);
-        }
-        if low > high {
-            return unknown;
-        }
-
-        let mut claimed: Vec<(u32, u32)> = Vec::new();
-        for known in knowns {
-            let first = known.data.partition_point(|run| run.1 < low);
-            for &(run_start, run_end) in &known.data[first..] {
-                if run_start > high {
-                    break;
+            }
+            for known in &knowns {
+                for edge in [Some(known.covers.0), known.covers.1.checked_add(1)]
+                    .into_iter()
+                    .flatten()
+                {
+                    if edge > start && edge <= end {
+                        cuts.push(edge);
+                    }
                 }
-                claimed.push((run_start.max(low), run_end.min(high)));
             }
+            per_peer.push(knowns);
         }
-        claimed.sort_unstable();
+        cuts.sort_unstable();
+        cuts.dedup();
 
-        let mut segments = Vec::new();
-        if start < low {
-            segments.push((start, low - 1, Coverage::Unknown));
-        }
-        // Next offset not yet assigned to a segment. `None` once past `high`.
-        let mut next = Some(low);
-        for (run_start, run_end) in claimed {
-            let Some(position) = next else {
-                break;
+        let mut segments: Vec<(u32, u32, Coverage)> = Vec::new();
+        for (index, &low) in cuts.iter().enumerate() {
+            let high = cuts.get(index + 1).map_or(end, |next| next - 1);
+            let mut covering: Vec<&Known> = Vec::new();
+            let answered = per_peer.iter().all(|knowns| {
+                let before = covering.len();
+                covering.extend(
+                    knowns
+                        .iter()
+                        .copied()
+                        .filter(|known| known.covers.0 <= low && high <= known.covers.1),
+                );
+                covering.len() > before
+            });
+            let pieces = if answered {
+                split_by_claims(&covering, low, high)
+            } else {
+                vec![(low, high, Coverage::Unknown)]
             };
-            if run_end < position {
-                continue;
-            }
-            if run_start > position {
-                segments.push((position, run_start - 1, Coverage::Unclaimed));
-            }
-            let claimed_from = run_start.max(position);
-            match segments.last_mut() {
-                Some(last) if last.2 == Coverage::Claimed && last.1 + 1 == claimed_from => {
-                    last.1 = run_end;
+            for piece in pieces {
+                match segments.last_mut() {
+                    Some(last) if last.2 == piece.2 && last.1 + 1 == piece.0 => last.1 = piece.1,
+                    _ => segments.push(piece),
                 }
-                _ => segments.push((claimed_from, run_end, Coverage::Claimed)),
             }
-            next = run_end.checked_add(1).filter(|offset| *offset <= high);
-        }
-        if let Some(position) = next {
-            segments.push((position, high, Coverage::Unclaimed));
-        }
-        if high < end {
-            segments.push((high + 1, end, Coverage::Unknown));
         }
         segments
     }
 
-    /// True when `peer` answered for `offset` and does not hold it.
+    /// True when a window of `peer` answers for `offset` and none of them
+    /// holds it.
     pub(crate) fn excludes(&self, peer: &IrysAddress, offset: u32) -> bool {
-        self.known(peer).is_some_and(|known| {
-            known.covers.0 <= offset && offset <= known.covers.1 && !known.holds(offset)
-        })
+        let Some(state) = self.peers.get(peer) else {
+            return false;
+        };
+        let mut answered = false;
+        for known in state.knowns() {
+            if known.covers.0 <= offset && offset <= known.covers.1 {
+                if known.holds(offset) {
+                    return false;
+                }
+                answered = true;
+            }
+        }
+        answered
     }
 
     #[cfg(test)]
@@ -317,20 +391,78 @@ impl AssigneeIntervals {
         data: Vec<(u32, u32)>,
         now: Instant,
     ) {
-        self.peers.insert(
-            peer,
-            PeerState {
-                hint: PeerHint::Known(Known {
-                    covers,
-                    data,
-                    fetched_at: now,
-                    extendable_low: false,
-                    extendable_high: false,
-                }),
-                window: HINT_WINDOW_CHUNKS,
-            },
-        );
+        self.insert_known_window(peer, WindowKind::Scan, covers, data, now);
     }
+
+    #[cfg(test)]
+    pub(crate) fn insert_known_window(
+        &mut self,
+        peer: IrysAddress,
+        kind: WindowKind,
+        covers: (u32, u32),
+        data: Vec<(u32, u32)>,
+        now: Instant,
+    ) {
+        let state = self.peers.entry(peer).or_insert(PeerState {
+            scan: PeerHint::Unknown { retry_at: now },
+            head: PeerHint::Unknown { retry_at: now },
+            window: HINT_WINDOW_CHUNKS,
+        });
+        let known = PeerHint::Known(Known {
+            covers,
+            data,
+            fetched_at: now,
+            extendable_low: false,
+            extendable_high: false,
+        });
+        match kind {
+            WindowKind::Scan => state.scan = known,
+            WindowKind::Head => state.head = known,
+        }
+    }
+}
+
+/// Split `low..=high` into Claimed and Unclaimed spans. Every window in
+/// `knowns` covers the whole range; a chunk any of them holds is claimed.
+fn split_by_claims(knowns: &[&Known], low: u32, high: u32) -> Vec<(u32, u32, Coverage)> {
+    let mut claimed: Vec<(u32, u32)> = Vec::new();
+    for known in knowns {
+        let first = known.data.partition_point(|run| run.1 < low);
+        for &(run_start, run_end) in &known.data[first..] {
+            if run_start > high {
+                break;
+            }
+            claimed.push((run_start.max(low), run_end.min(high)));
+        }
+    }
+    claimed.sort_unstable();
+
+    let mut segments = Vec::new();
+    // Next offset not yet assigned to a segment. `None` once past `high`.
+    let mut next = Some(low);
+    for (run_start, run_end) in claimed {
+        let Some(position) = next else {
+            break;
+        };
+        if run_end < position {
+            continue;
+        }
+        if run_start > position {
+            segments.push((position, run_start - 1, Coverage::Unclaimed));
+        }
+        let claimed_from = run_start.max(position);
+        match segments.last_mut() {
+            Some(last) if last.2 == Coverage::Claimed && last.1 + 1 == claimed_from => {
+                last.1 = run_end;
+            }
+            _ => segments.push((claimed_from, run_end, Coverage::Claimed)),
+        }
+        next = run_end.checked_add(1).filter(|offset| *offset <= high);
+    }
+    if let Some(position) = next {
+        segments.push((position, high, Coverage::Unclaimed));
+    }
+    segments
 }
 
 /// The span to fetch for a scan at `cursor`: below it on a reverse scan,
@@ -644,7 +776,8 @@ mod tests {
             vec![WindowFetch {
                 peer: peer(1),
                 start: 0,
-                end: 1_000
+                end: 1_000,
+                kind: WindowKind::Scan,
             }],
             "a reverse scan reads the window below the cursor"
         );
@@ -755,6 +888,80 @@ mod tests {
                 "the cursor is in the frontier band, not past an extendable edge"
             );
         }
+    }
+
+    /// Once the scan is far below the head, a second window is fetched at
+    /// the head. While the scan window reaches the head, it is not.
+    #[test]
+    fn a_head_window_is_fetched_only_when_the_scan_has_left_the_head() {
+        let now = Instant::now();
+        let head = 10_000_000;
+        let mut hints = AssigneeIntervals::new(0);
+        let at_head = hints.plan_fetches(&[peer(1)], head, head, true, now);
+        assert_eq!(at_head.len(), 1, "the scan window covers the head");
+        assert_eq!(at_head[0].kind, WindowKind::Scan);
+
+        let mut hints = AssigneeIntervals::new(0);
+        let deep = hints.plan_fetches(&[peer(1)], 1_000_000, head, true, now);
+        assert_eq!(deep.len(), 2);
+        let head_fetch = deep
+            .iter()
+            .find(|fetch| fetch.kind == WindowKind::Head)
+            .expect("a head window");
+        assert_eq!(head_fetch.end, head);
+        assert_eq!(
+            head_fetch.end - head_fetch.start + 1,
+            HINT_HEAD_WINDOW_CHUNKS
+        );
+        hints.on_fetched(*head_fetch, head, Ok(window(vec![], head, true)), now);
+        assert!(
+            hints
+                .plan_fetches(&[peer(1)], 1_000_000, head, true, now)
+                .is_empty(),
+            "neither window is due again yet"
+        );
+    }
+
+    /// The head window answers for the band the scan window has moved away
+    /// from: dispatch excludes it there and the scan skips it.
+    #[test]
+    fn the_head_window_answers_where_the_scan_window_does_not() {
+        let now = Instant::now();
+        let mut hints = AssigneeIntervals::new(0);
+        hints.insert_known_window(peer(1), WindowKind::Scan, (0, 99), vec![(0, 9)], now);
+        hints.insert_known_window(peer(1), WindowKind::Head, (900, 999), vec![(950, 959)], now);
+        assert!(hints.excludes(&peer(1), 905), "answered by the head window");
+        assert!(!hints.excludes(&peer(1), 955), "the head window holds it");
+        assert!(!hints.excludes(&peer(1), 500), "no window answers here");
+        assert_eq!(
+            hints.segments(&[peer(1)], 0, 999),
+            vec![
+                (0, 9, Coverage::Claimed),
+                (10, 99, Coverage::Unclaimed),
+                (100, 899, Coverage::Unknown),
+                (900, 949, Coverage::Unclaimed),
+                (950, 959, Coverage::Claimed),
+                (960, 999, Coverage::Unclaimed),
+            ]
+        );
+    }
+
+    /// Where a peer's windows overlap, a chunk either one holds is claimed.
+    #[test]
+    fn overlapping_windows_of_one_peer_favor_a_claim() {
+        let now = Instant::now();
+        let mut hints = AssigneeIntervals::new(0);
+        hints.insert_known_window(peer(1), WindowKind::Scan, (0, 99), vec![], now);
+        hints.insert_known_window(peer(1), WindowKind::Head, (50, 149), vec![(60, 69)], now);
+        assert!(!hints.excludes(&peer(1), 65));
+        assert_eq!(
+            hints.segments(&[peer(1)], 0, 149),
+            vec![
+                (0, 59, Coverage::Unclaimed),
+                (60, 69, Coverage::Claimed),
+                (70, 149, Coverage::Unclaimed),
+            ]
+        );
     }
 
     #[test]

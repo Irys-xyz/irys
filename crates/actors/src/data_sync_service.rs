@@ -438,6 +438,9 @@ pub struct DataSyncServiceInner {
     delivery: DeliveryPipeline,
     /// See [`MAX_DELIVERED_BODIES`].
     max_delivered_bodies: usize,
+    /// Dispatch into a slot as soon as its request finishes. Off only in
+    /// tests that count slots across a completion.
+    refill_on_release: bool,
 }
 
 /// Re-arm `Blocked(MissingDataRootIndex)` when the local index looks ready.
@@ -734,6 +737,7 @@ impl DataSyncServiceInner {
             publish_dispatch_cursor: 0,
             delivery,
             max_delivered_bodies: MAX_DELIVERED_BODIES,
+            refill_on_release: true,
         };
         data_sync.synchronize_peers_and_orchestrators();
         data_sync
@@ -752,18 +756,16 @@ impl DataSyncServiceInner {
                 chunk_offset,
                 peer_address: peer_addr,
                 chunk,
-            } => {
-                if let Err(e) =
-                    self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)
-                {
-                    error!(
-                        storage_module.id = storage_module_id,
-                        chunk.offset = %chunk_offset,
-                        peer.address = %peer_addr,
-                        "Failed to handle chunk completion: {e:?}"
-                    );
-                }
-            }
+            } => match self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk) {
+                Ok(true) => self.dispatch_after_release(),
+                Ok(false) => {}
+                Err(e) => error!(
+                    storage_module.id = storage_module_id,
+                    chunk.offset = %chunk_offset,
+                    peer.address = %peer_addr,
+                    "Failed to handle chunk completion: {e:?}"
+                ),
+            },
             DataSyncServiceMessage::ChunkIngressed {
                 storage_module_id,
                 chunk_offset,
@@ -793,13 +795,14 @@ impl DataSyncServiceInner {
                 failure_kind,
             } => {
                 metrics::record_data_sync_chunk_failure();
-                if let Err(e) =
-                    self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr, failure_kind)
+                // A failure that matched a live request released its slot.
+                match self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr, failure_kind)
                 {
-                    error!(
+                    Ok(()) => self.dispatch_after_release(),
+                    Err(e) => error!(
                         "Failed to handle chunk failure for storage_module {} chunk_offset {} from peer {}: {e:?}",
                         storage_module_id, chunk_offset, peer_addr
-                    );
+                    ),
                 }
             }
             DataSyncServiceMessage::GetActivePeersList(tx) => self.handle_get_active_peers_list(tx),
@@ -829,6 +832,43 @@ impl DataSyncServiceInner {
             }
         }
         Ok(())
+    }
+
+    /// A finished request released one peer slot. Use it now: waiting for
+    /// the next tick idles that slot for up to 250 ms, even after a 1 ms 404.
+    /// One dispatch, in tick order (term ledgers, then Publish, each group
+    /// starting at its tick cursor) and under the same held-body limit. The
+    /// tick still refills each queue and advances the cursors.
+    fn dispatch_after_release(&mut self) {
+        if !self.refill_on_release
+            || self.delivery.held_bodies.load(Ordering::SeqCst) >= self.max_delivered_bodies
+        {
+            return;
+        }
+        let mut ids: Vec<_> = self.chunk_orchestrators.keys().copied().collect();
+        ids.sort_unstable();
+        let (mut term, mut publish): (Vec<_>, Vec<_>) = ids.into_iter().partition(|id| {
+            self.chunk_orchestrators
+                .get(id)
+                .is_some_and(ChunkOrchestrator::prioritizes_write_frontier)
+        });
+        if !term.is_empty() {
+            let start = self.term_dispatch_cursor % term.len();
+            term.rotate_left(start);
+        }
+        if !publish.is_empty() {
+            let start = self.publish_dispatch_cursor % publish.len();
+            publish.rotate_left(start);
+        }
+        for id in term.into_iter().chain(publish) {
+            if self
+                .chunk_orchestrators
+                .get_mut(&id)
+                .is_some_and(ChunkOrchestrator::dispatch_next)
+            {
+                return;
+            }
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -1097,7 +1137,7 @@ impl DataSyncServiceInner {
         chunk_offset: PartitionChunkOffset,
         peer_addr: IrysAddress,
         chunk: ChunkFormat,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<bool> {
         let requested_at = match self.chunk_orchestrators.get_mut(&storage_module_id) {
             // Releases the peer slot. Validation and ingress can still reject
             // the body; that path counts the failure without a second release.
@@ -1155,7 +1195,8 @@ impl DataSyncServiceInner {
             }
             .instrument(tracing::Span::current()),
         );
-        Ok(())
+        // A tracked body released its peer slot in `on_chunk_fetched`.
+        Ok(requested_at.is_some())
     }
 
     /// Direct for Publish and the term ledgers when this offset has a local
@@ -4738,6 +4779,8 @@ mod assignment_follow_tests {
         use crate::chunk_ingress_service::{ChunkIngressError, CriticalChunkIngressError};
 
         let mut t = pipelined();
+        // This test counts the slots each body releases.
+        t.inner.refill_on_release = false;
         assert_eq!(t.slots(), (0, 20, 0, 0), "a fresh peer may fill 20 slots");
         t.inner.tick().expect("first tick");
         assert_eq!(t.slots().0, 20);
@@ -4873,6 +4916,8 @@ mod assignment_follow_tests {
     #[tokio::test]
     async fn ingress_permits_and_the_held_body_limit_bound_the_pipeline() {
         let mut t = pipelined();
+        // This test counts the slots that stay free across the held-body limit.
+        t.inner.refill_on_release = false;
         t.inner.delivery.ingress_permits = Arc::new(tokio::sync::Semaphore::new(2));
         t.inner.max_delivered_bodies = 3;
         t.inner.tick().expect("tick");
@@ -4920,8 +4965,49 @@ mod assignment_follow_tests {
         assert_eq!(t.slots().3, 0);
     }
 
+    /// A finished request's slot is used at once, not at the next tick.
+    #[tokio::test]
+    async fn a_released_slot_is_refilled_without_waiting_for_the_tick() {
+        let mut t = pipelined();
+        t.inner.tick().expect("tick");
+        let first = t.requested();
+        assert_eq!(first.len(), 20, "the tick fills the allowance");
+
+        // A 404 frees its slot. The next offset goes out at once.
+        t.inner
+            .handle_message(DataSyncServiceMessage::ChunkFailed {
+                storage_module_id: t.sm_id,
+                chunk_offset: first[0],
+                peer_addr: t.assignee,
+                failure_kind: super::chunk_fetcher::ChunkFetchFailureKind::NotFound,
+            })
+            .await
+            .expect("failure");
+        let after_404 = t.requested();
+        assert_eq!(
+            after_404.len(),
+            20,
+            "the freed slot was used before any tick"
+        );
+        assert!(!after_404.contains(&first[0]));
+        assert_eq!(t.slots().0, 20);
+
+        // A delivered body frees its slot on arrival, before ingress answers.
+        let body = t.chunks[1].clone();
+        t.complete(first[1], body).await;
+        let after_body = t.requested();
+        assert_eq!(
+            after_body.len(),
+            21,
+            "the delivered offset waits on ingress, and its slot already went out again"
+        );
+        assert!(t.state(first[1]).1, "the delivered body is in ingress");
+        assert_eq!(t.slots().0, 20, "the peer is back at its allowance");
+    }
+
     /// A body no request is waiting for still reaches ingress, which writes it
-    /// to any module with a writeable offset. No result comes back for it.
+    /// to any module with a writeable offset. No result comes back for it, and
+    /// it frees no slot, so nothing new is dispatched.
     #[tokio::test]
     async fn an_untracked_body_still_reaches_ingress() {
         let mut t = pipelined();
