@@ -50,11 +50,34 @@ pub fn prune_stale_executables(
         .collect();
 
     for dir in dirs {
-        // Fingerprints sit beside this `deps/` dir, under the cargo target directory.
-        let fingerprint_target = dir
+        // `debug` or `release` may be a symlink while `deps` is a real directory.
+        // Refuse that `deps` unless it resolves inside the canonical target, so
+        // the deletes below cannot unlink files in the tree the profile points at.
+        let Some(target_dir) = dir
             .parent()
             .and_then(|profile| profile.parent())
-            .and_then(|target| target.canonicalize().ok());
+            .and_then(|target| target.canonicalize().ok())
+        else {
+            tracing::debug!(
+                deps = %dir.display(),
+                "executable prune skipped: target dir does not resolve"
+            );
+            continue;
+        };
+        match dir.canonicalize() {
+            Ok(real) if real.starts_with(&target_dir) => {}
+            Ok(real) => {
+                tracing::debug!(
+                    deps = %real.display(),
+                    "skip deps: resolves outside the target dir"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::debug!(deps = %dir.display(), "skip deps: {e}");
+                continue;
+            }
+        }
         let current: HashSet<&Path> = built
             .iter()
             .filter(|exe| exe.parent() == Some(dir))
@@ -104,15 +127,9 @@ pub fn prune_stale_executables(
                 continue;
             }
             tracing::debug!(exe = %path.display(), root = %key.root.display(), ?reason, "removing");
-            remove_with_siblings(dir, &path, &mut report)?;
+            remove_with_siblings(dir, &path, &target_dir, &mut report)?;
             if let Some(id) = path.file_name().and_then(|n| n.to_str()) {
-                match fingerprint_target.as_deref() {
-                    Some(target_dir) => remove_fingerprint(dir, id, target_dir),
-                    None => tracing::debug!(
-                        deps = %dir.display(),
-                        "fingerprint delete skipped: target dir does not resolve"
-                    ),
-                }
+                remove_fingerprint(dir, id, &target_dir);
             }
         }
     }
@@ -155,7 +172,12 @@ fn crate_root(dep_info: &str) -> Option<&Path> {
     (!first.ends_with('\\')).then(|| Path::new(first))
 }
 
-fn remove_with_siblings(dir: &Path, exe: &Path, report: &mut PruneReport) -> io::Result<()> {
+fn remove_with_siblings(
+    dir: &Path,
+    exe: &Path,
+    target_dir: &Path,
+    report: &mut PruneReport,
+) -> io::Result<()> {
     let name = exe
         .file_name()
         .and_then(|n| n.to_str())
@@ -174,6 +196,11 @@ fn remove_with_siblings(dir: &Path, exe: &Path, report: &mut PruneReport) -> io:
     }
     let mut exe_removed = false;
     for path in doomed {
+        // `dir` may be reached through a profile symlink. Unlink only entries
+        // whose parent resolves inside the canonical target.
+        if !delete_inside(target_dir, &path) {
+            continue;
+        }
         // A file a concurrent prune already removed is skipped, not an error.
         if let Some(len) = remove_path(&path)? {
             exe_removed |= path == exe;
@@ -980,7 +1007,8 @@ mod tests {
         fs::remove_file(&exe).unwrap();
 
         let mut report = PruneReport::default();
-        remove_with_siblings(&f.deps(), &exe, &mut report).unwrap();
+        let target = f.root.path().join("target").canonicalize().unwrap();
+        remove_with_siblings(&f.deps(), &exe, &target, &mut report).unwrap();
 
         assert_eq!(report.removed_executables, 0);
         assert_eq!(report.removed_files.len(), 2);
@@ -1066,6 +1094,35 @@ mod tests {
         let uplifted = f.root.path().join("target/debug/it");
 
         assert_eq!(f.prune(&[uplifted]), PruneReport::default());
+    }
+
+    #[test]
+    fn does_not_delete_executables_through_a_symlinked_profile() {
+        let f = Fixture::new();
+        f.source(CDN);
+        // `debug` points at a profile outside the target. `deps` there is a real
+        // directory, which is the shape cargo reports through the link.
+        let outside = TempDirBuilder::new().build();
+        let outside_debug = outside.path().join("debug");
+        fs::rename(f.root.path().join("target/debug"), &outside_debug).unwrap();
+        std::os::unix::fs::symlink(&outside_debug, f.root.path().join("target/debug")).unwrap();
+        let current = f.exe("it-00000000000000aa", CDN);
+        let stale = f.exe("it-00000000000000bb", CDN);
+
+        let report = f.prune(std::slice::from_ref(&current));
+
+        assert!(
+            stale.exists(),
+            "stale executable outside the target was deleted"
+        );
+        assert!(outside_debug.join("deps/it-00000000000000bb.d").exists());
+        assert!(
+            outside_debug
+                .join("deps/it-00000000000000bb.cgu.0.rcgu.dwo")
+                .exists()
+        );
+        assert!(current.exists());
+        assert_eq!(report, PruneReport::default());
     }
 
     #[test]
