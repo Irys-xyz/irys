@@ -4,7 +4,7 @@
 
 This page lists code that exists because some nodes still run the MDBX per-submodule index (`db/`, schema v2 marker `irys-submodule-index 2`). RocksDB v1 lives in `rocks/` (`irys-submodule-index rocksdb 1`). The consensus database stays MDBX. Do not use these markers on consensus open, the cache database, the block index, or reth.
 
-Search for the marker prefix in the HTML comment at the top of this page. Each hit in a code comment, a TOML comment, or an HTML comment is one removal site. Line numbers match the commit that added this page.
+Search for the marker prefix in the HTML comment at the top of this page. Each hit in a code comment, a TOML comment, or an HTML comment is one removal site. Line numbers locate each marker in the current source. The marker text identifies the site after a line moves.
 
 ## Preconditions
 
@@ -270,12 +270,12 @@ Guards outside those plays:
 
 #### `crates/domain/src/models/chunk_provider.rs`
 
-- L640: this test opens only MDBX. Retarget it at RocksDB.
-- L665: this test opens only MDBX. Retarget it at RocksDB.
-- L701: delete this MDBX case and keep the RocksDB case.
-- L746: delete this MDBX case and keep the RocksDB case.
-- L790: delete this MDBX case and keep the RocksDB case.
-- L834: this test opens only MDBX. Retarget it at RocksDB.
+- L711: this test opens only MDBX. Retarget it at RocksDB.
+- L736: this test opens only MDBX. Retarget it at RocksDB.
+- L772: delete this MDBX case and keep the RocksDB case.
+- L817: delete this MDBX case and keep the RocksDB case.
+- L861: delete this MDBX case and keep the RocksDB case.
+- L905: this test opens only MDBX. Retarget it at RocksDB.
 
 #### `crates/domain/src/models/storage_module.rs`
 
@@ -348,9 +348,9 @@ Guards outside those plays:
 
 #### `crates/actors/src/chunk_migration_service.rs`
 
-- L1071: this helper opens only MDBX. Retarget it at RocksDB, or delete the tests that call fixture.
-- L1695: retarget this test at RocksDB. The scan bound is not MDBX-specific.
-- L1812: retarget this test at RocksDB. The scan bound is not MDBX-specific.
+- L1123: this helper opens only MDBX. Retarget it at RocksDB, or delete the tests that call fixture.
+- L1855: retarget this test at RocksDB. The scan bound is not MDBX-specific.
+- L1972: retarget this test at RocksDB. The scan bound is not MDBX-specific.
 
 #### `crates/actors/src/partition_mining_service.rs`
 
