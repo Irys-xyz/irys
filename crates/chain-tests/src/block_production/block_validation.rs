@@ -491,13 +491,10 @@ async fn test_prevalidation_rejects_tx_root_mismatch() -> Result<()> {
 /// covers the `len != txs * N` arithmetic in isolation; this proves the guard
 /// actually runs inside `prevalidate_block`.
 ///
-/// Note the orphan shape (proofs present, zero publish txs) does NOT isolate this
-/// guard — `validate_ingress_proof_signers` rejects that earlier with the same
-/// error. So the fixture uses a NON-empty Publish ledger: one structurally-valid
-/// publish tx, `required_proof_count = 0` (so the earlier per-tx signer check
-/// slices zero proofs and passes without needing valid signatures), and a proofs
-/// list of length 2. With testing `N = 1`, `proofs.len() = 2 != 1 * N = 1`, a
-/// mismatch that only this guard catches — every earlier check passes.
+/// The guard runs right after the Publish cap, before any check that slices or
+/// recovers proofs. The fixture uses one structurally-valid publish tx and a
+/// proofs list of length 2. With testing `N = 1`, `proofs.len() = 2 != 1 * N = 1`,
+/// so the guard rejects the block before `validate_ingress_proof_signers` runs.
 #[tokio::test]
 async fn test_prevalidation_rejects_mismatched_ingress_proof_count() -> Result<()> {
     use irys_types::{
@@ -532,8 +529,8 @@ async fn test_prevalidation_rejects_mismatched_ingress_proof_count() -> Result<(
         IngressProof::default(),
         IngressProof::default(),
     ]));
-    // rpc = 0 → the earlier `validate_ingress_proof_signers` slices zero proofs
-    // per tx and passes; the aggregate guard is what must catch the length.
+    // The length mismatch fires before the guard compares `required_proof_count`
+    // with N, so this value does not change the expected error.
     publish_ledger.required_proof_count = Some(0);
 
     ctx.config.signer().sign_block_header(&mut header)?;
