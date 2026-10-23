@@ -4978,6 +4978,7 @@ dependencies = [
  "nodit",
  "openssl",
  "opentelemetry",
+ "opentelemetry_sdk",
  "priority-queue",
  "proptest",
  "rand 0.8.5",
