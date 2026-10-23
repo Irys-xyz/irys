@@ -1194,7 +1194,10 @@ fn validate_existing_packing_params(
     config: &Config,
     assignment: Option<PartitionAssignment>,
 ) -> eyre::Result<Option<PackingParams>> {
-    if !params_path.exists() {
+    if !params_path
+        .try_exists()
+        .wrap_err_with(|| format!("stat {}", params_path.display()))?
+    {
         return Ok(None);
     }
     // A short or corrupt file is an open error. It must not abort the
@@ -16815,6 +16818,24 @@ mod tests {
         let message = format!("{err:#}");
         assert!(message.contains(&path.display().to_string()), "{message}");
         drop(tmp);
+        Ok(())
+    }
+
+    /// A stat error is an open error. Only a confirmed miss is `Ok(None)`.
+    #[test]
+    fn packing_params_stat_error_is_returned() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("packing_params_stat").build();
+        let parent = tmp.path().join("not_a_directory");
+        fs::write(&parent, b"x")?;
+        let params_path = parent.join(PACKING_PARAMS_FILE_NAME);
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let err = validate_existing_packing_params(&params_path, &config, None)
+            .expect_err("a stat error must not look like a missing file");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&params_path.display().to_string()),
+            "{message}"
+        );
         Ok(())
     }
 
