@@ -408,6 +408,10 @@ pub enum PreValidationError {
     #[error("Too many data transactions in submit ledger: max {max}, got {got}")]
     TooManyDataTxs { max: u64, got: usize },
 
+    /// The Publish ledger holds more transactions than `max_publish_txs_per_block`.
+    #[error("Too many publish transactions: max {max}, got {got}")]
+    TooManyPublishTxs { max: u64, got: usize },
+
     /// The ledger's `tx_root` does not match the merkle root recomputed from the
     /// included transactions' folded `(data_root, prefix_hash)` leaves. Any tampering
     /// with a tx's `data_root` or `prefix_hash` relative to the signed `tx_root` is
@@ -690,6 +694,7 @@ impl PreValidationError {
             | Self::TimestampTooFarInFuture { .. }
             | Self::TooManyCommitmentTxs { .. }
             | Self::TooManyDataTxs { .. }
+            | Self::TooManyPublishTxs { .. }
             | Self::TxRootMismatch { .. }
             | Self::TotalChunksMismatch { .. }
             | Self::PoaTxRootLeafMismatch { .. }
@@ -807,6 +812,7 @@ impl PreValidationError {
             Self::DatabaseError { .. } => "database_error",
             Self::InvalidEpochSnapshot { .. } => "invalid_epoch_snapshot",
             Self::TooManyDataTxs { .. } => "too_many_data_txs",
+            Self::TooManyPublishTxs { .. } => "too_many_publish_txs",
             Self::TxRootMismatch { .. } => "tx_root_mismatch",
             Self::TotalChunksMismatch { .. } => "total_chunks_mismatch",
             Self::PoaTxRootLeafMismatch { .. } => "poa_tx_root_leaf_mismatch",
@@ -1692,6 +1698,37 @@ pub async fn prevalidate_block(
     let block = sealed_block.header();
     let transactions = sealed_block.transactions();
 
+    // Length compare. Reject before PoA, VDF, and ingress-proof signer recovery.
+    // `SealedBlock::new` rejects duplicate ledger entries and pairs header ids
+    // with body txs, so this is the Publish count.
+    let max_publish_txs = config.consensus.mempool.max_publish_txs_per_block;
+    let publish_tx_count = transactions.get_ledger_txs(DataLedger::Publish).len();
+    if publish_tx_count > max_publish_txs as usize {
+        return Err(PreValidationError::TooManyPublishTxs {
+            max: max_publish_txs,
+            got: publish_tx_count,
+        });
+    }
+
+    // Pin the proof list to `count × N` before any check slices or recovers
+    // proofs. Until then, slicing trusts the peer-supplied `required_proof_count`.
+    let publish_ledger = block
+        .data_ledgers
+        .iter()
+        .find(|dl| dl.ledger_id == DataLedger::Publish as u32)
+        .ok_or_else(|| PreValidationError::InvalidDataLedgersLength {
+            expected: DataLedger::Publish.into(),
+            got: block.data_ledgers.len(),
+        })?;
+    // N is taken at the block's own timestamp to match block production and
+    // `data_txs_are_valid`, so an honestly-produced block always passes — see the
+    // doc comment on `publish_ingress_proof_count_is_valid`.
+    publish_ingress_proof_count_is_valid(
+        publish_ledger,
+        publish_tx_count,
+        config.number_of_ingress_proofs_total_at(block.timestamp_secs()),
+    )?;
+
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -2103,27 +2140,8 @@ pub async fn prevalidate_block(
         }
     }
 
-    // Look up individual ledgers for ingress proof validation
-    let publish_ledger = block
-        .data_ledgers
-        .iter()
-        .find(|dl| dl.ledger_id == DataLedger::Publish as u32)
-        .ok_or_else(|| PreValidationError::InvalidDataLedgersLength {
-            expected: DataLedger::Publish.into(),
-            got: block.data_ledgers.len(),
-        })?;
-
+    // The proof list was pinned to `count × N` at the top of this function.
     let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
-
-    // Reject a mis-sized flat proof list before shadow-tx generation slices it
-    // by N. N is taken at the block's own timestamp to match block production and
-    // `data_txs_are_valid`, so an honestly-produced block always passes — see the
-    // doc comment on `publish_ingress_proof_count_is_valid`.
-    publish_ingress_proof_count_is_valid(
-        publish_ledger,
-        publish_txs.len(),
-        config.number_of_ingress_proofs_total_at(block.timestamp_secs()),
-    )?;
 
     // Flatten (proof, data_root) pairs across publish txs so the parallel
     // verify below fans out across every proof rather than per-tx batches.
