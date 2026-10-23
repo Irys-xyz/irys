@@ -3434,7 +3434,9 @@ mod tests {
     // provider must be installed before this instrument is first recorded.
     #[tokio::test]
     async fn ingest_records_the_cache_commit_duration() {
-        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::data::{
+            AggregatedMetrics, HistogramDataPoint, MetricData, ResourceMetrics, ScopeMetrics,
+        };
         use opentelemetry_sdk::metrics::{
             InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
         };
@@ -3473,13 +3475,13 @@ mod tests {
             .get_finished_metrics()
             .expect("collected metrics")
             .iter()
-            .flat_map(|resource| resource.scope_metrics())
-            .flat_map(|scope| scope.metrics())
+            .flat_map(ResourceMetrics::scope_metrics)
+            .flat_map(ScopeMetrics::metrics)
             .find(|metric| metric.name() == "irys.mempool.chunks.cache_commit_duration_ms")
             .map(|metric| match metric.data() {
                 AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
                     .data_points()
-                    .map(|point| point.count())
+                    .map(HistogramDataPoint::count)
                     .sum::<u64>(),
                 _ => panic!("cache_commit_duration_ms must be an f64 histogram"),
             });
