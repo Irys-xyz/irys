@@ -1800,7 +1800,7 @@ pub async fn prevalidate_block(
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
-        "poa_partition_is_owned_by_miner",
+        "poa_partition_is_owned_by_miner and poa_ledger_matches_assignment",
     );
 
     // Check the solution_hash
@@ -2392,11 +2392,7 @@ pub fn check_poa_data_expiration(
         .contains_key(&poa.partition_hash);
 
     // if is a data chunk
-    if poa.data_path.is_some()
-        && poa.tx_path.is_some()
-        && poa.ledger_id.is_some()
-        && !is_data_partition_assigned
-    {
+    if poa.is_data_poa() && !is_data_partition_assigned {
         return Err(PreValidationError::PoADataPartitionExpired {
             partition_hash: poa.partition_hash,
         });
@@ -2438,8 +2434,7 @@ pub fn poa_ledger_matches_assignment(
     poa: &PoaData,
     epoch_snapshot: &EpochSnapshot,
 ) -> Result<(), PreValidationError> {
-    let (Some(_), Some(_), Some(poa_ledger_id)) = (&poa.data_path, &poa.tx_path, poa.ledger_id)
-    else {
+    let Some(poa_ledger_id) = poa.ledger_id.filter(|_| poa.is_data_poa()) else {
         return Ok(());
     };
     let assigned_ledger_id = epoch_snapshot
