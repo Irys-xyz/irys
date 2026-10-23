@@ -1033,11 +1033,34 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(peer_node)
     }
 
+    /// Posts a stake and a pledge from each already-running `peer` and waits for
+    /// them to reach this (genesis) node's mempool. Returns the commitment ids.
+    #[diag_slow(state = self.diag_wait_state().await)]
+    pub async fn post_stake_and_pledge_commitments(
+        &self,
+        peers: &[&Self],
+        seconds_to_wait: usize,
+    ) -> eyre::Result<Vec<H256>> {
+        let mut commitment_ids = Vec::with_capacity(peers.len() * 2);
+        for peer in peers {
+            let stake_tx = peer.post_stake_commitment(None).await?;
+            let pledge_tx = peer.post_pledge_commitment(None).await?;
+            self.wait_for_mempool(stake_tx.id(), seconds_to_wait)
+                .await?;
+            self.wait_for_mempool(pledge_tx.id(), seconds_to_wait)
+                .await?;
+            commitment_ids.push(stake_tx.id());
+            commitment_ids.push(pledge_tx.id());
+        }
+        Ok(commitment_ids)
+    }
+
     /// Stakes and pledges one partition for each already-running `peer`, then
-    /// mines on this (genesis) node to the epoch that assigns those partitions.
+    /// mines on this (genesis) node until every commitment is included and on to
+    /// the epoch that assigns those partitions.
     /// An epoch block applies the parent commitment snapshot only, so a pledge
     /// included in an epoch block is assigned at the following epoch. Mining
-    /// always continues to the epoch boundary strictly after the inclusion
+    /// always continues to the epoch boundary strictly after the last inclusion
     /// height. Peers can produce blocks validators accept once they own a
     /// partition. Returns the assigning epoch height. Every node has reached
     /// that height on return.
@@ -1047,19 +1070,30 @@ impl IrysNodeTest<IrysNodeCtx> {
         peers: &[&Self],
         seconds_to_wait: usize,
     ) -> eyre::Result<u64> {
-        for peer in peers {
-            let stake_tx = peer.post_stake_commitment(None).await?;
-            let pledge_tx = peer.post_pledge_commitment(None).await?;
-            self.wait_for_mempool(stake_tx.id(), seconds_to_wait)
-                .await?;
-            self.wait_for_mempool(pledge_tx.id(), seconds_to_wait)
-                .await?;
-        }
+        let mut pending: HashSet<H256> = self
+            .post_stake_and_pledge_commitments(peers, seconds_to_wait)
+            .await?
+            .into_iter()
+            .collect();
 
-        // An epoch block assigns partitions from the parent commitment snapshot.
-        // A pledge included in an epoch block itself waits until the next epoch,
-        // so always mine to the boundary strictly after the inclusion height.
-        let inclusion = self.mine_block().await?;
+        // Block space or ordering may defer a commitment past the next block.
+        let max_blocks_to_include = 8;
+        let mut inclusion = self.mine_block().await?;
+        let mut mined = 1;
+        loop {
+            for id in inclusion.commitment_tx_ids() {
+                pending.remove(id);
+            }
+            if pending.is_empty() {
+                break;
+            }
+            eyre::ensure!(
+                mined < max_blocks_to_include,
+                "commitments {pending:?} were not included"
+            );
+            inclusion = self.mine_block().await?;
+            mined += 1;
+        }
         let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
         let blocks_until_assigning_epoch =
             num_blocks_in_epoch - (inclusion.height % num_blocks_in_epoch);

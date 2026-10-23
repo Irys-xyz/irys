@@ -75,7 +75,12 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
 
     // Peer only follows during shared base — stop it from producing competing blocks
     peer.stop_mining();
-    stake_and_pledge_peer(&genesis, &peer, seconds_to_wait).await?;
+    // Validators accept a PoA only over a partition assigned to the block's miner,
+    // so the peer must own one to mine its fork. The commitments land in block 1
+    // and the block-2 epoch boundary assigns the partition.
+    genesis
+        .post_stake_and_pledge_commitments(&[&peer], seconds_to_wait)
+        .await?;
 
     // ─── Stage 1: Shared base with data (gossip ON) ───
 
@@ -535,26 +540,6 @@ fn has_path_hashes_at_offset(
     false
 }
 
-/// Stakes the peer and pledges one partition so it can produce blocks on its own
-/// fork: validators only accept a PoA over a partition assigned to the block's
-/// miner. Call before block 1; the commitments land in block 1 and the block-2
-/// epoch boundary assigns the partition.
-async fn stake_and_pledge_peer(
-    genesis: &IrysNodeTest<IrysNodeCtx>,
-    peer: &IrysNodeTest<IrysNodeCtx>,
-    seconds_to_wait: usize,
-) -> eyre::Result<()> {
-    let stake_tx = peer.post_stake_commitment(None).await?;
-    let pledge_tx = peer.post_pledge_commitment(None).await?;
-    genesis
-        .wait_for_mempool(stake_tx.id(), seconds_to_wait)
-        .await?;
-    genesis
-        .wait_for_mempool(pledge_tx.id(), seconds_to_wait)
-        .await?;
-    Ok(())
-}
-
 /// Asserts the peer owns a partition on the canonical chain, i.e. it can mine.
 fn assert_peer_has_partition(genesis: &IrysNodeTest<IrysNodeCtx>, peer_signer: &IrysSigner) {
     assert!(
@@ -686,7 +671,12 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
 
     IrysNodeTest::announce_between(&genesis, &peer).await?;
     peer.stop_mining();
-    stake_and_pledge_peer(&genesis, &peer, seconds_to_wait).await?;
+    // Validators accept a PoA only over a partition assigned to the block's miner,
+    // so the peer must own one to mine its fork. The commitments land in block 1
+    // and the block-2 epoch boundary assigns the partition.
+    genesis
+        .post_stake_and_pledge_commitments(&[&peer], seconds_to_wait)
+        .await?;
 
     // Shared base: both nodes agree on a common ancestor (the fork point / LCA).
     for h in 1..=2_u64 {
