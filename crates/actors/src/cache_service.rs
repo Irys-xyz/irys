@@ -69,6 +69,18 @@ fn checked_ledger_offset(start: LedgerChunkOffset, count: u64) -> Option<LedgerC
 /// If this limit is reached, eviction will continue in the next cycle.
 const MAX_EVICTIONS_PER_RUN: usize = 10_000;
 
+/// Whether every tx of a cached data root is migrated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootMigration {
+    Migrated,
+    /// No `CachedDataRoots` row for the root.
+    NoRecord,
+    /// The row lists no txs.
+    NoTxids,
+    /// A tx has no inclusion height, or one above the migration height.
+    TxPending,
+}
+
 /// Why one chunk-pruning pass kept or deleted each cached body it looked at.
 /// `too_young` covers every body the scan visited; the rest cover old bodies
 /// collected as candidates, each counted once.
@@ -90,6 +102,14 @@ pub(crate) struct PruneTally {
     pub no_ingress_hash: u64,
     /// Kept: not durable here, and some tx of its root is not migrated yet.
     pub root_not_migrated: u64,
+    /// Of `root_not_migrated`: the root has no `CachedDataRoots` row, so it
+    /// can never count as migrated.
+    pub root_no_record: u64,
+    /// Of `root_not_migrated`: the root's row lists no txs.
+    pub root_no_txids: u64,
+    /// Of `root_not_migrated`: a local storage module has a placement for
+    /// the chunk. The rest are placed nowhere on this node.
+    pub root_not_migrated_placed: u64,
     /// Kept: storage metadata for the root could not be read.
     pub unreadable: u64,
     /// Offered to the unplaced path. What it did not delete was placed or
@@ -334,26 +354,27 @@ impl InnerCacheTask {
         Ok(false)
     }
 
-    /// True when the root has at least one tx and every one is included at or
-    /// below `migration_height`. Placements exist only after migration.
-    fn root_txs_migrated<T: reth_db::transaction::DbTx>(
+    /// Whether the root has at least one tx and every one is included at or
+    /// below `migration_height`, and if not, why. Placements exist only after
+    /// migration.
+    fn root_migration<T: reth_db::transaction::DbTx>(
         tx: &T,
         data_root: DataRoot,
         migration_height: u64,
-    ) -> eyre::Result<bool> {
+    ) -> eyre::Result<RootMigration> {
         let Some(cached) = tx.get::<CachedDataRoots>(data_root)? else {
-            return Ok(false);
+            return Ok(RootMigration::NoRecord);
         };
         if cached.txid_set.is_empty() {
-            return Ok(false);
+            return Ok(RootMigration::NoTxids);
         }
         for tx_id in cached.txid_set.iter() {
             match get_data_tx_metadata(tx, tx_id)?.and_then(|m| m.included_height) {
                 Some(height) if height <= migration_height => {}
-                _ => return Ok(false),
+                _ => return Ok(RootMigration::TxPending),
             }
         }
-        Ok(true)
+        Ok(RootMigration::Migrated)
     }
 
     /// Evaluates the CDR pruning-horizon policy for `cached`, reading tx
@@ -489,18 +510,16 @@ impl InnerCacheTask {
             drop(tx);
         }
 
-        let (proven_roots, migrated_roots) = self.db.view_eyre(|tx| {
+        let (proven_roots, root_migration) = self.db.view_eyre(|tx| {
             let mut proven = BTreeSet::new();
-            let mut migrated = BTreeSet::new();
+            let mut migration = HashMap::with_capacity(candidates.len());
             for root in candidates.keys() {
                 if Self::has_local_ingress_proof(tx, *root, local_address)? {
                     proven.insert(*root);
                 }
-                if Self::root_txs_migrated(tx, *root, migration_height)? {
-                    migrated.insert(*root);
-                }
+                migration.insert(*root, Self::root_migration(tx, *root, migration_height)?);
             }
-            Ok((proven, migrated))
+            Ok((proven, migration))
         })?;
 
         // Resolve placement and durability outside the write txn: each root
@@ -552,13 +571,26 @@ impl InnerCacheTask {
             tally.candidates += cached_offsets.len() as u64;
             let not_durable = cached_offsets.difference(&durable).count() as u64;
             let proven = proven_roots.contains(&root);
-            let migrated = migrated_roots.contains(&root);
+            let migration = root_migration
+                .get(&root)
+                .copied()
+                .unwrap_or(RootMigration::NoRecord);
+            let migrated = migration == RootMigration::Migrated;
             if unreadable {
                 tally.unreadable += not_durable;
             } else if proven {
                 tally.not_durable += not_durable;
             } else if !migrated {
                 tally.root_not_migrated += not_durable;
+                match migration {
+                    RootMigration::NoRecord => tally.root_no_record += not_durable,
+                    RootMigration::NoTxids => tally.root_no_txids += not_durable,
+                    RootMigration::TxPending | RootMigration::Migrated => {}
+                }
+                tally.root_not_migrated_placed += cached_offsets
+                    .iter()
+                    .filter(|offset| !durable.contains(offset) && placed.contains(offset))
+                    .count() as u64;
             }
             if !unreadable && !proven && migrated {
                 let mut unprotected: BTreeSet<TxChunkOffset> =
@@ -691,6 +723,9 @@ impl InnerCacheTask {
             prune.kept_not_durable = tally.not_durable,
             prune.kept_no_ingress_hash = tally.no_ingress_hash,
             prune.kept_root_not_migrated = tally.root_not_migrated,
+            prune.root_no_record = tally.root_no_record,
+            prune.root_no_txids = tally.root_no_txids,
+            prune.root_not_migrated_placed = tally.root_not_migrated_placed,
             prune.kept_unreadable = tally.unreadable,
             prune.kept_unplaced = tally.unplaced_kept(),
             "Completed chunk pruning pass"
@@ -2175,6 +2210,9 @@ mod tests {
         durable: bool,
         /// This signer recorded the chunk's compact ingress hash.
         ingress_hash: bool,
+        /// The root's `CachedDataRoots` row is gone, as for a body ingress
+        /// cached with its data size taken from a storage-module index.
+        no_root_record: bool,
     }
 
     /// Runs one capacity prune over an old cached body. Reports whether it is
@@ -2186,6 +2224,7 @@ mod tests {
             migrated,
             durable,
             ingress_hash,
+            no_root_record,
         } = body;
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -2249,6 +2288,12 @@ mod tests {
                     &ingress_proof,
                     config.irys_signer().address(),
                 )?;
+                eyre::Ok(())
+            })??;
+        }
+        if no_root_record {
+            db.update(|wtx| {
+                wtx.delete::<CachedDataRoots>(tx_header.data_root, None)?;
                 eyre::Ok(())
             })??;
         }
@@ -2338,6 +2383,30 @@ mod tests {
                 false,
                 PruneTally {
                     root_not_migrated: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                OldBody {
+                    no_root_record: true,
+                    ..migrated
+                },
+                false,
+                PruneTally {
+                    root_not_migrated: 1,
+                    root_no_record: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                OldBody {
+                    assigned: true,
+                    ..OldBody::default()
+                },
+                false,
+                PruneTally {
+                    root_not_migrated: 1,
+                    root_not_migrated_placed: 1,
                     ..Default::default()
                 },
             ),

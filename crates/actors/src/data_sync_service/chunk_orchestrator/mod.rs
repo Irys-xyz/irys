@@ -1,7 +1,14 @@
 use crate::{
-    DataSyncServiceMessage, chunk_fetcher::ChunkFetcher,
+    DataSyncServiceMessage,
+    chunk_fetcher::{ChunkFetchError, ChunkFetcher, DataIntervalsPage},
     chunk_migration_service::validate_chunk_for_migration,
-    data_sync_service::peer_bandwidth_manager::PeerBandwidthManager, metrics,
+    data_sync_service::{
+        assignee_intervals::{
+            self, AssigneeIntervals, Coverage, HINT_FRONTIER_MARGIN, HINT_PAGE_TIMEOUT, WindowFetch,
+        },
+        peer_bandwidth_manager::PeerBandwidthManager,
+    },
+    metrics,
     services::ServiceSenders,
 };
 use irys_database::{cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _};
@@ -30,10 +37,19 @@ pub(crate) const LOW_OFFSET_PROBE_THRESHOLD: u32 = 20_000;
 /// without turning ordinary buffered writes into duplicate network requests.
 const DURABILITY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Longest wait for a write the storage module still holds in its write path
+/// (queued, buffered, or written but not fsynced). A busy disk can take longer
+/// than [`DURABILITY_WAIT_TIMEOUT`] to flush, and fetching the chunk again then
+/// only finds the same pending write. Past this, the chunk returns to the
+/// fetch queue anyway.
+const DURABILITY_PENDING_LIMIT: Duration = Duration::from_secs(10 * 60);
+
 /// Retry an offset only after other ready work has had an opportunity to run.
 /// While its in-memory request record is retained, the delay is monotonic,
 /// doubles after each exhausted peer cycle, and is capped so data that appears
-/// later is eventually rediscovered.
+/// later is eventually rediscovered. Jitter adds up to a quarter of each step.
+/// At the cap the window opens below it, so a capped retry waits 45 to 60
+/// seconds.
 const RETRY_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
@@ -264,6 +280,17 @@ pub struct ChunkOrchestrator {
     fail_coverage_read: bool,
     /// Local-cache lookups since the last [`Self::prepare_tick`].
     cache_lookups_this_tick: u32,
+    /// What each assignee reports holding. The scan skips Entropy no assignee
+    /// claims, and dispatch does not ask an assignee for an offset it answered
+    /// without.
+    pub(crate) assignee_intervals: AssigneeIntervals,
+    /// Slot the hints were fetched for. A new slot starts from no hints.
+    hint_slot: Option<usize>,
+    /// The last scan walked the whole partition and found no Entropy. Interval
+    /// hints are not fetched while this holds: there is nothing to skip.
+    hints_idle: bool,
+    /// Set by the scan when it finds an Entropy run this tick.
+    scan_found_entropy: bool,
 }
 impl ChunkOrchestrator {
     pub fn new(
@@ -341,6 +368,9 @@ impl ChunkOrchestrator {
         db: DatabaseProvider,
         ledger_id: u32,
     ) -> Self {
+        let hint_slot = storage_module
+            .partition_assignment()
+            .and_then(|pa| pa.slot_index);
         Self {
             storage_module,
             chunk_requests: Default::default(),
@@ -375,6 +405,10 @@ impl ChunkOrchestrator {
             #[cfg(test)]
             fail_coverage_read: false,
             cache_lookups_this_tick: 0,
+            assignee_intervals: AssigneeIntervals::new(HINT_FRONTIER_MARGIN),
+            hint_slot,
+            hints_idle: false,
+            scan_found_entropy: false,
         }
     }
 
@@ -638,6 +672,7 @@ impl ChunkOrchestrator {
         // Held offsets are not hot. Promoting all of them would skip the
         // pending budget and bury the write head. The rest stay Held and this
         // function takes another batch when a slot is free.
+        self.sort_in_scan_order(&mut promote);
         let mut slots = self.free_hot_slots();
         for offset in promote {
             if slots == 0 {
@@ -673,6 +708,11 @@ impl ChunkOrchestrator {
                     "data_sync chunk durably stored"
                 );
             } else if now.saturating_duration_since(started) >= timeout {
+                if now.saturating_duration_since(started) < DURABILITY_PENDING_LIMIT
+                    && self.storage_module.is_data_write_pending_at(*offset)
+                {
+                    continue;
+                }
                 request.request_state = ChunkRequestState::Pending;
                 request.ready_since = now;
                 request.excluded.clear();
@@ -685,7 +725,21 @@ impl ChunkOrchestrator {
                 );
             }
         }
+        // A stalled batch shares one fdatasync and returns as a run.
+        self.sort_in_scan_order(&mut ready);
         self.ready_offsets.extend(ready);
+    }
+
+    /// Order offsets the way the entropy scan visits them: high to low on term
+    /// ledgers, low to high on Publish. Requeued neighbours then meet at the
+    /// queue head and one cache lookup covers the run, instead of one lookup
+    /// per offset in map order.
+    fn sort_in_scan_order(&self, offsets: &mut [PartitionChunkOffset]) {
+        if self.prioritizes_write_frontier() {
+            offsets.sort_unstable_by(|a, b| b.cmp(a));
+        } else {
+            offsets.sort_unstable();
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -726,7 +780,7 @@ impl ChunkOrchestrator {
         // Peer exclusions and the cache-miss memo are cleared here, at the
         // beginning of a new attempt cycle, never in the same transition that
         // handled a 404. The next pop reads the cache once.
-        let due: Vec<_> = self
+        let mut due: Vec<_> = self
             .chunk_requests
             .iter()
             .filter_map(|(&offset, request)| match request.request_state {
@@ -734,6 +788,12 @@ impl ChunkOrchestrator {
                 _ => None,
             })
             .collect();
+        self.sort_in_scan_order(&mut due);
+        // A wave of offsets that 404 on every peer must not take the whole
+        // hot budget, or the entropy scan below never runs and never reaches
+        // a range a peer can serve. Retries take at most half of the free
+        // slots. The rest stay Delayed, already due, and go first next tick.
+        due.truncate(self.free_hot_slots().div_ceil(2));
         for offset in due {
             if let Some(request) = self.chunk_requests.get_mut(&offset) {
                 request.excluded.clear();
@@ -757,7 +817,7 @@ impl ChunkOrchestrator {
             return;
         };
 
-        let Some((max_chunk_offset, _)) = max_chunk_offset else {
+        let Some((max_chunk_offset, ledger_head)) = max_chunk_offset else {
             // Not requests needed
             tracing::trace!(
                 "No chunk requests needed for ledger:{:?} slot_index:{:?}",
@@ -766,6 +826,28 @@ impl ChunkOrchestrator {
             );
             return;
         };
+
+        // Answers describe one slot. After a move to another slot of the same
+        // ledger they say nothing about the new one. Reset before this tick's
+        // scan, even while hints are idle: a move repacks the partition.
+        if self.hint_slot != pa.slot_index {
+            self.assignee_intervals = AssigneeIntervals::new(HINT_FRONTIER_MARGIN);
+            self.hint_slot = pa.slot_index;
+            self.hints_idle = false;
+        }
+        let assignees = self.current_assignees();
+        if !self.hints_idle {
+            let hint_head = self.hint_head(*max_chunk_offset, ledger_head);
+            self.plan_assignee_interval_fetches(&assignees, *max_chunk_offset, hint_head, now);
+        }
+        // An ingress-proof signer in the peer set can serve offsets no assignee
+        // holds. Then the scan skips nothing: those offsets are queued, and
+        // dispatch sends them to the signer alone.
+        let has_signer = self
+            .current_peers
+            .iter()
+            .any(|peer| !assignees.contains(peer));
+        let scan_assignees: &[IrysAddress] = if has_signer { &[] } else { &assignees };
 
         let max_requests = self.config.data_sync.max_pending_chunk_requests as usize;
         let mut requests_to_add = max_requests.saturating_sub(hot_count);
@@ -802,6 +884,8 @@ impl ChunkOrchestrator {
         // eventual reconciliation without falsely marking a 404 synchronized.
         let max_probes = max_requests.saturating_mul(4).max(max_requests);
         let mut probes = 0_usize;
+        self.scan_found_entropy = false;
+        let mut scan_stopped = false;
         if self.prioritizes_write_frontier() {
             // High offsets near the write head are live data; low-offset Entropy
             // on a term ledger is often an abandoned upload. Walk down from the
@@ -818,9 +902,11 @@ impl ChunkOrchestrator {
                 }
                 let budget = max_probes.saturating_sub(probes);
                 if budget == 0 {
+                    scan_stopped = true;
                     break;
                 }
                 if self.consume_entropy_scan(
+                    scan_assignees,
                     range_start,
                     range_end,
                     true,
@@ -831,6 +917,7 @@ impl ChunkOrchestrator {
                     max_probes,
                     &mut requests_to_add,
                 ) {
+                    scan_stopped = true;
                     break 'scan;
                 }
             }
@@ -846,9 +933,11 @@ impl ChunkOrchestrator {
                 }
                 let budget = max_probes.saturating_sub(probes);
                 if budget == 0 {
+                    scan_stopped = true;
                     break;
                 }
                 if self.consume_entropy_scan(
+                    scan_assignees,
                     range_start,
                     range_end,
                     false,
@@ -859,10 +948,12 @@ impl ChunkOrchestrator {
                     max_probes,
                     &mut requests_to_add,
                 ) {
+                    scan_stopped = true;
                     break 'scan;
                 }
             }
         }
+        self.hints_idle = !scan_stopped && !self.scan_found_entropy;
     }
 
     /// Walk one query window. Returns true when this tick must stop.
@@ -874,6 +965,7 @@ impl ChunkOrchestrator {
     /// the returned run is only a prefix of its interval.
     fn consume_entropy_scan(
         &mut self,
+        assignees: &[IrysAddress],
         range_start: u32,
         range_end: u32,
         reverse: bool,
@@ -891,45 +983,46 @@ impl ChunkOrchestrator {
             reverse,
             budget,
         );
+        self.scan_found_entropy |= !scan.runs.is_empty();
         let mut stop = false;
-        if reverse {
-            for (start, end) in scan.runs {
-                for interval_step in (start..=end).rev() {
-                    if self.note_scan_offset(
-                        interval_step,
-                        max_offset,
-                        true,
-                        now,
-                        probes,
-                        max_probes,
-                        requests_to_add,
-                    ) {
-                        stop = true;
-                        break;
-                    }
-                }
-                if stop {
-                    break;
-                }
+        'runs: for (start, end) in scan.runs {
+            let mut segments = self.assignee_intervals.segments(assignees, start, end);
+            if reverse {
+                segments.reverse();
             }
-        } else {
-            for (start, end) in scan.runs {
-                for interval_step in start..=end {
+            for (segment_start, segment_end, coverage) in segments {
+                if coverage == Coverage::Unclaimed {
+                    if self.skip_unclaimed(
+                        segment_start,
+                        segment_end,
+                        max_offset,
+                        reverse,
+                        probes,
+                        max_probes,
+                    ) {
+                        stop = true;
+                        break 'runs;
+                    }
+                    continue;
+                }
+                for step in 0..=segment_end - segment_start {
+                    let interval_step = if reverse {
+                        segment_end - step
+                    } else {
+                        segment_start + step
+                    };
                     if self.note_scan_offset(
                         interval_step,
                         max_offset,
-                        false,
+                        reverse,
                         now,
                         probes,
                         max_probes,
                         requests_to_add,
                     ) {
                         stop = true;
-                        break;
+                        break 'runs;
                     }
-                }
-                if stop {
-                    break;
                 }
             }
         }
@@ -943,6 +1036,161 @@ impl ChunkOrchestrator {
             return true;
         }
         false
+    }
+
+    /// Move the scan past an Entropy span every assignee answered without,
+    /// queueing none of it. Each skipped offset counts as a probe, so a tick
+    /// visits no more of the map than it would while probing.
+    fn skip_unclaimed(
+        &mut self,
+        start: u32,
+        end: u32,
+        max_offset: u32,
+        reverse: bool,
+        probes: &mut usize,
+        max_probes: usize,
+    ) -> bool {
+        let span = usize::try_from(end - start)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
+        *probes = probes.saturating_add(span);
+        self.scan_cursor =
+            resume_scan_cursor(if reverse { start } else { end }, max_offset, reverse);
+        metrics::record_data_sync_hint_skipped(self.ledger_id, span as u64);
+        *probes >= max_probes
+    }
+
+    /// The write head as interval hints see it. Hints stop
+    /// [`HINT_FRONTIER_MARGIN`] below it, because a peer's map lags chunks
+    /// that are still migrating. A partition the ledger has filled has no such
+    /// chunks, so its hints reach its last offset.
+    fn hint_head(&self, max_offset: u32, ledger_head: LedgerChunkOffset) -> u32 {
+        let head_inside = self
+            .storage_module
+            .get_storage_module_ledger_offsets()
+            .ok()
+            .is_none_or(|range| range.end() > ledger_head);
+        if head_inside {
+            max_offset
+        } else {
+            max_offset.saturating_add(HINT_FRONTIER_MARGIN)
+        }
+    }
+
+    /// Peers in the current set that are assigned this ledger slot. Only their
+    /// interval answers decide what the scan may skip.
+    fn current_assignees(&self) -> Vec<IrysAddress> {
+        let slot_index = self
+            .storage_module
+            .partition_assignment()
+            .and_then(|pa| pa.slot_index);
+        let Ok(peers) = self.active_sync_peers.read() else {
+            return Vec::new();
+        };
+        self.current_peers
+            .iter()
+            .copied()
+            .filter(|address| {
+                peers
+                    .get(address)
+                    .is_some_and(|peer| peer.is_assigned_to(self.ledger_id, slot_index))
+            })
+            .collect()
+    }
+
+    /// Start the interval fetches that are due. Each answer comes back as
+    /// [`DataSyncServiceMessage::AssigneeIntervalsFetched`].
+    fn plan_assignee_interval_fetches(
+        &mut self,
+        assignees: &[IrysAddress],
+        max_offset: u32,
+        hint_head: u32,
+        now: Instant,
+    ) {
+        let Some(slot_index) = self
+            .storage_module
+            .partition_assignment()
+            .and_then(|pa| pa.slot_index)
+        else {
+            return;
+        };
+        let reverse = self.prioritizes_write_frontier();
+        let planned = self.assignee_intervals.plan_fetches(
+            assignees,
+            self.scan_cursor,
+            max_offset,
+            reverse,
+            now,
+        );
+        for fetch in planned {
+            let api = self
+                .active_sync_peers
+                .read()
+                .ok()
+                .and_then(|peers| peers.get(&fetch.peer).map(|peer| peer.peer_address.api));
+            let Some(api) = api else {
+                self.assignee_intervals.on_fetched(
+                    fetch,
+                    hint_head,
+                    Err(ChunkFetchError::NetworkError {
+                        message: "peer left the peer set".to_string(),
+                    }),
+                    now,
+                );
+                continue;
+            };
+            let fetcher = Arc::clone(&self.chunk_fetcher);
+            let tx = self.service_senders.data_sync.clone();
+            let storage_module_id = self.storage_module.id;
+            self.runtime_handle.spawn(
+                async move {
+                    let result = assignee_intervals::fetch_window(
+                        &*fetcher,
+                        slot_index,
+                        fetch.start,
+                        fetch.end,
+                        api,
+                        HINT_PAGE_TIMEOUT,
+                    )
+                    .await;
+                    let _ = tx.send_traced(DataSyncServiceMessage::AssigneeIntervalsFetched {
+                        storage_module_id,
+                        fetch,
+                        head: hint_head,
+                        result,
+                    });
+                }
+                .instrument(tracing::Span::current()),
+            );
+        }
+    }
+
+    /// An assignee's interval answer arrived.
+    pub fn on_assignee_intervals(
+        &mut self,
+        fetch: WindowFetch,
+        head: u32,
+        result: Result<DataIntervalsPage, ChunkFetchError>,
+    ) {
+        match &result {
+            Ok(page) => debug!(
+                peer.address = %fetch.peer,
+                window.start = fetch.start,
+                window.end = fetch.end,
+                intervals = page.intervals.len(),
+                coverage = ?page.coverage,
+                "data sync assignee intervals"
+            ),
+            Err(error) => debug!(
+                peer.address = %fetch.peer,
+                window.start = fetch.start,
+                window.end = fetch.end,
+                error = %error,
+                "data sync assignee intervals unavailable; probing per offset"
+            ),
+        }
+        self.assignee_intervals
+            .on_fetched(fetch, head, result, Instant::now());
     }
 
     /// Submit / OneYear / ThirtyDay: prefer the migrated write head. Publish
@@ -1041,7 +1289,17 @@ impl ChunkOrchestrator {
             self.reload_pending_body_coverage();
         }
 
+        // Offsets this call may set aside because no peer they may use has a
+        // free slot. Bounded by the queue so a call cannot spin.
+        let mut set_aside_budget = self.ready_offsets.len();
         while let Some(chunk_offset) = self.ready_offsets.pop_front() {
+            // An assignee that answered without this offset is not asked for it.
+            let absent: Vec<IrysAddress> = self
+                .current_peers
+                .iter()
+                .copied()
+                .filter(|peer| self.assignee_intervals.excludes(peer, chunk_offset.0))
+                .collect();
             let Some((excluded, all_peers_exhausted, cache_miss)) = self
                 .chunk_requests
                 .get_mut(&chunk_offset)
@@ -1054,15 +1312,12 @@ impl ChunkOrchestrator {
                         .excluded
                         .retain(|peer| self.current_peers.contains(peer));
                     let exhausted = !self.current_peers.is_empty()
-                        && self
-                            .current_peers
-                            .iter()
-                            .all(|peer| chunk_request.excluded.contains(peer));
-                    Some((
-                        chunk_request.excluded.clone(),
-                        exhausted,
-                        chunk_request.local_cache_miss,
-                    ))
+                        && self.current_peers.iter().all(|peer| {
+                            chunk_request.excluded.contains(peer) || absent.contains(peer)
+                        });
+                    let mut excluded = chunk_request.excluded.clone();
+                    excluded.extend(absent.iter().copied());
+                    Some((excluded, exhausted, chunk_request.local_cache_miss))
                 })
             else {
                 continue;
@@ -1103,10 +1358,18 @@ impl ChunkOrchestrator {
             }
 
             let Some(peer_address) = self.find_best_peer(Some(&excluded)) else {
-                // Eligible peers exist but currently have no concurrency. Keep
-                // FIFO position for the next service tick without spinning.
+                if set_aside_budget == 0 || self.find_best_peer(None).is_none() {
+                    // No peer has a free slot. Keep this offset's place at the
+                    // head; the next released slot or tick takes it.
+                    self.ready_offsets.push_front(chunk_offset);
+                    return false;
+                }
+                // A peer has a free slot, but not one this offset may use, for
+                // example only a busy signer can serve it. Later offsets may use
+                // that slot. This one waits at the tail.
+                set_aside_budget -= 1;
                 self.ready_offsets.push_back(chunk_offset);
-                return false;
+                continue;
             };
 
             match self.dispatch_chunk_request(chunk_offset, peer_address) {
@@ -1140,17 +1403,17 @@ impl ChunkOrchestrator {
     /// `start` is already popped and Pending. Append following Pending offsets
     /// that continue the run, are not cache-miss memoized, and sit at the queue
     /// head. Stale non-pending heads are dropped, same as [`Self::dispatch_next`].
+    ///
+    /// Term ledgers queue offsets high to low, so a run may descend. The first
+    /// appended offset fixes the direction for the rest of the run.
     fn take_local_cache_run(&mut self, start: PartitionChunkOffset) -> Vec<PartitionChunkOffset> {
         let mut run = vec![start];
+        let mut descending = None;
         let limit = self.local_cache_run_limit();
         while run.len() < limit {
             let Some(last) = run.last().copied() else {
                 break;
             };
-            let Some(next_u32) = last.0.checked_add(1) else {
-                break;
-            };
-            let next_expected = PartitionChunkOffset(next_u32);
             let Some(&front) = self.ready_offsets.front() else {
                 break;
             };
@@ -1168,10 +1431,18 @@ impl ChunkOrchestrator {
                 self.ready_offsets.pop_front();
                 continue;
             }
+            let up = last.0.checked_add(1) == Some(front.0);
+            let down = last.0.checked_sub(1) == Some(front.0);
+            let continues = match descending {
+                None => up || down,
+                Some(true) => down,
+                Some(false) => up,
+            };
             // Stop before an offset a body job still owns. The next pop holds it.
-            if front != next_expected || cache_miss || self.body_worker_owns(front) {
+            if !continues || cache_miss || self.body_worker_owns(front) {
                 break;
             }
+            descending.get_or_insert(down);
             self.ready_offsets.pop_front();
             run.push(front);
         }
@@ -1313,10 +1584,17 @@ impl ChunkOrchestrator {
         };
         let placements = irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
             self.storage_module
-                .data_root_and_tx_offset_span(start, last)
+                .data_root_and_tx_offset_span(start.min(last), start.max(last))
         });
         let placements = match placements {
-            Ok(placements) if placements.len() == run.len() => placements,
+            Ok(mut placements) if placements.len() == run.len() => {
+                // The span reads low to high. Every later step indexes by run
+                // position, so a descending run needs its placements reversed.
+                if last < start {
+                    placements.reverse();
+                }
+                placements
+            }
             Ok(_) => {
                 warn!(
                     chunk.offset = %start,
@@ -1538,30 +1816,44 @@ impl ChunkOrchestrator {
         applied
     }
 
-    fn retry_delay(chunk_offset: PartitionChunkOffset, retry_round: u32) -> Duration {
+    /// `jitter_bucket` is the local-cache run length. Offsets in one aligned
+    /// bucket share a deadline, so a contiguous hole comes due in one tick and
+    /// its retries still form one cache run. Different buckets spread out.
+    fn retry_delay(
+        chunk_offset: PartitionChunkOffset,
+        retry_round: u32,
+        jitter_bucket: u64,
+    ) -> Duration {
         let exponent = retry_round.saturating_sub(1).min(6);
         let base = RETRY_BACKOFF_INITIAL
             .saturating_mul(1_u32 << exponent)
             .min(RETRY_BACKOFF_MAX);
-        // Stable per-offset jitter avoids synchronized retry waves without a
+        // Stable per-bucket jitter avoids synchronized retry waves without a
         // random generator or wall-clock dependency. Keep the capped maximum.
         let jitter_window_ms = (base.as_millis() / 4) as u64;
+        let bucket = u64::from(*chunk_offset) / jitter_bucket.max(1);
         let jitter_ms = if jitter_window_ms == 0 {
             0
         } else {
-            u64::from(*chunk_offset).wrapping_mul(0x9e37_79b9) % (jitter_window_ms + 1)
+            bucket.wrapping_mul(0x9e37_79b9) % (jitter_window_ms + 1)
         };
+        // At the cap, open the window below the maximum. Clamping after the
+        // add would put every capped retry on the same deadline, so a full
+        // delayed set would return as one wave and fill the hot budget.
+        let base =
+            base.min(RETRY_BACKOFF_MAX.saturating_sub(Duration::from_millis(jitter_window_ms)));
         base.saturating_add(Duration::from_millis(jitter_ms))
             .min(RETRY_BACKOFF_MAX)
     }
 
     fn delay_request(&mut self, chunk_offset: PartitionChunkOffset, now: Instant) {
+        let jitter_bucket = u64::try_from(self.local_cache_run_limit()).unwrap_or(1);
         let Some(request) = self.chunk_requests.get_mut(&chunk_offset) else {
             return;
         };
         request.retry_round = request.retry_round.saturating_add(1);
         let retry_round = request.retry_round;
-        let delay = Self::retry_delay(chunk_offset, retry_round);
+        let delay = Self::retry_delay(chunk_offset, retry_round, jitter_bucket);
         request.request_state = ChunkRequestState::Delayed {
             retry_at: now + delay,
         };
@@ -2414,6 +2706,7 @@ impl ChunkOrchestrator {
                 ready.push(*offset);
             }
         }
+        self.sort_in_scan_order(&mut ready);
         self.ready_offsets.extend(ready);
     }
 

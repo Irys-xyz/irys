@@ -1,3 +1,4 @@
+pub mod assignee_intervals;
 pub mod chunk_fetcher;
 pub mod chunk_orchestrator;
 pub mod peer_bandwidth_manager;
@@ -20,8 +21,8 @@ use irys_database::ingress_proofs_by_data_root;
 use irys_domain::{BatchEnqueueItem, BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
 use irys_packing::unpack;
 use irys_types::{
-    ChunkFormat, Config, DataRoot, IrysAddress, PartitionChunkOffset, SendTraced as _,
-    TokioServiceHandle, Traced, UnpackedChunk, app_state::DatabaseProvider,
+    ChunkFormat, Config, DataLedger, DataRoot, IrysAddress, PartitionChunkOffset, SendTraced as _,
+    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
 };
 use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
@@ -165,12 +166,20 @@ pub enum DeliveryError {
     /// The node failed, not the peer: an unpack panic or a timeout. The
     /// offset is requeued without blaming the peer.
     Local(String),
+    /// Direct route: the body names a different data root, tx offset, or data
+    /// size than the placement captured when it arrived. The peer is at fault
+    /// only if that placement is still current; a rollback in between means
+    /// the peer may have served the new chunk correctly.
+    PlacementMismatch {
+        expected: (DataRoot, TxChunkOffset, u64),
+        detail: String,
+    },
 }
 
 impl DeliveryError {
     fn is_peer_fault(&self) -> bool {
         match self {
-            Self::InvalidBody(_) => true,
+            Self::InvalidBody(_) | Self::PlacementMismatch { .. } => true,
             Self::Ingress(error) => ingress_error_is_invalid_peer_data(error),
             Self::Local(_) => false,
         }
@@ -183,8 +192,55 @@ impl std::fmt::Display for DeliveryError {
             Self::InvalidBody(error) => write!(f, "invalid peer chunk: {error}"),
             Self::Ingress(error) => write!(f, "chunk ingress rejected the body: {error}"),
             Self::Local(error) => write!(f, "{error}"),
+            Self::PlacementMismatch { detail, .. } => write!(f, "invalid peer chunk: {detail}"),
         }
     }
+}
+
+/// How a delivered body reaches the storage-module write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryRoute {
+    /// Through chunk ingress, which commits the body and its compact leaf
+    /// before the storage module may make the offset durable. Submit data
+    /// needs that leaf: this node may sign an ingress proof to promote it.
+    Ingress,
+    /// Straight to the storage-module write, skipping the ingress lane, the
+    /// chunk cache, gossip, and the ingress-proof attempt. No ingress proof
+    /// can be needed: term-ledger data never takes one, and Publish data is
+    /// already promoted. The body must match this offset's local placement.
+    Direct {
+        data_root: DataRoot,
+        tx_offset: TxChunkOffset,
+        data_size: u64,
+    },
+}
+
+/// Check a body for the direct route: it must be the chunk indexed at the
+/// requested offset, and its bytes must match its data path. With the
+/// placement fields equal, the data-path check runs against the local data
+/// root, tx offset, and data size.
+fn check_against_placement(
+    unpacked: UnpackedChunk,
+    data_root: DataRoot,
+    tx_offset: TxChunkOffset,
+    data_size: u64,
+    chunk_size: u64,
+) -> Result<UnpackedChunk, DeliveryError> {
+    if unpacked.data_root != data_root
+        || unpacked.tx_offset != tx_offset
+        || unpacked.data_size != data_size
+    {
+        return Err(DeliveryError::PlacementMismatch {
+            expected: (data_root, tx_offset, data_size),
+            detail: format!(
+                "fetched data_root {} tx_offset {} data_size {} does not match the local data_root {data_root} tx_offset {tx_offset} data_size {data_size}",
+                unpacked.data_root, unpacked.tx_offset, unpacked.data_size,
+            ),
+        });
+    }
+    validate_peer_unpacked_chunk(&unpacked, chunk_size)
+        .map_err(|error| DeliveryError::InvalidBody(error.to_string()))?;
+    Ok(unpacked)
 }
 
 /// Everything the task that carries one delivered body needs.
@@ -255,10 +311,12 @@ async fn unpack_off_loop(
         .map_err(|error| unpack_failed(error.to_string()))
 }
 
-/// Unpack, check the body against its own data path, then hand it to
-/// ingress. Ingress can accept a body it did not hash, so the path check
-/// runs first and an invalid body never reaches the ingress cache.
+/// Unpack, then check the body. On the direct route it is checked against
+/// the local placement and returned for the storage-module write.
 ///
+/// On the ingress route it is checked against its own data path, then
+/// handed to ingress. Ingress can accept a body it did not hash, so the path
+/// check runs first and an invalid body never reaches the ingress cache.
 /// The ingress acknowledgement is the durable compact-leaf fence: the
 /// storage module may not make this fetch permanently complete until
 /// ingress has committed the cached body and signer-specific ingress hash.
@@ -266,9 +324,24 @@ async fn unpack_off_loop(
 /// the same body is sent again after a short wait.
 async fn process_delivered_body(
     chunk: ChunkFormat,
+    route: DeliveryRoute,
     pipeline: &DeliveryPipeline,
 ) -> Result<UnpackedChunk, DeliveryError> {
     let unpacked = unpack_off_loop(chunk, pipeline).await?;
+    if let DeliveryRoute::Direct {
+        data_root,
+        tx_offset,
+        data_size,
+    } = route
+    {
+        return check_against_placement(
+            unpacked,
+            data_root,
+            tx_offset,
+            data_size,
+            pipeline.chunk_size,
+        );
+    }
     validate_peer_unpacked_chunk(&unpacked, pipeline.chunk_size)
         .map_err(|error| DeliveryError::InvalidBody(error.to_string()))?;
     let _permit = Arc::clone(&pipeline.ingress_permits)
@@ -377,6 +450,10 @@ pub struct DataSyncServiceInner {
     delivery: DeliveryPipeline,
     /// See [`MAX_DELIVERED_BODIES`].
     max_delivered_bodies: usize,
+    /// Dispatch into a slot as soon as its request finishes. Tests that count
+    /// slots across a completion turn it off.
+    #[cfg(test)]
+    refill_on_release: bool,
 }
 
 /// Re-arm `Blocked(MissingDataRootIndex)` when the local index looks ready.
@@ -621,6 +698,15 @@ pub enum DataSyncServiceMessage {
         storage_module_id: usize,
         chunk_offsets: Vec<PartitionChunkOffset>,
     },
+    /// An assignee's Data intervals for one window, fetched so the scan can
+    /// skip local Entropy no assignee holds. `head` is the write head when the
+    /// fetch was planned.
+    AssigneeIntervalsFetched {
+        storage_module_id: usize,
+        fetch: assignee_intervals::WindowFetch,
+        head: u32,
+        result: Result<chunk_fetcher::DataIntervalsPage, chunk_fetcher::ChunkFetchError>,
+    },
 }
 
 impl DataSyncServiceInner {
@@ -664,6 +750,8 @@ impl DataSyncServiceInner {
             publish_dispatch_cursor: 0,
             delivery,
             max_delivered_bodies: MAX_DELIVERED_BODIES,
+            #[cfg(test)]
+            refill_on_release: true,
         };
         data_sync.synchronize_peers_and_orchestrators();
         data_sync
@@ -682,18 +770,16 @@ impl DataSyncServiceInner {
                 chunk_offset,
                 peer_address: peer_addr,
                 chunk,
-            } => {
-                if let Err(e) =
-                    self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)
-                {
-                    error!(
-                        storage_module.id = storage_module_id,
-                        chunk.offset = %chunk_offset,
-                        peer.address = %peer_addr,
-                        "Failed to handle chunk completion: {e:?}"
-                    );
-                }
-            }
+            } => match self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk) {
+                Ok(true) => self.dispatch_after_release(),
+                Ok(false) => {}
+                Err(e) => error!(
+                    storage_module.id = storage_module_id,
+                    chunk.offset = %chunk_offset,
+                    peer.address = %peer_addr,
+                    "Failed to handle chunk completion: {e:?}"
+                ),
+            },
             DataSyncServiceMessage::ChunkIngressed {
                 storage_module_id,
                 chunk_offset,
@@ -715,6 +801,9 @@ impl DataSyncServiceInner {
                         "Failed to handle chunk ingress result: {e:?}"
                     );
                 }
+                // A finished body freed a held-body place. A slot released
+                // while that limit was reached is filled now, not at the tick.
+                self.dispatch_after_release();
             }
             DataSyncServiceMessage::ChunkFailed {
                 storage_module_id,
@@ -723,16 +812,27 @@ impl DataSyncServiceInner {
                 failure_kind,
             } => {
                 metrics::record_data_sync_chunk_failure();
-                if let Err(e) =
-                    self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr, failure_kind)
+                // A failure that matched a live request released its slot.
+                match self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr, failure_kind)
                 {
-                    error!(
+                    Ok(()) => self.dispatch_after_release(),
+                    Err(e) => error!(
                         "Failed to handle chunk failure for storage_module {} chunk_offset {} from peer {}: {e:?}",
                         storage_module_id, chunk_offset, peer_addr
-                    );
+                    ),
                 }
             }
             DataSyncServiceMessage::GetActivePeersList(tx) => self.handle_get_active_peers_list(tx),
+            DataSyncServiceMessage::AssigneeIntervalsFetched {
+                storage_module_id,
+                fetch,
+                head,
+                result,
+            } => {
+                if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
+                    orchestrator.on_assignee_intervals(fetch, head, result);
+                }
+            }
             DataSyncServiceMessage::BodyMigrationHoles {
                 storage_module_id,
                 chunk_offsets,
@@ -749,6 +849,45 @@ impl DataSyncServiceInner {
             }
         }
         Ok(())
+    }
+
+    /// A finished request released one peer slot. Use it now: waiting for
+    /// the next tick idles that slot for up to 250 ms, even after a 1 ms 404.
+    /// One dispatch, in tick order (term ledgers, then Publish, each group
+    /// starting at its tick cursor) and under the same held-body limit. The
+    /// tick still refills each queue and advances the cursors.
+    fn dispatch_after_release(&mut self) {
+        #[cfg(test)]
+        if !self.refill_on_release {
+            return;
+        }
+        if self.delivery.held_bodies.load(Ordering::SeqCst) >= self.max_delivered_bodies {
+            return;
+        }
+        let mut ids: Vec<_> = self.chunk_orchestrators.keys().copied().collect();
+        ids.sort_unstable();
+        let (mut term, mut publish): (Vec<_>, Vec<_>) = ids.into_iter().partition(|id| {
+            self.chunk_orchestrators
+                .get(id)
+                .is_some_and(ChunkOrchestrator::prioritizes_write_frontier)
+        });
+        if !term.is_empty() {
+            let start = self.term_dispatch_cursor % term.len();
+            term.rotate_left(start);
+        }
+        if !publish.is_empty() {
+            let start = self.publish_dispatch_cursor % publish.len();
+            publish.rotate_left(start);
+        }
+        for id in term.into_iter().chain(publish) {
+            if self
+                .chunk_orchestrators
+                .get_mut(&id)
+                .is_some_and(ChunkOrchestrator::dispatch_next)
+            {
+                return;
+            }
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -1017,7 +1156,7 @@ impl DataSyncServiceInner {
         chunk_offset: PartitionChunkOffset,
         peer_addr: IrysAddress,
         chunk: ChunkFormat,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<bool> {
         let requested_at = match self.chunk_orchestrators.get_mut(&storage_module_id) {
             // Releases the peer slot. Validation and ingress can still reject
             // the body; that path counts the failure without a second release.
@@ -1036,14 +1175,29 @@ impl DataSyncServiceInner {
             None => None,
         };
 
+        // A body no request waits for still goes to ingress, which writes it
+        // wherever it belongs. Nothing here would write a direct-route body.
+        let route = if requested_at.is_some() {
+            self.delivery_route(storage_module_id, chunk_offset)
+        } else {
+            DeliveryRoute::Ingress
+        };
+        metrics::record_data_sync_delivery_route(match route {
+            DeliveryRoute::Ingress => "ingress",
+            DeliveryRoute::Direct { .. } => "direct",
+        });
         let pipeline = self.delivery.clone();
         let held = HeldBody::new(&pipeline.held_bodies);
         self.runtime_handle.spawn(
             async move {
-                let _held = held;
-                let result =
-                    settle_delivery(process_delivered_body(chunk, &pipeline), pipeline.timeout)
-                        .await;
+                let result = settle_delivery(
+                    process_delivered_body(chunk, route, &pipeline),
+                    pipeline.timeout,
+                )
+                .await;
+                // Release the held-body place before the result is sent, so
+                // the refill that handles it can count this body as gone.
+                drop(held);
                 let Some(requested_at) = requested_at else {
                     if let Err(error) = result {
                         debug!("untracked data-sync body was not accepted: {error}");
@@ -1062,7 +1216,47 @@ impl DataSyncServiceInner {
             }
             .instrument(tracing::Span::current()),
         );
-        Ok(())
+        // A tracked body released its peer slot in `on_chunk_fetched`.
+        Ok(requested_at.is_some())
+    }
+
+    /// Direct for Publish and the term ledgers when this offset has a local
+    /// placement. Submit, an unknown ledger, and a missing or unreadable
+    /// placement use ingress, which keeps the missing-index handling.
+    fn delivery_route(
+        &self,
+        storage_module_id: usize,
+        chunk_offset: PartitionChunkOffset,
+    ) -> DeliveryRoute {
+        let Some(orchestrator) = self.chunk_orchestrators.get(&storage_module_id) else {
+            return DeliveryRoute::Ingress;
+        };
+        match DataLedger::try_from(orchestrator.ledger_id()) {
+            Ok(DataLedger::Publish | DataLedger::OneYear | DataLedger::ThirtyDay) => {}
+            Ok(DataLedger::Submit) | Err(_) => return DeliveryRoute::Ingress,
+        }
+        match self.local_placement(storage_module_id, chunk_offset) {
+            Some((data_root, tx_offset, data_size)) => DeliveryRoute::Direct {
+                data_root,
+                tx_offset,
+                data_size,
+            },
+            None => DeliveryRoute::Ingress,
+        }
+    }
+
+    /// Data root, tx offset, and data size indexed at `chunk_offset`. `None`
+    /// when nothing is placed there or the index cannot be read.
+    fn local_placement(
+        &self,
+        storage_module_id: usize,
+        chunk_offset: PartitionChunkOffset,
+    ) -> Option<(DataRoot, TxChunkOffset, u64)> {
+        let sm = storage_module_by_id(&self.storage_modules.read().unwrap(), storage_module_id)?;
+        let placement = irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
+            sm.data_root_and_tx_offset_span(chunk_offset, chunk_offset)
+        });
+        placement.ok()?.into_iter().next().flatten()
     }
 
     /// Penalize the peer for a body it delivered and retry the offset from
@@ -1100,6 +1294,14 @@ impl DataSyncServiceInner {
         requested_at: Instant,
         result: Result<UnpackedChunk, DeliveryError>,
     ) -> eyre::Result<()> {
+        // A field mismatch is the peer's fault only if the placement it was
+        // checked against is still the one indexed here.
+        let placement_moved = match &result {
+            Err(DeliveryError::PlacementMismatch { expected, .. }) => {
+                self.local_placement(storage_module_id, chunk_offset) != Some(*expected)
+            }
+            _ => false,
+        };
         let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) else {
             debug!(
                 storage_module.id = storage_module_id,
@@ -1122,6 +1324,12 @@ impl DataSyncServiceInner {
         let unpacked_chunk = match result {
             Ok(unpacked) => unpacked,
             Err(error) => {
+                if placement_moved {
+                    orchestrator.requeue_after_local_write_failure(chunk_offset)?;
+                    return Err(eyre::eyre!(
+                        "the placement at offset {chunk_offset} changed while its body was in delivery; retrying without blaming the peer: {error}"
+                    ));
+                }
                 if error.is_peer_fault() {
                     self.reject_delivered_body(storage_module_id, chunk_offset, peer_addr)?;
                 } else {
@@ -3251,6 +3459,301 @@ mod peer_chunk_validation_tests {
             request.request_state
         );
     }
+
+    struct RouteHarness {
+        inner: DataSyncServiceInner,
+        sm: Arc<StorageModule>,
+        data_sync_rx: UnboundedReceiver<Traced<DataSyncServiceMessage>>,
+        /// `IngestChunk` messages that reached ingress.
+        ingested: Arc<std::sync::atomic::AtomicUsize>,
+        chunk: UnpackedChunk,
+    }
+
+    /// One storage module on `ledger` with a one-chunk tx at offset 0. With
+    /// `index` false the offset has a data-root row but no placement.
+    /// The second value is the temp dir; keep it alive for the test.
+    fn route_harness(ledger: DataLedger, index: bool) -> (RouteHarness, impl Sized) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let config = Config::new_with_random_peer_id(super::sync_test_node_config(tmp.path(), 4));
+        let sm = Arc::new(
+            StorageModule::new(
+                &StorageModuleInfo {
+                    id: 0,
+                    partition_assignment: Some(PartitionAssignment {
+                        ledger_id: Some(ledger.into()),
+                        slot_index: Some(0),
+                        miner_address: IrysAddress::from([1_u8; 20]),
+                        partition_hash: H256::random(),
+                    }),
+                    submodules: vec![(partition_chunk_offset_ie!(0, 4), "chunks".into())],
+                },
+                &config,
+            )
+            .expect("storage module"),
+        );
+        sm.pack_with_zeros();
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let tx = signer
+            .create_transaction(vec![3_u8; 32], H256::zero())
+            .expect("tx");
+        let tx = signer.sign_transaction(tx).expect("sign");
+        let chunk = tx.data_chunks().expect("chunk").remove(0);
+        if index {
+            let (_root, proofs) = irys_types::DataTransactionLedger::merklize_tx_root(
+                std::slice::from_ref(&tx.header),
+            );
+            sm.index_transaction_data(
+                &tx.header,
+                &proofs[0].proof,
+                LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+                0,
+            )
+            .expect("index tx");
+        } else {
+            let (_, submodule) = sm
+                .get_submodule_for_offset(PartitionChunkOffset::from(0_u32))
+                .expect("submodule");
+            submodule
+                .db
+                .update(|db_tx| {
+                    db_tx.add_data_root_info(
+                        chunk.data_root,
+                        &DataRootInfo {
+                            start_offset: RelativeChunkOffset::from(0_i32),
+                            data_size: chunk.data_size,
+                        },
+                    )
+                })
+                .expect("index data root");
+        }
+
+        let env = open_or_create_db(
+            tmp.path().join("db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        )
+        .expect("db");
+        let (service_senders, receivers) = ServiceSenders::new();
+        let mut ingress_rx = receivers.chunk_ingress;
+        let ingested = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&ingested);
+        tokio::spawn(async move {
+            while let Some(traced) = ingress_rx.recv().await {
+                let (msg, _span) = traced.into_parts();
+                if let ChunkIngressMessage::IngestChunk(_, Some(reply), _) = msg {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        });
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        {
+            use irys_testing_utils::IrysBlockHeaderTestExt as _;
+            genesis.test_sign();
+        }
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let peer_list = PeerList::from_peers(
+            Vec::new(),
+            service_senders.peer_network.clone(),
+            &config,
+            tokio::sync::broadcast::channel(8).0,
+        )
+        .expect("peer list");
+        let factory: crate::chunk_fetcher::ChunkFetcherFactory =
+            Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize)));
+        let inner = DataSyncServiceInner::new(
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree))),
+            Arc::new(RwLock::new(vec![sm.clone()])),
+            peer_list,
+            DatabaseProvider(Arc::new(env)),
+            factory,
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        );
+        let harness = RouteHarness {
+            inner,
+            sm,
+            data_sync_rx: receivers.data_sync,
+            ingested,
+            chunk,
+        };
+        (harness, tmp)
+    }
+
+    #[tokio::test]
+    async fn the_route_follows_the_ledger_and_the_local_placement() {
+        let offset = PartitionChunkOffset::from(0_u32);
+        for ledger in [
+            DataLedger::Publish,
+            DataLedger::OneYear,
+            DataLedger::ThirtyDay,
+        ] {
+            let (h, _tmp) = route_harness(ledger, true);
+            assert_eq!(
+                h.inner.delivery_route(h.sm.id, offset),
+                super::DeliveryRoute::Direct {
+                    data_root: h.chunk.data_root,
+                    tx_offset: h.chunk.tx_offset,
+                    data_size: h.chunk.data_size,
+                },
+                "{ledger:?} with a placement writes directly"
+            );
+        }
+        let (submit, _tmp_submit) = route_harness(DataLedger::Submit, true);
+        assert_eq!(
+            submit.inner.delivery_route(submit.sm.id, offset),
+            super::DeliveryRoute::Ingress,
+            "Submit keeps the compact-leaf fence"
+        );
+        let (unplaced, _tmp_unplaced) = route_harness(DataLedger::ThirtyDay, false);
+        assert_eq!(
+            unplaced.inner.delivery_route(unplaced.sm.id, offset),
+            super::DeliveryRoute::Ingress,
+            "no placement: ingress keeps the missing-index handling"
+        );
+    }
+
+    /// A ThirtyDay body is written to the storage module without touching
+    /// ingress. A Submit body still goes through ingress.
+    #[tokio::test]
+    async fn a_term_ledger_body_is_written_without_ingress() {
+        use std::sync::atomic::Ordering;
+
+        let offset = PartitionChunkOffset::from(0_u32);
+        let peer = IrysAddress::from([9_u8; 20]);
+        for (ledger, expected_ingress) in [(DataLedger::ThirtyDay, 0), (DataLedger::Submit, 1)] {
+            let (mut h, _tmp) = route_harness(ledger, true);
+            mark_requested(&mut h.inner, h.sm.id, offset, peer);
+            let chunk = ChunkFormat::Unpacked(h.chunk.clone());
+            deliver(
+                &mut h.inner,
+                &mut h.data_sync_rx,
+                h.sm.id,
+                offset,
+                peer,
+                chunk,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{ledger:?} body is stored: {error}"));
+            assert!(
+                h.sm.is_data_write_pending_at(offset),
+                "{ledger:?} body reached the storage module"
+            );
+            assert_eq!(
+                h.ingested.load(Ordering::SeqCst),
+                expected_ingress,
+                "{ledger:?} ingress messages"
+            );
+        }
+    }
+
+    /// The direct route checks the body against this offset's placement. A
+    /// body that disagrees on data size is the peer's fault.
+    /// A rollback can change the placement while a body is in delivery. A
+    /// body that no longer matches the captured placement is then retried
+    /// without blaming the peer, which may have served the new chunk.
+    #[tokio::test]
+    async fn a_placement_change_during_delivery_does_not_blame_the_peer() {
+        let offset = PartitionChunkOffset::from(0_u32);
+        let peer = IrysAddress::from([9_u8; 20]);
+        let (mut h, _tmp) = route_harness(DataLedger::ThirtyDay, true);
+        mark_requested(&mut h.inner, h.sm.id, offset, peer);
+        let other = UnpackedChunk {
+            data_size: h.chunk.data_size + 1,
+            ..h.chunk.clone()
+        };
+        h.inner
+            .on_chunk_completed(h.sm.id, offset, peer, ChunkFormat::Unpacked(other))
+            .expect("completion");
+        h.sm.rollback_unassigned_range(offset, offset, &[h.chunk.data_root])
+            .expect("rollback");
+
+        let (msg, _span) = h.data_sync_rx.recv().await.expect("result").into_parts();
+        let DataSyncServiceMessage::ChunkIngressed {
+            storage_module_id,
+            chunk_offset,
+            peer_address,
+            requested_at,
+            result,
+        } = msg
+        else {
+            panic!("expected ChunkIngressed");
+        };
+        let error = h
+            .inner
+            .on_chunk_ingressed(
+                storage_module_id,
+                chunk_offset,
+                peer_address,
+                requested_at,
+                result,
+            )
+            .expect_err("the body is not stored");
+        assert!(error.to_string().contains("placement"), "{error}");
+        let request = &h.inner.chunk_orchestrators[&h.sm.id].chunk_requests[&offset];
+        assert!(
+            !request.excluded.contains(&peer),
+            "the peer is not blamed for a placement that moved"
+        );
+        assert!(matches!(request.request_state, ChunkRequestState::Pending));
+    }
+
+    #[tokio::test]
+    async fn a_direct_body_that_misses_the_placement_is_rejected() {
+        use std::sync::atomic::Ordering;
+
+        let offset = PartitionChunkOffset::from(0_u32);
+        let peer = IrysAddress::from([9_u8; 20]);
+        let (mut h, _tmp) = route_harness(DataLedger::ThirtyDay, true);
+        let wrong_size = UnpackedChunk {
+            data_size: h.chunk.data_size + 1,
+            ..h.chunk.clone()
+        };
+        mark_requested(&mut h.inner, h.sm.id, offset, peer);
+        let error = deliver(
+            &mut h.inner,
+            &mut h.data_sync_rx,
+            h.sm.id,
+            offset,
+            peer,
+            ChunkFormat::Unpacked(wrong_size),
+        )
+        .await
+        .expect_err("a body for another data size must not be stored");
+        assert!(error.to_string().contains("data_size"), "{error}");
+        assert!(!h.sm.is_data_write_pending_at(offset));
+        assert!(
+            h.inner.chunk_orchestrators[&h.sm.id].chunk_requests[&offset]
+                .excluded
+                .contains(&peer),
+            "the peer is penalized"
+        );
+
+        let bad_bytes = UnpackedChunk {
+            bytes: Base64(vec![0_u8; 32]),
+            ..h.chunk.clone()
+        };
+        mark_requested(&mut h.inner, h.sm.id, offset, peer);
+        let error = deliver(
+            &mut h.inner,
+            &mut h.data_sync_rx,
+            h.sm.id,
+            offset,
+            peer,
+            ChunkFormat::Unpacked(bad_bytes),
+        )
+        .await
+        .expect_err("bytes that miss the leaf hash must not be stored");
+        assert!(
+            error.to_string().contains("leaf") || error.to_string().contains("hash"),
+            "{error}"
+        );
+        assert!(!h.sm.is_data_write_pending_at(offset));
+        assert_eq!(h.ingested.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[cfg(test)]
@@ -4363,6 +4866,8 @@ mod assignment_follow_tests {
         use crate::chunk_ingress_service::{ChunkIngressError, CriticalChunkIngressError};
 
         let mut t = pipelined();
+        // This test counts the slots each body releases.
+        t.inner.refill_on_release = false;
         assert_eq!(t.slots(), (0, 20, 0, 0), "a fresh peer may fill 20 slots");
         t.inner.tick().expect("first tick");
         assert_eq!(t.slots().0, 20);
@@ -4498,6 +5003,8 @@ mod assignment_follow_tests {
     #[tokio::test]
     async fn ingress_permits_and_the_held_body_limit_bound_the_pipeline() {
         let mut t = pipelined();
+        // This test counts the slots that stay free across the held-body limit.
+        t.inner.refill_on_release = false;
         t.inner.delivery.ingress_permits = Arc::new(tokio::sync::Semaphore::new(2));
         t.inner.max_delivered_bodies = 3;
         t.inner.tick().expect("tick");
@@ -4545,8 +5052,77 @@ mod assignment_follow_tests {
         assert_eq!(t.slots().3, 0);
     }
 
+    /// A slot freed while the held-body limit holds dispatch back is filled
+    /// when a body finishes, not at the next tick.
+    #[tokio::test]
+    async fn a_finished_body_refills_a_slot_the_held_limit_held_back() {
+        let mut t = pipelined();
+        t.inner.max_delivered_bodies = 1;
+        t.inner.tick().expect("tick");
+        let first = t.requested();
+        assert_eq!(first.len(), 20);
+
+        let body = t.chunks[0].clone();
+        t.complete(first[0], body).await;
+        assert_eq!(
+            t.slots().0,
+            19,
+            "the held-body limit keeps the freed slot idle"
+        );
+
+        let (_, reply) = t.next_ingress().await;
+        reply.send(Ok(())).expect("reply");
+        t.apply_results(1).await;
+        assert_eq!(
+            t.slots().0,
+            20,
+            "the finished body's result refilled the slot"
+        );
+    }
+
+    /// A finished request's slot is used at once, not at the next tick.
+    #[tokio::test]
+    async fn a_released_slot_is_refilled_without_waiting_for_the_tick() {
+        let mut t = pipelined();
+        t.inner.tick().expect("tick");
+        let first = t.requested();
+        assert_eq!(first.len(), 20, "the tick fills the allowance");
+
+        // A 404 frees its slot. The next offset goes out at once.
+        t.inner
+            .handle_message(DataSyncServiceMessage::ChunkFailed {
+                storage_module_id: t.sm_id,
+                chunk_offset: first[0],
+                peer_addr: t.assignee,
+                failure_kind: super::chunk_fetcher::ChunkFetchFailureKind::NotFound,
+            })
+            .await
+            .expect("failure");
+        let after_404 = t.requested();
+        assert_eq!(
+            after_404.len(),
+            20,
+            "the freed slot was used before any tick"
+        );
+        assert!(!after_404.contains(&first[0]));
+        assert_eq!(t.slots().0, 20);
+
+        // A delivered body frees its slot on arrival, before ingress answers.
+        let body = t.chunks[1].clone();
+        t.complete(first[1], body).await;
+        let after_body = t.requested();
+        assert_eq!(
+            after_body.len(),
+            21,
+            "the delivered offset waits on ingress, and its slot already went out again"
+        );
+        assert!(t.state(first[1]).1, "the delivered body is in ingress");
+        assert_eq!(t.slots().0, 20, "the peer is back at its allowance");
+    }
+
     /// A body no request is waiting for still reaches ingress, which writes it
-    /// to any module with a writeable offset. No result comes back for it.
+    /// to any module with a writeable offset. No result comes back for it, and
+    /// it frees no slot, so nothing new is dispatched.
     #[tokio::test]
     async fn an_untracked_body_still_reaches_ingress() {
         let mut t = pipelined();

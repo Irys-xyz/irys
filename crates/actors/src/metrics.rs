@@ -46,6 +46,8 @@ irys_utils::define_metrics! {
     counter DATA_SYNC_ATTEMPTS("irys.data_sync.attempts_total", "Data sync scheduling attempts by ledger and fresh/retry class");
     counter DATA_SYNC_UNIQUE_OFFSETS_ATTEMPTED("irys.data_sync.unique_offsets_attempted_total", "Offsets attempted for the first time in the current in-memory scheduler lifecycle");
     counter DATA_SYNC_PEERS_EXHAUSTED("irys.data_sync.peer_cycles_exhausted_total", "Offsets delayed after exhausting all currently eligible peers");
+    counter DATA_SYNC_DELIVERY_ROUTE("irys.data_sync.delivery_route_total", "Peer bodies by how they reach the storage module: ingress (Submit, or no local placement) or direct");
+    counter DATA_SYNC_HINT_SKIPPED("irys.data_sync.hint_skipped_chunks_total", "Local Entropy offsets the scan skipped because every assignee answered without them");
     gauge DATA_SYNC_READY("irys.data_sync.ready_work", "Ready data sync offsets by ledger and storage module");
     gauge DATA_SYNC_FETCHING("irys.data_sync.fetching_work", "Fetching data sync offsets by ledger and storage module");
     gauge DATA_SYNC_DELAYED("irys.data_sync.delayed_work", "Delayed data sync offsets by ledger and storage module");
@@ -235,6 +237,9 @@ pub(crate) fn record_cache_prune_pass(tally: &crate::cache_service::PruneTally) 
         ("kept_not_durable", tally.not_durable),
         ("kept_no_ingress_hash", tally.no_ingress_hash),
         ("kept_root_not_migrated", tally.root_not_migrated),
+        ("root_no_record", tally.root_no_record),
+        ("root_no_txids", tally.root_no_txids),
+        ("root_not_migrated_placed", tally.root_not_migrated_placed),
         ("kept_unreadable", tally.unreadable),
         ("kept_unplaced", tally.unplaced_kept()),
     ] {
@@ -453,6 +458,24 @@ pub(crate) fn record_data_sync_unique_offset_attempted(ledger_id: u32) {
 
 pub(crate) fn record_data_sync_peers_exhausted(ledger_id: u32) {
     DATA_SYNC_PEERS_EXHAUSTED.add(1, &[KeyValue::new("ledger", i64::from(ledger_id))]);
+}
+
+pub(crate) fn record_data_sync_delivery_route(route: &'static str) {
+    DATA_SYNC_DELIVERY_ROUTE.add(1, &[KeyValue::new("route", route)]);
+}
+
+pub(crate) fn record_data_sync_hint_skipped(ledger_id: u32, chunks: u64) {
+    #[cfg(test)]
+    HINT_SKIPPED_TEST.fetch_add(chunks, std::sync::atomic::Ordering::Relaxed);
+    DATA_SYNC_HINT_SKIPPED.add(chunks, &[KeyValue::new("ledger", i64::from(ledger_id))]);
+}
+
+#[cfg(test)]
+static HINT_SKIPPED_TEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn test_hint_skipped_count() -> u64 {
+    HINT_SKIPPED_TEST.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub(crate) fn record_data_sync_retry_delay(ledger_id: u32, delay: std::time::Duration) {
