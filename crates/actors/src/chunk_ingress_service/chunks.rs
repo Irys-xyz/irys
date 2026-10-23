@@ -158,10 +158,20 @@ pub fn select_data_size_from_storage_modules(
     }
 }
 
+/// What the storage-module pass did with a chunk's placements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleWrites {
+    /// Written, skipped, or not assigned to any module.
+    Settled,
+    /// Nothing written: another write still occupies every placement, and
+    /// that write may yet fail.
+    InFlight,
+}
+
 async fn write_chunk_to_assigned_modules(
     modules: &[Arc<StorageModule>],
     chunk: &UnpackedChunk,
-) -> Result<(), ChunkIngressError> {
+) -> Result<ModuleWrites, ChunkIngressError> {
     let mut wrote_any = false;
     let mut in_flight = false;
     for sm in modules {
@@ -222,8 +232,9 @@ async fn write_chunk_to_assigned_modules(
             tx_offset = %chunk.tx_offset,
             "chunk placement already in flight; treating as written"
         );
+        return Ok(ModuleWrites::InFlight);
     }
-    Ok(())
+    Ok(ModuleWrites::Settled)
 }
 
 /// HTTP API ingest (the only path holding an admission guard) is the
@@ -253,13 +264,17 @@ fn chunk_offered_at_served_size(
     Arc::new(offered)
 }
 
+/// An in-flight placement is accepted but not remembered: if the occupying
+/// write fails, its sender's retry must reach the storage modules rather
+/// than the `recent_valid_chunks` early return.
 async fn remember_after_module_writes(
     recent_valid_chunks: &RwLock<LruCache<ChunkPathHash, ()>>,
     chunk_path_hash: ChunkPathHash,
-    write_result: Result<(), ChunkIngressError>,
+    write_result: Result<ModuleWrites, ChunkIngressError>,
 ) -> Result<(), ChunkIngressError> {
-    write_result?;
-    recent_valid_chunks.write().await.put(chunk_path_hash, ());
+    if write_result? == ModuleWrites::Settled {
+        recent_valid_chunks.write().await.put(chunk_path_hash, ());
+    }
     Ok(())
 }
 
@@ -1756,6 +1771,7 @@ mod tests {
 
     /// A second ingress while another write still occupies the offset must
     /// succeed. The body is already in the cache, so the sender should stop.
+    /// The path hash is not remembered: the occupying write may still fail.
     #[tokio::test]
     async fn in_flight_duplicate_write_returns_ok() -> eyre::Result<()> {
         use irys_domain::{StorageModule, StorageModuleInfo};
@@ -1767,6 +1783,7 @@ mod tests {
             partition::PartitionAssignment, partition_chunk_offset_ii,
         };
         use nodit::interval::ii;
+        use std::num::NonZeroUsize;
         use std::thread::JoinHandle;
         use std::time::Duration;
 
@@ -1857,9 +1874,19 @@ mod tests {
             storage_module.has_in_flight_index_for(&chunk),
             "precondition: the first write must still be queued"
         );
-        write_chunk_to_assigned_modules(&[Arc::clone(&storage_module)], &chunk)
-            .await
-            .expect("an in-flight duplicate must not be rejected as Overloaded");
+        let path_hash = chunk.chunk_path_hash();
+        let recent = RwLock::new(LruCache::new(NonZeroUsize::new(8).expect("nonzero")));
+        remember_after_module_writes(
+            &recent,
+            path_hash,
+            write_chunk_to_assigned_modules(&[Arc::clone(&storage_module)], &chunk).await,
+        )
+        .await
+        .expect("an in-flight duplicate must not be rejected as Overloaded");
+        assert!(
+            !recent.read().await.contains(&path_hash),
+            "the occupying sender's retry must not stop at recent_valid_chunks"
+        );
         assert!(
             storage_module.has_in_flight_index_for(&chunk),
             "the second call must not clear the in-flight placement"
@@ -1869,6 +1896,114 @@ mod tests {
         assert!(
             !storage_module.has_in_flight_index_for(&chunk),
             "the occupancy mark is gone once the first write finishes"
+        );
+        Ok(())
+    }
+
+    /// A duplicate accepted while another write occupies the offset must not
+    /// absorb that write's retry. When the occupying write fails, its
+    /// sender's retry reaches the storage module and writes the offset.
+    #[tokio::test]
+    async fn retry_after_a_failed_occupying_write_writes_the_offset() -> eyre::Result<()> {
+        use irys_domain::{StorageModule, StorageModuleInfo, StorageModulesReadGuard};
+        use irys_types::{
+            DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+            DataTransactionMetadata, LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset,
+            ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ii,
+        };
+        use nodit::interval::ii;
+        use std::time::Duration;
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-failed-occupier-retry")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let chunk = valid_single_chunk(vec![9_u8; 32]);
+        insert_confirmed_cdr(&inner.irys_db, chunk.data_root, chunk.data_size);
+        let storage_module = Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: inner.config.node_config.miner_address(),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+            },
+            &inner.config,
+        )?);
+        storage_module.pack_with_zeros();
+        storage_module.force_sync_pending_chunks()?;
+        let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root: chunk.data_root,
+                data_size: chunk.data_size,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        storage_module.index_transaction_data(
+            &data_tx,
+            &vec![5, 6, 7, 8],
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        inner.storage_modules_guard = StorageModulesReadGuard::new(Arc::new(
+            std::sync::RwLock::new(vec![Arc::clone(&storage_module)]),
+        ));
+        let offset = PartitionChunkOffset::from(0_u32);
+
+        storage_module.hold_ingress_after_occupy_for_test();
+        let module = Arc::clone(&storage_module);
+        let queued = chunk.clone();
+        let occupier = std::thread::spawn(move || module.write_data_chunk(&queued));
+        assert!(
+            storage_module.ingress_occupy_hold_arrived_for_test(Duration::from_secs(5)),
+            "the occupying write did not stop after taking the offset"
+        );
+        inner
+            .ingest_chunk(
+                Arc::new(chunk.clone()),
+                PendingDrainRole::External,
+                ChunkBroadcastMode::Announce,
+            )
+            .await
+            .map_err(|failure| failure.error)?;
+
+        // A pause after occupancy makes the held write stale.
+        storage_module.pause_data_writes();
+        storage_module.resume_data_writes();
+        storage_module.release_ingress_occupy_hold_for_test();
+        let occupied = occupier.join().expect("occupying writer thread");
+        assert!(
+            matches!(
+                occupied,
+                Err(irys_domain::WriteDataChunkError::WritesPaused)
+            ),
+            "the occupying write must fail after occupancy, got {occupied:?}"
+        );
+        assert!(!storage_module.is_data_write_pending_at(offset));
+        assert!(!storage_module.is_data_chunk_durable_at(offset));
+
+        inner
+            .ingest_chunk(
+                Arc::new(chunk),
+                PendingDrainRole::External,
+                ChunkBroadcastMode::Announce,
+            )
+            .await
+            .map_err(|failure| failure.error)?;
+        assert!(
+            storage_module.is_data_write_pending_at(offset)
+                || storage_module.is_data_chunk_durable_at(offset),
+            "the retry must write the offset"
         );
         Ok(())
     }

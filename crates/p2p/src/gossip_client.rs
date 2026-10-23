@@ -438,9 +438,10 @@ impl GossipClient {
     }
 
     /// Admit one pull. `probe` grants a half-open trial even when the open
-    /// cooldown has not elapsed. The source-peer body pull is that probe:
-    /// an authenticated header proves the peer can reach us, and this dial
-    /// is the proof that we can reach them. Network fan-out passes `false`.
+    /// cooldown has not elapsed. The source-peer body pull and the
+    /// announced-chunk fetch are that probe: an authenticated header or
+    /// announcement proves the peer can reach us, and this dial is the proof
+    /// that we can reach them. Network fan-out passes `false`.
     fn admit_pull(&self, peer: &IrysPeerId, probe: bool) -> GossipResult<()> {
         let allowed = if probe {
             self.circuit_breaker.begin_probe(peer)
@@ -2099,8 +2100,9 @@ impl GossipClient {
         }
     }
 
-    /// Fetch an announced chunk from one source. Breaker-gated and scored
-    /// like any pull. `Ok(None)`: the source no longer has the body.
+    /// Fetch an announced chunk from one source. Scored like any pull, and
+    /// admitted as a recovery probe: the announcement proves the source
+    /// reached us. `Ok(None)`: the source no longer has the body.
     pub(crate) async fn fetch_chunk(
         &self,
         peer_id: &IrysPeerId,
@@ -2108,7 +2110,7 @@ impl GossipClient {
         announcement: &crate::wire_types::ChunkAnnouncement,
         peer_list: &PeerList,
     ) -> GossipResult<Option<UnpackedChunk>> {
-        self.admit_pull(peer_id, false)?;
+        self.admit_pull(peer_id, true)?;
         let url = format!(
             "{}{}",
             gossip_base_url(address, ProtocolVersion::V2),
