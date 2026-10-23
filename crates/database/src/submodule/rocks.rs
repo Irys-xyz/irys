@@ -2550,15 +2550,16 @@ impl RocksSubmoduleStore {
 
     /// Delete presence rows in each inclusive span.
     ///
-    /// A span wider than [`DELETE_SUBRANGE_OFFSETS`] is one synced batch per
-    /// sub-span. The batch still holds the content keys for that sub-span only.
+    /// Consecutive pieces share one synced batch while their offset count stays
+    /// within [`DELETE_SUBRANGE_OFFSETS`]. The batch holds the content keys for
+    /// that group only.
     pub(super) fn delete_presence_ranges(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
     ) -> eyre::Result<PresenceReconcile> {
         let mut total = PresenceReconcile::default();
-        for piece in presence_subspans(self, ranges)? {
-            let part = self.delete_presence_ranges_one(&[piece])?;
+        for group in group_presence_pieces(presence_subspans(self, ranges)?) {
+            let part = self.delete_presence_ranges_one(&group)?;
             total.path_hash_rows = total.path_hash_rows.saturating_add(part.path_hash_rows);
             total.data_path_rows = total.data_path_rows.saturating_add(part.data_path_rows);
         }
@@ -2650,15 +2651,15 @@ impl RocksSubmoduleStore {
 
     /// Drop proof rows in each span. Keep a checksum-only row.
     ///
-    /// A span wider than [`DELETE_SUBRANGE_OFFSETS`] is one synced batch per
-    /// sub-span, same as [`Self::delete_presence_ranges`].
+    /// Consecutive pieces share one synced batch under the same offset bound as
+    /// [`Self::delete_presence_ranges`].
     fn retain_entropy_crc_rows(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
     ) -> eyre::Result<PresenceReconcile> {
         let mut total = PresenceReconcile::default();
-        for piece in presence_subspans(self, ranges)? {
-            let part = self.retain_entropy_crc_rows_one(&[piece])?;
+        for group in group_presence_pieces(presence_subspans(self, ranges)?) {
+            let part = self.retain_entropy_crc_rows_one(&group)?;
             total.path_hash_rows = total.path_hash_rows.saturating_add(part.path_hash_rows);
             total.data_path_rows = total.data_path_rows.saturating_add(part.data_path_rows);
         }
@@ -4410,6 +4411,30 @@ fn presence_subspans(
     } else {
         Ok(Vec::new())
     }
+}
+
+/// Consecutive pieces share one batch while the summed offset count stays
+/// within [`DELETE_SUBRANGE_OFFSETS`]. A group is never wider than that, so
+/// one commit cannot hold more content keys than the bound allows.
+fn group_presence_pieces(
+    pieces: Vec<(PartitionChunkOffset, PartitionChunkOffset)>,
+) -> Vec<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> {
+    let mut groups = Vec::new();
+    let mut group = Vec::new();
+    let mut offsets = 0_u32;
+    for piece in pieces {
+        let width = piece.1.0.saturating_sub(piece.0.0).saturating_add(1);
+        if !group.is_empty() && offsets.saturating_add(width) > DELETE_SUBRANGE_OFFSETS {
+            groups.push(std::mem::take(&mut group));
+            offsets = 0;
+        }
+        offsets = offsets.saturating_add(width);
+        group.push(piece);
+    }
+    if !group.is_empty() {
+        groups.push(group);
+    }
+    groups
 }
 
 fn contiguous_pieces(pieces: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> bool {
@@ -10868,6 +10893,82 @@ mod tests {
         assert_eq!(
             commits, 3,
             "entropy retain of 3 * {limit} offsets used {commits} commits"
+        );
+        Ok(())
+    }
+
+    /// Many small disjoint spans share one commit. Spans whose offset count
+    /// exceeds [`DELETE_SUBRANGE_OFFSETS`] take another.
+    #[test]
+    fn disjoint_presence_spans_share_a_commit_until_the_offset_limit() -> eyre::Result<()> {
+        let limit = DELETE_SUBRANGE_OFFSETS;
+        let small: Vec<_> = (0..8_u32)
+            .map(|index| {
+                let offset = index * 2;
+                (
+                    PartitionChunkOffset::from(offset),
+                    PartitionChunkOffset::from(offset),
+                )
+            })
+            .collect();
+        let seed = |store: &RocksSubmoduleStore,
+                    spans: &[(PartitionChunkOffset, PartitionChunkOffset)]|
+         -> eyre::Result<()> {
+            for (index, (start, end)) in spans.iter().copied().enumerate() {
+                place_span(
+                    store,
+                    start.0,
+                    end.0,
+                    H256::repeat_byte(u8::try_from(index).unwrap_or(1).saturating_add(1)),
+                    0,
+                    1,
+                    u32::try_from(index).unwrap_or(0),
+                    &[start.0],
+                    None,
+                )?;
+            }
+            Ok(())
+        };
+
+        let dropped = temp_dir("submodule_rocks_disjoint_drop_commits");
+        let store = RocksSubmoduleStore::open(dropped.path().join("index"))?;
+        seed(&store, &small)?;
+        let before = store.wal_sync_count();
+        store.drop_presence_in_ranges(&small)?;
+        let commits = store.wal_sync_count() - before;
+        assert_eq!(commits, 1, "8 one-offset spans used {commits} drop commits");
+
+        let retained = temp_dir("submodule_rocks_disjoint_retain_commits");
+        let store = RocksSubmoduleStore::open(retained.path().join("index"))?;
+        seed(&store, &small)?;
+        let before = store.wal_sync_count();
+        store.retain_entropy_crc_rows(&small)?;
+        let commits = store.wal_sync_count() - before;
+        assert_eq!(
+            commits, 1,
+            "8 one-offset spans used {commits} retain commits"
+        );
+
+        let wide_start = limit + 10;
+        let wide = [
+            (
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(limit - 1),
+            ),
+            (
+                PartitionChunkOffset::from(wide_start),
+                PartitionChunkOffset::from(wide_start + limit - 1),
+            ),
+        ];
+        let wide_dropped = temp_dir("submodule_rocks_disjoint_wide_commits");
+        let store = RocksSubmoduleStore::open(wide_dropped.path().join("index"))?;
+        seed(&store, &wide)?;
+        let before = store.wal_sync_count();
+        store.drop_presence_in_ranges(&wide)?;
+        let commits = store.wal_sync_count() - before;
+        assert!(
+            commits > 1,
+            "spans totaling more than {limit} offsets used {commits} commits"
         );
         Ok(())
     }
