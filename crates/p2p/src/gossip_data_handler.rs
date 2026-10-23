@@ -293,13 +293,12 @@ where
         if decision == AnnounceDecision::OverCapacity {
             return Err(GossipError::RateLimited);
         }
-        self.cache.record_seen(announcer, key)?;
         if decision == AnnounceDecision::StartFetch {
             let handler = Arc::clone(self);
             self.runtime_handle
                 .spawn(handler.run_chunk_fetch(announcement).in_current_span());
         }
-        Ok(())
+        self.cache.record_seen(announcer, key)
     }
 
     /// One fetch task per claim (design, "The fetch task").
