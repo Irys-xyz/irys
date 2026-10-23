@@ -166,12 +166,20 @@ pub enum DeliveryError {
     /// The node failed, not the peer: an unpack panic or a timeout. The
     /// offset is requeued without blaming the peer.
     Local(String),
+    /// Direct route: the body names a different data root, tx offset, or data
+    /// size than the placement captured when it arrived. The peer is at fault
+    /// only if that placement is still current; a rollback in between means
+    /// the peer may have served the new chunk correctly.
+    PlacementMismatch {
+        expected: (DataRoot, TxChunkOffset, u64),
+        detail: String,
+    },
 }
 
 impl DeliveryError {
     fn is_peer_fault(&self) -> bool {
         match self {
-            Self::InvalidBody(_) => true,
+            Self::InvalidBody(_) | Self::PlacementMismatch { .. } => true,
             Self::Ingress(error) => ingress_error_is_invalid_peer_data(error),
             Self::Local(_) => false,
         }
@@ -184,6 +192,7 @@ impl std::fmt::Display for DeliveryError {
             Self::InvalidBody(error) => write!(f, "invalid peer chunk: {error}"),
             Self::Ingress(error) => write!(f, "chunk ingress rejected the body: {error}"),
             Self::Local(error) => write!(f, "{error}"),
+            Self::PlacementMismatch { detail, .. } => write!(f, "invalid peer chunk: {detail}"),
         }
     }
 }
@@ -221,10 +230,13 @@ fn check_against_placement(
         || unpacked.tx_offset != tx_offset
         || unpacked.data_size != data_size
     {
-        return Err(DeliveryError::InvalidBody(format!(
-            "fetched data_root {} tx_offset {} data_size {} does not match the local data_root {data_root} tx_offset {tx_offset} data_size {data_size}",
-            unpacked.data_root, unpacked.tx_offset, unpacked.data_size,
-        )));
+        return Err(DeliveryError::PlacementMismatch {
+            expected: (data_root, tx_offset, data_size),
+            detail: format!(
+                "fetched data_root {} tx_offset {} data_size {} does not match the local data_root {data_root} tx_offset {tx_offset} data_size {data_size}",
+                unpacked.data_root, unpacked.tx_offset, unpacked.data_size,
+            ),
+        });
     }
     validate_peer_unpacked_chunk(&unpacked, chunk_size)
         .map_err(|error| DeliveryError::InvalidBody(error.to_string()))?;
@@ -789,6 +801,9 @@ impl DataSyncServiceInner {
                         "Failed to handle chunk ingress result: {e:?}"
                     );
                 }
+                // A finished body freed a held-body place. A slot released
+                // while that limit was reached is filled now, not at the tick.
+                self.dispatch_after_release();
             }
             DataSyncServiceMessage::ChunkFailed {
                 storage_module_id,
@@ -1175,12 +1190,14 @@ impl DataSyncServiceInner {
         let held = HeldBody::new(&pipeline.held_bodies);
         self.runtime_handle.spawn(
             async move {
-                let _held = held;
                 let result = settle_delivery(
                     process_delivered_body(chunk, route, &pipeline),
                     pipeline.timeout,
                 )
                 .await;
+                // Release the held-body place before the result is sent, so
+                // the refill that handles it can count this body as gone.
+                drop(held);
                 let Some(requested_at) = requested_at else {
                     if let Err(error) = result {
                         debug!("untracked data-sync body was not accepted: {error}");
@@ -1218,18 +1235,7 @@ impl DataSyncServiceInner {
             Ok(DataLedger::Publish | DataLedger::OneYear | DataLedger::ThirtyDay) => {}
             Ok(DataLedger::Submit) | Err(_) => return DeliveryRoute::Ingress,
         }
-        let Some(sm) =
-            storage_module_by_id(&self.storage_modules.read().unwrap(), storage_module_id)
-        else {
-            return DeliveryRoute::Ingress;
-        };
-        let placement = irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
-            sm.data_root_and_tx_offset_span(chunk_offset, chunk_offset)
-        });
-        match placement
-            .ok()
-            .and_then(|span| span.into_iter().next().flatten())
-        {
+        match self.local_placement(storage_module_id, chunk_offset) {
             Some((data_root, tx_offset, data_size)) => DeliveryRoute::Direct {
                 data_root,
                 tx_offset,
@@ -1237,6 +1243,20 @@ impl DataSyncServiceInner {
             },
             None => DeliveryRoute::Ingress,
         }
+    }
+
+    /// Data root, tx offset, and data size indexed at `chunk_offset`. `None`
+    /// when nothing is placed there or the index cannot be read.
+    fn local_placement(
+        &self,
+        storage_module_id: usize,
+        chunk_offset: PartitionChunkOffset,
+    ) -> Option<(DataRoot, TxChunkOffset, u64)> {
+        let sm = storage_module_by_id(&self.storage_modules.read().unwrap(), storage_module_id)?;
+        let placement = irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
+            sm.data_root_and_tx_offset_span(chunk_offset, chunk_offset)
+        });
+        placement.ok()?.into_iter().next().flatten()
     }
 
     /// Penalize the peer for a body it delivered and retry the offset from
@@ -1274,6 +1294,14 @@ impl DataSyncServiceInner {
         requested_at: Instant,
         result: Result<UnpackedChunk, DeliveryError>,
     ) -> eyre::Result<()> {
+        // A field mismatch is the peer's fault only if the placement it was
+        // checked against is still the one indexed here.
+        let placement_moved = match &result {
+            Err(DeliveryError::PlacementMismatch { expected, .. }) => {
+                self.local_placement(storage_module_id, chunk_offset) != Some(*expected)
+            }
+            _ => false,
+        };
         let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) else {
             debug!(
                 storage_module.id = storage_module_id,
@@ -1296,6 +1324,12 @@ impl DataSyncServiceInner {
         let unpacked_chunk = match result {
             Ok(unpacked) => unpacked,
             Err(error) => {
+                if placement_moved {
+                    orchestrator.requeue_after_local_write_failure(chunk_offset)?;
+                    return Err(eyre::eyre!(
+                        "the placement at offset {chunk_offset} changed while its body was in delivery; retrying without blaming the peer: {error}"
+                    ));
+                }
                 if error.is_peer_fault() {
                     self.reject_delivered_body(storage_module_id, chunk_offset, peer_addr)?;
                 } else {
@@ -3618,6 +3652,55 @@ mod peer_chunk_validation_tests {
 
     /// The direct route checks the body against this offset's placement. A
     /// body that disagrees on data size is the peer's fault.
+    /// A rollback can change the placement while a body is in delivery. A
+    /// body that no longer matches the captured placement is then retried
+    /// without blaming the peer, which may have served the new chunk.
+    #[tokio::test]
+    async fn a_placement_change_during_delivery_does_not_blame_the_peer() {
+        let offset = PartitionChunkOffset::from(0_u32);
+        let peer = IrysAddress::from([9_u8; 20]);
+        let (mut h, _tmp) = route_harness(DataLedger::ThirtyDay, true);
+        mark_requested(&mut h.inner, h.sm.id, offset, peer);
+        let other = UnpackedChunk {
+            data_size: h.chunk.data_size + 1,
+            ..h.chunk.clone()
+        };
+        h.inner
+            .on_chunk_completed(h.sm.id, offset, peer, ChunkFormat::Unpacked(other))
+            .expect("completion");
+        h.sm.rollback_unassigned_range(offset, offset, &[h.chunk.data_root])
+            .expect("rollback");
+
+        let (msg, _span) = h.data_sync_rx.recv().await.expect("result").into_parts();
+        let DataSyncServiceMessage::ChunkIngressed {
+            storage_module_id,
+            chunk_offset,
+            peer_address,
+            requested_at,
+            result,
+        } = msg
+        else {
+            panic!("expected ChunkIngressed");
+        };
+        let error = h
+            .inner
+            .on_chunk_ingressed(
+                storage_module_id,
+                chunk_offset,
+                peer_address,
+                requested_at,
+                result,
+            )
+            .expect_err("the body is not stored");
+        assert!(error.to_string().contains("placement"), "{error}");
+        let request = &h.inner.chunk_orchestrators[&h.sm.id].chunk_requests[&offset];
+        assert!(
+            !request.excluded.contains(&peer),
+            "the peer is not blamed for a placement that moved"
+        );
+        assert!(matches!(request.request_state, ChunkRequestState::Pending));
+    }
+
     #[tokio::test]
     async fn a_direct_body_that_misses_the_placement_is_rejected() {
         use std::sync::atomic::Ordering;
@@ -4967,6 +5050,34 @@ mod assignment_follow_tests {
         );
         assert!(!request.excluded.contains(&t.assignee));
         assert_eq!(t.slots().3, 0);
+    }
+
+    /// A slot freed while the held-body limit holds dispatch back is filled
+    /// when a body finishes, not at the next tick.
+    #[tokio::test]
+    async fn a_finished_body_refills_a_slot_the_held_limit_held_back() {
+        let mut t = pipelined();
+        t.inner.max_delivered_bodies = 1;
+        t.inner.tick().expect("tick");
+        let first = t.requested();
+        assert_eq!(first.len(), 20);
+
+        let body = t.chunks[0].clone();
+        t.complete(first[0], body).await;
+        assert_eq!(
+            t.slots().0,
+            19,
+            "the held-body limit keeps the freed slot idle"
+        );
+
+        let (_, reply) = t.next_ingress().await;
+        reply.send(Ok(())).expect("reply");
+        t.apply_results(1).await;
+        assert_eq!(
+            t.slots().0,
+            20,
+            "the finished body's result refilled the slot"
+        );
     }
 
     /// A finished request's slot is used at once, not at the next tick.

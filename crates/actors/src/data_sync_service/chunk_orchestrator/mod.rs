@@ -827,6 +827,14 @@ impl ChunkOrchestrator {
             return;
         };
 
+        // Answers describe one slot. After a move to another slot of the same
+        // ledger they say nothing about the new one. Reset before this tick's
+        // scan, even while hints are idle: a move repacks the partition.
+        if self.hint_slot != pa.slot_index {
+            self.assignee_intervals = AssigneeIntervals::new(HINT_FRONTIER_MARGIN);
+            self.hint_slot = pa.slot_index;
+            self.hints_idle = false;
+        }
         let assignees = self.current_assignees();
         if !self.hints_idle {
             let hint_head = self.hint_head(*max_chunk_offset, ledger_head);
@@ -1106,12 +1114,6 @@ impl ChunkOrchestrator {
         else {
             return;
         };
-        // Answers describe one slot. After a move to another slot of the
-        // same ledger they say nothing about the new one.
-        if self.hint_slot != Some(slot_index) {
-            self.assignee_intervals = AssigneeIntervals::new(HINT_FRONTIER_MARGIN);
-            self.hint_slot = Some(slot_index);
-        }
         let reverse = self.prioritizes_write_frontier();
         let planned = self.assignee_intervals.plan_fetches(
             assignees,

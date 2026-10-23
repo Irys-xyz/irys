@@ -3542,6 +3542,26 @@ async fn a_slot_change_drops_the_old_slots_hints() {
     );
 }
 
+/// A slot change resets hints before the scan even while hints are idle, so
+/// the new slot's Entropy is not skipped on the old slot's answers.
+#[test_log::test(tokio::test)]
+async fn a_slot_change_resets_hints_even_while_idle() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 64);
+    let (mut orch, assignee) = submit_orchestrator_with_hint(&config, (0, 59), vec![(0, 7)]);
+    orch.hint_slot = Some(9);
+    orch.hints_idle = true;
+
+    orch.populate_request_queue_at(Instant::now());
+
+    assert!(!orch.assignee_intervals.excludes(&assignee, 30));
+    assert_eq!(
+        tracked_in(&orch, 8..=59),
+        (8..=59).collect::<Vec<_>>(),
+        "nothing was skipped on the old slot's answers"
+    );
+}
+
 /// The frontier margin applies only while the ledger's head is inside this
 /// partition. A partition the ledger has filled is hinted to its last offset.
 #[test_log::test(tokio::test)]
