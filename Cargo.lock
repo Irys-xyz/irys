@@ -5273,6 +5273,7 @@ dependencies = [
  "tempfile",
  "test-fuzz",
  "test-log",
+ "tokio",
  "tracing",
 ]
 
