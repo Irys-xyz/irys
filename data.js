@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792735607754,
+  "lastUpdate": 1792759176017,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -18727,6 +18727,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9b33af4c70982c15b9359e8d77f88606e41e8cf3",
+          "message": "fix(validation): bind the PoA partition to the block miner (#1689)\n\n* fix(validation): require the PoA partition to belong to the block miner\n\nEntropy is a public function of (miner, partition, offset), so the capacity\nbranch of `poa_is_valid` accepted a PoA over any partition hash, pledged or\nnot. An unstaked key could mine invented partitions and keep the rewards.\n\n- `PoAPartitionNotOwned`: the partition must be assigned to the block miner\n  in the parent epoch snapshot.\n- `PoALedgerMismatch`: a data PoA's ledger must be the partition's ledger.\n\nBoth checks run in `prevalidate_block` (trusted sync skips `poa_is_valid`)\nand in `poa_is_valid`. The producer drops a solution over a partition the\nparent snapshot does not assign to it. Tests now stake and pledge peers that\nproduce blocks.\n\n* test(validation): cover ownership in isolation and at epoch boundaries\n\n- An unstaked key packing entropy for an invented partition is rejected by\n  `PoAPartitionNotOwned` alone: prevalidation accepts the same block once the\n  partition is assigned to that key. An evil strategy skips the producer's\n  ownership check; the block is re-signed by the unstaked key.\n- A block at the epoch height is checked against the pre-epoch snapshot, so a\n  partition first assigned at that epoch is rejected, and the producer skips it.\n- A partition unpledged at an epoch is owned on the epoch block's parent\n  snapshot and gone on the child of the epoch block: the producer skips it and\n  a block built anyway is rejected.\n\n* refactor(producer): reuse the validator's ownership check\n\nThe producer carried its own copy of the ownership rule and read the parent\nepoch snapshot twice. It now reads the snapshot once and calls\n`poa_partition_is_owned_by_miner`, which takes the partition hash so callers\nwithout a `PoaData` can use it.\n\n* test(partition-recovery): keep each doc comment on its own helper\n\n* test(validation): rename the unassigned zero-hash case\n\n* refactor(validation): name the data-PoA test and both checks\n\n`PoaData::is_data_poa` replaces the repeated data_path/tx_path/ledger_id\ntest. The prevalidation debug label now names both ownership checks.\n\n* test(chain-tests): mine until stake and pledge are included\n\n`stake_and_pledge_peers` assumed both commitments land in the next block. It\nnow mines until every one is included, then to the assigning epoch. The posting\nhalf is a shared helper, which the partition-recovery tests reuse in place of\ntheir own copy.",
+          "timestamp": "2026-10-23T13:21:01+01:00",
+          "tree_id": "7e2c93d7203179133d072e4ba1aef67f06fe61f2",
+          "url": "https://github.com/Irys-xyz/irys/commit/9b33af4c70982c15b9359e8d77f88606e41e8cf3"
+        },
+        "date": 1792759174089,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.01192,
+            "range": "± 0.000137",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119646,
+            "range": "± 0.001697",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.201039,
+            "range": "± 0.022766",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.889797,
+            "range": "± 0.044238",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074617,
+            "range": "± 0.000152",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 746.652648,
+            "range": "± 1.983322",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 981.129812,
+            "range": "± 29.80634",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.147284,
+            "range": "± 0.002582",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1235.501825,
+            "range": "± 110.019331",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1576.701835,
+            "range": "± 82.79328",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.032426,
+            "range": "± 0.002688",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.668452,
+            "range": "± 0.214717",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.592069,
+            "range": "± 2.490995",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000124,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
