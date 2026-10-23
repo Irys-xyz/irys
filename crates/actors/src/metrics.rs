@@ -237,6 +237,9 @@ pub(crate) fn record_cache_prune_pass(tally: &crate::cache_service::PruneTally) 
         ("kept_not_durable", tally.not_durable),
         ("kept_no_ingress_hash", tally.no_ingress_hash),
         ("kept_root_not_migrated", tally.root_not_migrated),
+        ("root_no_record", tally.root_no_record),
+        ("root_no_txids", tally.root_no_txids),
+        ("root_not_migrated_placed", tally.root_not_migrated_placed),
         ("kept_unreadable", tally.unreadable),
         ("kept_unplaced", tally.unplaced_kept()),
     ] {
