@@ -1,9 +1,9 @@
 use crate::ApiState;
 use crate::error::ApiError;
-use actix_web::web::{Data, Json, Path};
+use actix_web::web::{Data, Json, Path, Query};
 use awc::http::StatusCode;
 use irys_domain::{ChunkType, StorageModule};
-use irys_types::{DataLedger, H256};
+use irys_types::{DataLedger, H256, PartitionChunkOffset, ii};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -24,7 +24,21 @@ pub struct StorageIntervalsParams {
     chunk_type: ChunkType,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+/// Optional window for [`INTERVALS_ROUTE`]. Both bounds are partition-relative
+/// and inclusive. With neither set the route returns the whole list, as it
+/// always has. Data sync on a peer reads a window ahead of its scan cursor.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct StorageIntervalsQuery {
+    start: Option<u32>,
+    end: Option<u32>,
+}
+
+/// Most intervals one windowed response carries. Past this the response
+/// stops early and [`StorageIntervalsResponse::range`] says how far it got,
+/// so the caller asks for the rest from there.
+pub const MAX_INTERVALS_PER_WINDOW: usize = 32_768;
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChunkInterval {
     start: u32,
@@ -38,6 +52,15 @@ pub struct StorageIntervalsResponse {
     slot_index: usize,
     chunk_type: ChunkType,
     intervals: Vec<ChunkInterval>,
+    /// Windowed requests only: the span this answer is complete for. Its end
+    /// is below the requested end when [`MAX_INTERVALS_PER_WINDOW`] cut it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    range: Option<ChunkInterval>,
+    /// Windowed requests only: whether this node has a storage module for
+    /// the ledger slot. Without it an empty list cannot be told apart from a
+    /// node that is not assigned the slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assigned: Option<bool>,
 }
 
 impl StorageIntervalsResponse {
@@ -47,6 +70,8 @@ impl StorageIntervalsResponse {
             slot_index: params.slot_index,
             chunk_type: params.chunk_type,
             intervals,
+            range: None,
+            assigned: None,
         }
     }
 }
@@ -93,26 +118,95 @@ fn module_intervals(sm: &StorageModule, chunk_type: ChunkType) -> Vec<ChunkInter
         .collect()
 }
 
+/// Intervals of `chunk_type` that overlap `[start, end]`, clipped to it, with
+/// touching runs merged. Returns them with the last offset the answer is
+/// complete through: `end`, or less when `max` intervals were reached.
+///
+/// Reads the stored label runs, so a body still in the pending-write buffer
+/// shows up after its flush. Only the overlapping runs are visited.
+fn module_intervals_in_window(
+    sm: &StorageModule,
+    chunk_type: ChunkType,
+    start: u32,
+    end: u32,
+    max: usize,
+) -> (Vec<ChunkInterval>, u32) {
+    // At least one, so a capped answer always reports a run and moves forward.
+    let max = max.max(1);
+    let runs = sm.label_runs();
+    let query = ii(
+        PartitionChunkOffset::from(start),
+        PartitionChunkOffset::from(end),
+    );
+    let mut intervals: Vec<ChunkInterval> = Vec::new();
+    for (interval, kind) in runs.overlapping(query) {
+        if *kind != chunk_type {
+            continue;
+        }
+        let run_start = (*interval.start()).max(start);
+        let run_end = (*interval.end()).min(end);
+        if let Some(last) = intervals.last_mut()
+            && last.end.checked_add(1) == Some(run_start)
+        {
+            last.end = run_end;
+            continue;
+        }
+        if intervals.len() == max {
+            // Everything up to the previous run is reported. The caller
+            // resumes from here.
+            return (intervals, run_start - 1);
+        }
+        intervals.push(ChunkInterval {
+            start: run_start,
+            end: run_end,
+        });
+    }
+    (intervals, end)
+}
+
 pub async fn get_intervals(
     params: Path<StorageIntervalsParams>,
+    query: Query<StorageIntervalsQuery>,
     app_state: Data<ApiState>,
 ) -> Result<Json<StorageIntervalsResponse>, ApiError> {
     let storage_modules = app_state.chunk_provider.storage_modules_guard.read();
 
-    let intervals = storage_modules
-        .iter()
-        .find(|sm| {
-            sm.partition_assignment()
-                .map(|pa| {
-                    pa.ledger_id == Some(params.ledger.into())
-                        && pa.slot_index == Some(params.slot_index)
-                })
-                .unwrap_or(false)
-        })
-        .map(|sm| module_intervals(sm, params.chunk_type))
-        .unwrap_or_default();
+    let storage_module = storage_modules.iter().find(|sm| {
+        sm.partition_assignment()
+            .map(|pa| {
+                pa.ledger_id == Some(params.ledger.into())
+                    && pa.slot_index == Some(params.slot_index)
+            })
+            .unwrap_or(false)
+    });
 
-    Ok(Json(StorageIntervalsResponse::new(&params, intervals)))
+    if query.start.is_none() && query.end.is_none() {
+        let intervals = storage_module
+            .map(|sm| module_intervals(sm, params.chunk_type))
+            .unwrap_or_default();
+        return Ok(Json(StorageIntervalsResponse::new(&params, intervals)));
+    }
+
+    let start = query.start.unwrap_or(0);
+    let end = query.end.unwrap_or(u32::MAX);
+    if start > end {
+        return Err(ApiError::CustomWithStatus(
+            format!("interval window start {start} is above end {end}"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let (intervals, covered_end) = storage_module
+        .map(|sm| {
+            module_intervals_in_window(sm, params.chunk_type, start, end, MAX_INTERVALS_PER_WINDOW)
+        })
+        .unwrap_or((Vec::new(), end));
+    let mut response = StorageIntervalsResponse::new(&params, intervals);
+    response.range = Some(ChunkInterval {
+        start,
+        end: covered_end,
+    });
+    response.assigned = Some(storage_module.is_some());
+    Ok(Json(response))
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -364,6 +458,72 @@ mod tests {
         assert_eq!(object["chunkType"], "Data");
         assert_eq!(object["intervals"][0]["start"], 0);
         assert_eq!(object["intervals"][0]["end"], 3);
+    }
+
+    /// A plain request must stay byte-for-byte what older callers parse.
+    #[actix_web::test]
+    async fn unwindowed_response_omits_the_window_fields() {
+        let params: StorageIntervalsParams = serde_json::from_value(serde_json::json!({
+            "ledger": "ThirtyDay",
+            "slot_index": 0,
+            "chunk_type": "Data",
+        }))
+        .expect("params");
+        let value = serde_json::to_value(StorageIntervalsResponse::new(&params, vec![]))
+            .expect("serialise");
+        let object = value.as_object().expect("object");
+        assert!(!object.contains_key("range"));
+        assert!(!object.contains_key("assigned"));
+    }
+
+    #[actix_web::test]
+    async fn window_query_parses_alongside_the_path() {
+        async fn echo_query(query: Query<StorageIntervalsQuery>) -> Json<StorageIntervalsQuery> {
+            Json(query.into_inner())
+        }
+        let app = test::init_service(App::new().service(
+            web::scope(crate::API_VERSION).route(INTERVALS_ROUTE, web::get().to(echo_query)),
+        ))
+        .await;
+        let req = test::TestRequest::get()
+            .uri("/v1/storage/intervals/ThirtyDay/0/Data?start=10&end=20")
+            .to_request();
+        let body = test::read_body(app.call(req).await.expect("call")).await;
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+        assert_eq!(parsed, serde_json::json!({"start": 10, "end": 20}));
+    }
+
+    #[actix_web::test]
+    async fn windowed_intervals_clip_merge_and_stop_at_the_cap() {
+        let tmp_dir = TempDirBuilder::new().prefix("windowed_intervals").build();
+        let config = storage_test_config(tmp_dir.path().to_path_buf());
+        let module =
+            module_with_assignment(0, &config, capacity_assignment_for(&config, H256::random()));
+        module.pack_with_zeros();
+        for offset in [2_u32, 3, 4, 8, 9, 15, 16, 17] {
+            module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![0xd4; 32],
+                ChunkType::Data,
+            );
+        }
+        module.force_sync_pending_chunks().expect("sync");
+        let pairs = |intervals: &[ChunkInterval]| -> Vec<(u32, u32)> {
+            intervals.iter().map(|i| (i.start, i.end)).collect()
+        };
+
+        let (all, covered) = module_intervals_in_window(&module, ChunkType::Data, 3, 16, 8);
+        assert_eq!(pairs(&all), vec![(3, 4), (8, 9), (15, 16)]);
+        assert_eq!(covered, 16);
+
+        let (capped, covered) = module_intervals_in_window(&module, ChunkType::Data, 0, 19, 2);
+        assert_eq!(pairs(&capped), vec![(2, 4), (8, 9)]);
+        assert_eq!(covered, 14, "complete through the gap before the next run");
+
+        let (rest, covered) =
+            module_intervals_in_window(&module, ChunkType::Data, covered + 1, 19, 2);
+        assert_eq!(pairs(&rest), vec![(15, 17)]);
+        assert_eq!(covered, 19);
     }
 
     // === Partition-hash-keyed intervals ===

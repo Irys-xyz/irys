@@ -1626,6 +1626,7 @@ async fn publish_entropy_scan_keeps_the_cursor_inside_a_clipped_entropy_run() {
     let mut probes = 0_usize;
     let mut requests_to_add = 100_usize;
     let stop = orch.consume_entropy_scan(
+        &[],
         0,
         far_end,
         false,
@@ -3250,4 +3251,144 @@ async fn body_in_ingress_survives_peer_removal_and_slot_sweep() {
         orch.chunk_requests[&in_flight].request_state,
         ChunkRequestState::Pending
     ));
+}
+
+// === Assignee interval hints ===
+
+fn submit_orchestrator_with_hint(
+    config: &Config,
+    covers: (u32, u32),
+    data: Vec<(u32, u32)>,
+) -> (ChunkOrchestrator, IrysAddress) {
+    let sm = packed_sm_for_ledger(config, 64, DataLedger::Submit);
+    let mut orch = make_orchestrator_with_ledger_total(sm, config, DataLedger::Submit, 64);
+    let assignee = add_assigned_peer(&mut orch, config, 21, 9121);
+    orch.assignee_intervals = AssigneeIntervals::new(4);
+    orch.assignee_intervals
+        .insert_known(assignee, covers, data, Instant::now());
+    (orch, assignee)
+}
+
+fn tracked_in(orch: &ChunkOrchestrator, range: std::ops::RangeInclusive<u32>) -> Vec<u32> {
+    let mut tracked: Vec<u32> = range
+        .filter(|value| {
+            orch.chunk_requests
+                .contains_key(&PartitionChunkOffset::from(*value))
+        })
+        .collect();
+    tracked.sort_unstable();
+    tracked
+}
+
+/// The assignee answered for 0..=59 and holds only 0..=7. The scan queues the
+/// unanswered frontier band and the claimed run, and jumps over 8..=59.
+#[test_log::test(tokio::test)]
+async fn the_scan_skips_entropy_no_assignee_holds() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 64);
+    let (mut orch, _) = submit_orchestrator_with_hint(&config, (0, 59), vec![(0, 7)]);
+    let before = metrics::test_hint_skipped_count();
+
+    orch.populate_request_queue_at(Instant::now());
+
+    assert_eq!(tracked_in(&orch, 60..=63), vec![60, 61, 62, 63]);
+    assert_eq!(tracked_in(&orch, 0..=7), (0..=7).collect::<Vec<_>>());
+    assert!(
+        tracked_in(&orch, 8..=59).is_empty(),
+        "no assignee holds 8..=59 and no signer is in the peer set"
+    );
+    assert_eq!(orch.scan_cursor, u32::MAX, "the scan reached the bottom");
+    assert!(metrics::test_hint_skipped_count() >= before + 52);
+}
+
+/// Without an answer from every assignee nothing is skipped.
+#[test_log::test(tokio::test)]
+async fn one_silent_assignee_means_every_offset_is_probed() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 64);
+    let (mut orch, _) = submit_orchestrator_with_hint(&config, (0, 59), vec![(0, 7)]);
+    add_assigned_peer(&mut orch, &config, 22, 9122);
+
+    orch.populate_request_queue_at(Instant::now());
+
+    assert_eq!(tracked_in(&orch, 0..=63).len(), 64);
+}
+
+/// Dispatch picks another peer over an assignee that answered without the
+/// offset, and never asks that assignee once it is the only one left.
+#[test_log::test(tokio::test)]
+async fn dispatch_does_not_ask_an_assignee_that_answered_without_the_offset() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 64);
+    let sm = packed_sm(&config, 64);
+    let db = open_test_db(&config);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm, &config, db);
+    let absent = add_assigned_peer(&mut orch, &config, 23, 9123);
+    orch.assignee_intervals = AssigneeIntervals::new(0);
+    orch.assignee_intervals
+        .insert_known(absent, (0, 63), vec![(40, 63)], Instant::now());
+    let other = add_assigned_peer(&mut orch, &config, 24, 9124);
+    let offset = PartitionChunkOffset::from(5);
+    insert_pending(&mut orch, offset);
+
+    assert!(orch.dispatch_next());
+    wait_for_ledger_requests(&fetcher, 1).await;
+    let asked: Vec<u16> = fetcher
+        .request_log
+        .read()
+        .unwrap()
+        .iter()
+        .map(|(_, api)| api.port())
+        .collect();
+    assert_eq!(asked, vec![9124]);
+    assert!(matches!(
+        orch.chunk_requests[&offset].request_state,
+        ChunkRequestState::Requested(peer, _) if peer == other
+    ));
+
+    orch.remove_peer(other);
+    orch.chunk_requests.get_mut(&offset).unwrap().request_state = ChunkRequestState::Pending;
+    orch.chunk_requests
+        .get_mut(&offset)
+        .unwrap()
+        .excluded
+        .clear();
+    orch.ready_offsets.push_back(offset);
+    assert!(!orch.dispatch_next());
+    assert!(
+        matches!(
+            orch.chunk_requests[&offset].request_state,
+            ChunkRequestState::Delayed { .. }
+        ),
+        "the only peer left answered without it: delay, do not ask"
+    );
+    assert_eq!(fetcher.request_log.read().unwrap().len(), 1);
+}
+
+/// A signer in the peer set still gets a few unclaimed offsets per tick.
+#[test_log::test(tokio::test)]
+async fn unclaimed_offsets_trickle_to_signers() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 64);
+    let (mut orch, _) = submit_orchestrator_with_hint(&config, (0, 59), vec![(0, 7)]);
+    let other_slot = PartitionAssignment {
+        ledger_id: Some(DataLedger::Submit.into()),
+        slot_index: Some(9),
+        miner_address: IrysAddress::from([25_u8; 20]),
+        partition_hash: H256::random(),
+    };
+    add_peer_with_assignment(&mut orch, &config, 25, 9125, other_slot);
+
+    orch.populate_request_queue_at(Instant::now());
+
+    assert_eq!(
+        tracked_in(&orch, 8..=59),
+        vec![56, 57, 58, 59],
+        "highest first on a term ledger, a handful per tick"
+    );
+    orch.populate_request_queue_at(Instant::now());
+    assert_eq!(
+        tracked_in(&orch, 8..=59),
+        vec![52, 53, 54, 55, 56, 57, 58, 59]
+    );
 }

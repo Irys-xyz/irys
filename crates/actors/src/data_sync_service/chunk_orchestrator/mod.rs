@@ -1,7 +1,14 @@
 use crate::{
-    DataSyncServiceMessage, chunk_fetcher::ChunkFetcher,
+    DataSyncServiceMessage,
+    chunk_fetcher::{ChunkFetchError, ChunkFetcher, DataIntervalsPage},
     chunk_migration_service::validate_chunk_for_migration,
-    data_sync_service::peer_bandwidth_manager::PeerBandwidthManager, metrics,
+    data_sync_service::{
+        assignee_intervals::{
+            self, AssigneeIntervals, Coverage, HINT_FRONTIER_MARGIN, HINT_PAGE_TIMEOUT, WindowFetch,
+        },
+        peer_bandwidth_manager::PeerBandwidthManager,
+    },
+    metrics,
     services::ServiceSenders,
 };
 use irys_database::{cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _};
@@ -201,6 +208,14 @@ fn write_error_label(error: &WriteDataChunkError) -> &'static str {
 /// Minimum gap between entropy-interval scans for an orchestrator without peers.
 const ENTROPY_PEER_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Entropy offsets no assignee holds that are queued per tick for the
+/// ingress-proof signers in the peer set. Signers are the only peers that can
+/// serve them, and only for a data root this node has indexed.
+const UNCLAIMED_ENQUEUE_PER_TICK: usize = 4;
+
+/// Chunks of the Entropy map the unclaimed pass visits per tick.
+const UNCLAIMED_SCAN_CHUNKS: usize = 4_096;
+
 /// Orchestrates efficient chunk downloading for a StorageModule's assigned data partition.
 ///
 /// Key responsibilities:
@@ -266,6 +281,12 @@ pub struct ChunkOrchestrator {
     fail_coverage_read: bool,
     /// Local-cache lookups since the last [`Self::prepare_tick`].
     cache_lookups_this_tick: u32,
+    /// What each assignee reports holding. The scan skips Entropy no assignee
+    /// claims, and dispatch does not ask an assignee for an offset it answered
+    /// without.
+    pub(crate) assignee_intervals: AssigneeIntervals,
+    /// Next offset the unclaimed pass looks at, in scan direction.
+    unclaimed_cursor: u32,
 }
 impl ChunkOrchestrator {
     pub fn new(
@@ -377,6 +398,12 @@ impl ChunkOrchestrator {
             #[cfg(test)]
             fail_coverage_read: false,
             cache_lookups_this_tick: 0,
+            assignee_intervals: AssigneeIntervals::new(HINT_FRONTIER_MARGIN),
+            unclaimed_cursor: if Self::ledger_prioritizes_write_frontier(ledger_id) {
+                u32::MAX
+            } else {
+                0
+            },
         }
     }
 
@@ -790,6 +817,9 @@ impl ChunkOrchestrator {
             return;
         };
 
+        let assignees = self.current_assignees();
+        self.plan_assignee_interval_fetches(&assignees, *max_chunk_offset, now);
+
         let max_requests = self.config.data_sync.max_pending_chunk_requests as usize;
         let mut requests_to_add = max_requests.saturating_sub(hot_count);
         // A full hot budget has nothing new to queue. Do not walk entropy intervals.
@@ -844,6 +874,7 @@ impl ChunkOrchestrator {
                     break;
                 }
                 if self.consume_entropy_scan(
+                    &assignees,
                     range_start,
                     range_end,
                     true,
@@ -872,6 +903,7 @@ impl ChunkOrchestrator {
                     break;
                 }
                 if self.consume_entropy_scan(
+                    &assignees,
                     range_start,
                     range_end,
                     false,
@@ -886,6 +918,7 @@ impl ChunkOrchestrator {
                 }
             }
         }
+        self.enqueue_unclaimed_slowly(&assignees, max_offset, now, &mut requests_to_add);
     }
 
     /// Walk one query window. Returns true when this tick must stop.
@@ -897,6 +930,7 @@ impl ChunkOrchestrator {
     /// the returned run is only a prefix of its interval.
     fn consume_entropy_scan(
         &mut self,
+        assignees: &[IrysAddress],
         range_start: u32,
         range_end: u32,
         reverse: bool,
@@ -915,44 +949,44 @@ impl ChunkOrchestrator {
             budget,
         );
         let mut stop = false;
-        if reverse {
-            for (start, end) in scan.runs {
-                for interval_step in (start..=end).rev() {
-                    if self.note_scan_offset(
-                        interval_step,
-                        max_offset,
-                        true,
-                        now,
-                        probes,
-                        max_probes,
-                        requests_to_add,
-                    ) {
-                        stop = true;
-                        break;
-                    }
-                }
-                if stop {
-                    break;
-                }
+        'runs: for (start, end) in scan.runs {
+            let mut segments = self.assignee_intervals.segments(assignees, start, end);
+            if reverse {
+                segments.reverse();
             }
-        } else {
-            for (start, end) in scan.runs {
-                for interval_step in start..=end {
+            for (segment_start, segment_end, coverage) in segments {
+                if coverage == Coverage::Unclaimed {
+                    if self.skip_unclaimed(
+                        segment_start,
+                        segment_end,
+                        max_offset,
+                        reverse,
+                        probes,
+                        max_probes,
+                    ) {
+                        stop = true;
+                        break 'runs;
+                    }
+                    continue;
+                }
+                for step in 0..=segment_end - segment_start {
+                    let interval_step = if reverse {
+                        segment_end - step
+                    } else {
+                        segment_start + step
+                    };
                     if self.note_scan_offset(
                         interval_step,
                         max_offset,
-                        false,
+                        reverse,
                         now,
                         probes,
                         max_probes,
                         requests_to_add,
                     ) {
                         stop = true;
-                        break;
+                        break 'runs;
                     }
-                }
-                if stop {
-                    break;
                 }
             }
         }
@@ -966,6 +1000,230 @@ impl ChunkOrchestrator {
             return true;
         }
         false
+    }
+
+    /// Move the scan past an Entropy span every assignee answered without,
+    /// queueing none of it. Each skipped offset counts as a probe, so a tick
+    /// visits no more of the map than it would while probing.
+    fn skip_unclaimed(
+        &mut self,
+        start: u32,
+        end: u32,
+        max_offset: u32,
+        reverse: bool,
+        probes: &mut usize,
+        max_probes: usize,
+    ) -> bool {
+        let span = usize::try_from(end - start)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
+        *probes = probes.saturating_add(span);
+        self.scan_cursor =
+            resume_scan_cursor(if reverse { start } else { end }, max_offset, reverse);
+        metrics::record_data_sync_hint_skipped(self.ledger_id, span as u64);
+        *probes >= max_probes
+    }
+
+    /// Queue a few Entropy offsets no assignee holds, so the ingress-proof
+    /// signers in the peer set are still asked for them. Dispatch does not send
+    /// these to an assignee that answered without them. Runs only while the
+    /// peer set has a peer that is not an assignee.
+    fn enqueue_unclaimed_slowly(
+        &mut self,
+        assignees: &[IrysAddress],
+        max_offset: u32,
+        now: Instant,
+        requests_to_add: &mut usize,
+    ) {
+        if *requests_to_add == 0
+            || !self
+                .current_peers
+                .iter()
+                .any(|peer| !assignees.contains(peer))
+        {
+            return;
+        }
+        let reverse = self.prioritizes_write_frontier();
+        let mut left = UNCLAIMED_ENQUEUE_PER_TICK.min(*requests_to_add);
+        let mut chunks = UNCLAIMED_SCAN_CHUNKS;
+        let cursor = self.unclaimed_cursor.min(max_offset);
+        let ranges = if reverse {
+            [(0, cursor), (cursor.saturating_add(1), max_offset)]
+        } else if cursor == 0 {
+            [(0, max_offset), (1, 0)]
+        } else {
+            [(cursor, max_offset), (0, cursor - 1)]
+        };
+        for (range_start, range_end) in ranges {
+            if range_start > range_end {
+                continue;
+            }
+            let scan = entropy_scan_runs(
+                &self.storage_module,
+                range_start,
+                range_end,
+                reverse,
+                chunks,
+            );
+            for (start, end) in scan.runs {
+                chunks = chunks.saturating_sub(
+                    usize::try_from(end - start)
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(1),
+                );
+                let mut segments = self.assignee_intervals.segments(assignees, start, end);
+                if reverse {
+                    segments.reverse();
+                }
+                for (segment_start, segment_end, coverage) in segments {
+                    if coverage != Coverage::Unclaimed {
+                        let edge = if reverse { segment_start } else { segment_end };
+                        self.unclaimed_cursor = resume_scan_cursor(edge, max_offset, reverse);
+                        continue;
+                    }
+                    for step in 0..=segment_end - segment_start {
+                        let offset = if reverse {
+                            segment_end - step
+                        } else {
+                            segment_start + step
+                        };
+                        self.unclaimed_cursor = resume_scan_cursor(offset, max_offset, reverse);
+                        let offset = PartitionChunkOffset::from(offset);
+                        if self.is_entropy(offset) && self.enqueue_pending(offset, now, false) {
+                            left -= 1;
+                            *requests_to_add -= 1;
+                            if left == 0 {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            if scan.interval_budget_spent
+                && let Some(edge) = scan.visited_edge
+            {
+                self.unclaimed_cursor = resume_scan_cursor(edge, max_offset, reverse);
+                return;
+            }
+            if chunks == 0 {
+                return;
+            }
+        }
+    }
+
+    /// Peers in the current set that are assigned this ledger slot. Only their
+    /// interval answers decide what the scan may skip.
+    fn current_assignees(&self) -> Vec<IrysAddress> {
+        let slot_index = self
+            .storage_module
+            .partition_assignment()
+            .and_then(|pa| pa.slot_index);
+        let Ok(peers) = self.active_sync_peers.read() else {
+            return Vec::new();
+        };
+        self.current_peers
+            .iter()
+            .copied()
+            .filter(|address| {
+                peers
+                    .get(address)
+                    .is_some_and(|peer| peer.is_assigned_to(self.ledger_id, slot_index))
+            })
+            .collect()
+    }
+
+    /// Start the interval fetches that are due. Each answer comes back as
+    /// [`DataSyncServiceMessage::AssigneeIntervalsFetched`].
+    fn plan_assignee_interval_fetches(
+        &mut self,
+        assignees: &[IrysAddress],
+        max_offset: u32,
+        now: Instant,
+    ) {
+        let Some(slot_index) = self
+            .storage_module
+            .partition_assignment()
+            .and_then(|pa| pa.slot_index)
+        else {
+            return;
+        };
+        let reverse = self.prioritizes_write_frontier();
+        let planned = self.assignee_intervals.plan_fetches(
+            assignees,
+            self.scan_cursor,
+            max_offset,
+            reverse,
+            now,
+        );
+        for fetch in planned {
+            let api = self
+                .active_sync_peers
+                .read()
+                .ok()
+                .and_then(|peers| peers.get(&fetch.peer).map(|peer| peer.peer_address.api));
+            let Some(api) = api else {
+                self.assignee_intervals.on_fetched(
+                    fetch,
+                    max_offset,
+                    Err(ChunkFetchError::NetworkError {
+                        message: "peer left the peer set".to_string(),
+                    }),
+                    now,
+                );
+                continue;
+            };
+            let fetcher = Arc::clone(&self.chunk_fetcher);
+            let tx = self.service_senders.data_sync.clone();
+            let storage_module_id = self.storage_module.id;
+            self.runtime_handle.spawn(
+                async move {
+                    let result = assignee_intervals::fetch_window(
+                        &*fetcher,
+                        slot_index,
+                        fetch.start,
+                        fetch.end,
+                        api,
+                        HINT_PAGE_TIMEOUT,
+                    )
+                    .await;
+                    let _ = tx.send_traced(DataSyncServiceMessage::AssigneeIntervalsFetched {
+                        storage_module_id,
+                        fetch,
+                        head: max_offset,
+                        result,
+                    });
+                }
+                .instrument(tracing::Span::current()),
+            );
+        }
+    }
+
+    /// An assignee's interval answer arrived.
+    pub fn on_assignee_intervals(
+        &mut self,
+        fetch: WindowFetch,
+        head: u32,
+        result: Result<DataIntervalsPage, ChunkFetchError>,
+    ) {
+        match &result {
+            Ok(page) => debug!(
+                peer.address = %fetch.peer,
+                window.start = fetch.start,
+                window.end = fetch.end,
+                intervals = page.intervals.len(),
+                coverage = ?page.coverage,
+                "data sync assignee intervals"
+            ),
+            Err(error) => debug!(
+                peer.address = %fetch.peer,
+                window.start = fetch.start,
+                window.end = fetch.end,
+                error = %error,
+                "data sync assignee intervals unavailable; probing per offset"
+            ),
+        }
+        self.assignee_intervals
+            .on_fetched(fetch, head, result, Instant::now());
     }
 
     /// Submit / OneYear / ThirtyDay: prefer the migrated write head. Publish
@@ -1065,6 +1323,13 @@ impl ChunkOrchestrator {
         }
 
         while let Some(chunk_offset) = self.ready_offsets.pop_front() {
+            // An assignee that answered without this offset is not asked for it.
+            let absent: Vec<IrysAddress> = self
+                .current_peers
+                .iter()
+                .copied()
+                .filter(|peer| self.assignee_intervals.excludes(peer, chunk_offset.0))
+                .collect();
             let Some((excluded, all_peers_exhausted, cache_miss)) = self
                 .chunk_requests
                 .get_mut(&chunk_offset)
@@ -1077,15 +1342,12 @@ impl ChunkOrchestrator {
                         .excluded
                         .retain(|peer| self.current_peers.contains(peer));
                     let exhausted = !self.current_peers.is_empty()
-                        && self
-                            .current_peers
-                            .iter()
-                            .all(|peer| chunk_request.excluded.contains(peer));
-                    Some((
-                        chunk_request.excluded.clone(),
-                        exhausted,
-                        chunk_request.local_cache_miss,
-                    ))
+                        && self.current_peers.iter().all(|peer| {
+                            chunk_request.excluded.contains(peer) || absent.contains(peer)
+                        });
+                    let mut excluded = chunk_request.excluded.clone();
+                    excluded.extend(absent.iter().copied());
+                    Some((excluded, exhausted, chunk_request.local_cache_miss))
                 })
             else {
                 continue;

@@ -1,3 +1,4 @@
+pub mod assignee_intervals;
 pub mod chunk_fetcher;
 pub mod chunk_orchestrator;
 pub mod peer_bandwidth_manager;
@@ -621,6 +622,15 @@ pub enum DataSyncServiceMessage {
         storage_module_id: usize,
         chunk_offsets: Vec<PartitionChunkOffset>,
     },
+    /// An assignee's Data intervals for one window, fetched so the scan can
+    /// skip local Entropy no assignee holds. `head` is the write head when the
+    /// fetch was planned.
+    AssigneeIntervalsFetched {
+        storage_module_id: usize,
+        fetch: assignee_intervals::WindowFetch,
+        head: u32,
+        result: Result<chunk_fetcher::DataIntervalsPage, chunk_fetcher::ChunkFetchError>,
+    },
 }
 
 impl DataSyncServiceInner {
@@ -733,6 +743,16 @@ impl DataSyncServiceInner {
                 }
             }
             DataSyncServiceMessage::GetActivePeersList(tx) => self.handle_get_active_peers_list(tx),
+            DataSyncServiceMessage::AssigneeIntervalsFetched {
+                storage_module_id,
+                fetch,
+                head,
+                result,
+            } => {
+                if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
+                    orchestrator.on_assignee_intervals(fetch, head, result);
+                }
+            }
             DataSyncServiceMessage::BodyMigrationHoles {
                 storage_module_id,
                 chunk_offsets,
