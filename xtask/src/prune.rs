@@ -369,10 +369,11 @@ pub struct UnitPruneReport {
 /// Records last written before `unused_before` expire and are deleted. With no live record the
 /// pass removes nothing, since nothing is known to be in use.
 ///
-/// A symlink at `deps`, `examples`, `build` or `.fingerprint` is not followed. A symlink at the
-/// usage directory is not a usage directory: nothing there is read or deleted. A usage path that
-/// does not resolve inside `target_dir` is ignored. A delete whose parent resolves outside
-/// `target_dir` is skipped.
+/// A symlink at `deps`, `examples` or `build` is not followed. A symlinked `.fingerprint` is
+/// walked when it resolves inside `target_dir`. When it resolves outside, or does not resolve,
+/// unit deletion for that profile is skipped. A symlink at the usage directory is not a usage
+/// directory: nothing there is read or deleted. A usage path that does not resolve inside
+/// `target_dir` is ignored. A delete whose parent resolves outside `target_dir` is skipped.
 pub fn prune_unused_units(
     target_dir: &Path,
     unused_before: SystemTime,
@@ -417,7 +418,15 @@ pub fn prune_unused_units(
                 continue;
             }
         };
-        let uplifted = uplifted_closure(&profile)?;
+        // `None`: `.fingerprint` is outside the target or does not resolve. Pruning from
+        // the uplifted roots alone would drop dependency units the graph would have kept.
+        let Some(uplifted) = uplifted_closure(&profile, &target_dir)? else {
+            tracing::debug!(
+                profile = %profile.display(),
+                "skip profile: fingerprint dir is not inside the target"
+            );
+            continue;
+        };
         tracing::debug!(units = uplifted.len(), profile = %profile.display(), "uplifted closure");
         for unit_dir in UNIT_DIRS {
             prune_deps_units(
@@ -497,9 +506,14 @@ fn prune_orphan_fingerprints(
 /// rewrites nothing, so neither a record nor a file time shows that those units are in use. The
 /// closure follows each unit's fingerprint JSON: a dependency is listed by its fingerprint hash,
 /// which cargo also writes, as little-endian hex, to the dependency's own fingerprint file.
-pub fn uplifted_closure(profile: &Path) -> io::Result<HashSet<String>> {
+///
+/// Returns `None` when `.fingerprint` is a symlink that resolves outside `target_dir` or does
+/// not resolve. The caller skips unit deletion for that profile: a closure of only the uplifted
+/// roots would drop dependency units the graph would have kept. A symlink that resolves inside
+/// `target_dir` is walked. A missing fingerprint directory still returns only the uplifted roots.
+pub fn uplifted_closure(profile: &Path, target_dir: &Path) -> io::Result<Option<HashSet<String>>> {
     use std::os::unix::fs::MetadataExt as _;
-    let fingerprints = profile.join(".fingerprint");
+    let mut fingerprints = profile.join(".fingerprint");
     // Hashed unit files: libraries and binaries in `deps/`, examples in `examples/`.
     let mut by_inode = std::collections::HashMap::new();
     for dir in UNIT_DIRS {
@@ -530,13 +544,38 @@ pub fn uplifted_closure(profile: &Path) -> io::Result<HashSet<String>> {
         }
     }
 
+    match fs::symlink_metadata(&fingerprints) {
+        Ok(meta) if meta.file_type().is_symlink() => match fingerprints.canonicalize() {
+            Ok(real) if real.starts_with(target_dir) => fingerprints = real,
+            Ok(real) => {
+                tracing::debug!(
+                    fingerprints = %real.display(),
+                    "fingerprint dir resolves outside the target dir"
+                );
+                return Ok(None);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    fingerprints = %fingerprints.display(),
+                    "fingerprint dir does not resolve: {e}"
+                );
+                return Ok(None);
+            }
+        },
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // Without fingerprints cargo rebuilds everything anyway; still keep the roots.
+            return Ok(Some(roots.into_iter().collect()));
+        }
+        Err(e) => return Err(e),
+    }
+
     let unit_dirs: Vec<String> = match open_real_dir(&fingerprints)? {
         Some(entries) => entries
             .filter_map(|e| e.ok()?.file_name().into_string().ok())
             .collect(),
-        // Without fingerprints cargo rebuilds everything anyway; still keep the roots themselves.
-        // A symlink is not a fingerprint directory to walk.
-        None => return Ok(roots.into_iter().collect()),
+        // The directory disappeared after the metadata check. Keep the roots.
+        None => return Ok(Some(roots.into_iter().collect())),
     };
     // Unit hash -> its fingerprint dir, and fingerprint hash (as cargo writes it) -> unit hash.
     let dir_of: std::collections::HashMap<&str, &String> =
@@ -579,7 +618,7 @@ pub fn uplifted_closure(profile: &Path) -> io::Result<HashSet<String>> {
             }
         }
     }
-    Ok(closure)
+    Ok(Some(closure))
 }
 
 /// The `<hash>` of a `<name>-<hash>` unit id or dir name.
@@ -1783,6 +1822,103 @@ mod tests {
             );
             assert!(t.has("libserde-00000000000000aa.rlib"));
             assert_eq!(report, UnitPruneReport::default());
+        }
+
+        #[test]
+        fn keeps_dependency_units_when_the_fingerprint_dir_is_symlinked_inside_the_target() {
+            let t = Target::new();
+            let used = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            let bin = t.exe("gateway-00000000000000b1", 48 * HOUR);
+            fs::hard_link(&bin, t.target().join("debug/gateway")).unwrap();
+            t.fingerprint("gateway-00000000000000b1", "bin-gateway", 0xb1, &[0xd1]);
+            t.lib(
+                "my_dep-00000000000000d1",
+                "crates/my-dep/src/lib.rs",
+                48 * HOUR,
+            );
+            t.fingerprint("my-dep-00000000000000d1", "lib-my_dep", 0xd1, &[]);
+            t.lib("old-00000000000000e1", "crates/old/src/lib.rs", 48 * HOUR);
+            // The fingerprint tree stays inside the target, but `.fingerprint` is a symlink.
+            let real = t.target().join("debug/fp-real");
+            fs::rename(t.fingerprints(), &real).unwrap();
+            std::os::unix::fs::symlink(&real, t.fingerprints()).unwrap();
+            t.record(&[used]);
+
+            let report = t.prune();
+
+            assert!(
+                t.has("libmy_dep-00000000000000d1.rlib"),
+                "dependency unit was pruned from a root-only closure"
+            );
+            assert!(bin.exists());
+            assert!(!t.has("libold-00000000000000e1.rlib"));
+            assert_eq!(report.removed_units, 1);
+        }
+
+        #[test]
+        fn skips_unit_deletion_when_the_fingerprint_dir_points_outside_the_target() {
+            let t = Target::new();
+            let used = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            let bin = t.exe("gateway-00000000000000b1", 48 * HOUR);
+            fs::hard_link(&bin, t.target().join("debug/gateway")).unwrap();
+            t.fingerprint("gateway-00000000000000b1", "bin-gateway", 0xb1, &[0xd1]);
+            t.lib(
+                "my_dep-00000000000000d1",
+                "crates/my-dep/src/lib.rs",
+                48 * HOUR,
+            );
+            t.fingerprint("my-dep-00000000000000d1", "lib-my_dep", 0xd1, &[]);
+            t.lib("old-00000000000000e1", "crates/old/src/lib.rs", 48 * HOUR);
+            let outside = TempDirBuilder::new().build();
+            let real = outside.path().join("fingerprint");
+            fs::rename(t.fingerprints(), &real).unwrap();
+            std::os::unix::fs::symlink(&real, t.fingerprints()).unwrap();
+            let marker = real.join("keep.txt");
+            fs::write(&marker, "keep").unwrap();
+            t.record(&[used]);
+
+            let report = t.prune();
+
+            assert!(
+                t.has("libmy_dep-00000000000000d1.rlib"),
+                "dependency unit was pruned from a root-only closure"
+            );
+            assert!(
+                t.has("libold-00000000000000e1.rlib"),
+                "unit deletion ran for a profile whose fingerprint dir is outside the target"
+            );
+            assert!(bin.exists());
+            assert!(marker.exists());
+            assert_eq!(report.removed_units, 0);
+        }
+
+        #[test]
+        fn skips_unit_deletion_when_the_fingerprint_dir_does_not_resolve() {
+            let t = Target::new();
+            let used = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            t.lib("old-00000000000000bb", "crates/old/src/lib.rs", 48 * HOUR);
+            std::os::unix::fs::symlink(t.target().join("missing-fp"), t.fingerprints()).unwrap();
+            t.record(&[used]);
+
+            let report = t.prune();
+
+            assert!(
+                t.has("libold-00000000000000bb.rlib"),
+                "unit deletion ran from a root-only closure"
+            );
+            assert_eq!(report.removed_units, 0);
         }
     }
 }
