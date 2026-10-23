@@ -460,7 +460,21 @@ where
             .map_err(|error| {
                 GossipError::Internal(InternalGossipError::Database(error.to_string()))
             })?;
-        Ok(cached.filter(|chunk| chunk.chunk_path_hash() == request.chunk_path_hash))
+        Ok(cached.filter(|chunk| {
+            if chunk.chunk_path_hash() != request.chunk_path_hash {
+                return false;
+            }
+            // The body carries the cached root's size. A path stored against
+            // a different size must not be served: the fetcher would score it
+            // BogusData.
+            match irys_types::validate_unpacked_chunk(chunk, chunk_size) {
+                Ok(()) => true,
+                Err(error) => {
+                    debug!(%error, "not serving a cached chunk that does not prove its data size");
+                    false
+                }
+            }
+        }))
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]

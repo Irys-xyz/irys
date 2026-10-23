@@ -238,6 +238,22 @@ pub(super) fn broadcast_mode_for_admission(has_http_admission: bool) -> ChunkBro
     }
 }
 
+/// The fetch server stamps the cached root's `data_size` onto the body.
+/// A prefix chunk may carry a smaller field. Announcing that field makes
+/// the fetcher score this node `BogusData`.
+fn chunk_offered_at_served_size(
+    chunk: Arc<UnpackedChunk>,
+    served_data_size: u64,
+) -> Arc<UnpackedChunk> {
+    if chunk.data_size == served_data_size {
+        return chunk;
+    }
+    // clone: the cache write keeps the ingress claim; the offer carries the served size
+    let mut offered = (*chunk).clone();
+    offered.data_size = served_data_size;
+    Arc::new(offered)
+}
+
 async fn remember_after_module_writes(
     recent_valid_chunks: &RwLock<LruCache<ChunkPathHash, ()>>,
     chunk_path_hash: ChunkPathHash,
@@ -939,10 +955,20 @@ impl ChunkIngressServiceInner {
                 body_committed: true,
             })?;
 
-        // Gossip the chunk before moving onto ingress proof checks
+        // Gossip the chunk before moving onto ingress proof checks.
+        // A rightmost path just confirmed `expected_max_byte_range`. Every
+        // other path leaves the cached root size unchanged. That is the size
+        // a later fetch will serve, not the field on the ingress claim.
+        let served_data_size = if path_result.is_rightmost_chunk {
+            expected_max_byte_range
+        } else {
+            data_size
+        };
         let chunk_data_root = chunk.data_root;
         let chunk_tx_offset = chunk.tx_offset;
-        let gossip_broadcast_message = GossipBroadcastMessageV2::from(chunk).with_chunk_mode(mode);
+        let offered = chunk_offered_at_served_size(chunk, served_data_size);
+        let gossip_broadcast_message =
+            GossipBroadcastMessageV2::from(offered).with_chunk_mode(mode);
 
         if let Err(error) = self
             .service_senders
@@ -3266,6 +3292,59 @@ mod tests {
         assert_eq!(msg.chunk_mode, ChunkBroadcastMode::Announce);
     }
 
+    /// A prefix of a confirmed larger root is stored with the claim's smaller
+    /// field. The announcement must use the size a fetch will serve.
+    #[tokio::test]
+    async fn confirmed_prefix_chunk_is_announced_at_the_cached_root_size() {
+        use irys_database::db::IrysDatabaseExt as _;
+        use irys_types::gossip::v2::GossipDataV2;
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-prefix-announce")
+            .build();
+        let (mut inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let (chunk, served_size) = prefix_chunk_of_larger_root(32);
+        let data_root = chunk.data_root;
+        insert_confirmed_cdr(&inner.irys_db, data_root, served_size);
+
+        inner
+            .ingest_chunk(
+                Arc::new(chunk),
+                PendingDrainRole::External,
+                ChunkBroadcastMode::Announce,
+            )
+            .await
+            .map_err(|failure| failure.error)
+            .expect("prefix chunk ingress");
+
+        let msg = receivers
+            .gossip_broadcast
+            .try_recv()
+            .expect("one broadcast");
+        let (msg, _span) = msg.into_parts();
+        assert_eq!(msg.chunk_mode, ChunkBroadcastMode::Announce);
+        let GossipDataV2::Chunk(offered) = &msg.data else {
+            panic!("chunk broadcast");
+        };
+        assert_eq!(offered.data_size, served_size);
+
+        let served = inner
+            .irys_db
+            .view_eyre(|tx| {
+                irys_database::cached_unpacked_chunk(tx, data_root, TxChunkOffset::from(0), 32)
+            })
+            .expect("read")
+            .expect("cached body");
+        assert_eq!(served.data_size, offered.data_size);
+        irys_types::validate_unpacked_chunk(&served, 32).expect("path proves the served size");
+    }
+
     fn test_ingress_inner(
         tmp: &impl AsRef<std::path::Path>,
         max_chunks_per_item: usize,
@@ -3350,6 +3429,45 @@ mod tests {
         });
         db.update_eyre(|tx| cache_data_root(tx, &header, None).map(|_| ()))
             .expect("insert cached data root");
+    }
+
+    fn insert_confirmed_cdr(db: &DatabaseProvider, data_root: H256, data_size: u64) {
+        use irys_database::db::IrysDatabaseExt as _;
+
+        insert_unconfirmed_cdr(db, data_root, data_size);
+        db.update_eyre(|tx| {
+            irys_database::confirm_data_size_for_data_root(tx, &data_root, data_size).map(|_| ())
+        })
+        .expect("confirm cached data root");
+    }
+
+    /// First chunk of a two-chunk root, labelled with only the first chunk's length.
+    fn prefix_chunk_of_larger_root(chunk_size: usize) -> (UnpackedChunk, u64) {
+        let first = vec![7_u8; chunk_size];
+        let second = vec![8_u8; chunk_size];
+        // clone: generate_leaves consumes the bytes the chunk keeps
+        let leaves =
+            irys_types::generate_leaves([Ok(first.clone()), Ok(second)].into_iter(), chunk_size)
+                .expect("leaves");
+        let root = irys_types::generate_data_root(leaves).expect("root");
+        let data_root = H256(root.id);
+        let proof = irys_types::resolve_proofs(root, None)
+            .expect("proofs")
+            .into_iter()
+            .next()
+            .expect("first proof");
+        let served_size = u64::try_from(chunk_size.saturating_mul(2)).expect("served size");
+        let field = u64::try_from(chunk_size).expect("chunk size");
+        (
+            UnpackedChunk {
+                data_root,
+                data_size: field,
+                data_path: proof.proof.into(),
+                bytes: first.into(),
+                tx_offset: TxChunkOffset::from(0),
+            },
+            served_size,
+        )
     }
 
     fn valid_single_chunk(bytes: Vec<u8>) -> UnpackedChunk {
