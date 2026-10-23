@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792759176017,
+  "lastUpdate": 1792760484183,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -18835,6 +18835,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000124,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ffd3e8d32f2696ed33f8e717ab7f4c9ed1cd0036",
+          "message": "fix(validation): map a PoA chunk through the whole-chunk layout (#1599)\n\n* test(validation): PoA fails on a later tx's chunk after an unaligned tx\n\nThe block index rounds each tx up to whole chunks (BlockIndex::push_block),\nbut the tx_root tree gives each tx a byte range of its raw data_size, and\npoa_is_valid looks up block_chunk_offset * chunk_size in that tree. Padding\nfrom earlier txs shifts the lookup past the end of a later tx.\n\nWith two 40-byte txs and 32-byte chunks, tx1's last chunk (ledger offset 3)\nis looked up at byte 96 against tx1's tree range 40..=80 and rejected with\nMerkleProofInvalid(\"Invalid target_byte_position: out of bounds\").\n\npoa_test now takes the ledger offset instead of assuming 3 chunks per tx.\nThis test fails on master.\n\n* fix(validation): map a PoA chunk through the whole-chunk layout\n\nThe tx_root tree gives each transaction a byte range of its raw data_size.\nThe block index rounds each data_size up to a whole chunk. PoA validation\nlooked the chunk up at block_chunk_offset * chunk_size, so padding from\nearlier transactions shifted the target. Once that padding reached one\nchunk, an honest proof was rejected.\n\nEcho changes only that mapping, and only for a block whose own timestamp\nis at or after activation. The pre-fork lookup is unchanged. Every preset\nleaves Echo unset.\n\n* test(validation): Echo PoA reads an unmigrated block from the tree\n\nThe owning block stays in the block tree. It is not in the block index\nand its header is not in the consensus DB. Echo accepts the chunk after\nan unaligned transaction. The same proof stays rejected while Echo is\ninactive.\n\n* fix(validation): apply the whole-chunk PoA mapping without a hardfork\n\nThe mapping ships with a coordinated upgrade. Echo is removed. Delta\nstays a WIP, undeployed fork and keeps accumulating changes that need\nactivation. The change it carries now is slot seeding.\n\n* fix(validation): reject an unparseable PoA proof before the header fetch\n\nA short or misaligned path is invalid for every byte target. Checking\nit first keeps an empty proof as MerkleProofInvalid when the owning\nheader is missing.\n\n* test(validation): spell the PoA fixture buffers as data\n\nThe spell check rejects `datas`.\n\n* fix(validation): fix every byte of a data PoA chunk\n\nThe solution hash covers the whole packed PoA chunk, but the data branch\nof poa_is_valid only hashed the bytes inside the data leaf's range, and\nit never checked that range. A miner could vary the unchecked bytes, or\nthe chunk length, and grind the solution hash without the packed data:\n\n- The tx author builds the data tree, and a Submit or term-ledger tx has\n  no ingress proof. A leaf wider than its chunk, behind a shifted pivot,\n  or zero bytes wide was accepted. The zero-width leaf checked no chunk\n  bytes at all.\n- A short last chunk's padding was never read, and the chunk could be\n  any length from the data span up to chunk_size.\n\nThe data leaf must now cover exactly expected_chunk_byte_range, as chunk\ningress and data sync already require\n(PoAChunkOffsetOutOfDataChunksBounds). The packed chunk must be exactly\nchunk_size (PoAChunkTooShort now carries the expected length), and the\nunpacked bytes after the data span must be zero\n(PoAChunkPaddingNotZero). Honest packing (packing_xor_vec_u8) leaves\nthose zeros, and miners only submit full stored chunks.\n\nThis tightens consensus without a hardfork. Every testnet data PoA up to\nheight 1,143,903 meets it: all 216 chunks are chunk_size, their data\nleaves have the exact range, and the 22 short-tail chunks unpack to zero\npadding. Mainnet has no data chunks.\n\nThe test fixtures now pad a short chunk the way honest packing does.\npoa_split_index has no caller left and is removed.\n\n* fix(mining): cross-check a derived tx path with the whole-chunk mapping\n\nA submodule index that stores no tx path (RocksDB v1) derives one when a\ndata chunk wins, and cross_check_derived must accept it before the\nsolution is built. The check still used the old validator byte,\nblock_chunk_offset * chunk_size. Once padding from earlier unaligned txs\nin the block reached a chunk, that byte left the tx's raw range, the\ncheck failed, and assemble_poa dropped an honest solution that\npoa_is_valid now accepts.\n\nDerivedTxPath now carries the tx's raw byte start in the tx_root tree and\nits data_size. The check uses the targets poa_is_valid uses: the tx leaf\nmust cover exactly the tx's raw byte range, and the data leaf must cover\nexactly the chunk at this offset (expected_chunk_byte_range).\n\nunaligned_offsets_agree_with_the_validator replaces the oracle that\ncopied the old validator byte. Every chunk of the two-partial,\nthree-odd and 1/1/32 layouts now passes both. derived_for sets the tx's\nown ledger start, which the check now reads.\n\n* refactor(validation): drop dead PoA walker plumbing\n\n- visit_owning_ledger_txs took a stop_before predicate. Its only caller\n  passed `|| false`, and a Break already ends the walk before the next\n  header read.\n- select_poa_tx_by_chunk_layout tracked its cursors in Cells and carried a\n  Stop::Overflow arm. The visitor is FnMut, so plain mut locals do. Each\n  tx adds at most u64::MAX bytes, so the u128 cursors, the tx chunk\n  offset, and poa_is_valid's raw_end and target cannot overflow. The\n  chunk_size == 0 guard repeats Config::validate. The debug_asserts\n  restated the selector.\n- ensure_proof_layout returns the branch length, so validate_path and\n  print_debug stop recomputing the layout and repeating its checks. The\n  error text is unchanged.\n\n* test(validation): trim PoA layout cases, cover the early proof reject\n\n- Keep only the one_byte layout in the layout test. aligned,\n  chunk_minus_one, chunk_plus_one, tiny_then_large and tiny_after_large\n  pass on the old lookup too, or fail the same way as the 40/40 test.\n  On the old lookup, one_byte resolves into a different tx's leaf, which\n  the 40/40 test does not do.\n- A foreign proof is MerkleProofInvalid. Assert that instead of any of\n  five rejects.\n- poa_rejects_an_empty_proof_before_the_header_fetch covers ec18c5baf:\n  with the owning header gone, an empty tx_path is still\n  MerkleProofInvalid. Without the early ensure_proof_layout it becomes\n  BlockBoundsLookupError, a node fault.\n\n* fix(validation): reject a short PoA chunk instead of panicking\n\nEntropy packing emits whole 32-byte hashes, so a chunk_size that is not a\nmultiple of 32 yields a shorter entropy chunk. 8cca9a601 required the PoA\nchunk to be as long as the entropy, then split it at the data span, which\ncan reach chunk_size: split_at panicked. Master returned PoAChunkTooShort.\n\nThe data branch now requires the chunk to be chunk_size bytes. The longer-\nthan-entropy check still runs first, so the XOR and the split stay in\nbounds. Config::validate also requires chunk_size to be a multiple of 32,\nbecause such a size leaves the chunk's tail unpacked.\n\nFound by the adversarial review of #1599. Production uses 256 KiB, so only\na misconfigured node or a test could reach it.",
+          "timestamp": "2026-10-23T13:21:23+01:00",
+          "tree_id": "ba1045c85ecc96776051b8eb086e8644fa9ead4d",
+          "url": "https://github.com/Irys-xyz/irys/commit/ffd3e8d32f2696ed33f8e717ab7f4c9ed1cd0036"
+        },
+        "date": 1792760481066,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011934,
+            "range": "± 0.000011",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119458,
+            "range": "± 0.000269",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.197065,
+            "range": "± 0.001079",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.90235,
+            "range": "± 0.017546",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074677,
+            "range": "± 0.00007",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 744.829088,
+            "range": "± 0.943434",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 967.918598,
+            "range": "± 1.061539",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119732,
+            "range": "± 0.000107",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1196.9295,
+            "range": "± 1.340717",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1554.880945,
+            "range": "± 1.236636",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033691,
+            "range": "± 0.00031",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.385025,
+            "range": "± 0.281453",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.343555,
+            "range": "± 0.385869",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
