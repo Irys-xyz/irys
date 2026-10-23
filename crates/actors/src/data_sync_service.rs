@@ -451,6 +451,9 @@ pub struct DataSyncServiceInner {
     term_dispatch_cursor: usize,
     /// Rotates which Publish storage module is visited first each tick.
     publish_dispatch_cursor: usize,
+    /// The previous successful refill started a term-ledger module. The next
+    /// refill tries Publish first.
+    last_refill_was_term: bool,
     /// Unpack, validation, and ingress for delivered bodies.
     delivery: DeliveryPipeline,
     /// See [`MAX_DELIVERED_BODIES`].
@@ -546,6 +549,32 @@ fn dispatch_term_then_publish<T: Copy>(
     (next_term, next_publish)
 }
 
+/// One freed peer slot. The tick stays term-first. A refill alternates, so a
+/// peer shared by term and Publish modules does not give every freed slot
+/// back to term. `last_refill_was_term` tries Publish first, then term.
+/// Otherwise term is first. An idle group falls through. The first module
+/// that starts wins. `Some(true)` means that start was a term module.
+fn dispatch_refill<T: Copy>(
+    term_ids: &[T],
+    publish_ids: &[T],
+    last_refill_was_term: bool,
+    mut dispatch: impl FnMut(T) -> bool,
+) -> Option<bool> {
+    let groups: [(&[T], bool); 2] = if last_refill_was_term {
+        [(publish_ids, false), (term_ids, true)]
+    } else {
+        [(term_ids, true), (publish_ids, false)]
+    };
+    for (ids, is_term) in groups {
+        for id in ids.iter().copied() {
+            if dispatch(id) {
+                return Some(is_term);
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn classify_synced_chunk(
     sm: &StorageModule,
     unpacked: &UnpackedChunk,
@@ -581,7 +610,7 @@ pub(crate) fn classify_synced_chunk(
 
 #[cfg(test)]
 mod scheduler_fairness_tests {
-    use super::dispatch_term_then_publish;
+    use super::{dispatch_refill, dispatch_term_then_publish};
 
     #[test]
     fn term_ledgers_take_permits_before_publish_when_capacity_is_scarce() {
@@ -677,6 +706,30 @@ mod scheduler_fairness_tests {
         });
         assert_eq!(order, vec![1, 2, 3, 0, 1, 2, 3, 0, 1, 2]);
     }
+
+    #[test]
+    fn release_refill_dispatches_publish_while_term_work_is_endless() {
+        // One shared slot. Each call is one refill: the release path starts
+        // one fetch and returns. Term modules always accept. Publish must
+        // still be started across those refills.
+        let term = [1_u8, 2_u8];
+        let publish = [0_u8];
+        let mut last_was_term = false;
+        let mut order = Vec::new();
+        for _ in 0..4 {
+            let mut budget = 1_usize;
+            let started = dispatch_refill(&term, &publish, last_was_term, |id| {
+                if budget == 0 {
+                    return false;
+                }
+                budget -= 1;
+                order.push(id);
+                true
+            });
+            last_was_term = started.expect("a module accepted the slot");
+        }
+        assert_eq!(order, vec![1, 0, 1, 0]);
+    }
 }
 
 pub enum DataSyncServiceMessage {
@@ -770,6 +823,7 @@ impl DataSyncServiceInner {
             rearm_backoff_next_skips: 0,
             term_dispatch_cursor: 0,
             publish_dispatch_cursor: 0,
+            last_refill_was_term: false,
             delivery,
             max_delivered_bodies: MAX_DELIVERED_BODIES,
             #[cfg(test)]
@@ -875,9 +929,10 @@ impl DataSyncServiceInner {
 
     /// A finished request released one peer slot. Use it now: waiting for
     /// the next tick idles that slot for up to 250 ms, even after a 1 ms 404.
-    /// One dispatch, in tick order (term ledgers, then Publish, each group
-    /// starting at its tick cursor) and under the same held-body limit. The
-    /// tick still refills each queue and advances the cursors.
+    /// One dispatch, under the same held-body limit. Each group starts at its
+    /// tick cursor. Publish is tried first when the previous refill started a
+    /// term module, so a shared peer does not stay on term work. The tick
+    /// still refills each queue, stays term-first, and advances the cursors.
     fn dispatch_after_release(&mut self) {
         #[cfg(test)]
         if !self.refill_on_release {
@@ -901,14 +956,13 @@ impl DataSyncServiceInner {
             let start = self.publish_dispatch_cursor % publish.len();
             publish.rotate_left(start);
         }
-        for id in term.into_iter().chain(publish) {
-            if self
-                .chunk_orchestrators
+        let started_on_term = dispatch_refill(&term, &publish, self.last_refill_was_term, |id| {
+            self.chunk_orchestrators
                 .get_mut(&id)
                 .is_some_and(ChunkOrchestrator::dispatch_next)
-            {
-                return;
-            }
+        });
+        if let Some(was_term) = started_on_term {
+            self.last_refill_was_term = was_term;
         }
     }
 
