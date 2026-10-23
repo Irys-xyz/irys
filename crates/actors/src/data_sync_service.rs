@@ -690,8 +690,7 @@ mod scheduler_fairness_tests {
     #[test]
     fn publish_gets_a_dispatch_when_three_term_modules_exhaust_the_budget() {
         // Three term modules with endless work and one Publish module. The
-        // shared budget is a fresh peer's baseline slot count. Publish must
-        // be dispatched before that budget runs out.
+        // shared budget is 10. Publish must be dispatched before it runs out.
         let mut term = [1_u8, 2_u8, 3_u8];
         let mut publish = [0_u8];
         let mut budget = 10_usize;

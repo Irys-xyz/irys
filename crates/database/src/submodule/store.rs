@@ -476,13 +476,14 @@ pub trait SubmoduleStore: Send + Sync {
     /// one cursor per presence family inside each span and seeks across the
     /// gaps.
     ///
-    /// RocksDB splits the spans into pieces of at most
-    /// `DELETE_SUBRANGE_OFFSETS` offsets and commits one synced batch per
-    /// piece, so an error can follow a durable prefix. Each batch deletes the
-    /// offset rows with `DeleteRange`. RocksDB v1 also reads the data-proof
-    /// values in a piece that has rows and point-deletes the matching
-    /// content-hash keys in the same batch. A piece with no row reads no
-    /// values.
+    /// RocksDB splits each span into pieces of at most
+    /// `DELETE_SUBRANGE_OFFSETS` offsets. Consecutive pieces share one synced
+    /// batch while their offset count stays within that bound, so an error
+    /// can follow a durable prefix. A group with no offset row does not
+    /// commit. A piece with at most `RANGE_TOMBSTONE_KEY_LIMIT` keys uses
+    /// point deletes. A denser piece uses `DeleteRange`. RocksDB v1 also
+    /// reads the data-proof values in a group that has rows and point-deletes
+    /// the matching content-hash keys in the same batch.
     fn drop_presence_in_ranges(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
