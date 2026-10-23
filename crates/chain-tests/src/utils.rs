@@ -4120,8 +4120,18 @@ pub async fn solution_context_for_partition(
     node_ctx: &IrysNodeCtx,
     partition_hash: H256,
 ) -> Result<SolutionContext, eyre::Error> {
-    let prev_block = max_difficulty_block(node_ctx)?;
     let miner_address = node_ctx.config.node_config.miner_address();
+    solution_context_for_miner_partition(node_ctx, miner_address, partition_hash).await
+}
+
+/// Like [`solution_context_for_partition`], with the entropy packed for
+/// `miner_address` instead of the node's own key.
+pub async fn solution_context_for_miner_partition(
+    node_ctx: &IrysNodeCtx,
+    miner_address: IrysAddress,
+    partition_hash: H256,
+) -> Result<SolutionContext, eyre::Error> {
+    let prev_block = max_difficulty_block(node_ctx)?;
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
     let was_vdf_enabled = node_ctx.vdf_controller.is_enabled();
     if !was_vdf_enabled {

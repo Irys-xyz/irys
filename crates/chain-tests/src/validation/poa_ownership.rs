@@ -7,18 +7,21 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use crate::utils::{
     BlockValidationOutcome, IrysNodeTest, read_block_from_state, solution_context,
-    solution_context_for_partition,
+    solution_context_for_miner_partition, solution_context_for_partition,
 };
 use irys_actors::{
-    BlockProdStrategy as _, ProductionStrategy,
+    BlockProdStrategy, BlockProducerInner, BlockProductionError, ProductionStrategy, async_trait,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
-    block_validation::PreValidationError,
+    block_producer::current_timestamp,
+    block_validation::{PreValidationError, prevalidate_block},
 };
 use irys_chain::IrysNodeCtx;
+use irys_domain::{EmaSnapshot, EpochSnapshot};
 use irys_types::{
-    Base64, DataLedger, H256, IrysAddress, IrysBlockHeader, NodeConfig, SealedBlock,
-    block_production::SolutionContext,
+    AdjustmentStats, Base64, CommitmentTransaction, DataLedger, H256, IrysAddress, IrysBlockHeader,
+    NodeConfig, SealedBlock, block_production::SolutionContext, partition::PartitionAssignment,
 };
+use reth::payload::EthBuiltPayload;
 
 fn start_config(num_blocks_in_epoch: usize) -> NodeConfig {
     let mut config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -258,20 +261,26 @@ async fn producer_skips_solution_over_unowned_partition() -> eyre::Result<()> {
     Ok(())
 }
 
-async fn mine_pledge_into_block(node: &IrysNodeTest<IrysNodeCtx>) -> eyre::Result<IrysBlockHeader> {
-    let pledge_tx = node.post_pledge_commitment(None).await?;
-    let pledge_id = pledge_tx.id();
-    node.wait_for_mempool_commitment_txs(vec![pledge_id], 20)
+async fn mine_into_block(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    commitment_id: H256,
+) -> eyre::Result<IrysBlockHeader> {
+    node.wait_for_mempool_commitment_txs(vec![commitment_id], 20)
         .await?;
 
     let mut inclusion = node.mine_block().await?;
     let mut mined = 1;
-    while !inclusion.commitment_tx_ids().contains(&pledge_id) {
-        eyre::ensure!(mined < 8, "pledge {pledge_id} was not included");
+    while !inclusion.commitment_tx_ids().contains(&commitment_id) {
+        eyre::ensure!(mined < 8, "commitment {commitment_id} was not included");
         inclusion = node.mine_block().await?;
         mined += 1;
     }
     Ok(inclusion)
+}
+
+async fn mine_pledge_into_block(node: &IrysNodeTest<IrysNodeCtx>) -> eyre::Result<IrysBlockHeader> {
+    let pledge_tx = node.post_pledge_commitment(None).await?;
+    mine_into_block(node, pledge_tx.id()).await
 }
 
 async fn mine_assigning_epoch(
@@ -364,6 +373,290 @@ async fn ownership_uses_parent_epoch_snapshot() -> eyre::Result<()> {
 
     let outcome = read_block_from_state(&node.node_ctx, &block.header().block_hash, event_rx).await;
     assert!(matches!(outcome, BlockValidationOutcome::StoredOnNode(_)));
+
+    node.stop().await;
+    Ok(())
+}
+
+/// Produces without the ownership skip, so a test can hand validators a block
+/// over a partition the parent snapshot does not assign to the miner. The block
+/// is a capacity (entropy) PoA, built as the default strategy builds it.
+struct UnownedPartitionStrategy {
+    prod: ProductionStrategy,
+}
+
+#[async_trait::async_trait]
+impl BlockProdStrategy for UnownedPartitionStrategy {
+    fn inner(&self) -> &BlockProducerInner {
+        &self.prod.inner
+    }
+
+    async fn produce_block_with_parent(
+        &self,
+        solution: &SolutionContext,
+        prev_block_header: IrysBlockHeader,
+        prev_block_ema_snapshot: Arc<EmaSnapshot>,
+    ) -> Result<
+        Option<(Arc<SealedBlock>, Option<AdjustmentStats>, EthBuiltPayload)>,
+        BlockProductionError,
+    > {
+        let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
+        let timestamp = current_timestamp(&prev_block_header, irys_types::global_clock()).await;
+        let mempool_bundle = self.get_mempool_txs(&prev_block_header, timestamp).await?;
+        let block_reward = self.block_reward(&prev_block_header)?;
+        let reward_address = self
+            .inner()
+            .block_tree_guard
+            .read()
+            .get_epoch_snapshot(&prev_block_header.block_hash)
+            .expect("parent epoch snapshot")
+            .resolve_reward_address(solution.mining_address);
+
+        if self.create_poa_data(solution, None).await?.is_none() {
+            return Ok(None);
+        }
+        let (eth_built_payload, final_treasury) = self
+            .create_evm_block(
+                &prev_block_header,
+                &prev_evm_block,
+                &mempool_bundle,
+                block_reward,
+                timestamp,
+                solution.solution_hash,
+                reward_address,
+            )
+            .await?;
+        let block_result = self
+            .produce_block_without_broadcasting(
+                solution,
+                &prev_block_header,
+                mempool_bundle,
+                timestamp,
+                block_reward,
+                eth_built_payload.block(),
+                &prev_block_ema_snapshot,
+                final_treasury,
+                reward_address,
+            )
+            .await?;
+        Ok(block_result.map(|(block, stats)| (block, stats, eth_built_payload)))
+    }
+}
+
+fn unowned_strategy(node: &IrysNodeTest<IrysNodeCtx>) -> UnownedPartitionStrategy {
+    UnownedPartitionStrategy {
+        prod: producer(node),
+    }
+}
+
+fn parent_snapshots(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    parent_hash: &H256,
+) -> (IrysBlockHeader, Arc<EpochSnapshot>, Arc<EmaSnapshot>) {
+    let tree = node.node_ctx.block_tree_guard.read();
+    (
+        tree.get_block(parent_hash).cloned().expect("parent block"),
+        tree.get_epoch_snapshot(parent_hash)
+            .expect("parent epoch snapshot"),
+        tree.get_ema_snapshot(parent_hash)
+            .expect("parent ema snapshot"),
+    )
+}
+
+async fn prevalidate(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    block: &SealedBlock,
+    parent: &IrysBlockHeader,
+    parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_ema_snapshot: &EmaSnapshot,
+) -> Result<(), PreValidationError> {
+    let pool = Arc::new(irys_vdf::build_verification_pool(&node.node_ctx.config.vdf));
+    prevalidate_block(
+        block,
+        parent,
+        parent_epoch_snapshot,
+        node.node_ctx.config.clone(),
+        pool,
+        node.node_ctx.reward_curve.clone(),
+        parent_ema_snapshot,
+    )
+    .await
+}
+
+/// Only ownership rejects this block. The signer is an unstaked key with entropy
+/// packed for its own address, a valid recall range, and the reward address
+/// the snapshot resolves for it. Prevalidation accepts the same block once the
+/// partition is assigned to that key, and rejects it with the real snapshot.
+#[test_log::test(tokio::test)]
+async fn ownership_is_the_only_rule_rejecting_unstaked_miner_over_invented_partition()
+-> eyre::Result<()> {
+    let config = start_config(4);
+    let unstaked = config.new_random_signer();
+    let node = start_node(config).await;
+    node.mine_block().await?;
+
+    let partition_hash = H256::random();
+    let solution =
+        solution_context_for_miner_partition(&node.node_ctx, unstaked.address(), partition_hash)
+            .await?;
+    let (block, _stats, _payload) = unowned_strategy(&node)
+        .fully_produce_new_block_without_gossip(&solution)
+        .await
+        .map_err(|err| eyre::eyre!("block production failed: {err:?}"))?
+        .ok_or_else(|| eyre::eyre!("evil producer must build the block"))?;
+    let mut header = (**block.header()).clone();
+    assert_eq!(header.poa.partition_hash, partition_hash);
+    unstaked.sign_block_header(&mut header)?;
+    assert_eq!(header.miner_address, unstaked.address());
+    let block = reseal(&block, header)?;
+
+    let (parent, parent_snapshot, parent_ema) =
+        parent_snapshots(&node, &block.header().previous_block_hash);
+    let result = prevalidate(&node, &block, &parent, parent_snapshot.clone(), &parent_ema).await;
+    assert!(
+        matches!(
+            &result,
+            Err(PreValidationError::PoAPartitionNotOwned { owner: None, .. })
+        ),
+        "{result:?}"
+    );
+
+    let mut assigned = (*parent_snapshot).clone();
+    assigned.partition_assignments.capacity_partitions.insert(
+        partition_hash,
+        PartitionAssignment {
+            partition_hash,
+            miner_address: unstaked.address(),
+            ledger_id: None,
+            slot_index: None,
+        },
+    );
+    let result = prevalidate(&node, &block, &parent, Arc::new(assigned), &parent_ema).await;
+    assert!(
+        matches!(&result, Ok(())),
+        "block must pass every other prevalidation rule: {result:?}"
+    );
+
+    let tip = node.get_max_difficulty_block();
+    let result = discovery(&node).handle_block(block, false).await;
+    assert_not_owned(&result, partition_hash, unstaked.address(), None);
+    assert_eq!(node.get_max_difficulty_block().block_hash, tip.block_hash);
+
+    node.stop().await;
+    Ok(())
+}
+
+/// The epoch block assigns the partition, but a block at the epoch height has the
+/// pre-epoch block as parent and is checked against the pre-epoch snapshot. The
+/// producer skips the solution there too.
+#[test_log::test(tokio::test)]
+async fn epoch_block_over_partition_first_assigned_at_that_epoch_gets_rejected() -> eyre::Result<()>
+{
+    let node = start_node(start_config(4)).await;
+    let inclusion = mine_pledge_into_block(&node).await?;
+    let (parent, epoch_block) = mine_assigning_epoch(&node, inclusion.height).await?;
+    let new_partition = new_partition_at_epoch(&node, &parent.block_hash, &epoch_block.block_hash);
+    let miner = node.node_ctx.config.node_config.miner_address();
+
+    let (parent, _parent_snapshot, parent_ema) = parent_snapshots(&node, &parent.block_hash);
+    let solution = solution_context_for_partition(&node.node_ctx, new_partition).await?;
+
+    let default_result = producer(&node)
+        .produce_block_with_parent(&solution, parent.clone(), parent_ema.clone())
+        .await;
+    assert!(
+        matches!(&default_result, Ok(None)),
+        "producer must skip: {:?}",
+        default_result.as_ref().map(|_| ())
+    );
+
+    let (block, _stats, _payload) = unowned_strategy(&node)
+        .produce_block_with_parent(&solution, parent, parent_ema)
+        .await
+        .map_err(|err| eyre::eyre!("block production failed: {err:?}"))?
+        .ok_or_else(|| eyre::eyre!("evil producer must build the block"))?;
+    assert_eq!(block.header().height, epoch_block.height);
+    assert_eq!(
+        block.header().previous_block_hash,
+        epoch_block.previous_block_hash
+    );
+
+    let tip = node.get_max_difficulty_block();
+    let result = discovery(&node).handle_block(block, false).await;
+    assert_not_owned(&result, new_partition, miner, None);
+    assert_eq!(node.get_max_difficulty_block().block_hash, tip.block_hash);
+
+    node.stop().await;
+    Ok(())
+}
+
+/// An unpledge takes effect at the epoch block, so the partition is still owned
+/// on that block's parent snapshot and gone on the epoch block's own snapshot.
+/// A block whose parent is the epoch block cannot use it: the producer skips the
+/// solution and validators reject a block built anyway.
+#[test_log::test(tokio::test)]
+async fn partition_unpledged_at_epoch_is_rejected_on_the_epoch_block_child() -> eyre::Result<()> {
+    let node = start_node(start_config(4)).await;
+    let miner = node.node_ctx.config.node_config.miner_address();
+
+    let pledge_inclusion = mine_pledge_into_block(&node).await?;
+    let (before_assign, assign_epoch) =
+        mine_assigning_epoch(&node, pledge_inclusion.height).await?;
+    let partition_hash =
+        new_partition_at_epoch(&node, &before_assign.block_hash, &assign_epoch.block_hash);
+    {
+        let tree = node.node_ctx.block_tree_guard.read();
+        let snapshot = tree
+            .get_epoch_snapshot(&assign_epoch.block_hash)
+            .expect("epoch snapshot");
+        eyre::ensure!(
+            snapshot
+                .partition_assignments
+                .capacity_partitions
+                .contains_key(&partition_hash),
+            "only a capacity partition can be unpledged"
+        );
+    }
+
+    let mut unpledge = CommitmentTransaction::new_unpledge(
+        &node.node_ctx.config.consensus,
+        node.get_anchor().await?,
+        node.node_ctx.mempool_pledge_provider.as_ref(),
+        miner,
+        partition_hash,
+    )
+    .await;
+    node.cfg.signer().sign_commitment(&mut unpledge)?;
+    node.post_commitment_tx(&unpledge).await?;
+    let unpledge_inclusion = mine_into_block(&node, unpledge.id()).await?;
+    let (before_unpledge, unpledge_epoch) =
+        mine_assigning_epoch(&node, unpledge_inclusion.height).await?;
+
+    assert!(
+        miner_partitions(&node, &before_unpledge.block_hash).contains(&partition_hash),
+        "partition must be owned on the epoch block's parent snapshot"
+    );
+    assert!(
+        !miner_partitions(&node, &unpledge_epoch.block_hash).contains(&partition_hash),
+        "partition must be gone on the epoch block's own snapshot"
+    );
+
+    let solution = solution_context_for_partition(&node.node_ctx, partition_hash).await?;
+    assert_skipped(&node, &solution).await;
+
+    let (block, _stats, _payload) = unowned_strategy(&node)
+        .fully_produce_new_block_without_gossip(&solution)
+        .await
+        .map_err(|err| eyre::eyre!("block production failed: {err:?}"))?
+        .ok_or_else(|| eyre::eyre!("evil producer must build the block"))?;
+    assert_eq!(
+        block.header().previous_block_hash,
+        unpledge_epoch.block_hash
+    );
+    let tip = node.get_max_difficulty_block();
+    let result = discovery(&node).handle_block(block, false).await;
+    assert_not_owned(&result, partition_hash, miner, None);
+    assert_eq!(node.get_max_difficulty_block().block_hash, tip.block_hash);
 
     node.stop().await;
     Ok(())
