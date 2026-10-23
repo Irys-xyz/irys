@@ -1,4 +1,5 @@
 use crate::utils::IrysNodeTest;
+use irys_chain::IrysNodeCtx;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_domain::ChunkType;
 use irys_storage::ii;
@@ -74,6 +75,12 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
 
     // Peer only follows during shared base — stop it from producing competing blocks
     peer.stop_mining();
+    // Validators accept a PoA only over a partition assigned to the block's miner,
+    // so the peer must own one to mine its fork. The commitments land in block 1
+    // and the block-2 epoch boundary assigns the partition.
+    genesis
+        .post_stake_and_pledge_commitments(&[&peer], seconds_to_wait)
+        .await?;
 
     // ─── Stage 1: Shared base with data (gossip ON) ───
 
@@ -90,6 +97,7 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     peer.wait_for_block(&block_2.block_hash, seconds_to_wait)
         .await?;
     info!("Both nodes synced to height 2 (epoch boundary)");
+    assert_peer_has_partition(&genesis, &peer_signer);
 
     genesis.wait_for_packing(seconds_to_wait).await;
     peer.wait_for_packing(seconds_to_wait).await;
@@ -209,8 +217,10 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     )
     .await?;
 
-    // Re-enable mining on peer for its fork phase
-    peer.node_ctx.start_mining()?;
+    // Re-enable the peer's VDF for its fork phase. `start_vdf`, not `start_mining`:
+    // the peer now owns a partition, so autonomous partition mining would add
+    // fork blocks beyond the three this test mines and counts.
+    peer.node_ctx.start_vdf();
     peer.wait_for_packing(seconds_to_wait).await;
 
     // Peer posts unique txs (majority fork)
@@ -530,6 +540,16 @@ fn has_path_hashes_at_offset(
     false
 }
 
+/// Asserts the peer owns a partition on the canonical chain, i.e. it can mine.
+fn assert_peer_has_partition(genesis: &IrysNodeTest<IrysNodeCtx>, peer_signer: &IrysSigner) {
+    assert!(
+        !genesis
+            .get_partition_assignments(peer_signer.address())
+            .is_empty(),
+        "peer must own a partition before mining its own fork"
+    );
+}
+
 /// Helper: create a transaction for the given ledger, post it + chunks to the node.
 async fn post_tx_with_chunks(
     node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
@@ -651,6 +671,12 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
 
     IrysNodeTest::announce_between(&genesis, &peer).await?;
     peer.stop_mining();
+    // Validators accept a PoA only over a partition assigned to the block's miner,
+    // so the peer must own one to mine its fork. The commitments land in block 1
+    // and the block-2 epoch boundary assigns the partition.
+    genesis
+        .post_stake_and_pledge_commitments(&[&peer], seconds_to_wait)
+        .await?;
 
     // Shared base: both nodes agree on a common ancestor (the fork point / LCA).
     for h in 1..=2_u64 {
@@ -659,6 +685,7 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
         peer.wait_for_block(&block.block_hash, seconds_to_wait)
             .await?;
     }
+    assert_peer_has_partition(&genesis, &peer_signer);
     genesis.wait_for_packing(seconds_to_wait).await;
     peer.wait_for_packing(seconds_to_wait).await;
     let fork_height = 2_u64;

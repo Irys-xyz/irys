@@ -671,6 +671,13 @@ pub struct PoaData {
     pub data_path: Option<Base64>,
 }
 
+impl PoaData {
+    /// A data PoA proves a chunk of a ledger tx. Any other PoA proves entropy.
+    pub fn is_data_poa(&self) -> bool {
+        self.data_path.is_some() && self.tx_path.is_some() && self.ledger_id.is_some()
+    }
+}
+
 pub type TxRoot = H256;
 
 #[derive(
