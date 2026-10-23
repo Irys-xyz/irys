@@ -1,5 +1,5 @@
 {
-  "description": "Segment proofs: in-chunk siblings, then the chunk proof, one hex string (spec §5, §10). Mainnet geometry, mod251: every segment of every chunk for chunk count 1 and 2 (full uploads); segments (3, 5), (3, 31), (3, 32), and (3, 63) of the 917504-byte upload; and segment (0, 1) of 4097 bytes, which is 1 byte. Testing geometry, mod251: the printed proof at data_size 112, chunk 3, segment 1.",
+  "description": "Segment proofs: in-chunk siblings, then the chunk proof, one hex string (spec §5, §10). Mainnet geometry, mod251: every segment of every chunk for chunk count 1 and 2 (full uploads); segments (3, 5), (3, 31), (3, 32), and (3, 63) of the 917504-byte upload; and segment (0, 1) of 4097 bytes, which is 1 byte. Testing geometry, mod251: the printed proof at data_size 112, chunk 3, segment 1. Testing geometry, n = 20: segments 0 and 1 verify against the commitment whose leaf 3 is 32 bytes of 0xAB instead of empty(0) (spec §5). replaced_leaf names that leaf.",
   "cases": [
     {
       "geometry": {
@@ -2970,6 +2970,44 @@
       "chunk_count": 4,
       "data_commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
       "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd8480a98067aa92e3bf32b45c5afa5ff2bf38640d51a0e4e338b938bf735f99b0e9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 20,
+      "chunk_index": 0,
+      "segment_index": 0,
+      "segment_length": 8,
+      "chunk_count": 1,
+      "data_commitment": "ac69dccc89299c60d62ced57fe6744daddcfa9f4e08b32f41cd8520439f3b203",
+      "proof": "3682213b734464998683960f225fe5985a0feef2f693f0f507168debb9d9d6b83d374318acff4f82b4beb2eae03bba8631204c500f3c8f8b457408d627ad01056f3741bb9a5d4676045999c9f2f17541659c19fe62df036687efca5bed67d120",
+      "replaced_leaf": {
+        "leaf_index": 3,
+        "hash": "abababababababababababababababababababababababababababababababab"
+      }
+    },
+    {
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 20,
+      "chunk_index": 0,
+      "segment_index": 1,
+      "segment_length": 8,
+      "chunk_count": 1,
+      "data_commitment": "ac69dccc89299c60d62ced57fe6744daddcfa9f4e08b32f41cd8520439f3b203",
+      "proof": "26d7dcdb54e4b5b32f7ea3bbe360927b0776ca475389591a8d5a47f4a4abdeda3d374318acff4f82b4beb2eae03bba8631204c500f3c8f8b457408d627ad01056f3741bb9a5d4676045999c9f2f17541659c19fe62df036687efca5bed67d120",
+      "replaced_leaf": {
+        "leaf_index": 3,
+        "hash": "abababababababababababababababababababababababababababababababab"
+      }
     }
   ]
 }
