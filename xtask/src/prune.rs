@@ -369,7 +369,8 @@ pub struct UnitPruneReport {
 /// Records last written before `unused_before` expire and are deleted. With no live record the
 /// pass removes nothing, since nothing is known to be in use.
 ///
-/// A symlink at `deps`, `examples`, `build` or `.fingerprint` is not followed. A usage path that
+/// A symlink at `deps`, `examples`, `build` or `.fingerprint` is not followed. A symlink at the
+/// usage directory is not a usage directory: nothing there is read or deleted. A usage path that
 /// does not resolve inside `target_dir` is ignored. A delete whose parent resolves outside
 /// `target_dir` is skipped.
 pub fn prune_unused_units(
@@ -610,16 +611,18 @@ fn fingerprint_files(dir: &Path) -> Vec<PathBuf> {
 
 /// `target_dir` is canonical. Only lines that resolve inside it are returned, and the stored
 /// path is that resolved path, so a record cannot select a directory outside the target.
+///
+/// A symlink at `usage_dir` is not a usage directory. Following it would delete aged files in
+/// the directory it points at, and would let that directory name units to prune. Nothing is
+/// read and nothing is deleted.
 fn live_usage(
     usage_dir: &Path,
     target_dir: &Path,
     unused_before: SystemTime,
 ) -> io::Result<HashSet<PathBuf>> {
     let mut used = HashSet::new();
-    let entries = match fs::read_dir(usage_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(used),
-        Err(e) => return Err(e),
+    let Some(entries) = open_real_dir(usage_dir)? else {
+        return Ok(used);
     };
     for entry in entries {
         let path = entry?.path();
@@ -1743,6 +1746,43 @@ mod tests {
             assert!(named.exists());
             assert!(!t.has("libold-00000000000000bb.rlib"));
             assert!(t.has("libserde-00000000000000aa.rlib"));
+        }
+
+        #[test]
+        fn does_not_delete_expired_records_through_a_symlinked_usage_dir() {
+            let t = Target::new();
+            let kept = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            t.lib("old-00000000000000bb", "crates/old/src/lib.rs", 48 * HOUR);
+
+            // `xtask-usage` points outside the target. An aged file there must
+            // survive, and a live record there must not select units to prune.
+            let outside = TempDirBuilder::new().build();
+            let expired = outside.path().join("expired.txt");
+            fs::write(&expired, "# old\n").unwrap();
+            age_file(&expired, 48 * HOUR);
+            fs::write(
+                outside.path().join("live.txt"),
+                format!("# live\n{}\n", kept.display()),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(outside.path(), t.target().join(USAGE_DIR)).unwrap();
+
+            let report = t.prune();
+
+            assert!(
+                expired.exists(),
+                "expired usage record outside the target was deleted"
+            );
+            assert!(
+                t.has("libold-00000000000000bb.rlib"),
+                "symlinked usage dir was read and its record selected units for pruning"
+            );
+            assert!(t.has("libserde-00000000000000aa.rlib"));
+            assert_eq!(report, UnitPruneReport::default());
         }
     }
 }
