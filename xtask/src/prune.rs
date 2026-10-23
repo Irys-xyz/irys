@@ -50,6 +50,11 @@ pub fn prune_stale_executables(
         .collect();
 
     for dir in dirs {
+        // Fingerprints sit beside this `deps/` dir, under the cargo target directory.
+        let fingerprint_target = dir
+            .parent()
+            .and_then(|profile| profile.parent())
+            .and_then(|target| target.canonicalize().ok());
         let current: HashSet<&Path> = built
             .iter()
             .filter(|exe| exe.parent() == Some(dir))
@@ -67,7 +72,10 @@ pub fn prune_stale_executables(
             }
         }
 
-        for entry in fs::read_dir(dir)? {
+        let Some(entries) = open_real_dir(dir)? else {
+            continue;
+        };
+        for entry in entries {
             let path = entry?.path();
             if current.contains(path.as_path()) || executable_stem(&path).is_none() {
                 continue;
@@ -98,7 +106,13 @@ pub fn prune_stale_executables(
             tracing::debug!(exe = %path.display(), root = %key.root.display(), ?reason, "removing");
             remove_with_siblings(dir, &path, &mut report)?;
             if let Some(id) = path.file_name().and_then(|n| n.to_str()) {
-                remove_fingerprint(dir, id);
+                match fingerprint_target.as_deref() {
+                    Some(target_dir) => remove_fingerprint(dir, id, target_dir),
+                    None => tracing::debug!(
+                        deps = %dir.display(),
+                        "fingerprint delete skipped: target dir does not resolve"
+                    ),
+                }
             }
         }
     }
@@ -281,7 +295,12 @@ pub fn prune_recorded(
     keep_after: SystemTime,
     unused_before: SystemTime,
 ) -> io::Result<Option<RecordedPrune>> {
-    let used = live_usage(&target_dir.join(USAGE_DIR), unused_before)?;
+    let target_dir = match target_dir.canonicalize() {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let used = live_usage(&target_dir.join(USAGE_DIR), &target_dir, unused_before)?;
     if used.is_empty() {
         return Ok(None);
     }
@@ -296,7 +315,7 @@ pub fn prune_recorded(
         .collect();
     built.sort();
     let executables = prune_stale_executables(workspace_root, &built, keep_after)?;
-    let units = prune_unused_units(target_dir, unused_before)?;
+    let units = prune_unused_units(&target_dir, unused_before)?;
     Ok(Some(RecordedPrune { executables, units }))
 }
 
@@ -322,12 +341,24 @@ pub struct UnitPruneReport {
 ///
 /// Records last written before `unused_before` expire and are deleted. With no live record the
 /// pass removes nothing, since nothing is known to be in use.
+///
+/// A symlink at `deps`, `examples`, `build` or `.fingerprint` is not followed. A usage path that
+/// does not resolve inside `target_dir` is ignored. A delete whose parent resolves outside
+/// `target_dir` is skipped.
 pub fn prune_unused_units(
     target_dir: &Path,
     unused_before: SystemTime,
 ) -> io::Result<UnitPruneReport> {
     let mut report = UnitPruneReport::default();
-    let used = live_usage(&target_dir.join(USAGE_DIR), unused_before)?;
+    let target_dir = match target_dir.canonicalize() {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            tracing::debug!("target dir does not exist; unit prune skipped");
+            return Ok(report);
+        }
+        Err(e) => return Err(e),
+    };
+    let used = live_usage(&target_dir.join(USAGE_DIR), &target_dir, unused_before)?;
     if used.is_empty() {
         tracing::debug!("no live usage record; unit prune skipped");
         return Ok(report);
@@ -342,11 +373,28 @@ pub fn prune_unused_units(
         let Some(profile) = dir.parent() else {
             continue;
         };
-        let uplifted = uplifted_closure(profile)?;
+        // `dir` came from a resolved usage path, so this profile should already lie inside
+        // the target. Resolve it again and refuse it when it does not.
+        let profile = match profile.canonicalize() {
+            Ok(profile) if profile.starts_with(&target_dir) => profile,
+            Ok(profile) => {
+                tracing::debug!(
+                    profile = %profile.display(),
+                    "skip profile: resolves outside the target dir"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::debug!(profile = %profile.display(), "skip profile: {e}");
+                continue;
+            }
+        };
+        let uplifted = uplifted_closure(&profile)?;
         tracing::debug!(units = uplifted.len(), profile = %profile.display(), "uplifted closure");
         for unit_dir in UNIT_DIRS {
             prune_deps_units(
                 &profile.join(unit_dir),
+                &target_dir,
                 &used,
                 &uplifted,
                 unused_before,
@@ -355,12 +403,13 @@ pub fn prune_unused_units(
         }
         prune_build_dirs(
             &profile.join("build"),
+            &target_dir,
             &used,
             &uplifted,
             unused_before,
             &mut report,
         )?;
-        prune_orphan_fingerprints(profile, &uplifted, unused_before, &mut report)?;
+        prune_orphan_fingerprints(&profile, &target_dir, &uplifted, unused_before, &mut report)?;
     }
     Ok(report)
 }
@@ -370,6 +419,7 @@ pub fn prune_unused_units(
 /// `unused_before` rule like every other unit.
 fn prune_orphan_fingerprints(
     profile: &Path,
+    target_dir: &Path,
     uplifted: &HashSet<String>,
     unused_before: SystemTime,
     report: &mut UnitPruneReport,
@@ -392,6 +442,9 @@ fn prune_orphan_fingerprints(
         }
         let touched = last_touched(&fingerprint_files(&dir))?.unwrap_or(SystemTime::UNIX_EPOCH);
         if touched > unused_before {
+            continue;
+        }
+        if !delete_inside(target_dir, &dir) {
             continue;
         }
         let bytes = dir_size(&dir);
@@ -449,13 +502,13 @@ pub fn uplifted_closure(profile: &Path) -> io::Result<HashSet<String>> {
         }
     }
 
-    let unit_dirs: Vec<String> = match fs::read_dir(&fingerprints) {
-        Ok(entries) => entries
+    let unit_dirs: Vec<String> = match open_real_dir(&fingerprints)? {
+        Some(entries) => entries
             .filter_map(|e| e.ok()?.file_name().into_string().ok())
             .collect(),
         // Without fingerprints cargo rebuilds everything anyway; still keep the roots themselves.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(roots.into_iter().collect()),
-        Err(e) => return Err(e),
+        // A symlink is not a fingerprint directory to walk.
+        None => return Ok(roots.into_iter().collect()),
     };
     // Unit hash -> its fingerprint dir, and fingerprint hash (as cargo writes it) -> unit hash.
     let dir_of: std::collections::HashMap<&str, &String> =
@@ -522,14 +575,19 @@ fn hex_le(hash: u64) -> String {
 }
 
 fn fingerprint_files(dir: &Path) -> Vec<PathBuf> {
-    fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| Some(e.ok()?.path()))
-        .collect()
+    let Ok(Some(entries)) = open_real_dir(dir) else {
+        return Vec::new();
+    };
+    entries.filter_map(|e| e.ok().map(|e| e.path())).collect()
 }
 
-fn live_usage(usage_dir: &Path, unused_before: SystemTime) -> io::Result<HashSet<PathBuf>> {
+/// `target_dir` is canonical. Only lines that resolve inside it are returned, and the stored
+/// path is that resolved path, so a record cannot select a directory outside the target.
+fn live_usage(
+    usage_dir: &Path,
+    target_dir: &Path,
+    unused_before: SystemTime,
+) -> io::Result<HashSet<PathBuf>> {
     let mut used = HashSet::new();
     let entries = match fs::read_dir(usage_dir) {
         Ok(entries) => entries,
@@ -544,13 +602,37 @@ fn live_usage(usage_dir: &Path, unused_before: SystemTime) -> io::Result<HashSet
             continue;
         }
         let body = fs::read_to_string(&path)?;
-        used.extend(
-            body.lines()
-                .filter(|l| !l.starts_with('#') && !l.is_empty())
-                .map(PathBuf::from),
-        );
+        for line in body.lines() {
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            if let Some(resolved) = usage_path_in_target(target_dir, line) {
+                used.insert(resolved);
+            }
+        }
     }
     Ok(used)
+}
+
+fn usage_path_in_target(target_dir: &Path, line: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(line);
+    match path.canonicalize() {
+        Ok(resolved) if resolved.starts_with(target_dir) => Some(resolved),
+        Ok(resolved) => {
+            tracing::debug!(
+                path = %resolved.display(),
+                "usage path resolves outside the target dir"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::debug!(
+                path = %path.display(),
+                "usage path does not resolve inside the target dir: {e}"
+            );
+            None
+        }
+    }
 }
 
 /// `<name>-<16 hex>` for a file in `deps/`: rlibs, rmetas, static libs and proc-macro shared
@@ -569,6 +651,7 @@ fn unit_id(name: &str) -> Option<&str> {
 
 fn prune_deps_units(
     dir: &Path,
+    target_dir: &Path,
     used: &HashSet<PathBuf>,
     uplifted: &HashSet<String>,
     unused_before: SystemTime,
@@ -576,10 +659,8 @@ fn prune_deps_units(
 ) -> io::Result<()> {
     let mut units: std::collections::HashMap<String, Vec<PathBuf>> =
         std::collections::HashMap::new();
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
+    let Some(entries) = open_real_dir(dir)? else {
+        return Ok(());
     };
     for entry in entries {
         let path = entry?.path();
@@ -604,6 +685,9 @@ fn prune_deps_units(
         tracing::debug!(unit = %id, "removing unit");
         let mut removed_any = false;
         for file in files {
+            if !delete_inside(target_dir, file) {
+                continue;
+            }
             if let Some(len) = remove_path(file)? {
                 report.removed_bytes += len;
                 removed_any = true;
@@ -613,7 +697,7 @@ fn prune_deps_units(
         // gone is left to the orphan sweep.
         if removed_any {
             report.removed_units += 1;
-            remove_fingerprint(dir, id);
+            remove_fingerprint(dir, id, target_dir);
         }
     }
     Ok(())
@@ -622,7 +706,7 @@ fn prune_deps_units(
 /// Remove the `.fingerprint` dir next to `deps` of the unit with id `id`. Without the unit's
 /// files it describes nothing, and cargo rebuilds a unit that has no fingerprint. The dir is found
 /// by hash, since it carries the package name and `id` the crate name.
-fn remove_fingerprint(deps: &Path, id: &str) {
+fn remove_fingerprint(deps: &Path, id: &str, target_dir: &Path) {
     let Some(fingerprints) = deps.parent().map(|profile| profile.join(".fingerprint")) else {
         return;
     };
@@ -632,28 +716,35 @@ fn remove_fingerprint(deps: &Path, id: &str) {
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| unit_hash(n) == hash)
-            && let Err(e) = fs::remove_dir_all(&dir)
-            && e.kind() != io::ErrorKind::NotFound
         {
-            tracing::debug!(dir = %dir.display(), "fingerprint dir not removed: {e}");
+            if !delete_inside(target_dir, &dir) {
+                continue;
+            }
+            if let Err(e) = fs::remove_dir_all(&dir)
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                tracing::debug!(dir = %dir.display(), "fingerprint dir not removed: {e}");
+            }
         }
     }
 }
 
 fn prune_build_dirs(
     build: &Path,
+    target_dir: &Path,
     used: &HashSet<PathBuf>,
     uplifted: &HashSet<String>,
     unused_before: SystemTime,
     report: &mut UnitPruneReport,
 ) -> io::Result<()> {
-    let entries = match fs::read_dir(build) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
+    let Some(entries) = open_real_dir(build)? else {
+        return Ok(());
     };
     for entry in entries {
         let dir = entry?.path();
+        if !delete_inside(target_dir, &dir) {
+            continue;
+        }
         if !dir.is_dir()
             || used.iter().any(|p| p.starts_with(&dir))
             || dir
@@ -721,6 +812,52 @@ fn last_touched(files: &[PathBuf]) -> io::Result<Option<SystemTime>> {
         latest = latest.max(Some(meta.modified()?));
     }
     Ok(latest)
+}
+
+/// List `dir` only when it is a real directory.
+///
+/// A symlink is not opened. `deps`, `examples`, `build` and `.fingerprint` are reached through
+/// this, and following one would list whatever tree it points at. `Ok(None)` means the directory
+/// is missing or is a symlink.
+fn open_real_dir(dir: &Path) -> io::Result<Option<fs::ReadDir>> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            tracing::debug!(dir = %dir.display(), "not followed: symlinked directory");
+            Ok(None)
+        }
+        Ok(_) => Ok(Some(fs::read_dir(dir)?)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// `true` when `path`'s parent resolves inside the canonical `target_dir`.
+///
+/// The last component is not resolved, so a symlink there is unlinked and not followed.
+/// A parent outside the target is skipped and logged.
+fn delete_inside(target_dir: &Path, path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        tracing::debug!(path = %path.display(), "skip delete: path has no parent");
+        return false;
+    };
+    match parent.canonicalize() {
+        Ok(resolved) if resolved.starts_with(target_dir) => true,
+        Ok(resolved) => {
+            tracing::debug!(
+                path = %path.display(),
+                parent = %resolved.display(),
+                "skip delete: parent resolves outside the target dir"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::debug!(
+                path = %path.display(),
+                "skip delete: parent does not resolve inside the target dir: {e}"
+            );
+            false
+        }
+    }
 }
 
 /// Remove a unit's file, or a directory such as the `<name>-<hash>.dSYM` bundle rustc writes on
@@ -1479,6 +1616,76 @@ mod tests {
             assert_eq!(report.removed_build_dirs, 1);
             assert!(kept.exists());
             assert!(!gone.exists());
+        }
+
+        #[test]
+        fn does_not_follow_a_symlinked_build_dir() {
+            let t = Target::new();
+            let used = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            t.lib("old-00000000000000bb", "crates/old/src/lib.rs", 48 * HOUR);
+
+            // `debug/build` points at another tree. An old directory there must survive.
+            let outside = TempDirBuilder::new().build();
+            let victim = outside.path().join("ring-00000000000000cc");
+            fs::create_dir_all(&victim).unwrap();
+            let marker = victim.join("output");
+            fs::write(&marker, "keep").unwrap();
+            age_file(&marker, 48 * HOUR);
+            let build = t.target().join("debug/build");
+            fs::remove_dir_all(&build).unwrap();
+            std::os::unix::fs::symlink(outside.path(), &build).unwrap();
+            t.record(&[used]);
+
+            let report = t.prune();
+
+            assert!(
+                marker.exists(),
+                "symlinked build dir was followed and its contents were deleted"
+            );
+            assert!(
+                fs::symlink_metadata(&build)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(report.removed_build_dirs, 0);
+            assert!(!t.has("libold-00000000000000bb.rlib"));
+            assert!(t.has("libserde-00000000000000aa.rlib"));
+        }
+
+        #[test]
+        fn ignores_a_usage_path_outside_the_target_dir() {
+            let t = Target::new();
+            let used = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            t.lib("old-00000000000000bb", "crates/old/src/lib.rs", 48 * HOUR);
+
+            let outside = TempDirBuilder::new().build();
+            let outside_deps = outside.path().join("deps");
+            fs::create_dir_all(&outside_deps).unwrap();
+            let named = outside_deps.join("libkeep-0123456789abcdef.rlib");
+            let old = outside_deps.join("libold-0123456789abcdef.rlib");
+            fs::write(&named, "x").unwrap();
+            fs::write(&old, "x").unwrap();
+            age_file(&old, 48 * HOUR);
+            t.record(&[used, named.clone()]);
+
+            t.prune();
+
+            assert!(
+                old.exists(),
+                "usage path outside the target dir selected that tree for pruning"
+            );
+            assert!(named.exists());
+            assert!(!t.has("libold-00000000000000bb.rlib"));
+            assert!(t.has("libserde-00000000000000aa.rlib"));
         }
     }
 }

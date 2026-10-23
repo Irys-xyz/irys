@@ -6,7 +6,9 @@
 //! Each submodule has its own index environment, so a pass runs one blocking
 //! task per submodule that still has rows.
 
-use super::{MigrationError, load_chunks_for_migration, write_chunks_to_module};
+use super::{
+    LoadedMigrationChunks, MigrationError, load_chunks_for_migration, write_chunks_to_module,
+};
 use crate::DataSyncServiceMessage;
 use irys_database::submodule::tables::PendingBodyMigration;
 use irys_domain::{BatchEnqueueItem, ChunkType, StorageModule, StorageModulesReadGuard};
@@ -148,6 +150,10 @@ enum JobOutcome {
         unwritable: usize,
         resume: PartitionChunkOffset,
     },
+    /// A Submit replica could not be read, and a hole is still empty. That
+    /// hole may sit on the skipped replica, so this pass is not "no local
+    /// source" and does not count toward retirement.
+    SourceUnread { resume: PartitionChunkOffset },
     /// Attempted and nothing was written or in flight: `unavailable` offsets
     /// had no local source and `failed` errored (last error kept for the log).
     Stalled {
@@ -462,6 +468,14 @@ impl SubmoduleDrain {
                                     "body migration job is waiting for entropy at its offsets; no penalty"
                                 );
                             }
+                            JobOutcome::SourceUnread { .. } => {
+                                debug!(
+                                    storage_module.id = self.sm.id,
+                                    partition.offset = %key,
+                                    data_root = %job.data_root,
+                                    "body migration could not read a Submit replica; not counting the pass"
+                                );
+                            }
                             JobOutcome::Stalled {
                                 unavailable,
                                 failed,
@@ -564,6 +578,7 @@ impl SubmoduleDrain {
             JobOutcome::Progressed { resume, .. }
             | JobOutcome::Deferred { resume }
             | JobOutcome::Unpacked { resume, .. }
+            | JobOutcome::SourceUnread { resume }
             | JobOutcome::Stalled { resume, .. } => *resume,
         };
         if resume == key {
@@ -856,6 +871,7 @@ impl SubmoduleDrain {
             // keeps the `pending_writes` lock out of the per-offset loop.
             pending_bytes: self.sm.pending_write_bytes(),
             unavailable: 0,
+            source_unread: 0,
             failed: 0,
             last_error: None,
             in_flight: 0,
@@ -994,7 +1010,10 @@ impl SubmoduleDrain {
                         "tx chunk offset for partition offset {partition_offset} is out of range"
                     ))
                 })?);
-            let bodies = match load_chunks_for_migration(
+            let LoadedMigrationChunks {
+                bodies,
+                submit_unread,
+            } = match load_chunks_for_migration(
                 &self.storage_modules_guard,
                 &self.db,
                 self.ledger,
@@ -1004,7 +1023,7 @@ impl SubmoduleDrain {
                 count,
                 &self.config,
             ) {
-                Ok(bodies) => bodies,
+                Ok(loaded) => loaded,
                 Err(MigrationError::WritesPaused) => {
                     let _ = self.flush_run(&mut run, &mut progress)?;
                     cut_short = true;
@@ -1064,7 +1083,11 @@ impl SubmoduleDrain {
                             resume = partition_offset + step as i64 + 1;
                             break;
                         }
-                        progress.unavailable += 1;
+                        if submit_unread {
+                            progress.source_unread += 1;
+                        } else {
+                            progress.unavailable += 1;
+                        }
                     }
                 }
             }
@@ -1079,6 +1102,7 @@ impl SubmoduleDrain {
 
         let written = progress.written;
         let unavailable = progress.unavailable;
+        let source_unread = progress.source_unread;
         let failed = progress.failed;
         let last_error = progress.last_error;
         // A sibling placement can be reserved while this offset is not.
@@ -1088,12 +1112,16 @@ impl SubmoduleDrain {
         let resume = first_incomplete.unwrap_or(key);
         // `first_incomplete` stays empty only when every offset in the span
         // was durable. A stop in the middle has already recorded the hole.
+        // One attempts counter covers the whole job. An unread replica may
+        // hold any hole in the span, so those holes must not retire the row.
         Ok(if durable == total && first_incomplete.is_none() {
             JobOutcome::Settled
         } else if written > 0 || in_flight > 0 {
             JobOutcome::Progressed { written, resume }
         } else if cut_short {
             JobOutcome::Deferred { resume }
+        } else if source_unread > 0 {
+            JobOutcome::SourceUnread { resume }
         } else if unavailable == 0 && failed == 0 {
             JobOutcome::Unpacked { unwritable, resume }
         } else {
@@ -1186,6 +1214,8 @@ struct JobProgress {
     written: usize,
     pending_bytes: u64,
     unavailable: usize,
+    /// Holes left empty because a Submit replica could not be read.
+    source_unread: usize,
     failed: usize,
     last_error: Option<MigrationError>,
     /// Offsets not queued because another placement of the same chunk is reserved.

@@ -397,7 +397,8 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
                 genesis.node_ctx.config.consensus.entropy_packing_iterations,
                 genesis.node_ctx.config.consensus.chunk_size as usize,
                 genesis.node_ctx.config.consensus.chain_id,
-            );
+            )
+            .expect("stored chunk fits the entropy buffer");
             assert_eq!(
                 unpacked.bytes.0, chunk,
                 "Submit offset {i} should still contain shared chunk data"

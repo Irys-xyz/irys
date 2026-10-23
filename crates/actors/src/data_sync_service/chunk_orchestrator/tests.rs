@@ -2289,6 +2289,58 @@ async fn pending_body_offsets_are_skipped_until_the_job_settles() {
     assert_eq!(orch.holds_started, 3);
 }
 
+/// A live body job covers far more entropy than the pending budget. Each tick
+/// turns the new rows into holds. The map stays within the budget.
+#[test_log::test(tokio::test)]
+async fn live_body_range_does_not_grow_chunk_requests() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks: u64 = 200;
+    let budget: u64 = 10;
+    let ticks: usize = 15;
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), num_chunks, budget);
+    let sm = unpacked_sm_for_ledger(&config, num_chunks, DataLedger::Publish);
+    let chunk_size = usize::try_from(config.consensus.chunk_size).expect("chunk size");
+    let zeros = vec![0_u8; chunk_size];
+    for offset in 0..u32::try_from(num_chunks).expect("chunk count") {
+        assert!(
+            sm.write_chunk(
+                PartitionChunkOffset::from(offset),
+                zeros.clone(),
+                ChunkType::Entropy,
+            ),
+            "queue entropy at {offset}"
+        );
+    }
+    sm.force_sync_pending_chunks().expect("sync entropy");
+    let (tx, _data) = signed_tx(&config, num_chunks);
+    index_tx(&sm, &tx, num_chunks - 1);
+    let mut orch = make_orchestrator_with_ledger_chunks(Arc::clone(&sm), &config, num_chunks);
+
+    for _ in 0..ticks {
+        orch.prepare_tick();
+        let mut dispatched = 0_u32;
+        while orch.dispatch_next() {
+            dispatched += 1;
+            assert!(
+                dispatched < 8,
+                "a fully covered range must not start peer fetches"
+            );
+        }
+    }
+
+    let tracked = orch.chunk_requests.len();
+    assert!(
+        tracked <= usize::try_from(budget).expect("budget"),
+        "chunk_requests grew to {tracked} across {ticks} ticks; budget is {budget}"
+    );
+    assert!(tracked > 0, "the scan must queue the covered range");
+    assert_eq!(
+        count_state(&orch, &ChunkRequestState::HeldByBodyWorker),
+        tracked,
+        "every tracked offset inside the live job is a hold"
+    );
+}
+
 /// A hold that sees no row-key movement is released to peers. The clock is
 /// the monotonic time since the hold started. One second inside the timeout
 /// stays held. Past the timeout, every covered offset is Pending and counted.

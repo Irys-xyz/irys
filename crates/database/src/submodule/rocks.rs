@@ -2550,12 +2550,29 @@ impl RocksSubmoduleStore {
 
     /// Delete presence rows in each inclusive span.
     ///
+    /// A span wider than [`DELETE_SUBRANGE_OFFSETS`] is one synced batch per
+    /// sub-span. The batch still holds the content keys for that sub-span only.
+    pub(super) fn delete_presence_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<PresenceReconcile> {
+        let mut total = PresenceReconcile::default();
+        for piece in presence_subspans(self, ranges)? {
+            let part = self.delete_presence_ranges_one(&[piece])?;
+            total.path_hash_rows = total.path_hash_rows.saturating_add(part.path_hash_rows);
+            total.data_path_rows = total.data_path_rows.saturating_add(part.data_path_rows);
+        }
+        Ok(total)
+    }
+
+    /// Delete presence rows in each inclusive span.
+    ///
     /// Counts keys only, then `DeleteRange` removes them. RocksDB v1 also
     /// reads each data-proof value in a span that has rows and point-deletes
     /// its content-hash key in the same batch. A span with no presence key
     /// does not enter the batch and does not read values. An empty result
     /// does not write, so the sequence stays put.
-    pub(super) fn delete_presence_ranges(
+    fn delete_presence_ranges_one(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
     ) -> eyre::Result<PresenceReconcile> {
@@ -2633,10 +2650,27 @@ impl RocksSubmoduleStore {
 
     /// Drop proof rows in each span. Keep a checksum-only row.
     ///
+    /// A span wider than [`DELETE_SUBRANGE_OFFSETS`] is one synced batch per
+    /// sub-span, same as [`Self::delete_presence_ranges`].
+    fn retain_entropy_crc_rows(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<PresenceReconcile> {
+        let mut total = PresenceReconcile::default();
+        for piece in presence_subspans(self, ranges)? {
+            let part = self.retain_entropy_crc_rows_one(&[piece])?;
+            total.path_hash_rows = total.path_hash_rows.saturating_add(part.path_hash_rows);
+            total.data_path_rows = total.data_path_rows.saturating_add(part.data_path_rows);
+        }
+        Ok(total)
+    }
+
+    /// Drop proof rows in each span. Keep a checksum-only row.
+    ///
     /// A proof row's checksum was computed over data bytes. After the span
     /// is entropy those bytes are gone, so the row is dropped and the offset
     /// is unknown until the next entropy write.
-    fn retain_entropy_crc_rows(
+    fn retain_entropy_crc_rows_one(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
     ) -> eyre::Result<PresenceReconcile> {
@@ -4349,6 +4383,81 @@ fn cf_has_key(db: &DB, snap: &rocksdb::Snapshot<'_>, cf: Cf) -> eyre::Result<boo
     let present = iter.key().is_some();
     iter.status().wrap_err("seek column family")?;
     Ok(present)
+}
+
+/// One synced delete covers at most this many offsets: one 36-byte content
+/// key per offset. Callers publish the non-`Data` interval image before the
+/// delete. Open drops rows that remain under a non-`Data` interval, so a
+/// crash between these commits leaves a cleared prefix.
+pub const DELETE_SUBRANGE_OFFSETS: u32 = 65_536;
+
+/// Inclusive sub-spans of at most [`DELETE_SUBRANGE_OFFSETS`] offsets.
+///
+/// No forward span yields nothing. One coalesced span that was split and
+/// holds no row also yields nothing: one iterator per piece would not write.
+fn presence_subspans(
+    store: &RocksSubmoduleStore,
+    ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> {
+    let pieces = offset_subspans(ranges);
+    if pieces.len() <= 1 || !contiguous_pieces(&pieces) {
+        return Ok(pieces);
+    }
+    let start = pieces[0].0;
+    let end = pieces[pieces.len() - 1].1;
+    if span_has_offset_row(&store.db, start, end)? {
+        Ok(pieces)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn contiguous_pieces(pieces: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> bool {
+    pieces
+        .windows(2)
+        .all(|pair| pair[0].1.0.checked_add(1) == Some(pair[1].0.0))
+}
+
+/// `true` when `[start, end]` holds any offset-meta key. Does not read the value.
+fn span_has_offset_row(
+    db: &DB,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<bool> {
+    if start > end {
+        return Ok(false);
+    }
+    let handle = cf_handle(db, Cf::OffsetMeta)?;
+    let snap = db.snapshot();
+    let mut opts = full_scan_options();
+    opts.set_iterate_upper_bound(exclusive_end_key(end));
+    let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
+    iter.seek(encode_key(start));
+    let present = iter.key().is_some();
+    iter.status().wrap_err("seek offset span")?;
+    Ok(present)
+}
+
+fn offset_subspans(
+    ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> Vec<(PartitionChunkOffset, PartitionChunkOffset)> {
+    let mut pieces = Vec::new();
+    for (start, end) in coalesced_u32_spans(ranges) {
+        let mut cursor = start;
+        loop {
+            let span_end = if end - cursor >= DELETE_SUBRANGE_OFFSETS {
+                cursor + (DELETE_SUBRANGE_OFFSETS - 1)
+            } else {
+                end
+            };
+            pieces.push((PartitionChunkOffset(cursor), PartitionChunkOffset(span_end)));
+            if span_end == end {
+                break;
+            }
+            cursor = span_end + 1;
+        }
+    }
+    pieces
 }
 
 /// Content-hash keys held from one pass of a clear scan.
@@ -10627,5 +10736,204 @@ mod tests {
             previous = again;
         }
         eyre::bail!("manifest still moving before the swap")
+    }
+
+    /// Proofs at the start of each of three sub-spans, plus one just past the span.
+    fn seed_three_subspans(store: &RocksSubmoduleStore) -> eyre::Result<(u32, u32)> {
+        let limit = DELETE_SUBRANGE_OFFSETS;
+        let span_end = 3 * limit - 1;
+        let neighbor = 3 * limit;
+        place_span(
+            store,
+            0,
+            neighbor,
+            H256::repeat_byte(4),
+            0,
+            1,
+            0,
+            &[0, limit, 2 * limit, neighbor],
+            None,
+        )?;
+        Ok((span_end, neighbor))
+    }
+
+    fn content_offsets(store: &RocksSubmoduleStore) -> eyre::Result<Vec<u32>> {
+        let offsets = store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(0)))?;
+        Ok(offsets.into_iter().map(|offset| offset.0).collect())
+    }
+
+    /// A span wider than one sub-span deletes the same rows as one shot of
+    /// that span. The neighbor just past the span stays.
+    #[test]
+    fn subspan_delete_matches_one_shot() -> eyre::Result<()> {
+        let limit = DELETE_SUBRANGE_OFFSETS;
+        let dropped_chunked = temp_dir("submodule_rocks_subspan_drop_chunked");
+        let dropped_once = temp_dir("submodule_rocks_subspan_drop_once");
+        let chunked = RocksSubmoduleStore::open(dropped_chunked.path().join("index"))?;
+        let once = RocksSubmoduleStore::open(dropped_once.path().join("index"))?;
+        let (span_end, neighbor) = seed_three_subspans(&chunked)?;
+        seed_three_subspans(&once)?;
+        let span = (
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(span_end),
+        );
+        let chunked_stats = chunked.drop_presence_in_ranges(&[span])?;
+        let once_stats = once.delete_presence_ranges_one(&[span])?;
+        assert_eq!(chunked_stats, once_stats);
+        assert_eq!(chunked_stats.data_path_rows, 3);
+        assert_eq!(content_offsets(&chunked)?, content_offsets(&once)?);
+        assert_eq!(content_offsets(&chunked)?, vec![neighbor]);
+        assert_content_index(&chunked)?;
+        assert_content_index(&once)?;
+
+        let retained_chunked = temp_dir("submodule_rocks_subspan_retain_chunked");
+        let retained_once = temp_dir("submodule_rocks_subspan_retain_once");
+        let chunked = RocksSubmoduleStore::open(retained_chunked.path().join("index"))?;
+        let once = RocksSubmoduleStore::open(retained_once.path().join("index"))?;
+        seed_three_subspans(&chunked)?;
+        seed_three_subspans(&once)?;
+        put_checksums(&chunked, &[1, limit + 1])?;
+        put_checksums(&once, &[1, limit + 1])?;
+        let chunked_stats = chunked.retain_entropy_crc_rows(&[span])?;
+        let once_stats = once.retain_entropy_crc_rows_one(&[span])?;
+        assert_eq!(chunked_stats, once_stats);
+        assert_eq!(chunked_stats.data_path_rows, 3);
+        assert_eq!(content_offsets(&chunked)?, vec![neighbor]);
+        assert_eq!(content_offsets(&chunked)?, content_offsets(&once)?);
+        for offset in [1_u32, limit + 1] {
+            let meta = chunked
+                .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(offset)))?
+                .expect("checksum row");
+            assert!(meta.proof.is_none() && meta.crc.is_some());
+            let other = once
+                .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(offset)))?
+                .expect("one-shot checksum row");
+            assert_eq!(meta.crc, other.crc);
+            assert!(other.proof.is_none());
+        }
+        assert_content_index(&chunked)?;
+        assert_content_index(&once)?;
+        Ok(())
+    }
+
+    /// Three offset chunks must not share one synced delete. A proof in each
+    /// chunk makes that chunk write. One commit means the whole span was one batch.
+    #[test]
+    fn presence_delete_commits_once_per_offset_subrange() -> eyre::Result<()> {
+        let limit = DELETE_SUBRANGE_OFFSETS;
+        let span_end = 3 * limit - 1;
+        let proofs = [0_u32, limit, 2 * limit];
+        let span = (
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(span_end),
+        );
+
+        let dropped = temp_dir("submodule_rocks_subrange_drop_commits");
+        let store = RocksSubmoduleStore::open(dropped.path().join("index"))?;
+        place_span(
+            &store,
+            0,
+            span_end,
+            H256::repeat_byte(4),
+            0,
+            1,
+            0,
+            &proofs,
+            None,
+        )?;
+        let before = store.wal_sync_count();
+        store.drop_presence_in_ranges(&[span])?;
+        let commits = store.wal_sync_count() - before;
+        assert_eq!(
+            commits, 3,
+            "presence delete of 3 * {limit} offsets used {commits} commits"
+        );
+
+        let retained = temp_dir("submodule_rocks_subrange_retain_commits");
+        let store = RocksSubmoduleStore::open(retained.path().join("index"))?;
+        place_span(
+            &store,
+            0,
+            span_end,
+            H256::repeat_byte(4),
+            0,
+            1,
+            0,
+            &proofs,
+            None,
+        )?;
+        let before = store.wal_sync_count();
+        store.retain_entropy_crc_rows(&[span])?;
+        let commits = store.wal_sync_count() - before;
+        assert_eq!(
+            commits, 3,
+            "entropy retain of 3 * {limit} offsets used {commits} commits"
+        );
+        Ok(())
+    }
+
+    /// The first sub-span is durable and the rest is still present. Reopen,
+    /// then the same delete open reconcile runs finishes the span.
+    #[test]
+    fn crash_after_first_subspan_reconciles_on_reopen() -> eyre::Result<()> {
+        let limit = DELETE_SUBRANGE_OFFSETS;
+        let first = (
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(limit - 1),
+        );
+
+        let dropped = temp_dir("submodule_rocks_subspan_crash_drop");
+        let path = dropped.path().join("index");
+        let (span_end, neighbor) = {
+            let store = RocksSubmoduleStore::open(&path)?;
+            let seeded = seed_three_subspans(&store)?;
+            store.delete_presence_ranges_one(&[first])?;
+            drop(store);
+            seeded
+        };
+        let store = RocksSubmoduleStore::open(&path)?;
+        assert_eq!(content_offsets(&store)?, vec![limit, 2 * limit, neighbor]);
+        assert!(
+            store
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(0)))?
+                .is_none()
+        );
+        assert_content_index(&store)?;
+        let span = (
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(span_end),
+        );
+        store.drop_presence_in_ranges(&[span])?;
+        assert_eq!(content_offsets(&store)?, vec![neighbor]);
+        assert!(
+            store
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(limit)))?
+                .is_none()
+        );
+        assert_content_index(&store)?;
+
+        let retained = temp_dir("submodule_rocks_subspan_crash_retain");
+        let path = retained.path().join("index");
+        {
+            let store = RocksSubmoduleStore::open(&path)?;
+            seed_three_subspans(&store)?;
+            put_checksums(&store, &[1])?;
+            store.retain_entropy_crc_rows_one(&[first])?;
+        }
+        let store = RocksSubmoduleStore::open(&path)?;
+        assert_eq!(content_offsets(&store)?, vec![limit, 2 * limit, neighbor]);
+        let checksum = store
+            .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(1)))?
+            .expect("checksum in the cleared prefix");
+        assert!(checksum.proof.is_none() && checksum.crc.is_some());
+        assert_content_index(&store)?;
+        store.retain_entropy_crc_rows(&[span])?;
+        assert_eq!(content_offsets(&store)?, vec![neighbor]);
+        let checksum = store
+            .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(1)))?
+            .expect("checksum survives entropy retain");
+        assert!(checksum.proof.is_none() && checksum.crc.is_some());
+        assert_content_index(&store)?;
+        Ok(())
     }
 }

@@ -389,15 +389,17 @@ impl PackingService {
                     .await
                 {
                     warn!(target: "irys::packing", "Local packing failed for SM {}: {}", storage_module_id, e);
-                    // Put back only offsets that are still an entropy target,
+                    // Put back only spans that are still an entropy target,
                     // and only while this job's hash is still assigned. A hash
                     // change has its own pack. Data must not be queued again.
+                    // One interval: a partition-sized span is not one checksum
+                    // offset per chunk. The storage-module tick sends it.
                     let same_hash = storage_module
                         .partition_assignment()
                         .is_some_and(|current| current.partition_hash == partition_hash);
                     if same_hash {
                         for span in entropy_target_ranges(&storage_module, partition_hash, target) {
-                            storage_module.requeue_crc_repair_range(span.0);
+                            storage_module.requeue_packing_range(span.0);
                         }
                     }
                 }
@@ -651,18 +653,23 @@ mod tests {
 
         let start = std::time::Instant::now();
         let queued = loop {
-            let ranges = storage_module.take_crc_repair_ranges();
+            let ranges = storage_module.take_packing_ranges();
             if !ranges.is_empty() {
                 break ranges;
             }
             if start.elapsed() > Duration::from_secs(5) {
-                eyre::bail!("a panicked packing worker must put the range back on the CRC queue");
+                eyre::bail!("a panicked packing worker must put the range back");
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         assert_eq!(
             queued,
             vec![ii(PartitionChunkOffset(0), PartitionChunkOffset(0))]
+        );
+        assert_eq!(
+            storage_module.crc_repair_len(),
+            0,
+            "a failed pack is not a checksum repair"
         );
         Ok(())
     }
@@ -810,6 +817,11 @@ mod tests {
             ranges.is_empty(),
             "an unassigned module must not requeue the failed pack, still queued: {ranges:?}"
         );
+        let packs = storage_module.take_packing_ranges();
+        assert!(
+            packs.is_empty(),
+            "an unassigned module must not queue another pack, still queued: {packs:?}"
+        );
         Ok(())
     }
 
@@ -910,6 +922,11 @@ mod tests {
             ranges.is_empty(),
             "a hash change must not requeue the old pack, still queued: {ranges:?}"
         );
+        let packs = storage_module.take_packing_ranges();
+        assert!(
+            packs.is_empty(),
+            "a hash change must not queue another pack of the old span, still queued: {packs:?}"
+        );
         Ok(())
     }
 
@@ -1007,7 +1024,7 @@ mod tests {
         let start = std::time::Instant::now();
         let mut queued = BTreeSet::new();
         loop {
-            for range in storage_module.take_crc_repair_ranges() {
+            for range in storage_module.take_packing_ranges() {
                 let mut offset = range.start().0;
                 loop {
                     queued.insert(offset);
@@ -1026,6 +1043,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(
+            storage_module.crc_repair_len(),
+            0,
+            "uninitialized spans are not checksum repairs"
+        );
+        assert_eq!(
             storage_module.get_chunk_type(&PartitionChunkOffset(0)),
             Some(ChunkType::Data),
             "the data prefix stays data"
@@ -1043,6 +1065,123 @@ mod tests {
             storage_module.get_chunk_type(&PartitionChunkOffset(3)),
             Some(ChunkType::Uninitialized)
         );
+        Ok(())
+    }
+
+    /// A failed pack of a wide uninitialized span queues that span once.
+    /// It does not insert one checksum repair per chunk. A later request
+    /// packs the same span.
+    #[cfg(not(feature = "nvidia"))]
+    #[test_log::test(tokio::test)]
+    async fn failed_pack_of_a_large_span_requeues_one_range() -> eyre::Result<()> {
+        use super::strategies::cpu::PackPause;
+        use tokio::sync::Notify;
+
+        const SPAN_END: u32 = 4_095;
+
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("large_span_pack_requeue")
+            .build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        let consensus = node_config.consensus_config();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            entropy_packing_iterations: 1,
+            num_chunks_in_partition: u64::from(SPAN_END) + 1,
+            chunk_size: 32,
+            ..consensus
+        });
+        node_config.storage.num_writes_before_sync = 32;
+        node_config.storage.min_durable_interval_ms = 0;
+        node_config.packing.local.cpu_packing_concurrency = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = PartitionHash::zero();
+        let submodule_dir = tmp_dir.path().join("hdd0");
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(
+                irys_types::partition_chunk_offset_ie!(0, 4096),
+                submodule_dir,
+            )],
+        };
+        let storage_module = Arc::new(StorageModule::new(&info, &config)?);
+        let span = ii(PartitionChunkOffset(0), PartitionChunkOffset(SPAN_END));
+        let request = PackingRequest::new(storage_module.clone(), PartitionChunkRange(span))?;
+
+        let packing = PackingService::new(Arc::new(config));
+        let runtime_handle = tokio::runtime::Handle::current();
+        let _controllers = packing.spawn_packing_controllers(runtime_handle.clone());
+        let handle = packing.spawn_tokio_service(runtime_handle);
+        let pause = Arc::new(PackPause {
+            started: Notify::new(),
+            release: Notify::new(),
+            fail_with: std::sync::Mutex::new(None),
+        });
+        let started = pause.started.notified();
+        tokio::pin!(started);
+        assert!(
+            !started.as_mut().enable(),
+            "the pause must not already be notified"
+        );
+        packing.set_pack_pause_for_test(Some(Arc::clone(&pause)));
+        handle.send(request)?;
+        tokio::time::timeout(Duration::from_secs(5), started)
+            .await
+            .expect("pack starts on the uninitialized span");
+
+        *pause.fail_with.lock().expect("fail flag") = Some("disk lane stayed full".to_string());
+        pause.release.notify_one();
+
+        let start = std::time::Instant::now();
+        let queued = loop {
+            let repairs = storage_module.crc_repair_len();
+            if repairs != 0 {
+                eyre::bail!(
+                    "a failed pack of {} chunks inserted {repairs} checksum repairs",
+                    u64::from(SPAN_END) + 1
+                );
+            }
+            let queued = storage_module.take_packing_ranges();
+            if !queued.is_empty() {
+                break queued;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                eyre::bail!("a failed pack did not queue the span");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(queued, vec![span], "the span is one range");
+        assert_eq!(
+            storage_module.crc_repair_len(),
+            0,
+            "the checksum set stays empty"
+        );
+
+        packing.set_pack_pause_for_test(None);
+        handle.send(PackingRequest::new(
+            storage_module.clone(),
+            PartitionChunkRange(span),
+        )?)?;
+
+        let start = std::time::Instant::now();
+        loop {
+            let entropy = storage_module.get_intervals(ChunkType::Entropy);
+            if entropy.len() == 1 && *entropy[0].start() == 0 && *entropy[0].end() == SPAN_END {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(30) {
+                eyre::bail!("the requeued span was not packed, entropy={entropy:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(storage_module.crc_repair_len(), 0);
+        assert!(storage_module.take_packing_ranges().is_empty());
         Ok(())
     }
 
@@ -1149,6 +1288,11 @@ mod tests {
         assert!(
             ranges.is_empty(),
             "a successful pack must not requeue, still queued: {ranges:?}"
+        );
+        let packs = storage_module.take_packing_ranges();
+        assert!(
+            packs.is_empty(),
+            "a successful pack must not queue another pack, still queued: {packs:?}"
         );
         Ok(())
     }

@@ -807,7 +807,21 @@ impl ChunkOrchestrator {
         // Ready and in-flight work share the configured hot-work budget.
         // Delayed entries do not consume it, otherwise a sparse prefix could
         // prevent discovery of later Entropy forever.
-        let hot_count = self.hot_request_count();
+        //
+        // Body-worker holds share this discovery budget, so a live job cannot
+        // add a fresh budget of rows every tick. `hot_request_count` leaves
+        // them out: promotion still has a free slot for a finished hold.
+        // While a body job holds the budget, other holes on this module wait
+        // until rows release (the anchor moves past them, the job ends, or
+        // the hold times out).
+        let hot_count = self.hot_request_count().saturating_add(
+            self.chunk_requests
+                .values()
+                .filter(|request| {
+                    matches!(request.request_state, ChunkRequestState::HeldByBodyWorker)
+                })
+                .count(),
+        );
 
         let max_chunk_offset = self.get_max_chunk_offset();
         // `prepare_tick` checks the assignment, then drops that lock to read
@@ -1461,8 +1475,11 @@ impl ChunkOrchestrator {
         }
     }
 
-    /// Offsets in Pending, Requested, or AwaitingDurability. Held, Delayed, and
-    /// Blocked do not consume the hot budget.
+    /// Offsets in Pending, Requested, or AwaitingDurability.
+    ///
+    /// Held, Delayed, and Blocked stay out of this count. Promotion uses it,
+    /// so a finished hold can still become Pending. Discovery adds the hold
+    /// count on top.
     fn hot_request_count(&self) -> usize {
         self.chunk_requests
             .values()
@@ -2723,7 +2740,8 @@ impl ChunkOrchestrator {
                     ChunkRequestState::Completed => (r, a, w, c + 1, d, b),
                     ChunkRequestState::Delayed { .. } => (r, a, w, c, d + 1, b),
                     ChunkRequestState::Blocked(_) => (r, a, w, c, d, b + 1),
-                    // Held work is neither ready nor blocked. Discovery continues.
+                    // Held work is left out of the ready and blocked counters.
+                    // Discovery counts it toward `max_pending_chunk_requests`.
                     ChunkRequestState::HeldByBodyWorker => (r, a, w, c, d, b),
                 },
             );
