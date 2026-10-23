@@ -384,6 +384,10 @@ where
         else {
             return SourceOutcome::EndRound;
         };
+        // A push or another source may have committed the row during the wait.
+        if self.chunk_is_held(&hash) {
+            return SourceOutcome::Held;
+        }
         let body = match self
             .gossip_client
             .fetch_chunk(&source, &peer.address.gossip, claim, &self.peer_list)

@@ -26,11 +26,11 @@ use irys_types::irys::IrysSigner;
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
-    DataTransaction, DataTransactionHeader, DatabaseProvider, DbSyncMode, GossipRequest, H256,
-    IrysBlockHeader, IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, SendTraced as _,
-    TokioServiceHandle, Traced, TxChunkOffset, TxKnownStatus, UnpackedChunk,
+    BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config, DataTransaction,
+    DataTransactionHeader, DatabaseProvider, DbSyncMode, GossipRequest, H256, IrysBlockHeader,
+    IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
+    PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, SendTraced as _, TokioServiceHandle,
+    Traced, TxKnownStatus, UnpackedChunk,
 };
 use irys_utils::circuit_breaker::CircuitBreakerConfig;
 use irys_vdf::state::{VdfState, VdfStateReadonly};
@@ -601,28 +601,6 @@ pub(crate) fn generate_test_tx() -> DataTransaction {
     account1
         .sign_transaction(tx)
         .expect("signing transaction failed")
-}
-
-#[must_use]
-pub(crate) fn create_test_chunks(tx: &DataTransaction) -> Vec<UnpackedChunk> {
-    let mut chunks = Vec::new();
-    for _chunk_node in &tx.chunks {
-        let data_root = tx.header.data_root;
-        let data_size = tx.header.data_size;
-        let data_path = Base64(vec![1, 2, 3]);
-
-        let chunk = UnpackedChunk {
-            data_root,
-            data_size,
-            data_path,
-            bytes: Base64(vec![1, 2, 3]),
-            tx_offset: TxChunkOffset::from(0_i32),
-        };
-
-        chunks.push(chunk);
-    }
-
-    chunks
 }
 
 struct FakeGossipDataHandler {

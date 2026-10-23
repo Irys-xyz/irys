@@ -965,3 +965,42 @@ async fn overloaded_ingest_is_retried_with_the_same_body() -> eyre::Result<()> {
     handle.stop().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn chunk_held_while_awaiting_a_fetch_permit_is_not_fetched() -> eyre::Result<()> {
+    let chunk = valid_chunk(32, 32);
+    let (receiver, handle) = receiver_for(std::slice::from_ref(&chunk), 0).await;
+    // clone: the fake would serve the body if the task still fetched it
+    let (fake, requests) = serving_fake(vec![chunk.clone()]);
+    let source = add_fake_peer(&receiver, 0x6c, spawn_fake(fake).await);
+    let handler = receiver.data_handler().expect("handler");
+
+    let permits = handler.chunk_announce.fetch_permits.available_permits();
+    let drained = Arc::clone(&handler.chunk_announce.fetch_permits)
+        .acquire_many_owned(u32::try_from(permits).expect("fits"))
+        .await
+        .expect("drain fetch permits");
+    post_announce(
+        receiver.gossip_addr(),
+        &source,
+        ChunkAnnouncement::from(&chunk),
+    )
+    .await;
+    // The task passes its round's held check, then waits for a permit.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    cache_body(&receiver, &chunk);
+    drop(drained);
+
+    poll_until(Duration::from_secs(5), "claim released", || {
+        handler.chunk_announce.claim_count() == 0
+    })
+    .await?;
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "a body held before the permit is not fetched again"
+    );
+    assert_eq!(handler.chunk_announce.stats().bodies_fetch, 0);
+    handle.stop().await?;
+    Ok(())
+}
