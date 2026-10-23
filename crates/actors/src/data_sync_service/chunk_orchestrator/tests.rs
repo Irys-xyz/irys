@@ -1464,6 +1464,50 @@ async fn term_ledger_hot_budget_queues_the_write_head_before_the_prefix() {
     );
 }
 
+/// Holds fill the discovery budget and are not hot rows. The frontier is
+/// Entropy and untracked. It must still be queued.
+#[test_log::test(tokio::test)]
+async fn term_ledger_write_head_is_queued_when_holds_fill_the_budget() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let budget = 2_u64;
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 8, budget);
+    let sm = packed_sm_for_ledger(&config, 8, DataLedger::Submit);
+    let mut orch = make_orchestrator_with_ledger_total(sm, &config, DataLedger::Submit, 8);
+    for value in 0..u32::try_from(budget).expect("budget") {
+        insert_request(
+            &mut orch,
+            PartitionChunkOffset::from(value),
+            ChunkRequestState::HeldByBodyWorker,
+            false,
+        );
+    }
+    let frontier = PartitionChunkOffset::from(7_u32);
+    assert!(
+        !orch.chunk_requests.contains_key(&frontier),
+        "the frontier starts untracked"
+    );
+    assert_eq!(
+        orch.storage_module.get_chunk_type(&frontier),
+        Some(ChunkType::Entropy)
+    );
+
+    orch.populate_request_queue();
+
+    assert!(
+        orch.chunk_requests.contains_key(&frontier),
+        "a full hold budget must not skip the term write head"
+    );
+    assert!(matches!(
+        orch.chunk_requests[&frontier].request_state,
+        ChunkRequestState::Pending
+    ));
+    assert_eq!(
+        count_state(&orch, &ChunkRequestState::HeldByBodyWorker),
+        usize::try_from(budget).expect("budget"),
+        "the holds stay holds"
+    );
+}
+
 #[test_log::test(tokio::test)]
 async fn publish_hot_budget_still_walks_from_the_slot_start() {
     let tmp = TempDirBuilder::new().with_tracing().build();

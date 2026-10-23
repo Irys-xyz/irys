@@ -813,8 +813,10 @@ impl ChunkOrchestrator {
         // them out: promotion still has a free slot for a finished hold.
         // While a body job holds the budget, other holes on this module wait
         // until rows release (the anchor moves past them, the job ends, or
-        // the hold times out).
-        let hot_count = self.hot_request_count().saturating_add(
+        // the hold times out). The term write head is queued from the hot-row
+        // count alone, so that wait does not skip the frontier.
+        let hot_rows = self.hot_request_count();
+        let hot_count = hot_rows.saturating_add(
             self.chunk_requests
                 .values()
                 .filter(|request| {
@@ -864,12 +866,6 @@ impl ChunkOrchestrator {
         let scan_assignees: &[IrysAddress] = if has_signer { &[] } else { &assignees };
 
         let max_requests = self.config.data_sync.max_pending_chunk_requests as usize;
-        let mut requests_to_add = max_requests.saturating_sub(hot_count);
-        // A full hot budget has nothing new to queue. Do not walk entropy intervals.
-        if requests_to_add == 0 {
-            return;
-        }
-
         let max_offset = *max_chunk_offset;
 
         // Term ledgers (especially Submit) are a small write head on a packed
@@ -881,13 +877,23 @@ impl ChunkOrchestrator {
         // later copies Submit data and needs Submit replicas on the frontier.
         // `get_chunk_type` sees pending writes; the scan below reads the live
         // interval map only.
-        if self.prioritizes_write_frontier()
+        //
+        // The guard is the non-hold hot count. Holds fill `hot_count` and
+        // must not skip this offset.
+        let mut head_enqueued = false;
+        if hot_rows < max_requests
+            && self.prioritizes_write_frontier()
             && self.is_entropy(PartitionChunkOffset::from(max_offset))
             && self.enqueue_pending(PartitionChunkOffset::from(max_offset), now, true)
         {
-            requests_to_add -= 1;
+            head_enqueued = true;
         }
 
+        let mut requests_to_add = max_requests.saturating_sub(hot_count);
+        if head_enqueued {
+            requests_to_add = requests_to_add.saturating_sub(1);
+        }
+        // A full hot budget has nothing new to queue. Do not walk entropy intervals.
         if requests_to_add == 0 {
             return;
         }
