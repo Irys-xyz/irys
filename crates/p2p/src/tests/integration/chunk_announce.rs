@@ -7,9 +7,11 @@ use super::super::util::{
 use crate::types::{GossipResponse, RejectionReason};
 use crate::wire_types::ChunkAnnouncement;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-    DataTransactionMetadata, GossipRequestV2, H256, PeerListItem, TxChunkOffset, UnpackedChunk,
+    DataTransactionMetadata, GossipCacheKey, GossipRequestV2, H256, PeerListItem, SendTraced as _,
+    TxChunkOffset, UnpackedChunk,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -1009,5 +1011,154 @@ async fn chunk_held_while_awaiting_a_fetch_permit_is_not_fetched() -> eyre::Resu
     );
     assert_eq!(handler.chunk_announce.stats().bodies_fetch, 0);
     handle.stop().await?;
+    Ok(())
+}
+
+/// A second body pushed while the storage write is held must be accepted,
+/// and that sender must not retry. The old path answered `Overloaded`, which
+/// gossip turns into `RateLimited`, and the sender tried again.
+// Current-thread is the `tokio::test` default. The occupy pause blocks the
+// worker that is inside ingress, so the test needs other workers.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_flight_storage_write_accepts_the_second_push_once() -> eyre::Result<()> {
+    use irys_domain::{StorageModule, StorageModuleInfo, StorageModulesReadGuard};
+    use irys_types::{
+        DataLedger, DataTransactionHeaderV1, LedgerChunkOffset, LedgerChunkRange,
+        PartitionChunkOffset, ii, ledger_chunk_offset_ii, partition::PartitionAssignment,
+        partition_chunk_offset_ii,
+    };
+    use std::sync::RwLock;
+
+    let modules = Arc::new(RwLock::new(Vec::new()));
+    let mut receiver = GossipServiceTestFixture::new_with_storage_modules(
+        |_| {},
+        StorageModulesReadGuard::new(Arc::clone(&modules)),
+    );
+    let mut sender_a = GossipServiceTestFixture::new();
+    let mut sender_b = GossipServiceTestFixture::new();
+    let chunk = valid_chunk(chunk_size(&receiver), 7);
+    let last_offset = receiver
+        .config
+        .consensus
+        .num_chunks_in_partition
+        .saturating_sub(1);
+    let storage_module = Arc::new(StorageModule::new(
+        &StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                ledger_id: Some(DataLedger::Submit.into()),
+                slot_index: Some(0),
+                miner_address: receiver.config.node_config.miner_address(),
+                partition_hash: H256::random(),
+            }),
+            submodules: vec![(
+                partition_chunk_offset_ii!(0_u64, last_offset),
+                "hdd0".into(),
+            )],
+        },
+        &receiver.config,
+    )?);
+    storage_module.pack_with_zeros();
+    storage_module.force_sync_pending_chunks()?;
+    let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+        tx: DataTransactionHeaderV1 {
+            data_root: chunk.data_root,
+            data_size: chunk.data_size,
+            ..Default::default()
+        },
+        metadata: DataTransactionMetadata::new(),
+    });
+    let tx_path = vec![5_u8, 6, 7, 8];
+    storage_module.index_transaction_data(
+        &data_tx,
+        &tx_path,
+        LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+        0,
+    )?;
+    modules
+        .write()
+        .expect("storage module list")
+        .push(Arc::clone(&storage_module));
+    cache_root(&receiver, &chunk);
+
+    // The first push blocks inside occupy, on a runtime worker. Drop releases
+    // it on every exit, including a failed assertion.
+    storage_module.hold_ingress_after_occupy_for_test();
+    struct ReleaseHold(Arc<StorageModule>);
+    impl Drop for ReleaseHold {
+        fn drop(&mut self) {
+            self.0.release_ingress_occupy_hold_for_test();
+        }
+    }
+    let hold = ReleaseHold(Arc::clone(&storage_module));
+
+    receiver.add_peer(&sender_a);
+    receiver.add_peer(&sender_b);
+    sender_a.add_peer(&receiver);
+    sender_b.add_peer(&receiver);
+
+    let (receiver_handle, _) = receiver.run_service();
+    let (sender_a_handle, sender_a_bus) = sender_a.run_service();
+    let (sender_b_handle, sender_b_bus) = sender_b.run_service();
+    wait_until_listening(receiver.gossip_addr()).await;
+    wait_until_listening(sender_a.gossip_addr()).await;
+    wait_until_listening(sender_b.gossip_addr()).await;
+
+    let handler = receiver.data_handler().expect("handler");
+    let seen_key = GossipCacheKey::Chunk(chunk.chunk_path_hash());
+    let sender_b_id = sender_b.config.peer_id();
+
+    // clone: sender A keeps its own broadcast body
+    sender_a_bus
+        .send_traced(GossipBroadcastMessageV2::from(chunk.clone()))
+        .expect("send the first push");
+    assert!(
+        storage_module.ingress_occupy_hold_arrived_for_test(Duration::from_secs(2)),
+        "the first push did not stop inside the storage write"
+    );
+    assert_eq!(
+        handler.chunk_announce.stats().bodies_push,
+        1,
+        "the held write is one body, not a retry"
+    );
+
+    sender_b_bus
+        .send_traced(GossipBroadcastMessageV2::from(chunk.clone()))
+        .expect("send the second push");
+    poll_until(
+        Duration::from_secs(2),
+        "the second push was not accepted",
+        || {
+            handler.chunk_announce.stats().bodies_push == 2
+                && handler
+                    .cache
+                    .peers_that_have_seen(&seen_key)
+                    .expect("seen cache")
+                    .contains(&sender_b_id)
+        },
+    )
+    .await?;
+    // The first rate-limit retry waits 250ms. A second body inside this
+    // window would be that retry.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        handler.chunk_announce.stats().bodies_push,
+        2,
+        "an accepted in-flight duplicate must not be pushed again"
+    );
+
+    drop(hold);
+    poll_until(
+        Duration::from_secs(5),
+        "the paused write did not finish",
+        || !storage_module.has_in_flight_index_for(&chunk),
+    )
+    .await?;
+    sender_a_handle.stop().await?;
+    sender_b_handle.stop().await?;
+    receiver_handle.stop().await?;
+    if let Some(ingress) = receiver.chunk_ingress.take() {
+        ingress.stop_and_join().await;
+    }
     Ok(())
 }

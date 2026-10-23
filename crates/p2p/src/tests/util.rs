@@ -17,7 +17,10 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{MempoolFacade, block_discovery::BlockDiscoveryFacade};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvider};
-use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, PeerList};
+use irys_domain::{
+    BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, PeerList,
+    StorageModulesReadGuard,
+};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::tempfile::TempDir;
 use irys_testing_utils::utils::TempDirBuilder;
@@ -248,6 +251,8 @@ pub(crate) struct GossipServiceTestFixture {
     pub sync_tx: UnboundedSender<SyncChainServiceMessage>,
     pub chunk_announce_limits: Option<crate::chunk_announce::ChunkAnnounceLimits>,
     pub ingest_script: Arc<Mutex<VecDeque<ScriptedIngest>>>,
+    /// Real chunk ingress, when this fixture is not using the scripted consumer.
+    pub chunk_ingress: Option<TokioServiceHandle>,
     data_handler: Option<Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>>>,
     // needs to be held so the directory is removed correctly
     pub _temp_dir: TempDir,
@@ -262,6 +267,23 @@ impl GossipServiceTestFixture {
     }
 
     pub(crate) fn new_with(configure: impl FnOnce(&mut NodeConfig)) -> Self {
+        Self::build(configure, None)
+    }
+
+    /// Same fixture as [`Self::new_with`], but `IngestChunk` is served by a
+    /// real `ChunkIngressService` over `modules` instead of the script.
+    /// `script_chunk_ingest` has no effect.
+    pub(crate) fn new_with_storage_modules(
+        configure: impl FnOnce(&mut NodeConfig),
+        modules: StorageModulesReadGuard,
+    ) -> Self {
+        Self::build(configure, Some(modules))
+    }
+
+    fn build(
+        configure: impl FnOnce(&mut NodeConfig),
+        storage_modules: Option<StorageModulesReadGuard>,
+    ) -> Self {
         let temp_dir = TempDirBuilder::new()
             .prefix("gossip_test_fixture")
             .with_tracing()
@@ -379,15 +401,37 @@ impl GossipServiceTestFixture {
         });
 
         let ingest_script: Arc<Mutex<VecDeque<ScriptedIngest>>> = Arc::default();
-        spawn_test_chunk_ingress_consumer(
-            chunk_ingress_rx,
-            Some(Arc::clone(&mempool_chunks)),
-            Some(TestIngestStore {
-                db: db.clone(),
-                chunk_size: config.consensus.chunk_size,
-            }),
-            Arc::clone(&ingest_script),
-        );
+        let chunk_ingress = if let Some(modules) = storage_modules {
+            let genesis = block_status_provider_mock.genesis_header();
+            let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+                &genesis,
+                config.consensus.clone(),
+            ))));
+            let (handle, _state) =
+                irys_actors::chunk_ingress_service::ChunkIngressService::spawn_service(
+                    db.clone(),
+                    modules,
+                    &block_tree,
+                    chunk_ingress_rx,
+                    &config,
+                    &service_senders,
+                    irys_actors::chunk_ingress_service::IngressProofGenerationState::new(),
+                    tokio::runtime::Handle::current(),
+                    task_executor.clone(),
+                );
+            Some(handle)
+        } else {
+            spawn_test_chunk_ingress_consumer(
+                chunk_ingress_rx,
+                Some(Arc::clone(&mempool_chunks)),
+                Some(TestIngestStore {
+                    db: db.clone(),
+                    chunk_size: config.consensus.chunk_size,
+                }),
+                Arc::clone(&ingest_script),
+            );
+            None
+        };
 
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
 
@@ -416,6 +460,7 @@ impl GossipServiceTestFixture {
             _sync_rx: Some(sync_rx),
             chunk_announce_limits: None,
             ingest_script,
+            chunk_ingress,
             data_handler: None,
         }
     }
