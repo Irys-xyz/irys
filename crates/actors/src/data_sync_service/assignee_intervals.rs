@@ -38,8 +38,10 @@ const HINT_MIN_REFETCH: Duration = Duration::from_secs(5);
 const HINT_RETRY_AFTER_FAILURE: Duration = Duration::from_secs(60);
 
 /// A fetch with no result after this is dropped, and the previous answer, if
-/// any, is used again. Covers every page of a window at [`HINT_PAGE_TIMEOUT`].
-const HINT_FETCH_TIMEOUT: Duration = Duration::from_secs(300);
+/// any, is used again. Covers all [`HINT_MAX_PAGES`] pages at
+/// [`HINT_PAGE_TIMEOUT`] each, plus a minute for the answer to come back.
+const HINT_FETCH_TIMEOUT: Duration =
+    Duration::from_secs(HINT_PAGE_TIMEOUT.as_secs() * HINT_MAX_PAGES as u64 + 60);
 
 /// Per-page request timeout. An older peer sends its whole list in one page.
 pub(crate) const HINT_PAGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -95,8 +97,10 @@ enum PeerHint {
     Unknown {
         retry_at: Instant,
     },
-    /// A fetch is in flight. `prior` keeps answering until it lands.
+    /// A fetch is in flight. `prior` keeps answering until it lands. Only the
+    /// answer to fetch `seq` may replace it.
     Fetching {
+        seq: u64,
         started: Instant,
         prior: Option<Known>,
     },
@@ -130,7 +134,7 @@ impl PeerHint {
     fn due(&mut self, now: Instant, near_edge: impl FnOnce(&Known) -> bool) -> bool {
         match self {
             Self::Unknown { retry_at } => *retry_at <= now,
-            Self::Fetching { started, prior } => {
+            Self::Fetching { started, prior, .. } => {
                 if now.saturating_duration_since(*started) >= HINT_FETCH_TIMEOUT {
                     *self = match prior.take() {
                         Some(known) => Self::Known(known),
@@ -148,14 +152,16 @@ impl PeerHint {
         }
     }
 
-    /// Mark this window in flight. Its previous answer keeps applying.
-    fn begin_fetch(&mut self, now: Instant) {
+    /// Mark this window in flight for fetch `seq`. Its previous answer keeps
+    /// applying.
+    fn begin_fetch(&mut self, seq: u64, now: Instant) {
         let prior = match std::mem::replace(self, Self::Unknown { retry_at: now }) {
             Self::Known(known) => Some(known),
             Self::Fetching { prior, .. } => prior,
             Self::Unknown { .. } => None,
         };
         *self = Self::Fetching {
+            seq,
             started: now,
             prior,
         };
@@ -178,18 +184,23 @@ impl PeerState {
 }
 
 /// One planned fetch: read `start..=end` from `peer` into its `kind` window.
+/// `seq` ties the answer to this fetch. A late answer to an abandoned fetch
+/// for the same window carries an older `seq` and is dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowFetch {
     pub peer: IrysAddress,
     pub start: u32,
     pub end: u32,
     pub kind: WindowKind,
+    pub seq: u64,
 }
 
 #[derive(Debug)]
 pub(crate) struct AssigneeIntervals {
     peers: HashMap<IrysAddress, PeerState>,
     frontier_margin: u32,
+    /// `seq` of the next planned fetch.
+    next_seq: u64,
 }
 
 impl AssigneeIntervals {
@@ -197,6 +208,7 @@ impl AssigneeIntervals {
         Self {
             peers: HashMap::new(),
             frontier_margin,
+            next_seq: 0,
         }
     }
 
@@ -217,6 +229,12 @@ impl AssigneeIntervals {
             max_offset,
         );
         let mut planned = Vec::new();
+        let mut next_seq = self.next_seq;
+        let mut take_seq = || {
+            let seq = next_seq;
+            next_seq = next_seq.wrapping_add(1);
+            seq
+        };
         for &peer in assignees {
             let state = self.peers.entry(peer).or_insert(PeerState {
                 scan: PeerHint::Unknown { retry_at: now },
@@ -228,12 +246,14 @@ impl AssigneeIntervals {
             if state.scan.due(now, |known| {
                 near_window_edge(known, cursor, window, reverse)
             }) {
-                state.scan.begin_fetch(now);
+                let seq = take_seq();
+                state.scan.begin_fetch(seq, now);
                 planned.push(WindowFetch {
                     peer,
                     start,
                     end,
                     kind: WindowKind::Scan,
+                    seq,
                 });
             }
             // While the scan window reaches the head it answers for the head
@@ -241,15 +261,18 @@ impl AssigneeIntervals {
             // again for the head window would download the same list twice.
             let scan_is_full_list = state.scan.known().is_some_and(|known| known.full_list);
             if end < head_window.1 && !scan_is_full_list && state.head.due(now, |_| false) {
-                state.head.begin_fetch(now);
+                let seq = take_seq();
+                state.head.begin_fetch(seq, now);
                 planned.push(WindowFetch {
                     peer,
                     start: head_window.0,
                     end: head_window.1,
                     kind: WindowKind::Head,
+                    seq,
                 });
             }
         }
+        self.next_seq = next_seq;
         planned
     }
 
@@ -269,10 +292,12 @@ impl AssigneeIntervals {
             WindowKind::Scan => &mut state.scan,
             WindowKind::Head => &mut state.head,
         };
-        if !matches!(hint, PeerHint::Fetching { .. }) {
-            // A late answer after a timeout already settled this window.
-            return;
-        }
+        // Only the fetch this window is waiting for may fill it. A late answer
+        // to a fetch that timed out, or one a newer fetch replaced, is dropped.
+        let started = match hint {
+            PeerHint::Fetching { seq, started, .. } if *seq == fetch.seq => *started,
+            _ => return,
+        };
         if fetch.kind == WindowKind::Scan
             && let Ok(page) = &result
             && let IntervalsCoverage::Window { end, .. } = page.coverage
@@ -283,9 +308,10 @@ impl AssigneeIntervals {
                 state.window.saturating_mul(2).min(HINT_WINDOW_CHUNKS)
             };
         }
+        // Date the answer from when its fetch began: a slow answer is that old.
         let known = result
             .ok()
-            .and_then(|page| into_known(page, fetch.start, head, self.frontier_margin, now));
+            .and_then(|page| into_known(page, fetch.start, head, self.frontier_margin, started));
         let hint = match fetch.kind {
             WindowKind::Scan => &mut state.scan,
             WindowKind::Head => &mut state.head,
@@ -785,6 +811,7 @@ mod tests {
                 start: 0,
                 end: 1_000,
                 kind: WindowKind::Scan,
+                seq: 0,
             }],
             "a reverse scan reads the window below the cursor"
         );
@@ -829,6 +856,61 @@ mod tests {
                 )
                 .len(),
             1
+        );
+    }
+
+    /// A fetch that outlived its timeout is abandoned. Its late answer must
+    /// not fill the window a newer fetch is waiting on, and the newer answer
+    /// must still land.
+    #[test]
+    fn a_late_answer_to_an_abandoned_fetch_is_dropped() {
+        let now = Instant::now();
+        let mut hints = AssigneeIntervals::new(0);
+        let stale = hints.plan_fetches(&[peer(1)], 100, 100, true, now)[0];
+
+        let expired = now + HINT_FETCH_TIMEOUT;
+        assert!(
+            hints
+                .plan_fetches(&[peer(1)], 100, 100, true, expired)
+                .is_empty()
+        );
+        let retry = expired + HINT_RETRY_AFTER_FAILURE;
+        let fresh = hints.plan_fetches(&[peer(1)], 100, 100, true, retry)[0];
+        assert_ne!(stale.seq, fresh.seq);
+        assert_eq!(
+            (stale.start, stale.end),
+            (fresh.start, fresh.end),
+            "same window"
+        );
+
+        hints.on_fetched(stale, 100, Ok(full(vec![(0, 99)])), retry);
+        assert_eq!(
+            hints.segments(&[peer(1)], 0, 100),
+            vec![(0, 100, Coverage::Unknown)],
+            "the abandoned fetch's answer is ignored"
+        );
+        hints.on_fetched(fresh, 100, Ok(full(vec![(0, 9)])), retry);
+        assert_eq!(
+            hints.segments(&[peer(1)], 0, 100)[0],
+            (0, 9, Coverage::Claimed),
+            "the fetch the window waits on still fills it"
+        );
+    }
+
+    /// A slow answer is as old as its fetch, so it is refreshed on time.
+    #[test]
+    fn a_slow_answer_is_dated_from_when_its_fetch_began() {
+        let now = Instant::now();
+        let mut hints = AssigneeIntervals::new(0);
+        let fetch = hints.plan_fetches(&[peer(1)], 100, 100, true, now)[0];
+        let answered = now + Duration::from_secs(200);
+        hints.on_fetched(fetch, 100, Ok(full(vec![(0, 9)])), answered);
+        assert_eq!(
+            hints
+                .plan_fetches(&[peer(1)], 100, 100, true, now + HINT_REFRESH)
+                .len(),
+            1,
+            "due one refresh after the fetch began, not after it was answered"
         );
     }
 

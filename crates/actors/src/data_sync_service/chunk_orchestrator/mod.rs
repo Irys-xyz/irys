@@ -2740,6 +2740,7 @@ impl ChunkOrchestrator {
                 ready.push(*offset);
             }
         }
+        self.sort_in_scan_order(&mut ready);
         self.ready_offsets.extend(ready);
     }
 

@@ -1148,6 +1148,26 @@ async fn delayed_retry_metadata_discards_soonest_deadline_within_bound() {
     );
 }
 
+/// A disconnected peer's in-flight offsets go back in scan order, so their
+/// neighbours meet at the queue head and share one cache lookup.
+#[test_log::test(tokio::test)]
+async fn a_disconnected_peers_offsets_requeue_in_scan_order() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 16);
+    let sm = packed_sm(&config, 16);
+    let mut orch = make_orchestrator(sm, &config);
+    let gone = add_assigned_peer(&mut orch, &config, 61, 9161);
+    add_assigned_peer(&mut orch, &config, 62, 9162);
+    for value in [9_u32, 3, 12, 5, 7, 4] {
+        insert_requested(&mut orch, PartitionChunkOffset::from(value), gone);
+    }
+
+    orch.remove_peer(gone);
+
+    let queued: Vec<u32> = orch.ready_offsets.iter().map(|offset| offset.0).collect();
+    assert_eq!(queued, vec![3, 4, 5, 7, 9, 12], "Publish scans low to high");
+}
+
 #[test_log::test(tokio::test)]
 async fn dispatch_restores_pending_offset_when_selected_peer_disappears() {
     let tmp = TempDirBuilder::new().with_tracing().build();
