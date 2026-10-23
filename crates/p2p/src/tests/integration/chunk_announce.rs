@@ -229,6 +229,29 @@ async fn chunk_fetch_serves_cached_body_with_local_size() -> eyre::Result<()> {
 }
 
 #[tokio::test]
+async fn chunk_fetch_omits_a_body_that_does_not_prove_the_cached_size() -> eyre::Result<()> {
+    let mut server = GossipServiceTestFixture::new();
+    let requester = GossipServiceTestFixture::new();
+    server.add_peer(&requester);
+    let chunk = valid_chunk(chunk_size(&server), 5);
+    cache_root(&server, &chunk);
+    server
+        .db
+        .update_eyre(|tx| irys_database::cache_chunk(tx, &truncated(&chunk)).map(|_| ()))
+        .expect("cache truncated chunk");
+    let (handle, _) = server.run_service();
+    wait_until_listening(server.gossip_addr()).await;
+    let from = requester.create_default_peer_entry();
+
+    assert!(matches!(
+        post_fetch(server.gossip_addr(), &from, ChunkAnnouncement::from(&chunk)).await,
+        GossipResponse::Accepted(None)
+    ));
+    handle.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn chunk_fetch_over_budget_is_rate_limited() -> eyre::Result<()> {
     let mut server = GossipServiceTestFixture::new();
     let requester = GossipServiceTestFixture::new();

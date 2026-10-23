@@ -1386,6 +1386,18 @@ impl GossipClient {
         // offer, and each check takes a half-open trial. Spending the window
         // here leaves none for the source-peer body pull.
         self.check_circuit_breaker(peer_id)?;
+        self.push_preserialized_retries(address, route, body).await
+    }
+
+    /// Rate-limit retries for a push whose admission is already settled.
+    /// A chunk-announce 404 uses this so the fallback does not take a second
+    /// half-open trial.
+    async fn push_preserialized_retries(
+        &self,
+        address: &SocketAddr,
+        route: GossipRoutes,
+        body: bytes::Bytes,
+    ) -> GossipResult<GossipResponse<()>> {
         let mut attempt = 0_u32;
         loop {
             let result = self.send_preserialized(address, route, body.clone()).await;
@@ -1972,10 +1984,11 @@ impl GossipClient {
                                 client
                                     .announce_unsupported
                                     .insert(peer_id, std::time::Instant::now());
+                                // The 404 answered the admission above. Settle
+                                // that trial, then push without taking another.
+                                client.circuit_breaker.record_success(&peer_id);
                                 client
-                                    .push_preserialized_with_backoff(
-                                        &peer_id, &address, push_route, push_body,
-                                    )
+                                    .push_preserialized_retries(&address, push_route, push_body)
                                     .await
                             }
                         }
@@ -4530,7 +4543,7 @@ mod tests {
             0
         }
 
-        fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<()> {
+        fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<String> {
             use std::io::Read as _;
 
             let mut buf = Vec::with_capacity(1024);
@@ -4538,20 +4551,28 @@ mod tests {
             loop {
                 let n = stream.read(&mut tmp)?;
                 if n == 0 {
-                    return Ok(());
+                    return Ok(String::new());
                 }
                 buf.extend_from_slice(&tmp[..n]);
                 let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n")
                 else {
                     if buf.len() > 1024 * 1024 {
-                        return Ok(());
+                        return Ok(String::new());
                     }
                     continue;
                 };
                 let headers = std::str::from_utf8(&buf[..header_end]).unwrap_or("");
                 let content_length = content_length_of(headers);
                 if buf.len() - (header_end + 4) >= content_length {
-                    return Ok(());
+                    let path = headers
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .to_string();
+                    return Ok(path);
                 }
             }
         }
@@ -4690,6 +4711,167 @@ mod tests {
                 &result,
                 &cache,
             );
+        }
+
+        /// The announcement takes the last half-open trial. A 404 must still
+        /// push the body, and that trial must be settled so the peer is not
+        /// blocked for a cooldown.
+        #[tokio::test]
+        async fn announce_404_with_the_last_half_open_trial_still_pushes_the_body() {
+            use irys_utils::circuit_breaker::{FailureThreshold, RecoveryAttempts};
+            use std::num::NonZeroU32;
+
+            let announce_hits = Arc::new(AtomicUsize::new(0));
+            let chunk_hits = Arc::new(AtomicUsize::new(0));
+            let server =
+                OldAnnouncePeer::spawn(Arc::clone(&announce_hits), Arc::clone(&chunk_hits));
+
+            let mut config = CircuitBreakerConfig::p2p_defaults();
+            config.failure_threshold = FailureThreshold::new(NonZeroU32::new(1).expect("1"));
+            config.recovery_attempts = RecoveryAttempts::new(NonZeroU32::new(1).expect("1"));
+            config.cooldown_duration = Duration::from_millis(200);
+            let client = GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(2),
+                IrysAddress::from([6_u8; 20]),
+                IrysPeerId::from([7_u8; 20]),
+                config,
+                tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            );
+            let (peer_list, peer_id, peer, _) = peer_aimed_at(6, server.addr);
+            let cache = Arc::new(GossipCache::new());
+            let key = GossipCacheKey::Chunk(H256::zero());
+            client.circuit_breaker.record_failure(&peer_id);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                client.circuit_breaker.would_allow(&peer_id),
+                "precondition: the open cooldown has elapsed"
+            );
+            assert_eq!(client.circuit_breaker.metrics().half_open_count, 0);
+
+            let announcement = wire_types::ChunkAnnouncement {
+                data_root: H256::zero(),
+                data_size: 32,
+                tx_offset: irys_types::TxChunkOffset::from(0),
+                chunk_path_hash: H256::zero(),
+            };
+            client.send_chunk_announcement_detached(
+                (&peer_id, &peer),
+                announcement,
+                GossipRoutes::Chunk,
+                bytes::Bytes::from_static(b"{}"),
+                &peer_list,
+                Arc::clone(&cache),
+                key,
+            );
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let seen = cache.peers_that_have_seen(&key).expect("seen cache");
+                if seen.contains(&peer_id) {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "fallback push was not accepted; announce={} chunk={}",
+                    announce_hits.load(Ordering::SeqCst),
+                    chunk_hits.load(Ordering::SeqCst)
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+
+            assert_eq!(announce_hits.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                chunk_hits.load(Ordering::SeqCst),
+                1,
+                "the body must be pushed"
+            );
+            assert!(
+                client.circuit_breaker.would_allow(&peer_id),
+                "the 404 must settle the half-open trial"
+            );
+            assert_eq!(client.circuit_breaker.metrics().half_open_count, 0);
+            assert_eq!(client.circuit_breaker.metrics().open_count, 0);
+        }
+
+        /// 404 on `/chunk_announce`, then accept the body push.
+        struct OldAnnouncePeer {
+            addr: SocketAddr,
+            stop: Arc<std::sync::atomic::AtomicBool>,
+            handle: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl OldAnnouncePeer {
+            fn spawn(announce_hits: Arc<AtomicUsize>, chunk_hits: Arc<AtomicUsize>) -> Self {
+                use std::io::Write as _;
+
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+                let addr = listener.local_addr().expect("addr");
+                let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let stop_thread = Arc::clone(&stop);
+                let accepted = serde_json::to_string(&GossipResponse::<()>::Accepted(()))
+                    .expect("accepted body");
+                let accepted_response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    accepted.len(),
+                    accepted
+                );
+                let missing =
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let handle = std::thread::spawn(move || {
+                    while !stop_thread.load(Ordering::SeqCst) {
+                        let Ok((mut stream, _)) = listener.accept() else {
+                            break;
+                        };
+                        if stop_thread.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .expect("read timeout");
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(2)))
+                            .expect("write timeout");
+                        let path = match read_http_request(&mut stream) {
+                            Ok(path) => path,
+                            Err(_) => continue,
+                        };
+                        let response = if path.contains("/chunk_announce") {
+                            announce_hits.fetch_add(1, Ordering::SeqCst);
+                            missing
+                        } else {
+                            chunk_hits.fetch_add(1, Ordering::SeqCst);
+                            accepted_response.as_str()
+                        };
+                        if stream.write_all(response.as_bytes()).is_err() {
+                            continue;
+                        }
+                        if stream.flush().is_err() {
+                            continue;
+                        }
+                    }
+                });
+                std::thread::sleep(Duration::from_millis(50));
+                Self {
+                    addr,
+                    stop,
+                    handle: Some(handle),
+                }
+            }
+        }
+
+        impl Drop for OldAnnouncePeer {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::SeqCst);
+                if let Err(error) = std::net::TcpStream::connect(self.addr) {
+                    debug!(%error, "old-announce test server was already stopped");
+                }
+                if let Some(handle) = self.handle.take()
+                    && handle.join().is_err()
+                {
+                    debug!("old-announce test server thread panicked");
+                }
+            }
         }
     }
 
