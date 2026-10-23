@@ -483,6 +483,53 @@ async fn durability_poll_returns_a_stalled_wait_to_pending() {
     );
 }
 
+/// A slow flush is not a stalled write. While the module still holds the
+/// write, a timed-out wait keeps waiting instead of fetching the chunk again,
+/// up to the pending limit.
+#[test_log::test(tokio::test)]
+async fn a_write_still_in_the_module_keeps_waiting_past_the_timeout() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 4;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let mut orch = make_orchestrator(sm.clone(), &config);
+    let peer = IrysAddress::from([8_u8; 20]);
+    let waiting = PartitionChunkOffset::from(1_u32);
+    let chunk_size = usize::try_from(config.consensus.chunk_size).expect("chunk size");
+
+    insert_requested(&mut orch, waiting, peer);
+    orch.mark_chunk_awaiting_durability(waiting).unwrap();
+    sm.write_chunk(waiting, vec![9_u8; chunk_size], ChunkType::Data);
+    assert!(
+        sm.is_data_write_pending_at(waiting),
+        "buffered, not flushed"
+    );
+
+    let started = Instant::now();
+    orch.reconcile_awaiting_durability(
+        started + DURABILITY_WAIT_TIMEOUT + Duration::from_secs(1),
+        DURABILITY_WAIT_TIMEOUT,
+    );
+    assert!(
+        matches!(
+            orch.chunk_requests[&waiting].request_state,
+            ChunkRequestState::AwaitingDurability(..)
+        ),
+        "the write is still pending: fetching again would add nothing"
+    );
+    assert!(!orch.ready_offsets.contains(&waiting));
+
+    orch.reconcile_awaiting_durability(
+        started + DURABILITY_PENDING_LIMIT + Duration::from_secs(1),
+        DURABILITY_WAIT_TIMEOUT,
+    );
+    assert_eq!(
+        orch.chunk_requests[&waiting].request_state,
+        ChunkRequestState::Pending,
+        "past the pending limit the chunk is fetched again"
+    );
+}
+
 #[test_log::test(tokio::test)]
 async fn awaiting_durability_is_observable_and_times_out_to_pending() {
     let tmp = TempDirBuilder::new().with_tracing().build();

@@ -37,6 +37,13 @@ pub(crate) const LOW_OFFSET_PROBE_THRESHOLD: u32 = 20_000;
 /// without turning ordinary buffered writes into duplicate network requests.
 const DURABILITY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Longest wait for a write the storage module still holds in its write path
+/// (queued, buffered, or written but not fsynced). A busy disk can take longer
+/// than [`DURABILITY_WAIT_TIMEOUT`] to flush, and fetching the chunk again then
+/// only finds the same pending write. Past this, the chunk returns to the
+/// fetch queue anyway.
+const DURABILITY_PENDING_LIMIT: Duration = Duration::from_secs(10 * 60);
+
 /// Retry an offset only after other ready work has had an opportunity to run.
 /// While its in-memory request record is retained, the delay is monotonic,
 /// doubles after each exhausted peer cycle, and is capped so data that appears
@@ -703,6 +710,11 @@ impl ChunkOrchestrator {
                     "data_sync chunk durably stored"
                 );
             } else if now.saturating_duration_since(started) >= timeout {
+                if now.saturating_duration_since(started) < DURABILITY_PENDING_LIMIT
+                    && self.storage_module.is_data_write_pending_at(*offset)
+                {
+                    continue;
+                }
                 request.request_state = ChunkRequestState::Pending;
                 request.ready_since = now;
                 request.excluded.clear();
