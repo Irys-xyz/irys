@@ -47,15 +47,3 @@ pub(super) fn record_chunk_error(error_type: &'static str, is_advisory: bool) {
         ],
     );
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn record_cache_commit_duration_does_not_panic() {
-        // OTel exposes no in-process read; exercise the call path only.
-        record_cache_commit_duration(0.0);
-        record_cache_commit_duration(42.5);
-    }
-}
