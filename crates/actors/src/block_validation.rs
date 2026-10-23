@@ -6521,6 +6521,8 @@ async fn ingress_proof_chunk_bytes_from_local(
             let packed = match module.generate_full_chunk(offset) {
                 Ok(Some(packed)) => packed,
                 Ok(None) => continue,
+                // A data-path row with no body is a hole, the same miss as `Ok(None)`.
+                Err(error) if irys_domain::missing_on_disk(&error) => continue,
                 Err(error) => {
                     debug!(
                         error = %error,
@@ -11032,6 +11034,11 @@ mod ingress_proof_local_bytes_tests {
                 let module = index_placement(&config, &tx, 0);
                 StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![module])))
             }
+            LocalBytes::DataPathHole => {
+                let module = index_placement(&config, &tx, 0);
+                remember_data_path(&module, &tx);
+                StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![module])))
+            }
             LocalBytes::NoModule => empty_modules(),
         };
 
@@ -11253,7 +11260,26 @@ mod ingress_proof_local_bytes_tests {
     enum LocalBytes {
         ReadError,
         IndexedNoBody,
+        /// Index names a data path and the file has no body.
+        DataPathHole,
         NoModule,
+    }
+
+    /// Name the chunk in the offset index without writing its bytes.
+    fn remember_data_path(sm: &StorageModule, tx: &DataTransaction) {
+        use irys_database::submodule::SubmoduleStore as _;
+
+        let path = tx.proofs[0].proof.clone();
+        let path_hash = UnpackedChunk::hash_data_path(&path);
+        let offset = PartitionChunkOffset::from(0_u32);
+        let (_, submodule) = sm.get_submodule_for_offset(offset).unwrap();
+        submodule
+            .db
+            .update(|write| {
+                write.write_data_path_updates(vec![(offset, path_hash, path)])?;
+                Ok(())
+            })
+            .unwrap();
     }
 
     /// A local disk error must not stop validation when a peer has the chunk.
@@ -11298,6 +11324,31 @@ mod ingress_proof_local_bytes_tests {
         validate_full_ingress(LocalBytes::IndexedNoBody, true)
             .await
             .expect("a peer chunk is valid when the local body is not migrated");
+    }
+
+    /// A data-path row with no body is a hole. No peer: consensus rejection.
+    /// A truncated `chunks.dat` is still a node fault.
+    #[tokio::test]
+    async fn data_path_hole_with_no_peer_is_invalid_ingress_proof() {
+        let err = validate_full_ingress(LocalBytes::DataPathHole, false)
+            .await
+            .expect_err("a hole with no peer produces no chunk");
+        assert!(
+            matches!(err, PreValidationError::InvalidIngressProof { .. }),
+            "a storage hole must stay a consensus rejection, got {err:?}"
+        );
+        assert!(
+            !err.is_node_fault(),
+            "a storage hole must not abort the node, got {err:?}"
+        );
+
+        let err = validate_full_ingress(LocalBytes::ReadError, false)
+            .await
+            .expect_err("a failed local read with no peer produces no chunk");
+        assert!(
+            err.is_node_fault(),
+            "a failed local read must be a node fault, got {err:?}"
+        );
     }
 
     /// That same miss, with no peer, stays a consensus rejection.

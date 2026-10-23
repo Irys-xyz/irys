@@ -109,7 +109,8 @@ fn take_chunk_read_notes() -> Vec<(&'static str, &'static str, &'static str)> {
     CHUNK_READ_NOTES.with(|notes| std::mem::take(&mut *notes.borrow_mut()))
 }
 
-fn missing_on_disk(error: &eyre::Report) -> bool {
+/// `true` when `error` is a storage hole: the index names a body this file does not hold.
+pub fn missing_on_disk(error: &eyre::Report) -> bool {
     error
         .to_string()
         .contains("Could not find chunk bytes on disk")
