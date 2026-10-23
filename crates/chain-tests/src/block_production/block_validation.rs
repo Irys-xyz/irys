@@ -529,9 +529,10 @@ async fn test_prevalidation_rejects_mismatched_ingress_proof_count() -> Result<(
         IngressProof::default(),
         IngressProof::default(),
     ]));
-    // The length mismatch fires before the guard compares `required_proof_count`
-    // with N, so this value does not change the expected error.
-    publish_ledger.required_proof_count = Some(0);
+    // `required_proof_count` = N (1). If the guard ran after
+    // `validate_ingress_proof_signers`, signer recovery would run on the default
+    // proofs first and return a different error, so this pins the guard's position.
+    publish_ledger.required_proof_count = Some(1);
 
     ctx.config.signer().sign_block_header(&mut header)?;
     let mut body = ctx.block.to_block_body();
