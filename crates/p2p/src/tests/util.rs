@@ -38,7 +38,7 @@ use reth_tasks::TaskExecutor;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Formatter};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -1102,6 +1102,14 @@ pub(crate) enum ScriptedIngest {
     Reply(Result<(), irys_actors::ChunkIngressError>),
     /// Never reply; the sender is kept alive so the caller waits.
     Stall,
+    /// Block inside ingress until `gate` is notified, then reply.
+    /// No cache row is written. `waiting` becomes true only after the
+    /// wait is armed, so a test can see the arriving guard during ingress.
+    Release {
+        gate: Arc<tokio::sync::Notify>,
+        waiting: Arc<AtomicBool>,
+        result: Result<(), irys_actors::ChunkIngressError>,
+    },
 }
 
 pub(crate) struct TestIngestStore {
@@ -1150,6 +1158,19 @@ fn spawn_test_chunk_ingress_consumer(
                             send_test_reply(reply, result);
                         }
                         Some(ScriptedIngest::Stall) => stalled.push(reply),
+                        Some(ScriptedIngest::Release {
+                            gate,
+                            waiting,
+                            result,
+                        }) => {
+                            let pending = gate.notified();
+                            tokio::pin!(pending);
+                            // Arm before publishing, so notify_one cannot land in the gap.
+                            pending.as_mut().enable();
+                            waiting.store(true, Ordering::Release);
+                            pending.await;
+                            send_test_reply(reply, result);
+                        }
                         None => {
                             if let Some(ref ingest_store) = store
                                 && irys_types::validate_unpacked_chunk(

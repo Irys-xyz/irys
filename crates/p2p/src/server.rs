@@ -102,6 +102,21 @@ fn rejection_response(wire: ProtocolVersion, reason: RejectionReason) -> HttpRes
     }
 }
 
+/// A cache miss is `Accepted(None)`. A local failure is not: the fetcher
+/// would treat that as the peer no longer holding the chunk.
+fn chunk_fetch_response(
+    result: GossipResult<Option<UnpackedChunk>>,
+) -> GossipResponse<Option<wire_types::UnpackedChunk>> {
+    match result {
+        Ok(maybe) => GossipResponse::Accepted(maybe.map(wire_types::UnpackedChunk::from)),
+        Err(GossipError::RateLimited) => GossipResponse::Rejected(RejectionReason::RateLimited),
+        Err(error) => {
+            warn!(%error, "chunk fetch failed");
+            GossipResponse::Rejected(RejectionReason::InvalidData)
+        }
+    }
+}
+
 impl<M, B> GossipServer<M, B>
 where
     M: MempoolFacade,
@@ -1925,8 +1940,9 @@ where
             Err(GossipError::RateLimited) => HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited)),
             Err(error) => {
-                // A seen-cache write error after admission. The claim, if
-                // any, already has its task, so the announcement is owned.
+                // `record_seen` runs before the fetch spawn. If it fails, a
+                // StartFetch claim has no task and still leaks, while this
+                // arm answers Accepted.
                 warn!(%error, "chunk announcement bookkeeping failed");
                 HttpResponse::Ok().json(GossipResponse::Accepted(()))
             }
@@ -1951,18 +1967,9 @@ where
         ) {
             return error_response;
         }
-        match server.data_handler.handle_chunk_fetch(&request.data) {
-            Ok(maybe) => HttpResponse::Ok().json(GossipResponse::Accepted(
-                maybe.map(wire_types::UnpackedChunk::from),
-            )),
-            Err(GossipError::RateLimited) => HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited)),
-            Err(error) => {
-                warn!(%error, "chunk fetch failed");
-                HttpResponse::Ok()
-                    .json(GossipResponse::<Option<wire_types::UnpackedChunk>>::Accepted(None))
-            }
-        }
+        HttpResponse::Ok().json(chunk_fetch_response(
+            server.data_handler.handle_chunk_fetch(&request.data),
+        ))
     }
 
     pub fn routes() -> impl HttpServiceFactory {
@@ -2196,6 +2203,24 @@ mod tests {
             serde_json::json!({ "Rejected": "HandshakeRequired" }),
             "v1 routes must flatten to the bare string mainnet v1 peers parse",
         );
+    }
+
+    #[test]
+    fn chunk_fetch_database_error_is_not_a_miss() {
+        assert!(matches!(
+            chunk_fetch_response(Ok(None)),
+            GossipResponse::Accepted(None)
+        ));
+        assert!(matches!(
+            chunk_fetch_response(Err(GossipError::RateLimited)),
+            GossipResponse::Rejected(RejectionReason::RateLimited)
+        ));
+        assert!(matches!(
+            chunk_fetch_response(Err(GossipError::Internal(InternalGossipError::Database(
+                "read failed".into(),
+            )))),
+            GossipResponse::Rejected(RejectionReason::InvalidData)
+        ));
     }
 
     #[test]

@@ -215,6 +215,18 @@ where
 
         record_gossip_chunk_received(chunk_size);
 
+        // Ingress returns `Ok` for a short body and for a recent-path hit.
+        // Either `Ok` records the sender as holding the chunk.
+        if let Err(error) =
+            irys_types::validate_unpacked_chunk(&chunk, self.config.consensus.chunk_size)
+        {
+            debug!(%error, "rejecting a chunk push that does not prove itself");
+            record_gossip_inbound_error("invalid_data", false);
+            return Err(GossipError::InvalidData(
+                InvalidDataError::ChunkInvalidProof,
+            ));
+        }
+
         let _arriving = self.chunk_announce.begin_arriving(chunk_path_hash);
         self.chunk_announce.record_push_body();
         crate::metrics::record_chunk_body_received("push");
