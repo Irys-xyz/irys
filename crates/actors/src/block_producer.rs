@@ -1,5 +1,6 @@
 use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
+    block_validation::poa_partition_is_owned_by_miner,
     chunk_ingress_service::ChunkIngressState,
     mempool_guard::MempoolReadGuard,
     mempool_service::MempoolTxs,
@@ -670,11 +671,7 @@ pub trait BlockProdStrategy {
             return Ok(None);
         }
 
-        // Validators reject a PoA over a partition the parent epoch snapshot does
-        // not assign to this miner (`PoAPartitionNotOwned`). A solution can go
-        // stale this way when an epoch block unpledges the partition, so discard
-        // it rather than build a block that fails our own pre-validation.
-        let partition_owner = self
+        let parent_epoch_snapshot = self
             .inner()
             .block_tree_guard
             .read()
@@ -684,18 +681,20 @@ pub trait BlockProdStrategy {
                     "parent epoch snapshot missing for {}",
                     prev_block_header.block_hash
                 )
-            })?
-            .partition_assignments
-            .get_assignment(solution.partition_hash)
-            .map(|assignment| assignment.miner_address);
-        if partition_owner != Some(solution.mining_address) {
+            })?;
+
+        // Validators reject a PoA over a partition the parent epoch snapshot does
+        // not assign to this miner. A solution can go stale this way when an epoch
+        // block unpledges the partition, so discard it rather than build a block
+        // that fails our own pre-validation.
+        if let Err(err) = poa_partition_is_owned_by_miner(
+            solution.partition_hash,
+            solution.mining_address,
+            &parent_epoch_snapshot,
+        ) {
             warn!(
-                "Skipping solution {} over partition {} assigned to {:?}, not miner {} on parent {}",
-                solution.solution_hash,
-                solution.partition_hash,
-                partition_owner,
-                solution.mining_address,
-                prev_block_header.block_hash
+                "Skipping solution {} on parent {}: {err}",
+                solution.solution_hash, prev_block_header.block_hash
             );
             return Ok(None);
         }
@@ -712,22 +711,10 @@ pub trait BlockProdStrategy {
 
         // Registered payout for this miner on the parent epoch snapshot must be
         // what we declare on the Irys header and pay via EVM coinbase.
-        let (reward_address, ledger_id) = {
-            let tree = self.inner().block_tree_guard.read();
-            let epoch_snapshot = tree
-                .get_epoch_snapshot(&prev_block_header.block_hash)
-                .ok_or_else(|| {
-                    eyre!(
-                        "parent epoch snapshot missing for {}",
-                        prev_block_header.block_hash
-                    )
-                })?;
-            let reward_address = epoch_snapshot.resolve_reward_address(solution.mining_address);
-            let ledger_id = epoch_snapshot
-                .get_data_partition_assignment(solution.partition_hash)
-                .and_then(|assignment| assignment.ledger_id);
-            (reward_address, ledger_id)
-        };
+        let reward_address = parent_epoch_snapshot.resolve_reward_address(solution.mining_address);
+        let ledger_id = parent_epoch_snapshot
+            .get_data_partition_assignment(solution.partition_hash)
+            .and_then(|assignment| assignment.ledger_id);
 
         // A failed or late derive must not build a Reth payload. The call
         // inside `produce_block_without_broadcasting` then reads the finished job.

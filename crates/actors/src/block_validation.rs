@@ -1790,7 +1790,11 @@ pub async fn prevalidate_block(
     debug!("poa data not expired");
 
     // Cheap ownership check before the expensive entropy work in `poa_is_valid`
-    poa_partition_is_owned_by_miner(&block.poa, block.miner_address, &parent_epoch_snapshot)?;
+    poa_partition_is_owned_by_miner(
+        block.poa.partition_hash,
+        block.miner_address,
+        &parent_epoch_snapshot,
+    )?;
     // Here as well as in `poa_is_valid`, which trusted sync skips
     poa_ledger_matches_assignment(&block.poa, &parent_epoch_snapshot)?;
     debug!(
@@ -2406,7 +2410,7 @@ pub fn check_poa_data_expiration(
 /// so without this check any address could mine any partition hash, pledged or
 /// not.
 pub fn poa_partition_is_owned_by_miner(
-    poa: &PoaData,
+    partition_hash: H256,
     miner_address: IrysAddress,
     epoch_snapshot: &EpochSnapshot,
 ) -> Result<(), PreValidationError> {
@@ -2414,11 +2418,11 @@ pub fn poa_partition_is_owned_by_miner(
     // submit entropy-chunk PoAs from data partitions.
     let owner = epoch_snapshot
         .partition_assignments
-        .get_assignment(poa.partition_hash)
+        .get_assignment(partition_hash)
         .map(|assignment| assignment.miner_address);
     if owner != Some(miner_address) {
         return Err(PreValidationError::PoAPartitionNotOwned {
-            partition_hash: poa.partition_hash,
+            partition_hash,
             miner: miner_address,
             owner,
         });
@@ -4706,7 +4710,7 @@ pub fn poa_is_valid(
         None => return Err(PreValidationError::PoAChunkMissing),
     };
     poa_chunk_within_configured_len(poa_chunk_bytes, config.chunk_size)?;
-    poa_partition_is_owned_by_miner(poa, *miner_address, epoch_snapshot)?;
+    poa_partition_is_owned_by_miner(poa.partition_hash, *miner_address, epoch_snapshot)?;
     poa_ledger_matches_assignment(poa, epoch_snapshot)?;
     let mut poa_chunk: Vec<u8> = poa_chunk_bytes.to_vec();
     // data chunk

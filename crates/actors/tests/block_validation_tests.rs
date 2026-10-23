@@ -318,12 +318,12 @@ fn poa_partition_owned_by_miner_is_accepted(#[case] partition: Partition) {
     let miner = IrysAddress::random();
     let (epoch_snapshot, capacity_hash, data_hash) = ownership_snapshot(miner);
     // Honest miners also submit entropy-chunk PoAs (no data_path) from data partitions.
-    let poa = match partition {
-        Partition::Capacity => entropy_poa(capacity_hash, None),
-        Partition::Data => entropy_poa(data_hash, Some(DataLedger::Submit as u32)),
+    let partition_hash = match partition {
+        Partition::Capacity => capacity_hash,
+        Partition::Data => data_hash,
     };
 
-    assert!(poa_partition_is_owned_by_miner(&poa, miner, &epoch_snapshot).is_ok());
+    assert!(poa_partition_is_owned_by_miner(partition_hash, miner, &epoch_snapshot).is_ok());
 }
 
 #[rstest::rstest]
@@ -338,8 +338,7 @@ fn poa_partition_owned_by_other_miner_is_rejected(#[case] partition: Partition) 
         Partition::Data => data_hash,
     };
 
-    let res =
-        poa_partition_is_owned_by_miner(&entropy_poa(partition_hash, None), miner, &epoch_snapshot);
+    let res = poa_partition_is_owned_by_miner(partition_hash, miner, &epoch_snapshot);
 
     assert!(matches!(
         res,
@@ -354,8 +353,7 @@ fn poa_partition_absent_from_snapshot_is_rejected() {
     let (epoch_snapshot, _, _) = ownership_snapshot(miner);
     let unassigned = H256::random();
 
-    let res =
-        poa_partition_is_owned_by_miner(&entropy_poa(unassigned, None), miner, &epoch_snapshot);
+    let res = poa_partition_is_owned_by_miner(unassigned, miner, &epoch_snapshot);
 
     assert!(matches!(
         res,
