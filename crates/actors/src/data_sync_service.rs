@@ -3623,6 +3623,60 @@ mod peer_chunk_validation_tests {
         }
     }
 
+    /// Chunk ingress answers `Ok` to a duplicate while another write occupies
+    /// the offset, and remembers the path hash. If the occupying write then
+    /// fails, ingress answers `Ok` for that hash without writing, as the stub
+    /// here does. Data sync's Submit route must still write the offset.
+    #[tokio::test]
+    async fn a_submit_offset_left_by_a_failed_occupying_write_is_written_by_data_sync() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let offset = PartitionChunkOffset::from(0_u32);
+        let peer = IrysAddress::from([9_u8; 20]);
+        let (mut h, _tmp) = route_harness(DataLedger::Submit, true);
+
+        h.sm.hold_ingress_after_occupy_for_test();
+        let module = Arc::clone(&h.sm);
+        let queued = h.chunk.clone();
+        let writer = std::thread::spawn(move || module.write_data_chunk(&queued));
+        assert!(
+            h.sm.ingress_occupy_hold_arrived_for_test(Duration::from_secs(5)),
+            "the occupying write did not stop after taking the offset"
+        );
+        assert!(h.sm.has_in_flight_index_for(&h.chunk));
+        // A pause after occupancy makes the held write stale.
+        h.sm.pause_data_writes();
+        h.sm.resume_data_writes();
+        h.sm.release_ingress_occupy_hold_for_test();
+        let result = writer.join().expect("writer thread");
+        assert!(
+            matches!(result, Err(irys_domain::WriteDataChunkError::WritesPaused)),
+            "the occupying write must fail after occupancy, got {result:?}"
+        );
+        assert!(!h.sm.has_in_flight_index_for(&h.chunk));
+        assert!(!h.sm.is_data_write_pending_at(offset));
+        assert!(!h.sm.is_data_chunk_durable_at(offset));
+
+        mark_requested(&mut h.inner, h.sm.id, offset, peer);
+        let chunk = ChunkFormat::Unpacked(h.chunk.clone());
+        deliver(
+            &mut h.inner,
+            &mut h.data_sync_rx,
+            h.sm.id,
+            offset,
+            peer,
+            chunk,
+        )
+        .await
+        .expect("data sync stores the body");
+        assert_eq!(h.ingested.load(Ordering::SeqCst), 1);
+        assert!(
+            h.sm.is_data_write_pending_at(offset),
+            "data sync wrote the offset that ingress skipped"
+        );
+    }
+
     /// The direct route checks the body against this offset's placement. A
     /// body that disagrees on data size is the peer's fault.
     /// A rollback can change the placement while a body is in delivery. A
