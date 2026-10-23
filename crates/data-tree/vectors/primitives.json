@@ -1,0 +1,198 @@
+{
+  "description": "Domain-separated hashes (spec §3, §10). Leaves hash mod251 bytes of length 0, 1, 4095, and 4096. node hashes the 0-byte leaf with the 1-byte leaf. size_witness is mainnet geometry and covers 1, 4096, 262144, 917504, 2^40, and 5 TiB. empty covers heights 0 through 8. chunk_key uses the testing-geometry commitment of 112 mod251 bytes. Chunk indexes are 0, 1, and 2^24, plus 3 so the printed chunk_key is in this file. 2^24 is an input of the hash, not a chunk of that 112-byte tree.",
+  "cases": [
+    {
+      "kind": "leaf",
+      "pattern": "mod251",
+      "data_size": 0,
+      "hash": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+    },
+    {
+      "kind": "leaf",
+      "pattern": "mod251",
+      "data_size": 1,
+      "hash": "96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7"
+    },
+    {
+      "kind": "leaf",
+      "pattern": "mod251",
+      "data_size": 4095,
+      "hash": "5d6b173f044ad9abfa7c7ed1d064a2581c0cf8a20a9829a5d18d6e47c3ebf163"
+    },
+    {
+      "kind": "leaf",
+      "pattern": "mod251",
+      "data_size": 4096,
+      "hash": "c46b7e9f32bd7ac69139854bf809012fd58ea09765b26f84425175557b080a31"
+    },
+    {
+      "kind": "node",
+      "left": {
+        "pattern": "mod251",
+        "data_size": 0
+      },
+      "right": {
+        "pattern": "mod251",
+        "data_size": 1
+      },
+      "hash": "fac54203e7cc696cf0dfcb42c92a1d9dbaf70ad9e621f4bd8d98662f00e3c125"
+    },
+    {
+      "kind": "size_witness",
+      "data_size": 1,
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "hash": "e677df7f858cd910622cfd5c6ac7bbf6200e7829c3e4a7325590a6b6309c0597"
+    },
+    {
+      "kind": "size_witness",
+      "data_size": 4096,
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "hash": "c0c06f04b271e626a424dad90c9ad30189e210d4b9690f231d9147cdeca448f0"
+    },
+    {
+      "kind": "size_witness",
+      "data_size": 262144,
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "hash": "86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "kind": "size_witness",
+      "data_size": 917504,
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "hash": "438a131aaf3445c16ab8b8f66374f8ec253f8bce7acc9efd91f722e2409ef89e"
+    },
+    {
+      "kind": "size_witness",
+      "data_size": 1099511627776,
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "hash": "eb0ca292ffcb58b36cfc81d47956e893bad39b124e8d958bdce2bb1602a22691"
+    },
+    {
+      "kind": "size_witness",
+      "data_size": 5497558138880,
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "hash": "90ab7201174156e12cb3aca56cdfc799e6f595e07ad4f298e92481eef262b51c"
+    },
+    {
+      "kind": "empty",
+      "empty_height": 0,
+      "hash": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+    },
+    {
+      "kind": "empty",
+      "empty_height": 1,
+      "hash": "fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072a"
+    },
+    {
+      "kind": "empty",
+      "empty_height": 2,
+      "hash": "deb82e155954d6be14592c66ccf7a1ece193eeebcdabaf747b91f44519f09f47"
+    },
+    {
+      "kind": "empty",
+      "empty_height": 3,
+      "hash": "2960044c62f2354e945e8d78fdd220a05f2c0879f24df6f11ef5cc26b5270a0e"
+    },
+    {
+      "kind": "empty",
+      "empty_height": 4,
+      "hash": "4cfabc48c6898a30b1b5d12dda8e09a96e9ea17e80f4b2a050b8a8b4803fbd43"
+    },
+    {
+      "kind": "empty",
+      "empty_height": 5,
+      "hash": "7162ed848f19740e53766ce01ac099523b099d593e0782ddbc5296eece50ec50"
+    },
+    {
+      "kind": "empty",
+      "empty_height": 6,
+      "hash": "2be3cf0551cc6936d461e3dc43f3c4bf50cbee1bc091925254e879f4e7665e94"
+    },
+    {
+      "kind": "empty",
+      "empty_height": 7,
+      "hash": "12db5262a5500d2516b8f82362d2a87278d20f712ff1fce2019d42ecba17241d"
+    },
+    {
+      "kind": "empty",
+      "empty_height": 8,
+      "hash": "1a1a9265f869676c206824aa7bfc2fe8c7fe34691dddfb35797b6a321f977dfc"
+    },
+    {
+      "kind": "chunk_key",
+      "pattern": "mod251",
+      "data_size": 112,
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "chunk_index": 0,
+      "commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "hash": "1df4d5d998f60a07f7d1b4be60b96f425e1b7ebe7aa4bdbbb6d4fbbe7232fdfc"
+    },
+    {
+      "kind": "chunk_key",
+      "pattern": "mod251",
+      "data_size": 112,
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "chunk_index": 1,
+      "commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "hash": "fdaa9d5b5b00137a84197cf2811bc45f61bc54fbe55042cfd324039aaf7b8c3b"
+    },
+    {
+      "kind": "chunk_key",
+      "pattern": "mod251",
+      "data_size": 112,
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "chunk_index": 16777216,
+      "commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "hash": "5e9fbad10d3191505d9a614196f5733917ba49b0603034cb8886b217e3bd1363"
+    },
+    {
+      "kind": "chunk_key",
+      "pattern": "mod251",
+      "data_size": 112,
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "chunk_index": 3,
+      "commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "hash": "91ff543f909c38411b53d65ef72e411ed81721af90f8f88f6b49450688b32674"
+    }
+  ]
+}

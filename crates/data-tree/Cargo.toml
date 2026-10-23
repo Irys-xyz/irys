@@ -1,0 +1,28 @@
+[package]
+name = "irys-data-tree"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["parallel"]
+parallel = ["dep:rayon"]
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+hex.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json.workspace = true
+proptest.workspace = true
+rstest.workspace = true
+
+[lints]
+workspace = true
