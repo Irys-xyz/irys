@@ -608,13 +608,23 @@ async fn body_with_a_different_data_size_is_rejected_before_ingest() -> eyre::Re
     });
     let source = add_fake_peer(&receiver, 0x63, spawn_fake(fake).await);
     let handler = receiver.data_handler().expect("handler");
+    // PeerScore has no ordering; the numeric score is what "scored down" means.
+    let score_before = receiver
+        .peer_list
+        .peer_by_id(&source.peer_id)
+        .expect("source")
+        .reputation_score
+        .get();
 
-    post_announce(
-        receiver.gossip_addr(),
-        &source,
-        ChunkAnnouncement::from(&chunk),
-    )
-    .await;
+    assert!(matches!(
+        post_announce(
+            receiver.gossip_addr(),
+            &source,
+            ChunkAnnouncement::from(&chunk)
+        )
+        .await,
+        GossipResponse::Accepted(())
+    ));
     poll_until(Duration::from_secs(10), "claim exhausted", || {
         handler.chunk_announce.claim_count() == 0
     })
@@ -624,6 +634,16 @@ async fn body_with_a_different_data_size_is_rejected_before_ingest() -> eyre::Re
         "nothing reached ingest"
     );
     assert!(!held(&receiver, &chunk.chunk_path_hash()));
+    let score_after = receiver
+        .peer_list
+        .peer_by_id(&source.peer_id)
+        .expect("source")
+        .reputation_score
+        .get();
+    assert!(
+        score_after < score_before,
+        "a body with another data_size scores the source down"
+    );
     handle.stop().await?;
     Ok(())
 }
@@ -936,6 +956,49 @@ async fn exhausted_sources_stop_after_three_rounds() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Every round falls inside the 30s open cooldown. The announcement proves
+/// the peer reached us, so the fetch is a recovery probe and the only
+/// announcer is still asked.
+#[tokio::test]
+async fn open_breaker_does_not_stop_the_only_announcer_being_asked() -> eyre::Result<()> {
+    let chunk = valid_chunk(32, 34);
+    let (receiver, handle) = receiver_for(std::slice::from_ref(&chunk), 0).await;
+    // clone: the fake keeps the body and the claim is built from the original
+    let (fake, requests) = serving_fake(vec![chunk.clone()]);
+    let source = add_fake_peer(&receiver, 0x6d, spawn_fake(fake).await);
+    let handler = receiver.data_handler().expect("handler");
+    let breaker = handler.gossip_client.circuit_breaker();
+    for _ in 0..5 {
+        breaker.record_failure(&source.peer_id);
+    }
+    assert!(
+        !breaker.would_allow(&source.peer_id),
+        "the open cooldown has not elapsed"
+    );
+
+    assert!(matches!(
+        post_announce(
+            receiver.gossip_addr(),
+            &source,
+            ChunkAnnouncement::from(&chunk)
+        )
+        .await,
+        GossipResponse::Accepted(())
+    ));
+    poll_until(Duration::from_secs(10), "fetched body held", || {
+        held(&receiver, &chunk.chunk_path_hash())
+    })
+    .await?;
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        breaker.metrics().open_count,
+        0,
+        "a served body closes the breaker"
+    );
+    handle.stop().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn overloaded_ingest_is_retried_with_the_same_body() -> eyre::Result<()> {
     let chunk = valid_chunk(32, 31);
@@ -1018,8 +1081,10 @@ async fn chunk_held_while_awaiting_a_fetch_permit_is_not_fetched() -> eyre::Resu
 /// and that sender must not retry. The old path answered `Overloaded`, which
 /// gossip turns into `RateLimited`, and the sender tried again.
 // Current-thread is the `tokio::test` default. The occupy pause blocks the
-// worker that is inside ingress, so the test needs other workers.
-#[tokio::test(flavor = "multi_thread")]
+// worker that is inside ingress, so the test needs other workers. With two,
+// one worker drives all three services and, in a parallel run, the second
+// push misses its 2s deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn in_flight_storage_write_accepts_the_second_push_once() -> eyre::Result<()> {
     use irys_domain::{StorageModule, StorageModuleInfo, StorageModulesReadGuard};
     use irys_types::{
