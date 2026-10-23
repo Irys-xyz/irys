@@ -78,6 +78,8 @@ struct Known {
     /// and when the frontier margin cut the answer: asking again would be cut
     /// the same way.
     extendable_high: bool,
+    /// An older peer ignored the window and sent its whole list.
+    full_list: bool,
 }
 
 impl Known {
@@ -235,8 +237,10 @@ impl AssigneeIntervals {
                 });
             }
             // While the scan window reaches the head it answers for the head
-            // band too.
-            if end < head_window.1 && state.head.due(now, |_| false) {
+            // band too. So does a full list from an older peer: fetching it
+            // again for the head window would download the same list twice.
+            let scan_is_full_list = state.scan.known().is_some_and(|known| known.full_list);
+            if end < head_window.1 && !scan_is_full_list && state.head.due(now, |_| false) {
                 state.head.begin_fetch(now);
                 planned.push(WindowFetch {
                     peer,
@@ -414,6 +418,7 @@ impl AssigneeIntervals {
             fetched_at: now,
             extendable_low: false,
             extendable_high: false,
+            full_list: false,
         });
         match kind {
             WindowKind::Scan => state.scan = known,
@@ -506,6 +511,7 @@ fn into_known(
     now: Instant,
 ) -> Option<Known> {
     let settled_end = head.checked_sub(frontier_margin)?;
+    let full_list = matches!(page.coverage, IntervalsCoverage::FullList);
     let (covers, extendable_low, extendable_high) = match page.coverage {
         IntervalsCoverage::FullList if page.intervals.is_empty() => return None,
         IntervalsCoverage::FullList => ((0, settled_end), false, false),
@@ -533,6 +539,7 @@ fn into_known(
         fetched_at: now,
         extendable_low,
         extendable_high,
+        full_list,
     })
 }
 
@@ -919,6 +926,28 @@ mod tests {
                 .plan_fetches(&[peer(1)], 1_000_000, head, true, now)
                 .is_empty(),
             "neither window is due again yet"
+        );
+    }
+
+    /// An older peer sends its whole list for the scan window. That already
+    /// covers the head band, so the head window is not fetched again.
+    #[test]
+    fn a_full_list_from_an_older_peer_is_not_fetched_twice() {
+        let now = Instant::now();
+        let head = 10_000_000;
+        let mut hints = AssigneeIntervals::new(0);
+        let first = hints.plan_fetches(&[peer(1)], 1_000_000, head, true, now);
+        assert_eq!(first.len(), 2, "nothing is known about the peer yet");
+        for fetch in first {
+            hints.on_fetched(fetch, head, Ok(full(vec![(0, 9)])), now);
+        }
+
+        let later = now + HINT_REFRESH;
+        let refresh = hints.plan_fetches(&[peer(1)], 1_000_000, head, true, later);
+        assert_eq!(
+            refresh.iter().map(|fetch| fetch.kind).collect::<Vec<_>>(),
+            vec![WindowKind::Scan],
+            "the full list answers for the head band"
         );
     }
 
