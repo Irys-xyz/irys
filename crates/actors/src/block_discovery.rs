@@ -523,7 +523,7 @@ impl BlockDiscoveryServiceInner {
 
         // Map of valid anchor block hash -> height, computed from the block tree &
         // database. Each item type range-checks the resolved height against its
-        // own minimum-anchor floor (submit: tx window; ingress: ingress window;
+        // own minimum-anchor floor (data txs: tx window; ingress: ingress window;
         // commitment: commitment window). The by-hash walk populates the tx
         // window; the block-index pass below extends it down to `reorg_floor`.
         // Anchors older than the floor are finalized and resolved on demand.
@@ -655,7 +655,7 @@ impl BlockDiscoveryServiceInner {
             &new_block_header.block_hash, &valid_anchor_block_heights
         );
 
-        // validate anchors for submit, publish, commitments, and ingress proofs
+        // validate anchors for data txs (Submit/OneYear/ThirtyDay), commitments, and ingress proofs
         // (in this context, it means that anchors must be part of the fork/chain that the currently validating block is on)
         // all txs (commitment, data) use the same anchor
         // ingress proofs have a different, oftentimes longer, anchor
@@ -694,20 +694,20 @@ impl BlockDiscoveryServiceInner {
             };
 
         // check anchors for data txs (bounded by the tx anchor window).
-        // The prior-inclusion walk only rejects duplicates within the anchor window,
-        // so an unchecked anchor would let a tx be included again past that window.
-        // Iterate every ledger the block carries, in ledger-id order, and match
-        // exhaustively so a new ledger must decide here whether its anchor is checked.
-        let mut data_txs_by_ledger: Vec<_> = transactions.data_txs.iter().collect();
-        data_txs_by_ledger.sort_by_key(|(ledger, _)| ledger.get_id());
-        for (ledger, txs) in data_txs_by_ledger {
+        // `get_previous_tx_inclusions` only looks back `prior_inclusion_walk_depth`
+        // blocks, and term txs have no fallback below it, so an unchecked anchor
+        // would let a tx be included again below that bound.
+        // The match is exhaustive so a new ledger must decide here whether its
+        // anchor is checked; `DataLedger::iter()` is checked at compile time to
+        // yield every ledger, in ledger-id order.
+        for ledger in DataLedger::iter() {
             match ledger {
                 // Promotions: the anchor was checked on Submit inclusion; the
                 // ingress proof anchors are checked below.
                 DataLedger::Publish => continue,
                 DataLedger::Submit | DataLedger::OneYear | DataLedger::ThirtyDay => {}
             }
-            for tx in txs {
+            for tx in transactions.get_ledger_txs(ledger) {
                 if !anchor_valid_for(&tx.anchor, min_tx_anchor_height)? {
                     return Err(BlockDiscoveryError::InvalidAnchor {
                         item_type: AnchorItemType::DataTransaction { tx_id: tx.id },

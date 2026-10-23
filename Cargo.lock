@@ -5756,6 +5756,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "strum 0.27.2",
  "test-fuzz",
  "thiserror 1.0.69",
  "tokio",
