@@ -339,6 +339,7 @@ async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
     // Set up the mock API client to return only one transaction
     fixture1.add_tx_to_mempool(tx1.clone()).await;
     // Don't add tx2 to expected transactions, so it will be missing
+    fixture1.persist_block_header_to_db(&block);
 
     // Capture the baseline request count *before* sending, so the poll_until
     // detects a change from the true initial value.
@@ -357,11 +358,12 @@ async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
         .send_traced(GossipBroadcastMessageV2::from(Arc::new(block)))
         .expect("Failed to send block to service 1");
 
-    // Wait for service 2 to attempt the block body fetch. Service 1 never stored the
-    // header, so it answers without a body, and an empty pull does not change its score.
-    // Service 1's request tracker counts the pull, which is the concrete observable that
-    // the block processing path was invoked. Without a successful block body fetch,
-    // process_block is never called and the mempool remains empty.
+    // Wait for service 2 to attempt the block body fetch. Service 1 cannot build the body
+    // without tx2, so it rejects the pull: the block fails at its source, not in service 2's
+    // validation of a partial body (`order_transactions_header_body_mismatch_missing_tx`
+    // covers that). Service 1's request tracker counts the pull, which is the concrete
+    // observable that the block processing path was invoked. Without a body, process_block
+    // is never called and the mempool remains empty.
     poll_until(
         Duration::from_secs(10),
         "Expected fixture1 to receive fixture2's block body pull",
