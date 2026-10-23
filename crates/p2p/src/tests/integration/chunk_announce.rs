@@ -980,12 +980,19 @@ async fn chunk_held_while_awaiting_a_fetch_permit_is_not_fetched() -> eyre::Resu
         .acquire_many_owned(u32::try_from(permits).expect("fits"))
         .await
         .expect("drain fetch permits");
-    post_announce(
-        receiver.gossip_addr(),
-        &source,
-        ChunkAnnouncement::from(&chunk),
-    )
-    .await;
+    assert!(matches!(
+        post_announce(
+            receiver.gossip_addr(),
+            &source,
+            ChunkAnnouncement::from(&chunk),
+        )
+        .await,
+        GossipResponse::Accepted(())
+    ));
+    poll_until(Duration::from_secs(5), "fetch claim admitted", || {
+        handler.chunk_announce.claim_count() == 1
+    })
+    .await?;
     // The task passes its round's held check, then waits for a permit.
     tokio::time::sleep(Duration::from_millis(500)).await;
     cache_body(&receiver, &chunk);
