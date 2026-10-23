@@ -13,9 +13,9 @@ use irys_chain::IrysNodeCtx;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, H256, IngressProofsList, IrysBlockHeader,
-    NodeConfig, SendTraced as _, U256, UnixTimestampMs, ingress::generate_ingress_proof,
-    storage_pricing::Amount,
+    BoundedFee, CommitmentTransaction, DataLedger, DataTransactionHeader, H256, IngressProofsList,
+    IrysBlockHeader, NodeConfig, SendTraced as _, U256, UnixTimestampMs,
+    ingress::generate_ingress_proof, storage_pricing::Amount,
 };
 use reth::payload::EthBuiltPayload;
 use reth_db::transaction::DbTxMut as _;
@@ -630,6 +630,71 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
         })
     ));
 
+    // 1b.) term ledger txs with incorrect anchors
+    for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
+        let term_price = genesis_node
+            .get_data_price(ledger, data.len() as u64)
+            .await?;
+        let old_term_tx = genesis_signer.create_transaction_with_fees(
+            data.clone(),
+            genesis_hash,
+            ledger,
+            BoundedFee::new(term_price.term_fee),
+            None,
+        )?;
+        let old_term_tx = genesis_signer.sign_transaction(old_term_tx)?;
+
+        {
+            let mut lck = block_prod_strategy.txs.lock().unwrap();
+            *lck = MempoolTxs {
+                commitment_tx: vec![],
+                submit_tx: vec![],
+                publish_tx: PublishLedgerWithTxs::default(),
+                one_year_tx: if ledger == DataLedger::OneYear {
+                    vec![old_term_tx.header.clone()]
+                } else {
+                    vec![]
+                },
+                thirty_day_tx: if ledger == DataLedger::ThirtyDay {
+                    vec![old_term_tx.header.clone()]
+                } else {
+                    vec![]
+                },
+            };
+        }
+
+        genesis_node.gossip_disable();
+        let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+            .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
+            .await?
+            .unwrap();
+
+        genesis_node.gossip_enable();
+        // The tx must be in the term ledger, or the Submit check alone would reject it.
+        assert!(
+            block.header().data_ledgers[ledger]
+                .tx_ids
+                .0
+                .contains(&old_term_tx.header.id)
+        );
+        let preval_res = block_prod_strategy
+            .inner()
+            .block_discovery
+            .handle_block(Arc::clone(&block), false)
+            .await;
+
+        assert!(
+            matches!(
+                preval_res,
+                Err(BlockDiscoveryError::InvalidAnchor {
+                    item_type: AnchorItemType::DataTransaction { tx_id },
+                    anchor: _
+                }) if tx_id == old_term_tx.header.id
+            ),
+            "{ledger:?} tx with a stale anchor must be rejected, got: {preval_res:?}"
+        );
+    }
+
     // 2.) commitment tx with incorrectly anchored commitment tx
     {
         let mut lck = block_prod_strategy.txs.lock().unwrap();
@@ -831,6 +896,143 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
     }
 
     genesis_node.stop().await;
+
+    Ok(())
+}
+
+// A term tx that is already included must not be included again once the
+// prior-inclusion walk (`max(tx_anchor_expiry_depth, block_tree_depth)` blocks)
+// no longer reaches the first inclusion. Term txs have no finalized-index
+// fallback below the walk, so the anchor bound alone stops a second `term_fee` charge.
+#[test_log::test(tokio::test)]
+async fn heavy_term_tx_reinclusion_past_inclusion_walk_rejected() -> eyre::Result<()> {
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub txs: Mutex<MempoolTxs>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn fetch_best_mempool_txs(
+            &self,
+            _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
+        ) -> Result<MempoolTxs, irys_actors::tx_selector::TxSelectorError> {
+            Ok(self.txs.lock().unwrap().clone())
+        }
+    }
+
+    let seconds_to_wait = 30;
+    let tx_anchor_expiry_depth = 3;
+    let block_tree_depth = 8;
+    let mut config = NodeConfig::testing().with_consensus(|consensus| {
+        consensus.chunk_size = 32;
+        consensus.mempool.tx_anchor_expiry_depth = tx_anchor_expiry_depth;
+        consensus.block_tree_depth = block_tree_depth;
+        consensus.block_migration_depth = 1;
+    });
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // Include one tx per term ledger through the normal mempool path.
+    let mut term_txs = Vec::new();
+    for (ledger, fill) in [(DataLedger::OneYear, 11_u8), (DataLedger::ThirtyDay, 22_u8)] {
+        let data = vec![fill; 96];
+        let price = node.get_data_price(ledger, data.len() as u64).await?;
+        let tx = signer.create_transaction_with_fees(
+            data,
+            node.get_anchor().await?,
+            ledger,
+            BoundedFee::new(price.term_fee),
+            None,
+        )?;
+        let tx = signer.sign_transaction(tx)?;
+        node.ingest_data_tx(tx.header.clone()).await?;
+        node.wait_for_mempool(tx.header.id, seconds_to_wait).await?;
+        term_txs.push((ledger, tx.header));
+    }
+    let inclusion_block = node.mine_block().await?;
+    for (ledger, tx) in &term_txs {
+        assert!(
+            inclusion_block.data_ledgers[*ledger]
+                .tx_ids
+                .0
+                .contains(&tx.id),
+            "{ledger:?} tx must be included in block {}",
+            inclusion_block.height
+        );
+    }
+
+    // Mine until the walk from the next block no longer reaches the inclusion block.
+    let walk_depth = u64::from(tx_anchor_expiry_depth).max(block_tree_depth);
+    node.mine_blocks(walk_depth as usize + 1).await?;
+
+    for (ledger, tx) in &term_txs {
+        let block_prod_strategy = EvilBlockProdStrategy {
+            prod: ProductionStrategy {
+                inner: node.node_ctx.block_producer_inner.clone(),
+            },
+            txs: Mutex::new(MempoolTxs {
+                commitment_tx: vec![],
+                submit_tx: vec![],
+                publish_tx: PublishLedgerWithTxs::default(),
+                one_year_tx: if *ledger == DataLedger::OneYear {
+                    vec![tx.clone()]
+                } else {
+                    vec![]
+                },
+                thirty_day_tx: if *ledger == DataLedger::ThirtyDay {
+                    vec![tx.clone()]
+                } else {
+                    vec![]
+                },
+            }),
+        };
+
+        node.gossip_disable();
+        let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+            .fully_produce_new_block_candidate(solution_context(&node.node_ctx).await?)
+            .await?
+            .unwrap();
+        node.gossip_enable();
+
+        assert!(
+            block.header().height > inclusion_block.height + walk_depth,
+            "candidate must be past the inclusion walk"
+        );
+        assert!(
+            block.header().data_ledgers[*ledger]
+                .tx_ids
+                .0
+                .contains(&tx.id)
+        );
+
+        let preval_res = block_prod_strategy
+            .inner()
+            .block_discovery
+            .handle_block(Arc::clone(&block), false)
+            .await;
+
+        assert!(
+            matches!(
+                preval_res,
+                Err(BlockDiscoveryError::InvalidAnchor {
+                    item_type: AnchorItemType::DataTransaction { tx_id },
+                    anchor: _
+                }) if tx_id == tx.id
+            ),
+            "{ledger:?} tx included again past the inclusion walk must be rejected, got: {preval_res:?}"
+        );
+    }
+
+    node.stop().await;
 
     Ok(())
 }
