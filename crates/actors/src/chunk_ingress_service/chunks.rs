@@ -3200,6 +3200,65 @@ mod tests {
         assert_eq!(msg.chunk_mode, ChunkBroadcastMode::Announce);
     }
 
+    /// An ingest records its chunk-cache commit wait once, so a slow root
+    /// volume under the commit shows in `cache_commit_duration_ms`.
+    // Must run under nextest (process-per-test isolation): the metric statics
+    // bind to the global meter provider on first record (LazyLock), so the
+    // provider must be installed before this instrument is first recorded.
+    #[tokio::test]
+    async fn ingest_records_the_cache_commit_duration() {
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{
+            InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        };
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-commit-timer")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let chunk = valid_single_chunk(vec![5_u8; 32]);
+        insert_confirmed_cdr(&inner.irys_db, chunk.data_root, chunk.data_size);
+
+        inner
+            .ingest_chunk(
+                Arc::new(chunk),
+                PendingDrainRole::External,
+                ChunkBroadcastMode::Announce,
+            )
+            .await
+            .map_err(|failure| failure.error)
+            .expect("chunk ingress");
+        provider.force_flush().expect("flush metrics");
+
+        let commits = exporter
+            .get_finished_metrics()
+            .expect("collected metrics")
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == "irys.mempool.chunks.cache_commit_duration_ms")
+            .map(|metric| match metric.data() {
+                AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                    .data_points()
+                    .map(|point| point.count())
+                    .sum::<u64>(),
+                _ => panic!("cache_commit_duration_ms must be an f64 histogram"),
+            });
+        assert_eq!(commits, Some(1), "one ingest records one commit wait");
+    }
+
     /// A prefix of a confirmed larger root is stored with the claim's smaller
     /// field. The announcement must use the size a fetch will serve.
     #[tokio::test]
