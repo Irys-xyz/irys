@@ -19,6 +19,7 @@ irys_utils::define_metrics! {
     counter VALIDATION_CONCURRENT_CANCEL_REPEATED("irys.validation.concurrent_cancel_repeated_total", "Concurrent validation tasks parked as RepeatedCancellation SoftInternal after exceeding MAX_CONCURRENT_CANCEL_RETRIES (recovery delegated to fresh gossip).");
     gauge CACHE_CHUNK_COUNT("irys.cache.chunk_count", "Number of cached chunks");
     gauge CACHE_CHUNK_SIZE_BYTES("irys.cache.chunk_size_bytes", "Total size of cached chunks in bytes");
+    gauge CACHE_PRUNE_PASS_BODIES("irys.cache.prune_pass_bodies", "Cached bodies the last chunk-pruning pass deleted or kept, by outcome");
     counter BLOCK_DISCOVERY_ERRORS("irys.block_discovery.errors_total", "Block discovery errors by type");
     counter BLOCK_DISCOVERY_SUCCESS("irys.block_discovery.success_total", "Successful block pre-validations");
     // `chunks_completed_total` is kept as a durable-store success counter (historical name).
@@ -223,6 +224,22 @@ pub(crate) fn record_validation_concurrent_cancel_repeated() {
 pub(crate) fn record_cache_stats(chunk_count: u64, chunk_size_bytes: u64) {
     CACHE_CHUNK_COUNT.record(chunk_count, &[]);
     CACHE_CHUNK_SIZE_BYTES.record(chunk_size_bytes, &[]);
+}
+
+pub(crate) fn record_cache_prune_pass(tally: &crate::cache_service::PruneTally) {
+    for (outcome, bodies) in [
+        ("candidates", tally.candidates),
+        ("deleted_durable", tally.deleted_durable),
+        ("deleted_unplaced", tally.deleted_unplaced),
+        ("kept_too_young", tally.too_young),
+        ("kept_not_durable", tally.not_durable),
+        ("kept_no_ingress_hash", tally.no_ingress_hash),
+        ("kept_root_not_migrated", tally.root_not_migrated),
+        ("kept_unreadable", tally.unreadable),
+        ("kept_unplaced", tally.unplaced_kept()),
+    ] {
+        CACHE_PRUNE_PASS_BODIES.record(bodies, &[KeyValue::new("outcome", outcome)]);
+    }
 }
 
 /// One body-worker pass: counters for what it did, gauges for what is left.

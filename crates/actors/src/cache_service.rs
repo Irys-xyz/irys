@@ -6,8 +6,8 @@ use crate::chunk_ingress_service::ingress_proofs::{
 use crate::metrics;
 use irys_database::{
     cached_data_root_by_data_root, delete_ingress_proof_if_unchanged,
-    delete_reclaimable_cached_chunks_older_than, delete_unprotected_cached_chunks_older_than,
-    get_data_tx_metadata, tx_header_by_txid,
+    delete_unprotected_cached_chunks_older_than, get_data_tx_metadata,
+    reclaim_cached_chunks_older_than, tx_header_by_txid,
 };
 use irys_database::{
     db::IrysDatabaseExt as _,
@@ -68,6 +68,41 @@ fn checked_ledger_offset(start: LedgerChunkOffset, count: u64) -> Option<LedgerC
 /// Maximum evictions per invocation to prevent blocking the service.
 /// If this limit is reached, eviction will continue in the next cycle.
 const MAX_EVICTIONS_PER_RUN: usize = 10_000;
+
+/// Why one chunk-pruning pass kept or deleted each cached body it looked at.
+/// `too_young` covers every body the scan visited; the rest cover old bodies
+/// collected as candidates, each counted once.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PruneTally {
+    /// Old enough to evict, collected this pass.
+    pub candidates: u64,
+    /// Deleted: persisted `Data` here with this signer's ingress hash.
+    pub deleted_durable: u64,
+    /// Deleted: not stored or proven here, and its root is migrated.
+    pub deleted_unplaced: u64,
+    /// Kept: younger than migration depth plus the cache clean lag.
+    pub too_young: u64,
+    /// Kept: placed, assigned, or proven here, and the offset is not
+    /// persisted `Data` yet.
+    pub not_durable: u64,
+    /// Kept: persisted `Data` here, but this signer has no compact ingress
+    /// hash for the chunk. The durable path never deletes these.
+    pub no_ingress_hash: u64,
+    /// Kept: not durable here, and some tx of its root is not migrated yet.
+    pub root_not_migrated: u64,
+    /// Kept: storage metadata for the root could not be read.
+    pub unreadable: u64,
+    /// Offered to the unplaced path. What it did not delete was placed or
+    /// updated since the scan.
+    pub unplaced_attempted: u64,
+}
+
+impl PruneTally {
+    pub(crate) fn unplaced_kept(&self) -> u64 {
+        self.unplaced_attempted
+            .saturating_sub(self.deleted_unplaced)
+    }
+}
 /// Maximum ingress proofs to scan per pruning invocation.
 const MAX_PROOF_CHECKS_PER_RUN: usize = 1_000;
 
@@ -383,7 +418,10 @@ impl InnerCacheTask {
     /// no node has a placement yet, so "unassigned" cannot be told apart from
     /// "assigned, not migrated".
     #[tracing::instrument(level = "trace", skip_all)]
-    fn prune_durably_migrated_chunk_bodies(&self, migration_height: u64) -> eyre::Result<()> {
+    fn prune_durably_migrated_chunk_bodies(
+        &self,
+        migration_height: u64,
+    ) -> eyre::Result<PruneTally> {
         let local_address = self.config.irys_signer().address();
         let min_chunk_age_in_blocks = self
             .config
@@ -404,6 +442,7 @@ impl InnerCacheTask {
         // gated write (same shape as `prune_ingress_proofs`): holding a RO txn
         // across consensus-writer-gate waits pins MVCC free-page reclamation.
         let mut candidates: BTreeMap<DataRoot, BTreeSet<TxChunkOffset>> = BTreeMap::new();
+        let mut tally = PruneTally::default();
         {
             let tx = self.db.tx()?;
             let mut chunk_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
@@ -424,6 +463,7 @@ impl InnerCacheTask {
                         break;
                     }
                     if entry.meta.updated_at >= delete_chunks_older_than {
+                        tally.too_young += 1;
                         continue;
                     }
                     if candidates.len() >= MAX_EVICTIONS_PER_RUN
@@ -509,7 +549,18 @@ impl InnerCacheTask {
                     }
                 }
             });
-            if !unreadable && !proven_roots.contains(&root) && migrated_roots.contains(&root) {
+            tally.candidates += cached_offsets.len() as u64;
+            let not_durable = cached_offsets.difference(&durable).count() as u64;
+            let proven = proven_roots.contains(&root);
+            let migrated = migrated_roots.contains(&root);
+            if unreadable {
+                tally.unreadable += not_durable;
+            } else if proven {
+                tally.not_durable += not_durable;
+            } else if !migrated {
+                tally.root_not_migrated += not_durable;
+            }
+            if !unreadable && !proven && migrated {
                 let mut unprotected: BTreeSet<TxChunkOffset> =
                     cached_offsets.difference(&placed).copied().collect();
                 if !unprotected.is_empty() {
@@ -521,7 +572,14 @@ impl InnerCacheTask {
                     )?;
                     unprotected.retain(|offset| !keep.contains(offset));
                 }
+                // Placed here, or assigned here and not yet persisted `Data`.
+                let unprotected_not_durable = unprotected
+                    .iter()
+                    .filter(|offset| !durable.contains(offset))
+                    .count() as u64;
+                tally.not_durable += not_durable - unprotected_not_durable;
                 if !unprotected.is_empty() {
+                    tally.unplaced_attempted += unprotected.len() as u64;
                     unprotected_by_root.push((root, unprotected));
                 }
             }
@@ -541,34 +599,42 @@ impl InnerCacheTask {
         let mut pruned_chunks = 0_u64;
         for batch in durable_by_root.chunks(256) {
             let confirmed = self.recheck_durable_chunk_offsets(&storage_modules, batch);
+            let offered: usize = batch.iter().map(|(_, offsets)| offsets.len()).sum();
+            let still_durable: usize = confirmed.iter().map(|(_, offsets)| offsets.len()).sum();
+            tally.not_durable += offered.saturating_sub(still_durable) as u64;
             if confirmed.is_empty() {
                 continue;
             }
-            let batch_pruned = self
+            let batch_counts = self
                 .db
                 .update_eyre_at("cache_service.prune_chunks_batch", |write_tx| {
-                    let mut batch_pruned = 0_u64;
+                    let mut batch_counts = irys_database::ReclaimCounts::default();
                     for (root, durable_tx_offsets) in &confirmed {
                         trace!(
                             chunk.data_root = ?root,
                             "Pruning durably stored cached chunk bodies"
                         );
-                        let pruned = delete_reclaimable_cached_chunks_older_than(
+                        let counts = reclaim_cached_chunks_older_than(
                             write_tx,
                             *root,
                             local_address,
                             durable_tx_offsets,
                             delete_chunks_older_than,
                         )?;
-                        if pruned > 0 {
-                            batch_pruned = batch_pruned.saturating_add(pruned);
-                            debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned durably stored cached chunk bodies");
+                        if counts.deleted > 0 {
+                            debug!(chunk.data_root = ?root, chunk.pruned_chunks = counts.deleted, "Pruned durably stored cached chunk bodies");
                         }
+                        batch_counts.deleted += counts.deleted;
+                        batch_counts.too_young += counts.too_young;
+                        batch_counts.no_ingress_hash += counts.no_ingress_hash;
                     }
-                    Ok(batch_pruned)
+                    Ok(batch_counts)
                 })?;
             // Count only deletes whose enclosing MDBX transaction committed.
-            pruned_chunks = pruned_chunks.saturating_add(batch_pruned);
+            pruned_chunks = pruned_chunks.saturating_add(batch_counts.deleted);
+            tally.deleted_durable += batch_counts.deleted;
+            tally.too_young += batch_counts.too_young;
+            tally.no_ingress_hash += batch_counts.no_ingress_hash;
         }
 
         for batch in unprotected_by_root.chunks(256) {
@@ -613,13 +679,24 @@ impl InnerCacheTask {
                     Ok(batch_pruned)
                 })?;
             pruned_chunks = pruned_chunks.saturating_add(batch_pruned);
+            tally.deleted_unplaced += batch_pruned;
         }
 
         info!(
             chunk.pruned_chunks = pruned_chunks,
+            prune.candidates = tally.candidates,
+            prune.deleted_durable = tally.deleted_durable,
+            prune.deleted_unplaced = tally.deleted_unplaced,
+            prune.kept_too_young = tally.too_young,
+            prune.kept_not_durable = tally.not_durable,
+            prune.kept_no_ingress_hash = tally.no_ingress_hash,
+            prune.kept_root_not_migrated = tally.root_not_migrated,
+            prune.kept_unreadable = tally.unreadable,
+            prune.kept_unplaced = tally.unplaced_kept(),
             "Completed chunk pruning pass"
         );
-        Ok(())
+        metrics::record_cache_prune_pass(&tally);
+        Ok(tally)
     }
 
     /// Offsets from `batch` that still have no local placement. A placement
@@ -2088,13 +2165,28 @@ mod tests {
         Ok(())
     }
 
-    /// Runs one capacity prune over an old cached body and reports whether it
-    /// is still cached.
-    fn old_body_survives_capacity_prune(
+    /// What one capacity-prune fixture body looks like on this node.
+    #[derive(Clone, Copy, Default)]
+    struct OldBody {
         local_proof: bool,
         assigned: bool,
         migrated: bool,
-    ) -> eyre::Result<bool> {
+        /// The storage module holds offset 0 as persisted `Data`.
+        durable: bool,
+        /// This signer recorded the chunk's compact ingress hash.
+        ingress_hash: bool,
+    }
+
+    /// Runs one capacity prune over an old cached body. Reports whether it is
+    /// still cached, and the pass tally.
+    fn old_body_capacity_prune(body: OldBody) -> eyre::Result<(bool, PruneTally)> {
+        let OldBody {
+            local_proof,
+            assigned,
+            migrated,
+            durable,
+            ingress_hash,
+        } = body;
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
@@ -2160,13 +2252,26 @@ mod tests {
                 eyre::Ok(())
             })??;
         }
-        let storage_modules_guard = if assigned {
-            // A placement for the chunk, nothing durable yet.
+        if ingress_hash {
+            db.update(|wtx| {
+                irys_database::store_ingress_data_hash(
+                    wtx,
+                    tx_header.data_root,
+                    config.irys_signer().address(),
+                    TxChunkOffset::from(0_u32),
+                    H256::random(),
+                )?;
+                eyre::Ok(())
+            })??;
+        }
+        let storage_modules_guard = if assigned || durable {
+            // A placement for the chunk, persisted `Data` only when durable.
+            let durable_offsets: &[u32] = if durable { &[0] } else { &[] };
             storage_modules_guard_with_durable(
                 _temp_dir.path().join("sm"),
                 tx_header.data_root,
                 tx_header.data_size,
-                &[],
+                durable_offsets,
             )?
         } else {
             test_storage_modules_guard()
@@ -2185,15 +2290,116 @@ mod tests {
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
-        service_task.prune_durably_migrated_chunk_bodies(10)?;
-        db.view(|rtx| -> eyre::Result<bool> {
+        let tally = service_task.prune_durably_migrated_chunk_bodies(10)?;
+        let survives = db.view(|rtx| -> eyre::Result<bool> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
             Ok(walk
                 .next()
                 .transpose()?
                 .is_some_and(|(root, _)| root == tx_header.data_root))
-        })?
+        })??;
+        Ok((survives, tally))
+    }
+
+    fn old_body_survives_capacity_prune(
+        local_proof: bool,
+        assigned: bool,
+        migrated: bool,
+    ) -> eyre::Result<bool> {
+        old_body_capacity_prune(OldBody {
+            local_proof,
+            assigned,
+            migrated,
+            ..Default::default()
+        })
+        .map(|(survives, _)| survives)
+    }
+
+    /// Every body a pass collects lands in exactly one outcome.
+    #[tokio::test]
+    async fn the_prune_tally_names_why_each_body_was_kept() -> eyre::Result<()> {
+        let migrated = OldBody {
+            migrated: true,
+            ..Default::default()
+        };
+        let cases = [
+            (
+                migrated,
+                true,
+                PruneTally {
+                    deleted_unplaced: 1,
+                    unplaced_attempted: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                OldBody::default(),
+                false,
+                PruneTally {
+                    root_not_migrated: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                OldBody {
+                    local_proof: true,
+                    ..migrated
+                },
+                false,
+                PruneTally {
+                    not_durable: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                OldBody {
+                    assigned: true,
+                    ..migrated
+                },
+                false,
+                PruneTally {
+                    not_durable: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                OldBody {
+                    durable: true,
+                    ..migrated
+                },
+                false,
+                PruneTally {
+                    no_ingress_hash: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                OldBody {
+                    durable: true,
+                    ingress_hash: true,
+                    ..migrated
+                },
+                true,
+                PruneTally {
+                    deleted_durable: 1,
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (index, (body, deleted, expected)) in cases.into_iter().enumerate() {
+            let (survives, tally) = old_body_capacity_prune(body)?;
+            assert_eq!(survives, !deleted, "case {index}");
+            assert_eq!(
+                tally,
+                PruneTally {
+                    candidates: 1,
+                    ..expected
+                },
+                "case {index}"
+            );
+        }
+        Ok(())
     }
 
     // Only bodies this node stores or proves wait for local durability.
@@ -3385,7 +3591,7 @@ mod tests {
         })??;
 
         db.update(|wtx| {
-            let pruned = delete_reclaimable_cached_chunks_older_than(
+            let pruned = irys_database::delete_reclaimable_cached_chunks_older_than(
                 wtx,
                 tx_header_old.data_root,
                 address,

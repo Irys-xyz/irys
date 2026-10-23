@@ -327,6 +327,20 @@ mod compact_ingress_leaf_tests {
             // possible during rolling upgrade before startup backfill reaches
             // a legacy cached body.
             assert_eq!(
+                reclaim_cached_chunks_older_than(
+                    tx,
+                    data_root,
+                    address,
+                    &BTreeSet::from([tx_offset]),
+                    UnixTimestamp::from_secs(1),
+                )?,
+                ReclaimCounts {
+                    no_ingress_hash: 1,
+                    ..Default::default()
+                },
+                "the kept body is reported as missing its ingress hash"
+            );
+            assert_eq!(
                 delete_reclaimable_cached_chunks_older_than(
                     tx,
                     data_root,
@@ -367,6 +381,30 @@ mod compact_ingress_leaf_tests {
             );
 
             // Durable, but not yet older than the age threshold.
+            assert_eq!(
+                reclaim_cached_chunks_older_than(
+                    tx,
+                    data_root,
+                    address,
+                    &BTreeSet::from([tx_offset]),
+                    UnixTimestamp::from_secs(0),
+                )?,
+                ReclaimCounts {
+                    too_young: 1,
+                    ..Default::default()
+                }
+            );
+            assert_eq!(
+                reclaim_cached_chunks_older_than(
+                    tx,
+                    data_root,
+                    address,
+                    &BTreeSet::new(),
+                    UnixTimestamp::from_secs(1),
+                )?,
+                ReclaimCounts::default(),
+                "a body outside the durable set is not counted"
+            );
             assert_eq!(
                 delete_reclaimable_cached_chunks_older_than(
                     tx,
@@ -1473,28 +1511,59 @@ pub fn delete_reclaimable_cached_chunks_older_than<T: DbTx + DbTxMut>(
     durable_tx_offsets: &BTreeSet<TxChunkOffset>,
     older_than: UnixTimestamp,
 ) -> eyre::Result<u64> {
-    let mut chunks_pruned = 0;
+    reclaim_cached_chunks_older_than(tx, data_root, address, durable_tx_offsets, older_than)
+        .map(|counts| counts.deleted)
+}
+
+/// What [`reclaim_cached_chunks_older_than`] did with the bodies of one root
+/// whose offsets were in `durable_tx_offsets`. Other bodies of the root are
+/// not counted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimCounts {
+    pub deleted: u64,
+    /// Durable, but updated at or after `older_than`.
+    pub too_young: u64,
+    /// Durable and old enough, but the current signer has no compact ingress
+    /// hash for the chunk. These are never deleted by this path.
+    pub no_ingress_hash: u64,
+}
+
+/// [`delete_reclaimable_cached_chunks_older_than`], reporting why each
+/// durable body was kept or deleted.
+pub fn reclaim_cached_chunks_older_than<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    address: IrysAddress,
+    durable_tx_offsets: &BTreeSet<TxChunkOffset>,
+    older_than: UnixTimestamp,
+) -> eyre::Result<ReclaimCounts> {
+    let mut counts = ReclaimCounts::default();
     let leaf_key = CachedIngressLeafKey { data_root, address };
     let mut leaf_cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
     let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
     let mut walker = cursor.walk_dup(Some(data_root), None)?;
     while let Some((_key, entry)) = walker.next().transpose()? {
+        if !durable_tx_offsets.contains(&entry.index) {
+            continue;
+        }
+        if entry.meta.updated_at >= older_than {
+            counts.too_young += 1;
+            continue;
+        }
         let has_ingress_hash = leaf_cursor
             .seek_by_key_subkey(leaf_key, *entry.index)?
             .is_some_and(|leaf| leaf.tx_offset == entry.index);
-        if entry.meta.updated_at >= older_than
-            || !durable_tx_offsets.contains(&entry.index)
-            || !has_ingress_hash
-        {
+        if !has_ingress_hash {
+            counts.no_ingress_hash += 1;
             continue;
         }
         tx.delete::<CachedChunks>(entry.meta.chunk_path_hash, None)?;
         tx.delete::<CachedChunksIndex>(data_root, Some(entry))?;
-        chunks_pruned += 1;
+        counts.deleted += 1;
     }
     // MDBX removes the dupsort key with its final value, preserving the
     // `dup_count(root) == None` empty-bucket invariant used by cache callers.
-    Ok(chunks_pruned)
+    Ok(counts)
 }
 
 /// Capacity-prunes bodies of `tx_offsets` older than `older_than`, with no
