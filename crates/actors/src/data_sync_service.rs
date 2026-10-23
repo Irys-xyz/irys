@@ -3713,9 +3713,9 @@ mod peer_chunk_validation_tests {
     }
 
     /// Chunk ingress answers `Ok` to a duplicate while another write occupies
-    /// the offset, and remembers the path hash. If the occupying write then
-    /// fails, ingress answers `Ok` for that hash without writing, as the stub
-    /// here does. Data sync's Submit route must still write the offset.
+    /// the offset, so the duplicate's `Ok` writes nothing if that write then
+    /// fails, as the stub here does. Data sync's Submit route must still
+    /// write the offset.
     #[tokio::test]
     async fn a_submit_offset_left_by_a_failed_occupying_write_is_written_by_data_sync() {
         use std::sync::atomic::Ordering;
