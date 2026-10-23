@@ -291,6 +291,32 @@ pub(crate) enum AnnounceOutcome {
     RouteMissing,
 }
 
+/// An accepted pull payload that actually carried the requested data.
+/// `None` answered and has no body. A get-data `bool` stays a delivery
+/// either way: `false` means "I do not have it" on that older route, and
+/// this fix does not change that route.
+trait PullDelivery {
+    fn is_delivery(&self) -> bool;
+}
+
+impl<T> PullDelivery for Option<T> {
+    fn is_delivery(&self) -> bool {
+        self.is_some()
+    }
+}
+
+impl PullDelivery for bool {
+    fn is_delivery(&self) -> bool {
+        matches!(self, true | false)
+    }
+}
+
+impl PullDelivery for () {
+    fn is_delivery(&self) -> bool {
+        matches!(self, ())
+    }
+}
+
 impl GossipClient {
     pub const CURRENT_PROTOCOL_VERSION: u32 = ProtocolVersion::current() as u32;
 
@@ -1774,7 +1800,7 @@ impl GossipClient {
     }
 
     /// Handle scoring for data retrieval operations based on response time and success
-    fn handle_data_retrieval_score<T>(
+    fn handle_data_retrieval_score<T: PullDelivery>(
         peer_list: &PeerList,
         result: &GossipResult<GossipResponse<T>>,
         peer_id: &IrysPeerId,
@@ -1782,10 +1808,18 @@ impl GossipClient {
         circuit_breaker: &CircuitBreakerManager<IrysPeerId>,
     ) {
         match result {
-            Ok(GossipResponse::Accepted(_)) => {
+            Ok(GossipResponse::Accepted(payload)) if payload.is_delivery() => {
                 // The peer served this pull, so the next sample ranks it
                 // with peers that gossip.
                 peer_list.clear_not_gossiping(peer_id);
+            }
+            // An empty body is an answer, not a delivery. A fast
+            // `Accepted(None)` must not earn `TimelyResponse` or clear
+            // `not_gossiping`. The trial still closes: leaving it unsettled
+            // refuses this peer for the whole cooldown.
+            Ok(GossipResponse::Accepted(_)) => {
+                circuit_breaker.record_success(peer_id);
+                return;
             }
             // The peer answered, so the half-open trial is a success.
             // Not a delivery: no score change and no online mark. The
@@ -4177,6 +4211,71 @@ mod tests {
             assert!(
                 !client.circuit_breaker.would_allow(&peer_id),
                 "a pull error records a failure"
+            );
+        }
+
+        /// `Accepted(None)` is the chunk-fetch miss and a pull miss. It must
+        /// not raise the score, mark the peer online, or clear
+        /// `not_gossiping`. It must close the breaker.
+        #[tokio::test]
+        async fn empty_pull_is_an_answer_and_not_a_delivery() {
+            for response_time in [Duration::from_millis(100), Duration::from_secs(3)] {
+                let client = production_client();
+                let (peer_list, peer_id, initial_score) = offline_peer(11);
+                open_breaker(&client, &peer_id);
+                peer_list.mark_not_gossiping(&peer_id);
+
+                GossipClient::handle_data_retrieval_score(
+                    &peer_list,
+                    &Ok(GossipResponse::Accepted(None::<()>)),
+                    &peer_id,
+                    response_time,
+                    &client.circuit_breaker,
+                );
+
+                let (score, online) = score_and_online(&peer_list, &peer_id);
+                assert_eq!(
+                    score, initial_score,
+                    "an empty body at {response_time:?} must not change the score"
+                );
+                assert!(!online, "an empty body must not mark the peer online");
+                assert!(
+                    peer_list.is_not_gossiping(&peer_id),
+                    "an empty body must not clear not_gossiping"
+                );
+                assert!(
+                    client.circuit_breaker.would_allow(&peer_id),
+                    "an empty body is an answer and must close the breaker"
+                );
+            }
+        }
+
+        /// `Accepted(Some)` stays a delivery, including the `not_gossiping` clear.
+        #[tokio::test]
+        async fn accepted_some_is_still_a_delivery() {
+            let client = production_client();
+            let (peer_list, peer_id, initial_score) = offline_peer(12);
+            open_breaker(&client, &peer_id);
+            peer_list.mark_not_gossiping(&peer_id);
+
+            GossipClient::handle_data_retrieval_score(
+                &peer_list,
+                &Ok(GossipResponse::Accepted(Some(()))),
+                &peer_id,
+                Duration::from_millis(100),
+                &client.circuit_breaker,
+            );
+
+            let (score, online) = score_and_online(&peer_list, &peer_id);
+            assert!(score > initial_score, "a fast body must raise the score");
+            assert!(online, "a body marks the peer online");
+            assert!(
+                !peer_list.is_not_gossiping(&peer_id),
+                "a body clears not_gossiping"
+            );
+            assert!(
+                client.circuit_breaker.would_allow(&peer_id),
+                "a body closes the breaker"
             );
         }
     }
