@@ -50,6 +50,13 @@ const ONE_GIBIBYTE_CHUNK_INDEXES: [u32; 3] = [0, 2_047, 4_095];
 /// Printed testing upload (spec §10). Chunk count 4.
 const PRINTED_DATA_SIZE: u64 = 112;
 
+/// spec §5: test geometry, `n = 20`, one hash other than `empty(0)` at leaf 3.
+const MIXED_LEAF_DATA_SIZE: u64 = 20;
+
+/// One byte of the stand-in hash. The hash is [`HASH_SIZE`] copies of this byte.
+/// It stands in for a sibling that is not `empty(ℓ)` (spec §5).
+const STAND_IN_HASH_BYTE: u8 = 0xAB;
+
 const PRIMITIVES_DESCRIPTION: &str = concat!(
     "Domain-separated hashes (spec §3, §10). ",
     "Leaves hash mod251 bytes of length 0, 1, 4095, and 4096. ",
@@ -88,7 +95,9 @@ const SEGMENT_PROOFS_DESCRIPTION: &str = concat!(
     "Mainnet geometry, mod251: every segment of every chunk for chunk count 1 and 2 (full uploads); ",
     "segments (3, 5), (3, 31), (3, 32), and (3, 63) of the 917504-byte upload; ",
     "and segment (0, 1) of 4097 bytes, which is 1 byte. ",
-    "Testing geometry, mod251: the printed proof at data_size 112, chunk 3, segment 1."
+    "Testing geometry, mod251: the printed proof at data_size 112, chunk 3, segment 1. ",
+    "Testing geometry, n = 20: segments 0 and 1 verify against the commitment whose leaf 3 ",
+    "is 32 bytes of 0xAB instead of empty(0) (spec §5). replaced_leaf names that leaf."
 );
 
 const MULTI_SEGMENT_DESCRIPTION: &str = concat!(
@@ -112,7 +121,14 @@ const NEGATIVE_DESCRIPTION: &str = concat!(
     "The 64-byte segment is left concatenated with right, checked against the commitment of ",
     "node(left, right). That segment is a leaf (spec §3). ",
     "The unanchored case records the re-derived commitment, which verifies, ",
-    "and the anchored commitment, which does not (spec §6)."
+    "and the anchored commitment, which does not (spec §6). ",
+    "A pinned in-chunk sibling that is not empty(ℓ) is checked against the commitment of that proof. ",
+    "The stand-in hash is 32 bytes of 0xAB. One case is level 0 and one is a higher level (spec §5). ",
+    "Test geometry, n = 20, leaf 3 is that hash: segments 2 and 3 fail. ",
+    "Segments 0 and 1 of that upload verify; they are in the segment-proof file. ",
+    "An honest chunk proof and an honest segment proof whose last hash is size_witness(G, n+1) ",
+    "fail before the climb. ",
+    "data_size = max_data_size + 1 is out of range. That case records a one-chunk maximum."
 );
 
 fn main() -> ExitCode {
@@ -509,6 +525,8 @@ fn segment_proof_cases() -> Vec<SegmentProofCase> {
     push_mainnet_boundary_segments(&mut cases, mainnet);
     // Printed segment proof: testing geometry, outside the chunk-count-2 sweep (spec §10).
     push_segment_pairs(&mut cases, Geometry::TESTING, PRINTED_DATA_SIZE, &[(3, 1)]);
+    // spec §5: segments 0 and 1 verify under the malicious commitment.
+    cases.extend(mixed_leaf_accept_cases());
     cases
 }
 
@@ -616,6 +634,7 @@ fn push_segment_pairs_with_tree(
             chunk_count,
             data_commitment: hex_of(commitment.as_bytes()),
             proof: hex_of(&proof),
+            replaced_leaf: None,
         });
     }
 }
@@ -900,11 +919,583 @@ fn negative_cases() -> Vec<NegativeCase> {
     let mut cases: Vec<NegativeCase> = drafts.iter().copied().map(realize).collect();
     cases.extend(flip_sibling_cases(geometry));
     cases.push(two_digest_case());
+    cases.extend(pinned_sibling_cases());
+    cases.extend(mixed_leaf_rejection_cases());
+    cases.extend(replaced_witness_cases());
+    cases.push(data_size_above_max_case());
     let mut names = std::collections::BTreeSet::new();
     for case in &cases {
         assert!(names.insert(case.name), "duplicate case {}", case.name);
     }
     cases
+}
+
+/// Last chunk holds one segment, so segment 0's level-0 sibling starts at `s` (spec §5).
+fn level_0_pin_data_size(geometry: Geometry) -> u64 {
+    geometry.chunk_size() + geometry.segment_size()
+}
+
+/// Last chunk holds two segments, so segment 0's level-1 sibling starts at `s` (spec §5).
+fn level_1_pin_data_size(geometry: Geometry) -> u64 {
+    geometry.chunk_size() + 2 * geometry.segment_size()
+}
+
+fn stand_in_hash() -> NodeHash {
+    NodeHash::from([STAND_IN_HASH_BYTE; HASH_SIZE])
+}
+
+fn pinned_sibling_cases() -> Vec<NegativeCase> {
+    let geometry = Geometry::TESTING;
+    // Level 0, then a higher level. Each `start` equals `s`, so a pin that uses `>` misses it.
+    vec![
+        pinned_sibling_case(
+            "pinned_sibling_not_empty_level_0",
+            level_0_pin_data_size(geometry),
+            0,
+        ),
+        pinned_sibling_case(
+            "pinned_sibling_not_empty_level_1",
+            level_1_pin_data_size(geometry),
+            1,
+        ),
+    ]
+}
+
+fn pinned_sibling_case(name: &'static str, data_size: u64, level: u32) -> NegativeCase {
+    let geometry = Geometry::TESTING;
+    let (data, tree) = build_upload(geometry, MOD251, data_size);
+    let chunk_index = tree.chunk_count() - 1;
+    assert!(
+        chunk_index >= 1,
+        "{name}: the malformed chunk is the last of more than one"
+    );
+    let segment_index = 0;
+    let chunk = chunk_slice(&geometry, &data, data_size, chunk_index);
+    let segment = segment_slice(&geometry, &data, data_size, chunk_index, segment_index).to_vec();
+    let mut proof = tree
+        .segment_proof(chunk_index, segment_index, chunk)
+        .unwrap_or_else(|err| panic!("{name}: {err}"));
+    let data_segments = data_segment_count(&geometry, data_size, chunk_index);
+    let start = sibling_start(segment_index, level);
+    assert_eq!(
+        start, data_segments,
+        "{name}: the pin boundary is start = s"
+    );
+    assert_eq!(
+        sibling_hash(&proof, level),
+        empty(level),
+        "{name}: the honest sibling is empty({level})"
+    );
+    // A higher level stays `empty(ℓ)` here, so the stand-in is the only bad pin.
+    if level == 0 {
+        let higher = level + 1;
+        assert!(higher < geometry.height(), "{name}: a higher level exists");
+        assert_eq!(sibling_hash(&proof, higher), empty(higher));
+        assert!(sibling_start(segment_index, higher) >= data_segments);
+    }
+    let stand_in = stand_in_hash();
+    assert_ne!(
+        stand_in,
+        empty(level),
+        "{name}: the stand-in is not empty({level})"
+    );
+    replace_sibling(&mut proof, level, &stand_in);
+    let commitment = commitment_of_unpinned_proof(
+        &geometry,
+        data_size,
+        chunk_index,
+        segment_index,
+        &segment,
+        &proof,
+    );
+    assert_eq!(
+        verify_segment(
+            &geometry,
+            &commitment,
+            data_size,
+            chunk_index,
+            segment_index,
+            &segment,
+            &proof,
+        )
+        .expect_err(name),
+        irys_data_tree::VerifyError::CommitmentMismatch,
+        "{name}"
+    );
+    negative_segment_case(
+        name,
+        Mutation::PinnedSiblingNotEmpty,
+        data_size,
+        chunk_index,
+        segment_index,
+        Some(level),
+        &commitment,
+        &proof,
+        "CommitmentMismatch",
+    )
+}
+
+fn mixed_leaf_accept_cases() -> Vec<SegmentProofCase> {
+    let geometry = Geometry::TESTING;
+    // spec §5: segments 0 and 1 verify. Segments 2 and 3 are negative cases.
+    [0, 1]
+        .into_iter()
+        .map(|segment_index| mixed_leaf_accept_case(geometry, segment_index))
+        .collect()
+}
+
+fn mixed_leaf_accept_case(geometry: Geometry, segment_index: u32) -> SegmentProofCase {
+    let (commitment, proof, segment, leaf_index) = mixed_leaf_inputs(&geometry, segment_index);
+    verify_segment(
+        &geometry,
+        &commitment,
+        MIXED_LEAF_DATA_SIZE,
+        0,
+        segment_index,
+        &segment,
+        &proof,
+    )
+    .unwrap_or_else(|err| panic!("mixed leaf segment {segment_index} verifies: {err}"));
+    let segment_length = geometry
+        .segment_len(MIXED_LEAF_DATA_SIZE, 0, segment_index)
+        .expect("segment 0 or 1 of n = 20");
+    assert_eq!(u64::try_from(segment.len()).unwrap(), segment_length);
+    SegmentProofCase {
+        geometry: geometry.into(),
+        pattern: MOD251,
+        data_size: MIXED_LEAF_DATA_SIZE,
+        chunk_index: 0,
+        segment_index,
+        segment_length,
+        chunk_count: 1,
+        data_commitment: hex_of(commitment.as_bytes()),
+        proof: hex_of(&proof),
+        replaced_leaf: Some(ReplacedLeaf {
+            leaf_index,
+            hash: hex_of(stand_in_hash().as_bytes()),
+        }),
+    }
+}
+
+fn mixed_leaf_rejection_cases() -> Vec<NegativeCase> {
+    // spec §5: segments 2 and 3 fail under the same commitment.
+    [2, 3].into_iter().map(mixed_leaf_rejection_case).collect()
+}
+
+fn mixed_leaf_rejection_case(segment_index: u32) -> NegativeCase {
+    let geometry = Geometry::TESTING;
+    let (commitment, proof, segment, _leaf_index) = mixed_leaf_inputs(&geometry, segment_index);
+    let name = match segment_index {
+        2 => "mixed_leaf_segment_2",
+        3 => "mixed_leaf_segment_3",
+        _ => panic!("segments 2 and 3 fail"),
+    };
+    assert_eq!(
+        verify_segment(
+            &geometry,
+            &commitment,
+            MIXED_LEAF_DATA_SIZE,
+            0,
+            segment_index,
+            &segment,
+            &proof,
+        )
+        .expect_err(name),
+        irys_data_tree::VerifyError::CommitmentMismatch,
+        "{name}"
+    );
+    // Segment 2 meets the stand-in through a pinned sibling, so the unpinned climb matches.
+    // Segment 3 hashes empty bytes, so that climb does not (spec §5).
+    let unpinned = commitment_of_unpinned_proof(
+        &geometry,
+        MIXED_LEAF_DATA_SIZE,
+        0,
+        segment_index,
+        &segment,
+        &proof,
+    );
+    if segment_index == 2 {
+        assert_eq!(unpinned, commitment, "{name}: the pin is what rejects");
+    } else {
+        assert_ne!(
+            unpinned, commitment,
+            "{name}: empty bytes are not the stand-in"
+        );
+    }
+    negative_segment_case(
+        name,
+        Mutation::BadEmptyLeaf,
+        MIXED_LEAF_DATA_SIZE,
+        0,
+        segment_index,
+        None,
+        &commitment,
+        &proof,
+        "CommitmentMismatch",
+    )
+}
+
+fn mixed_leaf_inputs(
+    geometry: &Geometry,
+    segment_index: u32,
+) -> (irys_data_tree::DataCommitment, Vec<u8>, Vec<u8>, u32) {
+    assert_eq!(geometry.chunk_count(MIXED_LEAF_DATA_SIZE).unwrap(), 1);
+    let leaf_index = geometry.segments_per_chunk() - 1;
+    assert_eq!(leaf_index, 3, "spec §5: leaf 3");
+    assert_eq!(
+        geometry
+            .segment_len(MIXED_LEAF_DATA_SIZE, 0, leaf_index)
+            .unwrap(),
+        0,
+        "leaf 3 is past the data"
+    );
+    let data = data_bytes(MOD251, MIXED_LEAF_DATA_SIZE);
+    let chunk_length = geometry.chunk_len(MIXED_LEAF_DATA_SIZE, 0).unwrap();
+    let bad_root = subtree_with_stand_in_leaf(
+        geometry,
+        &data,
+        chunk_length,
+        0,
+        geometry.height(),
+        leaf_index,
+    );
+    let commitment = commitment_of_root(geometry, &bad_root, MIXED_LEAF_DATA_SIZE);
+    let segment = segment_slice(geometry, &data, MIXED_LEAF_DATA_SIZE, 0, segment_index).to_vec();
+    let mut proof = Vec::new();
+    for level in 0..geometry.height() {
+        // `start` uses the original segment index (spec §5), not the shifted walk.
+        let start = sibling_start(segment_index, level);
+        let sibling =
+            subtree_with_stand_in_leaf(geometry, &data, chunk_length, start, level, leaf_index);
+        proof.extend_from_slice(sibling.as_bytes());
+    }
+    proof.extend_from_slice(size_witness(geometry, MIXED_LEAF_DATA_SIZE).as_bytes());
+    (commitment, proof, segment, leaf_index)
+}
+
+fn replaced_witness_cases() -> Vec<NegativeCase> {
+    let geometry = Geometry::TESTING;
+    let data_size = geometry.chunk_size();
+    vec![
+        replaced_witness_case(
+            "replaced_chunk_witness",
+            Check::VerifyChunk,
+            data_size,
+            None,
+        ),
+        replaced_witness_case(
+            "replaced_segment_witness",
+            Check::VerifySegment,
+            data_size,
+            Some(0),
+        ),
+    ]
+}
+
+fn replaced_witness_case(
+    name: &'static str,
+    check: Check,
+    data_size: u64,
+    segment_index: Option<u32>,
+) -> NegativeCase {
+    let geometry = Geometry::TESTING;
+    let (data, tree) = build_upload(geometry, MOD251, data_size);
+    let chunk = chunk_slice(&geometry, &data, data_size, 0);
+    let honest = match check {
+        Check::VerifyChunk => chunk_proof_bytes(&tree, 0),
+        Check::VerifySegment => tree
+            .segment_proof(0, segment_index.expect("segment"), chunk)
+            .unwrap_or_else(|err| panic!("{name}: {err}")),
+    };
+    let claimed = size_witness(&geometry, data_size);
+    let replaced = size_witness(&geometry, data_size + 1);
+    assert_ne!(claimed.as_bytes(), replaced.as_bytes(), "{name}");
+    assert_eq!(&honest[honest.len() - HASH_SIZE..], claimed.as_bytes());
+    let mut proof = honest;
+    let start = proof.len() - HASH_SIZE;
+    proof[start..].copy_from_slice(replaced.as_bytes());
+    let commitment = tree.data_commitment();
+    let bytes = match check {
+        Check::VerifyChunk => chunk.to_vec(),
+        Check::VerifySegment => segment_slice(
+            &geometry,
+            &data,
+            data_size,
+            0,
+            segment_index.expect("segment"),
+        )
+        .to_vec(),
+    };
+    let draft = NegativeDraft {
+        name,
+        check,
+        geometry: None,
+        pattern: Some(MOD251),
+        source_data_size: data_size,
+        data_size,
+        chunk_index: 0,
+        segment_index,
+        mutation: Mutation::ReplacedSizeWitness,
+        sibling_index: None,
+        proof_chunk_index: None,
+        expected_error: "SizeWitnessMismatch",
+        record_unanchored: false,
+    };
+    reject(&geometry, &draft, &commitment, &bytes, &proof);
+    NegativeCase {
+        name,
+        check,
+        geometry: None,
+        pattern: Some(MOD251),
+        source_data_size: data_size,
+        data_size,
+        chunk_index: 0,
+        segment_index,
+        mutation: Mutation::ReplacedSizeWitness,
+        sibling_index: None,
+        proof_chunk_index: None,
+        left: None,
+        right: None,
+        leaf_hash: None,
+        node_hash: None,
+        commitment: hex_of(commitment.as_bytes()),
+        unanchored_commitment: None,
+        proof: hex_of(&proof),
+        expected_error: "SizeWitnessMismatch",
+    }
+}
+
+fn data_size_above_max_case() -> NegativeCase {
+    let testing = Geometry::TESTING;
+    // One testing chunk is the maximum, so the next byte is out of range (spec §5).
+    let recorded = Geometry::new(testing.chunk_size(), testing.segments_per_chunk(), 1)
+        .expect("one testing chunk is a valid maximum");
+    let data_size = recorded.max_data_size() + 1;
+    assert_eq!(data_size, testing.chunk_size() + 1);
+    // The proof is valid under a maximum that includes this size. `size_witness` does not use the maximum.
+    let wide = Geometry::new(testing.chunk_size(), testing.segments_per_chunk(), 2)
+        .expect("two testing chunks fit");
+    let (data, tree) = build_upload(wide, MOD251, data_size);
+    let proof = chunk_proof_bytes(&tree, 0);
+    let commitment = tree.data_commitment();
+    let bytes = chunk_slice(&wide, &data, data_size, 0);
+    verify_chunk(&wide, &commitment, data_size, 0, bytes, &proof)
+        .expect("the proof verifies when data_size is in range");
+    let draft = NegativeDraft {
+        name: "data_size_above_max",
+        check: Check::VerifyChunk,
+        geometry: Some(recorded),
+        pattern: Some(MOD251),
+        source_data_size: data_size,
+        data_size,
+        chunk_index: 0,
+        segment_index: None,
+        mutation: Mutation::DataSizeAboveMax,
+        sibling_index: None,
+        proof_chunk_index: None,
+        expected_error: "DataSizeOutOfRange",
+        record_unanchored: false,
+    };
+    reject(&recorded, &draft, &commitment, bytes, &proof);
+    NegativeCase {
+        name: draft.name,
+        check: draft.check,
+        geometry: Some(recorded.into()),
+        pattern: Some(MOD251),
+        source_data_size: data_size,
+        data_size,
+        chunk_index: 0,
+        segment_index: None,
+        mutation: Mutation::DataSizeAboveMax,
+        sibling_index: None,
+        proof_chunk_index: None,
+        left: None,
+        right: None,
+        leaf_hash: None,
+        node_hash: None,
+        commitment: hex_of(commitment.as_bytes()),
+        unanchored_commitment: None,
+        proof: hex_of(&proof),
+        expected_error: "DataSizeOutOfRange",
+    }
+}
+
+fn negative_segment_case(
+    name: &'static str,
+    mutation: Mutation,
+    data_size: u64,
+    chunk_index: u32,
+    segment_index: u32,
+    sibling_index: Option<u32>,
+    commitment: &irys_data_tree::DataCommitment,
+    proof: &[u8],
+    expected_error: &'static str,
+) -> NegativeCase {
+    NegativeCase {
+        name,
+        check: Check::VerifySegment,
+        geometry: None,
+        pattern: Some(MOD251),
+        source_data_size: data_size,
+        data_size,
+        chunk_index,
+        segment_index: Some(segment_index),
+        mutation,
+        sibling_index,
+        proof_chunk_index: None,
+        left: None,
+        right: None,
+        leaf_hash: None,
+        node_hash: None,
+        commitment: hex_of(commitment.as_bytes()),
+        unanchored_commitment: None,
+        proof: hex_of(proof),
+        expected_error,
+    }
+}
+
+fn data_segment_count(geometry: &Geometry, data_size: u64, chunk_index: u32) -> u32 {
+    let chunk_length = geometry
+        .chunk_len(data_size, chunk_index)
+        .expect("chunk is in range");
+    u32::try_from(chunk_length.div_ceil(geometry.segment_size()))
+        .expect("ceil(chunk_len / segment_size) fits segments_per_chunk")
+}
+
+/// `start = ((j >> ℓ) ^ 1) << ℓ` (spec §5).
+fn sibling_start(segment_index: u32, level: u32) -> u32 {
+    debug_assert!(level < u32::BITS);
+    ((segment_index >> level) ^ 1) << level
+}
+
+fn sibling_hash(proof: &[u8], level: u32) -> NodeHash {
+    let offset = usize::try_from(level).expect("level fits") * HASH_SIZE;
+    let bytes = <[u8; HASH_SIZE]>::try_from(&proof[offset..offset + HASH_SIZE])
+        .expect("the sibling is one hash");
+    NodeHash::from(bytes)
+}
+
+fn replace_sibling(proof: &mut [u8], level: u32, sibling: &NodeHash) {
+    let offset = usize::try_from(level).expect("level fits") * HASH_SIZE;
+    proof[offset..offset + HASH_SIZE].copy_from_slice(sibling.as_bytes());
+}
+
+fn commitment_of_root(
+    geometry: &Geometry,
+    root: &NodeHash,
+    data_size: u64,
+) -> irys_data_tree::DataCommitment {
+    let root = DataTreeRoot::from(*root.as_bytes());
+    data_commitment(geometry, &root, data_size)
+}
+
+/// Commitment of a segment proof climbed with no empty-sibling pin (spec §5).
+///
+/// The pin is what rejects a past-data sibling that is not `empty(ℓ)`.
+/// This root is the commitment that proof opens when the pin is absent.
+fn commitment_of_unpinned_proof(
+    geometry: &Geometry,
+    data_size: u64,
+    chunk_index: u32,
+    segment_index: u32,
+    segment: &[u8],
+    proof: &[u8],
+) -> irys_data_tree::DataCommitment {
+    let chunk_count = geometry.chunk_count(data_size).expect("data size in range");
+    let siblings = &proof[..proof.len() - HASH_SIZE];
+    let in_chunk_len = usize::try_from(geometry.height()).expect("height fits") * HASH_SIZE;
+    let (in_chunk, chunk_siblings) = siblings
+        .split_at_checked(in_chunk_len)
+        .expect("the proof holds the in-chunk siblings");
+    let mut root = leaf(segment);
+    let mut walked = segment_index;
+    for sibling in in_chunk.chunks_exact(HASH_SIZE) {
+        let bytes = <[u8; HASH_SIZE]>::try_from(sibling).expect("one hash");
+        let sibling = NodeHash::from(bytes);
+        root = if walked & 1 == 0 {
+            node(&root, &sibling)
+        } else {
+            node(&sibling, &root)
+        };
+        walked >>= 1;
+    }
+    let climbed = climb_without_empty_pin(root, chunk_index, chunk_count, chunk_siblings);
+    commitment_of_root(geometry, &climbed, data_size)
+}
+
+/// spec §5 `climb`. No empty-sibling pin: the caller already passed the in-chunk loop.
+fn climb_without_empty_pin(
+    mut root: NodeHash,
+    chunk_index: u32,
+    chunk_count: u32,
+    siblings: &[u8],
+) -> NodeHash {
+    // `node_index` is the RFC's `fn`. `last_index` is the RFC's `sn`.
+    let mut node_index = chunk_index;
+    let mut last_index = chunk_count - 1;
+    for sibling in siblings.chunks_exact(HASH_SIZE) {
+        assert_ne!(last_index, 0, "the chunk-level sibling count is depth");
+        let bytes = <[u8; HASH_SIZE]>::try_from(sibling).expect("one hash");
+        let sibling = NodeHash::from(bytes);
+        if node_index & 1 == 1 || node_index == last_index {
+            root = node(&sibling, &root);
+            while node_index & 1 == 0 && node_index != 0 {
+                node_index >>= 1;
+                last_index >>= 1;
+            }
+        } else {
+            root = node(&root, &sibling);
+        }
+        node_index >>= 1;
+        last_index >>= 1;
+    }
+    assert_eq!(last_index, 0, "the chunk-level sibling count is depth");
+    root
+}
+
+/// Spec §4 subtree. Leaf `stand_in_leaf` is the stand-in hash instead of `empty(0)`.
+fn subtree_with_stand_in_leaf(
+    geometry: &Geometry,
+    data: &[u8],
+    chunk_length: u64,
+    start_leaf: u32,
+    subtree_height: u32,
+    stand_in_leaf: u32,
+) -> NodeHash {
+    let width = 1_u32 << subtree_height;
+    let end_leaf = start_leaf.checked_add(width).expect("subtree end fits");
+    let contains = stand_in_leaf >= start_leaf && stand_in_leaf < end_leaf;
+    let range_start = u64::from(start_leaf) * geometry.segment_size();
+    if !contains && range_start >= chunk_length {
+        return empty(subtree_height);
+    }
+    if subtree_height == 0 {
+        if contains {
+            return stand_in_hash();
+        }
+        let end = (range_start + geometry.segment_size()).min(chunk_length);
+        let start = usize::try_from(range_start).expect("range start fits");
+        let end = usize::try_from(end).expect("range end fits");
+        return leaf(&data[start..end]);
+    }
+    let left_width = width / 2;
+    let left = subtree_with_stand_in_leaf(
+        geometry,
+        data,
+        chunk_length,
+        start_leaf,
+        subtree_height - 1,
+        stand_in_leaf,
+    );
+    let right = subtree_with_stand_in_leaf(
+        geometry,
+        data,
+        chunk_length,
+        start_leaf + left_width,
+        subtree_height - 1,
+        stand_in_leaf,
+    );
+    node(&left, &right)
 }
 
 fn assert_negative_shape(geometry: Geometry) {
@@ -1071,7 +1662,13 @@ fn mutated_input(
         | Mutation::EmptyProof
         | Mutation::DropLastChunkByte
         | Mutation::AppendZeroChunkByte => chunk_input(geometry, data, tree, draft),
-        Mutation::SegmentEqualsLeftAndRight => unreachable!("handled before the upload is built"),
+        Mutation::SegmentEqualsLeftAndRight
+        | Mutation::PinnedSiblingNotEmpty
+        | Mutation::BadEmptyLeaf
+        | Mutation::ReplacedSizeWitness
+        | Mutation::DataSizeAboveMax => {
+            unreachable!("handled before the upload is built")
+        }
     }
 }
 
@@ -1164,7 +1761,11 @@ fn mutate_chunk_proof(honest: &[u8], mutation: Mutation) -> Vec<u8> {
         | Mutation::ProofFromOtherChunk
         | Mutation::IndexOutOfRange
         | Mutation::DataSizeZero
-        | Mutation::SegmentEqualsLeftAndRight => {
+        | Mutation::SegmentEqualsLeftAndRight
+        | Mutation::PinnedSiblingNotEmpty
+        | Mutation::BadEmptyLeaf
+        | Mutation::ReplacedSizeWitness
+        | Mutation::DataSizeAboveMax => {
             panic!("not a chunk-proof mutation")
         }
     }
@@ -1190,7 +1791,11 @@ fn mutate_chunk_bytes(chunk: &[u8], mutation: Mutation) -> Vec<u8> {
         | Mutation::ProofFromOtherChunk
         | Mutation::IndexOutOfRange
         | Mutation::DataSizeZero
-        | Mutation::SegmentEqualsLeftAndRight => {
+        | Mutation::SegmentEqualsLeftAndRight
+        | Mutation::PinnedSiblingNotEmpty
+        | Mutation::BadEmptyLeaf
+        | Mutation::ReplacedSizeWitness
+        | Mutation::DataSizeAboveMax => {
             panic!("not a chunk-byte mutation")
         }
     }
@@ -1211,7 +1816,11 @@ fn mutate_segment_proof(honest: &[u8], draft: &NegativeDraft) -> Vec<u8> {
         | Mutation::ProofFromOtherChunk
         | Mutation::IndexOutOfRange
         | Mutation::DataSizeZero
-        | Mutation::SegmentEqualsLeftAndRight => {
+        | Mutation::SegmentEqualsLeftAndRight
+        | Mutation::PinnedSiblingNotEmpty
+        | Mutation::BadEmptyLeaf
+        | Mutation::ReplacedSizeWitness
+        | Mutation::DataSizeAboveMax => {
             panic!("not a segment-proof mutation")
         }
     }
@@ -1240,7 +1849,11 @@ fn mutate_segment_bytes(geometry: &Geometry, segment: &[u8], mutation: Mutation)
         | Mutation::ProofFromOtherChunk
         | Mutation::IndexOutOfRange
         | Mutation::DataSizeZero
-        | Mutation::SegmentEqualsLeftAndRight => {
+        | Mutation::SegmentEqualsLeftAndRight
+        | Mutation::PinnedSiblingNotEmpty
+        | Mutation::BadEmptyLeaf
+        | Mutation::ReplacedSizeWitness
+        | Mutation::DataSizeAboveMax => {
             panic!("not a segment-byte mutation")
         }
     }
@@ -1581,6 +2194,16 @@ struct SegmentProofCase {
     chunk_count: u32,
     data_commitment: String,
     proof: String,
+    /// Set when leaf `leaf_index` is the stand-in hash instead of `empty(0)`.
+    /// Honest segment proofs omit it (spec §5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replaced_leaf: Option<ReplacedLeaf>,
+}
+
+#[derive(Serialize)]
+struct ReplacedLeaf {
+    leaf_index: u32,
+    hash: String,
 }
 
 #[derive(Serialize)]
@@ -1659,6 +2282,15 @@ enum Mutation {
     IndexOutOfRange,
     DataSizeZero,
     SegmentEqualsLeftAndRight,
+    /// One in-chunk sibling that the pin requires to be `empty(ℓ)` is the stand-in hash.
+    /// `sibling_index` is `ℓ`. The commitment is the commitment of that proof (spec §5).
+    PinnedSiblingNotEmpty,
+    /// Leaf `segments_per_chunk - 1` is the stand-in hash. Test geometry, `n = 20` (spec §5).
+    BadEmptyLeaf,
+    /// The last hash is `size_witness(G, data_size + 1)`. The claim stays `data_size` (spec §5).
+    ReplacedSizeWitness,
+    /// `data_size = max_data_size + 1` for the case geometry (spec §5).
+    DataSizeAboveMax,
 }
 
 #[derive(Clone, Copy)]
