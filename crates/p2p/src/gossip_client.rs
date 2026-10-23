@@ -2009,10 +2009,7 @@ impl GossipClient {
                 let result = match client.check_circuit_breaker(&peer_id) {
                     Err(error) => Err(error),
                     Ok(()) => {
-                        match client
-                            .send_chunk_announcement(&address, &announcement)
-                            .await
-                        {
+                        match client.announce_retries(&address, &announcement).await {
                             AnnounceOutcome::Answered(result) => result,
                             AnnounceOutcome::RouteMissing => {
                                 client
@@ -2040,6 +2037,29 @@ impl GossipClient {
             }
             .instrument(span),
         );
+    }
+
+    /// Rate-limit retries for an announcement whose admission is already
+    /// settled. A 429 means the peer is busy, not that it lacks the route,
+    /// so this does not push the body and does not remember the peer as old.
+    async fn announce_retries(
+        &self,
+        address: &SocketAddr,
+        announcement: &crate::wire_types::ChunkAnnouncement,
+    ) -> AnnounceOutcome {
+        let mut attempt = 0_u32;
+        loop {
+            let outcome = self.send_chunk_announcement(address, announcement).await;
+            let AnnounceOutcome::Answered(result) = &outcome else {
+                return outcome;
+            };
+            if !push_response_rate_limited(result) || attempt == PUSH_BACKPRESSURE_RETRIES {
+                return outcome;
+            }
+            let shift = 1_u32.checked_shl(attempt).unwrap_or(u32::MAX);
+            tokio::time::sleep(PUSH_BACKPRESSURE_BACKOFF.saturating_mul(shift)).await;
+            attempt = attempt.saturating_add(1);
+        }
     }
 
     pub(crate) async fn send_chunk_announcement(
@@ -4890,6 +4910,75 @@ mod tests {
                 "the 404 must settle the half-open trial"
             );
             assert_eq!(client.circuit_breaker.metrics().half_open_count, 0);
+            assert_eq!(client.circuit_breaker.metrics().open_count, 0);
+        }
+
+        /// The announcement takes the last half-open trial. Every rate-limit
+        /// retry must reuse it. The body is not pushed, and a 429 does not
+        /// mark the peer as unable to announce.
+        #[tokio::test]
+        async fn rate_limited_announcement_retries_on_one_trial_without_a_body_push() {
+            let server = RateLimitedPeer::spawn();
+            let client = client_with_one_push_trial_left();
+            let (peer_list, peer_id, peer, initial_score) = peer_aimed_at(7, server.addr);
+            let cache = Arc::new(GossipCache::new());
+            let key = GossipCacheKey::Chunk(H256::zero());
+            client.circuit_breaker.record_failure(&peer_id);
+            wait_out_open_cooldown().await;
+            assert!(client.circuit_breaker.begin_probe(&peer_id));
+            assert!(
+                client.circuit_breaker.would_allow(&peer_id),
+                "precondition: one half-open trial remains"
+            );
+
+            let announcement = wire_types::ChunkAnnouncement {
+                data_root: H256::zero(),
+                data_size: 32,
+                tx_offset: irys_types::TxChunkOffset::from(0),
+                chunk_path_hash: H256::zero(),
+            };
+            client.send_chunk_announcement_detached(
+                (&peer_id, &peer),
+                announcement,
+                GossipRoutes::Chunk,
+                bytes::Bytes::from_static(b"{}"),
+                &peer_list,
+                Arc::clone(&cache),
+                key,
+            );
+
+            let expected = usize::try_from(PUSH_BACKPRESSURE_RETRIES + 1).expect("fits");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+            loop {
+                let hits = server.hits.load(Ordering::SeqCst);
+                let settled = client.circuit_breaker.would_allow(&peer_id)
+                    && client.circuit_breaker.metrics().half_open_count == 0;
+                if hits == expected && settled {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "announcement retries did not finish: hits={hits} expected={expected}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+
+            assert_eq!(
+                server.hits.load(Ordering::SeqCst),
+                expected,
+                "retries stay on the announcement; a body push would add more requests"
+            );
+            assert!(
+                !client.peer_lacks_announce(&peer_id),
+                "a rate limit is not a missing announce route"
+            );
+            assert!(
+                !peer_has_data(&cache, peer_id),
+                "a rate limit must not record the chunk as seen"
+            );
+            let scored = peer_list.get_peer(&peer_id).expect("peer");
+            assert_eq!(scored.reputation_score.get(), initial_score);
+            assert!(!scored.is_online);
             assert_eq!(client.circuit_breaker.metrics().open_count, 0);
         }
 
