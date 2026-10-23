@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792695802886,
+  "lastUpdate": 1792719253930,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -18505,6 +18505,114 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 272.353648,
             "range": "± 3.620662",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a4f8849ecbba48623dfc535a517999b7c8d48d25",
+          "message": "feat(cache): report why each chunk-pruning pass keeps cached bodies (#1687)\n\nDevnet node 2 holds a 37 GB chunk cache against a 10 GB soft cap, and a\npruning pass removed 158 bodies. The pass logged only the deleted count, so\nthere was no way to tell which reclaim gate kept the rest.\n\nEach pass now tallies every body it visits into one outcome:\n\n- deleted_durable / deleted_unplaced\n- kept_too_young: younger than migration depth plus the cache clean lag\n- kept_not_durable: placed, assigned, or proven here, offset not yet\n  persisted Data\n- kept_no_ingress_hash: persisted Data, but this signer has no compact\n  ingress hash, so the durable path never deletes it\n- kept_root_not_migrated, kept_unreadable, kept_unplaced\n\nThe counts are added to the \"Completed chunk pruning pass\" log line and to\nthe gauge irys.cache.prune_pass_bodies{outcome}.\n\nreclaim_cached_chunks_older_than reports per-root counts.\ndelete_reclaimable_cached_chunks_older_than is now a wrapper over it with\nthe same result. No deletion behavior changes.",
+          "timestamp": "2026-10-22T18:17:52-07:00",
+          "tree_id": "8e33c6eec5627bf7cf0c59b795dc105fd34f7720",
+          "url": "https://github.com/Irys-xyz/irys/commit/a4f8849ecbba48623dfc535a517999b7c8d48d25"
+        },
+        "date": 1792719252324,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012029,
+            "range": "± 0.000328",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120228,
+            "range": "± 0.000821",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.268423,
+            "range": "± 0.044573",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.910894,
+            "range": "± 0.14258",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074822,
+            "range": "± 0.000313",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 782.705663,
+            "range": "± 20.060443",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 972.761763,
+            "range": "± 17.756039",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120715,
+            "range": "± 0.002307",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1259.724468,
+            "range": "± 79.333051",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1836.464902,
+            "range": "± 122.786856",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.165679,
+            "range": "± 0.059007",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 248.080184,
+            "range": "± 60.714745",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 285.392085,
+            "range": "± 23.663938",
             "unit": "ms/iter"
           },
           {
