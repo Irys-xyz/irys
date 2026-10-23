@@ -474,6 +474,23 @@ fn test_block_index_item_v2_rejects_oversized_ledger_list() {
 // IrysTransactionResponse roundtrip
 // =============================================================================
 
+#[test]
+fn chunk_announcement_round_trips_and_matches_chunk() {
+    let chunk = irys_types::UnpackedChunk {
+        data_root: irys_types::H256::random(),
+        data_size: 64,
+        data_path: vec![1, 2, 3].into(),
+        bytes: vec![4, 5].into(),
+        tx_offset: irys_types::TxChunkOffset::from(1),
+    };
+    let a = wire::ChunkAnnouncement::from(&chunk);
+    assert_eq!(a.chunk_path_hash, chunk.chunk_path_hash());
+    let json = serde_json::to_string(&a).expect("ser");
+    assert!(json.contains("\"dataSize\":\"64\""), "{json}");
+    let back: wire::ChunkAnnouncement = serde_json::from_str(&json).expect("de");
+    assert_eq!(back, a);
+}
+
 #[rstest::rstest]
 #[case::storage(canonical_irys_tx_response_storage())]
 #[case::commitment(canonical_irys_tx_response_commitment())]

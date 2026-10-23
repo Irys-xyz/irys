@@ -26,7 +26,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
 use irys_types::Traced;
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::v2::{ChunkBroadcastMode, GossipBroadcastMessageV2, GossipDataV2};
 use irys_types::{
     Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion,
 };
@@ -111,6 +111,7 @@ pub struct P2PService {
     pub sync_state: ChainSyncState,
     gossip_cfg: P2PGossipConfig,
     runtime_handle: tokio::runtime::Handle,
+    chunk_announce_state: Option<Arc<crate::chunk_announce::ChunkAnnounceState>>,
 }
 
 impl P2PService {
@@ -175,7 +176,18 @@ impl P2PService {
             sync_state: ChainSyncState::new(true, false),
             gossip_cfg: P2PGossipConfig::default(),
             runtime_handle,
+            chunk_announce_state: None,
         }
+    }
+
+    /// Replace the default announcement state, so tests can shorten limits.
+    #[must_use]
+    pub fn with_chunk_announce_state(
+        mut self,
+        state: Arc<crate::chunk_announce::ChunkAnnounceState>,
+    ) -> Self {
+        self.chunk_announce_state = Some(state);
+        self
     }
 
     /// Spawns all gossip tasks and returns a handle to the service. The service will run until
@@ -260,6 +272,10 @@ impl P2PService {
             started_at,
             consensus_config_hash,
             runtime_handle: self.runtime_handle.clone(),
+            chunk_announce: self
+                .chunk_announce_state
+                .take()
+                .unwrap_or_else(|| Arc::new(crate::chunk_announce::ChunkAnnounceState::new())),
         });
         let server = GossipServer::new(
             Arc::clone(&gossip_data_handler),
@@ -320,11 +336,23 @@ impl P2PService {
         }
 
         let message_type_and_id = broadcast_message.data_type_and_id();
-        let GossipBroadcastMessageV2 { key, data } = broadcast_message;
+        let GossipBroadcastMessageV2 {
+            key,
+            data,
+            chunk_mode,
+        } = broadcast_message;
         let broadcast_data = Arc::new(data);
 
         // Pre-serialize once for all V2 peers (O(1) clone per peer instead of N serializations)
         let preserialized = self.client.pre_serialize_for_broadcast(&broadcast_data);
+        let announcement = if self.gossip_cfg.chunk_announce
+            && chunk_mode == ChunkBroadcastMode::Announce
+            && let GossipDataV2::Chunk(chunk) = broadcast_data.as_ref()
+        {
+            Some(crate::wire_types::ChunkAnnouncement::from(chunk.as_ref()))
+        } else {
+            None
+        };
 
         debug!("Broadcasting data to peers: {}", message_type_and_id);
 
@@ -364,6 +392,22 @@ impl P2PService {
             );
             // Send data to selected peers
             for (peer_miner_address, peer_entry) in selected_peers {
+                if peer_entry.protocol_version == ProtocolVersion::V2
+                    && let (Some(announcement), Some((route, body))) =
+                        (announcement, &preserialized)
+                    && !self.client.peer_lacks_announce(&peer_miner_address)
+                {
+                    self.client.send_chunk_announcement_detached(
+                        (&peer_miner_address, &peer_entry),
+                        announcement,
+                        *route,
+                        body.clone(),
+                        peer_list,
+                        Arc::clone(&self.cache),
+                        key,
+                    );
+                    continue;
+                }
                 if peer_entry.protocol_version == ProtocolVersion::V2
                     && let Some((route, ref body)) = preserialized
                 {

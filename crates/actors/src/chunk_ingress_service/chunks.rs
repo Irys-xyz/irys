@@ -2,15 +2,16 @@ use super::ChunkIngressMessage;
 use super::ChunkIngressServiceInner;
 use super::ingress_proofs::generate_and_store_ingress_proof_from_leaves;
 use super::metrics::{
-    record_chunk_duplicate, record_chunk_error, record_chunk_ingested, record_enqueue_duration,
-    record_flush_failure, record_validation_duration,
+    record_cache_commit_duration, record_chunk_duplicate, record_chunk_error,
+    record_chunk_ingested, record_enqueue_duration, record_flush_failure,
+    record_validation_duration,
 };
 
 use irys_database::{
     complete_ingress_leaves, confirm_data_size_for_data_root, db::IrysDatabaseExt as _,
 };
 use irys_domain::{StorageModule, WriteDataChunkError};
-use irys_types::gossip::v2::GossipBroadcastMessageV2;
+use irys_types::gossip::v2::{ChunkBroadcastMode, GossipBroadcastMessageV2};
 use irys_types::{
     ChunkPathHash, DataLedger, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
     SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256,
@@ -157,10 +158,20 @@ pub fn select_data_size_from_storage_modules(
     }
 }
 
+/// What the storage-module pass did with a chunk's placements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleWrites {
+    /// Written, skipped, or not assigned to any module.
+    Settled,
+    /// Nothing written: another write still occupies every placement, and
+    /// that write may yet fail.
+    InFlight,
+}
+
 async fn write_chunk_to_assigned_modules(
     modules: &[Arc<StorageModule>],
     chunk: &UnpackedChunk,
-) -> Result<(), ChunkIngressError> {
+) -> Result<ModuleWrites, ChunkIngressError> {
     let mut wrote_any = false;
     let mut in_flight = false;
     for sm in modules {
@@ -213,20 +224,57 @@ async fn write_chunk_to_assigned_modules(
         }
     }
     if !wrote_any && in_flight {
-        // The bytes are already queued. The sender should retry later, not
-        // treat this peer as having rejected the chunk.
-        return Err(AdvisoryChunkIngressError::Overloaded.into());
+        // Another write already queued this placement, and the body is in
+        // the chunk cache. The caller finishes the post-write steps; the
+        // in-flight owner may be data sync, which does not broadcast.
+        debug!(
+            data_root = %chunk.data_root,
+            tx_offset = %chunk.tx_offset,
+            "chunk placement already in flight; treating as written"
+        );
+        return Ok(ModuleWrites::InFlight);
     }
-    Ok(())
+    Ok(ModuleWrites::Settled)
 }
 
+/// HTTP API ingest (the only path holding an admission guard) is the
+/// chunk's origin and pushes full bodies. Gossip and data-sync ingest
+/// re-broadcast as announcements.
+pub(super) fn broadcast_mode_for_admission(has_http_admission: bool) -> ChunkBroadcastMode {
+    if has_http_admission {
+        ChunkBroadcastMode::Push
+    } else {
+        ChunkBroadcastMode::Announce
+    }
+}
+
+/// The fetch server stamps the cached root's `data_size` onto the body.
+/// A prefix chunk may carry a smaller field. Announcing that field makes
+/// the fetcher score this node `BogusData`.
+fn chunk_offered_at_served_size(
+    chunk: Arc<UnpackedChunk>,
+    served_data_size: u64,
+) -> Arc<UnpackedChunk> {
+    if chunk.data_size == served_data_size {
+        return chunk;
+    }
+    // clone: the cache write keeps the ingress claim; the offer carries the served size
+    let mut offered = (*chunk).clone();
+    offered.data_size = served_data_size;
+    Arc::new(offered)
+}
+
+/// An in-flight placement is accepted but not remembered: if the occupying
+/// write fails, its sender's retry must reach the storage modules rather
+/// than the `recent_valid_chunks` early return.
 async fn remember_after_module_writes(
     recent_valid_chunks: &RwLock<LruCache<ChunkPathHash, ()>>,
     chunk_path_hash: ChunkPathHash,
-    write_result: Result<(), ChunkIngressError>,
+    write_result: Result<ModuleWrites, ChunkIngressError>,
 ) -> Result<(), ChunkIngressError> {
-    write_result?;
-    recent_valid_chunks.write().await.put(chunk_path_hash, ());
+    if write_result? == ModuleWrites::Settled {
+        recent_valid_chunks.write().await.put(chunk_path_hash, ());
+    }
     Ok(())
 }
 
@@ -352,7 +400,11 @@ impl ChunkIngressServiceInner {
         for chunk in chunks {
             let chunk = Arc::new(chunk);
             match self
-                .ingest_chunk(Arc::clone(&chunk), PendingDrainRole::Own)
+                .ingest_chunk(
+                    Arc::clone(&chunk),
+                    PendingDrainRole::Own,
+                    ChunkBroadcastMode::Push,
+                )
                 .await
             {
                 Ok(()) => saw_ok = true,
@@ -468,8 +520,9 @@ impl ChunkIngressServiceInner {
     pub(crate) async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
+        mode: ChunkBroadcastMode,
     ) -> Result<(), ChunkIngressError> {
-        self.ingest_chunk(Arc::new(chunk), PendingDrainRole::External)
+        self.ingest_chunk(Arc::new(chunk), PendingDrainRole::External, mode)
             .await
             .map_err(|failure| failure.error)
     }
@@ -478,6 +531,7 @@ impl ChunkIngressServiceInner {
         &self,
         chunk: Arc<UnpackedChunk>,
         role: PendingDrainRole,
+        mode: ChunkBroadcastMode,
     ) -> Result<(), IngressFailure> {
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
@@ -865,7 +919,10 @@ impl ChunkIngressServiceInner {
         // fast SM fsync could delete the cache row before this batch commits,
         // and a delayed writer could reinsert the body. The acknowledgement is
         // tied to this exact write, so another batch cannot mask its failure.
-        if let Err(error) = queued_write.committed().await {
+        let commit_start = Instant::now();
+        let commit_result = queued_write.committed().await;
+        record_cache_commit_duration(commit_start.elapsed_ms());
+        if let Err(error) = commit_result {
             error!(
                 %error,
                 data_root = %chunk.data_root,
@@ -897,10 +954,20 @@ impl ChunkIngressServiceInner {
                 body_committed: true,
             })?;
 
-        // Gossip the chunk before moving onto ingress proof checks
+        // Gossip the chunk before moving onto ingress proof checks.
+        // A rightmost path just confirmed `expected_max_byte_range`. Every
+        // other path leaves the cached root size unchanged. That is the size
+        // a later fetch will serve, not the field on the ingress claim.
+        let served_data_size = if path_result.is_rightmost_chunk {
+            expected_max_byte_range
+        } else {
+            data_size
+        };
         let chunk_data_root = chunk.data_root;
         let chunk_tx_offset = chunk.tx_offset;
-        let gossip_broadcast_message = GossipBroadcastMessageV2::from(chunk);
+        let offered = chunk_offered_at_served_size(chunk, served_data_size);
+        let gossip_broadcast_message =
+            GossipBroadcastMessageV2::from(offered).with_chunk_mode(mode);
 
         if let Err(error) = self
             .service_senders
@@ -1702,6 +1769,245 @@ mod tests {
         Ok(())
     }
 
+    /// A second ingress while another write still occupies the offset must
+    /// succeed. The body is already in the cache, so the sender should stop.
+    /// The path hash is not remembered: the occupying write may still fail.
+    #[tokio::test]
+    async fn in_flight_duplicate_write_returns_ok() -> eyre::Result<()> {
+        use irys_domain::{StorageModule, StorageModuleInfo};
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            Config, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
+            DataTransactionMetadata, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
+            PartitionChunkOffset, TxChunkOffset, ledger_chunk_offset_ii,
+            partition::PartitionAssignment, partition_chunk_offset_ii,
+        };
+        use nodit::interval::ii;
+        use std::num::NonZeroUsize;
+        use std::thread::JoinHandle;
+        use std::time::Duration;
+
+        let tmp = TempDirBuilder::new()
+            .prefix("ingress_in_flight_dup")
+            .with_tracing()
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 5,
+                num_chunks_in_partition: 5,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+            },
+            &config,
+        )?);
+        storage_module.pack_with_zeros();
+        storage_module.force_sync_pending_chunks()?;
+        let data_root = H256::random();
+        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 5,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        storage_module.index_transaction_data(
+            &data_tx,
+            &vec![5, 6, 7, 8],
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 5,
+            data_path: vec![4, 3, 2, 1].into(),
+            bytes: vec![0, 1, 2, 3, 4].into(),
+            tx_offset: TxChunkOffset::from(0),
+        };
+
+        struct FinishWriter {
+            module: Arc<StorageModule>,
+            writer: Option<JoinHandle<Result<(), irys_domain::WriteDataChunkError>>>,
+        }
+        impl Drop for FinishWriter {
+            fn drop(&mut self) {
+                self.module.release_ingress_occupy_hold_for_test();
+                if let Some(handle) = self.writer.take() {
+                    drop(handle.join());
+                }
+            }
+        }
+        impl FinishWriter {
+            fn finish(mut self) -> Result<(), irys_domain::WriteDataChunkError> {
+                self.module.release_ingress_occupy_hold_for_test();
+                let handle = self.writer.take().expect("writer thread");
+                handle.join().expect("writer thread")
+            }
+        }
+
+        storage_module.hold_ingress_after_occupy_for_test();
+        let module = Arc::clone(&storage_module);
+        let queued = chunk.clone();
+        let hold = FinishWriter {
+            module: Arc::clone(&storage_module),
+            writer: Some(std::thread::spawn(move || module.write_data_chunk(&queued))),
+        };
+        assert!(
+            storage_module.ingress_occupy_hold_arrived_for_test(Duration::from_secs(5)),
+            "first write did not stop after occupying the offset"
+        );
+        assert!(
+            storage_module.has_in_flight_index_for(&chunk),
+            "precondition: the first write must still be queued"
+        );
+        let path_hash = chunk.chunk_path_hash();
+        let recent = RwLock::new(LruCache::new(NonZeroUsize::new(8).expect("nonzero")));
+        remember_after_module_writes(
+            &recent,
+            path_hash,
+            write_chunk_to_assigned_modules(&[Arc::clone(&storage_module)], &chunk).await,
+        )
+        .await
+        .expect("an in-flight duplicate must not be rejected as Overloaded");
+        assert!(
+            !recent.read().await.contains(&path_hash),
+            "the occupying sender's retry must not stop at recent_valid_chunks"
+        );
+        assert!(
+            storage_module.has_in_flight_index_for(&chunk),
+            "the second call must not clear the in-flight placement"
+        );
+        hold.finish()
+            .expect("paused write should finish after release");
+        assert!(
+            !storage_module.has_in_flight_index_for(&chunk),
+            "the occupancy mark is gone once the first write finishes"
+        );
+        Ok(())
+    }
+
+    /// A duplicate accepted while another write occupies the offset must not
+    /// absorb that write's retry. When the occupying write fails, its
+    /// sender's retry reaches the storage module and writes the offset.
+    #[tokio::test]
+    async fn retry_after_a_failed_occupying_write_writes_the_offset() -> eyre::Result<()> {
+        use irys_domain::{StorageModule, StorageModuleInfo, StorageModulesReadGuard};
+        use irys_types::{
+            DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+            DataTransactionMetadata, LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset,
+            ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ii,
+        };
+        use nodit::interval::ii;
+        use std::time::Duration;
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-failed-occupier-retry")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let chunk = valid_single_chunk(vec![9_u8; 32]);
+        insert_confirmed_cdr(&inner.irys_db, chunk.data_root, chunk.data_size);
+        let storage_module = Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: inner.config.node_config.miner_address(),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+            },
+            &inner.config,
+        )?);
+        storage_module.pack_with_zeros();
+        storage_module.force_sync_pending_chunks()?;
+        let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root: chunk.data_root,
+                data_size: chunk.data_size,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        storage_module.index_transaction_data(
+            &data_tx,
+            &vec![5, 6, 7, 8],
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        inner.storage_modules_guard = StorageModulesReadGuard::new(Arc::new(
+            std::sync::RwLock::new(vec![Arc::clone(&storage_module)]),
+        ));
+        let offset = PartitionChunkOffset::from(0_u32);
+
+        storage_module.hold_ingress_after_occupy_for_test();
+        let module = Arc::clone(&storage_module);
+        let queued = chunk.clone();
+        let occupier = std::thread::spawn(move || module.write_data_chunk(&queued));
+        assert!(
+            storage_module.ingress_occupy_hold_arrived_for_test(Duration::from_secs(5)),
+            "the occupying write did not stop after taking the offset"
+        );
+        inner
+            .ingest_chunk(
+                Arc::new(chunk.clone()),
+                PendingDrainRole::External,
+                ChunkBroadcastMode::Announce,
+            )
+            .await
+            .map_err(|failure| failure.error)?;
+
+        // A pause after occupancy makes the held write stale.
+        storage_module.pause_data_writes();
+        storage_module.resume_data_writes();
+        storage_module.release_ingress_occupy_hold_for_test();
+        let occupied = occupier.join().expect("occupying writer thread");
+        assert!(
+            matches!(
+                occupied,
+                Err(irys_domain::WriteDataChunkError::WritesPaused)
+            ),
+            "the occupying write must fail after occupancy, got {occupied:?}"
+        );
+        assert!(!storage_module.is_data_write_pending_at(offset));
+        assert!(!storage_module.is_data_chunk_durable_at(offset));
+
+        inner
+            .ingest_chunk(
+                Arc::new(chunk),
+                PendingDrainRole::External,
+                ChunkBroadcastMode::Announce,
+            )
+            .await
+            .map_err(|failure| failure.error)?;
+        assert!(
+            storage_module.is_data_write_pending_at(offset)
+                || storage_module.is_data_chunk_durable_at(offset),
+            "the retry must write the offset"
+        );
+        Ok(())
+    }
+
     /// Closed cache writer: ingress reaches `queue_write` and fails before the
     /// batch commits. The drain must put that body back and schedule another drain.
     #[tokio::test]
@@ -1887,7 +2193,7 @@ mod tests {
         let incoming = chunk_with(data_root, 1, 0xAB, CLAIMED_DATA_SIZE);
 
         inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, ChunkBroadcastMode::Push)
             .await
             .expect("a claim under the cap must be kept while the root is draining");
         {
@@ -1952,7 +2258,7 @@ mod tests {
         let incoming = chunk_with(data_root, cap as u32, 0xAB, CLAIMED_DATA_SIZE);
 
         let err = inner
-            .handle_chunk_ingress_message(incoming.clone())
+            .handle_chunk_ingress_message(incoming.clone(), ChunkBroadcastMode::Push)
             .await
             .expect_err("a pre-header chunk must be rejected while the root is draining");
         assert!(
@@ -1990,7 +2296,7 @@ mod tests {
         expect_no_redrain(&mut receivers).await;
 
         let err = inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, ChunkBroadcastMode::Push)
             .await
             .expect_err("after the drain, a chunk past the cap still rejects");
         assert!(
@@ -2019,7 +2325,10 @@ mod tests {
         park_offsets(&inner, data_root, [0_u32]).await;
         let (popped, ticket) = pop_for_drain(&inner, data_root).await;
         inner
-            .handle_chunk_ingress_message(chunk_with(data_root, 0, 0xAB, CLAIMED_DATA_SIZE))
+            .handle_chunk_ingress_message(
+                chunk_with(data_root, 0, 0xAB, CLAIMED_DATA_SIZE),
+                ChunkBroadcastMode::Push,
+            )
             .await
             .expect("the same offset parks while the root is draining");
 
@@ -2057,7 +2366,10 @@ mod tests {
         park_offsets(&inner, data_root, [0_u32]).await;
         let (popped, ticket) = pop_for_drain(&inner, data_root).await;
         inner
-            .handle_chunk_ingress_message(chunk_with(data_root, 1, 1, CLAIMED_DATA_SIZE))
+            .handle_chunk_ingress_message(
+                chunk_with(data_root, 1, 1, CLAIMED_DATA_SIZE),
+                ChunkBroadcastMode::Push,
+            )
             .await
             .expect("the arrival parks before cancel");
         drop(popped);
@@ -2099,7 +2411,7 @@ mod tests {
         }));
 
         let err = inner
-            .handle_chunk_ingress_message(chunk)
+            .handle_chunk_ingress_message(chunk, ChunkBroadcastMode::Push)
             .await
             .expect_err("a visible header takes the write path, and the test writer is closed");
         assert!(
@@ -2142,7 +2454,7 @@ mod tests {
         }));
 
         let err = inner
-            .handle_chunk_ingress_message(chunk)
+            .handle_chunk_ingress_message(chunk, ChunkBroadcastMode::Push)
             .await
             .expect_err("a visible header takes the write path, and the test writer is closed");
         assert!(
@@ -2175,12 +2487,10 @@ mod tests {
 
         for offset in [1_u32, 2] {
             inner
-                .handle_chunk_ingress_message(chunk_with(
-                    data_root,
-                    offset,
-                    offset as u8,
-                    CLAIMED_DATA_SIZE,
-                ))
+                .handle_chunk_ingress_message(
+                    chunk_with(data_root, offset, offset as u8, CLAIMED_DATA_SIZE),
+                    ChunkBroadcastMode::Push,
+                )
                 .await
                 .expect("a chunk under the cap must be kept while the root is draining");
         }
@@ -2233,7 +2543,10 @@ mod tests {
         expect_no_redrain(&mut receivers).await;
 
         inner
-            .handle_chunk_ingress_message(chunk_with(data_root, 3, 3, 128))
+            .handle_chunk_ingress_message(
+                chunk_with(data_root, 3, 3, 128),
+                ChunkBroadcastMode::Push,
+            )
             .await
             .expect("after the drain, a chunk under the cap parks");
         {
@@ -2616,7 +2929,7 @@ mod tests {
         let incoming = chunk_with(data_root, 2, 0xAB, CLAIMED_DATA_SIZE);
 
         let err = inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, ChunkBroadcastMode::Push)
             .await
             .expect_err("a new pre-header chunk must still reject at the cap");
         assert!(
@@ -2791,7 +3104,7 @@ mod tests {
             tx_offset: TxChunkOffset::from(2),
         };
         let err = inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, ChunkBroadcastMode::Push)
             .await
             .expect_err("full root must reject the larger-claim park");
         assert!(
@@ -2833,7 +3146,7 @@ mod tests {
             tx_offset: TxChunkOffset::from(1),
         };
         inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, ChunkBroadcastMode::Push)
             .await
             .expect("under-cap larger claim parks");
         let pending = inner.pending_chunks.read().await;
@@ -2841,6 +3154,164 @@ mod tests {
         assert!(parked.peek(&TxChunkOffset::from(0)).is_some());
         assert!(parked.peek(&TxChunkOffset::from(1)).is_some());
         assert_eq!(parked.len(), 2);
+    }
+
+    #[test]
+    fn broadcast_mode_follows_http_admission() {
+        use irys_types::gossip::v2::ChunkBroadcastMode;
+        assert_eq!(
+            broadcast_mode_for_admission(false),
+            ChunkBroadcastMode::Announce
+        );
+        assert_eq!(broadcast_mode_for_admission(true), ChunkBroadcastMode::Push);
+    }
+
+    #[tokio::test]
+    async fn ingest_broadcast_carries_the_requested_mode() {
+        use irys_types::gossip::v2::ChunkBroadcastMode;
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-broadcast-mode")
+            .build();
+        let (mut inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let chunk = valid_single_chunk(vec![7_u8; 32]);
+        insert_unconfirmed_cdr(&inner.irys_db, chunk.data_root, chunk.data_size);
+
+        inner
+            .ingest_chunk(
+                Arc::new(chunk),
+                PendingDrainRole::External,
+                ChunkBroadcastMode::Announce,
+            )
+            .await
+            .map_err(|f| f.error)
+            .expect("ingest");
+
+        let msg = receivers
+            .gossip_broadcast
+            .try_recv()
+            .expect("one broadcast");
+        let (msg, _span) = msg.into_parts();
+        assert_eq!(msg.chunk_mode, ChunkBroadcastMode::Announce);
+    }
+
+    /// An ingest records its chunk-cache commit wait once, so a slow root
+    /// volume under the commit shows in `cache_commit_duration_ms`.
+    // Must run under nextest (process-per-test isolation): the metric statics
+    // bind to the global meter provider on first record (LazyLock), so the
+    // provider must be installed before this instrument is first recorded.
+    #[tokio::test]
+    async fn ingest_records_the_cache_commit_duration() {
+        use opentelemetry_sdk::metrics::data::{
+            AggregatedMetrics, HistogramDataPoint, MetricData, ResourceMetrics, ScopeMetrics,
+        };
+        use opentelemetry_sdk::metrics::{
+            InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        };
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-commit-timer")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let chunk = valid_single_chunk(vec![5_u8; 32]);
+        insert_confirmed_cdr(&inner.irys_db, chunk.data_root, chunk.data_size);
+
+        inner
+            .ingest_chunk(
+                Arc::new(chunk),
+                PendingDrainRole::External,
+                ChunkBroadcastMode::Announce,
+            )
+            .await
+            .map_err(|failure| failure.error)
+            .expect("chunk ingress");
+        provider.force_flush().expect("flush metrics");
+
+        let commits = exporter
+            .get_finished_metrics()
+            .expect("collected metrics")
+            .iter()
+            .flat_map(ResourceMetrics::scope_metrics)
+            .flat_map(ScopeMetrics::metrics)
+            .find(|metric| metric.name() == "irys.mempool.chunks.cache_commit_duration_ms")
+            .map(|metric| match metric.data() {
+                AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                    .data_points()
+                    .map(HistogramDataPoint::count)
+                    .sum::<u64>(),
+                _ => panic!("cache_commit_duration_ms must be an f64 histogram"),
+            });
+        assert_eq!(commits, Some(1), "one ingest records one commit wait");
+    }
+
+    /// A prefix of a confirmed larger root is stored with the claim's smaller
+    /// field. The announcement must use the size a fetch will serve.
+    #[tokio::test]
+    async fn confirmed_prefix_chunk_is_announced_at_the_cached_root_size() {
+        use irys_database::db::IrysDatabaseExt as _;
+        use irys_types::gossip::v2::GossipDataV2;
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-prefix-announce")
+            .build();
+        let (mut inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let (chunk, served_size) = prefix_chunk_of_larger_root(32);
+        let data_root = chunk.data_root;
+        insert_confirmed_cdr(&inner.irys_db, data_root, served_size);
+
+        inner
+            .ingest_chunk(
+                Arc::new(chunk),
+                PendingDrainRole::External,
+                ChunkBroadcastMode::Announce,
+            )
+            .await
+            .map_err(|failure| failure.error)
+            .expect("prefix chunk ingress");
+
+        let msg = receivers
+            .gossip_broadcast
+            .try_recv()
+            .expect("one broadcast");
+        let (msg, _span) = msg.into_parts();
+        assert_eq!(msg.chunk_mode, ChunkBroadcastMode::Announce);
+        let GossipDataV2::Chunk(offered) = &msg.data else {
+            panic!("chunk broadcast");
+        };
+        assert_eq!(offered.data_size, served_size);
+
+        let served = inner
+            .irys_db
+            .view_eyre(|tx| {
+                irys_database::cached_unpacked_chunk(tx, data_root, TxChunkOffset::from(0), 32)
+            })
+            .expect("read")
+            .expect("cached body");
+        assert_eq!(served.data_size, offered.data_size);
+        irys_types::validate_unpacked_chunk(&served, 32).expect("path proves the served size");
     }
 
     fn test_ingress_inner(
@@ -2927,6 +3398,45 @@ mod tests {
         });
         db.update_eyre(|tx| cache_data_root(tx, &header, None).map(|_| ()))
             .expect("insert cached data root");
+    }
+
+    fn insert_confirmed_cdr(db: &DatabaseProvider, data_root: H256, data_size: u64) {
+        use irys_database::db::IrysDatabaseExt as _;
+
+        insert_unconfirmed_cdr(db, data_root, data_size);
+        db.update_eyre(|tx| {
+            irys_database::confirm_data_size_for_data_root(tx, &data_root, data_size).map(|_| ())
+        })
+        .expect("confirm cached data root");
+    }
+
+    /// First chunk of a two-chunk root, labelled with only the first chunk's length.
+    fn prefix_chunk_of_larger_root(chunk_size: usize) -> (UnpackedChunk, u64) {
+        let first = vec![7_u8; chunk_size];
+        let second = vec![8_u8; chunk_size];
+        // clone: generate_leaves consumes the bytes the chunk keeps
+        let leaves =
+            irys_types::generate_leaves([Ok(first.clone()), Ok(second)].into_iter(), chunk_size)
+                .expect("leaves");
+        let root = irys_types::generate_data_root(leaves).expect("root");
+        let data_root = H256(root.id);
+        let proof = irys_types::resolve_proofs(root, None)
+            .expect("proofs")
+            .into_iter()
+            .next()
+            .expect("first proof");
+        let served_size = u64::try_from(chunk_size.saturating_mul(2)).expect("served size");
+        let field = u64::try_from(chunk_size).expect("chunk size");
+        (
+            UnpackedChunk {
+                data_root,
+                data_size: field,
+                data_path: proof.proof.into(),
+                bytes: first.into(),
+                tx_offset: TxChunkOffset::from(0),
+            },
+            served_size,
+        )
     }
 
     fn valid_single_chunk(bytes: Vec<u8>) -> UnpackedChunk {

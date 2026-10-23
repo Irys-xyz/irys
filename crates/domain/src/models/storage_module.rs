@@ -38,7 +38,7 @@ use nodit::{
 #[cfg(test)]
 use openssl::sha;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 use std::sync::Condvar;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -599,7 +599,7 @@ enum RegistrationPausePoint {
 /// One armed pause. `wait_if` clears the point before it waits, so a second
 /// caller at that point returns. `reset` can rewrite the interval file while
 /// a test still holds the first writer.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug)]
 struct PauseGate<T> {
     point: Mutex<Option<T>>,
@@ -609,7 +609,7 @@ struct PauseGate<T> {
     release_cv: Condvar,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl<T: Copy + PartialEq> PauseGate<T> {
     fn new() -> Self {
         Self {
@@ -3019,6 +3019,26 @@ impl StorageModule {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn fail_next_index_commit(&self) {
         self.index_commit_fail_next.store(true, Ordering::SeqCst);
+    }
+
+    /// Stop the next ingress occupy after the offset is reserved and before
+    /// the sweep queue sees it. [`Self::has_in_flight_index_for`] is true
+    /// until [`Self::release_ingress_occupy_hold_for_test`].
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn hold_ingress_after_occupy_for_test(&self) {
+        self.disk.hold_after_entropy_copied();
+    }
+
+    /// `true` once the armed occupy hold is reached.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn ingress_occupy_hold_arrived_for_test(&self, timeout: std::time::Duration) -> bool {
+        self.disk.after_entropy_copied_arrived(timeout)
+    }
+
+    /// Let an occupy hold continue into the sweep.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn release_ingress_occupy_hold_for_test(&self) {
+        self.disk.release_entropy_pack_pause();
     }
 
     /// `true` while `reset` has not finished in this process.

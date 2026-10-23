@@ -94,33 +94,6 @@ async fn attempt_data_sync_write(
     }
 }
 
-/// The peer body must match its own data path. Ingress can return `Ok`
-/// without this check: a recent-chunk hit keys only the path hash, and a
-/// wrong length returns `Ok` before the leaf hash is compared.
-fn validate_peer_unpacked_chunk(chunk: &UnpackedChunk, chunk_size: u64) -> eyre::Result<()> {
-    let (min_byte, max_byte) =
-        irys_types::expected_chunk_byte_range(chunk.tx_offset, chunk.data_size, chunk_size)
-            .map_err(|error| eyre::eyre!("peer chunk data path range: {error}"))?;
-    let target = u128::from(max_byte - 1);
-    let path = irys_types::validate_path(chunk.data_root.0, &chunk.data_path, target)
-        .map_err(|error| eyre::eyre!("peer chunk data path: {error}"))?;
-    let chunk_len = u64::try_from(chunk.bytes.len())
-        .map_err(|_| eyre::eyre!("peer chunk length exceeds u64"))?;
-    let expected_len = max_byte - min_byte;
-    eyre::ensure!(
-        chunk_len == expected_len,
-        "peer chunk length {chunk_len} does not match the data path range {expected_len}"
-    );
-    irys_types::validate_path_byte_range(&path, (min_byte, max_byte))
-        .map_err(|error| eyre::eyre!("peer chunk data path range: {error}"))?;
-    let hash = irys_types::hash_sha256(&chunk.bytes.0);
-    eyre::ensure!(
-        path.leaf_hash == hash,
-        "peer chunk hash does not match the data path leaf"
-    );
-    Ok(())
-}
-
 fn ingress_error_is_invalid_peer_data(error: &ChunkIngressError) -> bool {
     matches!(
         error,
@@ -238,7 +211,7 @@ fn check_against_placement(
             ),
         });
     }
-    validate_peer_unpacked_chunk(&unpacked, chunk_size)
+    irys_types::validate_unpacked_chunk(&unpacked, chunk_size)
         .map_err(|error| DeliveryError::InvalidBody(error.to_string()))?;
     Ok(unpacked)
 }
@@ -342,7 +315,7 @@ async fn process_delivered_body(
             pipeline.chunk_size,
         );
     }
-    validate_peer_unpacked_chunk(&unpacked, pipeline.chunk_size)
+    irys_types::validate_unpacked_chunk(&unpacked, pipeline.chunk_size)
         .map_err(|error| DeliveryError::InvalidBody(error.to_string()))?;
     let _permit = Arc::clone(&pipeline.ingress_permits)
         .acquire_owned()
@@ -3650,6 +3623,60 @@ mod peer_chunk_validation_tests {
         }
     }
 
+    /// Chunk ingress answers `Ok` to a duplicate while another write occupies
+    /// the offset, so the duplicate's `Ok` writes nothing if that write then
+    /// fails, as the stub here does. Data sync's Submit route must still
+    /// write the offset.
+    #[tokio::test]
+    async fn a_submit_offset_left_by_a_failed_occupying_write_is_written_by_data_sync() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let offset = PartitionChunkOffset::from(0_u32);
+        let peer = IrysAddress::from([9_u8; 20]);
+        let (mut h, _tmp) = route_harness(DataLedger::Submit, true);
+
+        h.sm.hold_ingress_after_occupy_for_test();
+        let module = Arc::clone(&h.sm);
+        let queued = h.chunk.clone();
+        let writer = std::thread::spawn(move || module.write_data_chunk(&queued));
+        assert!(
+            h.sm.ingress_occupy_hold_arrived_for_test(Duration::from_secs(5)),
+            "the occupying write did not stop after taking the offset"
+        );
+        assert!(h.sm.has_in_flight_index_for(&h.chunk));
+        // A pause after occupancy makes the held write stale.
+        h.sm.pause_data_writes();
+        h.sm.resume_data_writes();
+        h.sm.release_ingress_occupy_hold_for_test();
+        let result = writer.join().expect("writer thread");
+        assert!(
+            matches!(result, Err(irys_domain::WriteDataChunkError::WritesPaused)),
+            "the occupying write must fail after occupancy, got {result:?}"
+        );
+        assert!(!h.sm.has_in_flight_index_for(&h.chunk));
+        assert!(!h.sm.is_data_write_pending_at(offset));
+        assert!(!h.sm.is_data_chunk_durable_at(offset));
+
+        mark_requested(&mut h.inner, h.sm.id, offset, peer);
+        let chunk = ChunkFormat::Unpacked(h.chunk.clone());
+        deliver(
+            &mut h.inner,
+            &mut h.data_sync_rx,
+            h.sm.id,
+            offset,
+            peer,
+            chunk,
+        )
+        .await
+        .expect("data sync stores the body");
+        assert_eq!(h.ingested.load(Ordering::SeqCst), 1);
+        assert!(
+            h.sm.is_data_write_pending_at(offset),
+            "data sync wrote the offset that ingress skipped"
+        );
+    }
+
     /// The direct route checks the body against this offset's placement. A
     /// body that disagrees on data size is the peer's fault.
     /// A rollback can change the placement while a body is in delivery. A
@@ -5026,6 +5053,22 @@ mod assignment_follow_tests {
         let _third = t.next_ingress().await;
         t.apply_results(1).await;
         t.wait_held_below(3).await;
+        // An accepted body opens the bandwidth window. Once that window is
+        // past 1ms the allowance ramps to the chunk-size ceiling (30 for
+        // these 32-byte chunks) and the next tick fills 30 slots. A loaded
+        // host crosses that cutoff before this tick; an idle one does not.
+        // Pin the ceiling so the assertion measures the held-body limit.
+        {
+            let mut peers = t
+                .inner
+                .active_peer_bandwidth_managers
+                .write()
+                .expect("peer bandwidth lock");
+            peers
+                .get_mut(&t.assignee)
+                .expect("assignee")
+                .set_max_concurrency(20);
+        }
         t.inner.tick().expect("tick under the limit");
         assert_eq!(t.slots().0, 20, "fetching resumes under the limit");
     }

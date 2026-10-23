@@ -196,8 +196,10 @@ enum NoPermitAction {
 impl ChunkIngressServiceInner {
     async fn handle_message(&self, msg: ChunkIngressMessage) {
         match msg {
-            ChunkIngressMessage::IngestChunk(chunk, response, _admission) => {
-                let result = self.handle_chunk_ingress_message(chunk).await;
+            ChunkIngressMessage::IngestChunk(chunk, response, admission) => {
+                let mode = chunks::broadcast_mode_for_admission(admission.is_some());
+                let result = self.handle_chunk_ingress_message(chunk, mode).await;
+                drop(admission);
                 if let Err(e) = &result {
                     metrics::record_chunk_error(e.error_type(), e.is_advisory());
                     if response.is_none() {

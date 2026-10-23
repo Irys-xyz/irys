@@ -101,6 +101,21 @@ fn rejection_response(wire: ProtocolVersion, reason: RejectionReason) -> HttpRes
     }
 }
 
+/// A cache miss is `Accepted(None)`. A local failure is not: the fetcher
+/// would treat that as the peer no longer holding the chunk.
+fn chunk_fetch_response(
+    result: GossipResult<Option<UnpackedChunk>>,
+) -> GossipResponse<Option<wire_types::UnpackedChunk>> {
+    match result {
+        Ok(maybe) => GossipResponse::Accepted(maybe.map(wire_types::UnpackedChunk::from)),
+        Err(GossipError::RateLimited) => GossipResponse::Rejected(RejectionReason::RateLimited),
+        Err(error) => {
+            warn!(%error, "chunk fetch failed");
+            GossipResponse::Rejected(RejectionReason::InvalidData)
+        }
+    }
+}
+
 impl<M, B> GossipServer<M, B>
 where
     M: MempoolFacade,
@@ -1857,6 +1872,69 @@ where
         }
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_chunk_announce_v2(
+        server: Data<Self>,
+        request: web::Json<wire_types::GossipRequestV2<wire_types::ChunkAnnouncement>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let request = request.into_inner();
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
+        if let Err(error_response) = Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            request.peer_id,
+            request.miner_address,
+        ) {
+            return error_response;
+        }
+        match server
+            .data_handler
+            .handle_chunk_announcement(request.peer_id, request.data)
+        {
+            Ok(()) => HttpResponse::Ok().json(GossipResponse::Accepted(())),
+            Err(GossipError::RateLimited) => HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited)),
+            Err(error) => {
+                // Only `record_seen` fails here. The chunk is held, or its
+                // claim already has a fetch task, so the announcement is
+                // still accepted.
+                warn!(%error, "chunk announcement bookkeeping failed");
+                HttpResponse::Ok().json(GossipResponse::Accepted(()))
+            }
+        }
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_chunk_fetch_v2(
+        server: Data<Self>,
+        request: web::Json<wire_types::GossipRequestV2<wire_types::ChunkAnnouncement>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let request = request.into_inner();
+        if let Err(error_response) = Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            request.peer_id,
+            request.miner_address,
+        ) {
+            return error_response;
+        }
+        HttpResponse::Ok().json(chunk_fetch_response(
+            server.data_handler.handle_chunk_fetch(&request.data),
+        ))
+    }
+
     pub fn routes() -> impl HttpServiceFactory {
         web::scope("/gossip")
             .service(
@@ -1896,6 +1974,14 @@ where
                     .route(
                         GossipRoutes::PullData.as_str(),
                         web::post().to(Self::handle_pull_data),
+                    )
+                    .route(
+                        GossipRoutes::ChunkFetch.as_str(),
+                        web::post().to(Self::handle_chunk_fetch_v2),
+                    )
+                    .route(
+                        GossipRoutes::ChunkAnnounce.as_str(),
+                        web::post().to(Self::handle_chunk_announce_v2),
                     )
                     .route(
                         GossipRoutes::Handshake.as_str(),
@@ -2080,6 +2166,24 @@ mod tests {
             serde_json::json!({ "Rejected": "HandshakeRequired" }),
             "v1 routes must flatten to the bare string mainnet v1 peers parse",
         );
+    }
+
+    #[test]
+    fn chunk_fetch_database_error_is_not_a_miss() {
+        assert!(matches!(
+            chunk_fetch_response(Ok(None)),
+            GossipResponse::Accepted(None)
+        ));
+        assert!(matches!(
+            chunk_fetch_response(Err(GossipError::RateLimited)),
+            GossipResponse::Rejected(RejectionReason::RateLimited)
+        ));
+        assert!(matches!(
+            chunk_fetch_response(Err(GossipError::Internal(InternalGossipError::Database(
+                "read failed".into(),
+            )))),
+            GossipResponse::Rejected(RejectionReason::InvalidData)
+        ));
     }
 
     #[test]

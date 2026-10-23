@@ -1,7 +1,6 @@
-use super::util::{
-    GossipServiceTestFixture, create_test_chunks, generate_test_tx, poll_until,
-    wait_until_listening,
-};
+mod chunk_announce;
+
+use super::util::{GossipServiceTestFixture, generate_test_tx, poll_until, wait_until_listening};
 use crate::SyncChainServiceMessage;
 use core::time::Duration;
 use irys_actors::MempoolFacade as _;
@@ -194,9 +193,8 @@ async fn heavy3_should_broadcast_chunk_data() -> eyre::Result<()> {
     wait_until_listening(fixture2.gossip_addr()).await;
 
     // Create and send chunk data
-    let chunks = create_test_chunks(&generate_test_tx());
-    #[expect(clippy::indexing_slicing, reason = "just a test")]
-    let data = GossipBroadcastMessageV2::from(chunks[0].clone());
+    let chunk = chunk_announce::valid_chunk(chunk_announce::chunk_size(&fixture1), 1);
+    let data = GossipBroadcastMessageV2::from(chunk);
 
     gossip_service1_message_bus
         .send_traced(data)
@@ -341,35 +339,35 @@ async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
     // Set up the mock API client to return only one transaction
     fixture1.add_tx_to_mempool(tx1.clone()).await;
     // Don't add tx2 to expected transactions, so it will be missing
+    fixture1.persist_block_header_to_db(&block);
 
-    // Capture the baseline reputation score *before* sending, so the poll_until
+    // Capture the baseline request count *before* sending, so the poll_until
     // detects a change from the true initial value.
-    let fixture1_peer_id = fixture1.config.peer_id();
-    let initial_score = fixture2
-        .peer_list
-        .get_peer(&fixture1_peer_id)
-        .expect("fixture1 should be a known peer")
-        .reputation_score;
+    let fixture2_peer_id = fixture2.config.peer_id();
+    let fixture1_handler = fixture1.data_handler().expect("handler after run_service");
+    let pulls_from_fixture2 = || {
+        fixture1_handler
+            .data_request_tracker
+            .get_peer_stats(&fixture2_peer_id)
+            .map_or(0, |record| record.request_count)
+    };
+    let initial_pulls = pulls_from_fixture2();
 
     // Send block from service 1 to service 2
     gossip_service1_message_bus
         .send_traced(GossipBroadcastMessageV2::from(Arc::new(block)))
         .expect("Failed to send block to service 1");
 
-    // Wait for service 2 to attempt the block body fetch (which will fail because tx2 is
-    // unavailable). The pull attempts update fixture1's peer score in fixture2's peer list,
-    // providing a concrete observable that the block processing path was invoked.
-    // Without a successful block body fetch, process_block is never called and the mempool
-    // remains empty.
+    // Wait for service 2 to attempt the block body fetch. Service 1 cannot build the body
+    // without tx2, so it rejects the pull: the block fails at its source, not in service 2's
+    // validation of a partial body (`order_transactions_header_body_mismatch_missing_tx`
+    // covers that). Service 1's request tracker counts the pull, which is the concrete
+    // observable that the block processing path was invoked. Without a body, process_block
+    // is never called and the mempool remains empty.
     poll_until(
         Duration::from_secs(10),
-        "Expected fixture1's peer score to change in fixture2's peer list after block body fetch attempts",
-        || {
-            fixture2
-                .peer_list
-                .get_peer(&fixture1_peer_id)
-                .is_some_and(|p| p.reputation_score != initial_score)
-        },
+        "Expected fixture1 to receive fixture2's block body pull",
+        || pulls_from_fixture2() > initial_pulls,
     )
     .await?;
 
