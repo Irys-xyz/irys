@@ -40,14 +40,15 @@ pub(crate) fn segment_siblings(
     // `h = log2(segments_per_chunk)` fits `usize`.
     let mut siblings =
         Vec::with_capacity(usize::try_from(subtree_height).expect("height fits usize"));
-    let mut segment_index = segment_index;
+    // `node_index` starts as `j` and is `j >> ℓ` at level `ℓ` (spec §5).
+    let mut node_index = segment_index;
     for level in 0..subtree_height {
         // Sibling of the current node: flip bit 0 (`i ^ 1`), then move that
         // leaf back to this level. `j < segments_per_chunk <= MAX_SEGMENTS_PER_CHUNK`
         // and `level < h <= MAX_SUBTREE_HEIGHT`, so the shift fits in `u32`.
-        let start_leaf = (segment_index ^ 1) << level;
+        let start_leaf = (node_index ^ 1) << level;
         siblings.push(subtree(geometry, bytes, start_leaf, level));
-        segment_index >>= 1;
+        node_index >>= 1;
     }
     siblings
 }

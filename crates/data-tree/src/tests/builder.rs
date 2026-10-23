@@ -1,6 +1,6 @@
 use super::pattern;
 use crate::chunk::chunk_root;
-use crate::error::{BuildError, ChunkLengthError};
+use crate::error::{BuildError, ChunkLengthError, ProofError};
 use crate::geometry::Geometry;
 use crate::types::{HASH_SIZE, NodeHash};
 use crate::{DataTree, DataTreeBuilder};
@@ -97,6 +97,28 @@ fn push_chunk_matches_push_chunk_root() {
     assert_eq!(
         from_bytes.finish().unwrap().data_tree_root(),
         from_root.finish().unwrap().data_tree_root()
+    );
+}
+
+#[test]
+fn segment_proof_rejects_a_same_length_chunk_with_another_root() {
+    // Catches a `segment_proof` that skips the stored chunk-root check.
+    // The other chunk has `chunk_len` bytes, so the length gate passes (spec §4).
+    let geometry = Geometry::TESTING;
+    let chunk_size = usize::try_from(geometry.chunk_size()).unwrap();
+    let data = pattern(chunk_size * 2);
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
+    let stored = &data[..chunk_size];
+    let other = &data[chunk_size..];
+    let chunk_length = geometry.chunk_len(tree.data_size(), 0).unwrap();
+    assert_eq!(u64::try_from(other.len()).unwrap(), chunk_length);
+    assert_ne!(
+        chunk_root(&geometry, stored).unwrap(),
+        chunk_root(&geometry, other).unwrap()
+    );
+    assert_eq!(
+        tree.segment_proof(0, 0, other).unwrap_err(),
+        ProofError::ChunkRootMismatch
     );
 }
 

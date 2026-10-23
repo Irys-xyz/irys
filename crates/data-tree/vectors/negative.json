@@ -134,7 +134,7 @@
       "source_data_size": 96,
       "data_size": 97,
       "chunk_index": 0,
-      "mutation": "honest_chunk",
+      "mutation": "rederived_witness",
       "commitment": "d4d12af60c93b37ff699bfd1879f4fe5feba4019b72b1c4010f67c40107e6538",
       "unanchored_commitment": "16668d044ec056c146f5d2d15922db8f97896ed9a5786f1910d0c741cf9cd4b0",
       "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a797350f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65e9b58b9b365c0413b0cc4152402468219ff726b99916c0d9bcfbb00461516beb",

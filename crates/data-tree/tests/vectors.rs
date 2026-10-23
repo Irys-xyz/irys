@@ -987,6 +987,7 @@ fn check_negative(file: &VectorFile<NegativeCase>) {
                 check_segment_mutation(&geometry, case)
             }
             Mutation::HonestChunk
+            | Mutation::RederivedWitness
             | Mutation::AppendOneZeroHash
             | Mutation::DropLastHash
             | Mutation::EmptyProof
@@ -1022,6 +1023,12 @@ fn check_chunk_mutation(geometry: &Geometry, case: &NegativeCase) {
     if case.unanchored_commitment.is_some() {
         // spec §6: the proof's last hash is size_witness of the claimed size.
         // The true witness is rejected before the climb (spec §5).
+        assert_eq!(
+            case.mutation,
+            Mutation::RederivedWitness,
+            "{}: the last hash is size_witness of the claimed size",
+            case.name
+        );
         let witness = size_witness(geometry, case.data_size);
         let start = proof.len() - HASH_SIZE;
         proof[start..].copy_from_slice(witness.as_bytes());
@@ -1096,6 +1103,7 @@ fn check_segment_mutation(geometry: &Geometry, case: &NegativeCase) {
         ),
         Mutation::ZeroPadSegment => (zero_pad_segment(geometry, segment), honest),
         Mutation::HonestChunk
+        | Mutation::RederivedWitness
         | Mutation::AppendOneZeroHash
         | Mutation::DropLastHash
         | Mutation::EmptyProof
@@ -1253,9 +1261,10 @@ fn mutate_chunk_proof(honest: &[u8], mutation: Mutation) -> Vec<u8> {
             );
             Vec::new()
         }
-        Mutation::HonestChunk | Mutation::DropLastChunkByte | Mutation::AppendZeroChunkByte => {
-            honest.to_vec()
-        }
+        Mutation::HonestChunk
+        | Mutation::RederivedWitness
+        | Mutation::DropLastChunkByte
+        | Mutation::AppendZeroChunkByte => honest.to_vec(),
         Mutation::ZeroPadSegment
         | Mutation::FlipSiblingBit0
         | Mutation::ProofFromOtherChunk
@@ -1281,6 +1290,7 @@ fn mutate_chunk_bytes(chunk: &[u8], mutation: Mutation) -> Vec<u8> {
             bytes
         }
         Mutation::HonestChunk
+        | Mutation::RederivedWitness
         | Mutation::AppendOneZeroHash
         | Mutation::DropLastHash
         | Mutation::EmptyProof => chunk.to_vec(),
@@ -1678,6 +1688,9 @@ enum Check {
 #[serde(rename_all = "snake_case")]
 enum Mutation {
     HonestChunk,
+    /// Honest chunk bytes. The stored proof's last hash is `size_witness(G, data_size)`,
+    /// the witness of the claimed size (spec §6).
+    RederivedWitness,
     AppendOneZeroHash,
     DropLastHash,
     EmptyProof,

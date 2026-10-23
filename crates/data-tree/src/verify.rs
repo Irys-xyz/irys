@@ -117,17 +117,18 @@ pub fn verify_segment(
     let data_segments = u32::try_from(chunk_length.div_ceil(geometry.segment_size()))
         .expect("ceil(chunk_len / segment_size) is at most segments_per_chunk");
     let mut root = leaf(bytes);
-    let mut segment_index = segment_index;
+    // `node_index` starts as `j` and is `j >> ℓ` at level `ℓ` (spec §5).
+    let mut node_index = segment_index;
     for (level, sibling) in in_chunk.chunks_exact(HASH_SIZE).enumerate() {
-        let bytes = <[u8; HASH_SIZE]>::try_from(sibling)
+        let sibling_bytes = <[u8; HASH_SIZE]>::try_from(sibling)
             .expect("chunks_exact yields HASH_SIZE-byte slices");
-        let sibling = NodeHash::from(bytes);
-        // `level` is `ℓ`. `segment_index` is `j >> ℓ`. The sibling subtree
+        let sibling = NodeHash::from(sibling_bytes);
+        // `level` is `ℓ`. `node_index` is `j >> ℓ`. The sibling subtree
         // starts at `((j >> ℓ) ^ 1) << ℓ` (spec §5). `ℓ < h`, and `h` is at
         // most `MAX_SUBTREE_HEIGHT`, so the shift fits in `u32`.
         let level = u32::try_from(level).expect("height fits u32");
         debug_assert!(level < u32::BITS);
-        let sibling_start = (segment_index ^ 1) << level;
+        let sibling_start = (node_index ^ 1) << level;
         // Entirely past the data: the sibling must be `empty(ℓ)`. Any other hash
         // fails. A sibling that still holds a data segment is not opened
         // (spec §5, §9).
@@ -135,12 +136,12 @@ pub fn verify_segment(
             return Err(VerifyError::CommitmentMismatch);
         }
         // Bit `ℓ` of `j` picks the side (spec §5). Even: this segment is the left child.
-        root = if segment_index & 1 == 0 {
+        root = if node_index & 1 == 0 {
             node(&root, &sibling)
         } else {
             node(&sibling, &root)
         };
-        segment_index >>= 1;
+        node_index >>= 1;
     }
     let climbed = climb(root, chunk_index, chunk_count, chunk_siblings)
         .ok_or(VerifyError::CommitmentMismatch)?;
