@@ -1701,11 +1701,7 @@ pub async fn prevalidate_block(
     // Length compare. Reject before PoA, VDF, and ingress-proof signer recovery.
     // `SealedBlock::new` rejects duplicate ledger entries and pairs header ids
     // with body txs, so this is the Publish count.
-    let max_publish_txs = config
-        .node_config
-        .consensus_config()
-        .mempool
-        .max_publish_txs_per_block;
+    let max_publish_txs = config.consensus.mempool.max_publish_txs_per_block;
     let publish_txs = transactions.get_ledger_txs(DataLedger::Publish).len();
     if publish_txs > max_publish_txs as usize {
         return Err(PreValidationError::TooManyPublishTxs {
