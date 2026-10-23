@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792760484183,
+  "lastUpdate": 1792771514776,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -18942,6 +18942,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000112,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0bf180530e77e373938f5ee2467100b454d7f390",
+          "message": "feat(consensus): cap Publish-ledger txs per block; reject duplicate ledgers (#1602)\n\n* feat(consensus): cap Publish-ledger transactions per block\n\nA publish tx can be included only after its ingress proofs arrive, so\ninclusion is bursty. The cap is 110, above the term-ledger cap of 100,\nso a burst can drain. The producer keeps lowest-tx-id order and leaves\nthe rest eligible. Validation rejects an over-cap block before the\ntx-root check.\n\n* perf(consensus): stop publish selection at the block cap\n\nThe candidate list is already sorted by tx id. The first 110 eligible\ntransactions are the set the block includes. Walking every later\ncandidate only to drop it repeats ingress-proof lookups for\ntransactions that stay eligible for a later block.\n\n* perf(consensus): reject an over-cap Publish ledger before proof work\n\nSigner recovery walks every declared publish tx id, and signature checks\nwalk every supplied publish tx. The cap is a length compare, so it runs\nbefore either of those.\n\n* perf(consensus): check the Publish cap first in prevalidation\n\nSealedBlock::new already pairs header tx ids with body txs, so the\nPublish ledger length is the count. Check it before PoA, VDF and\ningress-proof work, and keep the term-ledger check as it was.\n\n* refactor(config): drop the publish-above-term-cap startup rule\n\nThe cap only needs to bound the Publish ledger. Remove the startup\ncheck that forces it above max_data_txs_per_block, and the cap asserts\nin the hardfork-schedule tests. The config-hash pins already freeze\nthe values.\n\n* test(promotion): producer stops Publish selection at the cap\n\nWith one ready candidate more than the cap, the first block holds\nexactly the cap and the next block promotes the remaining candidate.\n\n* fix(tx-selector): select Publish candidates by fee priority\n\nSort Publish candidates with the Submit ledger order: highest term\nfee first, then tx id. The Publish cap now leaves the lowest-priority\ncandidates for a later block, not the highest tx ids. The producer cap\ntest pins that the lowest-fee candidate is the one left out.\n\n* test(promotion): pin the exact Publish order at the cap\n\nGive the lowest fee to a tx whose id is not the greatest, so selection\nby tx id cannot leave out the same tx by chance. Assert the full Publish\nlist in fee order, which also fixes the tx_root order.\n\n* test(validation): Submit txs do not count toward the Publish cap\n\nA block with exactly the cap in Publish plus one Submit tx must not fail\nwith TooManyPublishTxs.\n\n* fix(consensus): reject blocks with duplicate ledger entries\n\nA block may hold only one entry per data ledger and per system ledger.\nSealedBlock::new now rejects a second entry as malformed. Before, the\nsecond entry replaced the first in the ordered txs, so checks that read\nthe header entry and checks that read the ordered txs saw different\nlists. A long Publish entry followed by an empty one passed the Publish\ncap while ingress-proof signer recovery ran on the long entry.\n\nDuplicate data ledgers were already invalid under the full-validation\nshape check; this rejects them at seal time. Duplicate system ledgers\nhad no shape check, so this is a new rule for them.\n\n* perf(consensus): read the Publish cap from the startup consensus config\n\nThe cap is the first check in prevalidate_block. Read it from\nconfig.consensus, as the producer does, instead of\nnode_config.consensus_config(), which clones the consensus config and\nre-reads the file for a path-based config on every block.\n\n* perf(consensus): check the Publish proof count before signer recovery\n\nSigner recovery sliced proofs by the peer-supplied required_proof_count\n(up to 255) before publish_ingress_proof_count_is_valid pinned it to N.\nRun that check right after the Publish cap, so recovery work is bounded\nby cap x N. It is stateless and does not change which blocks are valid.\n\n* test(p2p): serve a body with a missing tx and assert the peer penalty\n\nThe test only broadcast a header that no peer could serve a body for, so\nit passed on \"body not available\" and never reached SealedBlock::new.\nNow a fake peer serves a crafted body that omits one of the header's txs.\nThe test asserts the body was requested, the peer's score fell below its\ninitial value (only a served-and-rejected body lowers it), and the block\nreached neither the mempool nor block discovery.\n\n* test(validation): describe the proof-count guard's new position\n\nThe guard now runs before validate_ingress_proof_signers, so the doc\ncomment no longer needs required_proof_count = 0 to reach it.\n\n* test(validation): pin the proof-count guard before signer recovery\n\nSet required_proof_count to N in the mismatched-proof-count test. If the\nguard ran after validate_ingress_proof_signers, signer recovery would\nreject the default proofs first with a different error.",
+          "timestamp": "2026-10-23T16:46:47+01:00",
+          "tree_id": "1c0d28d20a59cf4e26c1f71662405d22cb860ef3",
+          "url": "https://github.com/Irys-xyz/irys/commit/0bf180530e77e373938f5ee2467100b454d7f390"
+        },
+        "date": 1792771513282,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011965,
+            "range": "± 0.000255",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120004,
+            "range": "± 0.002539",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.201931,
+            "range": "± 0.006438",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.927081,
+            "range": "± 0.051756",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074631,
+            "range": "± 0.000118",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 745.363626,
+            "range": "± 0.624862",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 967.274023,
+            "range": "± 1.03155",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117406,
+            "range": "± 0.000202",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1172.6577,
+            "range": "± 1.249399",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1524.057812,
+            "range": "± 1.081015",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034488,
+            "range": "± 0.00045",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.626007,
+            "range": "± 0.155158",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.467028,
+            "range": "± 0.19591",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
             "range": "± 0",
             "unit": "ms/iter"
           }
