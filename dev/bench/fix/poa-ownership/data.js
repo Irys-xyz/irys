@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792735607754,
+  "lastUpdate": 1792746708715,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -18727,6 +18727,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "cef740e83837d3040c75952e521121c39ab9f3ac",
+          "message": "fix(validation): bind the PoA partition to the block miner",
+          "timestamp": "2026-10-23T05:49:09Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1689/commits/cef740e83837d3040c75952e521121c39ab9f3ac"
+        },
+        "date": 1792746706771,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015438,
+            "range": "± 0.000636",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.123486,
+            "range": "± 0.015305",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.554723,
+            "range": "± 0.096775",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.38965,
+            "range": "± 0.506422",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.079065,
+            "range": "± 0.002417",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 816.890281,
+            "range": "± 17.172513",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1013.179622,
+            "range": "± 12.197338",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.145334,
+            "range": "± 0.010387",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1186.79212,
+            "range": "± 20.703115",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1533.870678,
+            "range": "± 47.172534",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035795,
+            "range": "± 0.000723",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.067217,
+            "range": "± 2.450222",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 278.166658,
+            "range": "± 11.931352",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000147,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
