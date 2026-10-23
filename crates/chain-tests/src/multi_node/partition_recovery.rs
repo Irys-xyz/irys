@@ -535,7 +535,6 @@ fn has_path_hashes_at_offset(
     false
 }
 
-/// Helper: create a transaction for the given ledger, post it + chunks to the node.
 /// Stakes the peer and pledges one partition so it can produce blocks on its own
 /// fork: validators only accept a PoA over a partition assigned to the block's
 /// miner. Call before block 1; the commitments land in block 1 and the block-2
@@ -566,6 +565,7 @@ fn assert_peer_has_partition(genesis: &IrysNodeTest<IrysNodeCtx>, peer_signer: &
     );
 }
 
+/// Helper: create a transaction for the given ledger, post it + chunks to the node.
 async fn post_tx_with_chunks(
     node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
     signer: &IrysSigner,
