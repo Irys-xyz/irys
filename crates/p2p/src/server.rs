@@ -1903,9 +1903,9 @@ where
             Err(GossipError::RateLimited) => HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited)),
             Err(error) => {
-                // `record_seen` runs before the fetch spawn. If it fails, a
-                // StartFetch claim has no task and still leaks, while this
-                // arm answers Accepted.
+                // Only `record_seen` fails here. The chunk is held, or its
+                // claim already has a fetch task, so the announcement is
+                // still accepted.
                 warn!(%error, "chunk announcement bookkeeping failed");
                 HttpResponse::Ok().json(GossipResponse::Accepted(()))
             }
