@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792719253930,
+  "lastUpdate": 1792735607754,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -18613,6 +18613,114 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 285.392085,
             "range": "± 23.663938",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9957fa80c6898432e894bffa0df0de99782c682d",
+          "message": "fix(data-sync): unstick sparse term-ledger backfill and raise sync throughput (#1679)\n\n* fix(data-sync): batch retry waves and descending runs into one cache lookup\n\nEvery offset popped for dispatch reads the local chunk cache first, and a\nstorage module gets 64 lookups per tick. A run of contiguous Pending offsets\nshares one lookup, but runs only formed upward, so two queues paid one lookup\nper offset:\n\n- Term ledgers scan down from the write head and queue offsets high to low.\n  Runs never formed, capping a ThirtyDay/OneYear/Submit module at about 256\n  offsets per second whether the span was servable or a hole.\n- Due retries were queued in HashMap order. A wave of parked 404 offsets cost\n  one lookup each, filled the hot budget, and stopped the entropy scan until\n  the wave drained.\n\nRetry jitter was also added and then clamped to the 60s cap, so every capped\nretry shared one deadline and a full delayed set returned as one wave.\n\n- Let a cache run extend in either direction; the first follower fixes it.\n  Read the placement span low to high and reverse it for a descending run so\n  every placement stays aligned with its offset.\n- Queue due retries in scan order (descending for term ledgers).\n- Open the jitter window below the cap so capped deadlines spread across\n  [45s, 60s] instead of all landing on 60s.\n\n* fix(data-sync): keep retry runs together and leave scan budget during a wave\n\nReview follow-ups to the previous commit:\n\n- Key retry jitter on a run-sized bucket instead of the offset. Per-offset\n  jitter put neighbouring capped retries about 9s apart (32 contiguous\n  offsets came due on 22 different ticks), so the sorted due wave almost\n  never formed a cache run. Offsets in one bucket now share a deadline;\n  different buckets still spread across the window.\n- Cap a due retry wave at half of the free hot slots. Promoting every due\n  offset let a wave of everywhere-404 retries fill the hot budget and stop\n  the entropy scan. The leftover retries stay Delayed and go first next tick.\n- Sort the other two requeue paths in scan order: expired body-worker holds\n  and durability waits that time out. Both returned contiguous runs in\n  HashMap order.\n- Read the run direction from the run itself in try_local_cache.\n\nTests: one insert_request helper replaces three ChunkRequest literals; new\ncoverage for the term-ledger populate-then-dispatch tick, a descending run\nacross a submodule boundary, the wave cap, and bucketed capped deadlines.\nThe backoff test again asserts the delay reaches the capped tier.\n\n* feat(data-sync): skip local entropy no assignee holds\n\nData sync walks local Entropy one offset at a time and asks assignees for\neach body. Where every assignee is missing a long run, the scan pays one 404\nper offset before it reaches a range a peer can serve. On devnet node 2's\nThirtyDay slot 0 that is hundreds of thousands to millions of offsets at\nabout 40 per second.\n\nThe orchestrator now asks each assignee which offsets it holds as Data and\nskips Entropy no assignee claims:\n\n- /storage/intervals/{ledger}/{slot}/{chunk_type} takes optional start/end\n  query parameters. A windowed answer is clipped to the window, capped at\n  32,768 intervals, and carries `range` (how far it is complete) and\n  `assigned` (whether the node hosts the slot). Without parameters the\n  response is unchanged.\n- ChunkFetcher::fetch_data_intervals reads one window, follows pages, caps\n  the body at 64 MiB, and checks every answer against the request. An older\n  peer ignores the window and returns its whole list; that is detected and\n  used as a full list.\n- assignee_intervals tracks one answer per assignee: windowed ahead of the\n  scan cursor, refreshed every 60s, shrunk when pages run out, backed off on\n  failure. Coverage is unknown unless every current assignee answered, and\n  unknown means probe. An empty full list or an unassigned window counts as\n  unknown. Offsets within 16,384 of the write head are always probed.\n- The scan jumps over unclaimed segments. Skipped offsets still count as\n  probes, so a tick visits no more of the map than before.\n- Dispatch never asks an assignee for an offset it answered without.\n- A slow pass queues four unclaimed offsets per tick while an ingress-proof\n  signer is in the peer set, so signers can still fill holes no assignee has.\n\nHints only steer scheduling. Bodies are still verified against their merkle\nproofs, so a wrong or stale answer can delay a fetch but cannot store bad\ndata. No consensus change.\n\n* perf(data-sync): write Publish and term-ledger peer bodies without ingress\n\nEvery peer body data sync fetched went through the public chunk-ingress\npath while holding a slot in the shared chunk lane: a full body written to\nthe MDBX chunk cache, a storage-module write waited on (its backpressure\nsurfacing as Overloaded), a gossip broadcast, and an ingress-proof attempt.\nData sync then wrote the same chunk to the storage module itself. On devnet\nnode 2 the lane stayed saturated, ThirtyDay backfill fell to 20-30 chunks\nper second, and the chunk cache reached 37 GB against a 10 GB soft cap.\n\nThe ingress hop exists so the compact leaf is committed before the offset\nbecomes durable, which this node needs to sign an ingress proof. Only\nSubmit data is promoted with ingress proofs. Term-ledger data never takes\none, and Publish data is already promoted.\n\n- Choose a route on the actor when a body arrives. Publish, OneYear and\n  ThirtyDay offsets with a local placement go direct. Submit, an unknown\n  ledger, a missing or unreadable placement, and a body no request waits for\n  keep the ingress route.\n- On the direct route the body must match the local data root, tx offset and\n  data size for the offset, then pass the data-path and leaf-hash check\n  against them. A mismatch is the peer's fault. No ingress permit, cache\n  row, gossip, or proof attempt.\n- The storage-module write after either route is unchanged.\n- New counter irys.data_sync.delivery_route_total{route}.\n\nLocal scheduling and validation only. No consensus or API change.\n\n* feat(cache): split pruning bodies kept for an unmigrated root by cause\n\nOn devnet node 2, 152,527 of 152,580 old cached bodies are kept because\ntheir root does not count as migrated. A root fails that check when it has\nno CachedDataRoots row, when its row lists no txs, or when a tx is not yet\nincluded at the migration height. Ingress can cache a body with no row when\nit takes the data size from a storage-module index, and such a body can\nnever count as migrated.\n\nThe pass tally now splits kept_root_not_migrated:\n\n- root_no_record: the root has no CachedDataRoots row\n- root_no_txids: the row lists no txs\n- root_not_migrated_placed: a local storage module has a placement for the\n  chunk\n\nThey are added to the \"Completed chunk pruning pass\" log line and to\nirys.cache.prune_pass_bodies{outcome}. No deletion behavior changes.\n\n* perf(data-sync): refill fetch slots on completion and hint the write head\n\nMeasured on devnet node 2 (ThirtyDay, about 68 chunks per second): node 2\nsent the other replica about 80-90 requests per second. A quarter were 404s\nanswered in about 1 ms. Successful requests took p50 84 ms, p90 600 ms. Peer\nslots refilled only on the 250 ms tick, so a request that took 300 ms held\nits slot for two ticks and a 1 ms 404 held it until the next tick. The 404s\nwere retries in the band just below the write head that both replicas lack.\nThe hint window follows the scan cursor, which had moved far below that\nband, so dispatch still asked for it.\n\n- After a ChunkCompleted or ChunkFailed that released a slot, dispatch once\n  in tick order (term ledgers, then Publish, from each group's cursor)\n  under the same held-body limit. An untracked body releases no slot and\n  dispatches nothing. Tests that count slots across a completion turn this\n  off.\n- Each assignee gets a second interval window, pinned 131,072 chunks below\n  the write head. It is fetched while the scan window does not reach the\n  head, and refreshed on the same 60 s timer. The scan cuts ranges at every\n  window edge and treats a piece as answered when every assignee has a\n  window over it. Dispatch excludes an assignee when a window covers the\n  offset and none of the covering windows holds it.\n\n* perf(data-sync): fetch an older peer's full interval list once, not twice\n\nAn older peer ignores the window and returns its whole interval list. That\nlist already covers the head band, but the head window fetched the same list\nagain, so each such peer cost two full downloads per refresh.\n\nRecord whether an answer was a full list, and skip the head-window fetch\nwhile the scan window's answer is one.\n\n* perf(data-sync): keep waiting on a write the module still holds\n\nOn devnet node 2 the ThirtyDay disk is busy enough that buffered writes take\nlonger than 60 s to flush. Each timed-out wait returned its chunk to the fetch\nqueue. Node 2 logged about 4 per second. The refetched body only found the\nsame pending write and was classified AwaitingDurability again, so each one\nspent a network fetch and achieved nothing.\n\nWhen a wait passes DURABILITY_WAIT_TIMEOUT but the storage module still holds\nthe write (queued in the lane, buffered, or written and not fsynced), keep\nwaiting up to DURABILITY_PENDING_LIMIT (10 minutes). A write the module no\nlonger holds, or one past the limit, still returns to the fetch queue as\nbefore.\n\n* fix(data-sync): tie hint answers to their fetch; requeue a lost peer in scan order\n\nFrom CodeRabbit review of #1679.\n\n- A hint window could be filled by the wrong fetch. HINT_FETCH_TIMEOUT\n  (300 s) was shorter than a full window can take (16 pages at 30 s each),\n  and on_fetched accepted any answer while its window was fetching. A late\n  answer to an abandoned fetch could fill a window a newer fetch was waiting\n  on, dated as current, and the newer answer was then dropped. Each fetch\n  now carries a sequence number, and only the fetch a window waits on can\n  fill it. An answer is dated from when its fetch began. The timeout now\n  covers the full page budget plus a minute.\n- remove_peer returned a disconnected peer's in-flight offsets in HashMap\n  order, which splits contiguous runs at the queue head. It now sorts them\n  in scan order, like the other requeue paths.\n\n* fix(data-sync): address code review of the sync stack\n\n- Dispatch: when no peer an offset may use has a free slot, tell two cases\n  apart. If no peer has a free slot at all, keep the offset at the head and\n  stop, instead of moving it to the tail on every released slot. If a slot is\n  free but this offset may not use it (only a busy signer can serve it), set\n  the offset aside and try the next one, bounded by the queue length.\n- Signers: the scan skips unclaimed Entropy only when no ingress-proof signer\n  is in the peer set. With a signer present those offsets are queued, and\n  dispatch sends them to the signer alone. This replaces the four-per-tick\n  slow pass, which throttled the only recovery path for holes no assignee\n  holds.\n- Slot change: hints are reset when the module's slot changes. Fetch\n  sequence numbers come from one process-wide counter, so a rebuilt\n  orchestrator cannot accept a late answer meant for the old one.\n- Failed refresh: a failed or unusable answer keeps the previous one while\n  it is under 5 minutes old, and waits before asking again.\n- Full partition: the frontier margin applies only while the ledger's write\n  head is inside the partition.\n- Idle: interval fetches stop once a full scan pass finds no Entropy, and\n  resume when Entropy appears.\n- Full lists: an older peer's full list is refreshed every 5 minutes.\n- Window growth: the scan window grows only after a complete answer that used\n  under a quarter of the page budget.\n- Contract test: the api-server test parses its own windowed and plain\n  responses with the data-sync client parser.\n- The refill switch is test-only, and the root_migration doc is corrected.\n\n* fix(data-sync): refill after a held body, reset hints while idle, retry a moved placement\n\nFrom CodeRabbit review of 070005ec7.\n\n- A slot freed while data sync held its delivered-body limit waited for the\n  next tick: dispatch_after_release returned at the limit, and nothing ran\n  again when a body finished. The delivery task now releases its held-body\n  place before sending ChunkIngressed, and handling that message refills.\n- The slot-change hint reset lived in fetch planning, which is skipped while\n  hints are idle. A move that repacks a synced partition could then scan one\n  tick on the old slot's answers. The reset now runs at the top of the queue\n  fill, before the scan, and wakes idle hints.\n- A rollback could change an offset's placement while its body was being\n  unpacked. A peer that served the new chunk failed the check against the\n  captured placement and was blamed. A field mismatch is now its own\n  DeliveryError carrying the expected placement. When the result is handled,\n  the placement is read again. If it moved, the offset is retried with no\n  blame. Hash and data-path failures are still the peer's fault.",
+          "timestamp": "2026-10-22T22:49:04-07:00",
+          "tree_id": "4fc36cb577e9c491c4067c096428cebc079e6836",
+          "url": "https://github.com/Irys-xyz/irys/commit/9957fa80c6898432e894bffa0df0de99782c682d"
+        },
+        "date": 1792735606368,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011932,
+            "range": "± 0.000524",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119367,
+            "range": "± 0.000158",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.197815,
+            "range": "± 0.00924",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.904256,
+            "range": "± 0.106029",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078794,
+            "range": "± 0.001316",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 747.683226,
+            "range": "± 7.784149",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 968.941626,
+            "range": "± 3.661513",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119989,
+            "range": "± 0.002828",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1197.759533,
+            "range": "± 6.795271",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1558.348635,
+            "range": "± 34.786088",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.03328,
+            "range": "± 0.000615",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.508821,
+            "range": "± 0.439434",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.272435,
+            "range": "± 0.229899",
             "unit": "ms/iter"
           },
           {
