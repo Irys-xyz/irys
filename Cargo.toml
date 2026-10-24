@@ -4,6 +4,7 @@ members = [
   "crates/actors",
   "crates/c",
   "crates/chain",
+  "crates/node",
   "crates/reth-node-bridge",
   "crates/types",
   "crates/packing",

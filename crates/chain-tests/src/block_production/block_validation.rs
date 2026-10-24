@@ -359,6 +359,89 @@ async fn test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_prevalidation_rejects_too_many_publish_txs() -> Result<()> {
+    let ctx = PrevalidationTestContext::new().await?;
+
+    let max = ctx
+        .config
+        .consensus_config()
+        .mempool
+        .max_publish_txs_per_block as usize;
+    let excessive_txs = mock_data_txs(max + 1);
+
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions = excessive_txs.clone();
+
+    let mut header = (**ctx.block.header()).clone();
+    let tx_ids: irys_types::H256List =
+        irys_types::H256List(excessive_txs.iter().map(|tx| tx.id).collect());
+    let ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Publish as u32)
+        .expect("Publish ledger should exist");
+    ledger.tx_ids = tx_ids;
+
+    ctx.config.signer().sign_block_header(&mut header)?;
+    body.block_hash = header.block_hash;
+
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+    match ctx.prevalidate(&bad_block).await {
+        Err(PreValidationError::TooManyPublishTxs { max: m, got }) => {
+            assert_eq!(m, max as u64);
+            assert_eq!(got, max + 1);
+        }
+        other => panic!("expected TooManyPublishTxs, got {:?}", other),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
+
+/// A Publish ledger at exactly the cap passes the cap check, and Submit-ledger txs
+/// in the same block do not count toward it.
+#[tokio::test]
+async fn test_prevalidation_publish_cap_ignores_submit_txs() -> Result<()> {
+    let ctx = PrevalidationTestContext::new().await?;
+
+    let max = ctx
+        .config
+        .consensus_config()
+        .mempool
+        .max_publish_txs_per_block as usize;
+    let mut publish_txs = mock_data_txs(max + 1);
+    let submit_tx = publish_txs.pop().expect("max + 1 mock txs");
+
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions = publish_txs.clone();
+    body.data_transactions.push(submit_tx.clone());
+
+    let mut header = (**ctx.block.header()).clone();
+    for ledger in header.data_ledgers.iter_mut() {
+        if ledger.ledger_id == DataLedger::Publish as u32 {
+            ledger.tx_ids = irys_types::H256List(publish_txs.iter().map(|tx| tx.id).collect());
+        } else if ledger.ledger_id == DataLedger::Submit as u32 {
+            ledger.tx_ids = irys_types::H256List(vec![submit_tx.id]);
+        }
+    }
+
+    ctx.config.signer().sign_block_header(&mut header)?;
+    body.block_hash = header.block_hash;
+
+    // The mock txs fail a later check. Only the cap result matters here.
+    let block = Arc::new(SealedBlock::new(header, body)?);
+    let result = ctx.prevalidate(&block).await;
+    assert!(
+        !matches!(result, Err(PreValidationError::TooManyPublishTxs { .. })),
+        "Publish cap must count only Publish txs, got {:?}",
+        result
+    );
+
+    ctx.stop().await;
+    Ok(())
+}
+
 /// A block whose ledger `tx_root` does not match the folded `(data_root, prefix_hash)`
 /// recompute of its included transactions must be rejected with `TxRootMismatch`. This is
 /// the consensus enforcement that authenticates each tx's `prefix_hash` via the
@@ -408,13 +491,10 @@ async fn test_prevalidation_rejects_tx_root_mismatch() -> Result<()> {
 /// covers the `len != txs * N` arithmetic in isolation; this proves the guard
 /// actually runs inside `prevalidate_block`.
 ///
-/// Note the orphan shape (proofs present, zero publish txs) does NOT isolate this
-/// guard — `validate_ingress_proof_signers` rejects that earlier with the same
-/// error. So the fixture uses a NON-empty Publish ledger: one structurally-valid
-/// publish tx, `required_proof_count = 0` (so the earlier per-tx signer check
-/// slices zero proofs and passes without needing valid signatures), and a proofs
-/// list of length 2. With testing `N = 1`, `proofs.len() = 2 != 1 * N = 1`, a
-/// mismatch that only this guard catches — every earlier check passes.
+/// The guard runs right after the Publish cap, before any check that slices or
+/// recovers proofs. The fixture uses one structurally-valid publish tx and a
+/// proofs list of length 2. With testing `N = 1`, `proofs.len() = 2 != 1 * N = 1`,
+/// so the guard rejects the block before `validate_ingress_proof_signers` runs.
 #[tokio::test]
 async fn test_prevalidation_rejects_mismatched_ingress_proof_count() -> Result<()> {
     use irys_types::{
@@ -449,9 +529,10 @@ async fn test_prevalidation_rejects_mismatched_ingress_proof_count() -> Result<(
         IngressProof::default(),
         IngressProof::default(),
     ]));
-    // rpc = 0 → the earlier `validate_ingress_proof_signers` slices zero proofs
-    // per tx and passes; the aggregate guard is what must catch the length.
-    publish_ledger.required_proof_count = Some(0);
+    // `required_proof_count` = N (1). If the guard ran after
+    // `validate_ingress_proof_signers`, signer recovery would run on the default
+    // proofs first and return a different error, so this pins the guard's position.
+    publish_ledger.required_proof_count = Some(1);
 
     ctx.config.signer().sign_block_header(&mut header)?;
     let mut body = ctx.block.to_block_body();

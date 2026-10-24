@@ -41,7 +41,7 @@ ENV SOURCE_DATE_EPOCH=0 \
     CARGO_INCREMENTAL=0 \
     RUSTFLAGS="-C target-cpu=x86-64 -C link-arg=-fuse-ld=mold"
 
-RUN cargo build --release --bin irys -p irys-chain --locked
+RUN cargo build --release --bin irys -p irys-node --locked
 
 RUN /bin/bash -o pipefail -c "sha256sum /workspace/target/release/irys | tee /workspace/binary_sha256.txt"
 

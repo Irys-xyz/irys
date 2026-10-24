@@ -41,9 +41,11 @@ pub struct IrysHardforkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cascade: Option<Cascade>,
 
-    /// Delta hardfork - seeds slots for a data ledger in the epoch it activates.
-    /// Resolved at the epoch block's own timestamp; no per-block effect, since it
-    /// only acts during epoch processing. None means disabled.
+    /// Delta hardfork. WIP and not deployed: every preset leaves it unset, and
+    /// it accumulates consensus changes that need a hardfork. The change it
+    /// carries now seeds slots for a data ledger in the epoch it activates.
+    /// Resolved at the epoch block's own timestamp. It only acts during epoch
+    /// processing. None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
 
@@ -144,8 +146,11 @@ impl Cascade {
     }
 }
 
-/// Delta hardfork - a data ledger that becomes active mid-chain gets its first
-/// slots in the epoch that activates it.
+/// Delta hardfork. WIP and not deployed. It accumulates consensus changes that
+/// need a hardfork.
+///
+/// The change it carries now: a data ledger that becomes active mid-chain gets
+/// its first slots in the epoch that activates it.
 ///
 /// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
 /// but the epoch block's own header cannot list it: the producer derives the
@@ -861,6 +866,7 @@ mod tests {
         assert_eq!(config.frontier.number_of_ingress_proofs_total, 5);
         assert_eq!(config.frontier.number_of_ingress_proofs_from_assignees, 2);
         assert!(config.next_name_tbd.is_none());
+        assert!(config.delta.is_none());
     }
 
     proptest! {

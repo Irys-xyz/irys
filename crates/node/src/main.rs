@@ -20,7 +20,7 @@ async fn main() -> eyre::Result<()> {
     // IMPORTANT: Must run before any code that calls `get_version()` (e.g. handshake defaults).
     // The OnceLock is set-once, so late initialization panics.
     irys_types::init_version(
-        env!("CARGO_PKG_VERSION"),
+        irys_chain::PKG_VERSION,
         env!("GIT_SHA"),
         env!("GIT_HAS_TAG")
             .parse()

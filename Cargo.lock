@@ -5085,7 +5085,6 @@ dependencies = [
  "alloy-sol-types",
  "base58",
  "core_affinity",
- "dotenvy",
  "eyre",
  "futures",
  "hex",
@@ -5101,7 +5100,6 @@ dependencies = [
  "irys-reth-node-bridge",
  "irys-reward-curve",
  "irys-storage",
- "irys-testing-utils",
  "irys-types",
  "irys-utils",
  "irys-vdf",
@@ -5112,7 +5110,6 @@ dependencies = [
  "rand 0.8.5",
  "reqwest 0.12.28",
  "reth",
- "reth-cli-util",
  "reth-db",
  "rstest",
  "serde",
@@ -5123,8 +5120,6 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tracing",
- "tracing-error",
- "tracing-subscriber 0.3.23",
  "zeroize",
 ]
 
@@ -5395,6 +5390,23 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
+]
+
+[[package]]
+name = "irys-node"
+version = "0.0.0"
+dependencies = [
+ "dotenvy",
+ "eyre",
+ "irys-chain",
+ "irys-testing-utils",
+ "irys-types",
+ "irys-utils",
+ "reth-cli-util",
+ "tokio",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]

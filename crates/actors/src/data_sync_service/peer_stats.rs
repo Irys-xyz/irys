@@ -4,6 +4,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Slots a fresh peer may fill before any bytes arrive, and the floor a
+/// healthy peer keeps after they do. Twenty fits under the ingress task cap
+/// (`max_concurrent_chunk_ingress_tasks`, 30 by default).
+pub const INITIAL_PEER_CONCURRENCY: u32 = 20;
+
 /// Halve `capacity` once per consecutive failure. A zero capacity stays zero.
 /// Any positive capacity stays at least 1, so one timed-out peer is retried.
 fn penalized_allowance(capacity: u32, consecutive_failures: u32) -> u32 {
@@ -64,9 +69,9 @@ impl PeerStats {
         let chunk_multiplier = if chunk_size < 1024 { 1.5 } else { 1.0 };
 
         // One 10 MiB sweep is the disk-lane packed-run cap, so it is the
-        // concurrency ceiling. A fresh peer starts at half the bandwidth-scaled
-        // count and ramps toward that ceiling only as bytes arrive. Tiny test
-        // chunks keep the bandwidth-scaled count.
+        // concurrency ceiling. A fresh peer starts at
+        // `INITIAL_PEER_CONCURRENCY` and ramps toward that ceiling as bytes
+        // arrive. Tiny test chunks keep the bandwidth-scaled ceiling.
         const SWEEP_SPAN_BYTES: u64 = 10 * 1024 * 1024;
         let span_floor = if chunk_size >= 1024 {
             u32::try_from((SWEEP_SPAN_BYTES / chunk_size.max(1)).clamp(1, 64)).unwrap_or(64)
@@ -77,7 +82,7 @@ impl PeerStats {
         let bandwidth_max =
             ((base_concurrency as f64 * chunk_multiplier).round() as u32).clamp(1, 32);
         let max_concurrency = bandwidth_max.max(span_floor);
-        let baseline_concurrency = (bandwidth_max / 2).max(1);
+        let baseline_concurrency = INITIAL_PEER_CONCURRENCY.min(max_concurrency);
 
         Self {
             chunk_size,
@@ -99,7 +104,8 @@ impl PeerStats {
     /// Slots this peer can still accept.
     ///
     /// With no delivered bytes the allowance is [`Self::baseline_concurrency`].
-    /// Delivered bytes scale it toward [`Self::max_concurrency`]. Each
+    /// Delivered bytes scale it toward [`Self::max_concurrency`], never below
+    /// the baseline. Health score does not gate the baseline. Each
     /// consecutive failure recorded by [`Self::record_request_failed`] halves
     /// that allowance, down to 1, including before any bytes are recorded. A
     /// completed request clears the streak. A 404 does not: it is not a
@@ -112,7 +118,9 @@ impl PeerStats {
             // If peer is performing better than expected, allow more concurrency
             let performance_ratio = observed_bytes_per_sec / expected_bytes_per_sec;
             let base_capacity = self.baseline_concurrency as f64;
-            (base_capacity * performance_ratio).min(self.max_concurrency as f64) as u32
+            (base_capacity * performance_ratio)
+                .max(base_capacity)
+                .min(self.max_concurrency as f64) as u32
         } else {
             // No observed data yet, use baseline capacity
             self.baseline_concurrency
@@ -136,19 +144,37 @@ impl PeerStats {
         self.active_requests += 1;
     }
 
+    /// A request delivered a body that was then accepted.
     pub fn record_request_completed(&mut self, chunk_time_record: ChunkTimeRecord) {
+        self.record_request_delivered(chunk_time_record);
+        self.record_delivery_accepted();
+    }
+
+    /// The body arrived. Frees the slot and records the latency. Data sync
+    /// checks the body after this, so the success credit waits for
+    /// [`Self::record_delivery_accepted`].
+    pub fn record_request_delivered(&mut self, chunk_time_record: ChunkTimeRecord) {
         self.completion_time_samples
             .push(chunk_time_record.duration);
+        self.active_requests = self.active_requests.saturating_sub(1);
+    }
 
-        self.active_requests -= 1;
+    /// The delivered body passed validation and ingress. Clears the failure
+    /// streak and counts the bytes.
+    pub fn record_delivery_accepted(&mut self) {
         self.consecutive_failures = 0;
-
-        // Add bytes to the bandwidth window
         self.bandwidth_window.add_bytes(self.chunk_size);
     }
 
     pub fn record_request_failed(&mut self) {
         self.active_requests = self.active_requests.saturating_sub(1);
+        self.consecutive_failures += 1;
+        self.total_failures += 1;
+    }
+
+    /// Validation or ingress rejected a body this peer delivered. Its slot was
+    /// already released when the body arrived, so only the failure is counted.
+    pub fn record_delivered_chunk_rejected(&mut self) {
         self.consecutive_failures += 1;
         self.total_failures += 1;
     }
@@ -341,8 +367,130 @@ impl BandwidthWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::BandwidthWindow;
+    use super::{BandwidthWindow, INITIAL_PEER_CONCURRENCY, PeerStats};
+    use irys_domain::ChunkTimeRecord;
     use std::time::{Duration, Instant};
+
+    const CHUNK: u64 = 256 * 1024;
+
+    fn completed(stats: &mut PeerStats, duration: Duration) {
+        let now = Instant::now();
+        stats.record_request_started();
+        stats.record_request_completed(ChunkTimeRecord {
+            chunk_offset: 0_u32.into(),
+            start_time: now,
+            completion_time: now,
+            duration,
+        });
+    }
+
+    /// A fresh peer for 256 KiB chunks may fill 20 slots before any bytes
+    /// arrive. The ceiling is the 10 MiB sweep span, 40 chunks.
+    #[test]
+    fn fresh_peer_starts_at_twenty_with_the_sweep_span_ceiling() {
+        let stats = PeerStats::new(100, CHUNK, Duration::from_secs(30));
+        assert_eq!(INITIAL_PEER_CONCURRENCY, 20);
+        assert_eq!(stats.baseline_concurrency, 20);
+        assert_eq!(stats.max_concurrency, 40);
+        assert_eq!(stats.concurrency_ceiling, 40);
+        assert_eq!(stats.available_concurrency(), 20);
+
+        // Health below 0.7 does not hold the peer under those 20.
+        let mut slow = PeerStats::new(100, CHUNK, Duration::from_secs(30));
+        completed(&mut slow, Duration::from_secs(2));
+        assert!(slow.health_score() < 0.7, "{}", slow.health_score());
+        assert_eq!(slow.consecutive_failures, 0);
+        assert!(slow.available_concurrency() >= 20);
+    }
+
+    /// Bytes slower than the per-request estimate do not cut the allowance
+    /// below 20. Faster bytes raise it, up to the ceiling. Failures still halve.
+    #[test]
+    fn delivered_bytes_ramp_from_twenty_without_dropping_below_it() {
+        let mut stats = PeerStats::new(100, CHUNK, Duration::from_secs(30));
+        // One chunk in a ten second window is far below one chunk per 10 ms.
+        completed(&mut stats, Duration::from_millis(10));
+        stats.bandwidth_window = BandwidthWindow::new(Duration::from_secs(300));
+        stats.bandwidth_window.add_bytes(CHUNK);
+        let oldest = Instant::now()
+            .checked_sub(Duration::from_secs(9))
+            .expect("host uptime covers 9s");
+        stats
+            .bandwidth_window
+            .buckets
+            .front_mut()
+            .expect("bucket")
+            .0 = oldest;
+        assert!(stats.short_term_bandwidth_bps() > 0);
+        assert!(
+            (stats.short_term_bandwidth_bps() as f64) < stats.expected_bandwidth_bps(),
+            "the test needs a slower-than-expected peer"
+        );
+        assert_eq!(stats.available_concurrency(), 20);
+
+        // Many chunks in a short window ramp toward the ceiling, not past it.
+        stats.bandwidth_window = BandwidthWindow::new(Duration::from_secs(300));
+        stats.bandwidth_window.add_bytes(CHUNK * 1_000);
+        let oldest = Instant::now()
+            .checked_sub(Duration::from_millis(500))
+            .expect("host uptime covers 500ms");
+        stats
+            .bandwidth_window
+            .buckets
+            .front_mut()
+            .expect("bucket")
+            .0 = oldest;
+        assert_eq!(stats.available_concurrency(), 40);
+
+        stats.record_request_started();
+        stats.record_request_failed();
+        assert_eq!(stats.consecutive_failures, 1);
+        assert_eq!(stats.available_concurrency(), 20, "one failure halves 40");
+    }
+
+    /// A rejected delivery counts a failure. Its slot was released when the
+    /// body arrived, so the active count does not move again.
+    #[test]
+    fn rejected_delivery_counts_a_failure_without_releasing_a_slot() {
+        let mut stats = PeerStats::new(100, CHUNK, Duration::from_secs(30));
+        stats.record_request_started();
+        completed(&mut stats, Duration::from_millis(10));
+        assert_eq!(stats.active_requests, 1);
+        stats.record_delivered_chunk_rejected();
+        assert_eq!(stats.active_requests, 1);
+        assert_eq!(stats.consecutive_failures, 1);
+        assert_eq!(stats.total_failures, 1);
+    }
+
+    /// A delivered body frees its slot, but only an accepted one clears the
+    /// failure streak and counts bytes. A peer that keeps serving bad bodies
+    /// keeps halving its allowance.
+    #[test]
+    fn delivery_frees_the_slot_and_acceptance_earns_the_credit() {
+        let mut stats = PeerStats::new(100, CHUNK, Duration::from_secs(30));
+        for streak in 1..=3_u32 {
+            stats.record_request_started();
+            stats.record_request_delivered(ChunkTimeRecord {
+                chunk_offset: 0_u32.into(),
+                start_time: Instant::now(),
+                completion_time: Instant::now(),
+                duration: Duration::from_millis(10),
+            });
+            assert_eq!(stats.active_requests, 0);
+            stats.record_delivered_chunk_rejected();
+            assert_eq!(stats.consecutive_failures, streak);
+        }
+        assert_eq!(
+            stats.short_term_bandwidth_bps(),
+            0,
+            "rejected bytes are not counted"
+        );
+        assert_eq!(stats.available_concurrency(), 20 >> 3);
+
+        stats.record_delivery_accepted();
+        assert_eq!(stats.consecutive_failures, 0);
+        assert_eq!(stats.bandwidth_window.buckets.len(), 1);
+    }
 
     /// A window longer than monotonic uptime must still count every bucket.
     /// `Instant::checked_sub` is `None` until the machine has been up for the

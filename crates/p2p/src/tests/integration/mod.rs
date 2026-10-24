@@ -1,20 +1,20 @@
 use super::util::{
-    GossipServiceTestFixture, create_test_chunks, generate_test_tx, poll_until,
+    FakeGossipServer, GossipServiceTestFixture, create_test_chunks, generate_test_tx, poll_until,
     wait_until_listening,
 };
-use crate::SyncChainServiceMessage;
+use crate::types::GossipResponse;
+use crate::{GossipClient, SyncChainServiceMessage};
 use core::time::Duration;
 use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{
-    DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1,
-    SendTraced as _,
-};
+use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
+use irys_types::{DataLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1, SendTraced as _};
 use reth::builder::Block as _;
 use reth::primitives::Header;
 use reth_ethereum_primitives::{Block, BlockBody};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::debug;
 
 async fn wait_for_mempool_len(
@@ -314,77 +314,116 @@ async fn should_fetch_missing_transactions_for_block() -> eyre::Result<()> {
 
 #[tokio::test]
 async fn should_reject_block_with_missing_transactions() -> eyre::Result<()> {
-    let mut fixture1 = GossipServiceTestFixture::new();
+    let fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
-    fixture1.add_peer(&fixture2);
-    fixture2.add_peer(&fixture1);
-
-    let (service1_handle, gossip_service1_message_bus) = fixture1.run_service();
-    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
-
-    wait_until_listening(fixture1.gossip_addr()).await;
-    wait_until_listening(fixture2.gossip_addr()).await;
-
-    // Create a test block with transactions
-    let mut block = IrysBlockHeader::new_mock_header();
-    let mut ledger = DataTransactionLedger::default();
+    // Create a test block, connecting to fixture2's genesis, whose Submit ledger lists two txs
+    let genesis = fixture2.block_status_provider.genesis_header();
+    let mut block_header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
+        height: genesis.height + 1,
+        previous_block_hash: genesis.block_hash,
+        ..IrysBlockHeaderV1::new_mock_header()
+    });
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
-    ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
-    block.data_ledgers.push(ledger);
+    block_header.data_ledgers[DataLedger::Submit].tx_ids = H256List(vec![tx1.id, tx2.id]);
     let signer = IrysSigner::random_signer(&fixture1.config.consensus);
     signer
-        .sign_block_header(&mut block)
+        .sign_block_header(&mut block_header)
         .expect("to sign block header");
+    let block_hash = block_header.block_hash;
 
-    // Set up the mock API client to return only one transaction
-    fixture1.add_tx_to_mempool(tx1.clone()).await;
-    // Don't add tx2 to expected transactions, so it will be missing
+    // An honest node cannot serve this body. A malicious peer can: the body carries tx1 only,
+    // so `SealedBlock::new` rejects it because the header lists tx2 and the body lacks it.
+    let crafted_body = irys_types::BlockBody {
+        block_hash,
+        data_transactions: vec![tx1],
+        ..Default::default()
+    };
+    let body_requests = Arc::new(AtomicUsize::new(0));
+    let fake_peer = FakeGossipServer::new();
+    {
+        let body_requests = Arc::clone(&body_requests);
+        fake_peer.set_on_pull_data_request(move |request| match request {
+            GossipDataRequestV2::BlockBody(_) => {
+                body_requests.fetch_add(1, Ordering::SeqCst);
+                GossipResponse::Accepted(Some(GossipDataV2::BlockBody(Arc::new(
+                    crafted_body.clone(),
+                ))))
+            }
+            _ => GossipResponse::Accepted(None),
+        });
+    }
+    let fake_peer_gossip_addr = fake_peer.spawn();
 
-    // Capture the baseline reputation score *before* sending, so the poll_until
-    // detects a change from the true initial value.
+    // fixture2 knows fixture1 (the header's source) at the fake server's address, so every body
+    // pull goes to the fake peer.
+    let mut fixture1_peer_entry = fixture1.create_default_peer_entry();
+    fixture1_peer_entry.address.gossip = fake_peer_gossip_addr;
+    fixture2
+        .peer_list
+        .add_or_update_peer(fixture1_peer_entry, true);
+
+    let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service();
+    wait_until_listening(fixture2.gossip_addr()).await;
+
+    // Push the header to fixture2, signing the request as fixture1.
+    let fixture1_gossip_client = GossipClient::new(
+        Duration::from_secs(5),
+        fixture1.config.node_config.miner_address(),
+        fixture1.config.peer_id(),
+        tokio::runtime::Handle::current(),
+        fixture1.config.node_config.max_peer_response_bytes,
+    );
+    let fixture2_peer_entry = fixture2.create_default_peer_entry();
+
+    // Rejecting the served body in `SealedBlock::new` costs the peer a BogusData penalty (-5),
+    // and the answered request earns +1, so one rejection lowers the score by 4. The other
+    // per-request penalties (slow response, network error) are -1, so a drop of at least 4 means
+    // the crafted body was served and rejected.
     let fixture1_peer_id = fixture1.config.peer_id();
     let initial_score = fixture2
         .peer_list
         .get_peer(&fixture1_peer_id)
         .expect("fixture1 should be a known peer")
         .reputation_score;
+    fixture1_gossip_client.send_data_without_score_update(
+        (&fixture2.config.peer_id(), &fixture2_peer_entry),
+        Arc::new(GossipDataV2::BlockHeader(Arc::new(block_header))),
+    );
 
-    // Send block from service 1 to service 2
-    gossip_service1_message_bus
-        .send_traced(GossipBroadcastMessageV2::from(Arc::new(block)))
-        .expect("Failed to send block to service 1");
-
-    // Wait for service 2 to attempt the block body fetch (which will fail because tx2 is
-    // unavailable). The pull attempts update fixture1's peer score in fixture2's peer list,
-    // providing a concrete observable that the block processing path was invoked.
-    // Without a successful block body fetch, process_block is never called and the mempool
-    // remains empty.
     poll_until(
         Duration::from_secs(10),
-        "Expected fixture1's peer score to change in fixture2's peer list after block body fetch attempts",
+        "Expected fixture2 to penalise the peer that served a block body with a missing tx",
         || {
-            fixture2
-                .peer_list
-                .get_peer(&fixture1_peer_id)
-                .is_some_and(|p| p.reputation_score != initial_score)
+            body_requests.load(Ordering::SeqCst) >= 1
+                && fixture2
+                    .peer_list
+                    .get_peer(&fixture1_peer_id)
+                    .is_some_and(|p| {
+                        initial_score.get().saturating_sub(p.reputation_score.get()) >= 4
+                    })
         },
     )
     .await?;
 
-    {
-        // Check that service 2 rejected the block due to missing transactions
-        let service2_mempool_txs = fixture2.mempool_txs.read().expect("to get mempool txs");
-        eyre::ensure!(
-            service2_mempool_txs.is_empty(),
-            "Expected {} transaction(s), but found {}",
-            0,
-            service2_mempool_txs.len()
-        );
-    };
+    eyre::ensure!(
+        fixture2
+            .mempool_txs
+            .read()
+            .expect("to read mempool")
+            .is_empty(),
+        "no transaction from the rejected body may reach the mempool"
+    );
+    eyre::ensure!(
+        fixture2
+            .discovery_blocks
+            .read()
+            .expect("to read blocks")
+            .is_empty(),
+        "the rejected block must not reach block discovery"
+    );
 
-    service1_handle.stop().await?;
     service2_handle.stop().await?;
 
     Ok(())

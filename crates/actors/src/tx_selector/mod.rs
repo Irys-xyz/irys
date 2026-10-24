@@ -980,8 +980,11 @@ async fn get_publish_txs_and_proofs(
             );
         }
 
-        // Sort the resulting publish_txs & proofs
-        tx_headers.sort_by_key(|a| a.id);
+        // Same priority as the Submit ledger: highest fee first, then tx id.
+        // The Publish cap below selects in this order.
+        tx_headers.sort_by(|a, b| {
+            BoundedFee::cmp_fee_then_id((&a.user_fee(), &a.id), (&b.user_fee(), &b.id)).reverse()
+        });
 
         // Filter out any tx headers with the wrong data_size for this data_root
         tx_headers.retain(|tx| {
@@ -1039,7 +1042,21 @@ async fn get_publish_txs_and_proofs(
             ctx.db,
         )?;
 
+        // Sorted by priority above. Stop once the cap is full so later candidates
+        // skip ingress-proof work. Ineligible candidates do not count, and
+        // anything not selected stays eligible for a later block.
+        let publish_cap = usize::try_from(ctx.config.consensus.mempool.max_publish_txs_per_block)
+            .expect("max_publish_txs_per_block to fit into usize");
+
         for tx_header in &tx_headers {
+            if publish_txs.len() >= publish_cap {
+                info!(
+                    publish_selection.selected = publish_txs.len(),
+                    publish_selection.cap = publish_cap,
+                    "Publish-ledger cap reached; remaining candidates stay eligible for a later block"
+                );
+                break;
+            }
             debug!(
                 "Processing publish candidate tx {} {:#?}",
                 &tx_header.id, &tx_header

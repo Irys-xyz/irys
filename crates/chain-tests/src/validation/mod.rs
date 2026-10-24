@@ -15,6 +15,7 @@ mod mempool_gossip_shape;
 mod mempool_ingress_proof_dedup;
 mod mid_epoch_promotability;
 mod poa_cases;
+mod poa_ownership;
 mod promote_after_activation_straddle;
 mod promote_after_submit_expiry;
 mod publish_after_submit_expiry_filtered;
@@ -726,15 +727,17 @@ async fn spiky_heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<
 
     // Create evil block with WRONG order: [low fee, high fee]
     // Canonical order should be: [high fee, low fee]
+    // Genesis produces it: both peers unpledged every partition, so neither
+    // has a partition it may mine.
     let block_prod_strategy = EvilBlockProdStrategy {
         commitments: vec![unstake_low_fee.clone(), unstake_high_fee.clone()], // WRONG!
         prod: ProductionStrategy {
-            inner: peer1_node.node_ctx.block_producer_inner.clone(),
+            inner: genesis_node.node_ctx.block_producer_inner.clone(),
         },
     };
 
     let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(&solution_context(&peer1_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -744,7 +747,7 @@ async fn spiky_heavy4_block_unstake_wrong_order_gets_rejected() -> eyre::Result<
         ledger_id: SystemLedger::Commitment as u32,
         tx_ids: H256List(vec![unstake_low_fee.id(), unstake_high_fee.id()]), // WRONG order!
     }];
-    peer1_signer.sign_block_header(&mut header)?;
+    genesis_config.signer().sign_block_header(&mut header)?;
 
     let mut tampered_body = block.to_block_body();
     tampered_body.block_hash = header.block_hash;

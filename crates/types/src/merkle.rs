@@ -173,22 +173,32 @@ pub fn get_leaf_proof(path_buff: &Base64) -> Result<LeafProof, Error> {
     Ok(leaf_proof)
 }
 
+const LEAF_PROOF_LEN: usize = HASH_SIZE + NOTE_SIZE;
+const BRANCH_PROOF_LEN: usize = HASH_SIZE * 2 + NOTE_SIZE;
+
+/// A proof buffer that fails here is invalid for every target. Returns the
+/// length of the branch section, which precedes the leaf.
+///
+/// Size and alignment only. Hash and range checks stay in [`validate_path`],
+/// because those depend on the target byte.
+pub fn ensure_proof_layout(path_buff: &[u8]) -> Result<usize, Error> {
+    let branches_len = path_buff
+        .len()
+        .checked_sub(LEAF_PROOF_LEN)
+        .ok_or_else(|| eyre!("Invalid proof: too short"))?;
+    eyre::ensure!(
+        branches_len.is_multiple_of(BRANCH_PROOF_LEN),
+        "Invalid proof: misaligned branch length"
+    );
+    Ok(branches_len)
+}
+
 pub fn validate_path(
     root_hash: [u8; HASH_SIZE],
     path_buff: &Base64,
     target_byte_position: u128,
 ) -> Result<ValidatePathResult, Error> {
-    // Basic size checks to avoid underflow and malformed proofs
-    let total_len = path_buff.len();
-    let leaf_len = HASH_SIZE + NOTE_SIZE;
-    eyre::ensure!(total_len >= leaf_len, "Invalid proof: too short");
-
-    let branches_len = total_len - leaf_len;
-    let branch_item_len = HASH_SIZE * 2 + NOTE_SIZE;
-    eyre::ensure!(
-        branches_len.is_multiple_of(branch_item_len),
-        "Invalid proof: misaligned branch length"
-    );
+    let branches_len = ensure_proof_layout(&path_buff.0)?;
 
     // Split proof into branches and leaf. Leaf is the final proof and branches
     // are ordered from root to leaf.
@@ -196,7 +206,7 @@ pub fn validate_path(
 
     // Deserialize proof.
     let branch_proofs: Vec<BranchProof> = branches
-        .chunks(branch_item_len)
+        .chunks(BRANCH_PROOF_LEN)
         .map(BranchProof::try_from_proof_slice)
         .collect::<Result<Vec<_>, _>>()?;
     let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
@@ -293,23 +303,12 @@ pub fn print_debug(
 ) -> Result<([u8; 32], u128, u128), Error> {
     // Split proof into branches and leaf. Leaf is at the end and branches are
     // ordered from root to leaf.
-    // Basic size checks to avoid underflow and malformed proofs
-    let total_len = proof.len();
-    let leaf_len = HASH_SIZE + NOTE_SIZE;
-    eyre::ensure!(total_len >= leaf_len, "Invalid proof: too short");
-
-    let branches_len = total_len - leaf_len;
-    let branch_item_len = HASH_SIZE * 2 + NOTE_SIZE;
-    eyre::ensure!(
-        branches_len.is_multiple_of(branch_item_len),
-        "Invalid proof: misaligned branch length"
-    );
-
+    let branches_len = ensure_proof_layout(proof)?;
     let (branches, leaf) = proof.split_at(branches_len);
 
     // Deserialize proof.
     let branch_proofs: Vec<BranchProof> = branches
-        .chunks(branch_item_len)
+        .chunks(BRANCH_PROOF_LEN)
         .map(BranchProof::try_from_proof_slice)
         .collect::<Result<Vec<_>, _>>()?;
     let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;

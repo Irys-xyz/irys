@@ -63,6 +63,9 @@ mod disk_lane;
 #[path = "chunk_crc.rs"]
 mod chunk_crc;
 
+#[path = "mid_write_intervals.rs"]
+mod mid_write_intervals;
+
 #[path = "recall_direct.rs"]
 mod recall_direct;
 pub use recall_direct::open_recall_direct;
@@ -374,6 +377,9 @@ struct WrittenAhead {
     queued_at: Instant,
     /// When the pwrite returned. `None` if that stamp was not kept.
     pwrite_at: Option<Instant>,
+    /// When this entry was parked. The oldest one opens an ingress gather
+    /// window that starts after the interval from the last point had passed.
+    parked_at: Instant,
 }
 
 impl Deref for PendingWrites {
@@ -451,8 +457,12 @@ impl LabelRuns<'_> {
     }
 }
 
-/// Offsets whose on-disk label must stay `Interrupted` until the completion is
-/// stored, or until a clean shutdown writes the live map.
+/// Offsets a crash must reload `Uninitialized` until the completion is stored,
+/// or until a clean shutdown writes the live map. On disk that is an
+/// `Interrupted` label in `intervals.json` or a `mid_write_intervals.json`
+/// record: `intervals.json` alone can still say `Entropy` or `Data` for a
+/// masked span. Every `intervals.json` replace projects the mask as
+/// `Interrupted`, which is what lets it truncate the log.
 type IntervalMask = NoditSet<PartitionChunkOffset, Interval<PartitionChunkOffset>>;
 
 /// Bytes of `Uninitialized` marked `Interrupted` ahead of one write, per
@@ -467,10 +477,16 @@ const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 ///
 /// Mark `Interrupted` before `pwrite` (skip a span already marked). The same
 /// rewrite may mark up to 512 MiB of following `Uninitialized` in the
-/// submodule, stopping at live `Data` or `Entropy`.
+/// submodule, stopping at live `Data` or `Entropy`. When nothing follows the
+/// batch to mark (an `Entropy` overwrite from data sync), the batch is
+/// appended to `mid_write_intervals.json` instead, and `intervals.json` is
+/// left alone. Open applies that list over `intervals.json` as
+/// `Uninitialized`. Each `intervals.json` replace projects the mask, so it
+/// covers every append made before its map copy and truncates them.
 /// Completions are stored after `fdatasync` and the presence commit, at most
-/// every `intervals_persist_secs`, or sooner on the next write-ahead,
-/// `force_sync`, or shutdown. A failed `pwrite` leaves the file
+/// every `intervals_persist_secs`, or sooner on the next write-ahead that
+/// rewrites `intervals.json` (not one that appends to the log), `force_sync`,
+/// or shutdown. A failed `pwrite` leaves the file
 /// `Interrupted`. A CRC mismatch cuts the live label to `Uninitialized` and
 /// rewrites that submodule's `intervals.json` before the confirm returns.
 /// The rewrite keeps the ahead mask, so it does not publish `Entropy` over a
@@ -494,6 +510,23 @@ struct IntervalDisk {
     /// Monotonic time of the last completion rewrite. The first wait starts
     /// at load, so opening a module does not rewrite the file.
     last_completion: BTreeMap<PartitionChunkOffset, Instant>,
+    /// `mid_write_intervals.json` per submodule start. Every recorded span is
+    /// also in `mask` until its write is retired.
+    mid_write: BTreeMap<PartitionChunkOffset, mid_write_intervals::MidWriteLog>,
+    /// Sequence of the last append. A replace reads it before its map copy
+    /// and truncates only appends at or below it.
+    mid_write_seq: u64,
+}
+
+/// What a replace read before it copied the interval map. The replace
+/// commits only while the three epochs still match. `mid_seq` bounds the
+/// `mid_write_intervals.json` appends the stored image covers.
+#[derive(Clone, Copy, Debug)]
+struct ImageSnapshot {
+    epoch: u64,
+    crc_epoch: u64,
+    publish: u64,
+    mid_seq: u64,
 }
 
 #[cfg(test)]
@@ -690,6 +723,12 @@ pub(super) struct DurableDeferQuery {
     pub headroom_open: bool,
     /// An owed recall flush must not fdatasync only because headroom is gone.
     pub recall_flush_owed: bool,
+    /// Age of an ingress gather window. `Some` only when the window holds an
+    /// ingress-priority write (data sync, HTTP upload, or gossip) and opened
+    /// after `interval` from the last point had already passed. That window
+    /// waits `interval` from its own start, so writes that arrive together
+    /// share one fdatasync. Packing or migration bytes parked in it wait too.
+    pub gather_age: Option<Duration>,
 }
 
 /// `cause == None` defers the point. `headroom_open` is the latch to store.
@@ -702,9 +741,10 @@ pub(super) struct DurablePointDecision {
 /// Defer only while the interval is the longest wait and the backlog is inside
 /// the headroom line. A larger backlog never starts a new deferral. The
 /// interval is an upper bound: once it has elapsed the point runs even when
-/// the backlog is small. Force, a zero interval, the first point, and the
-/// memory ceiling run it immediately. Headroom loss does too, except while a
-/// recall is waiting on the owed flush.
+/// the backlog is small. An ingress gather window measures that interval
+/// from its own start instead of the last point. Force, a zero interval, the
+/// first point, and the memory ceiling run it immediately. Headroom loss does
+/// too, except while a recall is waiting on the owed flush.
 pub(super) fn durable_point_decision(query: DurableDeferQuery) -> DurablePointDecision {
     let mut headroom_open = query.headroom_open;
     if query.pending_bytes > query.headroom_bytes {
@@ -719,7 +759,9 @@ pub(super) fn durable_point_decision(query: DurableDeferQuery) -> DurablePointDe
         Some(DurablePointCause::Interval)
     } else if query.pending_bytes > query.ceiling_bytes {
         Some(DurablePointCause::Ceiling)
-    } else if query.since_last.expect("checked above") >= query.interval {
+    } else if query.since_last.expect("checked above") >= query.interval
+        && query.gather_age.is_none_or(|age| age >= query.interval)
+    {
         Some(DurablePointCause::Interval)
     } else if !headroom_open && !query.recall_flush_owed {
         Some(DurablePointCause::Headroom)
@@ -931,6 +973,15 @@ pub struct StorageModule {
     /// Crash tests drop the module without storing batched completions.
     #[cfg(test)]
     suppress_interval_flush: AtomicBool,
+    /// `mid_write_intervals.json` appends that reached fdatasync.
+    #[cfg(test)]
+    mid_write_syncs: AtomicU64,
+    /// The next log truncate changes the file, then reports a failure.
+    #[cfg(test)]
+    fail_next_mid_write_truncate: AtomicBool,
+    /// `intervals.json` replaces that committed.
+    #[cfg(test)]
+    interval_image_commits: AtomicU64,
     /// `pause_data_writes` and `reset` bump this. A packed write that captured
     /// the previous value does not commit.
     index_write_generation: Arc<AtomicU64>,
@@ -1157,6 +1208,9 @@ pub struct StorageSubmodule {
     /// Mutex containing the interval file path
     /// we create an [`AtomicWriteFile`] for each interval file update, to ensure we are never left with interrupted writes
     intervals_file: Arc<Mutex<PathBuf>>,
+    /// `mid_write_intervals.json` beside `intervals_file`. The lock orders
+    /// appends and truncations. Lock order: this, then `interval_disk`.
+    mid_write_file: Mutex<PathBuf>,
 }
 
 pub fn get_atomic_file<P: AsRef<Path> + std::fmt::Debug>(path: P) -> eyre::Result<AtomicWriteFile> {
@@ -2244,6 +2298,9 @@ impl StorageModule {
                         split: opened.split,
                         db: submodule_db.clone(),
                         intervals_file: Arc::new(Mutex::new(submodules_intervals_file)),
+                        mid_write_file: Mutex::new(mid_write_intervals::mid_write_path(
+                            &sub_base_path,
+                        )),
                     },
                 )
                 .map_err(|e| {
@@ -2308,6 +2365,11 @@ impl StorageModule {
             Interval<PartitionChunkOffset>,
             ChunkType,
         > = Self::load_intervals_from_submodules(&submodule_map, storage_module_info.id)?;
+        // An overwrite listed in `mid_write_intervals.json` may have been cut
+        // off mid-`pwrite`. Those offsets reload `Uninitialized` before the
+        // presence reconcile below, so they cannot be mined or served.
+        let mid_writes = Self::load_mid_write_logs(&submodule_map)?;
+        Self::apply_mid_write_spans(&mut loaded_intervals, &mid_writes, storage_module_info.id);
 
         // A crash between the journal commit and the interval rewrite leaves
         // the old suffix in the files; the resume below rewrites them.
@@ -2410,7 +2472,11 @@ impl StorageModule {
             registration_drops: AtomicU64::new(0),
             last_pending_write: RwLock::new(Instant::now()),
             intervals: Arc::new(RwLock::new(loaded_intervals)),
-            interval_disk: Mutex::new(Self::load_interval_disk(&submodule_map)),
+            interval_disk: Mutex::new(Self::load_interval_disk(
+                &submodule_map,
+                mid_writes,
+                config.node_config.storage.intervals_persist_secs > 0,
+            )),
             interval_image_epoch: AtomicU64::new(0),
             interval_publish: Mutex::new(()),
             crc_cut_epoch: AtomicU64::new(0),
@@ -2418,6 +2484,12 @@ impl StorageModule {
             entropy_write_epoch: AtomicU64::new(0),
             #[cfg(test)]
             suppress_interval_flush: AtomicBool::new(false),
+            #[cfg(test)]
+            mid_write_syncs: AtomicU64::new(0),
+            #[cfg(test)]
+            fail_next_mid_write_truncate: AtomicBool::new(false),
+            #[cfg(test)]
+            interval_image_commits: AtomicU64::new(0),
             index_write_generation,
             submodules: submodule_map,
             recent_chunk_times: Arc::new(RwLock::new(CircularBuffer::new(8_000))), // sample window 10s = 10s x 800 chunks/s = capacity 8_000
@@ -3306,14 +3378,26 @@ impl StorageModule {
     /// drops its presence and placement rows. The bytes are on disk, but the
     /// node no longer knows it holds them. Anything that discards another copy
     /// of the chunk must wait for this, not for durability alone.
+    ///
+    /// An offset `mid_write_intervals.json` still lists is not persisted: a
+    /// crash reloads it `Uninitialized` whatever `intervals.json` says.
     pub fn is_data_chunk_persisted_at(&self, offset: PartitionChunkOffset) -> bool {
         if !self.is_data_chunk_durable_at(offset) {
             return false;
         }
-        self.lock_interval_disk()
+        let Ok((submodule, _)) = self.get_submodule_for_offset(offset) else {
+            return false;
+        };
+        let disk = self.lock_interval_disk();
+        let stored_data = disk
             .written
             .get_at_point(offset)
-            .is_some_and(|chunk_type| *chunk_type == ChunkType::Data)
+            .is_some_and(|chunk_type| *chunk_type == ChunkType::Data);
+        stored_data
+            && !disk
+                .mid_write
+                .get(&submodule.start())
+                .is_some_and(|log| log.contains_point(offset))
     }
 
     /// Transaction offsets whose bodies are fsynced as `Data` and already
@@ -3793,17 +3877,66 @@ impl StorageModule {
         self.pending_memory_ceiling_bytes().saturating_mul(permille) / 1000
     }
 
-    fn durable_cause(&self, force: bool) -> Option<DurablePointCause> {
-        let decision = durable_point_decision(DurableDeferQuery {
+    /// `batch_ingress` is true when the caller holds pwritten ingress bytes
+    /// that are not parked yet. With nothing parked they open the window now.
+    fn durable_query(&self, force: bool, batch_ingress: bool) -> DurableDeferQuery {
+        let interval = self.min_durable_interval();
+        let last = self.load_last_durable_at();
+        DurableDeferQuery {
             force,
-            interval: self.min_durable_interval(),
-            since_last: self.load_last_durable_at().map(|last| last.elapsed()),
+            interval,
+            since_last: last.map(|last| last.elapsed()),
             pending_bytes: self.pending_write_bytes(),
             ceiling_bytes: self.pending_memory_ceiling_bytes(),
             headroom_bytes: self.durable_headroom_bytes(),
             headroom_open: self.headroom_open.load(Ordering::Relaxed),
             recall_flush_owed: self.disk.recall_flush_is_owed(),
-        });
+            gather_age: last.and_then(|last| self.gather_window_age(last, interval, batch_ingress)),
+        }
+    }
+
+    /// Age of the ingress gather window, if one is open.
+    ///
+    /// The window starts at the oldest parked entry, or now when nothing is
+    /// parked. It is a gather window only when it holds an ingress-priority
+    /// write and starts at or after `last + interval`. A window that opened
+    /// inside the previous interval keeps that interval's deadline. Ingress
+    /// priority covers data sync, HTTP uploads, and gossip. None of them waits
+    /// on durability, so the first write after an idle stretch may take up
+    /// to one extra interval to become durable.
+    fn gather_window_age(
+        &self,
+        last: Instant,
+        interval: Duration,
+        batch_ingress: bool,
+    ) -> Option<Duration> {
+        // Every window starts at or before now. Inside the interval none can
+        // start after it, so skip the scan the lane would run each pass.
+        if last.elapsed() < interval {
+            return None;
+        }
+        let pending = self.pending_writes.read().unwrap();
+        let opened = pending
+            .written_ahead
+            .values()
+            .map(|ahead| ahead.parked_at)
+            .min()
+            .unwrap_or_else(Instant::now);
+        let ingress = batch_ingress
+            || pending
+                .written_ahead
+                .values()
+                .any(|ahead| ahead.priority == disk_lane::WritePriority::Ingress);
+        drop(pending);
+        (ingress && opened.saturating_duration_since(last) >= interval).then(|| opened.elapsed())
+    }
+
+    fn durable_cause(&self, force: bool) -> Option<DurablePointCause> {
+        self.durable_cause_for(force, false)
+    }
+
+    fn durable_cause_for(&self, force: bool, batch_ingress: bool) -> Option<DurablePointCause> {
+        let decision = durable_point_decision(self.durable_query(force, batch_ingress));
         self.headroom_open
             .store(decision.headroom_open, Ordering::Relaxed);
         decision.cause
@@ -3852,29 +3985,30 @@ impl StorageModule {
         *recover_mutex(&self.last_durable_at) = Some(Instant::now());
     }
 
-    /// True when this window must not fdatasync yet.
-    ///
-    /// Force, a zero interval, the first point, pending bytes over the
-    /// headroom line, and pending bytes above the ceiling all return false.
-    /// A closed headroom latch stays closed until pending bytes fall to half
-    /// the line. An owed recall flush still returns true on headroom loss, so
-    /// that recall does not wait on the fdatasync. The interval is the longest
-    /// wait: a younger point is never held past it.
-    fn defer_durable_point(&self, force: bool) -> bool {
-        self.durable_cause(force).is_none()
-    }
-
     /// Time until parked bytes may take a durable point. `None` when the
     /// interval is off or nothing is parked. Zero when the point is due.
+    ///
+    /// Force, a zero interval, the first point, pending bytes over the
+    /// headroom line, and pending bytes above the ceiling are due now. A
+    /// closed headroom latch stays closed until pending bytes fall to half
+    /// the line. An owed recall flush still defers on headroom loss, so that
+    /// recall does not wait on the fdatasync. The interval is the longest
+    /// wait: a younger point or gather window is never held past it.
     fn durable_point_remaining(&self) -> Option<Duration> {
         if self.min_durable_interval().is_zero() || !self.has_written_ahead() {
             return None;
         }
-        if !self.defer_durable_point(false) {
+        let query = self.durable_query(false, false);
+        let decision = durable_point_decision(query);
+        self.headroom_open
+            .store(decision.headroom_open, Ordering::Relaxed);
+        if decision.cause.is_some() {
             return Some(Duration::ZERO);
         }
-        let last = self.load_last_durable_at()?;
-        Some(self.min_durable_interval().saturating_sub(last.elapsed()))
+        // A gather window waits from its own start. Otherwise the wait runs
+        // from the last point.
+        let waited = query.gather_age.or(query.since_last)?;
+        Some(query.interval.saturating_sub(waited))
     }
 
     /// Durable points since this module was opened, by timing and cause.
@@ -3926,6 +4060,7 @@ impl StorageModule {
                         priority: *priority,
                         queued_at,
                         pwrite_at,
+                        parked_at: Instant::now(),
                     },
                 );
             }
@@ -4315,7 +4450,10 @@ impl StorageModule {
         // inside the headroom line. The pwrites above already ran. Force,
         // headroom loss, the pending-byte ceiling, and a zero interval do
         // not hold the pair. `0` is every point.
-        let Some(cause) = self.durable_cause(force) else {
+        let batch_ingress = write_batch
+            .iter()
+            .any(|(_, _, priority)| *priority == disk_lane::WritePriority::Ingress);
+        let Some(cause) = self.durable_cause_for(force, batch_ingress) else {
             self.park_written_ahead(&write_batch);
             return Ok(());
         };
@@ -4605,6 +4743,14 @@ impl StorageModule {
     /// same submodule. That ahead range is not written
     /// into the live map. The mask is updated only after the file replace
     /// succeeds, or immediately when the file already has those labels.
+    ///
+    /// When nothing follows the batch to mark (an `Entropy` overwrite, or the
+    /// submodule end), the batch is appended to `mid_write_intervals.json`
+    /// and fsynced instead, and the mask is updated after that append.
+    /// `intervals.json` is not rewritten, its pending completions keep
+    /// waiting for the persist period, and the live map is not cloned. A span
+    /// the mask or that log already holds skips the append, as
+    /// [`Self::runs_covered`] does.
     fn persist_write_ahead(
         &self,
         runs: &[WriteRun],
@@ -4612,6 +4758,10 @@ impl StorageModule {
     ) -> eyre::Result<()> {
         if !self.intervals_batched() {
             return self.write_intervals_files(Some(touched), None);
+        }
+        let snapshot_mid_seq = self.load_mid_write_seq();
+        if self.append_write_ahead_if_unextended(runs)? {
+            return Ok(());
         }
         // Read both epochs and the publish generation before the map. A later
         // reset fails this snapshot instead of letting it put the old mask
@@ -4666,9 +4816,12 @@ impl StorageModule {
         self.write_interval_image(
             projection.as_ref(),
             Some(touched),
-            snapshot_epoch,
-            snapshot_crc_epoch,
-            snapshot_publish,
+            ImageSnapshot {
+                epoch: snapshot_epoch,
+                crc_epoch: snapshot_crc_epoch,
+                publish: snapshot_publish,
+                mid_seq: snapshot_mid_seq,
+            },
             false,
         )?;
         let mut disk = self.lock_interval_disk();
@@ -4679,6 +4832,214 @@ impl StorageModule {
             disk.mask = mask;
         }
         Ok(())
+    }
+
+    /// Append the batch to `mid_write_intervals.json` when the look-ahead
+    /// would mark nothing past it. `true` when the batch is now covered (or
+    /// already was): the caller must not rewrite `intervals.json`. `false`
+    /// when the look-ahead extends, so the caller rewrites `intervals.json`
+    /// with the ahead span, and one rewrite covers the next pack.
+    ///
+    /// Whether the walk would mark anything is one probe per run: the point
+    /// after it. The mask and the live map are not cloned.
+    fn append_write_ahead_if_unextended(&self, runs: &[WriteRun]) -> eyre::Result<bool> {
+        let snapshot_epoch = self.load_interval_image_epoch();
+        let mut run_spans = Vec::with_capacity(runs.len());
+        for run in runs {
+            let (submodule, _) = self.get_submodule_for_offset(run.start)?;
+            let (start, end) = Self::run_bounds(run);
+            run_spans.push((*submodule, ii(start, end)));
+        }
+        // The point after each run inside its submodule, with its live label.
+        // Read before `interval_disk`: the two locks are not nested.
+        let next_points: Vec<_> = {
+            let memory = recover_read(&self.intervals);
+            run_spans
+                .iter()
+                .filter_map(|(submodule, span)| {
+                    let next = span.end().up().filter(|next| *next <= submodule.end())?;
+                    Some((next, memory.get_at_point(next).copied()))
+                })
+                .collect()
+        };
+        {
+            let disk = self.lock_interval_disk();
+            if !self.interval_snapshot_current(snapshot_epoch) {
+                return Ok(true);
+            }
+            let covered = run_spans.iter().all(|(submodule, span)| {
+                disk.mask.contains_interval(*span)
+                    || disk
+                        .mid_write
+                        .get(&submodule.start())
+                        .is_some_and(|log| log.covers(*span))
+            });
+            // The stop rules of `extend_write_ahead`'s first step: a masked
+            // point, a point in this batch, no label, `Data`, or `Entropy`
+            // ends the walk before it marks anything.
+            let extends = !covered
+                && next_points.iter().any(|(next, label)| {
+                    !disk.mask.contains_point(*next)
+                        && !run_spans.iter().any(|(_, span)| span.contains_point(*next))
+                        && label.is_some_and(|label| {
+                            !matches!(label, ChunkType::Data | ChunkType::Entropy)
+                        })
+                });
+            if extends {
+                return Ok(false);
+            }
+        }
+        let mut by_submodule: BTreeMap<PartitionChunkOffset, Vec<Interval<PartitionChunkOffset>>> =
+            BTreeMap::new();
+        for (submodule, span) in run_spans {
+            by_submodule
+                .entry(submodule.start())
+                .or_default()
+                .push(span);
+        }
+        for (start, spans) in by_submodule {
+            let (_, submodule) = self.get_submodule_for_offset(start)?;
+            // Held across the coverage check, the append, and the record, so
+            // a truncation cannot drop a span between them.
+            let path = recover_mutex(&submodule.mid_write_file);
+            let (needed, force_dir_sync) = {
+                let mut disk = self.lock_interval_disk();
+                if !self.interval_snapshot_current(snapshot_epoch) {
+                    return Ok(true);
+                }
+                // No append has succeeded since open or the last truncate, so
+                // the file's directory entry may not be durable yet.
+                let force_dir_sync = disk
+                    .mid_write
+                    .get(&start)
+                    .is_none_or(mid_write_intervals::MidWriteLog::is_empty);
+                let mut needed = Vec::new();
+                let mut rearmed = Vec::new();
+                for span in &spans {
+                    if disk.mask.contains_interval(*span) {
+                        continue;
+                    }
+                    let logged = disk
+                        .mid_write
+                        .get(&start)
+                        .is_some_and(|log| log.covers(*span));
+                    if logged {
+                        rearmed.push(*span);
+                    } else {
+                        needed.push(*span);
+                    }
+                }
+                if !rearmed.is_empty() {
+                    // The file already lists these spans. A fresh sequence
+                    // keeps a replace that read an older one from truncating
+                    // them while this write is in flight.
+                    disk.mid_write_seq += 1;
+                    let seq = disk.mid_write_seq;
+                    if let Some(log) = disk.mid_write.get_mut(&start) {
+                        log.rearm(seq, &rearmed);
+                    }
+                    for span in &rearmed {
+                        disk.mask.insert_merge_touching_or_overlapping(*span);
+                    }
+                }
+                (needed, force_dir_sync)
+            };
+            if needed.is_empty() {
+                continue;
+            }
+            let _dir_synced =
+                mid_write_intervals::append_mid_write(&path, &needed, force_dir_sync)?;
+            #[cfg(test)]
+            self.mid_write_syncs.fetch_add(1, Ordering::SeqCst);
+            let mut disk = self.lock_interval_disk();
+            disk.mid_write_seq += 1;
+            let seq = disk.mid_write_seq;
+            disk.mid_write
+                .entry(start)
+                .or_default()
+                .record(seq, &needed);
+            if self.interval_snapshot_current(snapshot_epoch) {
+                for span in &needed {
+                    disk.mask.insert_merge_touching_or_overlapping(*span);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn load_mid_write_seq(&self) -> u64 {
+        self.lock_interval_disk().mid_write_seq
+    }
+
+    /// Drop the appends at or below `snapshot_mid_seq` from `start`'s log.
+    /// The caller just stored an `intervals.json` image for that submodule,
+    /// copied after `snapshot_mid_seq` was read, with the mask projected
+    /// `Interrupted`, so the image covers those appends.
+    ///
+    /// A failed truncate may already have changed the file (a truncate whose
+    /// fsync failed, a rename whose directory fsync failed). The entries stay
+    /// for the next attempt, so offsets stay unpersisted, but they stop
+    /// covering writes: the next write inside them appends again.
+    fn compact_mid_write(
+        &self,
+        start: PartitionChunkOffset,
+        submodule: &StorageSubmodule,
+        snapshot_mid_seq: u64,
+    ) {
+        let due = self
+            .lock_interval_disk()
+            .mid_write
+            .get(&start)
+            .is_some_and(|log| log.has_entries_through(snapshot_mid_seq));
+        if !due {
+            return;
+        }
+        let path = recover_mutex(&submodule.mid_write_file);
+        let keep = {
+            let disk = self.lock_interval_disk();
+            let Some(log) = disk.mid_write.get(&start) else {
+                return;
+            };
+            if !log.has_entries_through(snapshot_mid_seq) {
+                return;
+            }
+            log.spans_after(snapshot_mid_seq)
+        };
+        let rewritten = mid_write_intervals::rewrite_mid_write(&path, &keep);
+        #[cfg(test)]
+        let rewritten = rewritten.and_then(|()| {
+            if self
+                .fail_next_mid_write_truncate
+                .swap(false, Ordering::SeqCst)
+            {
+                eyre::bail!("injected mid-write truncate failure after the file changed");
+            }
+            Ok(())
+        });
+        let mut disk = self.lock_interval_disk();
+        let Some(log) = disk.mid_write.get_mut(&start) else {
+            return;
+        };
+        if let Err(err) = rewritten {
+            warn!(
+                storage_module.id = self.id,
+                "could not truncate {}: {err:#}",
+                mid_write_intervals::MID_WRITE_INTERVALS_FILE
+            );
+            log.distrust_through(snapshot_mid_seq);
+            return;
+        }
+        log.retain_after(snapshot_mid_seq);
+        if log.is_empty() {
+            disk.mid_write.remove(&start);
+        }
+    }
+
+    /// [`Self::compact_mid_write`] for every submodule.
+    fn compact_all_mid_write(&self, snapshot_mid_seq: u64) {
+        for (interval, submodule) in self.submodules.iter() {
+            self.compact_mid_write(interval.start(), submodule, snapshot_mid_seq);
+        }
     }
 
     /// Drop the write-ahead mask for runs whose bytes and presence rows are
@@ -4732,6 +5093,7 @@ impl StorageModule {
         let snapshot_epoch = self.load_interval_image_epoch();
         let snapshot_crc_epoch = self.load_crc_cut_epoch();
         let snapshot_publish = self.load_publish_generation();
+        let snapshot_mid_seq = self.load_mid_write_seq();
         // Due-ness does not need the interval map. A lane pass with nothing
         // due must not clone that map: after a crash it is the fragment list.
         let due_starts = {
@@ -4763,9 +5125,12 @@ impl StorageModule {
         self.write_interval_image(
             &projection,
             Some(&touched),
-            snapshot_epoch,
-            snapshot_crc_epoch,
-            snapshot_publish,
+            ImageSnapshot {
+                epoch: snapshot_epoch,
+                crc_epoch: snapshot_crc_epoch,
+                publish: snapshot_publish,
+                mid_seq: snapshot_mid_seq,
+            },
             false,
         )
     }
@@ -4815,6 +5180,7 @@ impl StorageModule {
         let snapshot_epoch = self.load_interval_image_epoch();
         let snapshot_crc_epoch = self.load_crc_cut_epoch();
         let snapshot_publish = self.load_publish_generation();
+        let snapshot_mid_seq = self.load_mid_write_seq();
         let mut memory = recover_read(&self.intervals).clone();
         let nondurable = self.snapshot_nondurable_offsets();
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
@@ -4840,15 +5206,26 @@ impl StorageModule {
                     snapshot_crc_epoch,
                     snapshot_publish,
                 );
+                // That image covers every earlier mid-write append.
+                if self.interval_image_acceptable(
+                    snapshot_epoch,
+                    snapshot_crc_epoch,
+                    snapshot_publish,
+                ) {
+                    self.compact_all_mid_write(snapshot_mid_seq);
+                }
                 return Ok(());
             }
         }
         self.write_interval_image(
             &memory,
             None,
-            snapshot_epoch,
-            snapshot_crc_epoch,
-            snapshot_publish,
+            ImageSnapshot {
+                epoch: snapshot_epoch,
+                crc_epoch: snapshot_crc_epoch,
+                publish: snapshot_publish,
+                mid_seq: snapshot_mid_seq,
+            },
             force_replace,
         )?;
         // The mask means the file already says `Interrupted`. Install it
@@ -4891,9 +5268,12 @@ impl StorageModule {
         only: Option<&BTreeSet<PartitionChunkOffset>>,
         durable_now: Option<&BTreeSet<PartitionChunkOffset>>,
     ) -> eyre::Result<()> {
-        let snapshot_epoch = self.load_interval_image_epoch();
-        let snapshot_crc_epoch = self.load_crc_cut_epoch();
-        let snapshot_publish = self.load_publish_generation();
+        let snapshot = ImageSnapshot {
+            epoch: self.load_interval_image_epoch(),
+            crc_epoch: self.load_crc_cut_epoch(),
+            publish: self.load_publish_generation(),
+            mid_seq: self.load_mid_write_seq(),
+        };
         let mut memory = recover_read(&self.intervals).clone();
         let mut nondurable = self.snapshot_nondurable_offsets();
         if let Some(durable_now) = durable_now {
@@ -4902,14 +5282,7 @@ impl StorageModule {
             }
         }
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
-        self.write_interval_image(
-            &memory,
-            only,
-            snapshot_epoch,
-            snapshot_crc_epoch,
-            snapshot_publish,
-            false,
-        )
+        self.write_interval_image(&memory, only, snapshot, false)
     }
 
     /// `pending.chunks` and `pending.written_ahead`. Caller released
@@ -4964,31 +5337,28 @@ impl StorageModule {
         &self,
         image: &StorageIntervals,
         only: Option<&BTreeSet<PartitionChunkOffset>>,
-        snapshot_epoch: u64,
-        snapshot_crc_epoch: u64,
-        snapshot_publish: u64,
+        snapshot: ImageSnapshot,
         force_replace: bool,
     ) -> eyre::Result<()> {
         let _publish = self.lock_interval_publish();
-        self.write_interval_image_locked(
-            image,
-            only,
-            snapshot_epoch,
-            snapshot_crc_epoch,
-            snapshot_publish,
-            force_replace,
-        )
+        self.write_interval_image_locked(image, only, snapshot, force_replace)
     }
 
+    /// A stored or already-matching slice also truncates that submodule's
+    /// `mid_write_intervals.json` appends at or below `snapshot.mid_seq`.
     fn write_interval_image_locked(
         &self,
         image: &StorageIntervals,
         only: Option<&BTreeSet<PartitionChunkOffset>>,
-        snapshot_epoch: u64,
-        snapshot_crc_epoch: u64,
-        snapshot_publish: u64,
+        snapshot: ImageSnapshot,
         force_replace: bool,
     ) -> eyre::Result<()> {
+        let ImageSnapshot {
+            epoch: snapshot_epoch,
+            crc_epoch: snapshot_crc_epoch,
+            publish: snapshot_publish,
+            mid_seq: snapshot_mid_seq,
+        } = snapshot;
         for (submodule_interval, submodule) in self.submodules.iter() {
             if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch, snapshot_publish)
             {
@@ -5025,6 +5395,8 @@ impl StorageModule {
                     return Ok(());
                 }
                 disk.dirty.remove(&start);
+                drop(disk);
+                self.compact_mid_write(start, submodule, snapshot_mid_seq);
                 continue;
             }
             let path = recover_mutex(&submodule.intervals_file);
@@ -5052,6 +5424,10 @@ impl StorageModule {
             Self::splice_interval_slice(&mut disk.written, *submodule_interval, slice.as_ref());
             disk.dirty.remove(&start);
             disk.last_completion.insert(start, Instant::now());
+            drop(disk);
+            #[cfg(test)]
+            self.interval_image_commits.fetch_add(1, Ordering::SeqCst);
+            self.compact_mid_write(start, submodule, snapshot_mid_seq);
         }
         Ok(())
     }
@@ -5235,7 +5611,17 @@ impl StorageModule {
 
     /// Raw file image. `Interrupted` stays `Interrupted` and seeds the mask.
     /// The live map is built separately and normalizes those ranges.
-    fn load_interval_disk(submodules: &SubmoduleMap) -> IntervalDisk {
+    /// With batching on, `mid_writes` seeds the same mask: the log still says
+    /// those spans are `Interrupted` until a replace folds them into
+    /// `intervals.json`. Period `0` never retires a mask span, so a log span
+    /// masked there would be projected `Interrupted` over its later durable
+    /// `Data`. Its write-ahead stores the pending batch on every sync, and
+    /// the loaded spans are already `Uninitialized` in the live map.
+    fn load_interval_disk(
+        submodules: &SubmoduleMap,
+        mid_writes: BTreeMap<PartitionChunkOffset, Vec<Interval<PartitionChunkOffset>>>,
+        batched: bool,
+    ) -> IntervalDisk {
         let mut written = StorageIntervals::new();
         let mut mask = IntervalMask::new();
         let mut last_completion = BTreeMap::new();
@@ -5253,11 +5639,72 @@ impl StorageModule {
                 let _ = written.insert_merge_touching_if_values_equal(interval, chunk_type);
             }
         }
+        let mut mid_write = BTreeMap::new();
+        for (start, spans) in mid_writes {
+            if spans.is_empty() {
+                continue;
+            }
+            if batched {
+                for span in &spans {
+                    mask.insert_merge_touching_or_overlapping(*span);
+                }
+            }
+            let mut log = mid_write_intervals::MidWriteLog::default();
+            log.record(0, &spans);
+            mid_write.insert(start, log);
+        }
         IntervalDisk {
             written,
             mask,
             dirty: BTreeSet::new(),
             last_completion,
+            mid_write,
+            mid_write_seq: 0,
+        }
+    }
+
+    /// Each submodule's `mid_write_intervals.json` spans, clipped to that
+    /// submodule. A torn tail is ignored and cut off the file.
+    fn load_mid_write_logs(
+        submodules: &SubmoduleMap,
+    ) -> eyre::Result<BTreeMap<PartitionChunkOffset, Vec<Interval<PartitionChunkOffset>>>> {
+        let mut logs = BTreeMap::new();
+        for (submodule_interval, submodule) in submodules.iter() {
+            let path = recover_mutex(&submodule.mid_write_file);
+            let spans: Vec<_> = mid_write_intervals::read_mid_write_file(&path)?
+                .into_iter()
+                .filter_map(|span| {
+                    let start = span.start().max(submodule_interval.start());
+                    let end = span.end().min(submodule_interval.end());
+                    (start <= end).then(|| ii(start, end))
+                })
+                .collect();
+            if !spans.is_empty() {
+                logs.insert(submodule_interval.start(), spans);
+            }
+        }
+        Ok(logs)
+    }
+
+    /// Relabel every listed offset `Uninitialized`. Labels outside the list,
+    /// `Entropy` placements included, stay as `intervals.json` stored them.
+    fn apply_mid_write_spans(
+        intervals: &mut StorageIntervals,
+        mid_writes: &BTreeMap<PartitionChunkOffset, Vec<Interval<PartitionChunkOffset>>>,
+        module_id: usize,
+    ) {
+        let mut applied = 0_usize;
+        for span in mid_writes.values().flatten() {
+            let _ = intervals.cut(*span);
+            let _ =
+                intervals.insert_merge_touching_if_values_equal(*span, ChunkType::Uninitialized);
+            applied += 1;
+        }
+        if applied > 0 {
+            error!(
+                "Found {applied} interrupted writes in {} for storage module {module_id}",
+                mid_write_intervals::MID_WRITE_INTERVALS_FILE
+            );
         }
     }
 
@@ -6292,6 +6739,7 @@ impl StorageModule {
     fn publish_crc_cut(&self, offset: PartitionChunkOffset) -> eyre::Result<()> {
         let snapshot_epoch = self.load_interval_image_epoch();
         let snapshot_publish = self.load_publish_generation();
+        let snapshot_mid_seq = self.load_mid_write_seq();
         let mut memory = recover_read(&self.intervals).clone();
         let nondurable = self.snapshot_nondurable_offsets();
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
@@ -6308,9 +6756,12 @@ impl StorageModule {
         if let Err(err) = self.write_interval_image_locked(
             &projection,
             Some(&touched),
-            snapshot_epoch,
-            crc_epoch,
-            snapshot_publish,
+            ImageSnapshot {
+                epoch: snapshot_epoch,
+                crc_epoch,
+                publish: snapshot_publish,
+                mid_seq: snapshot_mid_seq,
+            },
             false,
         ) {
             let _ = self.crc_cut_epoch.fetch_sub(1, Ordering::SeqCst);
@@ -7146,6 +7597,7 @@ impl StorageModule {
         let snapshot_epoch = self.load_interval_image_epoch();
         let snapshot_crc_epoch = self.load_crc_cut_epoch();
         let snapshot_publish = self.load_publish_generation();
+        let snapshot_mid_seq = self.load_mid_write_seq();
         let mut memory = recover_read(&self.intervals).clone();
         let nondurable = self.snapshot_nondurable_offsets();
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
@@ -7155,9 +7607,12 @@ impl StorageModule {
         if let Err(err) = self.write_interval_image(
             &memory,
             None,
-            snapshot_epoch,
-            snapshot_crc_epoch,
-            snapshot_publish,
+            ImageSnapshot {
+                epoch: snapshot_epoch,
+                crc_epoch: snapshot_crc_epoch,
+                publish: snapshot_publish,
+                mid_seq: snapshot_mid_seq,
+            },
             true,
         ) {
             self.restore_rollback_intervals(previous_map, previous_generation);
@@ -11754,6 +12209,7 @@ mod tests {
                     priority: disk_lane::WritePriority::Ingress,
                     queued_at: Instant::now(),
                     pwrite_at: None,
+                    parked_at: Instant::now(),
                 },
             );
             pending
@@ -15717,6 +16173,38 @@ mod tests {
         read_intervals_file(&submodule_interval_path(module, 0))
     }
 
+    fn mid_write_file_path(module: &StorageModule, nth: usize) -> std::path::PathBuf {
+        module
+            .submodules
+            .iter()
+            .nth(nth)
+            .expect("submodule")
+            .1
+            .mid_write_file
+            .lock()
+            .expect("mid-write path")
+            .clone()
+    }
+
+    /// Spans `mid_write_intervals.json` of the first submodule lists on disk.
+    fn mid_write_spans(
+        module: &StorageModule,
+    ) -> eyre::Result<Vec<Interval<PartitionChunkOffset>>> {
+        mid_write_intervals::read_mid_write_file(&mid_write_file_path(module, 0))
+    }
+
+    /// A crash now reloads `offset` as `Uninitialized`: `intervals.json` says
+    /// `Interrupted`, or `mid_write_intervals.json` lists it.
+    fn fenced_on_disk(module: &StorageModule, offset: u32) -> eyre::Result<bool> {
+        let offset = PartitionChunkOffset::from(offset);
+        let interrupted =
+            file_intervals(module)?.get_at_point(offset).copied() == Some(ChunkType::Interrupted);
+        let listed = mid_write_spans(module)?
+            .iter()
+            .any(|span| span.contains_point(offset));
+        Ok(interrupted || listed)
+    }
+
     #[test]
     fn corrupt_intervals_file_names_its_path() -> eyre::Result<()> {
         let (tmp, config, storage) = interval_batch_module("corrupt_intervals", 0)?;
@@ -16083,10 +16571,7 @@ mod tests {
             Some(ChunkType::Entropy)
         );
         let file = file_intervals(&storage)?;
-        assert_eq!(
-            file.get_at_point(PartitionChunkOffset::from(0)).copied(),
-            Some(ChunkType::Interrupted)
-        );
+        assert!(fenced_on_disk(&storage, 0)?);
         assert_eq!(
             file.get_at_point(PartitionChunkOffset::from(1)).copied(),
             Some(ChunkType::Entropy)
@@ -16104,6 +16589,484 @@ mod tests {
         );
         drop(reloaded);
         drop(tmp);
+        Ok(())
+    }
+
+    /// `interval_batch_module` with every offset already `Entropy`, stored.
+    fn entropy_batch_module(
+        prefix: &str,
+        persist_secs: u64,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        StorageModule,
+    )> {
+        let (tmp, config, storage) = interval_batch_module(prefix, persist_secs)?;
+        {
+            let mut intervals = storage.intervals.write().unwrap();
+            *intervals = StorageIntervals::new();
+            intervals
+                .insert_merge_touching_if_values_equal(
+                    partition_chunk_offset_ii!(0, 10),
+                    ChunkType::Entropy,
+                )
+                .expect("entropy span");
+        }
+        storage.write_intervals_to_submodules()?;
+        Ok((tmp, config, storage))
+    }
+
+    fn image_commits(storage: &StorageModule) -> u64 {
+        storage.interval_image_commits.load(Ordering::SeqCst)
+    }
+
+    fn mid_write_syncs(storage: &StorageModule) -> u64 {
+        storage.mid_write_syncs.load(Ordering::SeqCst)
+    }
+
+    /// An `Entropy` overwrite appends its span to `mid_write_intervals.json`
+    /// and fsyncs it before the payload write. `intervals.json` is not
+    /// replaced. The pwrite is injected to fail, so the log entry is proof
+    /// the append ran first.
+    #[test]
+    fn entropy_overwrite_logs_the_run_before_pwrite_without_rewriting_intervals() -> eyre::Result<()>
+    {
+        let (_tmp, _config, storage) = entropy_batch_module("mid_write_append", 30)?;
+        let path = submodule_interval_path(&storage, 0);
+        let stored = fs::read(&path)?;
+        let commits = image_commits(&storage);
+        let offset = PartitionChunkOffset::from(3);
+        assert!(storage.write_chunk(offset, vec![7_u8; 32], ChunkType::Data));
+        storage.disk.fail_next_pwrites(1);
+        let _ = storage.sync_pending_chunks();
+        assert_eq!(mid_write_syncs(&storage), 1, "one fsynced append");
+        assert_eq!(
+            mid_write_spans(&storage)?,
+            vec![partition_chunk_offset_ii!(3, 3)],
+            "the span was logged before the failed pwrite"
+        );
+        assert_eq!(fs::read(&path)?, stored, "intervals.json was replaced");
+        assert_eq!(image_commits(&storage), commits);
+
+        // The retry pwrites the same run. The mask still holds it.
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(offset));
+        assert_eq!(mid_write_syncs(&storage), 1, "the retry appended again");
+        assert_eq!(fs::read(&path)?, stored, "the completion rewrote early");
+        assert_eq!(image_commits(&storage), commits);
+        assert!(
+            !storage.is_data_chunk_persisted_at(offset),
+            "a logged offset reloads Uninitialized, so it is not persisted"
+        );
+        assert_eq!(
+            storage.get_chunk_type(&PartitionChunkOffset::from(4)),
+            Some(ChunkType::Entropy)
+        );
+        Ok(())
+    }
+
+    /// The first write retires, so the mask no longer holds its span. The
+    /// log still does, and a second write inside it does not append.
+    #[test]
+    fn write_inside_a_logged_span_does_not_append_again() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = entropy_batch_module("mid_write_covered", 30)?;
+        for offset in [3_u32, 4] {
+            assert!(storage.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![7_u8; 32],
+                ChunkType::Data,
+            ));
+        }
+        storage.sync_pending_chunks()?;
+        assert_eq!(mid_write_syncs(&storage), 1);
+        assert_eq!(
+            mid_write_spans(&storage)?,
+            vec![partition_chunk_offset_ii!(3, 4)]
+        );
+        assert!(
+            !storage
+                .lock_interval_disk()
+                .mask
+                .contains_point(PartitionChunkOffset::from(4)),
+            "the completed run is still masked"
+        );
+
+        let offset = PartitionChunkOffset::from(4);
+        assert!(storage.write_chunk(offset, vec![8_u8; 32], ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(offset));
+        assert_eq!(mid_write_syncs(&storage), 1, "a logged span appended again");
+        assert_eq!(
+            mid_write_spans(&storage)?,
+            vec![partition_chunk_offset_ii!(3, 4)]
+        );
+        Ok(())
+    }
+
+    /// A replace that read the log sequence before a later append must keep
+    /// that append: its image was copied before the span was in flight.
+    #[test]
+    fn compaction_keeps_appends_after_the_image_snapshot() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = entropy_batch_module("mid_write_snapshot", 30)?;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(3),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        let snapshot = storage.load_mid_write_seq();
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(6),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        assert_eq!(mid_write_syncs(&storage), 2);
+
+        let (interval, submodule) = storage.submodules.iter().next().expect("submodule");
+        storage.compact_mid_write(interval.start(), submodule, snapshot);
+        assert_eq!(
+            mid_write_spans(&storage)?,
+            vec![partition_chunk_offset_ii!(6, 6)],
+            "the later append was truncated"
+        );
+        let disk = storage.lock_interval_disk();
+        let log = disk.mid_write.get(&interval.start()).expect("log");
+        assert_eq!(log.recorded_spans(), vec![partition_chunk_offset_ii!(6, 6)]);
+        Ok(())
+    }
+
+    /// Each fold point rewrites `intervals.json` once, stores the completed
+    /// `Data`, and truncates `mid_write_intervals.json`. Shutdown is the
+    /// sequence `Drop` runs: a forced sync, then the authoritative persist.
+    #[rstest]
+    #[case::persist_timer("timer")]
+    #[case::force_sync("force_sync")]
+    #[case::shutdown("shutdown")]
+    fn fold_points_rewrite_intervals_once_and_truncate_the_log(
+        #[case] point: &str,
+    ) -> eyre::Result<()> {
+        let (tmp, config, storage) = entropy_batch_module(&format!("mid_write_fold_{point}"), 30)?;
+        let offset = PartitionChunkOffset::from(3);
+        assert!(storage.write_chunk(offset, vec![7_u8; 32], ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        assert_eq!(mid_write_spans(&storage)?.len(), 1);
+        let commits = image_commits(&storage);
+        match point {
+            "timer" => {
+                storage.flush_interval_completions_locked(false)?;
+                assert_eq!(image_commits(&storage), commits, "folded before the period");
+                // Age the completion past the period instead of sleeping, so
+                // a slow runner cannot make it due early.
+                let start = *storage.submodules.iter().next().expect("submodule").0;
+                let aged = Instant::now()
+                    .checked_sub(Duration::from_secs(31))
+                    .expect("monotonic clock is past 31s");
+                storage
+                    .lock_interval_disk()
+                    .last_completion
+                    .insert(start.start(), aged);
+                storage.flush_interval_completions_locked(false)?;
+            }
+            "force_sync" => storage.force_sync_pending_chunks()?,
+            "shutdown" => {
+                storage.force_sync_pending_chunks()?;
+                storage.persist_intervals_authoritative(false)?;
+            }
+            other => unreachable!("{other}"),
+        }
+        assert_eq!(image_commits(&storage), commits + 1, "{point}: one rewrite");
+        assert_eq!(file_label(&storage, 3)?, Some(ChunkType::Data));
+        assert_eq!(file_label(&storage, 4)?, Some(ChunkType::Entropy));
+        assert_eq!(
+            fs::metadata(mid_write_file_path(&storage, 0))?.len(),
+            0,
+            "{point}: the log was not truncated"
+        );
+        assert!(storage.lock_interval_disk().mid_write.is_empty());
+        assert!(storage.is_data_chunk_persisted_at(offset));
+        drop(storage);
+
+        let reopened = StorageModule::new(&one_span(10, "sub", None), &config)?;
+        assert_eq!(reopened.get_chunk_type(&offset), Some(ChunkType::Data));
+        assert_eq!(
+            reopened.get_chunk_type(&PartitionChunkOffset::from(4)),
+            Some(ChunkType::Entropy)
+        );
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// The truncate after a fold changes the file and then fails. The old
+    /// entry stays (the offset is still not persisted), but it no longer
+    /// covers writes: a second write of that offset appends again.
+    #[test]
+    fn failed_truncate_stops_the_log_covering_writes() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = entropy_batch_module("mid_write_bad_truncate", 30)?;
+        let offset = PartitionChunkOffset::from(3);
+        assert!(storage.write_chunk(offset, vec![7_u8; 32], ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        assert_eq!(mid_write_syncs(&storage), 1);
+        storage
+            .fail_next_mid_write_truncate
+            .store(true, Ordering::SeqCst);
+        storage.force_sync_pending_chunks()?;
+        assert_eq!(file_label(&storage, 3)?, Some(ChunkType::Data));
+        assert!(
+            mid_write_spans(&storage)?.is_empty(),
+            "the file was truncated"
+        );
+        assert!(
+            !storage.is_data_chunk_persisted_at(offset),
+            "an entry whose truncate failed was treated as folded"
+        );
+
+        assert!(storage.write_chunk(offset, vec![8_u8; 32], ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        assert_eq!(
+            mid_write_syncs(&storage),
+            2,
+            "a distrusted entry covered the second write"
+        );
+        assert_eq!(
+            mid_write_spans(&storage)?,
+            vec![partition_chunk_offset_ii!(3, 3)]
+        );
+        Ok(())
+    }
+
+    /// A write inside a logged span takes a fresh sequence. A replace that
+    /// read the older one keeps the span in the file while it is in flight.
+    #[test]
+    fn rearmed_span_survives_a_replace_that_read_an_older_sequence() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = entropy_batch_module("mid_write_rearm", 30)?;
+        let offset = PartitionChunkOffset::from(3);
+        assert!(storage.write_chunk(offset, vec![7_u8; 32], ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        let older = storage.load_mid_write_seq();
+        assert!(storage.write_chunk(offset, vec![8_u8; 32], ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        assert_eq!(mid_write_syncs(&storage), 1, "the covered write appended");
+        assert!(storage.load_mid_write_seq() > older, "no fresh sequence");
+
+        let (interval, submodule) = storage.submodules.iter().next().expect("submodule");
+        storage.compact_mid_write(interval.start(), submodule, older);
+        assert_eq!(
+            mid_write_spans(&storage)?,
+            vec![partition_chunk_offset_ii!(3, 3)],
+            "a replace that read the older sequence truncated the rearmed span"
+        );
+        let disk = storage.lock_interval_disk();
+        let log = disk.mid_write.get(&interval.start()).expect("log");
+        assert!(log.covers(partition_chunk_offset_ii!(3, 3)));
+        Ok(())
+    }
+
+    /// Period 0 never retires a mask span. A logged span loaded there must
+    /// not be masked, or a later replace would store it `Interrupted` over
+    /// durable `Data`.
+    #[test]
+    fn period_zero_open_does_not_mask_logged_spans() -> eyre::Result<()> {
+        let (tmp, config, storage) = entropy_batch_module("mid_write_open_period_0", 0)?;
+        let log = mid_write_file_path(&storage, 0);
+        drop(storage);
+        mid_write_intervals::append_mid_write(&log, &[partition_chunk_offset_ii!(2, 2)], false)?;
+
+        let reopened = StorageModule::new(&one_span(10, "sub", None), &config)?;
+        let offset = PartitionChunkOffset::from(2);
+        assert_eq!(
+            reopened.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized)
+        );
+        assert!(
+            !reopened.lock_interval_disk().mask.contains_point(offset),
+            "period 0 masked a logged span"
+        );
+        assert!(reopened.write_chunk(offset, vec![7_u8; 32], ChunkType::Data));
+        reopened.sync_pending_chunks()?;
+        assert_eq!(file_label(&reopened, 2)?, Some(ChunkType::Data));
+        assert!(
+            mid_write_spans(&reopened)?.is_empty(),
+            "the replace kept the log"
+        );
+        assert!(reopened.lock_interval_disk().mask.iter().next().is_none());
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A real drop folds the log too.
+    #[test]
+    fn clean_drop_folds_the_mid_write_log() -> eyre::Result<()> {
+        let (tmp, config, storage) = entropy_batch_module("mid_write_drop", 30)?;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(3),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        let log = mid_write_file_path(&storage, 0);
+        drop(storage);
+        assert_eq!(fs::metadata(&log)?.len(), 0, "drop left the log");
+        let reopened = StorageModule::new(&one_span(10, "sub", None), &config)?;
+        assert_eq!(
+            reopened.get_chunk_type(&PartitionChunkOffset::from(3)),
+            Some(ChunkType::Data)
+        );
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// Open with a log that no `intervals.json` replace folded in. Listed
+    /// offsets reload `Uninitialized` and seed the mask. Data and Entropy
+    /// outside the log keep their labels, and the tx placement stays.
+    /// Open does not rewrite either file.
+    #[test]
+    fn open_applies_the_mid_write_log_over_intervals() -> eyre::Result<()> {
+        let (tmp, config, storage, data_root) =
+            indexed_entropy_module("mid_write_open", SubmoduleIndexEngine::Rocksdb)?;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        let log = mid_write_file_path(&storage, 0);
+        let intervals_path = submodule_interval_path(&storage, 0);
+        drop(storage);
+        assert_eq!(fs::metadata(&log)?.len(), 0);
+        // A crash after this append, mid-`pwrite`, with no fold after it.
+        mid_write_intervals::append_mid_write(&log, &[partition_chunk_offset_ii!(2, 3)], false)?;
+        let stored = fs::read(&intervals_path)?;
+
+        let reopened = StorageModule::new(&indexed_entropy_info(&config), &config)?;
+        assert_eq!(live_label(&reopened, 0), Some(ChunkType::Data));
+        assert_eq!(live_label(&reopened, 1), Some(ChunkType::Entropy));
+        assert_eq!(live_label(&reopened, 2), Some(ChunkType::Uninitialized));
+        assert_eq!(live_label(&reopened, 3), Some(ChunkType::Uninitialized));
+        for offset in 4..=10 {
+            assert_eq!(
+                live_label(&reopened, offset),
+                Some(ChunkType::Entropy),
+                "offset {offset}"
+            );
+        }
+        assert_indexed_entropy(&reopened, data_root)?;
+        assert!(
+            reopened
+                .lock_interval_disk()
+                .mask
+                .contains_interval(partition_chunk_offset_ii!(2, 3)),
+            "the log did not seed the mask"
+        );
+        assert_eq!(
+            fs::read(&intervals_path)?,
+            stored,
+            "open rewrote intervals.json"
+        );
+        assert_eq!(
+            mid_write_spans(&reopened)?,
+            vec![partition_chunk_offset_ii!(2, 3)]
+        );
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A torn last line is ignored and cut off. The good line before it applies.
+    #[test]
+    fn torn_mid_write_tail_is_ignored() -> eyre::Result<()> {
+        let (tmp, config, storage) = entropy_batch_module("mid_write_torn", 30)?;
+        let log = mid_write_file_path(&storage, 0);
+        storage.suppress_interval_flush_for_test();
+        drop(storage);
+        mid_write_intervals::append_mid_write(&log, &[partition_chunk_offset_ii!(2, 2)], false)?;
+        let good_len = fs::metadata(&log)?.len();
+        let mut file = OpenOptions::new().append(true).open(&log)?;
+        file.write_all(b"0000abcd [[{\"start\":5,\"en")?;
+        drop(file);
+
+        let reopened = StorageModule::new(&one_span(10, "sub", None), &config)?;
+        assert_eq!(
+            reopened.get_chunk_type(&PartitionChunkOffset::from(2)),
+            Some(ChunkType::Uninitialized)
+        );
+        assert_eq!(
+            reopened.get_chunk_type(&PartitionChunkOffset::from(5)),
+            Some(ChunkType::Entropy),
+            "the torn line was applied"
+        );
+        assert_eq!(
+            fs::metadata(&log)?.len(),
+            good_len,
+            "the torn tail was kept"
+        );
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// Packing into `Uninitialized` still marks up to 512 MiB ahead in
+    /// `intervals.json` with one rewrite. The next pack inside that span
+    /// skips it, and nothing is appended to the log.
+    #[test]
+    fn uninitialized_pack_still_marks_ahead_in_intervals() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = interval_batch_module("mid_write_pack", 30)?;
+        let commits = image_commits(&storage);
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![1_u8; 32],
+            ChunkType::Entropy,
+        ));
+        storage.sync_pending_chunks()?;
+        assert_eq!(image_commits(&storage), commits + 1);
+        let file = file_intervals(&storage)?;
+        for offset in 0..=10 {
+            assert_eq!(
+                file.get_at_point(PartitionChunkOffset::from(offset))
+                    .copied(),
+                Some(ChunkType::Interrupted),
+                "offset {offset} is not marked ahead"
+            );
+        }
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![2_u8; 32],
+            ChunkType::Entropy,
+        ));
+        storage.sync_pending_chunks()?;
+        assert_eq!(
+            image_commits(&storage),
+            commits + 1,
+            "a covered pack rewrote"
+        );
+        assert_eq!(mid_write_syncs(&storage), 0);
+        assert!(mid_write_spans(&storage)?.is_empty());
+        Ok(())
+    }
+
+    /// Period 0 still replaces `intervals.json` on every sync and never logs.
+    #[test]
+    fn period_zero_rewrites_on_every_sync_without_the_log() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = entropy_batch_module("mid_write_period_0", 0)?;
+        for offset in [3_u32, 6] {
+            let commits = image_commits(&storage);
+            assert!(storage.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![7_u8; 32],
+                ChunkType::Data,
+            ));
+            storage.sync_pending_chunks()?;
+            assert!(
+                image_commits(&storage) > commits,
+                "offset {offset}: the sync did not rewrite"
+            );
+            assert_eq!(file_label(&storage, offset)?, Some(ChunkType::Data));
+        }
+        assert_eq!(mid_write_syncs(&storage), 0);
+        assert!(mid_write_spans(&storage)?.is_empty());
         Ok(())
     }
 
@@ -16194,9 +17157,8 @@ mod tests {
         storage.sync_pending_chunks()?;
         assert!(storage.is_data_chunk_durable_at(written));
         assert_eq!(live_label(&storage, 5), Some(ChunkType::Entropy));
-        assert_eq!(
-            file_label(&storage, 0)?,
-            Some(ChunkType::Interrupted),
+        assert!(
+            fenced_on_disk(&storage, 0)?,
             "{engine:?}: the run fence was published before the completion period"
         );
         assert_eq!(
@@ -16248,9 +17210,8 @@ mod tests {
             format!("{failed:#}").contains("BeforeDataFsync"),
             "{engine:?}: {failed:#}"
         );
-        assert_eq!(
-            file_label(&storage, 0)?,
-            Some(ChunkType::Interrupted),
+        assert!(
+            fenced_on_disk(&storage, 0)?,
             "{engine:?}: the in-flight run was not fenced"
         );
         assert_eq!(
@@ -18714,6 +19675,158 @@ mod tests {
         Ok(())
     }
 
+    /// Like [`durable_spacing_module`], with room for 20 writes one chunk apart.
+    fn gather_module(
+        prefix: &str,
+        min_durable_interval_ms: u64,
+    ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let chunk_size = 32;
+        let config = testing_config_tuned(tmp_dir.path(), chunk_size, 64, |node| {
+            node.storage = StorageSyncConfig {
+                num_writes_before_sync: 1,
+                entropy_sweep_interval_millis: 60_000,
+                entropy_sweep_max_bytes: chunk_size,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms,
+                ..StorageSyncConfig::default()
+            };
+        });
+        let storage = StorageModule::new(
+            &one_span(63, "chunks", Some(PartitionAssignment::default())),
+            &config,
+        )?;
+        Ok((tmp_dir, storage))
+    }
+
+    /// The last durable point is older than the interval. A data-sync write
+    /// would otherwise fdatasync on its own.
+    fn age_last_durable_point(storage: &StorageModule, by: Duration) {
+        let earlier = Instant::now()
+            .checked_sub(by)
+            .expect("host uptime covers the backdated point");
+        *storage.last_durable_at.lock().unwrap() = Some(earlier);
+    }
+
+    /// Twenty data-sync writes that arrive after an idle interval share one
+    /// fdatasync. The first write opens a window; it does not sync alone.
+    #[test]
+    fn data_sync_writes_after_an_idle_interval_share_one_durable_point() -> eyre::Result<()> {
+        // Twenty synchronous commits must fit inside the window on a loaded
+        // runner, so the window is wide.
+        let interval = Duration::from_millis(3_000);
+        let (_tmp, storage) = gather_module("durable_gather_direct", 3_000)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+        let seeded = storage.durable_point_counts();
+        assert_eq!(seeded.immediate(), 1);
+
+        age_last_durable_point(&storage, Duration::from_secs(5));
+        let offsets: Vec<u32> = (0..20).map(|i| 2 + 2 * i).collect();
+        let mut opened = None;
+        for (i, offset) in offsets.iter().enumerate() {
+            write_spacing_chunk(&storage, *offset, u8::try_from(i + 2).expect("byte"));
+            storage.sync_pending_chunks()?;
+            // The window opens when the first write is parked.
+            opened.get_or_insert_with(Instant::now);
+            assert!(
+                !storage.is_data_chunk_durable_at(PartitionChunkOffset::from(*offset)),
+                "write {i} at {offset} took its own durable point"
+            );
+        }
+        assert_eq!(storage.durable_point_counts(), seeded);
+
+        wait_monotonic(opened.expect("twenty writes"), interval);
+        storage.sync_pending_chunks()?;
+        for offset in &offsets {
+            assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(*offset)));
+        }
+        assert!(!storage.has_pending_writes());
+        let points = storage.durable_point_counts().saturating_delta(seeded);
+        assert_eq!(points.deferred_interval, 1, "{points:?}");
+        assert_eq!(points.immediate(), 0, "{points:?}");
+        Ok(())
+    }
+
+    /// Same window on the disk lane. The lane pwrites the first write before
+    /// the others arrive, and still runs one fdatasync for all twenty. The
+    /// window is wider than the 250 ms default so nineteen lane handoffs fit
+    /// inside it on a loaded runner.
+    #[test]
+    fn lane_runs_one_fdatasync_for_twenty_data_sync_writes() -> eyre::Result<()> {
+        let (_tmp, storage) = gather_module("durable_gather_lane", 2_000)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        let seeded = storage.durable_point_counts();
+        assert_eq!(seeded.immediate(), 1);
+        age_last_durable_point(&storage, Duration::from_secs(5));
+
+        let storage = Arc::new(storage);
+        let lane = LaneGuard::start(Arc::clone(&storage))?;
+        let offsets: Vec<u32> = (0..20).map(|i| 2 + 2 * i).collect();
+        write_spacing_chunk(&lane.module, offsets[0], 2);
+        lane.module.sync_pending_chunks()?;
+        // Wait for the lane to pwrite the first write. The old rule synced
+        // it alone here.
+        let first = PartitionChunkOffset::from(offsets[0]);
+        let started = Instant::now();
+        while !lane
+            .module
+            .pending_writes
+            .read()
+            .unwrap()
+            .written_ahead
+            .contains_key(&first)
+            && !lane.module.is_data_chunk_durable_at(first)
+        {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the lane did not write the first chunk"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for (i, offset) in offsets.iter().enumerate().skip(1) {
+            write_spacing_chunk(&lane.module, *offset, u8::try_from(i + 2).expect("byte"));
+            lane.module.sync_pending_chunks()?;
+        }
+        wait_until_drained(
+            &lane.module,
+            Duration::from_secs(10),
+            "the gather window never became durable",
+        );
+        for offset in &offsets {
+            assert!(
+                lane.module
+                    .is_data_chunk_durable_at(PartitionChunkOffset::from(*offset))
+            );
+        }
+        let points = lane.module.durable_point_counts().saturating_delta(seeded);
+        assert_eq!(points.deferred_interval, 1, "{points:?}");
+        assert_eq!(points.immediate(), 0, "{points:?}");
+        Ok(())
+    }
+
+    /// The gather window is for data-sync writes. A packing write after an
+    /// idle interval still takes its point right away.
+    #[test]
+    fn entropy_write_after_an_idle_interval_is_not_gathered() -> eyre::Result<()> {
+        let (_tmp, storage) = gather_module("durable_gather_entropy", 60_000)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        let seeded = storage.durable_point_counts();
+        age_last_durable_point(&storage, Duration::from_secs(120));
+
+        let offset = PartitionChunkOffset::from(4);
+        assert!(storage.write_chunk(offset, vec![7_u8; 32], ChunkType::Entropy));
+        storage.sync_pending_chunks()?;
+        assert!(!storage.has_pending_writes());
+        assert_eq!(storage.get_chunk_type(&offset), Some(ChunkType::Entropy));
+        let points = storage.durable_point_counts().saturating_delta(seeded);
+        assert_eq!(points.immediate_interval, 1, "{points:?}");
+        Ok(())
+    }
+
     fn defer_query() -> DurableDeferQuery {
         DurableDeferQuery {
             force: false,
@@ -18724,6 +19837,7 @@ mod tests {
             headroom_bytes: 400,
             headroom_open: true,
             recall_flush_owed: false,
+            gather_age: None,
         }
     }
 
@@ -18785,6 +19899,35 @@ mod tests {
                 decision.headroom_open
             );
         }
+
+        // A gather window that opened after the last point's interval waits
+        // its own interval. The ceiling, headroom, and force still cut it.
+        let mut query = defer_query();
+        query.since_last = Some(Duration::from_secs(5));
+        query.gather_age = Some(Duration::from_millis(1));
+        assert_eq!(durable_point_decision(query).cause, None);
+        query.gather_age = Some(Duration::from_millis(250));
+        assert_eq!(
+            durable_point_decision(query).cause,
+            Some(DurablePointCause::Interval)
+        );
+        query.gather_age = Some(Duration::from_millis(1));
+        query.pending_bytes = 1_001;
+        assert_eq!(
+            durable_point_decision(query).cause,
+            Some(DurablePointCause::Ceiling)
+        );
+        query.pending_bytes = 401;
+        assert_eq!(
+            durable_point_decision(query).cause,
+            Some(DurablePointCause::Headroom)
+        );
+        query.pending_bytes = 0;
+        query.force = true;
+        assert_eq!(
+            durable_point_decision(query).cause,
+            Some(DurablePointCause::Forced)
+        );
     }
 
     fn submit_slot(config: &Config, hash: H256, slot: usize) -> PartitionAssignment {
@@ -21539,9 +22682,8 @@ mod tests {
             Some(ChunkType::Uninitialized),
             "open did not convert Interrupted"
         );
-        assert_eq!(
-            file_label(&reopened, 0)?,
-            Some(ChunkType::Interrupted),
+        assert!(
+            fenced_on_disk(&reopened, 0)?,
             "the completion rewrite ran before the crash"
         );
         assert_not_served_as_data(&reopened, offset)?;

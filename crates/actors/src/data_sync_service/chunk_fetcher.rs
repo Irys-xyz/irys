@@ -1,10 +1,120 @@
-use irys_types::{ChunkFormat, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset};
+use irys_domain::ChunkType;
+use irys_types::{
+    ChunkFormat, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
+};
 use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{Arc, RwLock},
     time::Duration,
 };
+
+/// Largest intervals body read from a peer. An older peer ignores the window
+/// and sends its whole list; past this the answer is dropped and the peer's
+/// coverage stays unknown, which means per-offset probing as before.
+const MAX_INTERVALS_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Data intervals one assignee reported for its slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataIntervalsPage {
+    /// Partition-relative, inclusive, ascending, touching runs merged.
+    pub intervals: Vec<(u32, u32)>,
+    pub coverage: IntervalsCoverage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntervalsCoverage {
+    /// Complete from the requested start through `end`. `assigned` is false
+    /// when the peer has no storage module for the slot.
+    Window { end: u32, assigned: bool },
+    /// The peer ignored the window and sent its whole list: an older build.
+    /// An empty full list cannot be told apart from an unassigned peer.
+    FullList,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireInterval {
+    start: u32,
+    end: u32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireIntervalsResponse {
+    ledger: DataLedger,
+    slot_index: usize,
+    chunk_type: ChunkType,
+    intervals: Vec<WireInterval>,
+    #[serde(default)]
+    range: Option<WireInterval>,
+    #[serde(default)]
+    assigned: Option<bool>,
+}
+
+/// Parse and check one `/storage/intervals` body. The peer is not trusted:
+/// the echo must match the request, runs must be ordered and inside the
+/// window, and a windowed answer must start where it was asked to.
+pub fn parse_data_intervals(
+    body: &[u8],
+    ledger: DataLedger,
+    slot_index: usize,
+    start: u32,
+    end: u32,
+) -> Result<DataIntervalsPage, ChunkFetchError> {
+    let invalid = |message: String| ChunkFetchError::InvalidResponse { message };
+    let wire: WireIntervalsResponse =
+        serde_json::from_slice(body).map_err(|e| invalid(format!("intervals JSON: {e}")))?;
+    if wire.ledger != ledger || wire.slot_index != slot_index || wire.chunk_type != ChunkType::Data
+    {
+        return Err(invalid(format!(
+            "intervals answer is for {:?} slot {} {:?}",
+            wire.ledger, wire.slot_index, wire.chunk_type
+        )));
+    }
+    let coverage = match wire.range {
+        Some(range) => {
+            if range.start != start || range.end < start || range.end > end {
+                return Err(invalid(format!(
+                    "intervals range {}..={} does not answer {start}..={end}",
+                    range.start, range.end
+                )));
+            }
+            IntervalsCoverage::Window {
+                end: range.end,
+                assigned: wire.assigned.unwrap_or(false),
+            }
+        }
+        None => IntervalsCoverage::FullList,
+    };
+    let (low, high) = match coverage {
+        IntervalsCoverage::Window { end, .. } => (start, end),
+        IntervalsCoverage::FullList => (0, u32::MAX),
+    };
+    let mut intervals: Vec<(u32, u32)> = Vec::with_capacity(wire.intervals.len());
+    for run in wire.intervals {
+        if run.start > run.end || run.start < low || run.end > high {
+            return Err(invalid(format!(
+                "interval {}..={} is outside {low}..={high}",
+                run.start, run.end
+            )));
+        }
+        match intervals.last_mut() {
+            Some(last) if run.start <= last.1 => {
+                return Err(invalid(format!(
+                    "interval {}..={} is not above {}",
+                    run.start, run.end, last.1
+                )));
+            }
+            Some(last) if last.1.checked_add(1) == Some(run.start) => last.1 = run.end,
+            _ => intervals.push((run.start, run.end)),
+        }
+    }
+    Ok(DataIntervalsPage {
+        intervals,
+        coverage,
+    })
+}
 
 // Define a factory function type
 pub type ChunkFetcherFactory = Box<dyn Fn(u32) -> Arc<dyn ChunkFetcher> + Send + Sync>;
@@ -97,6 +207,22 @@ pub trait ChunkFetcher: Send + Sync + std::fmt::Debug {
         api_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<ChunkFormat, ChunkFetchError>;
+
+    /// The Data intervals an assignee holds for `slot_index` in
+    /// `start..=end`. A fetcher that cannot ask leaves every peer's coverage
+    /// unknown, so data sync probes offsets one by one as before.
+    async fn fetch_data_intervals(
+        &self,
+        _slot_index: usize,
+        _start: u32,
+        _end: u32,
+        _api_addr: SocketAddr,
+        _timeout: Duration,
+    ) -> Result<DataIntervalsPage, ChunkFetchError> {
+        Err(ChunkFetchError::NotFound {
+            detail: "this fetcher does not read peer intervals".to_string(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -192,6 +318,73 @@ impl ChunkFetcher for HttpChunkFetcher {
         )
         .await
     }
+
+    async fn fetch_data_intervals(
+        &self,
+        slot_index: usize,
+        start: u32,
+        end: u32,
+        api_addr: SocketAddr,
+        timeout: Duration,
+    ) -> Result<DataIntervalsPage, ChunkFetchError> {
+        let ledger =
+            DataLedger::try_from(self.ledger_id).map_err(|e| ChunkFetchError::InvalidResponse {
+                message: e.to_string(),
+            })?;
+        // The route takes the ledger's serde name, e.g. `ThirtyDay`.
+        let url = format!(
+            "http://{api_addr}/v1/storage/intervals/{ledger:?}/{slot_index}/Data?start={start}&end={end}"
+        );
+        let read =
+            async {
+                let mut response = self.client.get(&url).send().await.map_err(|e| {
+                    ChunkFetchError::NetworkError {
+                        message: e.to_string(),
+                    }
+                })?;
+                match response.status() {
+                    reqwest::StatusCode::OK => {}
+                    reqwest::StatusCode::NOT_FOUND => {
+                        return Err(ChunkFetchError::NotFound {
+                            detail: "peer does not serve storage intervals".to_string(),
+                        });
+                    }
+                    status => {
+                        return Err(ChunkFetchError::ServerError {
+                            message: format!("intervals status {status}"),
+                        });
+                    }
+                }
+                let too_large = || ChunkFetchError::InvalidResponse {
+                    message: format!("intervals body exceeds {MAX_INTERVALS_BODY_BYTES} bytes"),
+                };
+                if response
+                    .content_length()
+                    .is_some_and(|length| length > MAX_INTERVALS_BODY_BYTES as u64)
+                {
+                    return Err(too_large());
+                }
+                let mut body = Vec::new();
+                while let Some(piece) =
+                    response
+                        .chunk()
+                        .await
+                        .map_err(|e| ChunkFetchError::NetworkError {
+                            message: e.to_string(),
+                        })?
+                {
+                    if body.len() + piece.len() > MAX_INTERVALS_BODY_BYTES {
+                        return Err(too_large());
+                    }
+                    body.extend_from_slice(&piece);
+                }
+                Ok(body)
+            };
+        let body = tokio::time::timeout(timeout, read)
+            .await
+            .map_err(|_| ChunkFetchError::Timeout)??;
+        parse_data_intervals(&body, ledger, slot_index, start, end)
+    }
 }
 
 // Mock implementation
@@ -203,6 +396,10 @@ pub struct MockChunkFetcher {
         Arc<RwLock<HashMap<(DataRoot, u32), Result<ChunkFormat, ChunkFetchError>>>>,
     pub request_log: Arc<RwLock<Vec<(LedgerChunkOffset, SocketAddr)>>>,
     pub data_root_request_log: Arc<RwLock<Vec<(DataRoot, u32, SocketAddr)>>>,
+    /// Answer per peer. A peer with no entry has no intervals route.
+    pub interval_responses:
+        Arc<RwLock<HashMap<SocketAddr, Result<DataIntervalsPage, ChunkFetchError>>>>,
+    pub interval_request_log: Arc<RwLock<Vec<(usize, u32, u32, SocketAddr)>>>,
 }
 
 #[async_trait::async_trait]
@@ -250,6 +447,30 @@ impl ChunkFetcher for MockChunkFetcher {
             }),
         }
     }
+
+    async fn fetch_data_intervals(
+        &self,
+        slot_index: usize,
+        start: u32,
+        end: u32,
+        api_addr: SocketAddr,
+        _timeout: Duration,
+    ) -> Result<DataIntervalsPage, ChunkFetchError> {
+        self.interval_request_log
+            .write()
+            .unwrap()
+            .push((slot_index, start, end, api_addr));
+        self.interval_responses
+            .read()
+            .unwrap()
+            .get(&api_addr)
+            .cloned()
+            .unwrap_or_else(|| {
+                Err(ChunkFetchError::NotFound {
+                    detail: "no intervals route".to_string(),
+                })
+            })
+    }
 }
 
 impl MockChunkFetcher {
@@ -260,6 +481,8 @@ impl MockChunkFetcher {
             data_root_responses: Default::default(),
             request_log: Default::default(),
             data_root_request_log: Default::default(),
+            interval_responses: Default::default(),
+            interval_request_log: Default::default(),
         }
     }
 
@@ -297,5 +520,171 @@ impl MockChunkFetcher {
             .unwrap()
             .insert(offset, Err(ChunkFetchError::Timeout));
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(
+        body: serde_json::Value,
+        start: u32,
+        end: u32,
+    ) -> Result<DataIntervalsPage, ChunkFetchError> {
+        parse_data_intervals(
+            body.to_string().as_bytes(),
+            DataLedger::ThirtyDay,
+            0,
+            start,
+            end,
+        )
+    }
+
+    fn body(intervals: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "ledger": "ThirtyDay",
+            "slotIndex": 0,
+            "chunkType": "Data",
+            "intervals": intervals,
+        })
+    }
+
+    /// Serve one canned HTTP response and hand back the request line.
+    async fn serve_once(
+        status: &'static str,
+        body: String,
+    ) -> (SocketAddr, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                request.extend_from_slice(&buf[..n]);
+            }
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&request)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn http_fetcher_asks_the_windowed_route_and_parses_the_answer() {
+        let mut answer = body(serde_json::json!([{"start": 12, "end": 14}]));
+        answer["range"] = serde_json::json!({"start": 10, "end": 20});
+        answer["assigned"] = serde_json::json!(true);
+        let (addr, request) = serve_once("200 OK", answer.to_string()).await;
+        let fetcher = HttpChunkFetcher::new(DataLedger::ThirtyDay.into());
+
+        let page = fetcher
+            .fetch_data_intervals(0, 10, 20, addr, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            request.await.unwrap(),
+            "GET /v1/storage/intervals/ThirtyDay/0/Data?start=10&end=20 HTTP/1.1"
+        );
+        assert_eq!(page.intervals, vec![(12, 14)]);
+        assert_eq!(
+            page.coverage,
+            IntervalsCoverage::Window {
+                end: 20,
+                assigned: true
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn http_fetcher_reports_a_missing_route_as_not_found() {
+        let (addr, _request) = serve_once("404 Not Found", String::new()).await;
+        let fetcher = HttpChunkFetcher::new(DataLedger::ThirtyDay.into());
+        let result = fetcher
+            .fetch_data_intervals(0, 10, 20, addr, Duration::from_secs(5))
+            .await;
+        assert!(matches!(result, Err(ChunkFetchError::NotFound { .. })));
+    }
+
+    #[test]
+    fn an_answer_without_a_range_is_an_older_full_list() {
+        let page = parse(body(serde_json::json!([{"start": 0, "end": 3}])), 10, 20).unwrap();
+        assert_eq!(page.coverage, IntervalsCoverage::FullList);
+        assert_eq!(page.intervals, vec![(0, 3)]);
+    }
+
+    #[test]
+    fn a_windowed_answer_reports_how_far_it_is_complete() {
+        let mut value =
+            body(serde_json::json!([{"start": 10, "end": 12}, {"start": 13, "end": 15}]));
+        value["range"] = serde_json::json!({"start": 10, "end": 18});
+        value["assigned"] = serde_json::json!(true);
+        let page = parse(value, 10, 20).unwrap();
+        assert_eq!(
+            page.coverage,
+            IntervalsCoverage::Window {
+                end: 18,
+                assigned: true
+            }
+        );
+        assert_eq!(page.intervals, vec![(10, 15)], "touching runs merge");
+    }
+
+    #[test]
+    fn a_window_without_assigned_counts_as_unassigned() {
+        let mut value = body(serde_json::json!([]));
+        value["range"] = serde_json::json!({"start": 10, "end": 20});
+        let page = parse(value, 10, 20).unwrap();
+        assert_eq!(
+            page.coverage,
+            IntervalsCoverage::Window {
+                end: 20,
+                assigned: false
+            }
+        );
+    }
+
+    #[test]
+    fn untrusted_answers_are_rejected() {
+        let mut wrong_slot = body(serde_json::json!([]));
+        wrong_slot["slotIndex"] = serde_json::json!(1);
+        let mut wrong_type = body(serde_json::json!([]));
+        wrong_type["chunkType"] = serde_json::json!("Entropy");
+        let mut wrong_start = body(serde_json::json!([]));
+        wrong_start["range"] = serde_json::json!({"start": 11, "end": 20});
+        let mut past_end = body(serde_json::json!([]));
+        past_end["range"] = serde_json::json!({"start": 10, "end": 21});
+        let mut outside = body(serde_json::json!([{"start": 5, "end": 12}]));
+        outside["range"] = serde_json::json!({"start": 10, "end": 20});
+        let unordered = body(serde_json::json!([{"start": 8, "end": 9}, {"start": 2, "end": 3}]));
+        let inverted = body(serde_json::json!([{"start": 9, "end": 8}]));
+        for (name, value) in [
+            ("wrong slot", wrong_slot),
+            ("wrong chunk type", wrong_type),
+            ("range starts elsewhere", wrong_start),
+            ("range past the window", past_end),
+            ("run outside the window", outside),
+            ("runs out of order", unordered),
+            ("inverted run", inverted),
+        ] {
+            assert!(
+                matches!(
+                    parse(value, 10, 20),
+                    Err(ChunkFetchError::InvalidResponse { .. })
+                ),
+                "{name} must be rejected"
+            );
+        }
     }
 }

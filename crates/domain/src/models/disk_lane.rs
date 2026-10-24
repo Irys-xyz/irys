@@ -4591,6 +4591,7 @@ mod tests {
                     priority: super::WritePriority::Packing,
                     queued_at: Instant::now(),
                     pwrite_at: None,
+                    parked_at: Instant::now(),
                 },
             );
         }
@@ -6898,6 +6899,7 @@ mod tests {
                     priority: super::WritePriority::Packing,
                     queued_at: Instant::now(),
                     pwrite_at: Some(Instant::now()),
+                    parked_at: Instant::now(),
                 },
             );
         }
