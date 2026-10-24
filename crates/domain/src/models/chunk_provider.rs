@@ -404,7 +404,6 @@ impl ChunkProvider {
             &ledger, &data_root, &data_tx_offset
         );
         let chunk_size = self.config.consensus.chunk_size;
-        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
         // map hashes to SMs
         let binding = self.storage_modules_guard.read();
         let sms = binding
@@ -433,7 +432,7 @@ impl ChunkProvider {
                 let Some(partition_offset) = partition_offset_for_placement(
                     info.start_offset,
                     data_tx_offset,
-                    num_chunks_in_partition,
+                    sm.partition_chunks(),
                 ) else {
                     continue;
                 };

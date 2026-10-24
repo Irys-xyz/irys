@@ -69,7 +69,12 @@ impl RemotePackingStrategy {
         let notify = self.notify.clone();
         let range_end = *current_chunk_range.0.end();
 
-        let mut process_chunk = |chunk_bytes: Bytes| -> Result<(), String> {
+        // `Ok(false)`: the offset is past the logical partition end (Estuary
+        // shrank it mid-stream); stop writing so the tail is not recreated.
+        let mut process_chunk = |chunk_bytes: Bytes| -> Result<bool, String> {
+            if u64::from(range_start) >= storage_module.partition_chunks() {
+                return Ok(false);
+            }
             if range_start > range_end {
                 return Err(format!(
                     "remote packing produced a chunk past inclusive end {range_end}"
@@ -111,7 +116,7 @@ impl RemotePackingStrategy {
             }
 
             range_start += 1;
-            Ok(())
+            Ok(true)
         };
 
         // Process streaming chunks. One item can hold many chunks, so the
@@ -130,7 +135,9 @@ impl RemotePackingStrategy {
             while buffer.len() >= chunk_size {
                 wait_for_stream_room(storage_module, stream_deadline, stream_budget).await?;
                 let chunk_to_process = buffer.split_to(chunk_size).freeze();
-                process_chunk(chunk_to_process)?;
+                if !process_chunk(chunk_to_process)? {
+                    return Ok(storage_module.partition_chunks() as u32);
+                }
             }
         }
 
@@ -159,6 +166,11 @@ impl RemotePackingStrategy {
         storage_module_id: usize,
         short_writes_before_sync: u32,
     ) -> Result<u32, String> {
+        let partition_chunks = storage_module.partition_chunks();
+        if u64::from(range_start) >= partition_chunks {
+            return Ok(range_start);
+        }
+        let range_end = range_end.min(partition_chunks as u32 - 1);
         let current_chunk_range =
             PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
 
@@ -334,6 +346,10 @@ impl RemotePackingStrategy {
                 .await
             {
                 Ok(new_start) => {
+                    // Nothing past the logical partition end is packed.
+                    if u64::from(new_start) >= storage_module.partition_chunks() {
+                        return Ok(());
+                    }
                     // Inclusive range is done only when the next offset is one
                     // past the end. `>= window_end` treats a stream that
                     // stopped on the last offset as success.

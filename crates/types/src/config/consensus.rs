@@ -856,6 +856,8 @@ impl ConsensusConfig {
                 }),
                 // Delta hardfork - not scheduled yet
                 delta: None,
+                // Estuary hardfork (partition resize) - not scheduled yet
+                estuary: None,
             },
         }
     }
@@ -1000,6 +1002,8 @@ impl ConsensusConfig {
                 // Delta hardfork - not active by default in testing;
                 // tests that need it should override via with_consensus()
                 delta: None,
+                // Estuary hardfork (partition resize) - not scheduled yet
+                estuary: None,
             },
         }
     }
@@ -1138,6 +1142,8 @@ impl ConsensusConfig {
                 }),
                 // Delta hardfork - not scheduled yet
                 delta: None,
+                // Estuary hardfork (partition resize) - not scheduled yet
+                estuary: None,
             },
         }
     }
@@ -1320,6 +1326,12 @@ mod tests {
             config.hardforks.delta.is_none(),
             "mainnet Delta is unscheduled"
         );
+        // Estuary (partition resize) — unscheduled, like Delta: scheduling it moves the
+        // canonical config hash too.
+        assert!(
+            config.hardforks.estuary.is_none(),
+            "mainnet Estuary is unscheduled"
+        );
     }
 
     /// Pins the testnet hardfork schedule: the Borealis activation time
@@ -1344,6 +1356,12 @@ mod tests {
         assert!(
             config.hardforks.delta.is_none(),
             "testnet Delta is unscheduled"
+        );
+        // Estuary (partition resize) — unscheduled, like Delta: scheduling it moves the
+        // canonical config hash too.
+        assert!(
+            config.hardforks.estuary.is_none(),
+            "testnet Estuary is unscheduled"
         );
     }
 

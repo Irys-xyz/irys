@@ -467,54 +467,6 @@ impl BlockValidationTask {
         let stage_captures: Arc<Mutex<StageFaultCaptures>> =
             Arc::new(Mutex::new(StageFaultCaptures::default()));
 
-        // Recall range validation
-        let recall_captures = Arc::clone(&stage_captures);
-        let recall_task = async move {
-            let started = Instant::now();
-            let outcome = recall_recall_range_is_valid(
-                block,
-                &self.service_inner.config.consensus,
-                &self.service_inner.vdf_state,
-                &self.service_inner.block_tree_guard,
-                &self.service_inner.db,
-                // While a re-anchor is pending the buffer is not authoritative
-                // in either direction; force the fork-local window.
-                self.service_inner
-                    .service_senders
-                    .vdf_reanchor_signals
-                    .is_buffer_suspect(),
-            )
-            .await;
-            metrics::record_validation_stage_duration_ms(
-                "recall_range",
-                started.elapsed().as_secs_f64() * 1000.0,
-            );
-            let result: ValidationResult = match outcome {
-                Ok(()) => ValidationResult::Valid,
-                Err(RecallRangeError::StepsUnavailable(err)) => {
-                    tracing::warn!(
-                        custom.error = ?err,
-                        "recall range validation: local VDF steps unavailable (soft internal)"
-                    );
-                    ValidationError::RecallRangeStepsUnavailable(err.to_string()).into()
-                }
-                Err(RecallRangeError::Mismatch(err)) => {
-                    tracing::error!(
-                        custom.error = ?err,
-                        "recall range validation failed"
-                    );
-                    ValidationError::RecallRangeInvalid(err.to_string()).into()
-                }
-            };
-            metrics::record_validation_result("recall_range", result.granular_metric_label());
-            // Side-channel write: record NodeFault / Invalid before
-            // returning so the cancel arm in `validate_block` can recover
-            // this observation even if other stages remain pending and
-            // the combined `tokio::join!` future never reports Ready.
-            capture_stage_result(&recall_captures, result)
-        }
-        .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height));
-
         // Fetch parent epoch + EMA snapshots once in the outer scope under
         // a single `block_tree.read()` and hand them to the concurrent
         // tasks below. Previously each task did its own `get_*_snapshot`
@@ -564,6 +516,56 @@ impl BlockValidationTask {
             (epoch, ema)
         };
         tracing::debug!("Using parent epoch snapshot for PoA validation");
+
+        // Recall range validation, under the parent snapshot's geometry: the
+        // activation block E itself is still sampled under the legacy layout.
+        let geometry = parent_epoch_snapshot.geometry();
+        let recall_captures = Arc::clone(&stage_captures);
+        let recall_task = async move {
+            let started = Instant::now();
+            let outcome = recall_recall_range_is_valid(
+                block,
+                geometry,
+                &self.service_inner.vdf_state,
+                &self.service_inner.block_tree_guard,
+                &self.service_inner.db,
+                // While a re-anchor is pending the buffer is not authoritative
+                // in either direction; force the fork-local window.
+                self.service_inner
+                    .service_senders
+                    .vdf_reanchor_signals
+                    .is_buffer_suspect(),
+            )
+            .await;
+            metrics::record_validation_stage_duration_ms(
+                "recall_range",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            let result: ValidationResult = match outcome {
+                Ok(()) => ValidationResult::Valid,
+                Err(RecallRangeError::StepsUnavailable(err)) => {
+                    tracing::warn!(
+                        custom.error = ?err,
+                        "recall range validation: local VDF steps unavailable (soft internal)"
+                    );
+                    ValidationError::RecallRangeStepsUnavailable(err.to_string()).into()
+                }
+                Err(RecallRangeError::Mismatch(err)) => {
+                    tracing::error!(
+                        custom.error = ?err,
+                        "recall range validation failed"
+                    );
+                    ValidationError::RecallRangeInvalid(err.to_string()).into()
+                }
+            };
+            metrics::record_validation_result("recall_range", result.granular_metric_label());
+            // Side-channel write: record NodeFault / Invalid before
+            // returning so the cancel arm in `validate_block` can recover
+            // this observation even if other stages remain pending and
+            // the combined `tokio::join!` future never reports Ready.
+            capture_stage_result(&recall_captures, result)
+        }
+        .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height));
 
         // POA validation
         let block_hash_for_error_log = self.sealed_block.header().block_hash;

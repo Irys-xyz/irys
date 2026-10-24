@@ -1,4 +1,6 @@
 use crate::ApiState;
+#[path = "storage_capacity.rs"]
+pub mod capacity;
 use crate::error::ApiError;
 use actix_web::web::{Data, Json, Path, Query};
 use awc::http::StatusCode;

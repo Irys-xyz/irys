@@ -228,6 +228,10 @@ impl super::PackingStrategy for CpuPackingStrategy {
 
         'spans: for span in gaps {
             for i in span.start().0..=span.end().0 {
+                // Gaps ascend, so nothing past the logical partition end is left to pack.
+                if u64::from(i) >= storage_module.partition_chunks() {
+                    break 'spans;
+                }
                 #[cfg(test)]
                 {
                     self.chunks_started
@@ -267,6 +271,7 @@ impl super::PackingStrategy for CpuPackingStrategy {
                 let handle = self.runtime_handle
                 .clone()
                 .spawn_blocking(move || {
+                    if u64::from(i) >= storage_module_clone.partition_chunks() { return Ok(()); }
                     let mut out = Vec::with_capacity(chunk_size);
                     compute_entropy_chunk(
                         mining_address,
