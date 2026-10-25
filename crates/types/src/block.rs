@@ -1027,6 +1027,7 @@ pub struct CombinedBlockHeader {
     Hash,
     Arbitrary,
     Compact,
+    strum::VariantArray,
 )]
 #[repr(u32)]
 #[derive(Default)]
@@ -1076,6 +1077,28 @@ impl Encode for DataLedger {
         self.get_id().to_be_bytes()
     }
 }
+
+// `VARIANTS` is derived from the enum itself, so a variant missing from
+// `DataLedger::ALL`, or `ALL` out of ledger-id order, fails to compile.
+const _: () = {
+    let variants = <DataLedger as strum::VariantArray>::VARIANTS;
+    assert!(
+        variants.len() == DataLedger::ALL.len(),
+        "DataLedger::ALL must list every variant"
+    );
+    let mut i = 0;
+    while i < variants.len() {
+        assert!(
+            variants[i] as u32 == DataLedger::ALL[i] as u32,
+            "DataLedger::ALL must match the declaration order"
+        );
+        assert!(
+            i == 0 || (DataLedger::ALL[i - 1] as u32) < (DataLedger::ALL[i] as u32),
+            "DataLedger::ALL must be in ledger-id order"
+        );
+        i += 1;
+    }
+};
 
 impl DataLedger {
     /// An array of all the Ledger numbers in order
