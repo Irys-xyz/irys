@@ -218,6 +218,8 @@ This is the fastest rollback path — it re-uses the existing tested image.
 
 > **Rollback from 4.1.x to 4.0.x on an MDBX submodule index.** The first 4.1.x
 > open migrates each submodule `db/` in place and drops the old path-hash table.
+> 4.0.x refuses a config that sets `database.submodule_index` (even to `mdbx`),
+> so remove that key before starting 4.0.x.
 > After that drop commits, 4.0.x starts, but it returns no data-path proof for a
 > migrated offset whose proof lived in the dropped table. A later 4.1.x start
 > still serves the copied offset rows. It does not import rows 4.0.x wrote into
