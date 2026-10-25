@@ -41,6 +41,33 @@ pub(super) fn valid_chunk(chunk_size: u64, fill: u8) -> UnpackedChunk {
     }
 }
 
+/// The first chunk of a two-chunk root of `chunk_size`-byte chunks. Not
+/// rightmost, so its path proves it at any `data_size` past its range.
+fn first_of_two_chunks(chunk_size: u64, fill: u8) -> UnpackedChunk {
+    let len = usize::try_from(chunk_size).expect("chunk size fits usize");
+    let first = vec![fill; len];
+    // clone: generate_leaves consumes the bytes the chunk keeps
+    let leaves = irys_types::generate_leaves(
+        [Ok(first.clone()), Ok(vec![fill.wrapping_add(1); len])].into_iter(),
+        len,
+    )
+    .expect("leaves");
+    let root = irys_types::generate_data_root(leaves).expect("root");
+    let data_root = H256(root.id);
+    let proof = irys_types::resolve_proofs(root, None)
+        .expect("proofs")
+        .into_iter()
+        .next()
+        .expect("first proof");
+    UnpackedChunk {
+        data_root,
+        data_size: chunk_size * 2,
+        data_path: proof.proof.into(),
+        bytes: first.into(),
+        tx_offset: TxChunkOffset::from(0),
+    }
+}
+
 pub(super) fn chunk_size(fixture: &GossipServiceTestFixture) -> u64 {
     fixture.config.consensus.chunk_size
 }
@@ -595,15 +622,17 @@ async fn invalid_first_source_falls_through_to_the_second() -> eyre::Result<()> 
     Ok(())
 }
 
+/// A served size that the body's own path cannot prove is bogus data.
 #[tokio::test]
-async fn body_with_a_different_data_size_is_rejected_before_ingest() -> eyre::Result<()> {
+async fn body_that_does_not_prove_its_data_size_is_rejected_before_ingest() -> eyre::Result<()> {
     let chunk = valid_chunk(32, 23);
     let (receiver, handle) = receiver_for(std::slice::from_ref(&chunk), 0).await;
     let fake = FakeGossipServer::new();
     let served = chunk.clone();
     fake.set_on_chunk_fetch(move |_| {
         let mut other = served.clone();
-        other.data_size += 1;
+        // 32 bytes cannot be the whole of a 16-byte root.
+        other.data_size = 16;
         GossipResponse::Accepted(Some(other))
     });
     let source = add_fake_peer(&receiver, 0x63, spawn_fake(fake).await);
@@ -642,7 +671,67 @@ async fn body_with_a_different_data_size_is_rejected_before_ingest() -> eyre::Re
         .get();
     assert!(
         score_after < score_before,
-        "a body with another data_size scores the source down"
+        "a body that does not prove its data_size scores the source down"
+    );
+    handle.stop().await?;
+    Ok(())
+}
+
+/// A later header can raise an unconfirmed root size after the announcement
+/// leaves, and the source then serves the larger size. A body that still
+/// proves itself is stale metadata, not bogus data: the source keeps its
+/// score and the body goes to ingest, which judges the size.
+#[tokio::test]
+async fn body_proved_at_an_inflated_data_size_does_not_score_the_source() -> eyre::Result<()> {
+    let chunk = first_of_two_chunks(32, 25);
+    let (receiver, handle) = receiver_for(std::slice::from_ref(&chunk), 0).await;
+    let fake = FakeGossipServer::new();
+    let served = chunk.clone();
+    fake.set_on_chunk_fetch(move |_| {
+        let mut inflated = served.clone();
+        inflated.data_size = 96;
+        GossipResponse::Accepted(Some(inflated))
+    });
+    let source = add_fake_peer(&receiver, 0x65, spawn_fake(fake).await);
+    let handler = receiver.data_handler().expect("handler");
+    let score_before = receiver
+        .peer_list
+        .peer_by_id(&source.peer_id)
+        .expect("source")
+        .reputation_score
+        .get();
+
+    assert!(matches!(
+        post_announce(
+            receiver.gossip_addr(),
+            &source,
+            ChunkAnnouncement::from(&chunk)
+        )
+        .await,
+        GossipResponse::Accepted(())
+    ));
+    poll_until(Duration::from_secs(10), "claim released", || {
+        handler.chunk_announce.claim_count() == 0
+    })
+    .await?;
+    assert!(
+        receiver
+            .mempool_chunks
+            .read()
+            .expect("lock")
+            .iter()
+            .any(|ingested| ingested.data_size == 96),
+        "the body reached ingest"
+    );
+    let score_after = receiver
+        .peer_list
+        .peer_by_id(&source.peer_id)
+        .expect("source")
+        .reputation_score
+        .get();
+    assert!(
+        score_after >= score_before,
+        "an inflated size is not bogus data: {score_before} -> {score_after}"
     );
     handle.stop().await?;
     Ok(())
@@ -994,6 +1083,34 @@ async fn open_breaker_does_not_stop_the_only_announcer_being_asked() -> eyre::Re
         breaker.metrics().open_count,
         0,
         "a served body closes the breaker"
+    );
+    handle.stop().await?;
+    Ok(())
+}
+
+/// `admit` reserves the claim before the fetch task runs. A task dropped
+/// before its first poll, as at runtime shutdown, must still release it.
+#[tokio::test]
+async fn fetch_task_dropped_before_its_first_poll_releases_the_claim() -> eyre::Result<()> {
+    use crate::chunk_announce::AnnounceDecision;
+
+    let chunk = valid_chunk(32, 26);
+    let (receiver, handle) = receiver_for(std::slice::from_ref(&chunk), 0).await;
+    let handler = receiver.data_handler().expect("handler");
+    let claim = ChunkAnnouncement::from(&chunk);
+    let announcer = irys_types::IrysPeerId::from([0x66_u8; 20]);
+    assert_eq!(
+        handler.chunk_announce.admit(&claim, announcer),
+        AnnounceDecision::StartFetch
+    );
+
+    drop(handler.chunk_fetch_task(claim));
+
+    assert_eq!(handler.chunk_announce.claim_count(), 0);
+    assert_eq!(
+        handler.chunk_announce.admit(&claim, announcer),
+        AnnounceDecision::StartFetch,
+        "a released claim is admitted afresh"
     );
     handle.stop().await?;
     Ok(())
