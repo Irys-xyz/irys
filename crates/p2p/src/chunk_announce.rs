@@ -359,6 +359,10 @@ impl ClaimGuard {
             announcement,
         }
     }
+
+    pub(crate) fn announcement(&self) -> &ChunkAnnouncement {
+        &self.announcement
+    }
 }
 
 impl Drop for ClaimGuard {

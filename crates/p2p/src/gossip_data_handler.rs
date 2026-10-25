@@ -47,12 +47,14 @@ const FAILED_HEADER_FETCH_CAPACITY: u64 = 10_000;
 /// Header fetches for pushed bodies above this number wait for a permit.
 const MAX_CONCURRENT_HEADER_FETCHES: usize = 16;
 
-/// A fetched body is acceptable only for the exact claim it answers.
-/// `data_size` is pinned: ingress checks the path against the confirmed
-/// size and returns `Ok` without storing a body whose length disagrees.
+/// A fetched body answers a claim when it names the same chunk.
+/// `data_size` is not compared: the source stamps its live cached root
+/// size, which any later header can raise while that size is unconfirmed.
+/// Such a body is stale metadata, not bogus data. It must still prove
+/// itself at the size it carries, ingress judges that size against ours,
+/// and `chunk_is_held` decides success.
 fn body_matches_claim(body: &UnpackedChunk, claim: &crate::wire_types::ChunkAnnouncement) -> bool {
     body.data_root == claim.data_root
-        && body.data_size == claim.data_size
         && body.tx_offset == claim.tx_offset
         && body.chunk_path_hash() == claim.chunk_path_hash
 }
@@ -294,20 +296,27 @@ where
             return Err(GossipError::RateLimited);
         }
         if decision == AnnounceDecision::StartFetch {
-            let handler = Arc::clone(self);
             self.runtime_handle
-                .spawn(handler.run_chunk_fetch(announcement).in_current_span());
+                .spawn(self.chunk_fetch_task(announcement).in_current_span());
         }
         self.cache.record_seen(announcer, key)
     }
 
+    /// The fetch task for a claim `admit` just created. The guard is built
+    /// here, not in the task body, so a task dropped before its first poll
+    /// still releases the claim.
+    pub(crate) fn chunk_fetch_task(
+        self: &Arc<Self>,
+        announcement: crate::wire_types::ChunkAnnouncement,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let claim =
+            crate::chunk_announce::ClaimGuard::new(Arc::clone(&self.chunk_announce), announcement);
+        Arc::clone(self).run_chunk_fetch(claim)
+    }
+
     /// One fetch task per claim (design, "The fetch task").
-    pub(crate) async fn run_chunk_fetch(
-        self: Arc<Self>,
-        claim: crate::wire_types::ChunkAnnouncement,
-    ) {
-        let _claim =
-            crate::chunk_announce::ClaimGuard::new(Arc::clone(&self.chunk_announce), claim);
+    async fn run_chunk_fetch(self: Arc<Self>, guard: crate::chunk_announce::ClaimGuard) {
+        let claim = *guard.announcement();
         let limits = self.chunk_announce.limits();
         let deadline = tokio::time::Instant::now() + limits.fetch_deadline;
         let delays = [
@@ -3311,7 +3320,7 @@ mod tests {
     use irys_types::H256;
 
     #[test]
-    fn body_matches_claim_checks_all_four_fields() {
+    fn body_matches_claim_checks_identity_but_not_data_size() {
         let chunk = irys_types::UnpackedChunk {
             data_root: H256::random(),
             data_size: 64,
@@ -3323,7 +3332,10 @@ mod tests {
         assert!(body_matches_claim(&chunk, &claim));
         let mut c = claim;
         c.data_size = 63;
-        assert!(!body_matches_claim(&chunk, &c), "data_size is pinned");
+        assert!(
+            body_matches_claim(&chunk, &c),
+            "a later header can change data_size"
+        );
         let mut c = claim;
         c.tx_offset = irys_types::TxChunkOffset::from(0_i32);
         assert!(!body_matches_claim(&chunk, &c));
