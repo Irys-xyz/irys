@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792771514776,
+  "lastUpdate": 1792965527144,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -19050,6 +19050,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000111,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8cea373fb5fc920ccec40fdf85b50ebf624b6c2d",
+          "message": "fix(block-discovery): validate anchors of term ledger txs (#1682)\n\n* fix(block-discovery): validate anchors of term ledger txs\n\nBlock discovery checked tx anchors only for the Submit ledger, so\nOneYear and ThirtyDay txs had no anchor check. The prior-inclusion walk\nrejects duplicates only within the anchor window, so a producer could\ninclude a term tx again after that window and charge the term fee again.\n\nThe anchor loop now covers every data ledger in the block, in ledger-id\norder, with an exhaustive match: Publish is skipped (its anchor was\nchecked on Submit inclusion, its ingress proofs are checked separately),\nand a new ledger variant must choose here.\n\nExtend the anchor double-check test with stale-anchor OneYear and\nThirtyDay txs.\n\n* test(chain-tests): reject a term tx included again past the inclusion walk\n\nMine a OneYear and a ThirtyDay tx, advance past\nmax(tx_anchor_expiry_depth, block_tree_depth), and include each again.\nThe walk no longer reaches the first inclusion, so only the anchor bound\nrejects it. Without the term anchor check the block is accepted.\n\nAlso assert that the stale-anchor sub-case puts the tx in the term\nledger, so the Submit check alone cannot make it pass.\n\n* refactor(types): check at compile time that DataLedger::ALL lists every ledger\n\nDerive strum::VariantArray on DataLedger and assert in a const block that\nALL equals the derived variant list, in ledger-id order. A new variant\nthat is not added to ALL now fails to compile.\n\nThe block-discovery anchor check now iterates DataLedger::iter() instead\nof sorting the block's tx map, and the nearby anchor comments name the\ndata-tx ledgers and the inclusion walk correctly.",
+          "timestamp": "2026-10-25T21:38:14Z",
+          "tree_id": "6abf0f843f53d01517ca078e2b3cb2cdd2ca8746",
+          "url": "https://github.com/Irys-xyz/irys/commit/8cea373fb5fc920ccec40fdf85b50ebf624b6c2d"
+        },
+        "date": 1792965525783,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015428,
+            "range": "± 0.000977",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153054,
+            "range": "± 0.007447",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.558146,
+            "range": "± 0.061223",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.988944,
+            "range": "± 0.1513",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.07879,
+            "range": "± 0.000489",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 782.54488,
+            "range": "± 12.118384",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 979.521483,
+            "range": "± 19.684123",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117314,
+            "range": "± 0.000348",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1172.795568,
+            "range": "± 1.717077",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1528.742672,
+            "range": "± 3.502669",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034148,
+            "range": "± 0.000341",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.71105,
+            "range": "± 0.172853",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.423694,
+            "range": "± 0.163689",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
             "range": "± 0",
             "unit": "ms/iter"
           }
