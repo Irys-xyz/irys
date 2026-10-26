@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{H256, PartitionChunkRange};
 
+/// Chunks one remote `/pack` request may cover. The next span is a new request.
+pub const REMOTE_PACK_WINDOW_CHUNKS: u32 = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemotePackingRequest {

@@ -12,8 +12,41 @@ use irys_packing::capacity_pack_range_cuda_c;
 #[cfg(feature = "nvidia")]
 use irys_types::split_interval;
 
+use irys_types::remote_packing::REMOTE_PACK_WINDOW_CHUNKS;
+
 use crate::types::RemotePackingRequest;
 use crate::worker::{PACKING_TYPE, PackingWorkerState};
+
+/// Rejects requests with an unsupported chunk size or a range wider than one node window,
+/// before the worker allocates for them. Does not bound `entropy_packing_iterations`.
+///
+/// The CUDA kernel needs the protocol chunk size; the CPU path accepts `1..=CHUNK_SIZE`.
+pub fn validate_request(request: &RemotePackingRequest) -> Result<(), String> {
+    let max_chunk_size = irys_types::ConsensusConfig::CHUNK_SIZE;
+    let chunk_size_supported = match PACKING_TYPE {
+        PackingType::CUDA => request.chunk_size == max_chunk_size,
+        _ => (1..=max_chunk_size).contains(&request.chunk_size),
+    };
+    if !chunk_size_supported {
+        return Err(format!(
+            "unsupported chunk_size {}, expected {} for {PACKING_TYPE:?} packing",
+            request.chunk_size,
+            if matches!(PACKING_TYPE, PackingType::CUDA) {
+                format!("{max_chunk_size}")
+            } else {
+                format!("1..={max_chunk_size}")
+            }
+        ));
+    }
+    let start = u64::from(*request.chunk_range.0.start());
+    let end = u64::from(*request.chunk_range.0.end());
+    if end < start || end - start + 1 > u64::from(REMOTE_PACK_WINDOW_CHUNKS) {
+        return Err(format!(
+            "chunk range {start}..={end} is empty or wider than {REMOTE_PACK_WINDOW_CHUNKS} chunks"
+        ));
+    }
+    Ok(())
+}
 
 impl PackingWorkerState {
     pub fn pack(
@@ -148,5 +181,51 @@ impl PackingWorkerState {
             }
             other => eyre::bail!("unsupported packing type: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::{
+        H256, IrysAddress, PartitionChunkOffset, PartitionChunkRange, ii, partition_chunk_offset_ii,
+    };
+
+    fn request(chunk_size: u64, start: u32, end: u32) -> RemotePackingRequest {
+        RemotePackingRequest {
+            mining_address: IrysAddress::ZERO,
+            partition_hash: H256::zero(),
+            chunk_range: PartitionChunkRange(partition_chunk_offset_ii!(start, end)),
+            chain_id: 1,
+            chunk_size,
+            entropy_packing_iterations: 1,
+        }
+    }
+
+    #[test]
+    fn validate_request_accepts_node_window() {
+        let chunk_size = irys_types::ConsensusConfig::CHUNK_SIZE;
+        assert!(validate_request(&request(chunk_size, 0, REMOTE_PACK_WINDOW_CHUNKS - 1)).is_ok());
+    }
+
+    #[cfg(not(feature = "nvidia"))]
+    #[test]
+    fn validate_request_accepts_small_chunk_size_on_cpu() {
+        assert!(validate_request(&request(32, 0, 10)).is_ok());
+    }
+
+    #[test]
+    fn validate_request_rejects_zero_or_oversized_chunk_size() {
+        let max = irys_types::ConsensusConfig::CHUNK_SIZE;
+        assert!(validate_request(&request(0, 0, 10)).is_err());
+        assert!(validate_request(&request(max + 1, 0, 10)).is_err());
+        assert!(validate_request(&request(1 << 40, 0, 10)).is_err());
+    }
+
+    #[test]
+    fn validate_request_rejects_wide_range() {
+        let chunk_size = irys_types::ConsensusConfig::CHUNK_SIZE;
+        assert!(validate_request(&request(chunk_size, 0, REMOTE_PACK_WINDOW_CHUNKS)).is_err());
+        assert!(validate_request(&request(chunk_size, 0, u32::MAX)).is_err());
     }
 }
