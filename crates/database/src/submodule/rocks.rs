@@ -8407,11 +8407,6 @@ mod tests {
         Ok(())
     }
 
-    /// A key that is not a 4-byte offset is inside the span, not its end.
-    ///
-    /// The clear must fail before `DeleteRange` removes later offset rows
-    /// whose content keys were not visited. A span that ends before that key,
-    /// or starts after it, still clears.
     #[test]
     fn short_interval_key_fails_the_placement_scans() -> eyre::Result<()> {
         let dir = temp_dir("submodule_rocks_short_interval_key");
@@ -8429,6 +8424,11 @@ mod tests {
         Ok(())
     }
 
+    /// A key that is not a 4-byte offset is inside the span, not its end.
+    ///
+    /// The clear must fail before `DeleteRange` removes later offset rows
+    /// whose content keys were not visited. A span that ends before that key,
+    /// or starts after it, still clears.
     #[test]
     fn short_offset_key_fails_the_clear_and_the_span_reads() -> eyre::Result<()> {
         let dir = temp_dir("submodule_rocks_short_offset_key");
