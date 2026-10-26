@@ -894,12 +894,18 @@ pub enum ValidationCancelReason {
     /// two apart instead of conflating "broadcast channel closed at shutdown"
     /// with "PoA blocking task aborted mid-flight".
     PoAAborted,
-    /// Block absent from the in-memory block tree: a stage reported a node
-    /// fault and the parent is fully valid, but the block left the tree
-    /// during validation. Tree walks done by the stages can miss when the
-    /// block or an ancestor is removed during validation, so the fault is
-    /// not confirmed as a fault of this node. Local, peer-innocent: the
-    /// block's validity is unknown.
+    /// Block absent from the in-memory block tree. Two sites report it:
+    /// - node-fault resolution: a stage reported a node fault and the parent
+    ///   is fully valid, but the block left the tree during validation. Tree
+    ///   walks done by the stages can miss when the block or an ancestor is
+    ///   removed during validation, so the fault is not confirmed as a fault
+    ///   of this node.
+    /// - VDF task: an ancestor's discard, a depth prune or an earlier verdict
+    ///   for the same block removed the block before or while its VDF task
+    ///   runs.
+    ///
+    /// Local, peer-innocent: the block's validity is unknown, and nothing
+    /// pursues it any more. Fresh gossip can re-enter it.
     BlockMissing,
 }
 
