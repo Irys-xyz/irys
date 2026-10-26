@@ -1987,10 +1987,9 @@ impl RocksSubmoduleStore {
         let mut out = Vec::new();
         for item in snap.iterator_cf_opt(&handle, opts, mode) {
             let (key, value) = item.wrap_err("scan placement interval")?;
-            if key.len() != 4 {
-                continue;
-            }
-            let start = u32::from_be_bytes(key.as_ref().try_into().expect("length checked"));
+            let start = PartitionChunkOffset::decode(key.as_ref())
+                .wrap_err("placement interval key is not an offset")?
+                .0;
             if after.is_some_and(|prev| start <= prev.0) {
                 continue;
             }
@@ -2022,7 +2021,9 @@ impl RocksSubmoduleStore {
         let Some(item) = iter.next() else {
             return Ok(None);
         };
-        let (_key, value) = item.wrap_err("read the last placement")?;
+        let (key, value) = item.wrap_err("read the last placement")?;
+        PartitionChunkOffset::decode(key.as_ref())
+            .wrap_err("placement interval key is not an offset")?;
         let end = records::decode_placement(value.as_ref())?.end;
         Ok(Some(PartitionChunkOffset(end)))
     }
@@ -8411,6 +8412,23 @@ mod tests {
     /// The clear must fail before `DeleteRange` removes later offset rows
     /// whose content keys were not visited. A span that ends before that key,
     /// or starts after it, still clears.
+    #[test]
+    fn short_interval_key_fails_the_placement_scans() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_short_interval_key");
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        place_span(&store, 0, 7, H256::repeat_byte(4), 0, 1, 0, &[], None)?;
+        assert_eq!(store.read_placements(None, 10)?.len(), 1);
+        let handle = cf_handle(&store.db, Cf::Interval)?;
+        store.db.put_cf(&handle, [0_u8, 0, 0, 9, 0], [])?;
+        store.db.flush_cf(&handle)?;
+
+        let scan_err = store.read_placements(None, 10).unwrap_err();
+        assert!(scan_err.to_string().contains("not an offset"), "{scan_err}");
+        let end_err = store.highest_placement_end().unwrap_err();
+        assert!(end_err.to_string().contains("not an offset"), "{end_err}");
+        Ok(())
+    }
+
     #[test]
     fn short_offset_key_fails_the_clear_and_the_span_reads() -> eyre::Result<()> {
         let dir = temp_dir("submodule_rocks_short_offset_key");
