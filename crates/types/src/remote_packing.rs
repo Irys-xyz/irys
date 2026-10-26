@@ -19,7 +19,7 @@ pub struct RemotePackingRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackingWorkerConfig {
-    pub bind_port: u8,
+    pub bind_port: u16,
     pub bind_addr: String,
 
     /// Number of CPU threads to use for data packing operations
