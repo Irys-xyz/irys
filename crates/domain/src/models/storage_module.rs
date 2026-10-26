@@ -1182,6 +1182,30 @@ fn expected_packing_record(config: &Config) -> PackingRecord {
     }
 }
 
+/// Refuse a submodule whose `intervals.json` labels stored chunks while
+/// `packing_params.toml` is missing.
+///
+/// Labels with no packing identity would accept bytes packed for an unknown
+/// miner or partition. A fresh open writes the params file before
+/// `intervals.json`, so only a change from outside the node leaves this state.
+fn refuse_labels_without_packing_params(params_path: &Path) -> eyre::Result<()> {
+    let intervals_path = params_path.with_file_name("intervals.json");
+    let labelled = match fs::metadata(&intervals_path) {
+        Ok(meta) => meta.len() > 0,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => {
+            return Err(err).wrap_err_with(|| format!("stat {}", intervals_path.display()));
+        }
+    };
+    ensure!(
+        !labelled,
+        "{} is missing, but {} labels stored chunks. Restore {PACKING_PARAMS_FILE_NAME}, or stop the node and clear this submodule directory (index, intervals.json, chunks.dat) so it can repack.",
+        params_path.display(),
+        intervals_path.display()
+    );
+    Ok(())
+}
+
 /// Address, partition hash, and packing identity for an existing
 /// `packing_params.toml`. This does not create, resize, or rewrite anything.
 ///
@@ -2229,6 +2253,14 @@ impl StorageModule {
                 config,
                 storage_module_info.partition_assignment,
             )?;
+            // A bench split writes its own labels before the first open.
+            #[cfg(feature = "bench")]
+            let check_labels = split.is_none();
+            #[cfg(not(feature = "bench"))]
+            let check_labels = true;
+            if existing_params.is_none() && check_labels {
+                refuse_labels_without_packing_params(&params_path)?;
+            }
 
             tracing::info!(custom.sub_base_path = ?sub_base_path);
             fs::create_dir_all(&sub_base_path)?; // Ensure the directory exists (for component tests)
@@ -10858,7 +10890,8 @@ mod tests {
     struct ModuleOnDisk {
         chunks_len: u64,
         chunks_prefix: Vec<u8>,
-        params: Vec<u8>,
+        /// `None` when the module has no `packing_params.toml`.
+        params: Option<Vec<u8>>,
         /// `None` when open has already removed the leftover sidecar.
         crc: Option<Vec<u8>>,
         index_files: BTreeMap<String, (u64, [u8; 32])>,
@@ -10877,7 +10910,7 @@ mod tests {
         Ok(ModuleOnDisk {
             chunks_len: fs::metadata(&chunks)?.len(),
             chunks_prefix: read_prefix(&chunks, 8)?,
-            params: fs::read(sub.join(PACKING_PARAMS_FILE_NAME))?,
+            params: read_optional_file(&sub.join(PACKING_PARAMS_FILE_NAME))?,
             crc: read_optional_file(&sub.join("chunks.crc"))?,
             index_files: directory_fingerprint(&sub.join(index_dir_name(engine)))?,
         })
@@ -10886,7 +10919,7 @@ mod tests {
     /// `set_len`, index open, and the packing-params rewrite must not run.
     fn assert_module_unchanged(
         engine: SubmoduleIndexEngine,
-        kind: ForeignModule,
+        kind: impl std::fmt::Debug,
         sub: &Path,
         before: &ModuleOnDisk,
         open_error: &str,
@@ -11001,6 +11034,45 @@ mod tests {
         assert_module_unchanged(engine, kind, &sub, &before, &message)
     }
 
+    fn labelled_module_without_params_is_refused(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("open_labels_without_params")
+            .build();
+        let config = engine_config(tmp.path(), engine);
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        seed_existing_index(&sub, engine)?;
+        fs::write(sub.join("chunks.dat"), [0xAB; 8])?;
+        fs::write(sub.join("chunks.crc"), b"leftover-crc")?;
+        let mut labels = StorageIntervals::new();
+        labels
+            .insert_merge_touching_if_values_equal(
+                partition_chunk_offset_ii!(0, 3),
+                ChunkType::Entropy,
+            )
+            .expect("one label span");
+        let intervals = serde_json::to_vec(&labels)?;
+        fs::write(sub.join("intervals.json"), &intervals)?;
+
+        let before = read_module_on_disk(&sub, engine)?;
+        clear_submodule_open_order();
+        let err = StorageModule::new(&one_span(3, "sub", None), &config)
+            .expect_err("labels with no packing identity must not open");
+        let message = err.to_string();
+        assert!(
+            message.contains("labels stored chunks"),
+            "{engine:?}: {message}"
+        );
+        assert_eq!(fs::read(sub.join("intervals.json"))?, intervals);
+        assert_module_unchanged(
+            engine,
+            "labels without packing params",
+            &sub,
+            &before,
+            &message,
+        )
+    }
+
     fn matching_module_opens(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
         let tmp = TempDirBuilder::new().prefix("open_match_identity").build();
         let config = engine_config(tmp.path(), engine);
@@ -11085,6 +11157,7 @@ mod tests {
             foreign_module_is_refused(engine, ForeignModule::Address)?;
             foreign_module_is_refused(engine, ForeignModule::Partition)?;
             foreign_module_is_refused(engine, ForeignModule::Iterations)?;
+            labelled_module_without_params_is_refused(engine)?;
             matching_module_opens(engine)?;
             fresh_module_opens(engine)?;
             legacy_params_are_filled_on_open(engine)?;
