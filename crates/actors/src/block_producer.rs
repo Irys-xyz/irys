@@ -119,6 +119,25 @@ impl BlockProductionError {
 /// stuck read from holding block production after the overlap window.
 const TX_PATH_DERIVE_WAIT: Duration = Duration::from_secs(2);
 
+/// The payload builder drops a shadow tx that fails to execute, and validators
+/// reject a block without it. The cause is deterministic, so a retry cannot
+/// help: drop this attempt instead of publishing a block no node accepts.
+fn ensure_payload_starts_with_shadow_txs(
+    built_tx_hashes: &[B256],
+    expected_shadow_tx_hashes: &[B256],
+) -> Result<(), BlockProductionError> {
+    if built_tx_hashes.starts_with(expected_shadow_tx_hashes) {
+        return Ok(());
+    }
+    Err(BlockProductionError::Recoverable {
+        reason: "payload_missing_shadow_tx",
+        source: eyre!(
+            "built payload does not start with the {} expected shadow txs",
+            expected_shadow_tx_hashes.len()
+        ),
+    })
+}
+
 /// Build PoA fields from a solution. `Ok(None)` means the tx path is not safe
 /// to publish.
 fn assemble_poa(
@@ -1267,6 +1286,12 @@ pub trait BlockProdStrategy {
         // send & await the payload
         info!("Sending new payload to Reth");
 
+        let expected_shadow_tx_hashes = attributes
+            .shadow_txs
+            .iter()
+            .map(|tx| *tx.transaction.hash())
+            .collect::<Vec<_>>();
+
         let payload_id = payload_builder
             .send_new_payload(attributes.clone())
             .await
@@ -1287,6 +1312,15 @@ pub trait BlockProdStrategy {
             })
             .map_err(BlockProductionError::recoverable("payload_builder"))?
             .map_err(classify_payload_error)?;
+
+        let built_tx_hashes = built_payload
+            .block()
+            .body()
+            .transactions
+            .iter()
+            .map(|tx| *tx.tx_hash())
+            .collect::<Vec<_>>();
+        ensure_payload_starts_with_shadow_txs(&built_tx_hashes, &expected_shadow_tx_hashes)?;
 
         let evm_block_hash = built_payload.block().hash();
         tracing::debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
@@ -2407,6 +2441,32 @@ mod current_timestamp_tests {
 
         assert!(ts.as_millis() >= before);
         assert!(ts.to_secs().as_secs() > parent.timestamp.to_secs().as_secs());
+    }
+}
+
+#[cfg(test)]
+mod shadow_tx_presence_tests {
+    use super::{B256, BlockProductionError, ensure_payload_starts_with_shadow_txs};
+
+    #[test]
+    fn payload_missing_a_shadow_tx_is_a_recoverable_error() {
+        let (a, b, pool) = (
+            B256::repeat_byte(1),
+            B256::repeat_byte(2),
+            B256::repeat_byte(3),
+        );
+        ensure_payload_starts_with_shadow_txs(&[a, b, pool], &[a, b]).expect("all present");
+        ensure_payload_starts_with_shadow_txs(&[pool], &[]).expect("none expected");
+        for built in [vec![a, pool], vec![b, a], vec![]] {
+            let err = ensure_payload_starts_with_shadow_txs(&built, &[a, b]).unwrap_err();
+            assert!(matches!(
+                err,
+                BlockProductionError::Recoverable {
+                    reason: "payload_missing_shadow_tx",
+                    ..
+                }
+            ));
+        }
     }
 }
 
