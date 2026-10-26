@@ -911,20 +911,6 @@ async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
 async fn test_prevalidation_rejects_too_many_commitment_txs() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;
 
-    // Check if block has a commitment ledger (needed for this test)
-    let has_commitment_ledger = ctx
-        .block
-        .header()
-        .system_ledgers
-        .iter()
-        .any(|l| l.ledger_id == SystemLedger::Commitment as u32);
-
-    if !has_commitment_ledger {
-        // Skip if block doesn't have commitment ledger (not at epoch boundary)
-        ctx.stop().await;
-        return Ok(());
-    }
-
     let max = ctx
         .config
         .consensus_config()
@@ -945,11 +931,24 @@ async fn test_prevalidation_rejects_too_many_commitment_txs() -> Result<()> {
             .collect(),
     );
 
+    // An empty mempool yields a block without a Commitment ledger; add one so the cap check runs.
+    if !header
+        .system_ledgers
+        .iter()
+        .any(|l| l.ledger_id == SystemLedger::Commitment as u32)
+    {
+        header
+            .system_ledgers
+            .push(irys_types::SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment as u32,
+                tx_ids: H256List(vec![]),
+            });
+    }
     let ledger = header
         .system_ledgers
         .iter_mut()
         .find(|l| l.ledger_id == SystemLedger::Commitment as u32)
-        .expect("Commitment ledger should exist");
+        .expect("Commitment ledger must exist in the fixture");
     ledger.tx_ids = tx_ids;
 
     // Re-sign the header after modification
