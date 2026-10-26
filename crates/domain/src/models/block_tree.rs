@@ -6,6 +6,7 @@ use irys_types::{
 };
 use reth_db::Database as _;
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::SystemTime,
@@ -133,6 +134,9 @@ pub struct BlockTree {
     // Track max cumulative difficulty
     max_cumulative_difficulty: (U256, BlockHash), // (difficulty, block_hash)
 
+    // `insertion_sequence` for the next block added to the tree
+    next_insertion_sequence: u64,
+
     // Height -> Hash mapping.  The inner container is intentionally
     // `HashSet`: the only reader (`get_hashes_for_height`) is API-server
     // observability and does not feed consensus.  If a consensus-path
@@ -157,6 +161,9 @@ pub struct BlockMetadata {
     pub epoch_snapshot: Arc<EpochSnapshot>,
     pub commitment_snapshot: Arc<CommitmentSnapshot>,
     pub ema_snapshot: Arc<EmaSnapshot>,
+    /// Order in which blocks were first added to the block tree (lower = earlier).
+    /// Blocks loaded at startup all have 0; blocks added after count up from 1.
+    pub insertion_sequence: u64,
 }
 
 /// Represents the `ChainState` of a block, is it Onchain? or a valid fork?
@@ -241,6 +248,7 @@ impl BlockTree {
             epoch_snapshot: dummy_epoch_snapshot(),
             commitment_snapshot,
             ema_snapshot,
+            insertion_sequence: 0,
         };
 
         // Initialize all indices
@@ -253,6 +261,7 @@ impl BlockTree {
             solutions,
             tip: block_hash,
             max_cumulative_difficulty: (cumulative_diff, block_hash),
+            next_insertion_sequence: 1,
             height_index,
             longest_chain_cache,
             consensus_config,
@@ -366,6 +375,7 @@ impl BlockTree {
             solutions: BTreeMap::new(),
             tip: start_block_hash,
             max_cumulative_difficulty: (start_block.cumulative_diff, start_block_hash),
+            next_insertion_sequence: 0,
             height_index: BTreeMap::new(),
             longest_chain_cache: (vec![entry], 0),
             consensus_config: consensus_config.clone(),
@@ -396,6 +406,7 @@ impl BlockTree {
             epoch_snapshot: arc_epoch_snapshot,
             commitment_snapshot: arc_commitment_snapshot.clone(),
             ema_snapshot: ema_snapshot.clone(),
+            insertion_sequence: 0,
         };
 
         block_tree_cache
@@ -488,6 +499,13 @@ impl BlockTree {
                 .unwrap();
         }
 
+        // Blocks loaded from the block index share sequence 0: they load in height order,
+        // which says nothing about the order this node first added them to a block tree.
+        for entry in block_tree_cache.blocks.values_mut() {
+            entry.insertion_sequence = 0;
+        }
+        block_tree_cache.next_insertion_sequence = 1;
+
         let tip_hash = {
             let block_index = block_index_guard.read();
             block_index.get_latest_item().unwrap().block_hash
@@ -562,6 +580,16 @@ impl BlockTree {
             self.max_cumulative_difficulty = (block.header().cumulative_diff, hash);
         }
 
+        // A block added again keeps the sequence of its first add.
+        let insertion_sequence = match self.blocks.get(&hash) {
+            Some(existing) => existing.insertion_sequence,
+            None => {
+                let sequence = self.next_insertion_sequence;
+                self.next_insertion_sequence += 1;
+                sequence
+            }
+        };
+
         self.blocks.insert(
             hash,
             BlockMetadata {
@@ -572,6 +600,7 @@ impl BlockTree {
                 epoch_snapshot,
                 commitment_snapshot,
                 ema_snapshot,
+                insertion_sequence,
             },
         );
 
@@ -711,13 +740,50 @@ impl BlockTree {
         self.delete_block(block_hash, &reason)
     }
 
-    // Helper to find new max difficulty when current max is removed
+    /// Finds the new max difficulty block when the current max is removed.
+    ///
+    /// Among the blocks with the highest cumulative difficulty:
+    /// 1. The block first added to the block tree wins (lowest `insertion_sequence`). This
+    ///    matches the add path, where the max moves only on a strictly greater difficulty.
+    /// 2. On equal sequence (blocks loaded at startup), the block whose fork point with the
+    ///    canonical chain is highest wins: the smallest reorg away from the current tip.
+    /// 3. The block hash orders what is left, so the result does not depend on `HashMap`
+    ///    iteration order. The add paths do not make this case: blocks added after startup get
+    ///    unique sequences, and the startup blocks form one chain, so their difficulties differ.
     fn find_max_difficulty(&self) -> (U256, BlockHash) {
+        let Some(max_diff) = self
+            .blocks
+            .values()
+            .map(|entry| entry.block.header().cumulative_diff)
+            .max()
+        else {
+            return (U256::zero(), BlockHash::default());
+        };
+
         self.blocks
             .iter()
-            .map(|(hash, entry)| (entry.block.header().cumulative_diff, *hash))
-            .max_by_key(|(diff, _)| *diff)
-            .unwrap_or((U256::zero(), BlockHash::default()))
+            .filter(|(_, entry)| entry.block.header().cumulative_diff == max_diff)
+            .min_by_key(|(hash, entry)| {
+                (
+                    entry.insertion_sequence,
+                    Reverse(self.canonical_fork_height(entry)),
+                    **hash,
+                )
+            })
+            .map(|(hash, _)| (max_diff, *hash))
+            .expect("at least one block has the max difficulty")
+    }
+
+    /// Height of the newest `Onchain` block (the ancestry of `tip`) in the ancestry of `entry`,
+    /// `entry` included. `None` when the parent walk leaves the tree first.
+    fn canonical_fork_height(&self, entry: &BlockMetadata) -> Option<u64> {
+        let mut current = entry;
+        while current.chain_state != ChainState::Onchain {
+            current = self
+                .blocks
+                .get(&current.block.header().previous_block_hash)?;
+        }
+        Some(current.block.header().height)
     }
 
     /// Returns the canonical chain as a cached sequence of block entries.
@@ -3553,6 +3619,7 @@ mod tests {
                 epoch_snapshot: dummy_epoch_snapshot(),
                 commitment_snapshot: comm.clone(),
                 ema_snapshot: dummy_ema_snapshot(),
+                insertion_sequence: 0,
             },
         );
         let mut o1 = extend_chain(random_block(U256::from(101)), &g2);
@@ -3576,5 +3643,145 @@ mod tests {
             .expect_err("chains with no shared ancestor must Err, not panic");
         let msg = format!("{err}");
         assert!(msg.contains("no common ancestor"), "unexpected err: {msg}");
+    }
+
+    fn add_validated(cache: &mut BlockTree, header: &mut IrysBlockHeader) {
+        let sealed = seal_block(header);
+        cache
+            .add_common(
+                sealed.header().block_hash,
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
+            )
+            .expect("add_common");
+    }
+
+    /// Canonical chain `genesis -> c1 -> c2`, `c2` marked as tip.
+    fn canonical_chain_of_three() -> (BlockTree, [IrysBlockHeader; 3]) {
+        let genesis = random_block(U256::from(0));
+        let mut cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let mut c1 = extend_chain(random_block(U256::from(1)), &genesis);
+        add_validated(&mut cache, &mut c1);
+        let mut c2 = extend_chain(random_block(U256::from(2)), &c1);
+        add_validated(&mut cache, &mut c2);
+        cache.mark_tip(&c2.block_hash).expect("mark_tip");
+        (cache, [genesis, c1, c2])
+    }
+
+    fn remove_and_get_max(cache: &mut BlockTree, block_hash: &BlockHash) -> (U256, BlockHash) {
+        cache
+            .remove_block(block_hash, RemovalReason::ValidationInvalid)
+            .expect("remove_block");
+        cache.get_max_cumulative_difficulty_block()
+    }
+
+    /// Removing the max block among equal-difficulty siblings hands the max to the
+    /// remaining tie first added to the tree, not to a hash-ordered pick.
+    #[test]
+    fn max_block_removal_picks_earliest_added_tie() {
+        let genesis = random_block(U256::from(0));
+        let mut cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+
+        let mut by_hash: Vec<IrysBlockHeader> = (0..4)
+            .map(|_| extend_chain(random_block(U256::from(5)), &genesis))
+            .collect();
+        by_hash.sort_by_key(|header| header.block_hash);
+        // Add order by hash rank 0, 2, 3, 1: after each removal the earliest-added
+        // remaining tie is not always the lowest or the highest remaining hash.
+        let mut added: Vec<IrysBlockHeader> = [0, 2, 3, 1]
+            .iter()
+            .map(|&rank| by_hash[rank].clone())
+            .collect();
+        for header in &mut added {
+            add_validated(&mut cache, header);
+        }
+        assert_eq!(
+            cache.get_max_cumulative_difficulty_block(),
+            (U256::from(5), added[0].block_hash),
+            "the add path keeps the first-added tie"
+        );
+
+        for pair in added.windows(2) {
+            assert_eq!(
+                remove_and_get_max(&mut cache, &pair[0].block_hash),
+                (U256::from(5), pair[1].block_hash)
+            );
+        }
+    }
+
+    /// With equal insertion sequence (as for blocks loaded at startup), the tie whose fork
+    /// point with the canonical chain is highest wins. A lower sequence still wins over a
+    /// higher fork point.
+    #[test]
+    fn max_block_removal_on_equal_sequence_picks_highest_fork_point() {
+        let (mut cache, [genesis, c1, c2]) = canonical_chain_of_three();
+
+        let mut heaviest = extend_chain(random_block(U256::from(10)), &c2);
+        add_validated(&mut cache, &mut heaviest);
+
+        // Ties fork from the canonical chain at heights 0, 1 and 2.
+        let mut fork_at_genesis = extend_chain(random_block(U256::from(5)), &genesis);
+        let mut fork_at_c1 = extend_chain(random_block(U256::from(5)), &c1);
+        let low = fork_at_genesis.block_hash.min(fork_at_c1.block_hash);
+        let high = fork_at_genesis.block_hash.max(fork_at_c1.block_hash);
+        // Keep the expected winner's hash between the other two, so no hash order picks it.
+        let mut fork_at_c2 = loop {
+            let candidate = extend_chain(random_block(U256::from(5)), &c2);
+            if low < candidate.block_hash && candidate.block_hash < high {
+                break candidate;
+            }
+        };
+        for header in [&mut fork_at_c2, &mut fork_at_genesis, &mut fork_at_c1] {
+            add_validated(&mut cache, header);
+        }
+        for header in [&fork_at_genesis, &fork_at_c1, &fork_at_c2] {
+            cache
+                .blocks
+                .get_mut(&header.block_hash)
+                .expect("tie in tree")
+                .insertion_sequence = 0;
+        }
+
+        assert_eq!(
+            remove_and_get_max(&mut cache, &heaviest.block_hash),
+            (U256::from(5), fork_at_c2.block_hash)
+        );
+
+        // A new heaviest block, then give the shallowest fork the lowest sequence.
+        let mut heaviest = extend_chain(random_block(U256::from(10)), &c2);
+        add_validated(&mut cache, &mut heaviest);
+        for (header, sequence) in [(&fork_at_genesis, 0), (&fork_at_c1, 1), (&fork_at_c2, 1)] {
+            cache
+                .blocks
+                .get_mut(&header.block_hash)
+                .expect("tie in tree")
+                .insertion_sequence = sequence;
+        }
+        assert_eq!(
+            remove_and_get_max(&mut cache, &heaviest.block_hash),
+            (U256::from(5), fork_at_genesis.block_hash)
+        );
+    }
+
+    /// The strictly heaviest remaining block becomes the max, whatever its add order or
+    /// fork point.
+    #[test]
+    fn max_block_removal_picks_strictly_heaviest() {
+        let (mut cache, [genesis, _, c2]) = canonical_chain_of_three();
+
+        let mut heaviest = extend_chain(random_block(U256::from(10)), &c2);
+        add_validated(&mut cache, &mut heaviest);
+        let mut lighter_earlier_deeper = extend_chain(random_block(U256::from(5)), &c2);
+        add_validated(&mut cache, &mut lighter_earlier_deeper);
+        let mut heavier_later_shallower = extend_chain(random_block(U256::from(6)), &genesis);
+        add_validated(&mut cache, &mut heavier_later_shallower);
+
+        assert_eq!(
+            remove_and_get_max(&mut cache, &heaviest.block_hash),
+            (U256::from(6), heavier_later_shallower.block_hash)
+        );
     }
 }

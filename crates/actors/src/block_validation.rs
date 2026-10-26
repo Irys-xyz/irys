@@ -3452,6 +3452,7 @@ mod c1_side_fork_regression_tests {
             epoch_snapshot: dummy_epoch_snapshot(),
             commitment_snapshot: Arc::new(CommitmentSnapshot::default()),
             ema_snapshot: EmaSnapshot::genesis(&header),
+            insertion_sequence: 0,
         };
         tree.blocks.insert(block_hash, entry);
     }
