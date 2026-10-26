@@ -193,6 +193,26 @@ pub fn ensure_proof_layout(path_buff: &[u8]) -> Result<usize, Error> {
     Ok(branches_len)
 }
 
+/// Returns true when any proof node in `path_buff` has a non-zero notepad.
+///
+/// [`validate_path`] never reads the notepad bytes. Honest proof producers always
+/// write zeros, so requiring zero notepads gives each proof one byte encoding.
+/// A path with a malformed layout returns false: layout, hashes and ranges are
+/// checked by [`validate_path`].
+pub fn has_non_zero_notepad(path_buff: &[u8]) -> bool {
+    let Ok(branches_len) = ensure_proof_layout(path_buff) else {
+        return false;
+    };
+    let (branches, leaf) = path_buff.split_at(branches_len);
+    let branch_notepads = branches
+        .chunks(BRANCH_PROOF_LEN)
+        .map(|branch| &branch[2 * HASH_SIZE..BRANCH_PROOF_LEN - 8]);
+    let leaf_notepad = &leaf[HASH_SIZE..LEAF_PROOF_LEN - 8];
+    branch_notepads
+        .chain(std::iter::once(leaf_notepad))
+        .any(|notepad| notepad.iter().any(|byte| *byte != 0))
+}
+
 pub fn validate_path(
     root_hash: [u8; HASH_SIZE],
     path_buff: &Base64,
@@ -743,6 +763,47 @@ mod tests {
             (64, 71)
         );
         assert!(expected_chunk_byte_range(TxChunkOffset::from(3), 71, 32).is_err());
+    }
+
+    /// Proof for chunk 0 of two chunks: one branch node then the leaf node.
+    fn two_chunk_proof() -> (H256, Vec<u8>) {
+        let chunks = vec![Ok(vec![1_u8; 32]), Ok(vec![2_u8; 32])];
+        let leaves = generate_leaves(chunks.into_iter(), 32).unwrap();
+        let root = generate_data_root(leaves).unwrap();
+        let data_root = H256(root.id);
+        let proof = resolve_proofs(root, None).unwrap().remove(0);
+        (data_root, proof.proof)
+    }
+
+    #[test]
+    fn zero_notepads_pass_and_validate_path_is_unchanged() {
+        let (data_root, proof) = two_chunk_proof();
+        assert_eq!(proof.len(), BRANCH_PROOF_LEN + LEAF_PROOF_LEN);
+        assert!(!has_non_zero_notepad(&proof));
+        assert!(validate_path(data_root.0, &Base64(proof), 0).is_ok());
+    }
+
+    #[test]
+    fn non_zero_leaf_notepad_fails_check_but_still_validates() {
+        let (data_root, mut proof) = two_chunk_proof();
+        // leaf layout: data_hash(32) | notepad(24) | offset(8)
+        proof[BRANCH_PROOF_LEN + HASH_SIZE] = 1;
+        assert!(has_non_zero_notepad(&proof));
+        assert!(validate_path(data_root.0, &Base64(proof), 0).is_ok());
+    }
+
+    #[test]
+    fn non_zero_branch_notepad_fails_check_but_still_validates() {
+        let (data_root, mut proof) = two_chunk_proof();
+        // branch layout: left_id(32) | right_id(32) | notepad(24) | offset(8)
+        proof[2 * HASH_SIZE + 23] = 1;
+        assert!(has_non_zero_notepad(&proof));
+        assert!(validate_path(data_root.0, &Base64(proof), 0).is_ok());
+    }
+
+    #[test]
+    fn notepad_check_ignores_bad_layout() {
+        assert!(!has_non_zero_notepad(&[1_u8; 5]));
     }
 
     #[test]

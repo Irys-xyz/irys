@@ -13,8 +13,8 @@ use irys_domain::{StorageModule, WriteDataChunkError};
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
     ChunkPathHash, DataLedger, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
-    SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256,
-    irys::IrysSigner, validate_path, validate_path_byte_range,
+    SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, has_non_zero_notepad,
+    hash_sha256, irys::IrysSigner, validate_path, validate_path_byte_range,
 };
 use irys_utils::ElapsedMs as _;
 use lru::LruCache;
@@ -536,6 +536,17 @@ impl ChunkIngressServiceInner {
             chunk.data_size = chunk.data_size,
             "Processing chunk"
         );
+
+        // One canonical encoding per proof: non-zero notepads would give the
+        // same chunk many distinct data_path hashes (dedup and storage keys).
+        // Runs before any cache lookup or parking so no variant is retained.
+        if has_non_zero_notepad(&chunk.data_path.0) {
+            error!(
+                "{:?}: data_path has non-zero notepad bytes",
+                CriticalChunkIngressError::InvalidProof
+            );
+            return Err(CriticalChunkIngressError::InvalidProof.into());
+        }
 
         // Early exit if we've already processed this chunk recently
         let chunk_path_hash = chunk.chunk_path_hash();
@@ -2089,6 +2100,48 @@ mod tests {
         }
         expect_delayed_redrain(&mut receivers, data_root).await;
         expect_no_redrain(&mut receivers).await;
+    }
+
+    /// A data_path with a non-zero notepad is rejected before any cache or
+    /// parking. The canonical encoding of the same chunk is accepted.
+    #[tokio::test]
+    async fn chunk_with_non_zero_notepad_is_rejected_and_not_cached() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-notepad")
+            .build();
+        let (inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        let honest = valid_single_chunk(vec![5_u8; 32]);
+        let data_root = honest.data_root;
+
+        let mut tampered = honest.clone();
+        // leaf layout: data_hash(32) | notepad(24) | offset(8)
+        tampered.data_path.0[32] = 1;
+        let tampered_hash = tampered.chunk_path_hash();
+        let err = inner
+            .handle_chunk_ingress_message(tampered)
+            .await
+            .expect_err("non-zero notepad must be rejected");
+        assert!(
+            matches!(
+                err,
+                ChunkIngressError::Critical(CriticalChunkIngressError::InvalidProof)
+            ),
+            "{err:?}"
+        );
+        assert!(
+            !inner
+                .recent_valid_chunks
+                .read()
+                .await
+                .contains(&tampered_hash)
+        );
+        assert!(inner.pending_chunks.read().await.get(&data_root).is_none());
+
+        inner
+            .handle_chunk_ingress_message(honest)
+            .await
+            .expect("canonical chunk is accepted");
+        assert!(inner.pending_chunks.read().await.get(&data_root).is_some());
     }
 
     /// The header can commit while the storage-module scan runs. The second
