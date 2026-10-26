@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793056502734,
+  "lastUpdate": 1793058856321,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -19369,6 +19369,114 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 271.323043,
             "range": "± 0.258505",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5c715733b4d7c32d0d59f8c48626c5599065df25",
+          "message": "fix: 4.1.0 version review fixes (#1678)\n\n* docs: drop the removed index drain from the MDBX-removal checklist; correct the rocksdb dependency note\n\nThe index drain file no longer exists, so the checklist entry and the keep-list\nline pointed at nothing. Reth does not depend on rocksdb; only irys-database does.\n\n* fix(packing): reject a chunk longer than the entropy buffer\n\nA packed body longer than the entropy buffer indexed past that buffer\nand panicked in release builds. The XOR now returns an error, so a\ntoo-long body cannot panic the node.\n\nData sync rejects a packed or unpacked body longer than chunk_size as\ninvalid peer data before unpack. Full ingress-proof validation treats\nthe same oversized peer body as bad peer data and tries the next peer.\nBoth HTTP chunk reads stop at max_peer_response_bytes before JSON\ndecode. Honest chunks of chunk_size or less keep the same XOR bytes.\n\n* docs(release): note the 4.1.x to 4.0.x rollback limit on the MDBX submodule index\n\nThe first 4.1.x open migrates an MDBX submodule index in place. A 4.0.x node\nstarted on that index writes data-path rows that 4.1.x does not read. RocksDB\nnodes are not affected.\n\n* fix(p2p): do not pause the VDF for a stale behind-check\n\nThe behind-check copied the local index height, then waited on every\ntrusted peer's /info. Blocks that migrated during that wait were ignored,\nso a peer tip just past the old height plus twice the migration depth\nstarted a sync and paused the VDF when there was nothing to fetch.\n\nRead the height after those calls return, and read it again in the sync\ntask immediately before the VDF pause. Skip the pause when the live index\nis no longer behind the trusted height the check selected.\n\n* fix(p2p): keep a block stored while a failed pull cleans up\n\nA failed parent pull checked that the block was not known locally, then\ntook the cache lock again to remove it. A block another path stored\nbetween those two locks was evicted.\n\nThe cache check and the remove now share one write lock. The block tree\nis a separate lock, so a tree-only block is checked first and is not\nremoved. The unconditional remove stays for callers that already decided\nthe block is done.\n\n* fix(ingress): bound oversized-claim parked chunks\n\nAn unconfirmed cached data root parked a larger claim with no check on\nthe body length, the data path length, or the offset. Both park branches\nnow share those checks and reject the chunk instead of acknowledging it.\n\n* fix(domain): keep scanning after a data-root index error\n\nA failed data-root index read returned from the whole lookup. Later\nstorage modules and the node cache were not tried, and a missing\nledger range panicked.\n\nRemember the index error and keep scanning. Return it only when no\nmodule and no cache entry answers. Skip a module that has no ledger\nrange.\n\n* fix(migration): keep scanning Submit replicas after a read error\n\nA Submit index or durable-body read error stopped the fallback, so later\nreplicas were never read. The empty chunks counted as no local source, and\neight such passes deleted the pending row.\n\nSkip the module whose read failed and keep reading the other Submit\nmodules. A pass that still has an empty chunk that module may hold does\nnot count toward the retirement limit.\n\n* fix(ci): stop a PR title from overwriting explain outputs\n\nThe resolve step wrote the raw PR title as title=... to GITHUB_OUTPUT. A\nnewline in the title added key=value lines that replaced number, stage or a\nSHA, and a later step checks out base_sha as the trusted skill. Write the\ntitle as a heredoc output with a random delimiter that does not occur in it,\nand check that the SHAs are 40 hex characters before they are published.\n\n* test(domain): unwrap the unpack result in the data-root scan test\n\nunpack now returns a Result; the test written against the old signature did\nnot compile once both changes were on one branch.\n\n* fix(actors): retry a recovery repack the packing channel refused\n\nA deep reorg marks the rolled-back span Uninitialized, then asks the\npacking channel to repack it. A full channel, a closed channel, or a\nrequest that cannot be built was only logged. Nothing else walks\nUninitialized offsets until the process starts, and data sync does not\nread that label, so those canonical chunks stayed unpacked.\n\nThe failed span is stored with the other deferred packing ranges. The\nstorage-module tick resends the offsets that are still Uninitialized\nand drops the span once none remain.\n\n* fix(storage): refuse a foreign module before opening its files\n\nStorageModule::open resized chunks.dat and migrated the submodule index\nbefore it compared the mining address, partition hash, and packing\nidentity. A mismatch now returns the same error and leaves the directory\nunchanged. A fresh module and a 4.0.8 params file still open, and the\nmissing iterations and chunk size are written only after those checks pass.\n\n* fix(actors): run the block index WAL sync off the migration worker\n\nEach migrated block flushed every touched submodule WAL on the async\nmigration task. A slow disk stalled that worker for the flush even\nthough chunk bodies already run on the blocking pool.\n\nThe flush now runs in spawn_blocking. The body wake and OnBlockMigrated\nare still sent only after it returns. A sync error still skips both.\n\n* fix(xtask): keep unit prune inside the target directory\n\nA symlink at deps, examples, build, or .fingerprint was followed, so the\nprune deleted directories in the tree the link pointed at. A usage line\nthat resolved outside the cargo target directory also selected that tree.\n\nCanonicalize the target directory and ignore usage lines that do not\nresolve inside it. Do not walk those four directories when they are\nsymlinks. Before a delete, resolve the parent and skip the entry when\nthat parent lies outside the target. A symlink as the final component is\nstill unlinked and not followed.\n\n* fix(domain): fail an unlimited sync while a recall flush is owed\n\nAn unlimited sync returned Ok without a pwrite when a recall flush\nstill owed a window. Callers treated that Ok as a finished flush, so\na crash could drop packed chunks that were still only in memory.\n\nThe unlimited path now returns an error and leaves the chunks queued.\nThe bounded window is unchanged. It still writes its runs and clears\nthe flag. The next sync writes the remainder.\n\n* fix(storage): fdatasync chunks.dat without holding its mutex\n\nA mining recall locks chunks.dat only to dup the fd, then preads the\nclone. The durable point held that mutex for the whole fdatasync, so a\nrecall that arrived after the yield waited out the syscall.\n\nDup the file after inflight disk ops have drained, drop the mutex, then\nfdatasync the clone. The dup shares the open file description, so the\nsame bytes become durable. A new pwrite still cannot start: the durable\npoint holds sync_in_progress.\n\n* fix(data-sync): count body-worker holds in the discovery budget\n\nA live body job marks every covered entropy offset HeldByBodyWorker.\nThose rows were not hot, so each tick added another full pending budget\nand the request map grew for the life of the job.\n\nDiscovery now counts holds toward max_pending_chunk_requests. Promotion\nstill ignores them, so a finished or expired hold can become Pending.\nWhile the holds fill the budget, other holes on that module wait until\na row releases.\n\n* fix(storage-module): retry a packing-params mismatch\n\nvalidate_packing_params read the assignment, dropped the lock, then read\npacking_params.toml. A concurrent expiry rewrite can make the file disagree\nwith that copy, and a missing partition hash was unwrapped. Either case\npanicked the storage-module task.\n\nA mismatch is now the same retryable error as an unfinished reset. The\none-second tick tries the update again. A later call with a matching file\napplies the assignment.\n\n* fix(storage): continue an epoch assignment when one module reset fails\n\nA reset that does not finish returned immediately, so every later\nmodule in that update kept the previous assignment. The handler now\napplies the rest of the update, then returns the failure so the same\nmessage is retried. A module already at the target assignment is not\nreset again.\n\n* fix(packing): requeue a failed pack as one range\n\nA local pack error inserted every remaining uninitialized offset into\nthe checksum repair set. A partition-sized span made that set tens of\nmillions of entries and held its mutex for the whole insert.\n\nQueue the span as one interval. The storage-module tick sends that\ninterval. Checksum mismatches stay one offset each.\n\n* fix(database): bound content-key deletes to an offset sub-span\n\nA range delete collected every 36-byte content key into one synced batch.\nA large rollback, or the open that retries it, can exhaust memory before\nthat batch commits.\n\nEach span is now split into sub-spans of at most DELETE_SUBRANGE_OFFSETS\noffsets, and each sub-span is one synced batch. Rollback clears a slice\nthe same way, one index transaction per sub-span. A crash leaves a cleared\nprefix. Open drops rows that remain under a non-Data interval.\n\n* fix(actors): resend a failed pack only while its span is uninitialized\n\nA failed pack and a dropped recovery repack both leave a span uninitialized.\nQueue the failed pack through the same uninitialized-span path, so the tick\nstops resending it once the offsets are written.\n\n* fix(block-validation): report a failed local ingress-proof read as a node fault\n\nWith full ingress-proof validation on, a storage-module placement lookup\nerror or chunk read error was logged and then treated as missing data.\nWhen no peer served the chunk, validation returned InvalidIngressProof\nand the block was discarded.\n\nThe local reader still returns no bytes after those errors, so peers are\ntried. It also reports whether a local read failed. If every source\nmissed and a local read failed, validation returns DatabaseError. A clean\nmiss, including an indexed path whose body is not stored yet, stays\nInvalidIngressProof.\n\n* fix(data-sync): interleave Publish with term modules each pass\n\nEach pass gave every term-ledger module a full sweep of starts before\nany Publish module. Those starts share one peer-slot pool, so the term\nmodules could take every slot. Completions between ticks freed the\nslots, and the next tick gave them back to the term modules. Publish\nfetched nothing while the term modules still had work.\n\nEach pass now gives every term module one start, then every Publish\nmodule one start, and repeats while any start succeeds. The sweep-sized\nburst is removed. Cursor rotation is unchanged.\n\n* fix(domain): refuse a bench index on another device or through a symlink\n\nThe bench open accepted an index path whose canonical form stayed inside\nthe submodule directory. A bind mount keeps that path, so a live db or\nrocks directory mounted there was opened. A symlink that stays inside\nthe directory was opened too.\n\nThe bench open now refuses when db, rocks, or intervals.json is a\nsymlink, or when its device number differs from the submodule directory.\nProduction open is unchanged.\n\n* fix(actors): continue the epoch update after a packing-params mismatch\n\nA disagreeing packing file returns a retryable error. Later modules in the same pass still apply, and the index-heal retry stays armed.\n\n* docs: state the 4.1 to 4.0 MDBX rollback limit\n\nAfter the in-place drop, 4.0.x starts but has no data-path proof for migrated offsets. A later 4.1.x start does not import rows written into the dropped table, and data sync does not refetch them while the interval is Data.\n\n* docs: point the MDBX removal checklist at current storage module lines\n\nThe storage_module.rs anchors had drifted from the code they describe.\n\n* chore: correct the presence-delete and discovery-hold comments\n\nRocksDB commits one synced batch per presence sub-span, so an error can follow a durable prefix. Discovery counts held requests toward the pending-request cap.\n\n* test(migration): cover a Submit fallback index-read error\n\nThe earlier tests failed a body read only. Fail the data-root index read on\nthe first Submit module and check the body still migrates from the second.\n\n* fix(actors): send a deferred checksum repair whole on the assignment path\n\nThe assignment update resent deferred spans through the uninitialized-only\npath. A deferred checksum repair over Entropy offsets had no Uninitialized\npart, so it was dropped and the corrupted offsets were never repacked. Honor\nthe span flag there, as the tick already does.\n\n* docs(database): describe each engine's presence delete separately\n\n* test(actors): drive the deferred checksum repair through a capacity-to-ledger update\n\nThe test called the resend helper directly. Apply a real capacity-to-ledger\nassignment update instead, so it covers the path that sends the deferred\nspans.\n\n* fix(actors): alternate data-sync slot refills between term and Publish\n\nA freed peer slot was always refilled from term modules first. On a peer\nshared with Publish, every completion handed the slot back to term work\nand Publish never started again. A refill now tries Publish first when\nthe previous refill started a term module, and falls through if that\ngroup cannot start. The tick stays term-first.\n\n* fix(actors): queue the term write head when holds fill the scan budget\n\nDiscovery counts body-worker holds toward the pending-request cap and\nreturned before the term write-head enqueue. A frontier offset that was\nstill Entropy and not yet tracked stayed unqueued while holds filled\nthe budget. The write head now uses the non-hold hot count. The scan\nkeeps the holds-inclusive budget.\n\n* fix(actors): treat a storage hole as an ingress-proof miss\n\nA data-path row with no body makes the chunk read return the hole error.\nFull ingress validation counted every such error as a failed read, so\nthe block became a node fault when no peer served the chunk. That error\nis a miss. A real read error still sets the node-fault path.\n\n* fix(database): batch disjoint presence deletes under the offset limit\n\nEach non-contiguous presence span was its own synced batch. Many small\nholes on one submodule paid one WAL sync per span. Consecutive pieces\nnow share one batch while their offset count stays within\nDELETE_SUBRANGE_OFFSETS. A wider total still splits, so one commit\ncannot exceed that many offsets.\n\n* fix(domain): return a stat error for packing_params.toml\n\nexists() reports a missing file when stat itself fails, so a parent that\nis not a directory looked like a fresh module. try_exists() returns that\nerror. Ok(None) stays the confirmed miss.\n\n* docs: correct the slot-budget comment and presence-delete docs\n\nThe interleave test called a budget of 10 a fresh peer's baseline. A\nfresh peer starts at 20 slots. The comment now states the budget of 10\nthat the test uses.\n\nThe presence-delete doc said each piece was its own DeleteRange batch.\nConsecutive pieces share one batch while their offset count stays within\nthe limit. A group with no offset row does not commit, and a piece with\nat most RANGE_TOMBSTONE_KEY_LIMIT keys uses point deletes.\n\n* fix(xtask): do not prune executables through a symlinked profile\n\nWhen target/debug or target/release is a symlink and deps is a real\ndirectory, the stale-executable prune unlinked executables and their\nsiblings in the directory the profile pointed at.\n\nCanonicalize deps and skip it when it is outside the canonical target.\nBefore each delete, require the parent to resolve inside that target.\n\n* fix(xtask): do not follow a symlinked usage directory\n\nlive_usage followed a symlink at target/xtask-usage and deleted aged\nfiles in the directory it pointed at. A live record there could also\nname units to prune.\n\nA symlinked usage directory is not a usage directory. Read nothing from\nit and delete nothing in it.\n\n* fix(xtask): do not prune from a symlinked fingerprint directory\n\nRefusing to walk a symlinked .fingerprint left only the uplifted roots\nin the keep set, so dependency units inside the target were deleted.\n\nWalk .fingerprint when it resolves inside the target. When it resolves\noutside, or does not resolve, skip unit deletion for that profile.\n\n* docs: point removal anchors at the current markers\n\nThe chunk_provider and chunk_migration checklist lines no longer sit on\nthe MDBX-SUBMODULE-INDEX markers. Point them at those markers, and stop\nclaiming the numbers match the commit that added the page.\n\nJoin the two rollback notes so they stay one blockquote.\n\n* docs(release): remove submodule_index from the config before a 4.0.x rollback\n\n* fix(utils): move the node panic hook out of irys-testing-utils\n\nThe irys binary installed its panic hook from irys-testing-utils, a\ntest-support crate. The hook's OTel flush and panic backtrace compile\nonly under that crate's telemetry feature, which the node telemetry\nfeature did not enable, so a telemetry build dropped both.\n\nMove setup_panic_hook into irys_utils::shutdown, next to the shutdown\nwatchdog it starts. irys-utils/telemetry gates the flush and backtrace,\nand the node telemetry feature already enables it. The node no longer\ndepends on irys-testing-utils. initialize_tracing in irys-testing-utils\ninstalls the same hook from irys-utils.\n\n* fix(domain): classify storage holes by a typed error, not message text\n\nmissing_on_disk recognized a storage hole (an index row with no body) by an exact error string, so rewording the emitter would silently reclassify a hole as a read fault and change ingress classification. Introduce a ChunkMissingOnDisk error type returned by the emitter and matched by type across the eyre chain; the Display text is unchanged, so log and message behavior is preserved.\n\n* fix(storage): refuse labelled chunks with no packing params\n\nWhen packing_params.toml was missing, open treated the submodule as fresh\nand wrote the current miner's params. An intervals.json left in that\ndirectory still labelled its chunks as packed or as data, so open accepted\nbytes packed for an unknown miner or partition.\n\nA fresh open writes the params file before intervals.json, so a crash\ncannot leave labels without params. Refuse that state before any file\nchanges. A chunks file or an index with no labels still opens as fresh:\neverything is Uninitialized, and ensure_default_intervals already refuses\nan index that holds tx intervals. A bench split writes its own labels\nbefore the first open, so it is not checked.\n\n* test(p2p): advance the index between the sync spawn and its re-read\n\nThe caught-up test started at a height that was already not behind the\ntrusted tip, so a task that used the spawn-time height also passed it.\nStart behind, then advance the index after the spawn reads its start\nheight and before the task runs. On the single-thread test runtime the\ntask cannot run before the test yields, so only a re-read of the live\nindex sees the new height.\n\n* fix(storage): refuse only real labels when packing params are missing\n\nAny non-empty intervals.json counted as stored chunks. A file with only\nUninitialized labels holds no packed bytes, so a missing params file\nthere is a fresh module. Parse the labels and refuse only when one is\nnot Uninitialized. mid_write_intervals.json only turns spans back to\nUninitialized, so intervals.json alone bounds what open would load. The\nread does not create or change the file. A read or parse error is an\nopen error.\n\n* docs: point the MDBX removal markers at their current lines\n\nRegenerate every marker line in the removal checklist from the source.\nDrop the rocks.rs section: those checksum guards and their markers were\nremoved. Add the three open-test markers that the list did not have.",
+          "timestamp": "2026-10-26T23:35:40Z",
+          "tree_id": "a646a34c60bad910a72520c1a7bbe05601106e6a",
+          "url": "https://github.com/Irys-xyz/irys/commit/5c715733b4d7c32d0d59f8c48626c5599065df25"
+        },
+        "date": 1793058853105,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012298,
+            "range": "± 0.000302",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119499,
+            "range": "± 0.001846",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.20561,
+            "range": "± 0.02073",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.901051,
+            "range": "± 0.097925",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074674,
+            "range": "± 0.000154",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 768.640898,
+            "range": "± 11.756208",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1016.889586,
+            "range": "± 33.840727",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.124158,
+            "range": "± 0.001472",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1180.980786,
+            "range": "± 8.862453",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1530.433984,
+            "range": "± 17.004693",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033975,
+            "range": "± 0.001154",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.672652,
+            "range": "± 0.239286",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.917968,
+            "range": "± 0.680959",
             "unit": "ms/iter"
           },
           {
