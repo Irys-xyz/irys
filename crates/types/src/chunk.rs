@@ -78,34 +78,6 @@ impl UnpackedChunk {
         hash_sha256(data_path).into()
     }
 
-    /// Returns the transaction-relative byte offset of the last byte in this chunk.
-    ///
-    /// Chunk offsets in the merkle tree are based on end byte offsets:
-    /// - Chunk 0: bytes [0, chunk_size)            → ends at chunk_size - 1
-    /// - Chunk 1: bytes [chunk_size, 2*chunk_size) → ends at 2*chunk_size - 1
-    /// - Last chunk may be partial                 → ends at data_size - 1
-    ///
-    /// Note: Converting from chunk count to chunk offset requires subtracting 1
-    /// (e.g., 3 chunks means the last chunk has offset 2) the same is true
-    /// of the byte offsets in the chunk.
-    pub fn end_byte_offset(&self, chunk_size: u64) -> u64 {
-        if self.data_size == 0 {
-            return 0;
-        }
-
-        // Calculate total number of chunks, then calculate the last chunks offset
-        let num_chunks = self.data_size.div_ceil(chunk_size);
-        let last_chunk_offset = num_chunks - 1;
-
-        if self.tx_offset.0 as u64 == last_chunk_offset {
-            // If it's the last chunk, the end byte offset is just # of bytes - 1
-            self.data_size - 1
-        } else {
-            // Intermediate chunks always end at a chunk boundary byte count minus 1 to make it an offset
-            (self.tx_offset.0 as u64 + 1) * chunk_size - 1
-        }
-    }
-
     /// Returns the maximum valid tx_offset for this chunk's data_size.
     /// Returns None if data_size is 0.
     pub fn max_valid_offset(&self, chunk_size: u64) -> Option<u64> {
