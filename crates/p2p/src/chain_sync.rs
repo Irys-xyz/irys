@@ -3993,10 +3993,16 @@ mod tests {
         /// pause mining.
         #[tokio::test]
         async fn sync_task_does_not_pause_when_the_live_index_caught_up() {
-            // Migration depth 6. Local 20 is not behind trusted 30: 20 + 12 < 30
-            // is false.
-            let (_dir, service, controller) = service_at_index_height(20);
+            // Migration depth 6. At spawn, local 2 is behind trusted 30:
+            // 2 + 12 < 30.
+            let (_dir, service, controller) = service_at_index_height(2);
+            assert!(is_index_behind_trusted_height(2, 30, 6));
             service.spawn_chain_sync_task(None, false, Some(30));
+            // This runtime has one thread, so the sync task has not run yet.
+            // The index catches up after the spawn reads its start height and
+            // before the task's re-read. Local 20 is not behind: 20 + 12 < 30
+            // is false. Only the re-read sees 20.
+            push_index_height(&service.block_index, 20);
 
             let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
             loop {
