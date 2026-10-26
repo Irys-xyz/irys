@@ -111,6 +111,7 @@ impl From<ChunkIngressError> for GossipError {
                 | AdvisoryChunkIngressError::PreHeaderOversizedDataPath
                 | AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap
                 | AdvisoryChunkIngressError::PreHeaderInvalidOffset(_)
+                | AdvisoryChunkIngressError::UnconfirmedChunkSizeMismatch
                 | AdvisoryChunkIngressError::Other(_)) => {
                     Self::Advisory(AdvisoryGossipError::ChunkIngress(other))
                 }
