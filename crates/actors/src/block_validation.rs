@@ -7321,8 +7321,6 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    // TODO: validate that block.treasury is correctly updated
-
     debug!("Data transaction validation successful");
     Ok(())
 }
