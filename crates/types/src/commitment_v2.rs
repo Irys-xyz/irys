@@ -466,6 +466,10 @@ impl Decodable for CommitmentTypeV2 {
             return Err(RlpError::UnexpectedString);
         }
 
+        if buf.is_empty() {
+            return Err(RlpError::InputTooShort);
+        }
+
         let type_id = buf[0];
         buf.advance(1);
 
@@ -703,6 +707,16 @@ mod tests {
     fn test_commitment_type_rlp_decode_errors(#[case] buf: &[u8]) {
         let mut slice = buf;
         assert!(CommitmentTypeV2::decode(&mut slice).is_err());
+    }
+
+    #[test]
+    fn test_commitment_type_rlp_decode_empty_list_returns_error() {
+        // 0xC0 is an RLP list header with an empty payload
+        let mut slice: &[u8] = &[0xC0];
+        assert_eq!(
+            CommitmentTypeV2::decode(&mut slice),
+            Err(RlpError::InputTooShort)
+        );
     }
 
     #[test]
