@@ -80,7 +80,11 @@ pub fn adjust_difficulty(
     let target_current = max_u256.saturating_sub(current_diff);
 
     // Use saturating_mul to prevent overflow - clamps to U256::MAX if overflow would occur
-    let new_target = (target_current / scale).saturating_mul(adjustment_ratio);
+    // Clamped to >= 1 so the result stays below `U256::MAX`:
+    // `next_cumulative_diff` divides by `U256::MAX - diff`.
+    let new_target = (target_current / scale)
+        .saturating_mul(adjustment_ratio)
+        .max(U256::one());
 
     max_u256.saturating_sub(new_target)
 }
@@ -611,5 +615,47 @@ mod tests {
             assert!(!stats.is_adjusted, "Should NOT adjust below 25% threshold");
             assert_eq!(new_diff, current_diff, "Difficulty should remain unchanged");
         }
+    }
+
+    /// A difficulty within 1000 of `U256::MAX` must not adjust to exactly `U256::MAX`,
+    /// because `next_cumulative_diff` divides by `U256::MAX - diff`.
+    #[test]
+    fn adjusted_difficulty_stays_below_max_near_max() {
+        for offset in 0..1000_u64 {
+            let current_diff = U256::MAX - U256::from(offset);
+            let adjusted = adjust_difficulty(current_diff, 1_000, 10_000, 400);
+            assert!(adjusted < U256::MAX, "offset {offset}");
+            let _cumulative = next_cumulative_diff(U256::zero(), adjusted);
+        }
+    }
+
+    /// Adjustments away from the `U256::MAX` edge are unchanged.
+    #[rstest]
+    #[case::mid_range_fast(
+        U256::from(10_u64).pow(U256::from(70_u64)), 5_000, 10_000,
+        "57896049618658097711785492504343953926634992332820282019728792003956564820435"
+    )]
+    #[case::half_max_slow(U256::MAX / 2, 20_000, 10_000, "1935")]
+    #[case::near_max_fast(
+        U256::MAX - U256::from(10_u64).pow(U256::from(30_u64)), 1_000, 10_000,
+        "115792089237316195423570985008687907853269984665390564039457584007913129639935"
+    )]
+    #[case::small_diff(
+        U256::from(12345_u64),
+        9_000,
+        10_000,
+        "11579208923731619542357098500868790785326998466564056403945758400791312975635"
+    )]
+    fn adjust_difficulty_matches_reference_values(
+        #[case] current_diff: U256,
+        #[case] actual_time_ms: u128,
+        #[case] target_time_ms: u128,
+        #[case] expected: &str,
+    ) {
+        let expected = U256::from_dec_str(expected).unwrap();
+        assert_eq!(
+            adjust_difficulty(current_diff, actual_time_ms, target_time_ms, 400),
+            expected
+        );
     }
 }
