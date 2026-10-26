@@ -2839,7 +2839,14 @@ impl StorageModule {
         }
         let pack_started = Instant::now();
         let cache_hit = slot.cached_entropy.is_some();
-        let packed = packing_xor_vec_u8(entropy, &slot.unpacked);
+        let packed = match packing_xor_vec_u8(entropy, &slot.unpacked) {
+            Ok(packed) => packed,
+            Err(error) => {
+                self.fail_slot(slot, WriteDataChunkError::Other(error));
+                self.fail_queued_group(group);
+                return;
+            }
+        };
         let mut disk_compare = Duration::ZERO;
         let inserted = self.commit_packed(
             slot.offset,
@@ -3064,7 +3071,7 @@ impl StorageModule {
             let live = self.entropy_write_epoch.load(Ordering::SeqCst);
             let confirmed = if copied_pad && live != entropy_epoch {
                 let compare_started = Instant::now();
-                let entropy = packing_xor_vec_u8(packed.clone(), unpacked);
+                let entropy = packing_xor_vec_u8(packed.clone(), unpacked)?;
                 let matched = self.stable_disk_matches(offset, &entropy);
                 *disk_compare = disk_compare.saturating_add(compare_started.elapsed());
                 match matched {
@@ -4113,6 +4120,70 @@ mod tests {
             .expect("recall did not start after the flush cleared");
         recall.join().expect("recall thread");
         assert!(!disk.recall_pending());
+    }
+
+    /// An unlimited sync must not report the batch durable while a recall
+    /// flush still owes a window. The owed window writes its own runs. The
+    /// next unlimited sync writes the rest, and those bytes stay readable.
+    #[test]
+    fn unlimited_sync_errors_while_recall_flush_is_owed() -> eyre::Result<()> {
+        // One chunk per run, so the owed window cannot swallow the tail.
+        let (_tmp, module) = span_fixture_timed("recall_owed_unlimited_sync", 16, 1, 0, 0, 0, 0)?;
+        let total = u32::try_from(INFLIGHT_DISK_OPS).expect("window") + 3;
+        for offset in 0..total {
+            assert!(module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![u8::try_from(offset + 1).expect("byte"); 32],
+                super::super::ChunkType::Data,
+            ));
+        }
+        module.disk.arm_recall_flush();
+
+        let err = module
+            .force_sync_pending_chunks()
+            .expect_err("unlimited sync reported success while a recall flush is owed");
+        assert!(err.to_string().contains("recall flush"), "{err}");
+        assert!(module.disk.recall_flush_is_owed());
+        assert!(module.has_pending_writes());
+        for offset in 0..total {
+            assert!(
+                !module.is_data_chunk_durable_at(PartitionChunkOffset::from(offset)),
+                "offset {offset} was durable before the owed window"
+            );
+        }
+
+        module.flush_packed_window()?;
+        assert!(!module.disk.recall_flush_is_owed());
+        let window = u32::try_from(INFLIGHT_DISK_OPS).expect("window");
+        for offset in 0..window {
+            let at = PartitionChunkOffset::from(offset);
+            assert!(
+                module.is_data_chunk_durable_at(at),
+                "window skipped offset {offset}"
+            );
+            assert_eq!(
+                module.read_chunk_internal(at)?,
+                vec![u8::try_from(offset + 1).expect("byte"); 32]
+            );
+        }
+        for offset in window..total {
+            assert!(
+                !module.is_data_chunk_durable_at(PartitionChunkOffset::from(offset)),
+                "offset {offset} was durable before the unlimited sync"
+            );
+        }
+
+        module.force_sync_pending_chunks()?;
+        assert!(!module.has_pending_writes());
+        for offset in 0..total {
+            let at = PartitionChunkOffset::from(offset);
+            assert!(module.is_data_chunk_durable_at(at));
+            assert_eq!(
+                module.read_chunk_internal(at)?,
+                vec![u8::try_from(offset + 1).expect("byte"); 32]
+            );
+        }
+        Ok(())
     }
 
     #[test]

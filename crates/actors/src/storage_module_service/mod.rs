@@ -41,6 +41,13 @@ pub enum StorageModuleServiceMessage {
         storage_module_infos: Arc<Vec<StorageModuleInfo>>,
         update_height: u64,
     },
+    /// Rollback marked this span `Uninitialized` and the packing channel did
+    /// not accept it. `tick` resends it while any offset is still
+    /// `Uninitialized`.
+    RepackUninitialized {
+        module_id: usize,
+        range: PartitionChunkRange,
+    },
 }
 
 #[derive(Debug)]
@@ -67,7 +74,7 @@ pub struct StorageModuleServiceInner {
     /// Spans the packing channel did not accept. `tick` sends them until the
     /// channel accepts. A range stays one interval, so a full partition is not
     /// expanded into one repair offset per chunk.
-    pending_ranges: HashMap<usize, Vec<PartitionChunkRange>>,
+    pending_ranges: HashMap<usize, Vec<PendingSpan>>,
     /// Test stand-in for a periodic heal pass. `None` in every other test.
     #[cfg(test)]
     heal_probe: Option<Arc<HealScheduleProbe>>,
@@ -162,6 +169,18 @@ pub(crate) enum PackSend {
     Rejected,
 }
 
+/// One span `tick` still has to send.
+///
+/// `while_uninitialized` is a rollback or assignment repack: only offsets
+/// that are still `Uninitialized` are sent, and the span is dropped when
+/// none remain. A checksum repair is sent whole, including when its label
+/// is `Entropy`.
+#[derive(Clone, Copy)]
+struct PendingSpan {
+    range: PartitionChunkRange,
+    while_uninitialized: bool,
+}
+
 fn is_reset_not_finished(err: &eyre::Report) -> bool {
     err.downcast_ref::<ResetNotFinished>().is_some()
 }
@@ -224,6 +243,18 @@ impl StorageModuleServiceInner {
         Ok(outcome)
     }
 
+    /// Assignment updates go through [`Self::apply_assignment`]. A repack must
+    /// not: that path stores the message and would replace a pending reset.
+    async fn on_message(&mut self, msg: StorageModuleServiceMessage) -> eyre::Result<()> {
+        match msg {
+            StorageModuleServiceMessage::RepackUninitialized { module_id, range } => {
+                self.defer_uninitialized_repack(module_id, range);
+                Ok(())
+            }
+            other => self.apply_assignment(other).await,
+        }
+    }
+
     async fn handle_message(&mut self, msg: StorageModuleServiceMessage) -> eyre::Result<()> {
         match msg {
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
@@ -233,8 +264,43 @@ impl StorageModuleServiceInner {
                 self.handle_partition_assignments_update(storage_module_infos, update_height)
                     .await?
             }
+            // `on_message` handles this. `apply_assignment` must not see it.
+            StorageModuleServiceMessage::RepackUninitialized { .. } => {}
         }
         Ok(())
+    }
+
+    /// Try once. A full, closed, or rejected send is kept for `tick` only
+    /// while an offset in the span is still `Uninitialized`.
+    fn defer_uninitialized_repack(&mut self, module_id: usize, range: PartitionChunkRange) {
+        let module = {
+            let guard = self.storage_modules.read().unwrap();
+            guard.iter().find(|module| module.id == module_id).cloned()
+        };
+        let Some(module) = module else {
+            warn!(
+                storage_module.id = module_id,
+                "uninitialized repack has no storage module"
+            );
+            return;
+        };
+        if module.partition_assignment().is_none() {
+            return;
+        }
+        let mut existing = self.pending_ranges.remove(&module_id).unwrap_or_default();
+        let mut added = Vec::new();
+        self.enqueue_uninitialized_span(&module, range, &mut added);
+        for span in added {
+            if !existing
+                .iter()
+                .any(|kept| kept.while_uninitialized && kept.range == span.range)
+            {
+                existing.push(span);
+            }
+        }
+        if !existing.is_empty() {
+            self.pending_ranges.insert(module_id, existing);
+        }
     }
 
     /// Apply one assignment update. A reset that does not finish is stored and
@@ -365,15 +431,26 @@ impl StorageModuleServiceInner {
             }
         }
 
+        // One module's reset error must not decide the assignment of the
+        // others. Remember the failure and keep going. Return it after both
+        // passes so this same update is retried. A module already at its
+        // target takes neither reset branch on that retry.
+        let mut reset_not_finished: Option<eyre::Report> = None;
+
         for (module_id, module) in local_modules_by_id.iter() {
             match update_info_by_id.get(module_id) {
                 None => {
                     // storage module is present locally, not present in the update
-                    self.clear_assignment_if_outdated(
+                    if let Err(err) = self.clear_assignment_if_outdated(
                         module,
                         update_height,
                         "missing_from_update",
-                    )?;
+                    ) {
+                        if !is_reset_not_finished(&err) {
+                            return Err(err);
+                        }
+                        reset_not_finished.get_or_insert(err);
+                    }
                 }
                 Some(sm_info) => {
                     if sm_info.submodules.is_empty() {
@@ -391,11 +468,16 @@ impl StorageModuleServiceInner {
 
                     if sm_info.partition_assignment.is_none() {
                         // storage module is present locally, present in the incoming update, but it has no partition assignment
-                        self.clear_assignment_if_outdated(
+                        if let Err(err) = self.clear_assignment_if_outdated(
                             module,
                             update_height,
                             "explicitly_unassigned",
-                        )?;
+                        ) {
+                            if !is_reset_not_finished(&err) {
+                                return Err(err);
+                            }
+                            reset_not_finished.get_or_insert(err);
+                        }
                     }
                 }
             }
@@ -414,7 +496,14 @@ impl StorageModuleServiceInner {
                 // Reset and install the assignment under one write lock. A
                 // failed reset leaves the module unassigned, so the next
                 // update takes this branch again.
-                let range = self.reset_and_install(existing, Some(assignment), update_height)?;
+                let range = match self.reset_and_install(existing, Some(assignment), update_height)
+                {
+                    Ok(range) => range,
+                    Err(err) => {
+                        reset_not_finished.get_or_insert(err);
+                        continue;
+                    }
+                };
                 // The protocol assigns a new partition to capacity for one epoch.
                 self.enqueue_packing(existing, range);
 
@@ -427,12 +516,11 @@ impl StorageModuleServiceInner {
 
             // Validate the in memory storage module against on-disk packing parameters
             if let Some(info_pa) = sm_info.partition_assignment {
-                // Validate the existing storage module info as it exists in our local state
-                // vs. the existing packing params on disk to make sure everything is in sync
-                // before updating the partition assignment
-                match self.validate_packing_params(existing, path, sm_info.id) {
-                    Ok(()) => {}
-                    Err(err) => panic!("{}", err),
+                // The on-disk file can disagree with memory. A mismatch, including
+                // a missing partition hash, is retried. It does not stop the service.
+                if let Err(err) = self.validate_packing_params(existing, path, sm_info.id) {
+                    reset_not_finished.get_or_insert(err);
+                    continue;
                 }
 
                 // Check to see if there's been a change in the ledger assignment for the partition_has
@@ -450,9 +538,12 @@ impl StorageModuleServiceInner {
                     // assignment, so the next update still sees the change.
                     // Capacity→ledger does not reset: index repair runs below.
                     if ledger_before.is_some() {
-                        let range =
-                            self.reset_and_install(existing, Some(info_pa), update_height)?;
-                        self.enqueue_packing(existing, range);
+                        match self.reset_and_install(existing, Some(info_pa), update_height) {
+                            Ok(range) => self.enqueue_packing(existing, range),
+                            Err(err) => {
+                                reset_not_finished.get_or_insert(err);
+                            }
+                        }
                     } else {
                         // Capacity→ledger does not reset. Entropy and Data stay
                         // unless a durable marker says the wipe already started.
@@ -468,7 +559,13 @@ impl StorageModuleServiceInner {
                         // channel has not accepted that is still Uninitialized.
                         // Do not pack offsets that are already Entropy or Data.
                         let wiped = if existing.reset_incomplete() {
-                            self.settle_incomplete_reset(existing)?
+                            match self.settle_incomplete_reset(existing) {
+                                Ok(wiped) => wiped,
+                                Err(err) => {
+                                    reset_not_finished.get_or_insert(err);
+                                    continue;
+                                }
+                            }
                         } else {
                             None
                         };
@@ -485,7 +582,8 @@ impl StorageModuleServiceInner {
                                 storage_module.id = existing.id,
                                 "capacity-to-ledger assignment was not stored; the update will be retried: {err:#}"
                             );
-                            return Err(ResetNotFinished.into());
+                            reset_not_finished.get_or_insert(ResetNotFinished.into());
+                            continue;
                         }
                         if wiped.is_none() {
                             self.enqueue_deferred_uninitialized(existing);
@@ -498,13 +596,25 @@ impl StorageModuleServiceInner {
                     // started, so finish it. `reset` does not write the
                     // assignment. The partition is still assigned, so the
                     // span is packed. A full channel keeps it.
-                    if let Some(range) = self.settle_incomplete_reset(existing)?
-                        && existing.partition_assignment().is_some()
-                    {
-                        self.enqueue_packing(existing, range);
+                    match self.settle_incomplete_reset(existing) {
+                        Ok(Some(range)) if existing.partition_assignment().is_some() => {
+                            self.enqueue_packing(existing, range);
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            reset_not_finished.get_or_insert(err);
+                        }
                     }
                 }
             }
+        }
+
+        if let Some(err) = reset_not_finished {
+            // A later module may already be on its new ledger. Heal did not
+            // run. The periodic pass covers that module until this retry
+            // completes and heal runs for the settled set.
+            self.index_heal_needs_retry = true;
+            return Err(err);
         }
 
         // After assignments settle: best-effort gap-scan + index backfill for every
@@ -621,24 +731,22 @@ impl StorageModuleServiceInner {
         }
     }
 
-    /// Send a deferred span that is still `Uninitialized`. A full channel
-    /// keeps that part for `tick`. Entropy and Data are not sent.
+    /// Send the deferred spans. A rollback or assignment repack sends only
+    /// the part that is still `Uninitialized`. A checksum repair is sent
+    /// whole. A full channel keeps the span for `tick`.
     fn enqueue_deferred_uninitialized(&mut self, module: &Arc<StorageModule>) {
         let Some(waiting) = self.pending_ranges.remove(&module.id) else {
             return;
         };
         let mut deferred = Vec::new();
-        for range in waiting {
-            for span in module
-                .uninitialized_spans_overlapping(range.0)
-                .into_iter()
-                .map(PartitionChunkRange)
-            {
-                match self.try_enqueue_packing(module, span) {
-                    PackSend::Accepted => {}
-                    PackSend::Deferred => deferred.push(span),
-                    PackSend::Rejected => {}
-                }
+        for span in waiting {
+            if span.while_uninitialized {
+                self.enqueue_uninitialized_span(module, span.range, &mut deferred);
+            } else if matches!(
+                self.try_enqueue_packing(module, span.range),
+                PackSend::Deferred
+            ) {
+                deferred.push(span);
             }
         }
         if !deferred.is_empty() {
@@ -653,7 +761,13 @@ impl StorageModuleServiceInner {
         // reset already cleared the old bytes.
         self.pending_ranges.remove(&module.id);
         if matches!(self.try_enqueue_packing(module, range), PackSend::Deferred) {
-            self.pending_ranges.insert(module.id, vec![range]);
+            self.pending_ranges.insert(
+                module.id,
+                vec![PendingSpan {
+                    range,
+                    while_uninitialized: true,
+                }],
+            );
         }
     }
 
@@ -666,13 +780,15 @@ impl StorageModuleServiceInner {
         send_packing_request(&self.service_senders.packing_sender(), module, range)
     }
 
-    /// Hand crc mismatches to the packing queue. A full channel keeps the
-    /// range here, as one interval. An unassigned module drops it.
+    /// Hand checksum mismatches and failed packs to the packing queue. A
+    /// full channel keeps each range here, as one interval. An unassigned
+    /// module drops both.
     fn enqueue_crc_repairs(&mut self, module: &Arc<StorageModule>) {
         if module.partition_assignment().is_none() {
             // The module cannot pack. Leaving the range queued makes every
             // later tick expand it and try again.
             let _dropped = module.take_crc_repair_ranges();
+            let _dropped_packs = module.take_packing_ranges();
             self.pending_ranges.remove(&module.id);
             return;
         }
@@ -682,25 +798,69 @@ impl StorageModuleServiceInner {
             module
                 .take_crc_repair_ranges()
                 .into_iter()
-                .map(PartitionChunkRange),
+                .map(|interval| PendingSpan {
+                    range: PartitionChunkRange(interval),
+                    while_uninitialized: false,
+                }),
+        );
+        // A failed pack left these spans uninitialized. Resend only the part
+        // that still is.
+        waiting.extend(
+            module
+                .take_packing_ranges()
+                .into_iter()
+                .map(|interval| PendingSpan {
+                    range: PartitionChunkRange(interval),
+                    while_uninitialized: true,
+                }),
         );
         let mut deferred = Vec::new();
-        for range in waiting {
-            match self.try_enqueue_packing(module, range) {
+        for span in waiting {
+            if span.while_uninitialized {
+                self.enqueue_uninitialized_span(module, span.range, &mut deferred);
+                continue;
+            }
+            match self.try_enqueue_packing(module, span.range) {
                 PackSend::Accepted => {}
-                PackSend::Deferred => deferred.push(range),
+                PackSend::Deferred => deferred.push(span),
                 PackSend::Rejected => {
                     // `new` failed while the module is still assigned: the
                     // range does not fit the partition. Put that range back.
                     // An assignment cleared during the send is not retried.
                     if module.partition_assignment().is_some() {
-                        module.requeue_crc_repair_range(range.0);
+                        module.requeue_crc_repair_range(span.range.0);
                     }
                 }
             }
         }
         if !deferred.is_empty() {
             self.pending_ranges.insert(module.id, deferred);
+        }
+    }
+
+    /// Send offsets in `range` that are still `Uninitialized`. A full, closed,
+    /// or rejected send stays in `deferred`. No such offset drops the span.
+    fn enqueue_uninitialized_span(
+        &mut self,
+        module: &Arc<StorageModule>,
+        range: PartitionChunkRange,
+        deferred: &mut Vec<PendingSpan>,
+    ) {
+        for overlap in module.uninitialized_spans_overlapping(range.0) {
+            let range = PartitionChunkRange(overlap);
+            let kept = PendingSpan {
+                range,
+                while_uninitialized: true,
+            };
+            match self.try_enqueue_packing(module, range) {
+                PackSend::Accepted => {}
+                PackSend::Deferred => deferred.push(kept),
+                PackSend::Rejected => {
+                    if module.partition_assignment().is_some() {
+                        deferred.push(kept);
+                    }
+                }
+            }
         }
     }
 
@@ -771,8 +931,9 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
-    /// Validates that a storage module's partition assignment matches the on-disk parameters.
-    /// Reports an error if there's a mismatch.
+    /// The in-memory assignment must match `packing_params.toml`.
+    /// A mismatch, including a missing partition hash, is [`ResetNotFinished`].
+    /// The caller retries that update. A file that cannot be read is skipped.
     #[tracing::instrument(level = "trace", skip_all, err)]
     fn validate_packing_params(
         &self,
@@ -805,8 +966,10 @@ impl StorageModuleServiceInner {
             }
         };
 
-        // Check all parameters
-        let hash_match = assignment.partition_hash == params.partition_hash.unwrap();
+        // A missing disk hash does not match. Unwrapping it would stop the service.
+        let hash_match = params
+            .partition_hash
+            .is_some_and(|hash| hash == assignment.partition_hash);
         let slot_match = assignment.slot_index == params.slot;
         let ledger_match = assignment.ledger_id == params.ledger;
 
@@ -819,7 +982,7 @@ impl StorageModuleServiceInner {
             return Ok(());
         }
 
-        // Collect detailed mismatch information for error message
+        // Collect detailed mismatch information for the retry log
         let mut mismatches = Vec::new();
 
         if !hash_match {
@@ -843,13 +1006,13 @@ impl StorageModuleServiceInner {
             ));
         }
 
-        // Return a detailed error with all mismatches
-        Err(eyre::eyre!(
-            "Storage module {:?} at index {} has mismatched parameters: {}",
+        warn!(
+            "Storage module {:?} at index {} has mismatched packing params; the update will be retried: {}",
             &module_path,
             index,
             mismatches.join(", ")
-        ))
+        );
+        Err(ResetNotFinished.into())
     }
 }
 
@@ -957,7 +1120,7 @@ impl StorageModuleService {
                             // clears it after the wipe finishes, or stores this
                             // message when the wipe is still incomplete.
                             let span = tracing::trace_span!(parent: &parent_span, "storage_module_handle_message");
-                            self.inner.apply_assignment(msg).instrument(span).await?;
+                            self.inner.on_message(msg).instrument(span).await?;
                         }
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
@@ -998,7 +1161,7 @@ impl StorageModuleService {
         while let Ok(traced) = self.msg_rx.try_recv() {
             let (msg, parent_span) = traced.into_parts();
             let span = tracing::trace_span!(parent: &parent_span, "storage_module_handle_message");
-            self.inner.apply_assignment(msg).instrument(span).await?
+            self.inner.on_message(msg).instrument(span).await?
         }
 
         tracing::info!("shutting down StorageModule Service gracefully");
@@ -1056,6 +1219,8 @@ mod assignment_reset_tests {
         inner: StorageModuleServiceInner,
         module: Arc<StorageModule>,
         path: std::path::PathBuf,
+        modules: Vec<Arc<StorageModule>>,
+        paths: Vec<std::path::PathBuf>,
     }
 
     fn harness(ledger_id: Option<u32>) -> Harness {
@@ -1063,6 +1228,14 @@ mod assignment_reset_tests {
     }
 
     fn open_harness(ledger_id: Option<u32>, configure: impl FnOnce(&mut NodeConfig)) -> Harness {
+        open_modules(1, ledger_id, configure)
+    }
+
+    fn open_modules(
+        module_count: usize,
+        ledger_id: Option<u32>,
+        configure: impl FnOnce(&mut NodeConfig),
+    ) -> Harness {
         let tmp = TempDirBuilder::new().build();
         let mut node_config = NodeConfig::testing();
         node_config.node_mode = NodeMode::Miner;
@@ -1073,23 +1246,32 @@ mod assignment_reset_tests {
             ..ConsensusConfig::testing()
         });
         configure(&mut node_config);
-        let submodules = StorageSubmodulesConfig::load_for_test(tmp.path().to_path_buf(), 1)
-            .expect("submodules");
-        let path = submodules.submodule_paths[0].clone();
+        let submodules =
+            StorageSubmodulesConfig::load_for_test(tmp.path().to_path_buf(), module_count)
+                .expect("submodules");
         let config = Config::new_with_random_peer_id(node_config);
+        let miner = config.node_config.miner_address();
 
-        let partition_hash = H256::repeat_byte(0x21);
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment {
-                partition_hash,
-                miner_address: config.node_config.miner_address(),
-                ledger_id,
-                slot_index: ledger_id.map(|_| 0),
-            }),
-            submodules: vec![(partition_chunk_offset_ie!(0, 10), path.clone())],
-        };
-        let module = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+        let mut modules = Vec::with_capacity(module_count);
+        for id in 0..module_count {
+            let path = submodules.submodule_paths[id].clone();
+            let info = StorageModuleInfo {
+                id,
+                partition_assignment: Some(PartitionAssignment {
+                    partition_hash: H256::repeat_byte(0x21 + u8::try_from(id).expect("id")),
+                    miner_address: miner,
+                    ledger_id,
+                    slot_index: ledger_id.map(|_| id),
+                }),
+                submodules: vec![(partition_chunk_offset_ie!(0, 10), path)],
+            };
+            modules.push(Arc::new(
+                StorageModule::new(&info, &config).expect("storage module"),
+            ));
+        }
+        let module = Arc::clone(&modules[0]);
+        let paths = submodules.submodule_paths;
+        let path = paths[0].clone();
 
         let db_env = open_or_create_db(
             tmp.path().join("chain-db"),
@@ -1104,7 +1286,7 @@ mod assignment_reset_tests {
         let (service_senders, receivers) = ServiceSenders::new();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let inner = StorageModuleServiceInner::new(
-            Arc::new(RwLock::new(vec![Arc::clone(&module)])),
+            Arc::new(RwLock::new(modules.clone())),
             block_index_guard,
             block_tree_guard,
             service_senders,
@@ -1118,6 +1300,8 @@ mod assignment_reset_tests {
             inner,
             module,
             path,
+            modules,
+            paths,
         }
     }
 
@@ -1181,6 +1365,192 @@ mod assignment_reset_tests {
         );
         assert!(!harness.module.reset_incomplete());
         assert!(harness.receivers.packing.try_recv().is_ok());
+    }
+
+    fn capacity_assignment(
+        id: usize,
+        path: &std::path::Path,
+        hash: H256,
+        miner: irys_types::IrysAddress,
+    ) -> StorageModuleInfo {
+        StorageModuleInfo {
+            id,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: hash,
+                miner_address: miner,
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), path.to_path_buf())],
+        }
+    }
+
+    /// The first module's reset fails. The later module still moves to the
+    /// target. The stored update retries the first module and does not reset
+    /// the module that is already there.
+    #[tokio::test]
+    async fn reset_failure_still_updates_later_modules() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = open_modules(2, Some(DataLedger::Publish.into()), |_| {});
+        let first = Arc::clone(&harness.modules[0]);
+        let second = Arc::clone(&harness.modules[1]);
+        let miner = first
+            .partition_assignment()
+            .expect("assigned")
+            .miner_address;
+        let update = Arc::new(vec![
+            capacity_assignment(
+                0,
+                &harness.paths[0],
+                first.partition_hash().expect("hash"),
+                miner,
+            ),
+            capacity_assignment(
+                1,
+                &harness.paths[1],
+                second.partition_hash().expect("hash"),
+                miner,
+            ),
+        ]);
+
+        first.fail_next_reset_for_test();
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: Arc::clone(&update),
+                update_height: 4,
+            })
+            .await
+            .expect("a reset failure is stored for retry");
+
+        assert_eq!(
+            first.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into()),
+            "the module whose reset failed keeps its assignment"
+        );
+        assert!(first.reset_incomplete());
+        assert_eq!(
+            second.partition_assignment().unwrap().ledger_id,
+            None,
+            "a later module is updated even though the earlier reset failed"
+        );
+        assert!(!second.reset_incomplete());
+        assert!(harness.inner.pending_assignment.is_some());
+
+        let offset = PartitionChunkOffset::from(0);
+        assert!(second.write_chunk(offset, vec![0xAB; 32], ChunkType::Entropy));
+        second.force_sync_pending_chunks().expect("sync entropy");
+        assert_eq!(second.get_chunk_type(&offset), Some(ChunkType::Entropy));
+
+        let queued = drain_packing(&mut harness);
+        assert_eq!(queued.len(), 1, "only the module that reset is packed");
+        assert_eq!(queued[0].storage_module().id, second.id);
+        drop(queued);
+
+        let pending = harness
+            .inner
+            .pending_assignment
+            .clone()
+            .expect("retry message");
+        harness
+            .inner
+            .apply_assignment(pending)
+            .await
+            .expect("retry finishes the first module");
+
+        assert_eq!(first.partition_assignment().unwrap().ledger_id, None);
+        assert!(!first.reset_incomplete());
+        assert_eq!(second.partition_assignment().unwrap().ledger_id, None);
+        assert_eq!(
+            second.get_chunk_type(&offset),
+            Some(ChunkType::Entropy),
+            "a retry must not reset a module that is already at the target"
+        );
+        assert!(harness.inner.pending_assignment.is_none());
+
+        let queued = drain_packing(&mut harness);
+        assert_eq!(
+            queued.len(),
+            1,
+            "the retry packs only the module that reset"
+        );
+        assert_eq!(queued[0].storage_module().id, first.id);
+    }
+
+    /// An unassign whose reset fails must not freeze the other module in the
+    /// same update. The retry clears the first module and leaves the second.
+    #[tokio::test]
+    async fn failed_unassign_still_updates_the_other_module() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = open_modules(2, Some(DataLedger::Publish.into()), |_| {});
+        let first = Arc::clone(&harness.modules[0]);
+        let second = Arc::clone(&harness.modules[1]);
+        let miner = first
+            .partition_assignment()
+            .expect("assigned")
+            .miner_address;
+        let update = Arc::new(vec![
+            StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ie!(0, 10), harness.paths[0].clone())],
+            },
+            capacity_assignment(
+                1,
+                &harness.paths[1],
+                second.partition_hash().expect("hash"),
+                miner,
+            ),
+        ]);
+
+        first.fail_next_reset_for_test();
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: Arc::clone(&update),
+                update_height: 4,
+            })
+            .await
+            .expect("a reset failure is stored for retry");
+
+        assert_eq!(
+            first.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into()),
+            "the module whose reset failed keeps its assignment"
+        );
+        assert!(first.reset_incomplete());
+        assert_eq!(
+            second.partition_assignment().unwrap().ledger_id,
+            None,
+            "the other module is updated even though the unassign reset failed"
+        );
+
+        let offset = PartitionChunkOffset::from(0);
+        assert!(second.write_chunk(offset, vec![0xCD; 32], ChunkType::Entropy));
+        second.force_sync_pending_chunks().expect("sync entropy");
+
+        let pending = harness
+            .inner
+            .pending_assignment
+            .clone()
+            .expect("retry message");
+        harness
+            .inner
+            .apply_assignment(pending)
+            .await
+            .expect("retry clears the first module");
+
+        assert!(first.partition_assignment().is_none());
+        assert!(!first.reset_incomplete());
+        assert_eq!(second.partition_assignment().unwrap().ledger_id, None);
+        assert_eq!(
+            second.get_chunk_type(&offset),
+            Some(ChunkType::Entropy),
+            "a retry must not reset a module that is already at the target"
+        );
+        assert!(harness.inner.pending_assignment.is_none());
     }
 
     fn write_synced_data(module: &StorageModule, byte: u8) {
@@ -1997,6 +2367,179 @@ mod assignment_reset_tests {
         assert!(harness.module.partition_assignment().is_none());
         assert!(!harness.module.reset_incomplete());
         assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// Expiry can store capacity in `packing_params.toml` while memory still
+    /// names the ledger. That disagreement is retried. It does not stop the
+    /// service. A later call with a file that matches memory applies the update.
+    #[tokio::test]
+    async fn packing_params_mismatch_is_retried() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        let params_path = path.join(PACKING_PARAMS_FILE_NAME);
+        let update = capacity_update(&path, hash, miner);
+
+        let mut params = PackingParams::from_toml(&params_path).expect("packing params");
+        params.ledger = None;
+        params.slot = None;
+        params
+            .write_to_disk(&params_path)
+            .expect("store capacity on disk");
+
+        let err = harness
+            .inner
+            .handle_partition_assignments_update(Arc::clone(&update), 4)
+            .await
+            .expect_err("a ledger mismatch is retried");
+        assert!(super::is_reset_not_finished(&err));
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into()),
+            "a mismatch must leave the in-memory assignment unchanged"
+        );
+
+        params.ledger = Some(DataLedger::Publish.into());
+        params.slot = Some(0);
+        params
+            .write_to_disk(&params_path)
+            .expect("restore the ledger file");
+
+        harness
+            .inner
+            .handle_partition_assignments_update(update, 4)
+            .await
+            .expect("a consistent file applies the update");
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        assert!(harness.receivers.packing.try_recv().is_ok());
+    }
+
+    /// A disk file with no partition hash is retried, same as a mismatch.
+    /// A later call with a hash in the file applies the update.
+    #[tokio::test]
+    async fn packing_params_without_a_partition_hash_is_retried() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        let params_path = path.join(PACKING_PARAMS_FILE_NAME);
+        let update = capacity_update(&path, hash, miner);
+
+        let mut params = PackingParams::from_toml(&params_path).expect("packing params");
+        params.partition_hash = None;
+        params
+            .write_to_disk(&params_path)
+            .expect("clear the disk hash");
+
+        let err = harness
+            .inner
+            .handle_partition_assignments_update(Arc::clone(&update), 4)
+            .await
+            .expect_err("a missing disk hash is retried");
+        assert!(super::is_reset_not_finished(&err));
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert_eq!(
+            harness
+                .module
+                .partition_assignment()
+                .unwrap()
+                .partition_hash,
+            hash
+        );
+
+        params.partition_hash = Some(hash);
+        params
+            .write_to_disk(&params_path)
+            .expect("restore the disk hash");
+
+        harness
+            .inner
+            .handle_partition_assignments_update(update, 4)
+            .await
+            .expect("a file with a hash applies the update");
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+    }
+
+    /// Module 0 changes ledger. Module 1's packing file disagrees with memory.
+    /// Module 0 still commits. The call returns the retryable error and arms
+    /// the heal retry. A later call with a file that matches memory updates
+    /// module 1.
+    #[tokio::test]
+    async fn packing_params_mismatch_still_updates_the_other_module() {
+        let mut harness = open_modules(2, Some(DataLedger::Publish.into()), |_| {});
+        let first = Arc::clone(&harness.modules[0]);
+        let second = Arc::clone(&harness.modules[1]);
+        let miner = first
+            .partition_assignment()
+            .expect("assigned")
+            .miner_address;
+        let update = Arc::new(vec![
+            capacity_assignment(
+                0,
+                &harness.paths[0],
+                first.partition_hash().expect("hash"),
+                miner,
+            ),
+            capacity_assignment(
+                1,
+                &harness.paths[1],
+                second.partition_hash().expect("hash"),
+                miner,
+            ),
+        ]);
+
+        let params_path = harness.paths[1].join(PACKING_PARAMS_FILE_NAME);
+        let mut params = PackingParams::from_toml(&params_path).expect("packing params");
+        let saved = params;
+        params.ledger = None;
+        params.slot = None;
+        params
+            .write_to_disk(&params_path)
+            .expect("store a disagreeing file");
+
+        harness.inner.index_heal_needs_retry = false;
+        let err = harness
+            .inner
+            .handle_partition_assignments_update(Arc::clone(&update), 4)
+            .await
+            .expect_err("a packing-params mismatch is retried");
+        assert!(super::is_reset_not_finished(&err));
+        assert_eq!(
+            first.partition_assignment().unwrap().ledger_id,
+            None,
+            "the earlier module's ledger change commits"
+        );
+        assert_eq!(
+            second.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into()),
+            "a disagreeing file is not applied"
+        );
+        assert!(
+            harness.inner.index_heal_needs_retry,
+            "a retryable mismatch must still arm index heal"
+        );
+
+        saved
+            .write_to_disk(&params_path)
+            .expect("restore a file that matches memory");
+        harness
+            .inner
+            .handle_partition_assignments_update(update, 4)
+            .await
+            .expect("a consistent file updates the later module");
+        assert_eq!(
+            second.partition_assignment().unwrap().ledger_id,
+            None,
+            "the retry applies the later module"
+        );
     }
 
     fn reset_marker(module: &StorageModule) -> bool {
@@ -2942,6 +3485,9 @@ mod assignment_reset_tests {
         harness
             .module
             .requeue_crc_repair_range(repair_one_to_three().0);
+        harness
+            .module
+            .requeue_packing_range(repair_one_to_three().0);
         harness.inner.tick();
         assert!(
             harness.receivers.packing.try_recv().is_err(),
@@ -2952,12 +3498,38 @@ mod assignment_reset_tests {
             left.is_empty(),
             "unassigned module must drop crc repairs, still queued: {left:?}"
         );
+        let packs = harness.module.take_packing_ranges();
+        assert!(
+            packs.is_empty(),
+            "unassigned module must drop a failed pack, still queued: {packs:?}"
+        );
         harness.inner.tick();
         let left = harness.module.take_crc_repair_ranges();
         assert!(
             left.is_empty(),
             "a later tick must not restore dropped repairs: {left:?}"
         );
+    }
+
+    /// A failed pack is one interval. The tick sends that interval and does
+    /// not insert one checksum repair per chunk.
+    #[tokio::test]
+    async fn tick_sends_a_failed_pack_span_as_one_range() {
+        let mut harness = harness(None);
+        let span = irys_types::partition_chunk_offset_ii!(0, 9);
+        harness.module.requeue_packing_range(span);
+        assert_eq!(harness.module.crc_repair_len(), 0);
+        harness.inner.tick();
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("the tick sends the failed pack as one range");
+        assert_eq!(*request.chunk_range().0.start(), 0);
+        assert_eq!(*request.chunk_range().0.end(), 9);
+        assert!(harness.receivers.packing.try_recv().is_err());
+        assert_eq!(harness.module.crc_repair_len(), 0);
+        assert!(harness.module.take_packing_ranges().is_empty());
     }
 
     /// A module that still has an assignment sends one range and does not
@@ -3018,6 +3590,204 @@ mod assignment_reset_tests {
         assert!(saw, "the repair range is sent once the channel has room");
     }
 
+    /// A checksum repair is not an uninitialized repack. Entropy in that span
+    /// is still sent whole.
+    #[tokio::test]
+    async fn full_channel_retries_a_crc_repair_that_is_still_entropy() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        write_span(&harness.module, 1, 3, irys_domain::ChunkType::Entropy);
+        fill_packing_channel(&harness);
+        harness
+            .module
+            .requeue_crc_repair_range(repair_one_to_three().0);
+        harness.inner.tick();
+        assert!(
+            harness.receivers.packing.try_recv().is_ok(),
+            "one filler leaves so the entropy span can be sent"
+        );
+        harness.inner.tick();
+        let mut saw = false;
+        for _ in 0..5_001 {
+            let Ok(request) = harness.receivers.packing.try_recv() else {
+                break;
+            };
+            if *request.chunk_range().0.start() == 1 && *request.chunk_range().0.end() == 3 {
+                saw = true;
+                break;
+            }
+            assert_eq!(
+                *request.chunk_range().0.end(),
+                0,
+                "unexpected packing range {request:?}"
+            );
+        }
+        assert!(saw, "an entropy checksum span is sent whole");
+    }
+
+    /// A capacity-to-ledger update sends the module's deferred spans. A
+    /// deferred checksum repair over Entropy is sent whole there, not
+    /// narrowed to its `Uninitialized` part and dropped.
+    #[tokio::test]
+    async fn capacity_to_ledger_sends_a_deferred_crc_repair_whole() {
+        let mut harness = harness(None);
+        write_span(&harness.module, 1, 3, irys_domain::ChunkType::Entropy);
+        fill_packing_channel(&harness);
+        harness
+            .module
+            .requeue_crc_repair_range(repair_one_to_three().0);
+        harness.inner.tick();
+        let _fillers = drain_packing(&mut harness);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        apply_update(&mut harness, publish_update(&path, hash, miner), 5).await;
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        let sent = drain_packing(&mut harness);
+        assert!(
+            sent.iter()
+                .any(|request| *request.chunk_range().0.start() == 1
+                    && *request.chunk_range().0.end() == 3),
+            "the deferred checksum repair is sent whole: {sent:?}"
+        );
+    }
+
+    fn recovery_span() -> PartitionChunkRange {
+        PartitionChunkRange(irys_types::partition_chunk_offset_ii!(1, 3))
+    }
+
+    /// A full channel keeps the recovery span. One free slot, then `tick`,
+    /// sends that same span.
+    #[tokio::test]
+    async fn full_channel_retries_a_recovery_repack_once_the_channel_has_room() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        fill_packing_channel(&harness);
+        harness.inner.defer_uninitialized_repack(0, recovery_span());
+        let pending = harness
+            .inner
+            .pending_ranges
+            .get(&0)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(pending.len(), 1, "a full channel keeps the recovery span");
+        assert_eq!(*pending[0].range.0.start(), 1);
+        assert_eq!(*pending[0].range.0.end(), 3);
+
+        assert!(
+            harness.receivers.packing.try_recv().is_ok(),
+            "one filler leaves so the kept span can be sent"
+        );
+        harness.inner.tick();
+        let mut saw = false;
+        for _ in 0..5_001 {
+            let Ok(request) = harness.receivers.packing.try_recv() else {
+                break;
+            };
+            if *request.chunk_range().0.start() == 1 && *request.chunk_range().0.end() == 3 {
+                saw = true;
+                break;
+            }
+            assert_eq!(
+                *request.chunk_range().0.end(),
+                0,
+                "unexpected packing range {request:?}"
+            );
+        }
+        assert!(saw, "the recovery span is sent once the channel has room");
+        assert!(!harness.inner.pending_ranges.contains_key(&0));
+    }
+
+    /// Data on the deferred span stays. The tick does not pack over it.
+    #[tokio::test]
+    async fn recovery_repack_stops_once_the_span_is_data() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        fill_packing_channel(&harness);
+        harness.inner.defer_uninitialized_repack(0, recovery_span());
+        assert!(
+            harness.inner.pending_ranges.contains_key(&0),
+            "the span is kept until it is no longer uninitialized"
+        );
+        write_span(&harness.module, 1, 3, irys_domain::ChunkType::Data);
+        let _fillers = drain_packing(&mut harness);
+        harness.inner.tick();
+        assert!(
+            harness.receivers.packing.try_recv().is_err(),
+            "a span that is no longer uninitialized is not packed"
+        );
+        assert!(!harness.inner.pending_ranges.contains_key(&0));
+    }
+
+    /// A prefix that became Data stays. Only the uninitialized suffix is sent.
+    #[tokio::test]
+    async fn recovery_repack_sends_only_the_uninitialized_suffix() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        fill_packing_channel(&harness);
+        harness.inner.defer_uninitialized_repack(0, recovery_span());
+        assert!(harness.module.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0xD4_u8; 32],
+            irys_domain::ChunkType::Data,
+        ));
+        harness
+            .module
+            .force_sync_pending_chunks()
+            .expect("sync data prefix");
+        assert!(
+            harness.receivers.packing.try_recv().is_ok(),
+            "one filler leaves so the suffix can be sent"
+        );
+        harness.inner.tick();
+        let mut saw = false;
+        for _ in 0..5_001 {
+            let Ok(request) = harness.receivers.packing.try_recv() else {
+                break;
+            };
+            if *request.chunk_range().0.start() == 2 && *request.chunk_range().0.end() == 3 {
+                saw = true;
+                break;
+            }
+            assert_eq!(
+                *request.chunk_range().0.end(),
+                0,
+                "unexpected packing range {request:?}"
+            );
+        }
+        assert!(saw, "only the uninitialized suffix is sent");
+        assert_eq!(
+            harness
+                .module
+                .get_chunk_type(&PartitionChunkOffset::from(1)),
+            Some(irys_domain::ChunkType::Data)
+        );
+    }
+
+    /// A repack message must not clear a stored assignment retry.
+    #[tokio::test]
+    async fn recovery_repack_does_not_replace_a_pending_assignment() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let pending = StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+            storage_module_infos: Arc::new(vec![]),
+            update_height: 7,
+        };
+        harness.inner.pending_assignment = Some(pending);
+        harness
+            .inner
+            .on_message(StorageModuleServiceMessage::RepackUninitialized {
+                module_id: 0,
+                range: recovery_span(),
+            })
+            .await
+            .expect("repack is not an assignment failure");
+        match harness.inner.pending_assignment {
+            Some(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                update_height: 7,
+                ..
+            }) => {}
+            other => panic!("repack replaced the stored assignment: {other:?}"),
+        }
+    }
+
     /// A full channel keeps the span and says it is waiting. An open channel
     /// sends the same span at once and does not log that wait. After one slot
     /// frees, the kept span is sent once.
@@ -3058,8 +3828,8 @@ mod assignment_reset_tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(pending.len(), 1, "a full channel keeps the repair span");
-        assert_eq!(*pending[0].0.start(), 1);
-        assert_eq!(*pending[0].0.end(), 3);
+        assert_eq!(*pending[0].range.0.start(), 1);
+        assert_eq!(*pending[0].range.0.end(), 3);
         assert!(
             logs_contain("Deferring packing request until the channel accepts it"),
             "a saturated channel must say the span waits for a free slot"
@@ -3117,7 +3887,13 @@ mod assignment_reset_tests {
     async fn deferred_uninitialized_scan_reads_only_the_overlap() -> eyre::Result<()> {
         let mut harness = harness(None);
         let full = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 9));
-        harness.inner.pending_ranges.insert(0, vec![full]);
+        harness.inner.pending_ranges.insert(
+            0,
+            vec![PendingSpan {
+                range: full,
+                while_uninitialized: true,
+            }],
+        );
         harness
             .inner
             .enqueue_deferred_uninitialized(&harness.module);
@@ -3151,7 +3927,13 @@ mod assignment_reset_tests {
         );
 
         let one = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(1, 1));
-        harness.inner.pending_ranges.insert(0, vec![one]);
+        harness.inner.pending_ranges.insert(
+            0,
+            vec![PendingSpan {
+                range: one,
+                while_uninitialized: true,
+            }],
+        );
         let before = harness.module.interval_visit_count();
         harness
             .inner
@@ -3173,7 +3955,13 @@ mod assignment_reset_tests {
             irys_domain::ChunkType::Data,
         ));
         let pending = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(3, 3));
-        harness.inner.pending_ranges.insert(0, vec![pending]);
+        harness.inner.pending_ranges.insert(
+            0,
+            vec![PendingSpan {
+                range: pending,
+                while_uninitialized: true,
+            }],
+        );
         harness
             .inner
             .enqueue_deferred_uninitialized(&harness.module);
@@ -3183,7 +3971,13 @@ mod assignment_reset_tests {
         );
 
         let neighbor = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(5, 5));
-        harness.inner.pending_ranges.insert(0, vec![neighbor]);
+        harness.inner.pending_ranges.insert(
+            0,
+            vec![PendingSpan {
+                range: neighbor,
+                while_uninitialized: true,
+            }],
+        );
         harness
             .inner
             .enqueue_deferred_uninitialized(&harness.module);
@@ -3399,8 +4193,8 @@ mod assignment_reset_tests {
             1,
             "a failed capacity-to-ledger write must keep the uninitialized span"
         );
-        assert_eq!(*pending[0].0.start(), 0);
-        assert_eq!(*pending[0].0.end(), 9);
+        assert_eq!(*pending[0].range.0.start(), 0);
+        assert_eq!(*pending[0].range.0.end(), 9);
 
         set_dir_mode(&path, 0o755);
         harness
@@ -3433,8 +4227,8 @@ mod assignment_reset_tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(pending.len(), 1, "a full channel keeps one wipe span");
-        assert_eq!(*pending[0].0.start(), 0);
-        assert_eq!(*pending[0].0.end(), 9);
+        assert_eq!(*pending[0].range.0.start(), 0);
+        assert_eq!(*pending[0].range.0.end(), 9);
     }
 
     fn assert_only_filler_ranges(queued: &[PackingRequest]) {
@@ -3685,8 +4479,8 @@ mod assignment_reset_tests {
             1,
             "a closed channel must remember the reset span"
         );
-        assert_eq!(*pending[0].0.start(), 0);
-        assert_eq!(*pending[0].0.end(), 9);
+        assert_eq!(*pending[0].range.0.start(), 0);
+        assert_eq!(*pending[0].range.0.end(), 9);
         harness.inner.tick();
         let pending = harness
             .inner

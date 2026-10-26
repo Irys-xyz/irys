@@ -18,7 +18,6 @@ telemetry = ["irys-chain/telemetry", "irys-utils/telemetry"]
 
 [dependencies]
 irys-chain.workspace = true
-irys-testing-utils.workspace = true
 irys-types.workspace = true
 irys-utils.workspace = true
 

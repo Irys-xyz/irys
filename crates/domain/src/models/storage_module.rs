@@ -15,7 +15,7 @@ use irys_database::submodule::db::placement_overlaps_inclusive_span;
 #[cfg(test)]
 use irys_database::submodule::tables::{SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_ROCKS_V1};
 use irys_database::submodule::{
-    PackingRecord, SubmoduleIndex, SubmoduleRead, SubmoduleStore as _,
+    DELETE_SUBRANGE_OFFSETS, PackingRecord, SubmoduleIndex, SubmoduleRead, SubmoduleStore as _,
     install_process_rocks_resources, packing_params_valid_for_module,
     tables::{
         DataRootInfo, DataRootInfos, OffsetMeta, PackedOffsetRow, PendingBodyMigration, Placement,
@@ -583,6 +583,9 @@ enum SyncPausePoint {
     /// `generate_full_chunks` has copied the bodies. It has not classified
     /// them against the checksum loaded before that read.
     AfterServeBodyRead,
+    /// The chunk file is dup'd and its mutex is free. `fdatasync` has not
+    /// started, so a recall can dup without waiting for that syscall.
+    AfterChunkFileDup,
 }
 
 /// Test barrier in a registration, after the rows are computed and before
@@ -883,6 +886,9 @@ pub struct StorageModule {
     reset_incomplete: AtomicBool,
     #[cfg(any(test, feature = "test-utils"))]
     reset_fail_next: AtomicBool,
+    /// `partition_offsets_for_data_root_chunk` fails while this is set.
+    #[cfg(any(test, feature = "test-utils"))]
+    fail_data_root_index_read: AtomicBool,
     #[cfg(test)]
     fail_entropy_read_nth: AtomicU64,
     #[cfg(test)]
@@ -994,6 +1000,10 @@ pub struct StorageModule {
     /// Settled offsets whose bytes failed the crc check. The storage-module
     /// service drains this into the existing packing queue.
     crc_repairs: Mutex<BTreeSet<PartitionChunkOffset>>,
+    /// Spans a failed pack must try again. One interval per span. The
+    /// storage-module tick sends these. Checksum mismatches stay in
+    /// [`Self::crc_repairs`].
+    packing_retries: Mutex<Vec<Interval<PartitionChunkOffset>>>,
     /// Recall mismatches not yet checked under `sync_in_progress`. The
     /// mining thread must not take that lock: it still holds the recall,
     /// and a durable point waits on the recall while holding the lock.
@@ -1172,6 +1182,94 @@ fn expected_packing_record(config: &Config) -> PackingRecord {
     }
 }
 
+/// Refuse a submodule whose `intervals.json` labels stored chunks while
+/// `packing_params.toml` is missing.
+///
+/// Labels with no packing identity would accept bytes packed for an unknown
+/// miner or partition. A fresh open writes the params file before
+/// `intervals.json`, so only a change from outside the node leaves this state.
+/// A missing or empty file, or one with only `Uninitialized` labels, holds no
+/// packed bytes. `mid_write_intervals.json` only turns spans back to
+/// `Uninitialized`, so this file alone bounds what open would load. The read
+/// does not create or change the file.
+fn refuse_labels_without_packing_params(params_path: &Path) -> eyre::Result<()> {
+    let intervals_path = params_path.with_file_name("intervals.json");
+    let bytes = match fs::read(&intervals_path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err).wrap_err_with(|| format!("read {}", intervals_path.display()));
+        }
+    };
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let labels: StorageIntervals = serde_json::from_slice(&bytes)
+        .wrap_err_with(|| format!("parse {}", intervals_path.display()))?;
+    let labelled = labels
+        .iter()
+        .any(|(_, chunk_type)| *chunk_type != ChunkType::Uninitialized);
+    ensure!(
+        !labelled,
+        "{} is missing, but {} labels stored chunks. Restore {PACKING_PARAMS_FILE_NAME}, or stop the node and clear this submodule directory (index, intervals.json, chunks.dat) so it can repack.",
+        params_path.display(),
+        intervals_path.display()
+    );
+    Ok(())
+}
+
+/// Address, partition hash, and packing identity for an existing
+/// `packing_params.toml`. This does not create, resize, or rewrite anything.
+///
+/// `Ok(None)` is a fresh module: the file is not there yet, and the caller
+/// writes it. A file that omits iterations or chunk size is filled in memory
+/// from consensus so the identity check can run. The caller writes that fill
+/// only after this returns. A mismatch leaves the directory unchanged.
+fn validate_existing_packing_params(
+    params_path: &Path,
+    config: &Config,
+    assignment: Option<PartitionAssignment>,
+) -> eyre::Result<Option<PackingParams>> {
+    if !params_path
+        .try_exists()
+        .wrap_err_with(|| format!("stat {}", params_path.display()))?
+    {
+        return Ok(None);
+    }
+    // A short or corrupt file is an open error. It must not abort the
+    // process, and it must not follow a change to this directory.
+    let params = PackingParams::from_toml(params_path)?;
+
+    ensure!(
+        params.packing_address == config.node_config.miner_address(),
+        "Active mining address: {} does not match partition packing address {}",
+        config.node_config.miner_address(),
+        params.packing_address
+    );
+
+    // If disk has a partition hash that conflicts with the epoch snapshot,
+    // the submodule was packed against a different genesis.
+    if let (Some(ph), Some(pa)) = (params.partition_hash, assignment) {
+        ensure!(
+            ph == pa.partition_hash,
+            "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
+            This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
+            assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
+            pa.partition_hash,
+            ph,
+        );
+    }
+
+    let mut filled = params;
+    filled.backfill_recorded_packing(&config.consensus);
+    let recorded = packing_record_from_params(&filled, config.consensus.chain_id)?;
+    let expected = expected_packing_record(config);
+    if let Err(err) = packing_params_valid_for_module(&recorded, &expected) {
+        return Err(eyre!("{err} at {}", params_path.display()));
+    }
+    Ok(Some(params))
+}
+
 /// Manages chunk storage on a single physical drive
 #[derive(Debug)]
 pub struct StorageSubmodule {
@@ -1270,6 +1368,13 @@ pub enum WriteDataChunkError {
     #[error(transparent)]
     Other(#[from] eyre::Report),
 }
+
+/// The index names a chunk body this storage module does not hold.
+/// A hole is an absence, not a read failure: the caller keeps reading
+/// other offsets or modules, or asks a peer.
+#[derive(Debug, thiserror::Error)]
+#[error("Could not find chunk bytes on disk")]
+pub struct ChunkMissingOnDisk;
 
 /// One body from a multi-chunk enqueue.
 ///
@@ -1604,6 +1709,50 @@ pub fn refuse_foreign_index(path: &Path, rocks: bool) -> eyre::Result<()> {
             "refusing to open RocksDB index {} with MDBX",
             path.display()
         ));
+    }
+    Ok(())
+}
+
+/// True when `path_dev` is not the submodule directory's device.
+///
+/// A bind mount keeps the lexical path and changes `st_dev`.
+#[cfg(feature = "bench")]
+fn bench_index_device_differs(base_dev: u64, path_dev: u64) -> bool {
+    path_dev != base_dev
+}
+
+/// Refuse a symlink, or a different filesystem, at `db`, `rocks`, or
+/// `intervals.json`. A missing path is a new index and is allowed.
+#[cfg(feature = "bench")]
+fn refuse_bench_index_mount(module_dir: &Path) -> eyre::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let base_meta = fs::symlink_metadata(module_dir)
+        .wrap_err_with(|| format!("stat {}", module_dir.display()))?;
+    let base_dev = base_meta.dev();
+    for name in ["db", "rocks", "intervals.json"] {
+        let path = module_dir.join(name);
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).wrap_err_with(|| format!("stat {}", path.display()));
+            }
+        };
+        if meta.file_type().is_symlink() {
+            return Err(eyre!(
+                "refusing to open {}: {} is a symlink",
+                module_dir.display(),
+                path.display()
+            ));
+        }
+        if bench_index_device_differs(base_dev, meta.dev()) {
+            return Err(eyre!(
+                "refusing to open {}: {} is on another device",
+                module_dir.display(),
+                path.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -2092,12 +2241,13 @@ impl StorageModule {
         // Bind after a pending reset clears the old partition hash. Binding
         // first refuses a new partition, or the reset clear drops the new one.
         let mut pack_binds = Vec::new();
-        // Hash, ledger, and slot changes are written only after
-        // `bind_packing_identity` accepts. A refused open leaves the previous
-        // file in place. The reset marker is written after every check that
-        // can refuse. A hash change sets it. A ledger or slot change sets it
-        // when the module already holds a ledger. Capacity gaining a ledger
-        // keeps the stored bytes.
+        // Address, partition hash, and packing identity are checked before a
+        // submodule directory changes. Hash, ledger, and slot changes are
+        // written only after `bind_packing_identity` accepts. The reset
+        // marker is written after every later check that can refuse. A hash
+        // change sets it. A ledger or slot change sets it when the module
+        // already holds a ledger. Capacity gaining a ledger keeps the stored
+        // bytes.
         let mut rebind_after_bind: Vec<(PathBuf, Option<H256>, Option<u32>, Option<usize>)> =
             Vec::new();
         let mut reset_dbs: Vec<SubmoduleIndex> = Vec::new();
@@ -2107,6 +2257,22 @@ impl StorageModule {
         // Initialize the submodules from the StorageModuleInfo
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
             let sub_base_path = config.node_config.base_directory.join(dir.clone());
+            let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
+            // Before `set_len`, index open, or the iterations backfill write.
+            // A mismatch leaves this directory byte-identical.
+            let existing_params = validate_existing_packing_params(
+                &params_path,
+                config,
+                storage_module_info.partition_assignment,
+            )?;
+            // A bench split writes its own labels before the first open.
+            #[cfg(feature = "bench")]
+            let check_labels = split.is_none();
+            #[cfg(not(feature = "bench"))]
+            let check_labels = true;
+            if existing_params.is_none() && check_labels {
+                refuse_labels_without_packing_params(&params_path)?;
+            }
 
             tracing::info!(custom.sub_base_path = ?sub_base_path);
             fs::create_dir_all(&sub_base_path)?; // Ensure the directory exists (for component tests)
@@ -2150,51 +2316,11 @@ impl StorageModule {
             )?;
             let chunks_file = opened.file;
 
-            let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
-            // if we don't have an existing packing params file, write it
-            if !params_path.exists() {
-                let mut params = PackingParams {
-                    packing_address: config.node_config.miner_address(),
-                    entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
-                    chunk_size: Some(config.consensus.chunk_size),
-                    ..Default::default()
-                };
-                if let Some(pa) = storage_module_info.partition_assignment {
-                    params.partition_hash = Some(pa.partition_hash);
-                    params.ledger = pa.ledger_id;
-                    params.slot = pa.slot_index;
-                }
-                params.write_to_disk(&params_path)?;
-            } else {
-                // Load the packing params and check to see if they match.
-                // A short or corrupt file is an open error. It must not abort
-                // the process before the address check.
-                let params = PackingParams::from_toml(&params_path)?;
-
-                ensure!(
-                    params.packing_address == config.node_config.miner_address(),
-                    "Active mining address: {} does not match partition packing address {}",
-                    config.node_config.miner_address(),
-                    params.packing_address
-                );
-
-                // If disk has a partition hash that conflicts with the epoch
-                // snapshot, the submodule was packed against a different genesis.
-                if let (Some(ph), Some(pa)) = (
-                    params.partition_hash,
-                    storage_module_info.partition_assignment,
-                ) {
-                    ensure!(
-                        ph == pa.partition_hash,
-                        "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
-                        This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
-                        assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
-                        pa.partition_hash,
-                        ph,
-                    );
-                }
-
-                // Derive the desired state from the epoch snapshot
+            // A missing file is a fresh module. The identity check above did
+            // not refuse it. Write the current miner and consensus.
+            if let Some(params) = existing_params {
+                // Derive the desired state from the epoch snapshot.
+                // Address, partition hash, and packing identity already matched.
                 let (want_hash, want_ledger, want_slot) =
                     match storage_module_info.partition_assignment {
                         Some(pa) => (Some(pa.partition_hash), pa.ledger_id, pa.slot_index),
@@ -2222,6 +2348,19 @@ impl StorageModule {
                         want_slot,
                     ));
                 }
+            } else {
+                let mut params = PackingParams {
+                    packing_address: config.node_config.miner_address(),
+                    entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
+                    chunk_size: Some(config.consensus.chunk_size),
+                    ..Default::default()
+                };
+                if let Some(pa) = storage_module_info.partition_assignment {
+                    params.partition_hash = Some(pa.partition_hash);
+                    params.ledger = pa.ledger_id;
+                    params.slot = pa.slot_index;
+                }
+                params.write_to_disk(&params_path)?;
             }
 
             let params = ensure_recorded_packing_params(&params_path, &config.consensus)
@@ -2399,6 +2538,8 @@ impl StorageModule {
             reset_incomplete: AtomicBool::new(false),
             #[cfg(any(test, feature = "test-utils"))]
             reset_fail_next: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-utils"))]
+            fail_data_root_index_read: AtomicBool::new(false),
             #[cfg(test)]
             fail_entropy_read_nth: AtomicU64::new(0),
             #[cfg(test)]
@@ -2452,6 +2593,7 @@ impl StorageModule {
             #[cfg(test)]
             recall_io: RecallIoAtoms::new(),
             crc_repairs: Mutex::new(BTreeSet::new()),
+            packing_retries: Mutex::new(Vec::new()),
             crc_suspects: Mutex::new(BTreeSet::new()),
             crc_scan_done: AtomicBool::new(false),
             crc_gap_submodule: AtomicU64::new(u64::MAX),
@@ -2489,22 +2631,9 @@ impl StorageModule {
             };
             let path = sub_base_path.join(index.dir_name());
             // The bench directory is already under a `loadtest` component.
-            // A symlink must not point the index somewhere else.
-            if path.exists() {
-                let base = sub_base_path
-                    .canonicalize()
-                    .wrap_err_with(|| format!("canonicalize {}", sub_base_path.display()))?;
-                let opened = path
-                    .canonicalize()
-                    .wrap_err_with(|| format!("canonicalize {}", path.display()))?;
-                if !opened.starts_with(&base) {
-                    return Err(eyre!(
-                        "index directory {} is outside {}",
-                        opened.display(),
-                        base.display()
-                    ));
-                }
-            }
+            // A bind keeps that path, so `lstat` and `st_dev` of `db`,
+            // `rocks`, and `intervals.json` decide before either open.
+            refuse_bench_index_mount(sub_base_path)?;
             let rocks = matches!(index, BenchIndex::Rocks(_));
             refuse_foreign_index(&path, rocks)?;
             debug!("submodule index path: {:?}", path);
@@ -3032,6 +3161,12 @@ impl StorageModule {
         self.reset_fail_next.store(true, Ordering::SeqCst);
     }
 
+    /// `partition_offsets_for_data_root_chunk` returns an error while `fail` is set.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn fail_data_root_index_reads(&self, fail: bool) {
+        self.fail_data_root_index_read.store(fail, Ordering::SeqCst);
+    }
+
     /// The next lane `pwrite` panics once, before the kernel write.
     #[cfg(test)]
     fn panic_next_pwrite_for_test(&self) {
@@ -3232,6 +3367,10 @@ impl StorageModule {
         data_root: DataRoot,
         tx_offset: TxChunkOffset,
     ) -> eyre::Result<Option<Vec<PartitionChunkOffset>>> {
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.fail_data_root_index_read.load(Ordering::SeqCst) {
+            return Err(eyre::eyre!("data root index read failed"));
+        }
         let infos = self.collect_data_root_infos(data_root)?;
         if infos.0.is_empty() {
             return Ok(None);
@@ -3527,6 +3666,7 @@ impl StorageModule {
         // Repairs belong to those bytes. The next assignment must not repack them.
         recover_mutex(&self.crc_suspects).clear();
         recover_mutex(&self.crc_repairs).clear();
+        recover_mutex(&self.packing_retries).clear();
         self.fail_queued_sweeps();
         // A body write can occupy after the clear above and before the
         // interval map flips. The test freezes that window here.
@@ -4070,8 +4210,17 @@ impl StorageModule {
             }
             self.disk.yield_to_recall();
             let file_arc = Arc::clone(&submodule.file);
-            let file = self.disk.lock_chunks(&file_arc);
-            file.sync_data()
+            // fdatasync on a dup'd fd syncs the same open file description, so
+            // durability is unchanged. Recall takes this mutex only to dup.
+            let synced = {
+                let file = self.disk.lock_chunks(&file_arc);
+                file.try_clone()
+                    .map_err(|e| eyre::eyre!("Failed to dup chunks.dat for fdatasync: {}", e))?
+            };
+            #[cfg(test)]
+            self.wait_if_sync_paused(SyncPausePoint::AfterChunkFileDup);
+            synced
+                .sync_data()
                 .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
         }
         Ok(())
@@ -4220,9 +4369,9 @@ impl StorageModule {
     /// `coalesce` sorts a reorder buffer and joins adjacent chunks up to the
     /// write cap. The no-lane path passes false and keeps the entropy cap.
     ///
-    /// A recall flush holds the owed flag across this call. An unlimited sync
-    /// that observes the flag returns without writing, so the recall waits
-    /// only for the window and not for the rest of the batch.
+    /// A recall flush holds the owed flag across its window. An unlimited sync
+    /// that sees the flag writes nothing and returns an error, so the recall
+    /// waits only for that window. The caller retries once the flag drops.
     fn commit_pending_runs(
         &self,
         force: bool,
@@ -4234,7 +4383,9 @@ impl StorageModule {
         let _sync_guard = self.lock_sync();
 
         if max_runs.is_none() && self.disk.recall_flush_is_owed() {
-            return Ok(());
+            return Err(eyre!(
+                "recall flush is owed; an unlimited sync did not write"
+            ));
         }
 
         let then = Instant::now();
@@ -6736,6 +6887,22 @@ impl StorageModule {
         }
     }
 
+    /// Queue one span for another pack. Does not expand the span into offsets.
+    pub fn requeue_packing_range(&self, range: Interval<PartitionChunkOffset>) {
+        recover_mutex(&self.packing_retries).push(range);
+    }
+
+    /// Spans waiting for another pack. The storage-module service drains these.
+    pub fn take_packing_ranges(&self) -> Vec<Interval<PartitionChunkOffset>> {
+        std::mem::take(&mut *recover_mutex(&self.packing_retries))
+    }
+
+    /// Offsets in the checksum-repair set.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn crc_repair_len(&self) -> usize {
+        recover_mutex(&self.crc_repairs).len()
+    }
+
     /// Clear `crc_complete` and allow the settled scan to run again.
     ///
     /// Called before a reset rewrites the module, when a crashed reset is
@@ -7613,8 +7780,8 @@ impl StorageModule {
     ///
     /// Used by network-partition rollback alongside
     /// [`Self::clear_data_root_infos_in_range`]. Walks each submodule covering
-    /// the range once, clearing its slice of the range in a single write
-    /// transaction.
+    /// the range once. Each commit covers at most [`DELETE_SUBRANGE_OFFSETS`]
+    /// offsets of that submodule's slice.
     pub fn clear_offset_index_in_range(
         &self,
         start: PartitionChunkOffset,
@@ -7628,14 +7795,26 @@ impl StorageModule {
                 self.get_submodule_for_offset(PartitionChunkOffset::from(cursor))?;
             let submodule_end = *interval.end();
             let slice_end = submodule_end.min(range_end);
-            submodule.db.update(|tx| {
-                // Removing coverage makes heal see a hole. Deleting the path
-                // rows makes a later read miss the data path.
-                tx.clear_paths_in_inclusive_range(
-                    PartitionChunkOffset::from(cursor),
-                    PartitionChunkOffset::from(slice_end),
-                )
-            })?;
+            let mut piece = cursor;
+            while piece <= slice_end {
+                let piece_end = if slice_end - piece >= DELETE_SUBRANGE_OFFSETS {
+                    piece + (DELETE_SUBRANGE_OFFSETS - 1)
+                } else {
+                    slice_end
+                };
+                submodule.db.update(|tx| {
+                    // Removing coverage makes heal see a hole. Deleting the path
+                    // rows makes a later read miss the data path.
+                    tx.clear_paths_in_inclusive_range(
+                        PartitionChunkOffset::from(piece),
+                        PartitionChunkOffset::from(piece_end),
+                    )
+                })?;
+                if piece_end == slice_end {
+                    break;
+                }
+                piece = piece_end + 1;
+            }
             // Advance to the next submodule covering the range.
             if submodule_end >= range_end {
                 break;
@@ -8430,7 +8609,7 @@ impl StorageModule {
             self.config.consensus.entropy_packing_iterations,
             chunk_size,
             self.config.consensus.chain_id,
-        )))
+        )?))
     }
 
     /// One `view` per submodule covering `[start, end]`. Shared tx paths, data
@@ -8575,7 +8754,7 @@ impl StorageModule {
         for (offset, meta) in metas {
             let Some((mut bytes, kind)) = bodies.remove(&offset) else {
                 if start == end {
-                    return Err(eyre!("Could not find chunk bytes on disk"));
+                    return Err(eyre::Report::from(ChunkMissingOnDisk));
                 }
                 continue;
             };
@@ -10670,6 +10849,357 @@ mod tests {
         );
         #[cfg(target_os = "linux")]
         assert_reserved(&sub.join("chunks.dat"), reserve_bytes())?;
+        Ok(())
+    }
+
+    /// Why an existing `packing_params.toml` must refuse this open.
+    #[derive(Clone, Copy, Debug)]
+    enum ForeignModule {
+        /// `packing_address` is not this process.
+        Address,
+        /// Both sides name a partition, and the hashes differ.
+        Partition,
+        /// Iterations differ, so the packing record does not match.
+        Iterations,
+    }
+
+    fn engine_config(dir: &Path, engine: SubmoduleIndexEngine) -> Config {
+        testing_config_tuned(dir, 32, 4, |node| {
+            node.database = index_database(engine);
+        })
+    }
+
+    fn index_dir_name(engine: SubmoduleIndexEngine) -> &'static str {
+        match engine {
+            // MDBX-SUBMODULE-INDEX: delete this arm with the MDBX open path.
+            SubmoduleIndexEngine::Mdbx => "db",
+            SubmoduleIndexEngine::Rocksdb => "rocks",
+        }
+    }
+
+    /// An index open would migrate or create. The refusal test compares this
+    /// directory to itself after `StorageModule::new` returns.
+    fn seed_existing_index(sub: &Path, engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+        match engine {
+            // MDBX-SUBMODULE-INDEX: delete this arm with the MDBX open path.
+            SubmoduleIndexEngine::Mdbx => {
+                let db = write_unstamped_mdbx(sub)?;
+                eyre::ensure!(
+                    mdbx_schema_row(&db)?.is_none(),
+                    "the fixture must have no schema row"
+                );
+            }
+            SubmoduleIndexEngine::Rocksdb => {
+                let index = open_submodule_index(sub, &index_database(engine))?;
+                drop(index);
+                let schema = fs::read_to_string(sub.join("rocks").join("SCHEMA"))?;
+                eyre::ensure!(schema == SUBMODULE_SCHEMA_ROCKS_V1, "{schema}");
+            }
+        }
+        Ok(())
+    }
+
+    struct ModuleOnDisk {
+        chunks_len: u64,
+        chunks_prefix: Vec<u8>,
+        /// `None` when the module has no `packing_params.toml`.
+        params: Option<Vec<u8>>,
+        /// `None` when open has already removed the leftover sidecar.
+        crc: Option<Vec<u8>>,
+        index_files: BTreeMap<String, (u64, [u8; 32])>,
+    }
+
+    fn read_optional_file(path: &Path) -> eyre::Result<Option<Vec<u8>>> {
+        match fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn read_module_on_disk(sub: &Path, engine: SubmoduleIndexEngine) -> eyre::Result<ModuleOnDisk> {
+        let chunks = sub.join("chunks.dat");
+        Ok(ModuleOnDisk {
+            chunks_len: fs::metadata(&chunks)?.len(),
+            chunks_prefix: read_prefix(&chunks, 8)?,
+            params: read_optional_file(&sub.join(PACKING_PARAMS_FILE_NAME))?,
+            crc: read_optional_file(&sub.join("chunks.crc"))?,
+            index_files: directory_fingerprint(&sub.join(index_dir_name(engine)))?,
+        })
+    }
+
+    /// `set_len`, index open, and the packing-params rewrite must not run.
+    fn assert_module_unchanged(
+        engine: SubmoduleIndexEngine,
+        kind: impl std::fmt::Debug,
+        sub: &Path,
+        before: &ModuleOnDisk,
+        open_error: &str,
+    ) -> eyre::Result<()> {
+        let after = read_module_on_disk(sub, engine)?;
+        let mut changes = Vec::new();
+        if after.chunks_len != before.chunks_len {
+            changes.push(format!(
+                "chunks.dat length {} -> {}",
+                before.chunks_len, after.chunks_len
+            ));
+        }
+        if after.chunks_prefix != before.chunks_prefix {
+            changes.push("chunks.dat prefix".to_string());
+        }
+        if after.params != before.params {
+            changes.push("packing_params.toml".to_string());
+        }
+        if after.crc != before.crc {
+            changes.push("chunks.crc".to_string());
+        }
+        if after.index_files != before.index_files {
+            changes.push("index directory".to_string());
+        }
+        // MDBX-SUBMODULE-INDEX: delete this schema read with the MDBX open path.
+        if engine == SubmoduleIndexEngine::Mdbx {
+            let schema = mdbx_schema_row(&sub.join("db"))?;
+            if schema.is_some() {
+                changes.push("mdbx schema row".to_string());
+            }
+        }
+        let order = submodule_open_order();
+        if order
+            .iter()
+            .any(|step| *step == "index" || *step == "file" || *step == "reserve")
+        {
+            changes.push(format!("open order {order:?}"));
+        }
+        assert!(
+            changes.is_empty(),
+            "{engine:?} {kind:?} changed the module before returning {open_error}: {changes:?}"
+        );
+        Ok(())
+    }
+
+    fn foreign_module_is_refused(
+        engine: SubmoduleIndexEngine,
+        kind: ForeignModule,
+    ) -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("open_foreign_identity")
+            .build();
+        let config = engine_config(tmp.path(), engine);
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        seed_existing_index(&sub, engine)?;
+        // Shorter than the partition. `set_len` would make this 128 bytes.
+        fs::write(sub.join("chunks.dat"), [0xAB; 8])?;
+        // A leftover sidecar. Open removes it only after the identity checks.
+        fs::write(sub.join("chunks.crc"), b"leftover-crc")?;
+
+        let stored = H256::repeat_byte(0x44);
+        let assigned = H256::repeat_byte(0x55);
+        let miner = config.node_config.miner_address();
+        let foreign = IrysAddress::from([0x11; 20]);
+        assert_ne!(foreign, miner, "the foreign address must not be this miner");
+        let iterations = config.consensus.entropy_packing_iterations;
+        let (address, partition_hash, recorded_iterations, omit_recorded, needle) = match kind {
+            // No iterations or chunk size: a rewrite would fill them in.
+            ForeignModule::Address => (
+                foreign,
+                Some(stored),
+                iterations,
+                true,
+                "does not match partition packing address",
+            ),
+            ForeignModule::Partition => (
+                miner,
+                Some(assigned),
+                iterations,
+                false,
+                "Partition hash mismatch",
+            ),
+            ForeignModule::Iterations => (
+                miner,
+                Some(stored),
+                iterations + 1,
+                false,
+                "packing identity",
+            ),
+        };
+        let params = PackingParams {
+            packing_address: address,
+            partition_hash,
+            entropy_packing_iterations: (!omit_recorded).then_some(recorded_iterations),
+            chunk_size: (!omit_recorded).then_some(config.consensus.chunk_size),
+            ..PackingParams::default()
+        };
+        params.write_to_disk(&sub.join(PACKING_PARAMS_FILE_NAME))?;
+        let assignment = PartitionAssignment {
+            partition_hash: stored,
+            miner_address: miner,
+            ledger_id: None,
+            slot_index: None,
+        };
+        let before = read_module_on_disk(&sub, engine)?;
+        clear_submodule_open_order();
+        let err = StorageModule::new(&one_span(3, "sub", Some(assignment)), &config)
+            .expect_err("a foreign module must not open");
+        let message = err.to_string();
+        assert!(message.contains(needle), "{engine:?} {kind:?}: {message}");
+        assert_module_unchanged(engine, kind, &sub, &before, &message)
+    }
+
+    fn labelled_module_without_params_is_refused(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("open_labels_without_params")
+            .build();
+        let config = engine_config(tmp.path(), engine);
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        seed_existing_index(&sub, engine)?;
+        fs::write(sub.join("chunks.dat"), [0xAB; 8])?;
+        fs::write(sub.join("chunks.crc"), b"leftover-crc")?;
+        let mut labels = StorageIntervals::new();
+        labels
+            .insert_merge_touching_if_values_equal(
+                partition_chunk_offset_ii!(0, 3),
+                ChunkType::Entropy,
+            )
+            .expect("one label span");
+        let intervals = serde_json::to_vec(&labels)?;
+        fs::write(sub.join("intervals.json"), &intervals)?;
+
+        let before = read_module_on_disk(&sub, engine)?;
+        clear_submodule_open_order();
+        let err = StorageModule::new(&one_span(3, "sub", None), &config)
+            .expect_err("labels with no packing identity must not open");
+        let message = err.to_string();
+        assert!(
+            message.contains("labels stored chunks"),
+            "{engine:?}: {message}"
+        );
+        assert_eq!(fs::read(sub.join("intervals.json"))?, intervals);
+        assert_module_unchanged(
+            engine,
+            "labels without packing params",
+            &sub,
+            &before,
+            &message,
+        )
+    }
+
+    /// Only `Uninitialized` labels hold no packed bytes, so a missing
+    /// params file is a fresh module.
+    fn unlabelled_module_without_params_opens(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("open_unlabelled_without_params")
+            .build();
+        let config = engine_config(tmp.path(), engine);
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        let mut labels = StorageIntervals::new();
+        labels
+            .insert_merge_touching_if_values_equal(
+                partition_chunk_offset_ii!(0, 3),
+                ChunkType::Uninitialized,
+            )
+            .expect("one label span");
+        fs::write(sub.join("intervals.json"), serde_json::to_vec(&labels)?)?;
+
+        let storage = StorageModule::new(&one_span(3, "sub", None), &config)?;
+        drop(storage);
+        let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+        assert_eq!(loaded.packing_address, config.node_config.miner_address());
+        Ok(())
+    }
+
+    fn matching_module_opens(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("open_match_identity").build();
+        let config = engine_config(tmp.path(), engine);
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        seed_existing_index(&sub, engine)?;
+        fs::write(sub.join("chunks.dat"), [0xAB; 8])?;
+        let hash = H256::repeat_byte(0x44);
+        let params = PackingParams {
+            packing_address: config.node_config.miner_address(),
+            partition_hash: Some(hash),
+            entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
+            chunk_size: Some(config.consensus.chunk_size),
+            ..PackingParams::default()
+        };
+        params.write_to_disk(&sub.join(PACKING_PARAMS_FILE_NAME))?;
+        let assignment = PartitionAssignment {
+            partition_hash: hash,
+            miner_address: config.node_config.miner_address(),
+            ledger_id: None,
+            slot_index: None,
+        };
+        let storage = StorageModule::new(&one_span(3, "sub", Some(assignment)), &config)?;
+        let full = config.consensus.chunk_size * config.consensus.num_chunks_in_partition;
+        assert_eq!(fs::metadata(sub.join("chunks.dat"))?.len(), full);
+        let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+        assert_eq!(loaded.packing_address, config.node_config.miner_address());
+        assert_eq!(loaded.partition_hash, Some(hash));
+        drop(storage);
+        Ok(())
+    }
+
+    fn fresh_module_opens(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("open_fresh_identity").build();
+        let config = engine_config(tmp.path(), engine);
+        let storage = StorageModule::new(&one_span(3, "sub", None), &config)?;
+        drop(storage);
+        let loaded =
+            PackingParams::from_toml(tmp.path().join("sub").join(PACKING_PARAMS_FILE_NAME))?;
+        assert_eq!(loaded.packing_address, config.node_config.miner_address());
+        assert_eq!(loaded.partition_hash, None);
+        assert_eq!(
+            loaded.entropy_packing_iterations,
+            Some(config.consensus.entropy_packing_iterations)
+        );
+        assert_eq!(loaded.chunk_size, Some(config.consensus.chunk_size));
+        Ok(())
+    }
+
+    /// A 4.0.8 file has no iterations or chunk size. Open fills both from
+    /// consensus and writes the file. It does not refuse the module.
+    fn legacy_params_are_filled_on_open(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("open_legacy_identity").build();
+        let config = engine_config(tmp.path(), engine);
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        let legacy = PackingParams {
+            packing_address: config.node_config.miner_address(),
+            ..PackingParams::default()
+        };
+        legacy.write_to_disk(&sub.join(PACKING_PARAMS_FILE_NAME))?;
+        let before = fs::read_to_string(sub.join(PACKING_PARAMS_FILE_NAME))?;
+        assert!(!before.contains("entropy_packing_iterations"), "{before}");
+        assert!(!before.contains("chunk_size"), "{before}");
+        let storage = StorageModule::new(&one_span(3, "sub", None), &config)?;
+        drop(storage);
+        let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+        assert_eq!(loaded.packing_address, config.node_config.miner_address());
+        assert_eq!(
+            loaded.entropy_packing_iterations,
+            Some(config.consensus.entropy_packing_iterations)
+        );
+        assert_eq!(loaded.chunk_size, Some(config.consensus.chunk_size));
+        Ok(())
+    }
+
+    /// A foreign module is refused before any file or index mutation.
+    /// A matching module, a fresh module, and a 4.0.8 params file still open.
+    #[test]
+    fn open_refuses_a_foreign_module_before_mutating_files() -> eyre::Result<()> {
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            foreign_module_is_refused(engine, ForeignModule::Address)?;
+            foreign_module_is_refused(engine, ForeignModule::Partition)?;
+            foreign_module_is_refused(engine, ForeignModule::Iterations)?;
+            labelled_module_without_params_is_refused(engine)?;
+            unlabelled_module_without_params_opens(engine)?;
+            matching_module_opens(engine)?;
+            fresh_module_opens(engine)?;
+            legacy_params_are_filled_on_open(engine)?;
+        }
         Ok(())
     }
 
@@ -13574,6 +14104,128 @@ mod tests {
         Ok(())
     }
 
+    /// Dev numbers stand in for `st_dev`. A bind of another filesystem
+    /// changes the number and keeps the path.
+    #[cfg(feature = "bench")]
+    #[test]
+    fn bench_index_device_differs_compares_the_given_numbers() {
+        assert!(!super::bench_index_device_differs(7, 7));
+        assert!(super::bench_index_device_differs(7, 8));
+        assert!(super::bench_index_device_differs(0, 1));
+    }
+
+    /// Recall and write files for one bench split, then open MDBX.
+    #[cfg(feature = "bench")]
+    fn try_open_split_mdbx(tmp: &Path) -> eyre::Result<StorageModule> {
+        let recall_path = tmp.join("recall");
+        let write_path = tmp.join("write");
+        fs::write(&recall_path, vec![0_u8; 128])?;
+        fs::write(&write_path, vec![0_u8; 128])?;
+        let recall = OpenOptions::new().read(true).open(&recall_path)?;
+        let write = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&write_path)?;
+        let split = Arc::new(SplitBacking::open(recall, write, 0, 4)?);
+        let config = testing_config(tmp, 32, 4);
+        let info = one_span(3, "sub", None);
+        StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)
+    }
+
+    /// `db`, `rocks`, and `intervals.json` must not be symlinks, including
+    /// a link whose target stays inside the submodule directory. Open must
+    /// refuse before it creates `db`.
+    #[cfg(feature = "bench")]
+    #[test]
+    fn open_split_refuses_index_path_symlinks() -> eyre::Result<()> {
+        let mut failures = Vec::new();
+
+        let db_tmp = TempDirBuilder::new()
+            .prefix("split_index_symlink_db")
+            .build();
+        let db_sub = db_tmp.path().join("sub");
+        let live_db = db_sub.join("live-db");
+        fs::create_dir_all(&live_db)?;
+        fs::write(live_db.join("marker"), b"keep")?;
+        // Relative target, so the link stays inside `sub/`.
+        std::os::unix::fs::symlink("live-db", db_sub.join("db"))?;
+        match try_open_split_mdbx(db_tmp.path()) {
+            Ok(_) => failures.push("db symlink inside the module was opened".to_string()),
+            Err(error) => {
+                let message = error.to_string();
+                if !message.contains("symlink") {
+                    failures.push(format!("db symlink: {message}"));
+                }
+            }
+        }
+        if live_db.join("mdbx.dat").exists() {
+            failures.push("db symlink wrote mdbx.dat through the link".to_string());
+        }
+        assert_eq!(fs::read(live_db.join("marker"))?, b"keep");
+
+        let rocks_tmp = TempDirBuilder::new()
+            .prefix("split_index_symlink_rocks")
+            .build();
+        let rocks_sub = rocks_tmp.path().join("sub");
+        fs::create_dir_all(&rocks_sub)?;
+        let live_rocks = rocks_tmp.path().join("outside-rocks");
+        fs::create_dir_all(&live_rocks)?;
+        fs::write(live_rocks.join("marker"), b"keep")?;
+        std::os::unix::fs::symlink(&live_rocks, rocks_sub.join("rocks"))?;
+        match try_open_split_mdbx(rocks_tmp.path()) {
+            Ok(_) => failures.push("rocks symlink was opened".to_string()),
+            Err(error) => {
+                let message = error.to_string();
+                if !message.contains("symlink") {
+                    failures.push(format!("rocks symlink: {message}"));
+                }
+            }
+        }
+        if rocks_sub.join("db").join("mdbx.dat").exists() {
+            failures.push("rocks symlink still created db".to_string());
+        }
+        assert_eq!(fs::read(live_rocks.join("marker"))?, b"keep");
+
+        let intervals_tmp = TempDirBuilder::new()
+            .prefix("split_index_symlink_intervals")
+            .build();
+        let intervals_sub = intervals_tmp.path().join("sub");
+        fs::create_dir_all(&intervals_sub)?;
+        let mut intervals = super::StorageIntervals::new();
+        intervals
+            .insert_merge_touching_if_values_equal(
+                partition_chunk_offset_ii!(0, 3),
+                ChunkType::Uninitialized,
+            )
+            .expect("one span");
+        let interval_bytes = serde_json::to_vec(&intervals)?;
+        let live_intervals = intervals_tmp.path().join("outside-intervals.json");
+        fs::write(&live_intervals, &interval_bytes)?;
+        std::os::unix::fs::symlink(&live_intervals, intervals_sub.join("intervals.json"))?;
+        match try_open_split_mdbx(intervals_tmp.path()) {
+            Ok(_) => failures.push("intervals.json symlink was opened".to_string()),
+            Err(error) => {
+                let message = error.to_string();
+                if !message.contains("symlink") {
+                    failures.push(format!("intervals.json symlink: {message}"));
+                }
+            }
+        }
+        if intervals_sub.join("db").join("mdbx.dat").exists() {
+            failures.push("intervals.json symlink still created db".to_string());
+        }
+        assert_eq!(fs::read(&live_intervals)?, interval_bytes);
+        assert!(
+            fs::symlink_metadata(intervals_sub.join("intervals.json"))?
+                .file_type()
+                .is_symlink(),
+            "intervals.json symlink was replaced"
+        );
+
+        assert!(failures.is_empty(), "{failures:#?}");
+        Ok(())
+    }
+
     #[test]
     fn recall_piece_plan_pairs_preads() {
         assert_eq!(
@@ -15590,6 +16242,35 @@ mod tests {
         Ok(())
     }
 
+    /// A slice of three sub-ranges is three index transactions. One transaction
+    /// would hold every content key in the slice.
+    #[test]
+    fn clear_offset_index_commits_once_per_subrange() -> eyre::Result<()> {
+        let limit = irys_database::submodule::DELETE_SUBRANGE_OFFSETS;
+        let chunks = u64::from(limit) * 3;
+        let last = u32::try_from(chunks - 1).expect("span fits u32");
+        let tmp = TempDirBuilder::new()
+            .prefix("clear_offset_subrange")
+            .build();
+        let config = testing_config_tuned(tmp.path(), 32, chunks, |node| {
+            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
+            node.storage.index_wal_backstop_ms = 60_000;
+        });
+        let storage = StorageModule::new(&one_span(last, "sub", None), &config)?;
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let before = submodule.db.wal_sync_count();
+        storage.clear_offset_index_in_range(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(last),
+        )?;
+        let commits = submodule.db.wal_sync_count() - before;
+        assert_eq!(
+            commits, 3,
+            "clear of 3 * {limit} offsets used {commits} commits"
+        );
+        Ok(())
+    }
+
     #[test]
     fn pending_writes_test() -> eyre::Result<()> {
         let infos = [StorageModuleInfo {
@@ -16086,6 +16767,64 @@ mod tests {
         Ok((tmp_dir, config, storage))
     }
 
+    /// A recall locks `chunks.dat` only to dup it. That lock has to succeed
+    /// at the fdatasync pause, and the syscall has to finish on its own fd
+    /// while the recall still holds the mutex.
+    #[test]
+    fn recall_dups_chunks_dat_while_fdatasync_is_pending() -> eyre::Result<()> {
+        let (tmp, _config, storage) = interval_batch_module("recall_during_fsync", 0)?;
+        let storage = Arc::new(storage);
+        let _release = SyncPauseRelease(storage.as_ref());
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage.write_chunk(offset, vec![7_u8; 32], ChunkType::Data));
+        storage.pause_next_sync_at(SyncPausePoint::AfterChunkFileDup);
+
+        let sync_mod = Arc::clone(&storage);
+        let (sync_tx, sync_rx) = std::sync::mpsc::channel();
+        let sync_worker = std::thread::spawn(move || {
+            let _ = sync_tx.send(sync_mod.sync_pending_chunks());
+        });
+        assert!(
+            storage.wait_for_sync_pause(Duration::from_secs(5)),
+            "the durable point did not reach fdatasync"
+        );
+
+        let (_, submodule) = storage
+            .submodules
+            .get_key_value_at_point(offset)
+            .expect("submodule for the written chunk");
+        let file_arc = Arc::clone(&submodule.file);
+        // Same critical section as mining recall: lock, dup, then the
+        // `pread` does not need this mutex. Hold it across the syscall.
+        let guard = match file_arc.try_lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                panic!("recall could not lock chunks.dat before fdatasync: {error}")
+            }
+        };
+        let recall_fd = guard.try_clone().expect("recall dup of chunks.dat");
+        drop(recall_fd);
+
+        storage.release_sync_pause();
+        sync_rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|err| {
+                eyre!("durable point did not finish while recall held chunks.dat: {err}")
+            })??;
+        drop(guard);
+        assert!(
+            storage.is_data_chunk_durable_at(offset),
+            "fdatasync did not make the chunk durable"
+        );
+        sync_worker
+            .join()
+            .map_err(|_| eyre!("durable point thread panicked"))?;
+        drop(_release);
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
     fn file_intervals(module: &StorageModule) -> eyre::Result<StorageIntervals> {
         read_intervals_file(&submodule_interval_path(module, 0))
     }
@@ -16197,6 +16936,24 @@ mod tests {
         let message = format!("{err:#}");
         assert!(message.contains(&path.display().to_string()), "{message}");
         drop(tmp);
+        Ok(())
+    }
+
+    /// A stat error is an open error. Only a confirmed miss is `Ok(None)`.
+    #[test]
+    fn packing_params_stat_error_is_returned() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("packing_params_stat").build();
+        let parent = tmp.path().join("not_a_directory");
+        fs::write(&parent, b"x")?;
+        let params_path = parent.join(PACKING_PARAMS_FILE_NAME);
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let err = validate_existing_packing_params(&params_path, &config, None)
+            .expect_err("a stat error must not look like a missing file");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&params_path.display().to_string()),
+            "{message}"
+        );
         Ok(())
     }
 

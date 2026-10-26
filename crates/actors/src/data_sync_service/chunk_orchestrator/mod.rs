@@ -807,7 +807,23 @@ impl ChunkOrchestrator {
         // Ready and in-flight work share the configured hot-work budget.
         // Delayed entries do not consume it, otherwise a sparse prefix could
         // prevent discovery of later Entropy forever.
-        let hot_count = self.hot_request_count();
+        //
+        // Body-worker holds share this discovery budget, so a live job cannot
+        // add a fresh budget of rows every tick. `hot_request_count` leaves
+        // them out: promotion still has a free slot for a finished hold.
+        // While a body job holds the budget, other holes on this module wait
+        // until rows release (the anchor moves past them, the job ends, or
+        // the hold times out). The term write head is queued from the hot-row
+        // count alone, so that wait does not skip the frontier.
+        let hot_rows = self.hot_request_count();
+        let hot_count = hot_rows.saturating_add(
+            self.chunk_requests
+                .values()
+                .filter(|request| {
+                    matches!(request.request_state, ChunkRequestState::HeldByBodyWorker)
+                })
+                .count(),
+        );
 
         let max_chunk_offset = self.get_max_chunk_offset();
         // `prepare_tick` checks the assignment, then drops that lock to read
@@ -850,12 +866,6 @@ impl ChunkOrchestrator {
         let scan_assignees: &[IrysAddress] = if has_signer { &[] } else { &assignees };
 
         let max_requests = self.config.data_sync.max_pending_chunk_requests as usize;
-        let mut requests_to_add = max_requests.saturating_sub(hot_count);
-        // A full hot budget has nothing new to queue. Do not walk entropy intervals.
-        if requests_to_add == 0 {
-            return;
-        }
-
         let max_offset = *max_chunk_offset;
 
         // Term ledgers (especially Submit) are a small write head on a packed
@@ -867,13 +877,23 @@ impl ChunkOrchestrator {
         // later copies Submit data and needs Submit replicas on the frontier.
         // `get_chunk_type` sees pending writes; the scan below reads the live
         // interval map only.
-        if self.prioritizes_write_frontier()
+        //
+        // The guard is the non-hold hot count. Holds fill `hot_count` and
+        // must not skip this offset.
+        let mut head_enqueued = false;
+        if hot_rows < max_requests
+            && self.prioritizes_write_frontier()
             && self.is_entropy(PartitionChunkOffset::from(max_offset))
             && self.enqueue_pending(PartitionChunkOffset::from(max_offset), now, true)
         {
-            requests_to_add -= 1;
+            head_enqueued = true;
         }
 
+        let mut requests_to_add = max_requests.saturating_sub(hot_count);
+        if head_enqueued {
+            requests_to_add = requests_to_add.saturating_sub(1);
+        }
+        // A full hot budget has nothing new to queue. Do not walk entropy intervals.
         if requests_to_add == 0 {
             return;
         }
@@ -1461,8 +1481,11 @@ impl ChunkOrchestrator {
         }
     }
 
-    /// Offsets in Pending, Requested, or AwaitingDurability. Held, Delayed, and
-    /// Blocked do not consume the hot budget.
+    /// Offsets in Pending, Requested, or AwaitingDurability.
+    ///
+    /// Held, Delayed, and Blocked stay out of this count. Promotion uses it,
+    /// so a finished hold can still become Pending. Discovery adds the hold
+    /// count on top.
     fn hot_request_count(&self) -> usize {
         self.chunk_requests
             .values()
@@ -2723,7 +2746,8 @@ impl ChunkOrchestrator {
                     ChunkRequestState::Completed => (r, a, w, c + 1, d, b),
                     ChunkRequestState::Delayed { .. } => (r, a, w, c, d + 1, b),
                     ChunkRequestState::Blocked(_) => (r, a, w, c, d, b + 1),
-                    // Held work is neither ready nor blocked. Discovery continues.
+                    // Held work is left out of the ready and blocked counters.
+                    // Discovery counts it toward `max_pending_chunk_requests`.
                     ChunkRequestState::HeldByBodyWorker => (r, a, w, c, d, b),
                 },
             );

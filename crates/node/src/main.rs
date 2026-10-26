@@ -1,7 +1,9 @@
 use irys_chain::{IrysNode, utils::load_config};
-use irys_testing_utils::setup_panic_hook;
 use irys_types::ShutdownReason;
-use irys_utils::{install_metrics_recorder, shutdown::spawn_shutdown_watchdog};
+use irys_utils::{
+    install_metrics_recorder,
+    shutdown::{setup_panic_hook, spawn_shutdown_watchdog},
+};
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{

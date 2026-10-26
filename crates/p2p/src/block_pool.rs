@@ -315,6 +315,19 @@ impl BlockCacheGuard {
         self.inner.write().await.remove_block(block_hash, &reason);
     }
 
+    /// Remove the entry only when it is not in `blocks` or
+    /// `recently_processed`. The check and the remove share this write lock.
+    async fn remove_block_unless_cached(&self, block_hash: &BlockHash, reason: BlockRemovalReason) {
+        let mut cache = self.inner.write().await;
+        if cache.blocks.contains(block_hash) || cache.recently_processed.contains(block_hash) {
+            return;
+        }
+        cache.remove_block(block_hash, &reason);
+        // `remove_block` pops transactions only when a block entry existed.
+        // A hash that was never stored can still have fetched transactions.
+        cache.txs_by_block.pop(block_hash);
+    }
+
     async fn get_block_cloned(&self, block_hash: &BlockHash) -> Option<CachedBlock> {
         self.inner.write().await.get_block_header_cloned(block_hash)
     }
@@ -1610,7 +1623,12 @@ where
         self.blocks_cache.remove_requested_block(block_hash).await;
     }
 
-    /// Remove block from cache - for orphan block processing
+    /// Remove block from cache - for orphan block processing.
+    ///
+    /// Test-only: remove unconditionally. Production uses
+    /// [`Self::remove_block_from_cache_unless_known_locally`] so a block stored
+    /// by another path is not evicted.
+    #[cfg(test)]
     pub(crate) async fn remove_block_from_cache(
         &self,
         block_hash: &BlockHash,
@@ -1619,6 +1637,28 @@ where
         self.blocks_cache.remove_block(block_hash, reason).await;
         // Remove associated transactions as well
         self.blocks_cache.take_txs_for_block(block_hash).await;
+    }
+
+    /// Remove the cache entry only when the block is not known locally.
+    ///
+    /// The cache check uses the same sets as [`Self::is_block_known_locally`]:
+    /// `blocks`, `recently_processed`, and the block tree. The two cache
+    /// checks and the remove share one write lock, so a store that arrives
+    /// after a failed pull and before this call keeps the block. The block
+    /// tree is a separate lock. A tree-only block is not a cache entry, so
+    /// it is checked first, and this method does not hold the cache lock
+    /// across that read.
+    pub(crate) async fn remove_block_from_cache_unless_known_locally(
+        &self,
+        block_hash: &BlockHash,
+        reason: BlockRemovalReason,
+    ) {
+        if self.block_status_provider.is_block_in_the_tree(block_hash) {
+            return;
+        }
+        self.blocks_cache
+            .remove_block_unless_cached(block_hash, reason)
+            .await;
     }
 
     /// Take cached transactions for a block (removes them from cache).

@@ -184,6 +184,39 @@ impl std::fmt::Display for ChunkFetchError {
 
 impl std::error::Error for ChunkFetchError {}
 
+/// Read a peer HTTP body up to `cap` bytes.
+///
+/// `Content-Length` above the cap is rejected before the body is buffered.
+/// A body with no length is stopped at the first chunk that would pass the cap.
+/// This is a memory guard for the whole response. It does not limit any one
+/// JSON field.
+pub(crate) async fn read_capped_bytes(
+    mut response: reqwest::Response,
+    cap: u64,
+) -> Result<Vec<u8>, String> {
+    if let Some(len) = response.content_length()
+        && len > cap
+    {
+        return Err(format!(
+            "peer response Content-Length {len} exceeds cap of {cap} bytes"
+        ));
+    }
+    let mut buf = Vec::new();
+    let mut total = 0_u64;
+    loop {
+        let next = response.chunk().await.map_err(|err| err.to_string())?;
+        let Some(chunk) = next else {
+            break;
+        };
+        let chunk_len = u64::try_from(chunk.len())
+            .map_err(|_| "peer response chunk length does not fit in u64".to_string())?;
+        total = irys_types::accumulate_response_bytes(total, chunk_len, cap)
+            .map_err(|_| format!("peer response exceeds cap of {cap} bytes"))?;
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 /// Dual fetch addressing for data_sync:
 /// - **Ledger-offset** — assignees with a storage module for the slot
 /// - **Data-root + tx_offset** — ingress-proof signers that may only hold cache
@@ -229,16 +262,21 @@ pub trait ChunkFetcher: Send + Sync + std::fmt::Debug {
 pub struct HttpChunkFetcher {
     client: reqwest::Client,
     ledger_id: u32,
+    max_peer_response_bytes: u64,
 }
 
 impl HttpChunkFetcher {
-    pub fn new(ledger_id: u32) -> Self {
+    pub fn new(ledger_id: u32, max_peer_response_bytes: u64) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { client, ledger_id }
+        Self {
+            client,
+            ledger_id,
+            max_peer_response_bytes,
+        }
     }
 
     async fn get_chunk_json(
@@ -257,24 +295,33 @@ impl HttpChunkFetcher {
             Err(_) => return Err(ChunkFetchError::Timeout),
         };
 
+        let cap = self.max_peer_response_bytes;
         match response.status() {
-            reqwest::StatusCode::OK => match response.json::<ChunkFormat>().await {
-                Ok(chunk) => Ok(chunk),
-                Err(e) => Err(ChunkFetchError::InvalidResponse {
-                    message: format!("JSON parsing failed: {e}"),
-                }),
-            },
+            reqwest::StatusCode::OK => {
+                let body = read_capped_bytes(response, cap)
+                    .await
+                    .map_err(|message| ChunkFetchError::InvalidResponse { message })?;
+                match serde_json::from_slice::<ChunkFormat>(&body) {
+                    Ok(chunk) => Ok(chunk),
+                    Err(e) => Err(ChunkFetchError::InvalidResponse {
+                        message: format!("JSON parsing failed: {e}"),
+                    }),
+                }
+            }
             reqwest::StatusCode::NOT_FOUND => Err(ChunkFetchError::NotFound {
                 detail: not_found_detail,
             }),
+            // The error body is the same memory guard as a success body. A body
+            // past the cap is an invalid response, not a server message.
             reqwest::StatusCode::INTERNAL_SERVER_ERROR => {
-                let error_body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                Err(ChunkFetchError::ServerError {
-                    message: error_body,
-                })
+                match read_capped_bytes(response, cap).await {
+                    Ok(body) => {
+                        let message =
+                            String::from_utf8(body).unwrap_or_else(|_| "Unknown error".to_string());
+                        Err(ChunkFetchError::ServerError { message })
+                    }
+                    Err(message) => Err(ChunkFetchError::InvalidResponse { message }),
+                }
             }
             status => Err(ChunkFetchError::ServerError {
                 message: format!("Unexpected status code: {status}"),
@@ -586,7 +633,10 @@ mod tests {
         answer["range"] = serde_json::json!({"start": 10, "end": 20});
         answer["assigned"] = serde_json::json!(true);
         let (addr, request) = serve_once("200 OK", answer.to_string()).await;
-        let fetcher = HttpChunkFetcher::new(DataLedger::ThirtyDay.into());
+        let fetcher = HttpChunkFetcher::new(
+            DataLedger::ThirtyDay.into(),
+            irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+        );
 
         let page = fetcher
             .fetch_data_intervals(0, 10, 20, addr, Duration::from_secs(5))
@@ -610,7 +660,10 @@ mod tests {
     #[tokio::test]
     async fn http_fetcher_reports_a_missing_route_as_not_found() {
         let (addr, _request) = serve_once("404 Not Found", String::new()).await;
-        let fetcher = HttpChunkFetcher::new(DataLedger::ThirtyDay.into());
+        let fetcher = HttpChunkFetcher::new(
+            DataLedger::ThirtyDay.into(),
+            irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+        );
         let result = fetcher
             .fetch_data_intervals(0, 10, 20, addr, Duration::from_secs(5))
             .await;
@@ -686,5 +739,89 @@ mod tests {
                 "{name} must be rejected"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod response_cap_tests {
+    use super::{ChunkFetchError, HttpChunkFetcher};
+    use crate::chunk_fetcher::ChunkFetcher as _;
+    use irys_types::{
+        Base64, ChunkFormat, ConsensusConfig, DEFAULT_MAX_PEER_RESPONSE_BYTES, H256,
+        LedgerChunkOffset, TxChunkOffset, UnpackedChunk,
+    };
+    use std::{
+        io::{Read as _, Write as _},
+        net::TcpListener,
+        time::Duration,
+    };
+
+    fn serve(body: Vec<u8>, with_content_length: bool) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0_u8; 8192];
+            let _ = stream.read(&mut buf);
+            let len_header = if with_content_length {
+                format!("Content-Length: {}\r\n", body.len())
+            } else {
+                String::new()
+            };
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{len_header}Connection: close\r\n\r\n"
+            );
+            stream.write_all(header.as_bytes()).expect("header");
+            stream.write_all(&body).expect("body");
+        });
+        addr
+    }
+
+    fn chunk_json(byte_len: usize, data_path_len: usize) -> Vec<u8> {
+        let chunk = ChunkFormat::Unpacked(UnpackedChunk {
+            data_root: H256::zero(),
+            data_size: u64::try_from(byte_len).expect("len"),
+            data_path: Base64(vec![0xAB; data_path_len]),
+            bytes: Base64(vec![0x11; byte_len]),
+            tx_offset: TxChunkOffset::from(0_u32),
+        });
+        serde_json::to_vec(&chunk).expect("chunk json")
+    }
+
+    #[tokio::test]
+    async fn response_above_the_cap_is_an_invalid_response() {
+        let body = chunk_json(64, 64);
+        assert!(body.len() > 128, "fixture must pass the cap");
+        let addr = serve(body, false);
+        let fetcher = HttpChunkFetcher::new(0, 128);
+        let error = fetcher
+            .fetch_chunk_by_ledger_offset(LedgerChunkOffset::from(0), addr, Duration::from_secs(2))
+            .await
+            .expect_err("a body over the cap is rejected");
+        assert!(
+            matches!(error, ChunkFetchError::InvalidResponse { .. }),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_chunk_with_a_large_data_path_decodes_under_the_cap() {
+        let chunk_size = ConsensusConfig::CHUNK_SIZE as usize;
+        let data_path_len = 8 * 1024;
+        let body = chunk_json(chunk_size, data_path_len);
+        assert!(
+            u64::try_from(body.len()).expect("len") < DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            "honest chunk response is {} bytes",
+            body.len()
+        );
+        let addr = serve(body, true);
+        let fetcher = HttpChunkFetcher::new(0, DEFAULT_MAX_PEER_RESPONSE_BYTES);
+        let chunk = fetcher
+            .fetch_chunk_by_ledger_offset(LedgerChunkOffset::from(0), addr, Duration::from_secs(5))
+            .await
+            .expect("honest chunk decodes");
+        let unpacked = chunk.as_unpacked().expect("unpacked chunk");
+        assert_eq!(unpacked.bytes.0.len(), chunk_size);
+        assert_eq!(unpacked.data_path.0.len(), data_path_len);
     }
 }

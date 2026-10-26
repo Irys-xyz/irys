@@ -2279,6 +2279,7 @@ mod tests {
                 cache.clone(),
                 chunk_migration_sender,
                 service_senders.packing_sender(),
+                service_senders.storage_modules.clone(),
                 false, // tests do not seed stream de-dup
             );
 

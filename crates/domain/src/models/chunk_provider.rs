@@ -17,8 +17,8 @@ use tracing::{debug, warn};
 
 use crate::models::index_read_metrics::{self, SERVE_DATA_ROOT, SERVE_LEDGER, SERVE_SPAN};
 use crate::{
-    StorageModulesReadGuard, checked_add_i32_u64, get_overlapped_storage_modules,
-    get_storage_module_at_offset,
+    ChunkMissingOnDisk, StorageModulesReadGuard, checked_add_i32_u64,
+    get_overlapped_storage_modules, get_storage_module_at_offset,
 };
 
 static CHUNK_READS: LazyLock<Counter<u64>> = LazyLock::new(|| {
@@ -77,6 +77,8 @@ thread_local! {
     static CACHE_READ_FAULT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
     static CHUNK_READ_NOTES: std::cell::RefCell<Vec<(&'static str, &'static str, &'static str)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Remaining `collect_data_root_infos` reads that fail before the database.
+    static DATA_ROOT_INDEX_FAULTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -85,17 +87,48 @@ fn set_cache_read_fault(tx_offset: Option<u32>) {
 }
 
 #[cfg(test)]
+fn set_data_root_index_faults(count: u32) {
+    DATA_ROOT_INDEX_FAULTS.with(|cell| cell.set(count));
+}
+
+/// `true` once. The next placement read fails and the count drops by one.
+#[cfg(test)]
+fn take_data_root_index_fault() -> bool {
+    DATA_ROOT_INDEX_FAULTS.with(|cell| {
+        let left = cell.get();
+        if left == 0 {
+            return false;
+        }
+        cell.set(left - 1);
+        true
+    })
+}
+
+#[cfg(test)]
 fn take_chunk_read_notes() -> Vec<(&'static str, &'static str, &'static str)> {
     CHUNK_READ_NOTES.with(|notes| std::mem::take(&mut *notes.borrow_mut()))
 }
 
-fn missing_on_disk(error: &eyre::Report) -> bool {
+/// `true` when `error` is a storage hole: the index names a body this file does not hold.
+pub fn missing_on_disk(error: &eyre::Report) -> bool {
     error
-        .to_string()
-        .contains("Could not find chunk bytes on disk")
+        .chain()
+        .any(|source| source.downcast_ref::<ChunkMissingOnDisk>().is_some())
 }
 
-fn unpack_packed(config: &Config, packed: &PackedChunk) -> UnpackedChunk {
+/// Placements of `data_root` in one storage module.
+fn read_data_root_placements(
+    sm: &crate::StorageModule,
+    data_root: DataRoot,
+) -> eyre::Result<irys_database::submodule::tables::DataRootInfos> {
+    #[cfg(test)]
+    if take_data_root_index_fault() {
+        return Err(eyre::eyre!("injected data root index error"));
+    }
+    sm.collect_data_root_infos(data_root)
+}
+
+fn unpack_packed(config: &Config, packed: &PackedChunk) -> eyre::Result<UnpackedChunk> {
     let consensus = &config.consensus;
     irys_packing::unpack(
         packed,
@@ -283,8 +316,17 @@ impl ChunkProvider {
                     }
                 };
                 if let Some(packed) = packed {
-                    note_chunk_read(SERVE_SPAN, "storage_module", "hit");
-                    out.push((ledger_offset, unpack_packed(&self.config, &packed)));
+                    match unpack_packed(&self.config, &packed) {
+                        Ok(unpacked) => {
+                            note_chunk_read(SERVE_SPAN, "storage_module", "hit");
+                            out.push((ledger_offset, unpacked));
+                        }
+                        Err(error) => {
+                            note_chunk_read(SERVE_SPAN, "storage_module", "error");
+                            read_failures += 1;
+                            last_read_error = Some(error);
+                        }
+                    }
                 } else if let Some(error) = read_failed {
                     match self.cached_unpacked_at(SERVE_SPAN, &module, partition_offset) {
                         Ok(Some(cached)) => out.push((ledger_offset, cached)),
@@ -417,15 +459,22 @@ impl ChunkProvider {
                     == Some(ledger as u32)
             })
             .collect::<Vec<_>>();
-        // A real read error is not a hole. A later hit still wins. A cache
-        // miss returns the last error.
+        // A real read error is not a hole. That includes an index read.
+        // A later hit still wins. A cache miss returns the last error.
         let mut disk_error: Option<eyre::Report> = None;
 
         for sm in sms {
             // One read of this root's placements. `generate_full_chunk` stamps
             // `data_root`, `data_size` and `tx_offset` from the interval that holds
             // the partition offset; those values are checked below.
-            let data_root_infos = sm.collect_data_root_infos(data_root)?;
+            let data_root_infos = match read_data_root_placements(sm, data_root) {
+                Ok(infos) => infos,
+                Err(error) => {
+                    debug!(error = %error, "data_root index read failed");
+                    disk_error = Some(error);
+                    continue;
+                }
+            };
             for info in &data_root_infos.0 {
                 if !tx_offset_within_data_size(data_tx_offset, info.data_size, chunk_size) {
                     continue;
@@ -564,10 +613,30 @@ impl ChunkProvider {
 
         // TODO: see if we should check the DataRootInfo.data_size here too
 
+        // An index error is not proof the root is absent. A later module may
+        // still hold it. Return that error only when none does. A module with
+        // no ledger range cannot be translated, so it is skipped.
+        let mut disk_error: Option<eyre::Report> = None;
         // find a SM that contains this data root, return the start_offsets once we find it
         for sm in sms {
-            let sm_range_start = sm.get_storage_module_ledger_offsets().unwrap().start();
-            let data_root_infos = sm.collect_data_root_infos(data_root)?;
+            let sm_range_start = match sm.get_storage_module_ledger_offsets() {
+                Ok(range) => range.start(),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        "storage module has no ledger range; skipping it"
+                    );
+                    continue;
+                }
+            };
+            let data_root_infos = match read_data_root_placements(sm, data_root) {
+                Ok(infos) => infos,
+                Err(error) => {
+                    debug!(error = %error, "data_root index read failed");
+                    disk_error = Some(error);
+                    continue;
+                }
+            };
             let mapped_offsets = data_root_infos
                 .0
                 .iter()
@@ -581,7 +650,10 @@ impl ChunkProvider {
                 return Ok(Some(mapped_offsets));
             }
         }
-        Ok(None)
+        match disk_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
     }
 }
 
@@ -635,6 +707,14 @@ mod tests {
     use nodit::interval::ii;
     use rand::Rng as _;
     use rstest::rstest;
+
+    #[test]
+    fn missing_on_disk_matches_only_the_typed_hole() {
+        let hole = eyre::Report::from(ChunkMissingOnDisk);
+        assert!(missing_on_disk(&hole));
+        assert!(missing_on_disk(&hole.wrap_err("outer context")));
+        assert!(!missing_on_disk(&eyre::eyre!("some other failure")));
+    }
 
     #[test]
     // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
@@ -1028,7 +1108,7 @@ mod tests {
             &packed,
             vec![0_u8; config.consensus.chunk_size as usize],
             config.consensus.chunk_size as usize,
-        );
+        )?;
         let unpacked = UnpackedChunk {
             data_root: packed.data_root,
             data_size: packed.data_size,
@@ -1278,6 +1358,7 @@ mod tests {
                 .contains("Could not find chunk bytes on disk"),
             "{err}"
         );
+        assert!(missing_on_disk(&err), "{err}");
 
         let db = create_test_db(&tmp.path().join("db"));
         let provider = make_provider(config, vec![Arc::new(sm)], db);
@@ -1605,6 +1686,182 @@ mod tests {
                 .0,
             data
         );
+        Ok(())
+    }
+
+    struct ClearIndexFault;
+    impl Drop for ClearIndexFault {
+        fn drop(&mut self) {
+            set_data_root_index_faults(0);
+        }
+    }
+
+    /// The first module's index read fails. The second holds the data root, so
+    /// the chunk is served. With only the failing module, the error is returned.
+    #[test]
+    fn placement_scan_serves_a_later_module_after_an_index_error() -> eyre::Result<()> {
+        let _clear = ClearIndexFault;
+        let (tmp, config) = opened_span("placement-scan-later-module", 4);
+        let (tx, data) = one_chunk(&config, 7);
+        let broken = assigned(&config, 0, 0, "hdd0", 4);
+        let good = assigned(&config, 1, 1, "hdd1", 4);
+        pack_entropy(&good, &config, 0);
+        index_one(&good, &tx, 4);
+        write_one(&good, &tx, &data);
+        good.sync_pending_chunks()?;
+        let broken = Arc::new(broken);
+        let good = Arc::new(good);
+
+        set_data_root_index_faults(1);
+        let only = make_provider(
+            config.clone(),
+            vec![Arc::clone(&broken)],
+            create_test_db(&tmp.path().join("empty")),
+        );
+        let error = only
+            .get_chunk_by_data_root(
+                DataLedger::Publish,
+                tx.header.data_root,
+                TxChunkOffset::from(0),
+            )
+            .expect_err("an index error with no later module and no cache is returned");
+        assert!(
+            error.to_string().contains("injected data root index error"),
+            "{error}"
+        );
+
+        set_data_root_index_faults(1);
+        let both = make_provider(
+            config.clone(),
+            vec![broken, good],
+            create_test_db(&tmp.path().join("db")),
+        );
+        let served = both
+            .get_chunk_by_data_root(
+                DataLedger::Publish,
+                tx.header.data_root,
+                TxChunkOffset::from(0),
+            )
+            .expect("a later module is tried after an index error")
+            .expect("the later module holds the chunk");
+        let packed = served
+            .as_packed()
+            .expect("a storage module returns packed bytes");
+        let unpacked = unpack_packed(&config, &packed)?;
+        assert_eq!(unpacked.bytes.0, data);
+        assert_eq!(unpacked.data_root, tx.header.data_root);
+        assert_eq!(*unpacked.tx_offset, 0);
+        Ok(())
+    }
+
+    /// An index error is not a hole. The cache is still tried, and a hit is served.
+    #[test]
+    fn placement_scan_serves_the_cache_after_an_index_error() -> eyre::Result<()> {
+        let _clear = ClearIndexFault;
+        let (tmp, config) = opened_span("placement-scan-cache", 4);
+        let (tx, data) = one_chunk(&config, 11);
+        let broken = Arc::new(assigned(&config, 0, 0, "hdd0", 4));
+        let db = create_test_db(&tmp.path().join("db"));
+        cache_one(&db, &tx, &data);
+        let provider = make_provider(config, vec![broken], db);
+
+        set_data_root_index_faults(1);
+        let served = provider
+            .get_chunk_by_data_root(
+                DataLedger::Publish,
+                tx.header.data_root,
+                TxChunkOffset::from(0),
+            )
+            .expect("the cache is tried after an index error")
+            .expect("the cache holds the chunk");
+        assert_eq!(
+            served
+                .as_unpacked()
+                .expect("cache returns unpacked")
+                .bytes
+                .0,
+            data
+        );
+        Ok(())
+    }
+
+    /// The first module's index read fails. A later module still reports the
+    /// ledger offsets. With only the failing module, the error is returned.
+    #[test]
+    fn placement_scan_returns_later_ledger_offsets_after_an_index_error() -> eyre::Result<()> {
+        let _clear = ClearIndexFault;
+        let (tmp, config) = opened_span("placement-scan-offsets", 4);
+        let (tx, _data) = one_chunk(&config, 9);
+        let broken = Arc::new(assigned(&config, 0, 0, "hdd0", 4));
+        let good = assigned(&config, 1, 1, "hdd1", 4);
+        index_one(&good, &tx, 4);
+        let good = Arc::new(good);
+
+        set_data_root_index_faults(1);
+        let only = make_provider(
+            config.clone(),
+            vec![Arc::clone(&broken)],
+            create_test_db(&tmp.path().join("empty")),
+        );
+        let error = only
+            .get_ledger_offsets_for_data_root(DataLedger::Publish, tx.header.data_root)
+            .expect_err("an index error with no later module is returned");
+        assert!(
+            error.to_string().contains("injected data root index error"),
+            "{error}"
+        );
+
+        set_data_root_index_faults(1);
+        let both = make_provider(
+            config,
+            vec![broken, good],
+            create_test_db(&tmp.path().join("db")),
+        );
+        let offsets = both
+            .get_ledger_offsets_for_data_root(DataLedger::Publish, tx.header.data_root)
+            .expect("a later module is tried after an index error");
+        assert_eq!(offsets, Some(vec![4]));
+        Ok(())
+    }
+
+    /// A module whose assignment has no ledger slot is skipped. A later module
+    /// still answers. A scan of only that module is a miss, not a panic.
+    #[test]
+    fn placement_scan_skips_a_module_with_no_ledger_slot() -> eyre::Result<()> {
+        let (tmp, config) = opened_span("placement-scan-no-slot", 4);
+        let (tx, _data) = one_chunk(&config, 3);
+        let skipped = assigned(&config, 0, 0, "hdd0", 4);
+        {
+            let mut assignment = skipped
+                .partition_assignment
+                .read()
+                .unwrap()
+                .expect("assigned");
+            assignment.slot_index = None;
+            *skipped.partition_assignment.write().unwrap() = Some(assignment);
+        }
+        let good = assigned(&config, 1, 1, "hdd1", 4);
+        index_one(&good, &tx, 4);
+        let skipped = Arc::new(skipped);
+        let good = Arc::new(good);
+
+        let alone = make_provider(
+            config.clone(),
+            vec![Arc::clone(&skipped)],
+            create_test_db(&tmp.path().join("empty")),
+        );
+        let missing =
+            alone.get_ledger_offsets_for_data_root(DataLedger::Publish, tx.header.data_root)?;
+        assert!(missing.is_none(), "{missing:?}");
+
+        let both = make_provider(
+            config,
+            vec![skipped, good],
+            create_test_db(&tmp.path().join("db")),
+        );
+        let offsets =
+            both.get_ledger_offsets_for_data_root(DataLedger::Publish, tx.header.data_root)?;
+        assert_eq!(offsets, Some(vec![4]));
         Ok(())
     }
 

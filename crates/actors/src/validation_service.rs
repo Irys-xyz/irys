@@ -739,7 +739,7 @@ impl ValidationService {
                         // never-mislabel rule: a stalled validation pipeline does not tell
                         // us whether the block is valid or invalid. Both misclassifications
                         // fork us off the network. Crashing is the only consensus-safe
-                        // response — `setup_panic_hook` (in chain/src/main.rs) catches the
+                        // response — `setup_panic_hook` (in crates/node/src/main.rs) catches the
                         // panic, raises SIGINT for graceful shutdown, and arms a 45s
                         // force-abort watchdog so the supervisor restarts the node clean.
                         // The operator gets a loud crash signal; the underlying bug isn't

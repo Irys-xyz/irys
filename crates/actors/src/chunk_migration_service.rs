@@ -22,7 +22,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::{Notify, mpsc::UnboundedReceiver, oneshot};
-use tracing::{error, instrument};
+use tracing::{Instrument as _, error, instrument};
 
 mod body_worker;
 
@@ -59,13 +59,15 @@ pub struct ChunkMigrationServiceInner {
     pub service_senders: ServiceSenders,
     /// Wakes the body-migration worker once a block's indexes are durable.
     pub body_wakeup: Arc<Notify>,
-    /// Test-only. Runs after the per-block WAL sync and before side effects.
+    /// Test-only. Runs on the WAL-sync thread after that sync and before side effects.
     #[cfg(test)]
     index_durable_hook: Option<IndexDurableHook>,
 }
 
 /// Observes the moment a block's index registrations are durable.
+/// Called on the thread that performed the sync.
 #[cfg(test)]
+#[derive(Clone)]
 struct IndexDurableHook(Arc<dyn Fn() + Send + Sync>);
 
 #[cfg(test)]
@@ -150,10 +152,10 @@ impl ChunkMigrationServiceInner {
     /// service — and every later block's indexes — down with it. The failure is
     /// logged; index heal re-migrates blocks whose indexes are missing.
     #[tracing::instrument(level = "trace", skip_all)]
-    pub fn handle_message(&mut self, msg: ChunkMigrationServiceMessage) {
+    pub async fn handle_message(&mut self, msg: ChunkMigrationServiceMessage) {
         match msg {
             ChunkMigrationServiceMessage::BlockMigrated(block_header, all_txs) => {
-                if let Err(error) = self.on_block_migrated(block_header.clone(), all_txs) {
+                if let Err(error) = self.on_block_migrated(block_header.clone(), all_txs).await {
                     tracing::error!(
                         block.height = block_header.height,
                         block.hash = %block_header.block_hash,
@@ -166,7 +168,7 @@ impl ChunkMigrationServiceInner {
                 block_hash,
                 receiver,
             } => {
-                let response_value = self.on_update_storage_module_indexes(block_hash);
+                let response_value = self.on_update_storage_module_indexes(block_hash).await;
                 if let Err(e) = receiver.send(response_value) {
                     tracing::error!(
                         "UpdateStorageModuleIndexes receiver.send() error for block {}: {:?}",
@@ -178,7 +180,7 @@ impl ChunkMigrationServiceInner {
         }
     }
 
-    fn on_update_storage_module_indexes(
+    async fn on_update_storage_module_indexes(
         &mut self,
         block_hash: BlockHash,
     ) -> Result<(), MigrationError> {
@@ -217,7 +219,8 @@ impl ChunkMigrationServiceInner {
         }
 
         // Index only. Chunk bytes stay pending rows for the body worker.
-        self.on_block_migrated(Arc::new(block_header), Arc::new(block_tx_map))?;
+        self.on_block_migrated(Arc::new(block_header), Arc::new(block_tx_map))
+            .await?;
 
         Ok(())
     }
@@ -227,7 +230,7 @@ impl ChunkMigrationServiceInner {
         hash = %block_header.block_hash
     ))]
 
-    fn on_block_migrated(
+    async fn on_block_migrated(
         &mut self,
         block_header: Arc<IrysBlockHeader>,
         all_txs: Arc<HashMap<DataLedger, Vec<DataTransactionHeader>>>,
@@ -286,10 +289,32 @@ impl ChunkMigrationServiceInner {
         // One SyncWAL per submodule this block wrote. Per-tx registrations
         // stay unsynced. The wake and `OnBlockMigrated` below treat the rows
         // as durable, so a failed sync must not publish them.
-        self.sync_block_indexes(&touched)?;
+        // RocksDB's WAL flush blocks. Run it on the blocking pool so this
+        // worker can run other tasks, and publish only after it returns.
         #[cfg(test)]
-        if let Some(hook) = &self.index_durable_hook {
-            hook.call();
+        let index_durable_hook = self.index_durable_hook.clone();
+        // The flush runs on another thread, so re-enter the span there.
+        let sync_span = tracing::Span::current();
+        let synced = tokio::task::spawn_blocking(move || {
+            let _entered = sync_span.entered();
+            let result = Self::sync_block_indexes(&touched);
+            #[cfg(test)]
+            if result.is_ok()
+                && let Some(hook) = &index_durable_hook
+            {
+                hook.call();
+            }
+            result
+        })
+        .await;
+        match synced {
+            Ok(result) => result?,
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+            Err(err) => {
+                return Err(MigrationError::Other(format!(
+                    "index sync task ended: {err}"
+                )));
+            }
         }
 
         // The bodies are now owed as `PendingBodyMigrationsByOffset` rows.
@@ -317,7 +342,7 @@ impl ChunkMigrationServiceInner {
     ///
     /// `sync_group` is a no-op on a clean submodule and on an MDBX index
     /// whose group commit is off. A failure returns [`MigrationError::ChunkIndexWrite`].
-    fn sync_block_indexes(&self, touched: &[Arc<StorageModule>]) -> Result<(), MigrationError> {
+    fn sync_block_indexes(touched: &[Arc<StorageModule>]) -> Result<(), MigrationError> {
         let mut seen = HashSet::new();
         for module in touched {
             if !seen.insert(module.id) {
@@ -419,9 +444,19 @@ pub fn process_ledger_transactions(
     Ok(())
 }
 
+/// Bodies loaded for one migration window.
+struct LoadedMigrationChunks {
+    bodies: Vec<Option<UnpackedChunk>>,
+    /// A Submit replica could not be read and at least one chunk is still
+    /// empty. That chunk may sit on the skipped replica, so the pass is not
+    /// "no local source".
+    submit_unread: bool,
+}
+
 /// Source `count` contiguous transaction offsets starting at `tx_start`.
 /// Cache hits stay per chunk. Each Publish cache miss is resolved on every
-/// Submit replica. A fallback error keeps the chunks already loaded. Term
+/// Submit replica. A replica whose read fails is skipped; the others are
+/// still read. A hard fallback error keeps the chunks already loaded. Term
 /// ledgers do not fall back across ledgers. `None` is a hole.
 fn load_chunks_for_migration(
     storage_modules_guard: &StorageModulesReadGuard,
@@ -432,7 +467,7 @@ fn load_chunks_for_migration(
     tx_start: TxChunkOffset,
     count: usize,
     config: &Config,
-) -> Result<Vec<Option<UnpackedChunk>>, MigrationError> {
+) -> Result<LoadedMigrationChunks, MigrationError> {
     let chunk_size = usize::try_from(config.consensus.chunk_size).map_err(|_| {
         MigrationError::Other(format!(
             "configured chunk size {} does not fit usize",
@@ -472,9 +507,9 @@ fn load_chunks_for_migration(
             }
         }
     }
-    if target_ledger == DataLedger::Publish
-        && !misses.is_empty()
-        && let Err(error) = fill_submit_misses(
+    let mut submit_unread = false;
+    if target_ledger == DataLedger::Publish && !misses.is_empty() {
+        match fill_submit_misses(
             storage_modules_guard,
             data_root,
             data_size,
@@ -482,15 +517,21 @@ fn load_chunks_for_migration(
             &misses,
             &mut bodies,
             chunk_size,
-        )
-    {
-        tracing::warn!(
-            data_root = %data_root,
-            ?error,
-            "Submit fallback failed; keeping chunks already loaded"
-        );
+        ) {
+            Ok(unread) => submit_unread = unread,
+            Err(error) => {
+                tracing::warn!(
+                    data_root = %data_root,
+                    ?error,
+                    "Submit fallback failed; keeping chunks already loaded"
+                );
+            }
+        }
     }
-    Ok(bodies)
+    Ok(LoadedMigrationChunks {
+        bodies,
+        submit_unread,
+    })
 }
 
 fn tx_offset_at(tx_start: TxChunkOffset, step: usize) -> Result<TxChunkOffset, MigrationError> {
@@ -506,7 +547,9 @@ fn tx_offset_at(tx_start: TxChunkOffset, step: usize) -> Result<TxChunkOffset, M
 /// Each still-empty index is resolved on every Submit replica. A tx offset
 /// this replica does not hold is a miss for the next replica. Adding later
 /// indexes to the first placement reads past the partition and fails the
-/// chunks that were in range.
+/// chunks that were in range. A read error skips that replica; later
+/// replicas are still read. `Ok(true)` means a replica could not be read
+/// and a miss is still empty: that chunk may sit on the skipped replica.
 fn fill_submit_misses(
     storage_modules_guard: &StorageModulesReadGuard,
     data_root: DataRoot,
@@ -515,9 +558,10 @@ fn fill_submit_misses(
     misses: &[usize],
     bodies: &mut [Option<UnpackedChunk>],
     chunk_size: usize,
-) -> Result<(), MigrationError> {
+) -> Result<bool, MigrationError> {
     let storage_modules = storage_modules_guard.read().clone();
     let mut pending = misses.to_vec();
+    let mut submit_unread = false;
     for module in &storage_modules {
         if pending.is_empty() {
             break;
@@ -530,14 +574,30 @@ fn fill_submit_misses(
             continue;
         }
         let mut still = Vec::new();
+        let mut skip_module = false;
         for step in pending {
+            if skip_module {
+                still.push(step);
+                continue;
+            }
             let tx_offset = tx_offset_at(tx_start, step)?;
-            let placements = irys_domain::trace_index_read(irys_domain::MIGRATION, || {
+            let placements = match irys_domain::trace_index_read(irys_domain::MIGRATION, || {
                 module.partition_offsets_for_data_root_chunk(data_root, tx_offset)
-            })
-            .map_err(|error| {
-                MigrationError::Other(format!("resolving Submit fallback: {error}"))
-            })?;
+            }) {
+                Ok(placements) => placements,
+                Err(error) => {
+                    tracing::warn!(
+                        data_root = %data_root,
+                        %tx_offset,
+                        storage_module.id = module.id,
+                        ?error,
+                        "Submit module index read failed; skipping module"
+                    );
+                    skip_module = true;
+                    still.push(step);
+                    continue;
+                }
+            };
             let Some(placements) = placements else {
                 still.push(step);
                 continue;
@@ -548,9 +608,21 @@ fn fill_submit_misses(
             }
             let mut filled = false;
             for place in placements {
-                let read = module.read_durable_bodies(place, place).map_err(|error| {
-                    MigrationError::Other(format!("reading durable Submit fallback: {error}"))
-                })?;
+                let read = match module.read_durable_bodies(place, place) {
+                    Ok(read) => read,
+                    Err(error) => {
+                        tracing::warn!(
+                            data_root = %data_root,
+                            %tx_offset,
+                            storage_module.id = module.id,
+                            partition.offset = %place,
+                            ?error,
+                            "Submit module body read failed; skipping module"
+                        );
+                        skip_module = true;
+                        break;
+                    }
+                };
                 let Some(body) = read.into_iter().next().flatten() else {
                     continue;
                 };
@@ -593,9 +665,15 @@ fn fill_submit_misses(
                 still.push(step);
             }
         }
+        if skip_module {
+            // The skipped replica may hold a chunk this pass did not read.
+            submit_unread = true;
+        }
         pending = still;
     }
-    Ok(())
+    // A later replica can fill every miss. Only a miss that is still empty
+    // may sit on the replica this pass could not read.
+    Ok(submit_unread && !pending.is_empty())
 }
 
 /// Ledger offset where `block` starts appending to `ledger`.
@@ -893,8 +971,8 @@ impl ChunkMigrationService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(traced) => {
-                            let (msg, _entered) = traced.into_inner();
-                            self.inner.handle_message(msg);
+                            let (msg, span) = traced.into_parts();
+                            self.inner.handle_message(msg).instrument(span).await;
                         }
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
@@ -907,8 +985,8 @@ impl ChunkMigrationService {
 
         // Process remaining messages before shutdown
         while let Ok(traced) = self.msg_rx.try_recv() {
-            let (msg, _entered) = traced.into_inner();
-            self.inner.handle_message(msg);
+            let (msg, span) = traced.into_parts();
+            self.inner.handle_message(msg).instrument(span).await;
         }
 
         tracing::info!("shutting down chunk migration service gracefully");
@@ -1263,14 +1341,16 @@ mod tests {
     /// Index heal's `UpdateStorageModuleIndexes` runs the same index-only path:
     /// rows appear, no chunk data moves — so a heal pass can never re-create
     /// the body-write stall it exists to repair.
-    #[test]
-    fn heal_reindex_is_index_only() -> eyre::Result<()> {
+    #[tokio::test]
+    async fn heal_reindex_is_index_only() -> eyre::Result<()> {
         let f = fixture(3, Some(u64::MAX))?;
         f.seed_cache()?;
         f.persist_block()?;
         let mut inner = f.service_inner();
 
-        inner.on_update_storage_module_indexes(f.block.block_hash)?;
+        inner
+            .on_update_storage_module_indexes(f.block.block_hash)
+            .await?;
 
         assert_eq!(f.rows()?.len(), 1);
         assert!(!f.sm.has_pending_writes());
@@ -1288,8 +1368,8 @@ mod tests {
     /// A block whose migration fails is logged and skipped; the next block is
     /// still processed. Previously the error unwound `start()` and killed the
     /// service for the life of the node.
-    #[test]
-    fn failed_block_does_not_stop_later_blocks() -> eyre::Result<()> {
+    #[tokio::test]
+    async fn failed_block_does_not_stop_later_blocks() -> eyre::Result<()> {
         let f = fixture(3, Some(u64::MAX))?;
         f.persist_block()?;
         let mut inner = f.service_inner();
@@ -1297,10 +1377,10 @@ mod tests {
         // Same hash (passes the block-index guard), corrupted tx_root: merklization fails.
         let mut bad = (*f.block).clone();
         bad.data_ledgers[DataLedger::Submit].tx_root = H256::random();
-        inner.handle_message(f.migrated_msg(Arc::new(bad)));
+        inner.handle_message(f.migrated_msg(Arc::new(bad))).await;
         assert!(f.rows()?.is_empty(), "failed block must index nothing");
 
-        inner.handle_message(f.migrated_msg(f.block.clone()));
+        inner.handle_message(f.migrated_msg(f.block.clone())).await;
         assert_eq!(f.rows()?.len(), 1, "later block still migrates");
         Ok(())
     }
@@ -2548,11 +2628,24 @@ mod tests {
     /// Submit module on `slot`. Slot 0 overlaps the fixture tx. A later slot
     /// does not, so indexing leaves its pending table empty.
     fn submit_module(config: &Config, id: usize, slot: usize) -> eyre::Result<Arc<StorageModule>> {
+        assigned_module(config, id, slot, DataLedger::Submit)
+    }
+
+    fn publish_module(config: &Config, id: usize, slot: usize) -> eyre::Result<Arc<StorageModule>> {
+        assigned_module(config, id, slot, DataLedger::Publish)
+    }
+
+    fn assigned_module(
+        config: &Config,
+        id: usize,
+        slot: usize,
+        ledger: DataLedger,
+    ) -> eyre::Result<Arc<StorageModule>> {
         Ok(Arc::new(StorageModule::new(
             &StorageModuleInfo {
                 id,
                 partition_assignment: Some(PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
+                    ledger_id: Some(ledger.into()),
                     slot_index: Some(slot),
                     miner_address: IrysAddress::from([0xBB; 20]),
                     partition_hash: H256::random(),
@@ -2561,6 +2654,57 @@ mod tests {
             },
             config,
         )?))
+    }
+
+    /// Drop body-migration rows. The index and any durable bytes stay.
+    fn clear_pending(module: &StorageModule) -> eyre::Result<()> {
+        for (offset, job) in module.pending_body_migrations()? {
+            module.settle_pending_body_migration(offset, job.data_root, job.block_height)?;
+        }
+        Ok(())
+    }
+
+    /// Shrink `chunks.dat` so the next durable read hits a short file.
+    /// `StorageSubmodule::path` is the directory name under the node base.
+    fn truncate_chunk_file(config: &Config, module: &StorageModule) -> eyre::Result<()> {
+        let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let path = config
+            .node_config
+            .base_directory
+            .join(&submodule.path)
+            .join("chunks.dat");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)?
+            .set_len(0)?;
+        Ok(())
+    }
+
+    /// Height 0 Publish copy of the fixture tx, indexed onto `guard`.
+    fn index_publish(f: &Fixture, guard: &StorageModulesReadGuard) -> Result<(), MigrationError> {
+        f.ensure_block_indexed()
+            .map_err(|err| MigrationError::Other(err.to_string()))?;
+        let mut block = (*f.block).clone();
+        let (tx_root, _) =
+            DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&f.tx.header));
+        {
+            let publish = &mut block.data_ledgers[DataLedger::Publish];
+            publish.tx_root = tx_root;
+            publish.total_chunks =
+                f.tx.header
+                    .data_size
+                    .div_ceil(f.config.consensus.chunk_size);
+            publish.tx_ids = H256List(vec![f.tx.header.id]);
+        }
+        process_ledger_transactions(
+            &Arc::new(block),
+            DataLedger::Publish,
+            std::slice::from_ref(&f.tx.header),
+            &f.block_index,
+            &f.config,
+            guard,
+            &mut Vec::new(),
+        )
     }
 
     fn index_fixture_block(f: &Fixture) -> Result<(), MigrationError> {
@@ -2659,7 +2803,8 @@ mod tests {
             TxChunkOffset::from(18),
             3,
             &f.config,
-        )?;
+        )?
+        .bodies;
         assert_eq!(
             bodies[0].as_ref().map(|chunk| chunk.tx_offset),
             Some(TxChunkOffset::from(18)),
@@ -2742,6 +2887,275 @@ mod tests {
             bodies[1].as_ref().map(|chunk| chunk.tx_offset),
             Some(TxChunkOffset::from(1))
         );
+        Ok(())
+    }
+
+    /// Publish migration, cache empty. The earlier Submit module's durable
+    /// read fails. The later Submit module holds the body. That body is copied
+    /// onto the Publish module.
+    #[tokio::test]
+    async fn submit_fallback_migrates_from_later_module_when_earlier_read_fails() -> eyre::Result<()>
+    {
+        let f = fixture(1, Some(u64::MAX))?;
+        let broken = submit_module(&f.config, 1, 0)?;
+        let healthy = submit_module(&f.config, 2, 0)?;
+        let publish = publish_module(&f.config, 3, 0)?;
+        publish.pack_with_zeros();
+        write_real_entropy(&broken, &f.config)?;
+        write_real_entropy(&healthy, &f.config)?;
+
+        let submit_guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            broken.clone(),
+            healthy.clone(),
+        ])));
+        index_on(&f, &submit_guard)?;
+        let chunk = unpacked_at(&f, 0);
+        broken
+            .write_data_chunk(&chunk)
+            .map_err(|err| eyre::eyre!("write broken replica: {err:?}"))?;
+        healthy
+            .write_data_chunk(&chunk)
+            .map_err(|err| eyre::eyre!("write healthy replica: {err:?}"))?;
+        broken.force_sync_pending_chunks()?;
+        healthy.force_sync_pending_chunks()?;
+        truncate_chunk_file(&f.config, &broken)?;
+        let broken_read = broken
+            .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0));
+        assert!(
+            broken_read.is_err(),
+            "the earlier Submit module's body read must fail, got {broken_read:?}"
+        );
+        assert!(
+            healthy
+                .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?
+                .into_iter()
+                .next()
+                .flatten()
+                .is_some(),
+            "the later Submit module holds the body"
+        );
+        clear_pending(&broken)?;
+        clear_pending(&healthy)?;
+
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            broken.clone(),
+            healthy.clone(),
+            publish.clone(),
+        ])));
+        index_publish(&f, &guard)?;
+        assert_eq!(publish.pending_body_migrations()?.len(), 1);
+        assert_eq!(publish.pending_body_migrations()?[0].1.attempts, 0);
+
+        let pass = worker_for(&f, guard).drain_pass().await;
+        assert_eq!(
+            pass.written, 1,
+            "the body on the later Submit module must migrate"
+        );
+        assert_eq!(pass.retired, 0);
+        assert!(
+            publish.is_data_write_pending_at(PartitionChunkOffset::from(0)),
+            "Publish must queue the body copied from the later Submit module"
+        );
+        assert_eq!(
+            publish.pending_body_migrations()?[0].1.attempts,
+            0,
+            "a copied body is progress, not a stall"
+        );
+        Ok(())
+    }
+
+    /// The only Submit replica cannot be read. That pass is not "no local
+    /// source": the row stays, and the attempt count stays at zero, including
+    /// after `MAX_BODY_MIGRATION_ATTEMPTS` passes.
+    #[tokio::test]
+    async fn unread_submit_replica_does_not_count_toward_retirement() -> eyre::Result<()> {
+        let f = fixture(1, Some(u64::MAX))?;
+        let broken = submit_module(&f.config, 1, 0)?;
+        let publish = publish_module(&f.config, 3, 0)?;
+        publish.pack_with_zeros();
+        write_real_entropy(&broken, &f.config)?;
+        index_on(
+            &f,
+            &StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![broken.clone()]))),
+        )?;
+        broken
+            .write_data_chunk(&unpacked_at(&f, 0))
+            .map_err(|err| eyre::eyre!("write broken replica: {err:?}"))?;
+        broken.force_sync_pending_chunks()?;
+        truncate_chunk_file(&f.config, &broken)?;
+        let broken_read = broken
+            .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0));
+        assert!(
+            broken_read.is_err(),
+            "the Submit module's body read must fail, got {broken_read:?}"
+        );
+        clear_pending(&broken)?;
+
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            broken.clone(),
+            publish.clone(),
+        ])));
+        index_publish(&f, &guard)?;
+        let worker = worker_for(&f, guard);
+        for pass_n in 1..=MAX_BODY_MIGRATION_ATTEMPTS {
+            let pass = worker.drain_pass().await;
+            assert_eq!(pass.written, 0, "pass {pass_n}");
+            assert_eq!(pass.retired, 0, "pass {pass_n}");
+            let rows = publish.pending_body_migrations()?;
+            assert_eq!(
+                rows.len(),
+                1,
+                "pass {pass_n} must keep the row while the Submit replica is unreadable"
+            );
+            assert_eq!(
+                rows[0].1.attempts, 0,
+                "pass {pass_n} must not count an unread Submit replica"
+            );
+        }
+        Ok(())
+    }
+
+    /// Publish migration, cache empty. The earlier Submit module's index read
+    /// fails. Its body is still on disk. The later Submit module holds the
+    /// same body, and that body is copied onto the Publish module.
+    #[tokio::test]
+    async fn submit_fallback_migrates_when_earlier_index_read_fails() -> eyre::Result<()> {
+        let f = fixture(1, Some(u64::MAX))?;
+        let broken = submit_module(&f.config, 1, 0)?;
+        let healthy = submit_module(&f.config, 2, 0)?;
+        let publish = publish_module(&f.config, 3, 0)?;
+        publish.pack_with_zeros();
+        write_real_entropy(&broken, &f.config)?;
+        write_real_entropy(&healthy, &f.config)?;
+
+        let submit_guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            broken.clone(),
+            healthy.clone(),
+        ])));
+        index_on(&f, &submit_guard)?;
+        let chunk = unpacked_at(&f, 0);
+        broken
+            .write_data_chunk(&chunk)
+            .map_err(|err| eyre::eyre!("write broken replica: {err:?}"))?;
+        healthy
+            .write_data_chunk(&chunk)
+            .map_err(|err| eyre::eyre!("write healthy replica: {err:?}"))?;
+        broken.force_sync_pending_chunks()?;
+        healthy.force_sync_pending_chunks()?;
+        clear_pending(&broken)?;
+        clear_pending(&healthy)?;
+
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            broken.clone(),
+            healthy.clone(),
+            publish.clone(),
+        ])));
+        index_publish(&f, &guard)?;
+        broken.fail_data_root_index_reads(true);
+        let index_read = broken
+            .partition_offsets_for_data_root_chunk(f.tx.header.data_root, TxChunkOffset::from(0));
+        assert!(
+            index_read.is_err(),
+            "the earlier Submit module's index read must fail, got {index_read:?}"
+        );
+        assert!(
+            broken
+                .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?
+                .into_iter()
+                .next()
+                .flatten()
+                .is_some(),
+            "the earlier Submit module's body is still readable"
+        );
+        assert!(
+            healthy
+                .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?
+                .into_iter()
+                .next()
+                .flatten()
+                .is_some(),
+            "the later Submit module holds the body"
+        );
+        assert_eq!(publish.pending_body_migrations()?.len(), 1);
+        assert_eq!(publish.pending_body_migrations()?[0].1.attempts, 0);
+
+        let pass = worker_for(&f, guard).drain_pass().await;
+        assert_eq!(
+            pass.written, 1,
+            "the body on the later Submit module must migrate"
+        );
+        assert_eq!(pass.retired, 0);
+        assert!(
+            publish.is_data_write_pending_at(PartitionChunkOffset::from(0)),
+            "Publish must queue the body copied from the later Submit module"
+        );
+        assert_eq!(
+            publish.pending_body_migrations()?[0].1.attempts,
+            0,
+            "a copied body is progress, not a stall"
+        );
+        Ok(())
+    }
+
+    /// The only Submit replica's index cannot be read. The body is still on
+    /// disk. That pass is not "no local source": the row stays, and the
+    /// attempt count stays at zero, including after
+    /// `MAX_BODY_MIGRATION_ATTEMPTS` passes.
+    #[tokio::test]
+    async fn unread_submit_index_does_not_count_toward_retirement() -> eyre::Result<()> {
+        let f = fixture(1, Some(u64::MAX))?;
+        let broken = submit_module(&f.config, 1, 0)?;
+        let publish = publish_module(&f.config, 3, 0)?;
+        publish.pack_with_zeros();
+        write_real_entropy(&broken, &f.config)?;
+        index_on(
+            &f,
+            &StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![broken.clone()]))),
+        )?;
+        broken
+            .write_data_chunk(&unpacked_at(&f, 0))
+            .map_err(|err| eyre::eyre!("write broken replica: {err:?}"))?;
+        broken.force_sync_pending_chunks()?;
+        clear_pending(&broken)?;
+
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            broken.clone(),
+            publish.clone(),
+        ])));
+        index_publish(&f, &guard)?;
+        broken.fail_data_root_index_reads(true);
+        let index_read = broken
+            .partition_offsets_for_data_root_chunk(f.tx.header.data_root, TxChunkOffset::from(0));
+        assert!(
+            index_read.is_err(),
+            "the Submit module's index read must fail, got {index_read:?}"
+        );
+        assert!(
+            broken
+                .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?
+                .into_iter()
+                .next()
+                .flatten()
+                .is_some(),
+            "the Submit module's body is still readable"
+        );
+
+        let worker = worker_for(&f, guard);
+        for pass_n in 1..=MAX_BODY_MIGRATION_ATTEMPTS {
+            let pass = worker.drain_pass().await;
+            assert_eq!(pass.written, 0, "pass {pass_n}");
+            assert_eq!(pass.retired, 0, "pass {pass_n}");
+            let rows = publish.pending_body_migrations()?;
+            assert_eq!(
+                rows.len(),
+                1,
+                "pass {pass_n} must keep the row while the Submit index is unreadable"
+            );
+            assert_eq!(
+                rows[0].1.attempts, 0,
+                "pass {pass_n} must not count an unread Submit index"
+            );
+        }
         Ok(())
     }
 
@@ -2950,8 +3364,8 @@ mod tests {
 
     /// Registrations in one block stay unsynced until one WAL sync. The body
     /// wake and `OnBlockMigrated` run only after that sync.
-    #[test]
-    fn block_index_sync_precedes_migration_side_effects() -> eyre::Result<()> {
+    #[tokio::test(flavor = "current_thread")]
+    async fn block_index_sync_precedes_migration_side_effects() -> eyre::Result<()> {
         let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb, 20)?;
         f.persist_block()?;
         let db = {
@@ -2990,7 +3404,14 @@ mod tests {
         let hook_db = db.clone();
         let saw = Arc::new(AtomicBool::new(false));
         let hook_saw = Arc::clone(&saw);
+        // The hook runs on the thread that just synced the WAL.
+        let worker_thread = std::thread::current().id();
         inner.set_index_durable_hook(move || {
+            assert_ne!(
+                std::thread::current().id(),
+                worker_thread,
+                "index WAL sync ran on the async worker"
+            );
             assert!(hook_db.wal_sync_count() > syncs_before);
             assert!(hook_db.durable_generation() >= hook_db.published_generation());
             assert!(
@@ -3004,7 +3425,9 @@ mod tests {
             hook_saw.store(true, Ordering::SeqCst);
         });
 
-        inner.on_block_migrated(Arc::clone(&f.block), submit_txs(&f))?;
+        inner
+            .on_block_migrated(Arc::clone(&f.block), submit_txs(&f))
+            .await?;
         assert!(saw.load(Ordering::SeqCst), "sync hook did not run");
         assert_eq!(db.wal_sync_count(), syncs_before + 1);
         assert_eq!(db.wal_backstop_sync_count(), backstop_before + 1);
@@ -3026,8 +3449,8 @@ mod tests {
 
     /// A failed per-block sync is the old registration-sync error, and it
     /// does not wake the body worker or send `OnBlockMigrated`.
-    #[test]
-    fn block_index_sync_failure_does_not_publish() -> eyre::Result<()> {
+    #[tokio::test]
+    async fn block_index_sync_failure_does_not_publish() -> eyre::Result<()> {
         let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb, 20)?;
         f.persist_block()?;
         let db = {
@@ -3055,6 +3478,7 @@ mod tests {
 
         let err = inner
             .on_block_migrated(Arc::clone(&f.block), submit_txs(&f))
+            .await
             .expect_err("sync failure");
         assert!(matches!(err, MigrationError::ChunkIndexWrite));
         assert!(
