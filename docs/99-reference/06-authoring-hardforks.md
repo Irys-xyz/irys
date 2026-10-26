@@ -88,3 +88,7 @@ hardfork!(
 Update [ethereum_hardfork_mapping()](https://github.com/Irys-xyz/irys/blob/3fd8226cf3fa1d57b29b4c60a74d90243db250b5/crates/types/src/chainspec.rs#L82-L117) to map Irys hardforks to EVM hardforks if there are any.
 
 > **Note:** Skip this step if the hardfork doesn't affect the EVM.
+
+## Delta
+
+`delta` (`Option<Delta>` on `IrysHardforkConfig`) is a consensus-only fork. It does not change the EVM, so it has no `IrysHardfork` chainspec entry. It is a WIP hardfork and is not deployed: every preset leaves it `None`. It accumulates changes that need a hardfork activation. Epoch processing reads the current change with `delta_for_block` on the epoch block. That change gives a data ledger its first slots in the epoch that activates it.

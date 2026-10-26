@@ -1,0 +1,34 @@
+[package]
+name = "irys-node"
+# The `irys` node binary. Its reported version is irys-chain's (irys_chain::PKG_VERSION).
+# It is a separate package so the git metadata build.rs emits (new on every commit and
+# in every worktree) only recompiles this small crate, not the irys-chain library and
+# everything that depends on it.
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "irys"
+path = "src/main.rs"
+
+[features]
+nvidia = ["irys-chain/nvidia"]
+telemetry = ["irys-chain/telemetry", "irys-utils/telemetry"]
+
+[dependencies]
+irys-chain.workspace = true
+irys-testing-utils.workspace = true
+irys-types.workspace = true
+irys-utils.workspace = true
+
+dotenvy = "0.15"
+eyre.workspace = true
+reth-cli-util = { workspace = true, features = ["jemalloc"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing.workspace = true
+tracing-error.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

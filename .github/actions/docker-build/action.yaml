@@ -2,7 +2,7 @@ name: "Build the Irys release image"
 description: >-
   Runs `docker build` from docker/Dockerfile.release with the standard git
   build-args (GIT_COMMIT/GIT_SHA/GIT_HAS_TAG/GIT_DIRTY — consumed by
-  crates/chain/build.rs for version embedding). Builds a single local tag;
+  crates/node/build.rs for version embedding). Builds a single local tag;
   callers handle push and the `:latest` alias, which differ per workflow.
   Requires Docker running (pair with docker-setup) and a checkout of the
   source commit.

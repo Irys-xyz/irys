@@ -3,14 +3,10 @@ edition.workspace = true
 name = "irys-chain"
 version = "4.1.0"
 
-[[bin]]
-name = "irys"
-path = "src/main.rs"
-
 [features]
 nvidia = ["irys-actors/nvidia"]
 test-utils = []
-telemetry = ["irys-utils/telemetry", "irys-testing-utils/telemetry"]
+telemetry = ["irys-utils/telemetry"]
 
 [dependencies]
 # Irys
@@ -21,7 +17,6 @@ irys-reth-node-bridge.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-api-server.workspace = true
 irys-config.workspace = true
-irys-testing-utils.workspace = true
 irys-actors.workspace = true
 irys-packing.workspace = true
 irys-vdf.workspace = true
@@ -32,7 +27,6 @@ irys-reward-curve.workspace = true
 irys-utils.workspace = true
 
 base58.workspace = true
-tracing-error.workspace = true
 eyre.workspace = true
 rand.workspace = true
 toml.workspace = true
@@ -45,7 +39,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 opentelemetry.workspace = true
-tracing-subscriber.workspace = true
 modular-bitfield.workspace = true
 futures.workspace = true
 test-fuzz.workspace = true
@@ -59,9 +52,7 @@ reth-db.workspace = true
 reth.workspace = true
 alloy-sol-types.workspace = true
 alloy-contract.workspace = true
-reth-cli-util = { workspace = true, features = ["jemalloc"] }
 reqwest = { workspace = true, features = ["json"] }
-dotenvy = "0.15"
 
 [dev-dependencies]
 proptest.workspace = true

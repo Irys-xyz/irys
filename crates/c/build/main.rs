@@ -1,6 +1,7 @@
 use std::{env, ffi::OsString, path::PathBuf};
 
 mod capacity;
+mod cargo_callbacks;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -9,9 +10,18 @@ fn main() {
     // Watch individual files instead of the directory.
     // Directory-level watches use mtime which can change even when rsync
     // doesn't modify any files, triggering unnecessary full rebuilds.
-    for entry in std::fs::read_dir(&c_src).unwrap() {
-        let entry = entry.unwrap();
-        println!("cargo:rerun-if-changed={}", entry.path().display());
+    // Emit them sorted and relative to the package root (cargo resolves them there):
+    // cargo fingerprints this list in order, and both read_dir order and absolute
+    // paths differ between checkouts, so a target/ copied between worktrees would
+    // rerun this script and rebuild everything that depends on irys-c.
+    let mut sources: Vec<PathBuf> = std::fs::read_dir(&c_src)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    sources.sort();
+    for path in &sources {
+        let rel = path.strip_prefix(&manifest_dir).unwrap_or(path);
+        println!("cargo:rerun-if-changed={}", rel.display());
     }
 
     let (lib_dir, include_dir) = build_openssl();

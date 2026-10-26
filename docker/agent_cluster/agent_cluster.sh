@@ -180,12 +180,12 @@ cmd_build() {
             info "Native cross-compile (aarch64-unknown-linux-gnu) with -j$CARGO_JOBS..."
             (cd "$REPO_ROOT" && \
                 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-unknown-linux-gnu-gcc \
-                cargo build --release --bin irys -p irys-chain --locked \
+                cargo build --release --bin irys -p irys-node --locked \
                 --target aarch64-unknown-linux-gnu -j"$CARGO_JOBS")
             cp "$REPO_ROOT/target/aarch64-unknown-linux-gnu/release/irys" "$BUILD_OUTPUT/irys"
         else
             info "Native Linux build with -j$CARGO_JOBS..."
-            (cd "$REPO_ROOT" && cargo build --release --bin irys -p irys-chain --locked -j"$CARGO_JOBS")
+            (cd "$REPO_ROOT" && cargo build --release --bin irys -p irys-node --locked -j"$CARGO_JOBS")
             cp "$REPO_ROOT/target/release/irys" "$BUILD_OUTPUT/irys"
         fi
 
@@ -341,7 +341,7 @@ cmd_build() {
                 echo "==> No files changed since last sync"
             fi
             echo "==> Starting cargo build (-j'"$CARGO_JOBS"', mem='"$BUILD_MEMORY"')..."
-            '"$cargo_env"'CARGO_TARGET_DIR=/workspace-target cargo build --release --bin irys -p irys-chain --locked -j'"$CARGO_JOBS"' \
+            '"$cargo_env"'CARGO_TARGET_DIR=/workspace-target cargo build --release --bin irys -p irys-node --locked -j'"$CARGO_JOBS"' \
             && cp /workspace-target/release/irys /build-output/irys
         '
 

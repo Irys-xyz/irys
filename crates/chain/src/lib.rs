@@ -8,3 +8,7 @@ pub mod utils;
 pub mod vdf_seed_source;
 
 pub use chain::*;
+
+/// irys-chain's package version. The `irys` binary (crates/node) reports this, so the
+/// release version stays defined in one place.
+pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -173,6 +173,8 @@ balance = "0x152cf4e72a974f1c0000"
 
 [consensus.Custom.mempool]
 max_data_txs_per_block = 100
+# Above max_data_txs_per_block. Publish inclusion waits on ingress proofs.
+max_publish_txs_per_block = 110
 max_data_tx_chunks = 20971520
 max_commitment_txs_per_block = 100
 tx_anchor_expiry_depth = 20
@@ -224,8 +226,9 @@ number_of_ingress_proofs_from_assignees = 0
 # thirty_day_epoch_length = 30      # epochs per ThirtyDay term (default: 30)
 # annual_cost_per_gb = 0.028        # USD/GB/year override (default: 0.028)
 
-# To enable Delta (a ledger a hardfork activates mid-chain gets its first slots
-# in the activating epoch instead of the one after), uncomment:
+# Delta is a WIP hardfork and is not deployed. It accumulates changes that
+# need a hardfork. The change it carries now: a ledger activated mid-chain
+# gets its first slots in the activating epoch. Uncomment to enable:
 # [consensus.Custom.hardforks.delta]
 # activation_timestamp = "2026-09-01T00:00:00+00:00"
 # initial_slots_per_new_ledger = 1   # slots seeded per newly activated ledger (default: 1)

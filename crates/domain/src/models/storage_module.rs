@@ -374,6 +374,9 @@ struct WrittenAhead {
     queued_at: Instant,
     /// When the pwrite returned. `None` if that stamp was not kept.
     pwrite_at: Option<Instant>,
+    /// When this entry was parked. The oldest one opens an ingress gather
+    /// window that starts after the interval from the last point had passed.
+    parked_at: Instant,
 }
 
 impl Deref for PendingWrites {
@@ -717,6 +720,12 @@ pub(super) struct DurableDeferQuery {
     pub headroom_open: bool,
     /// An owed recall flush must not fdatasync only because headroom is gone.
     pub recall_flush_owed: bool,
+    /// Age of an ingress gather window. `Some` only when the window holds an
+    /// ingress-priority write (data sync, HTTP upload, or gossip) and opened
+    /// after `interval` from the last point had already passed. That window
+    /// waits `interval` from its own start, so writes that arrive together
+    /// share one fdatasync. Packing or migration bytes parked in it wait too.
+    pub gather_age: Option<Duration>,
 }
 
 /// `cause == None` defers the point. `headroom_open` is the latch to store.
@@ -729,9 +738,10 @@ pub(super) struct DurablePointDecision {
 /// Defer only while the interval is the longest wait and the backlog is inside
 /// the headroom line. A larger backlog never starts a new deferral. The
 /// interval is an upper bound: once it has elapsed the point runs even when
-/// the backlog is small. Force, a zero interval, the first point, and the
-/// memory ceiling run it immediately. Headroom loss does too, except while a
-/// recall is waiting on the owed flush.
+/// the backlog is small. An ingress gather window measures that interval
+/// from its own start instead of the last point. Force, a zero interval, the
+/// first point, and the memory ceiling run it immediately. Headroom loss does
+/// too, except while a recall is waiting on the owed flush.
 pub(super) fn durable_point_decision(query: DurableDeferQuery) -> DurablePointDecision {
     let mut headroom_open = query.headroom_open;
     if query.pending_bytes > query.headroom_bytes {
@@ -746,7 +756,9 @@ pub(super) fn durable_point_decision(query: DurableDeferQuery) -> DurablePointDe
         Some(DurablePointCause::Interval)
     } else if query.pending_bytes > query.ceiling_bytes {
         Some(DurablePointCause::Ceiling)
-    } else if query.since_last.expect("checked above") >= query.interval {
+    } else if query.since_last.expect("checked above") >= query.interval
+        && query.gather_age.is_none_or(|age| age >= query.interval)
+    {
         Some(DurablePointCause::Interval)
     } else if !headroom_open && !query.recall_flush_owed {
         Some(DurablePointCause::Headroom)
@@ -3801,17 +3813,66 @@ impl StorageModule {
         self.pending_memory_ceiling_bytes().saturating_mul(permille) / 1000
     }
 
-    fn durable_cause(&self, force: bool) -> Option<DurablePointCause> {
-        let decision = durable_point_decision(DurableDeferQuery {
+    /// `batch_ingress` is true when the caller holds pwritten ingress bytes
+    /// that are not parked yet. With nothing parked they open the window now.
+    fn durable_query(&self, force: bool, batch_ingress: bool) -> DurableDeferQuery {
+        let interval = self.min_durable_interval();
+        let last = self.load_last_durable_at();
+        DurableDeferQuery {
             force,
-            interval: self.min_durable_interval(),
-            since_last: self.load_last_durable_at().map(|last| last.elapsed()),
+            interval,
+            since_last: last.map(|last| last.elapsed()),
             pending_bytes: self.pending_write_bytes(),
             ceiling_bytes: self.pending_memory_ceiling_bytes(),
             headroom_bytes: self.durable_headroom_bytes(),
             headroom_open: self.headroom_open.load(Ordering::Relaxed),
             recall_flush_owed: self.disk.recall_flush_is_owed(),
-        });
+            gather_age: last.and_then(|last| self.gather_window_age(last, interval, batch_ingress)),
+        }
+    }
+
+    /// Age of the ingress gather window, if one is open.
+    ///
+    /// The window starts at the oldest parked entry, or now when nothing is
+    /// parked. It is a gather window only when it holds an ingress-priority
+    /// write and starts at or after `last + interval`. A window that opened
+    /// inside the previous interval keeps that interval's deadline. Ingress
+    /// priority covers data sync, HTTP uploads, and gossip. None of them waits
+    /// on durability, so the first write after an idle stretch may take up
+    /// to one extra interval to become durable.
+    fn gather_window_age(
+        &self,
+        last: Instant,
+        interval: Duration,
+        batch_ingress: bool,
+    ) -> Option<Duration> {
+        // Every window starts at or before now. Inside the interval none can
+        // start after it, so skip the scan the lane would run each pass.
+        if last.elapsed() < interval {
+            return None;
+        }
+        let pending = self.pending_writes.read().unwrap();
+        let opened = pending
+            .written_ahead
+            .values()
+            .map(|ahead| ahead.parked_at)
+            .min()
+            .unwrap_or_else(Instant::now);
+        let ingress = batch_ingress
+            || pending
+                .written_ahead
+                .values()
+                .any(|ahead| ahead.priority == disk_lane::WritePriority::Ingress);
+        drop(pending);
+        (ingress && opened.saturating_duration_since(last) >= interval).then(|| opened.elapsed())
+    }
+
+    fn durable_cause(&self, force: bool) -> Option<DurablePointCause> {
+        self.durable_cause_for(force, false)
+    }
+
+    fn durable_cause_for(&self, force: bool, batch_ingress: bool) -> Option<DurablePointCause> {
+        let decision = durable_point_decision(self.durable_query(force, batch_ingress));
         self.headroom_open
             .store(decision.headroom_open, Ordering::Relaxed);
         decision.cause
@@ -3860,29 +3921,30 @@ impl StorageModule {
         *recover_mutex(&self.last_durable_at) = Some(Instant::now());
     }
 
-    /// True when this window must not fdatasync yet.
-    ///
-    /// Force, a zero interval, the first point, pending bytes over the
-    /// headroom line, and pending bytes above the ceiling all return false.
-    /// A closed headroom latch stays closed until pending bytes fall to half
-    /// the line. An owed recall flush still returns true on headroom loss, so
-    /// that recall does not wait on the fdatasync. The interval is the longest
-    /// wait: a younger point is never held past it.
-    fn defer_durable_point(&self, force: bool) -> bool {
-        self.durable_cause(force).is_none()
-    }
-
     /// Time until parked bytes may take a durable point. `None` when the
     /// interval is off or nothing is parked. Zero when the point is due.
+    ///
+    /// Force, a zero interval, the first point, pending bytes over the
+    /// headroom line, and pending bytes above the ceiling are due now. A
+    /// closed headroom latch stays closed until pending bytes fall to half
+    /// the line. An owed recall flush still defers on headroom loss, so that
+    /// recall does not wait on the fdatasync. The interval is the longest
+    /// wait: a younger point or gather window is never held past it.
     fn durable_point_remaining(&self) -> Option<Duration> {
         if self.min_durable_interval().is_zero() || !self.has_written_ahead() {
             return None;
         }
-        if !self.defer_durable_point(false) {
+        let query = self.durable_query(false, false);
+        let decision = durable_point_decision(query);
+        self.headroom_open
+            .store(decision.headroom_open, Ordering::Relaxed);
+        if decision.cause.is_some() {
             return Some(Duration::ZERO);
         }
-        let last = self.load_last_durable_at()?;
-        Some(self.min_durable_interval().saturating_sub(last.elapsed()))
+        // A gather window waits from its own start. Otherwise the wait runs
+        // from the last point.
+        let waited = query.gather_age.or(query.since_last)?;
+        Some(query.interval.saturating_sub(waited))
     }
 
     /// Durable points since this module was opened, by timing and cause.
@@ -3934,6 +3996,7 @@ impl StorageModule {
                         priority: *priority,
                         queued_at,
                         pwrite_at,
+                        parked_at: Instant::now(),
                     },
                 );
             }
@@ -4323,7 +4386,10 @@ impl StorageModule {
         // inside the headroom line. The pwrites above already ran. Force,
         // headroom loss, the pending-byte ceiling, and a zero interval do
         // not hold the pair. `0` is every point.
-        let Some(cause) = self.durable_cause(force) else {
+        let batch_ingress = write_batch
+            .iter()
+            .any(|(_, _, priority)| *priority == disk_lane::WritePriority::Ingress);
+        let Some(cause) = self.durable_cause_for(force, batch_ingress) else {
             self.park_written_ahead(&write_batch);
             return Ok(());
         };
@@ -12060,6 +12126,7 @@ mod tests {
                     priority: disk_lane::WritePriority::Ingress,
                     queued_at: Instant::now(),
                     pwrite_at: None,
+                    parked_at: Instant::now(),
                 },
             );
             pending
@@ -19525,6 +19592,158 @@ mod tests {
         Ok(())
     }
 
+    /// Like [`durable_spacing_module`], with room for 20 writes one chunk apart.
+    fn gather_module(
+        prefix: &str,
+        min_durable_interval_ms: u64,
+    ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let chunk_size = 32;
+        let config = testing_config_tuned(tmp_dir.path(), chunk_size, 64, |node| {
+            node.storage = StorageSyncConfig {
+                num_writes_before_sync: 1,
+                entropy_sweep_interval_millis: 60_000,
+                entropy_sweep_max_bytes: chunk_size,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms,
+                ..StorageSyncConfig::default()
+            };
+        });
+        let storage = StorageModule::new(
+            &one_span(63, "chunks", Some(PartitionAssignment::default())),
+            &config,
+        )?;
+        Ok((tmp_dir, storage))
+    }
+
+    /// The last durable point is older than the interval. A data-sync write
+    /// would otherwise fdatasync on its own.
+    fn age_last_durable_point(storage: &StorageModule, by: Duration) {
+        let earlier = Instant::now()
+            .checked_sub(by)
+            .expect("host uptime covers the backdated point");
+        *storage.last_durable_at.lock().unwrap() = Some(earlier);
+    }
+
+    /// Twenty data-sync writes that arrive after an idle interval share one
+    /// fdatasync. The first write opens a window; it does not sync alone.
+    #[test]
+    fn data_sync_writes_after_an_idle_interval_share_one_durable_point() -> eyre::Result<()> {
+        // Twenty synchronous commits must fit inside the window on a loaded
+        // runner, so the window is wide.
+        let interval = Duration::from_millis(3_000);
+        let (_tmp, storage) = gather_module("durable_gather_direct", 3_000)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+        let seeded = storage.durable_point_counts();
+        assert_eq!(seeded.immediate(), 1);
+
+        age_last_durable_point(&storage, Duration::from_secs(5));
+        let offsets: Vec<u32> = (0..20).map(|i| 2 + 2 * i).collect();
+        let mut opened = None;
+        for (i, offset) in offsets.iter().enumerate() {
+            write_spacing_chunk(&storage, *offset, u8::try_from(i + 2).expect("byte"));
+            storage.sync_pending_chunks()?;
+            // The window opens when the first write is parked.
+            opened.get_or_insert_with(Instant::now);
+            assert!(
+                !storage.is_data_chunk_durable_at(PartitionChunkOffset::from(*offset)),
+                "write {i} at {offset} took its own durable point"
+            );
+        }
+        assert_eq!(storage.durable_point_counts(), seeded);
+
+        wait_monotonic(opened.expect("twenty writes"), interval);
+        storage.sync_pending_chunks()?;
+        for offset in &offsets {
+            assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(*offset)));
+        }
+        assert!(!storage.has_pending_writes());
+        let points = storage.durable_point_counts().saturating_delta(seeded);
+        assert_eq!(points.deferred_interval, 1, "{points:?}");
+        assert_eq!(points.immediate(), 0, "{points:?}");
+        Ok(())
+    }
+
+    /// Same window on the disk lane. The lane pwrites the first write before
+    /// the others arrive, and still runs one fdatasync for all twenty. The
+    /// window is wider than the 250 ms default so nineteen lane handoffs fit
+    /// inside it on a loaded runner.
+    #[test]
+    fn lane_runs_one_fdatasync_for_twenty_data_sync_writes() -> eyre::Result<()> {
+        let (_tmp, storage) = gather_module("durable_gather_lane", 2_000)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        let seeded = storage.durable_point_counts();
+        assert_eq!(seeded.immediate(), 1);
+        age_last_durable_point(&storage, Duration::from_secs(5));
+
+        let storage = Arc::new(storage);
+        let lane = LaneGuard::start(Arc::clone(&storage))?;
+        let offsets: Vec<u32> = (0..20).map(|i| 2 + 2 * i).collect();
+        write_spacing_chunk(&lane.module, offsets[0], 2);
+        lane.module.sync_pending_chunks()?;
+        // Wait for the lane to pwrite the first write. The old rule synced
+        // it alone here.
+        let first = PartitionChunkOffset::from(offsets[0]);
+        let started = Instant::now();
+        while !lane
+            .module
+            .pending_writes
+            .read()
+            .unwrap()
+            .written_ahead
+            .contains_key(&first)
+            && !lane.module.is_data_chunk_durable_at(first)
+        {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the lane did not write the first chunk"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for (i, offset) in offsets.iter().enumerate().skip(1) {
+            write_spacing_chunk(&lane.module, *offset, u8::try_from(i + 2).expect("byte"));
+            lane.module.sync_pending_chunks()?;
+        }
+        wait_until_drained(
+            &lane.module,
+            Duration::from_secs(10),
+            "the gather window never became durable",
+        );
+        for offset in &offsets {
+            assert!(
+                lane.module
+                    .is_data_chunk_durable_at(PartitionChunkOffset::from(*offset))
+            );
+        }
+        let points = lane.module.durable_point_counts().saturating_delta(seeded);
+        assert_eq!(points.deferred_interval, 1, "{points:?}");
+        assert_eq!(points.immediate(), 0, "{points:?}");
+        Ok(())
+    }
+
+    /// The gather window is for data-sync writes. A packing write after an
+    /// idle interval still takes its point right away.
+    #[test]
+    fn entropy_write_after_an_idle_interval_is_not_gathered() -> eyre::Result<()> {
+        let (_tmp, storage) = gather_module("durable_gather_entropy", 60_000)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        let seeded = storage.durable_point_counts();
+        age_last_durable_point(&storage, Duration::from_secs(120));
+
+        let offset = PartitionChunkOffset::from(4);
+        assert!(storage.write_chunk(offset, vec![7_u8; 32], ChunkType::Entropy));
+        storage.sync_pending_chunks()?;
+        assert!(!storage.has_pending_writes());
+        assert_eq!(storage.get_chunk_type(&offset), Some(ChunkType::Entropy));
+        let points = storage.durable_point_counts().saturating_delta(seeded);
+        assert_eq!(points.immediate_interval, 1, "{points:?}");
+        Ok(())
+    }
+
     fn defer_query() -> DurableDeferQuery {
         DurableDeferQuery {
             force: false,
@@ -19535,6 +19754,7 @@ mod tests {
             headroom_bytes: 400,
             headroom_open: true,
             recall_flush_owed: false,
+            gather_age: None,
         }
     }
 
@@ -19596,6 +19816,35 @@ mod tests {
                 decision.headroom_open
             );
         }
+
+        // A gather window that opened after the last point's interval waits
+        // its own interval. The ceiling, headroom, and force still cut it.
+        let mut query = defer_query();
+        query.since_last = Some(Duration::from_secs(5));
+        query.gather_age = Some(Duration::from_millis(1));
+        assert_eq!(durable_point_decision(query).cause, None);
+        query.gather_age = Some(Duration::from_millis(250));
+        assert_eq!(
+            durable_point_decision(query).cause,
+            Some(DurablePointCause::Interval)
+        );
+        query.gather_age = Some(Duration::from_millis(1));
+        query.pending_bytes = 1_001;
+        assert_eq!(
+            durable_point_decision(query).cause,
+            Some(DurablePointCause::Ceiling)
+        );
+        query.pending_bytes = 401;
+        assert_eq!(
+            durable_point_decision(query).cause,
+            Some(DurablePointCause::Headroom)
+        );
+        query.pending_bytes = 0;
+        query.force = true;
+        assert_eq!(
+            durable_point_decision(query).cause,
+            Some(DurablePointCause::Forced)
+        );
     }
 
     fn submit_slot(config: &Config, hash: H256, slot: usize) -> PartitionAssignment {

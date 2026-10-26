@@ -16,7 +16,8 @@ use eyre::eyre;
 use irys_types::{
     Base64, ChunkDataPath, DataLedger, DataRootLeaf, DataTransactionHeader, DataTransactionLedger,
     H256, HASH_SIZE, Helpers as _, Node, PartitionChunkOffset, Proof, ProofDeserialize as _,
-    TxPath, generate_data_root, generate_leaves_from_data_roots, hash_sha256, validate_path,
+    TxChunkOffset, TxPath, expected_chunk_byte_range, generate_data_root,
+    generate_leaves_from_data_roots, hash_sha256, validate_path, validate_path_byte_range,
 };
 use reth_db::DatabaseEnv;
 use reth_db::cursor::DbCursorRO as _;
@@ -62,6 +63,12 @@ pub struct DerivedTxPath {
     pub ledger_start: u64,
     /// Inclusive ledger chunk offset of the tx that owns this path.
     pub tx_ledger_start: u64,
+    /// Byte where the tx's leaf starts in the `tx_root` tree: the sum of the
+    /// earlier txs' `data_size`. The block index rounds each tx up to whole
+    /// chunks, so this is not `tx_ledger_start` times the chunk size.
+    pub tx_byte_start: u128,
+    /// `data_size` of the tx.
+    pub data_size: u64,
     /// Proof for `tx_index` only.
     pub proof: Proof,
     /// Consensus reads, including the read-transaction commit.
@@ -235,6 +242,8 @@ fn derive_tx_path_at_offset_timed(
             tx_root,
             ledger_start: bounds.start,
             tx_ledger_start,
+            tx_byte_start: tx_byte_start(&headers, tx_index),
+            data_size: chosen.data_size,
             proof,
         }
     };
@@ -316,6 +325,8 @@ pub fn derive_tx_path_at_offset_cached(
             tx_root: block.tx_root,
             ledger_start: block.bounds.start,
             tx_ledger_start,
+            tx_byte_start: tx_byte_start(&block.headers, tx_index),
+            data_size: chosen.data_size,
             proof,
         },
     )
@@ -480,6 +491,8 @@ pub fn derive_tx_path_synthetic_with(
             tx_root,
             ledger_start: 0,
             tx_ledger_start: 0,
+            tx_byte_start: tx_byte_start(&headers, leaf_index),
+            data_size: chosen.data_size,
             proof,
         }
     };
@@ -541,6 +554,14 @@ pub fn read_stored_tx_data_path(
 }
 
 /// Proof bytes for one leaf. The root id is the ledger `tx_root`.
+/// Byte where `headers[index]`'s leaf starts in the ledger `tx_root` tree.
+fn tx_byte_start(headers: &[DataTransactionHeader], index: usize) -> u128 {
+    headers[..index]
+        .iter()
+        .map(|header| u128::from(header.data_size))
+        .sum()
+}
+
 fn tree_for_headers(headers: &[DataTransactionHeader]) -> eyre::Result<(H256, Node)> {
     eyre::ensure!(!headers.is_empty(), "ledger has no txs");
     let leaves = folded_leaves(headers)?;
@@ -804,6 +825,8 @@ struct BuiltPath {
     tx_root: H256,
     ledger_start: u64,
     tx_ledger_start: u64,
+    tx_byte_start: u128,
+    data_size: u64,
     proof: Proof,
 }
 
@@ -821,6 +844,8 @@ fn finish(started: Instant, cpu_nanos: u64, built: BuiltPath) -> eyre::Result<De
         tx_root: built.tx_root,
         ledger_start: built.ledger_start,
         tx_ledger_start: built.tx_ledger_start,
+        tx_byte_start: built.tx_byte_start,
+        data_size: built.data_size,
         proof: built.proof,
         db_nanos: fit_u64(db_nanos)?,
         cpu_nanos,
@@ -846,26 +871,34 @@ pub fn cross_check_derived(
     data_path: &[u8],
     placement: Option<PlacementCheck>,
 ) -> eyre::Result<()> {
-    let block_chunk_offset = ledger_offset
-        .checked_sub(derived.ledger_start)
-        .ok_or_else(|| eyre!("ledger offset {ledger_offset} is before the derived block"))?;
-    let byte_offset = u128::from(block_chunk_offset)
-        .checked_mul(u128::from(chunk_size))
-        .ok_or_else(|| eyre!("block byte offset overflow"))?;
+    // The same checks as `poa_is_valid`: the tx leaf covers the tx's raw byte
+    // range, and the data leaf covers exactly the chunk at this offset.
+    let chunk_index = ledger_offset
+        .checked_sub(derived.tx_ledger_start)
+        .and_then(|index| u32::try_from(index).ok())
+        .ok_or_else(|| eyre!("ledger offset {ledger_offset} is not inside the derived tx"))?;
+    let chunk_range =
+        expected_chunk_byte_range(TxChunkOffset(chunk_index), derived.data_size, chunk_size)
+            .map_err(|error| {
+                eyre!("derived tx path does not prove offset {ledger_offset}: {error}")
+            })?;
+    let tx_end = derived
+        .tx_byte_start
+        .checked_add(u128::from(derived.data_size))
+        .ok_or_else(|| eyre!("derived tx byte range overflow"))?;
     let tx_path = validate_path(
         derived.tx_root.0,
         &Base64(derived.proof.proof.clone()),
-        byte_offset,
+        derived.tx_byte_start + u128::from(chunk_range.0),
     )
     .map_err(|error| eyre!("derived tx path does not prove offset {ledger_offset}: {error}"))?;
-    if !(tx_path.min_byte_range..=tx_path.max_byte_range).contains(&byte_offset) {
-        eyre::bail!("derived tx path range does not contain offset {ledger_offset}");
+    if (tx_path.min_byte_range, tx_path.max_byte_range) != (derived.tx_byte_start, tx_end) {
+        eyre::bail!("derived tx path range does not match offset {ledger_offset}");
     }
-    let tx_chunk_offset = byte_offset - tx_path.min_byte_range;
-    validate_path(
+    let data = validate_path(
         derived.data_root.0,
         &Base64(data_path.to_vec()),
-        tx_chunk_offset,
+        u128::from(chunk_range.0),
     )
     .map_err(|error| {
         eyre!(
@@ -873,6 +906,8 @@ pub fn cross_check_derived(
             derived.data_root
         )
     })?;
+    validate_path_byte_range(&data, chunk_range)
+        .map_err(|error| eyre!("data path range does not match offset {ledger_offset}: {error}"))?;
     let Some(placement) = placement else {
         return Ok(());
     };
@@ -935,8 +970,8 @@ mod tests {
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
         Base64, DataLedger, DataTransactionHeader, DataTransactionLedger, H256, H256List,
-        IrysBlockHeader, PartitionChunkOffset, Proof, generate_data_root,
-        generate_leaves_from_data_roots, resolve_proofs, validate_path,
+        IrysBlockHeader, PartitionChunkOffset, Proof, TxChunkOffset, expected_chunk_byte_range,
+        generate_data_root, generate_leaves_from_data_roots, resolve_proofs, validate_path,
     };
     use reth_db::mdbx::DatabaseArguments;
 
@@ -1098,6 +1133,8 @@ mod tests {
             tx_root,
             ledger_start: 8,
             tx_ledger_start: 8,
+            tx_byte_start: 0,
+            data_size: chunk_size,
             proof,
             db_nanos: 0,
             cpu_nanos: 0,
@@ -1153,28 +1190,30 @@ mod tests {
         }
     }
 
-    /// Producer cross-check versus the validator byte formula.
+    /// Producer cross-check versus the validator's whole-chunk mapping.
     ///
-    /// A ledger offset is accepted only when both accept it, the proof bytes match
-    /// `merklize_tx_root`, the addressed data chunk is the chunk `assign_tx_index`
-    /// selected, and the miner prefix length equals the validator trim.
+    /// Every chunk of an honest layout passes both, however unaligned the txs
+    /// before it. The proof bytes match `merklize_tx_root`, the addressed data
+    /// chunk is the chunk `assign_tx_index` selected, and the miner prefix
+    /// length equals the validator's chunk span.
     #[test]
-    fn unaligned_offsets_agree_with_the_validator_byte() {
+    fn unaligned_offsets_agree_with_the_validator() {
         let chunk_size = 32_u64;
         let patterns: &[(&str, &[u64], u64, Option<&[bool]>)] = &[
             ("one-partial", &[40], 0, Some(&[true, true])),
             ("one-byte", &[1], 0, Some(&[true])),
-            (
-                "two-partial",
-                &[40, 40],
-                0,
-                Some(&[true, true, true, false]),
-            ),
+            ("two-partial", &[40, 40], 0, Some(&[true, true, true, true])),
             (
                 "three-odd",
                 &[33, 33, 32],
                 0,
-                Some(&[true, true, true, false, false]),
+                Some(&[true, true, true, true, true]),
+            ),
+            (
+                "one-byte-then-chunk",
+                &[1, 1, 32],
+                0,
+                Some(&[true, true, true]),
             ),
             ("mixed", &[32, 40, 32], 7, Some(&[true, true, true, true])),
             ("zero-middle", &[32, 0, 32], 0, Some(&[true, true])),
@@ -1228,31 +1267,45 @@ mod tests {
             let (data_root, data_proofs) = data_tree(size, chunk_size);
             assert_eq!(headers[tx_index].data_root, data_root);
             let data_path = &data_proofs[local].proof;
-            let derived = derived_for(&headers, tx_index, &proof, tx_root, data_root, start);
+            let derived = derived_for(
+                &headers, tx_index, &proof, tx_root, data_root, start, tx_start,
+            );
             let cross = super::cross_check_derived(&derived, offset, chunk_size, data_path, None);
-            let byte = u128::from(offset - start) * u128::from(chunk_size);
-            let validator =
-                validate_path(tx_root.0, &Base64(proof.proof.clone()), byte).and_then(|tx_path| {
-                    let tx_byte = byte - tx_path.min_byte_range;
-                    let data = validate_path(data_root.0, &Base64(data_path.clone()), tx_byte)?;
-                    Ok((tx_path, data, tx_byte))
-                });
+            // The validator: the tx's raw byte range in the tx_root tree, then
+            // chunk `local` of that tx, each pinned to its exact range.
+            let raw_start = super::tx_byte_start(&headers, tx_index);
+            let raw_end = raw_start + u128::from(size);
+            let data_byte = (offset - tx_start) * chunk_size;
+            let chunk_range =
+                expected_chunk_byte_range(TxChunkOffset::from(offset - tx_start), size, chunk_size)
+                    .expect("chunk range");
+            let validator = validate_path(
+                tx_root.0,
+                &Base64(proof.proof.clone()),
+                raw_start + u128::from(data_byte),
+            )
+            .and_then(|tx_path| {
+                eyre::ensure!(
+                    (tx_path.min_byte_range, tx_path.max_byte_range) == (raw_start, raw_end),
+                    "tx leaf range"
+                );
+                let data = validate_path(
+                    data_root.0,
+                    &Base64(data_path.clone()),
+                    u128::from(data_byte),
+                )?;
+                irys_types::validate_path_byte_range(&data, chunk_range)?;
+                Ok(data)
+            });
             match (cross, validator) {
-                (Ok(()), Ok((tx_path, data, tx_byte))) => {
-                    let owner = owning_index(&headers, tx_path.min_byte_range);
-                    assert_eq!(owner, Some(tx_index), "{name} offset {offset} owner");
-                    let span = data.max_byte_range - data.min_byte_range;
-                    let trim = u128::from(chunk_size).min(span);
+                (Ok(()), Ok(data)) => {
                     let end = usize::try_from(data.max_byte_range).unwrap_or(usize::MAX);
                     let rem = end % (chunk_size as usize);
                     let miner_span = if rem == 0 { chunk_size as usize } else { rem };
                     assert_eq!(
-                        miner_span as u128, trim,
-                        "{name} offset {offset} span {miner_span} trim {trim}"
-                    );
-                    assert!(
-                        tx_byte >= data.min_byte_range && tx_byte <= data.max_byte_range,
-                        "{name} offset {offset} data byte {tx_byte}"
+                        miner_span as u64,
+                        chunk_range.1 - chunk_range.0,
+                        "{name} offset {offset} miner span"
                     );
                     accepted.push(true);
                 }
@@ -1261,7 +1314,7 @@ mod tests {
                     assert!(
                         text.contains("does not prove offset")
                             || text.contains("data_root mismatch")
-                            || text.contains("range does not contain"),
+                            || text.contains("range does not"),
                         "{name} offset {offset}: {text}"
                     );
                     accepted.push(false);
@@ -1301,6 +1354,7 @@ mod tests {
         tx_root: H256,
         data_root: H256,
         ledger_start: u64,
+        tx_ledger_start: u64,
     ) -> super::DerivedTxPath {
         super::DerivedTxPath {
             height: 1,
@@ -1312,22 +1366,13 @@ mod tests {
             data_root,
             tx_root,
             ledger_start,
-            tx_ledger_start: ledger_start,
+            tx_ledger_start,
+            tx_byte_start: super::tx_byte_start(headers, tx_index),
+            data_size: headers[tx_index].data_size,
             proof: proof.clone(),
             db_nanos: 0,
             cpu_nanos: 0,
         }
-    }
-
-    fn owning_index(headers: &[DataTransactionHeader], target: u128) -> Option<usize> {
-        let mut cursor = 0_u128;
-        for (index, header) in headers.iter().enumerate() {
-            if cursor == target && header.data_size > 0 {
-                return Some(index);
-            }
-            cursor = cursor.saturating_add(u128::from(header.data_size));
-        }
-        None
     }
 
     fn set_ledger(

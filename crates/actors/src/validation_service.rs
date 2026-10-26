@@ -856,7 +856,7 @@ impl ValidationService {
 /// handler (`on_block_validation_finished`) is the normal site that converts
 /// node faults into a panic+SIGINT for graceful shutdown; if delivery to it
 /// fails we must not silently swallow the fault and keep running. The panic
-/// is caught by `setup_panic_hook` in `crates/chain/src/main.rs`, which
+/// is caught by `setup_panic_hook` in `crates/node/src/main.rs`, which
 /// raises SIGINT for graceful shutdown. Same never-mislabel rationale as
 /// the block-tree node-fault site — see `ValidationError::is_node_fault`.
 fn send_validation_result_via(

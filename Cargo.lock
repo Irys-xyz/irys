@@ -5085,7 +5085,6 @@ dependencies = [
  "alloy-sol-types",
  "base58",
  "core_affinity",
- "dotenvy",
  "eyre",
  "futures",
  "hex",
@@ -5101,7 +5100,6 @@ dependencies = [
  "irys-reth-node-bridge",
  "irys-reward-curve",
  "irys-storage",
- "irys-testing-utils",
  "irys-types",
  "irys-utils",
  "irys-vdf",
@@ -5112,7 +5110,6 @@ dependencies = [
  "rand 0.8.5",
  "reqwest 0.12.28",
  "reth",
- "reth-cli-util",
  "reth-db",
  "rstest",
  "serde",
@@ -5123,8 +5120,6 @@ dependencies = [
  "tokio-util",
  "toml 0.8.23",
  "tracing",
- "tracing-error",
- "tracing-subscriber 0.3.23",
  "zeroize",
 ]
 
@@ -5246,6 +5241,20 @@ dependencies = [
  "test-log",
  "toml 0.8.23",
  "tracing",
+]
+
+[[package]]
+name = "irys-data-tree"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "proptest",
+ "rayon",
+ "rstest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -5396,6 +5405,23 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tracing",
+]
+
+[[package]]
+name = "irys-node"
+version = "0.0.0"
+dependencies = [
+ "dotenvy",
+ "eyre",
+ "irys-chain",
+ "irys-testing-utils",
+ "irys-types",
+ "irys-utils",
+ "reth-cli-util",
+ "tokio",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
@@ -5745,6 +5771,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "strum 0.27.2",
  "test-fuzz",
  "thiserror 1.0.69",
  "tokio",

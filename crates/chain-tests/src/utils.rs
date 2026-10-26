@@ -57,8 +57,8 @@ use irys_types::{
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, DataLedger, EvmBlockHash, H256, H256List, IrysAddress,
     NetworkConfigWithDefaults as _, SealedBlock, SyncMode, SystemLedger, U256,
-    block_production::Seed, block_production::SolutionContext, block_production::TxPathSource,
-    irys::IrysSigner, partition::PartitionAssignment,
+    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
+    partition::PartitionAssignment,
 };
 use irys_types::{
     HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
@@ -221,8 +221,11 @@ where
     }
 }
 
+/// Mines the capacity (entropy) chunks of `partition_hash`. Validators only
+/// accept the solution if the partition is assigned to `miner_addr`.
 pub async fn capacity_chunk_solution(
     miner_addr: IrysAddress,
+    partition_hash: H256,
     vdf_steps_guard: VdfStateReadonly,
     config: &Config,
     difficulty: U256,
@@ -240,7 +243,6 @@ pub async fn capacity_chunk_solution(
     }
 
     // Scan across VDF steps and chunk offsets within the recall range until we find a valid solution
-    let partition_hash = H256::zero();
     let max_scan_steps: u64 = 100;
     let mut current_step = step_num;
 
@@ -1029,6 +1031,96 @@ impl IrysNodeTest<IrysNodeCtx> {
         );
 
         Ok(peer_node)
+    }
+
+    /// Posts a stake and a pledge from each already-running `peer` and waits for
+    /// them to reach this (genesis) node's mempool. Returns the commitment ids.
+    #[diag_slow(state = self.diag_wait_state().await)]
+    pub async fn post_stake_and_pledge_commitments(
+        &self,
+        peers: &[&Self],
+        seconds_to_wait: usize,
+    ) -> eyre::Result<Vec<H256>> {
+        let mut commitment_ids = Vec::with_capacity(peers.len() * 2);
+        for peer in peers {
+            let stake_tx = peer.post_stake_commitment(None).await?;
+            let pledge_tx = peer.post_pledge_commitment(None).await?;
+            self.wait_for_mempool(stake_tx.id(), seconds_to_wait)
+                .await?;
+            self.wait_for_mempool(pledge_tx.id(), seconds_to_wait)
+                .await?;
+            commitment_ids.push(stake_tx.id());
+            commitment_ids.push(pledge_tx.id());
+        }
+        Ok(commitment_ids)
+    }
+
+    /// Stakes and pledges one partition for each already-running `peer`, then
+    /// mines on this (genesis) node until every commitment is included and on to
+    /// the epoch that assigns those partitions.
+    /// An epoch block applies the parent commitment snapshot only, so a pledge
+    /// included in an epoch block is assigned at the following epoch. Mining
+    /// always continues to the epoch boundary strictly after the last inclusion
+    /// height. Peers can produce blocks validators accept once they own a
+    /// partition. Returns the assigning epoch height. Every node has reached
+    /// that height on return.
+    #[diag_slow(state = self.diag_wait_state().await)]
+    pub async fn stake_and_pledge_peers(
+        &self,
+        peers: &[&Self],
+        seconds_to_wait: usize,
+    ) -> eyre::Result<u64> {
+        let mut pending: HashSet<H256> = self
+            .post_stake_and_pledge_commitments(peers, seconds_to_wait)
+            .await?
+            .into_iter()
+            .collect();
+
+        // Block space or ordering may defer a commitment past the next block.
+        let max_blocks_to_include = 8;
+        let mut inclusion = self.mine_block().await?;
+        let mut mined = 1;
+        loop {
+            for id in inclusion.commitment_tx_ids() {
+                pending.remove(id);
+            }
+            if pending.is_empty() {
+                break;
+            }
+            eyre::ensure!(
+                mined < max_blocks_to_include,
+                "commitments {pending:?} were not included"
+            );
+            inclusion = self.mine_block().await?;
+            mined += 1;
+        }
+        let num_blocks_in_epoch = self.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
+        let blocks_until_assigning_epoch =
+            num_blocks_in_epoch - (inclusion.height % num_blocks_in_epoch);
+        for _ in 0..blocks_until_assigning_epoch {
+            self.mine_block().await?;
+        }
+        let epoch_height = self.get_canonical_chain_height().await;
+        eyre::ensure!(
+            epoch_height > inclusion.height && epoch_height % num_blocks_in_epoch == 0,
+            "assigning epoch {epoch_height} must follow inclusion height {}",
+            inclusion.height
+        );
+
+        for peer in peers {
+            peer.wait_until_height(epoch_height, seconds_to_wait)
+                .await?;
+            let address = peer.node_ctx.config.node_config.miner_address();
+            eyre::ensure!(
+                !self.get_partition_assignments(address).is_empty(),
+                "peer {address} has no partition on the genesis view at epoch {epoch_height}"
+            );
+            eyre::ensure!(
+                !peer.get_partition_assignments(address).is_empty(),
+                "peer {address} has no partition on its own view at epoch {epoch_height}"
+            );
+        }
+        Ok(epoch_height)
     }
 
     /// get block height in block index
@@ -3616,8 +3708,18 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         anchor: Option<H256>,
     ) -> eyre::Result<CommitmentTransaction> {
+        self.post_pledge_commitment_signed_by(&self.cfg.signer(), anchor)
+            .await
+    }
+
+    /// Posts a pledge signed by `signer` (not necessarily this node's miner) to
+    /// this node's API. Gossip follows the node's current gossip setting.
+    pub async fn post_pledge_commitment_signed_by(
+        &self,
+        signer: &IrysSigner,
+        anchor: Option<H256>,
+    ) -> eyre::Result<CommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
-        let signer = self.cfg.signer();
         let anchor = match anchor {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
@@ -3687,13 +3789,23 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         anchor: Option<H256>,
     ) -> eyre::Result<CommitmentTransaction> {
+        self.post_stake_commitment_signed_by(&self.cfg.signer(), anchor)
+            .await
+    }
+
+    /// Posts a stake signed by `signer` (not necessarily this node's miner) to
+    /// this node's API. Gossip follows the node's current gossip setting.
+    pub async fn post_stake_commitment_signed_by(
+        &self,
+        signer: &IrysSigner,
+        anchor: Option<H256>,
+    ) -> eyre::Result<CommitmentTransaction> {
         let config = &self.node_ctx.config.consensus;
         let anchor = match anchor {
             Some(anchor) => anchor,
             None => self.get_anchor().await?,
         };
         let mut stake_tx = CommitmentTransaction::new_stake(config, anchor);
-        let signer = self.cfg.signer();
         signer.sign_commitment(&mut stake_tx).unwrap();
         info!("Generated stake_tx.id: {}", stake_tx.id());
 
@@ -4010,104 +4122,58 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 }
 
-/// Construct a SolutionContext using a provided PoA chunk for the current step.
-/// Computes solution_hash = sha256(poa_chunk || offset_le || vdf_output) and returns immediately
-/// with a consistent cryptographic link, without attempting to satisfy difficulty or iterate offsets.
-/// This avoids timeouts and nondeterminism when running the full test suite.
-///
-/// Note: This is only used in tests that disable validation when producing the "evil" block.
-/// The block will later be rejected when validation is re-enabled due to PoA verification.
-pub async fn solution_context_with_poa_chunk(
-    node_ctx: &IrysNodeCtx,
-    poa_chunk: Vec<u8>,
-) -> Result<SolutionContext, eyre::Error> {
-    let was_vdf_enabled = node_ctx.vdf_controller.is_enabled();
-    if !was_vdf_enabled {
-        node_ctx.start_vdf();
-    }
+pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext, eyre::Error> {
+    let prev_block = max_difficulty_block(node_ctx)?;
 
-    let result = async {
-        // Ensure the VDF has at least two steps materialized (N-1, N)
-        let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-        let start = std::time::Instant::now();
-        let max_wait = std::time::Duration::from_secs(5);
-        let (step, steps) = loop {
-            if start.elapsed() > max_wait {
-                return Err(eyre::eyre!(
-                    "VDF steps unavailable: timed out waiting for (prev,current) pair"
-                ));
-            }
-            let s = vdf_steps_guard.current_step();
-            if s >= 1
-                && let Ok(steps) = vdf_steps_guard.read().get_steps(ii(s - 1, s))
-                && steps.len() >= 2
-            {
-                break (s, steps);
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
-
-        let reset_seed = {
-            let read = node_ctx.block_tree_guard.read();
-            let parent_hash = read.get_max_cumulative_difficulty_block().1;
-            read.get_block(&parent_hash)
-                .map(|b| b.vdf_limiter_info.next_seed)
-                .unwrap_or_default()
-        };
-        let (_seed, checkpoints) =
-            compute_step_checkpoints(&node_ctx.config.vdf, step, steps[0], reset_seed);
-
-        // For deterministic linkage without recall-range dependency, use offset 0
-        let partition_hash = H256::zero();
-        let partition_chunk_offset: u32 = 0;
-
-        // Compute solution_hash = sha256(poa_chunk || offset_le || vdf_output)
-        let mut hasher_sol = Sha256::new();
-        hasher_sol.update(&poa_chunk);
-        hasher_sol.update(partition_chunk_offset.to_le_bytes());
-        hasher_sol.update(steps[1].as_bytes());
-        let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
-
-        Ok(SolutionContext {
-            partition_hash,
-            chunk_offset: partition_chunk_offset,
-            mining_address: node_ctx.config.node_config.miner_address(),
-            tx_path: TxPathSource::Stored(None),
-            data_path: None,
-            chunk: poa_chunk,
-            vdf_step: step,
-            checkpoints: H256List(checkpoints),
-            seed: Seed(steps[1]),
-            solution_hash,
-        })
-    }
-    .await;
-
-    if !was_vdf_enabled {
-        node_ctx.stop_vdf();
-    }
-
-    result
+    // Validators require the PoA partition to be assigned to the miner on the
+    // parent's epoch snapshot. Prefer a capacity partition, whose chunks are
+    // always entropy.
+    let miner_address = node_ctx.config.node_config.miner_address();
+    let partition_hash = {
+        let epoch_snapshot = node_ctx
+            .block_tree_guard
+            .read()
+            .get_epoch_snapshot(&prev_block.block_hash)
+            .ok_or_else(|| eyre!("Parent epoch snapshot not found in block tree"))?;
+        let assignments = &epoch_snapshot.partition_assignments;
+        assignments
+            .capacity_partitions
+            .values()
+            .chain(assignments.data_partitions.values())
+            .find(|pa| pa.miner_address == miner_address)
+            .map(|pa| pa.partition_hash)
+            .ok_or_else(|| eyre!("Miner {miner_address} has no assigned partition to mine"))?
+    };
+    solution_context_for_partition(node_ctx, partition_hash).await
 }
 
-pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext, eyre::Error> {
-    // Fetch previous (parent) block difficulty
-    // Get parent block directly from in-memory block tree
-    let prev_block = {
-        let read = node_ctx.block_tree_guard.read();
-        let parent_hash = read.get_max_cumulative_difficulty_block().1;
-        read.get_block(&parent_hash)
-            .cloned()
-            .ok_or_else(|| eyre!("Parent block header not found in block tree"))?
-    };
+/// Mines the entropy chunks of `partition_hash` on the max-difficulty block.
+/// Unlike [`solution_context`], it does not require the parent epoch snapshot to
+/// assign `partition_hash` to the miner.
+pub async fn solution_context_for_partition(
+    node_ctx: &IrysNodeCtx,
+    partition_hash: H256,
+) -> Result<SolutionContext, eyre::Error> {
+    let miner_address = node_ctx.config.node_config.miner_address();
+    solution_context_for_miner_partition(node_ctx, miner_address, partition_hash).await
+}
 
+/// Like [`solution_context_for_partition`], with the entropy packed for
+/// `miner_address` instead of the node's own key.
+pub async fn solution_context_for_miner_partition(
+    node_ctx: &IrysNodeCtx,
+    miner_address: IrysAddress,
+    partition_hash: H256,
+) -> Result<SolutionContext, eyre::Error> {
+    let prev_block = max_difficulty_block(node_ctx)?;
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
     let was_vdf_enabled = node_ctx.vdf_controller.is_enabled();
     if !was_vdf_enabled {
         node_ctx.start_vdf();
     }
     let poa_solution = capacity_chunk_solution(
-        node_ctx.config.node_config.miner_address(),
+        miner_address,
+        partition_hash,
         vdf_steps_guard.clone(),
         &node_ctx.config,
         prev_block.diff,
@@ -4118,6 +4184,15 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
         node_ctx.stop_vdf();
     }
     Ok(poa_solution)
+}
+
+// Parent block directly from the in-memory block tree
+fn max_difficulty_block(node_ctx: &IrysNodeCtx) -> eyre::Result<IrysBlockHeader> {
+    let read = node_ctx.block_tree_guard.read();
+    let parent_hash = read.get_max_cumulative_difficulty_block().1;
+    read.get_block(&parent_hash)
+        .cloned()
+        .ok_or_else(|| eyre!("Parent block header not found in block tree"))
 }
 
 /// Evil producer that substitutes a fixed set of commitment txs as the sole
