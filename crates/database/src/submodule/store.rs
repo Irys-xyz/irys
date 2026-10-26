@@ -615,6 +615,11 @@ impl MdbxSubmoduleStore {
         Ok(store)
     }
 
+    #[cfg(feature = "rocksdb")]
+    pub(super) fn env(&self) -> &DatabaseEnv {
+        &self.env
+    }
+
     pub(super) fn from_env(env: DatabaseEnv, writable: bool) -> Self {
         let group = GroupCommit::new();
         Self {
