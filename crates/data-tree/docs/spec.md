@@ -112,7 +112,7 @@ segment_len(n, c, j) = 0                                 if seg_start(c, j) ≥ 
 
 ## 3. Hashing
 
-Every hash input starts with a one-byte domain tag. This table is the single registry of tag bytes. Tags `0x05` to `0x07` are in use by the design documents on branch `docs/tree-v2-concept`. Do not assign them.
+Every hash input starts with a one-byte domain tag. This table is the single registry of tag bytes. Tags `0x05` to `0x07` are reserved for proposed designs. Do not assign them.
 
 | Tag | Name | Preimage | Use |
 | --- | --- | --- | --- |
