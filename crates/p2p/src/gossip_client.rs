@@ -2010,7 +2010,7 @@ impl GossipClient {
             None,
             use_trusted_peers_only,
             peer_list,
-            Self::execution_payload,
+            |gossip_data| Self::requested_execution_payload(evm_payload_hash, gossip_data),
         )
         .await
     }
@@ -2109,6 +2109,22 @@ impl GossipClient {
                 gossip_data.data_type_and_id()
             ))),
         }
+    }
+
+    /// A payload whose hash is not the requested one is bogus data from the
+    /// peer: the pull scores the peer down and tries the next one.
+    fn requested_execution_payload(
+        requested_hash: B256,
+        gossip_data: GossipDataV2,
+    ) -> Result<Block, PeerNetworkError> {
+        let block = Self::execution_payload(gossip_data)?;
+        let received_hash = block.hash_slow();
+        if received_hash != requested_hash {
+            return Err(PeerNetworkError::UnexpectedData(format!(
+                "Requested execution payload {requested_hash}, got {received_hash}"
+            )));
+        }
+        Ok(block)
     }
 
     fn transaction(gossip_data: GossipDataV2) -> Result<IrysTransactionResponse, PeerNetworkError> {
@@ -6067,6 +6083,44 @@ mod tests {
             assert!(
                 result.is_err(),
                 "object-shaped response must be rejected, got {result:?}",
+            );
+        }
+    }
+
+    mod requested_execution_payload_tests {
+        use super::*;
+        use reth::primitives::Header;
+
+        fn block_with_number(number: u64) -> Block {
+            Block {
+                header: Header {
+                    number,
+                    ..Default::default()
+                },
+                body: Default::default(),
+            }
+        }
+
+        #[test]
+        fn payload_with_requested_hash_is_returned() {
+            let block = block_with_number(1);
+            let result = GossipClient::requested_execution_payload(
+                block.hash_slow(),
+                GossipDataV2::ExecutionPayload(block.clone()),
+            );
+            assert_eq!(result.expect("hash matches"), block);
+        }
+
+        #[test]
+        fn payload_with_other_hash_is_rejected() {
+            let requested = block_with_number(1).hash_slow();
+            let result = GossipClient::requested_execution_payload(
+                requested,
+                GossipDataV2::ExecutionPayload(block_with_number(2)),
+            );
+            assert!(
+                matches!(result, Err(PeerNetworkError::UnexpectedData(_))),
+                "{result:?}"
             );
         }
     }
