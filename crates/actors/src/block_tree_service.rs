@@ -1194,6 +1194,25 @@ impl BlockTreeServiceInner {
                     // side of the split holds each block after the old tip up to the new
                     // tip, oldest first. Confirm each one and detect an epoch block among
                     // them, as on a reorg.
+                    // Log a warning instead of running the reorg-path cache-window
+                    // shutdown check: an extension abandons no fork.
+                    let fork_height = split.lca.header().height;
+                    if validate_reorg_within_cache_window(
+                        fork_height,
+                        arc_block.height,
+                        self.config.consensus.block_tree_depth,
+                    )
+                    .is_err()
+                    {
+                        warn!(
+                            fork_height,
+                            new_tip = %block_hash,
+                            new_tip_height = arc_block.height,
+                            block_tree_depth = self.config.consensus.block_tree_depth,
+                            new_block_count = split.new_divergent.len(),
+                            "tip extension spans more blocks than the block-tree cache window",
+                        );
+                    }
                     let blocks_to_confirm: Vec<Arc<SealedBlock>> = split.new_divergent;
                     let new_epoch_block = blocks_to_confirm
                         .iter()
