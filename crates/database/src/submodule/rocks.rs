@@ -35,7 +35,7 @@ use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, DatabaseConfig, H256, PartitionChunkOffset, TxPath,
     TxPathHash,
 };
-use reth_db::table::{Decode, Decompress, Encode, Table};
+use reth_db::table::{Decode, Encode, Table};
 use rocksdb::{
     BlockBasedIndexType, BlockBasedOptions, DB, DBCompactionStyle, DBCompressionType, Direction,
     IteratorMode, Options, ReadOptions, WriteBatch, WriteOptions,
@@ -1851,61 +1851,6 @@ impl RocksSubmoduleStore {
             Some(bytes) => Ok(Some(bytes)),
             None => Ok(None),
         }
-    }
-
-    /// Next rows after `after`, in key order. A single oversized value is
-    /// still returned so the caller moves forward.
-    pub(super) fn read_cf_batch<K, V, F>(
-        &self,
-        cf: &str,
-        after: Option<K>,
-        limit_rows: usize,
-        limit_bytes: usize,
-        value_len: F,
-    ) -> eyre::Result<Vec<(K, V)>>
-    where
-        K: Decode + Encode + Ord + Copy,
-        V: Decompress,
-        F: Fn(&V) -> usize,
-    {
-        let limit_rows = limit_rows.max(1);
-        let limit_bytes = limit_bytes.max(1);
-        let handle = self
-            .db
-            .cf_handle(cf)
-            .ok_or_else(|| eyre::eyre!("missing column family {cf}"))?;
-        let mut opts = ReadOptions::default();
-        opts.fill_cache(false);
-        // A prefix extractor stops `Next` unless the seek is total order.
-        opts.set_total_order_seek(true);
-        let encoded = after.map(encode_key);
-        let mode = match &encoded {
-            None => IteratorMode::Start,
-            Some(bytes) => IteratorMode::From(bytes.as_slice(), Direction::Forward),
-        };
-        let snap = self.db.snapshot();
-        let mut out = Vec::new();
-        let mut bytes_used = 0_usize;
-        for item in snap.iterator_cf_opt(handle, opts, mode) {
-            let (key, value) = item.wrap_err("scan rocksdb row")?;
-            let key =
-                K::decode(key.as_ref()).map_err(|err| eyre::eyre!("decode key in {cf}: {err}"))?;
-            if after.is_some_and(|prev| key <= prev) {
-                continue;
-            }
-            let value = V::decompress(value.as_ref())
-                .map_err(|err| eyre::eyre!("decode value in {cf}: {err}"))?;
-            let next_bytes = bytes_used.saturating_add(value_len(&value));
-            if !out.is_empty() && (out.len() >= limit_rows || next_bytes > limit_bytes) {
-                break;
-            }
-            bytes_used = next_bytes;
-            out.push((key, value));
-            if out.len() >= limit_rows || bytes_used >= limit_bytes {
-                break;
-            }
-        }
-        Ok(out)
     }
 
     /// Next keys after `after`. Values are not read.
