@@ -17,8 +17,8 @@ use tracing::{debug, warn};
 
 use crate::models::index_read_metrics::{self, SERVE_DATA_ROOT, SERVE_LEDGER, SERVE_SPAN};
 use crate::{
-    StorageModulesReadGuard, checked_add_i32_u64, get_overlapped_storage_modules,
-    get_storage_module_at_offset,
+    ChunkMissingOnDisk, StorageModulesReadGuard, checked_add_i32_u64,
+    get_overlapped_storage_modules, get_storage_module_at_offset,
 };
 
 static CHUNK_READS: LazyLock<Counter<u64>> = LazyLock::new(|| {
@@ -112,8 +112,8 @@ fn take_chunk_read_notes() -> Vec<(&'static str, &'static str, &'static str)> {
 /// `true` when `error` is a storage hole: the index names a body this file does not hold.
 pub fn missing_on_disk(error: &eyre::Report) -> bool {
     error
-        .to_string()
-        .contains("Could not find chunk bytes on disk")
+        .chain()
+        .any(|source| source.downcast_ref::<ChunkMissingOnDisk>().is_some())
 }
 
 /// Placements of `data_root` in one storage module.
@@ -707,6 +707,14 @@ mod tests {
     use nodit::interval::ii;
     use rand::Rng as _;
     use rstest::rstest;
+
+    #[test]
+    fn missing_on_disk_matches_only_the_typed_hole() {
+        let hole = eyre::Report::from(ChunkMissingOnDisk);
+        assert!(missing_on_disk(&hole));
+        assert!(missing_on_disk(&hole.wrap_err("outer context")));
+        assert!(!missing_on_disk(&eyre::eyre!("some other failure")));
+    }
 
     #[test]
     // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
@@ -1350,6 +1358,7 @@ mod tests {
                 .contains("Could not find chunk bytes on disk"),
             "{err}"
         );
+        assert!(missing_on_disk(&err), "{err}");
 
         let db = create_test_db(&tmp.path().join("db"));
         let provider = make_provider(config, vec![Arc::new(sm)], db);

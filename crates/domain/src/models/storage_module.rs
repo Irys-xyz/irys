@@ -1333,6 +1333,13 @@ pub enum WriteDataChunkError {
     Other(#[from] eyre::Report),
 }
 
+/// The index names a chunk body this storage module does not hold.
+/// A hole is an absence, not a read failure: the caller keeps reading
+/// other offsets or modules, or asks a peer.
+#[derive(Debug, thiserror::Error)]
+#[error("Could not find chunk bytes on disk")]
+pub struct ChunkMissingOnDisk;
+
 /// One body from a multi-chunk enqueue.
 ///
 /// Every queued body in the slice is published to the sweep queue before the
@@ -8703,7 +8710,7 @@ impl StorageModule {
         for (offset, meta) in metas {
             let Some((mut bytes, kind)) = bodies.remove(&offset) else {
                 if start == end {
-                    return Err(eyre!("Could not find chunk bytes on disk"));
+                    return Err(eyre::Report::from(ChunkMissingOnDisk));
                 }
                 continue;
             };
