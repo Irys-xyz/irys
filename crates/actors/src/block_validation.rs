@@ -178,6 +178,10 @@ pub enum PreValidationError {
     },
     #[error("Missing PoA chunk to be pre validated")]
     PoAChunkMissing,
+    /// A PoA with `tx_path` or `data_path` set must name its ledger. The header
+    /// signature cannot tell `ledger_id = None` from `Some(0)`.
+    #[error("PoA carries a tx_path or data_path but no ledger_id")]
+    PoALedgerIdMissing,
     #[error(
         "PoA chunk length {got} exceeds packing limit {limit} (configured chunk size {chunk_size})"
     )]
@@ -665,6 +669,7 @@ impl PreValidationError {
             | Self::PoACapacityChunkMismatch { .. }
             | Self::PoAChunkHashMismatch { .. }
             | Self::PoAChunkMissing
+            | Self::PoALedgerIdMissing
             | Self::PoAChunkTooLong { .. }
             | Self::PoAChunkTooShort { .. }
             | Self::PoAChunkPaddingNotZero { .. }
@@ -751,6 +756,7 @@ impl PreValidationError {
             Self::PoACapacityChunkMismatch { .. } => "poa_capacity_chunk_mismatch",
             Self::PoAChunkHashMismatch { .. } => "poa_chunk_hash_mismatch",
             Self::PoAChunkMissing => "poa_chunk_missing",
+            Self::PoALedgerIdMissing => "poa_ledger_id_missing",
             Self::PoAChunkTooLong { .. } => "poa_chunk_too_long",
             Self::PoAChunkTooShort { .. } => "poa_chunk_too_short",
             Self::PoAChunkPaddingNotZero { .. } => "poa_chunk_padding_not_zero",
@@ -1593,6 +1599,36 @@ impl ValidationError {
     }
 }
 
+/// Require the canonical encoding of the header fields.
+///
+/// The block signature covers the RLP encoding of the header, and an absent
+/// `Option` field can share its encoding with a zero value. A header therefore
+/// has one canonical form, which honest producers always emit:
+/// - a PoA with `tx_path` or `data_path` has `ledger_id = Some(_)`
+///   (a data PoA has all three; the producer takes `ledger_id` from the partition
+///   assignment);
+/// - the Publish ledger has `expires = None` (see `validate_term_ledger_expiry`).
+///
+/// Cheap and independent of chain state, so it runs before any signature work.
+pub fn block_header_fields_are_canonical(
+    block: &IrysBlockHeader,
+) -> Result<(), PreValidationError> {
+    let poa = &block.poa;
+    if (poa.tx_path.is_some() || poa.data_path.is_some()) && poa.ledger_id.is_none() {
+        return Err(PreValidationError::PoALedgerIdMissing);
+    }
+    for dl in &block.data_ledgers {
+        if dl.ledger_id == DataLedger::Publish as u32 && dl.expires.is_some() {
+            return Err(PreValidationError::TermLedgerExpiryMismatch {
+                ledger_id: dl.ledger_id,
+                expected: None,
+                actual: dl.expires,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Reject step counts that would underflow [`VDFLimiterInfo::first_step_number`].
 fn vdf_step_count_is_consistent(
     global_step_number: u64,
@@ -1697,6 +1733,8 @@ pub async fn prevalidate_block(
 ) -> Result<(), PreValidationError> {
     let block = sealed_block.header();
     let transactions = sealed_block.transactions();
+
+    block_header_fields_are_canonical(block)?;
 
     // Length compare. Reject before PoA, VDF, and ingress-proof signer recovery.
     // `SealedBlock::new` rejects duplicate ledger entries and pairs header ids
@@ -11425,6 +11463,78 @@ mod ingress_proof_local_bytes_tests {
         assert!(
             !err.is_node_fault(),
             "an unmigrated body must not abort the node, got {err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod canonical_header_field_tests {
+    use super::*;
+    use irys_types::{Base64, IngressProofsList, Signable as _};
+
+    fn signing_bytes(header: &IrysBlockHeader) -> Vec<u8> {
+        let mut buf = Vec::new();
+        header.encode_for_signing(&mut buf);
+        buf
+    }
+
+    fn data_poa_header() -> IrysBlockHeader {
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.poa.ledger_id = Some(DataLedger::Publish.into());
+        header.poa.tx_path = Some(Base64(vec![1, 2, 3]));
+        header.poa.data_path = Some(Base64(vec![4, 5, 6]));
+        header
+    }
+
+    #[test]
+    fn honest_headers_are_canonical() {
+        assert!(block_header_fields_are_canonical(&IrysBlockHeader::new_mock_header()).is_ok());
+        assert!(block_header_fields_are_canonical(&data_poa_header()).is_ok());
+
+        // Entropy PoA from a data partition: ledger_id set, no paths.
+        let mut entropy = IrysBlockHeader::new_mock_header();
+        entropy.poa.ledger_id = Some(DataLedger::Submit.into());
+        assert!(block_header_fields_are_canonical(&entropy).is_ok());
+    }
+
+    #[test]
+    fn data_poa_without_ledger_id_is_rejected_and_shares_signing_bytes() {
+        let honest = data_poa_header();
+        let mut twin = honest.clone();
+        twin.poa.ledger_id = None;
+
+        assert_eq!(signing_bytes(&honest), signing_bytes(&twin));
+        assert!(!twin.poa.is_data_poa());
+        assert_eq!(
+            block_header_fields_are_canonical(&twin),
+            Err(PreValidationError::PoALedgerIdMissing)
+        );
+
+        let mut only_tx_path = twin.clone();
+        only_tx_path.poa.data_path = None;
+        assert_eq!(
+            block_header_fields_are_canonical(&only_tx_path),
+            Err(PreValidationError::PoALedgerIdMissing)
+        );
+    }
+
+    #[test]
+    fn publish_ledger_with_expires_is_rejected_and_shares_signing_bytes() {
+        let mut honest = IrysBlockHeader::new_mock_header();
+        honest.data_ledgers[DataLedger::Publish].proofs = Some(IngressProofsList(vec![]));
+        assert_eq!(honest.data_ledgers[DataLedger::Publish].expires, None);
+        let mut twin = honest.clone();
+        twin.data_ledgers[DataLedger::Publish].expires = Some(0);
+
+        assert!(block_header_fields_are_canonical(&honest).is_ok());
+        assert_eq!(signing_bytes(&honest), signing_bytes(&twin));
+        assert_eq!(
+            block_header_fields_are_canonical(&twin),
+            Err(PreValidationError::TermLedgerExpiryMismatch {
+                ledger_id: DataLedger::Publish.into(),
+                expected: None,
+                actual: Some(0),
+            })
         );
     }
 }
