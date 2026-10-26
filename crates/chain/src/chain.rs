@@ -149,6 +149,7 @@ pub struct IrysNodeCtx {
     pub chunk_ingress_state: irys_actors::ChunkIngressState,
     pub http_chunk_admission: Arc<Semaphore>,
     pub http_chunk_waiters: Arc<Semaphore>,
+    pub tx_ingress_admission: Arc<Semaphore>,
     /// Atomic timestamps tracking the last canonical advance / last reorg
     /// observed by [`BlockTreeService`]; same `Arc` is shared with the
     /// service worker and with [`ApiState`] so `/v1/tip` does not have to
@@ -177,6 +178,7 @@ impl IrysNodeCtx {
             chunk_ingress_state: self.chunk_ingress_state.clone(),
             http_chunk_admission: Arc::clone(&self.http_chunk_admission),
             http_chunk_waiters: Arc::clone(&self.http_chunk_waiters),
+            tx_ingress_admission: Arc::clone(&self.tx_ingress_admission),
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
             block_tree_lifecycle: self.block_tree_lifecycle.clone(),
@@ -2258,6 +2260,9 @@ impl IrysNode {
             chunk_ingress_state,
             http_chunk_admission: Arc::new(Semaphore::new(config.mempool.max_http_chunk_admission)),
             http_chunk_waiters: Arc::new(Semaphore::new(config.mempool.max_http_chunk_waiters)),
+            tx_ingress_admission: Arc::new(Semaphore::new(
+                irys_api_server::routes::tx_ingress::MAX_IN_FLIGHT_TX_INGRESS,
+            )),
             block_tree_lifecycle: block_tree_lifecycle.clone(),
             backfill_complete,
         };
@@ -2359,6 +2364,7 @@ impl IrysNode {
                 chunk_ingress_state: irys_node_ctx.chunk_ingress_state.clone(),
                 http_chunk_admission: Arc::clone(&irys_node_ctx.http_chunk_admission),
                 http_chunk_waiters: Arc::clone(&irys_node_ctx.http_chunk_waiters),
+                tx_ingress_admission: Arc::clone(&irys_node_ctx.tx_ingress_admission),
                 started_at: irys_node_ctx.started_at,
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
                 block_tree_lifecycle: irys_node_ctx.block_tree_lifecycle.clone(),

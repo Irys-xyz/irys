@@ -48,6 +48,7 @@ pub struct ApiState {
     pub chunk_ingress: UnboundedSender<Traced<ChunkIngressMessage>>,
     pub http_chunk_admission: Arc<Semaphore>,
     pub http_chunk_waiters: Arc<Semaphore>,
+    pub tx_ingress_admission: Arc<Semaphore>,
     pub mempool_guard: MempoolReadGuard,
     pub chunk_provider: Arc<ChunkProvider>,
     pub peer_list: PeerList,
