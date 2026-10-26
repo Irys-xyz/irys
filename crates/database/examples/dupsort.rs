@@ -21,6 +21,7 @@ use reth_primitives_traits::ValueWithSubKey;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+impl irys_database::tables::CompactRowCheck for CachedChunk2 {}
 impl_compression_for_compact!(CachedChunk2);
 
 tables! {

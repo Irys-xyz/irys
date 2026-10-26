@@ -7,14 +7,15 @@ use crate::{
     },
     submodule::tables::{ChunkPathHashes, TxPathInterval},
 };
-use irys_types::ingress::CachedIngressProof;
+use irys_types::ingress::{CachedIngressProof, IngressProofV1};
 use irys_types::{
     Base64, BlockHeight, DataLedger, IrysAddress, IrysPeerId, LedgerIndexItem, PeerListItemInner,
 };
 use irys_types::{ChunkPathHash, DataRoot, H256};
 use irys_types::{
-    CommitmentTransaction, CommitmentTransactionMetadata, DataTransactionHeader,
-    DataTransactionMetadata, IrysBlockHeader,
+    CommitmentTransaction, CommitmentTransactionMetadata, CommitmentTransactionV1,
+    CommitmentTransactionV2, DataTransactionHeader, DataTransactionHeaderV1,
+    DataTransactionMetadata, IrysBlockHeader, IrysBlockHeaderV1, Versioned as _,
 };
 use reth_codecs::Compact;
 use reth_db::{DatabaseError, TableSet, table::DupSort, tables};
@@ -58,6 +59,64 @@ macro_rules! add_wrapper_struct {
 	};
 }
 
+/// Cheap structural check run by `Decompress::decompress` before `Compact::from_compact`.
+///
+/// `from_compact` panics on malformed input, and a panic stops the node. Implementations
+/// reject the inputs that make `from_compact` panic at the top level of the encoding
+/// (missing bytes, unknown version discriminant). They do not parse nested fields, so a
+/// row that passes can still be malformed deeper in; a row that fails is always malformed.
+/// The default accepts every buffer.
+pub trait CompactRowCheck {
+    /// Returns the reason the buffer cannot be a valid encoding of `Self`.
+    fn check_compact_row(_buf: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Fails when `buf` is shorter than `min_len`.
+pub fn require_min_compact_row_len(buf: &[u8], min_len: usize) -> Result<(), String> {
+    if buf.len() < min_len {
+        return Err(format!(
+            "row too short: expected at least {min_len} bytes, got {}",
+            buf.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Checks the leading version byte against `supported`, then the minimum length for it.
+/// `min_len_for_version` gives the length of the version byte plus the fixed header of
+/// that version's inner encoding.
+fn check_versioned_compact_row(
+    buf: &[u8],
+    supported: &[u8],
+    min_len_for_version: impl Fn(u8) -> usize,
+) -> Result<(), String> {
+    let Some(&version) = buf.first() else {
+        return Err("row is empty: missing version byte".to_string());
+    };
+    if !supported.contains(&version) {
+        return Err(format!("unsupported version {version}"));
+    }
+    require_min_compact_row_len(buf, min_len_for_version(version))
+}
+
+/// Implements `CompactRowCheck` for derived-`Compact` types: the encoding starts with a
+/// bit-flag header of `bitflag_encoded_bytes()` bytes that `from_compact` reads unconditionally.
+macro_rules! impl_compact_row_check_for_flag_header {
+    ($($name:ty),+) => {
+        $(
+            impl CompactRowCheck for $name {
+                fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+                    require_min_compact_row_len(buf, <$name>::bitflag_encoded_bytes())
+                }
+            }
+        )+
+    };
+}
+
+/// Implements `Compress`/`Decompress` through `Compact`. `decompress` first runs
+/// `CompactRowCheck`, so each type must implement that trait.
 #[macro_export]
 macro_rules! impl_compression_for_compact {
 	($($name:tt),+) => {
@@ -72,6 +131,17 @@ macro_rules! impl_compression_for_compact {
 
 					impl Decompress for $name {
 							fn decompress(value: &[u8]) -> Result<$name, DatabaseError> {
+									if let Err(reason) =
+											<$name as $crate::tables::CompactRowCheck>::check_compact_row(value)
+									{
+											tracing::error!(
+													table_value_type = stringify!($name),
+													buffer_len = value.len(),
+													%reason,
+													"malformed table row"
+											);
+											return Err(DatabaseError::Decode);
+									}
 									let (obj, _) = Compact::from_compact(value, value.len());
 									Ok(obj)
 							}
@@ -108,6 +178,83 @@ impl_compression_for_compact!(
     GlobalChunkOffset,
     CompactBase64,
     CompactCachedIngressProof,
+    CompactLedgerIndexItem,
+    CompactCommitmentTxMetadata,
+    CompactDataTxMetadata
+);
+
+impl CompactRowCheck for CompactIrysBlockHeader {
+    fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+        check_versioned_compact_row(buf, &[IrysBlockHeaderV1::VERSION], |_| {
+            1 + IrysBlockHeaderV1::bitflag_encoded_bytes()
+        })
+    }
+}
+
+impl CompactRowCheck for CompactTxHeader {
+    fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+        check_versioned_compact_row(buf, &[DataTransactionHeaderV1::VERSION], |_| {
+            1 + DataTransactionHeaderV1::bitflag_encoded_bytes()
+        })
+    }
+}
+
+impl CompactRowCheck for CompactCommitment {
+    fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+        check_versioned_compact_row(
+            buf,
+            &[
+                CommitmentTransactionV1::VERSION,
+                CommitmentTransactionV2::VERSION,
+            ],
+            |version| {
+                1 + if version == CommitmentTransactionV1::VERSION {
+                    CommitmentTransactionV1::bitflag_encoded_bytes()
+                } else {
+                    CommitmentTransactionV2::bitflag_encoded_bytes()
+                }
+            },
+        )
+    }
+}
+
+/// Byte offset of `IngressProof`'s variant byte: after the 20-byte `IrysAddress`
+/// (`CachedIngressProof` has no flag header).
+const CACHED_INGRESS_PROOF_VARIANT_OFFSET: usize = 20;
+/// The derived `Compact` for `IngressProof` stores the variant's declaration index
+/// (not its `repr(u8)` discriminant) in its first byte. `V1` is declared first.
+const INGRESS_PROOF_V1_COMPACT_VARIANT: u8 = 0;
+
+impl CompactRowCheck for CompactCachedIngressProof {
+    fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+        let proof_start = Self::bitflag_encoded_bytes() + CACHED_INGRESS_PROOF_VARIANT_OFFSET;
+        let Some(&variant) = buf.get(proof_start) else {
+            return Err(format!(
+                "row too short: no ingress proof variant byte at offset {proof_start}, got {} bytes",
+                buf.len()
+            ));
+        };
+        if variant != INGRESS_PROOF_V1_COMPACT_VARIANT {
+            return Err(format!("unsupported ingress proof variant {variant}"));
+        }
+        require_min_compact_row_len(
+            buf,
+            proof_start + 1 + IngressProofV1::bitflag_encoded_bytes(),
+        )
+    }
+}
+
+impl_compact_row_check_for_flag_header!(
+    CompactPeerListItem,
+    CachedDataRoot,
+    CachedChunk,
+    ChunkPathHashes,
+    TxPathInterval,
+    PartitionHashes,
+    DataRootInfos,
+    TxLeafBinding,
+    PendingBodyMigration,
+    CompactBase64,
     CompactLedgerIndexItem,
     CompactCommitmentTxMetadata,
     CompactDataTxMetadata
@@ -263,4 +410,117 @@ table IrysBlockStreamEvents {
     type Key = u64;
     type Value = Vec<u8>;
 }
+}
+
+#[cfg(test)]
+mod compact_row_check_tests {
+    use super::*;
+    use crate::db_cache::GlobalChunkOffset;
+    use rstest::rstest;
+
+    /// One table value type, reduced to what the checks need.
+    struct RowCase {
+        /// Valid encoding of `T::default()`.
+        valid: Vec<u8>,
+        decompress_fails: fn(&[u8]) -> bool,
+        /// Shortest buffer the check accepts (independent of the check's own constants).
+        min_len: usize,
+        /// Offset of the version/variant byte, for versioned types.
+        version_offset: Option<usize>,
+    }
+
+    fn row_case<T>(value: T, min_len: usize, version_offset: Option<usize>) -> RowCase
+    where
+        T: Compress<Compressed = Vec<u8>> + Decompress,
+    {
+        RowCase {
+            valid: value.compress(),
+            decompress_fails: |buf| T::decompress(buf).is_err(),
+            min_len,
+            version_offset,
+        }
+    }
+
+    #[rstest]
+    #[case::block_header(row_case(CompactIrysBlockHeader::default(), 7, Some(0)))]
+    #[case::data_tx_header(row_case(CompactTxHeader::default(), 4, Some(0)))]
+    #[case::commitment_v2(row_case(CompactCommitment::default(), 3, Some(0)))]
+    #[case::cached_ingress_proof(row_case(CompactCachedIngressProof::default(), 22, Some(20)))]
+    #[case::global_chunk_offset(row_case(GlobalChunkOffset::default(), 29, None))]
+    #[case::cached_ingress_leaf(row_case(CachedIngressLeaf { tx_offset: 7.into(), ingress_data_hash: H256::repeat_byte(1) }, 36, None))]
+    #[case::cached_chunk_index_entry(row_case(CachedChunkIndexEntry::default(), 5, None))]
+    #[case::cached_data_root(row_case(CachedDataRoot::default(), 2, None))]
+    #[case::cached_chunk(row_case(CachedChunk::default(), 1, None))]
+    #[case::chunk_path_hashes(row_case(ChunkPathHashes::default(), 1, None))]
+    #[case::pending_body_migration(row_case(PendingBodyMigration::default(), 2, None))]
+    fn malformed_rows_are_decode_errors(#[case] case: RowCase) {
+        assert!(
+            case.valid.len() >= case.min_len,
+            "valid encoding is shorter than the minimum"
+        );
+        assert!(
+            !(case.decompress_fails)(&case.valid),
+            "valid row must decode"
+        );
+        assert!(
+            (case.decompress_fails)(&[]),
+            "empty buffer must be rejected"
+        );
+        assert!(
+            (case.decompress_fails)(&case.valid[..case.min_len - 1]),
+            "truncated buffer must be rejected"
+        );
+        if let Some(offset) = case.version_offset {
+            let mut unknown = case.valid.clone();
+            unknown[offset] = 0xFF;
+            assert!(
+                (case.decompress_fails)(&unknown),
+                "unknown version must be rejected"
+            );
+        }
+    }
+
+    /// Re-encoding a decoded valid row reproduces the stored bytes.
+    fn assert_round_trip<T>(value: T)
+    where
+        T: Compress<Compressed = Vec<u8>> + Decompress,
+    {
+        let encoded = value.compress();
+        let decoded = T::decompress(&encoded).expect("valid row decodes");
+        assert_eq!(decoded.compress(), encoded);
+    }
+
+    #[test]
+    fn valid_rows_decode_to_the_same_encoding() {
+        assert_round_trip(CompactIrysBlockHeader::default());
+        assert_round_trip(CompactTxHeader::default());
+        assert_round_trip(CompactCommitment::default());
+        assert_round_trip(CompactCachedIngressProof::default());
+        assert_round_trip(GlobalChunkOffset::default());
+        assert_round_trip(CachedIngressLeaf {
+            tx_offset: 7.into(),
+            ingress_data_hash: H256::repeat_byte(1),
+        });
+        assert_round_trip(CachedChunkIndexEntry::default());
+        assert_round_trip(CachedDataRoot::default());
+        assert_round_trip(CachedChunk::default());
+        assert_round_trip(ChunkPathHashes::default());
+        assert_round_trip(PendingBodyMigration::default());
+    }
+
+    #[test]
+    fn commitment_v1_truncated_row_is_rejected() {
+        let v1 = CommitmentTransactionV1::VERSION;
+        assert!(CompactCommitment::decompress(&[v1]).is_err());
+        assert!(CompactCommitment::decompress(&[v1, 0]).is_err());
+    }
+
+    #[test]
+    fn ingress_proof_variant_constant_matches_the_derived_encoding() {
+        let encoded = CompactCachedIngressProof::default().compress();
+        assert_eq!(
+            encoded[CACHED_INGRESS_PROOF_VARIANT_OFFSET],
+            INGRESS_PROOF_V1_COMPACT_VARIANT
+        );
+    }
 }
