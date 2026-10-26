@@ -187,9 +187,9 @@ async fn heavy_commitment_replay_rejected_in_full_validation() -> eyre::Result<(
 /// tx_id -> tx map from the body by id, so a duplicated tx collapses to one
 /// map entry, and matching the header's system ledger (which still lists the
 /// id twice) against it fails with "missing tx" on the second occurrence.
-/// Block production therefore never produces a block at all — an
-/// irrecoverable error aborts it before `find_replayed_commitment` is ever
-/// reached. This is documented here rather than dropped, since it shows the
+/// Block production therefore never produces a block at all — a
+/// block-assembly error drops the attempt before `find_replayed_commitment` is
+/// ever reached. This is documented here rather than dropped, since it shows the
 /// attack has no route to a real block even before the dedup layer runs.
 #[test_log::test(tokio::test)]
 async fn heavy_same_block_duplicate_commitment_rejected() -> eyre::Result<()> {
@@ -224,14 +224,17 @@ async fn heavy_same_block_duplicate_commitment_rejected() -> eyre::Result<()> {
     node.gossip_enable();
 
     match production_result {
-        Err(irys_actors::block_producer::BlockProductionError::Irrecoverable { source }) => {
+        Err(irys_actors::block_producer::BlockProductionError::Recoverable {
+            reason: "block_assembly",
+            source,
+        }) => {
             assert!(
                 source.to_string().contains("system ledger missing tx"),
                 "expected a header/body reconciliation failure on the duplicated commitment, got: {source}"
             );
         }
         Err(other) => panic!(
-            "expected an Irrecoverable header/body reconciliation error, got a different \
+            "expected a block_assembly header/body reconciliation error, got a different \
              BlockProductionError: {other}"
         ),
         Ok(_) => panic!(

@@ -48,6 +48,10 @@ pub enum TxSelectorError {
         parent_block_hash: BlockHash,
         canonical_tip: Option<BlockHash>,
     },
+    /// Commitment-refund derivation found the local commitment snapshot
+    /// internally inconsistent.
+    #[error(transparent)]
+    CommitmentRefund(#[from] crate::commitment_refunds::CommitmentRefundError),
     /// Any other error during tx selection or bundle assembly.
     #[error(transparent)]
     Other(#[from] eyre::Error),
@@ -60,14 +64,21 @@ impl From<TxSelectorError> for crate::block_producer::BlockProductionError {
             // leaving our parent off the canonical chain. Retrying with the new tip
             // resolves it.
             TxSelectorError::StaleParent { .. } => Self::Retryable { source: e.into() },
+            // A snapshot invariant violation proves local corruption; the
+            // validator treats the same error as a node fault.
+            TxSelectorError::CommitmentRefund(_) => Self::Irrecoverable { source: e.into() },
             // TODO: Some `Other` errors are actually stale-parent races — the parent
             // passes the initial canonical-chain check but a concurrent reorg removes
             // it before we query its snapshots/header (e.g. "Block not found",
             // "snapshot not found", "block header not found"). These should be
-            // Retryable, not Irrecoverable. Needs a cleaner approach than downcasting
-            // the eyre chain — consider adding typed error variants for the specific
-            // lookup failures so they can be matched directly.
-            TxSelectorError::Other(source) => Self::Irrecoverable { source },
+            // Retryable, not Recoverable, so the solution is not wasted. Needs a
+            // cleaner approach than downcasting the eyre chain — consider adding typed
+            // error variants for the specific lookup failures so they can be matched
+            // directly.
+            TxSelectorError::Other(source) => Self::Recoverable {
+                reason: "tx_selection",
+                source,
+            },
         }
     }
 }

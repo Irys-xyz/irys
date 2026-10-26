@@ -403,7 +403,9 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let timestamp = current_timestamp(&prev_block_header, irys_types::global_clock()).await;
         let mempool_bundle = self.get_mempool_txs(&prev_block_header, timestamp).await?;
-        let block_reward = self.block_reward(&prev_block_header)?;
+        let block_reward = self
+            .block_reward(&prev_block_header)
+            .map_err(BlockProductionError::recoverable("block_reward"))?;
         let reward_address = self
             .inner()
             .block_tree_guard
@@ -412,7 +414,12 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
             .expect("parent epoch snapshot")
             .resolve_reward_address(solution.mining_address);
 
-        if self.create_poa_data(solution, None).await?.is_none() {
+        if self
+            .create_poa_data(solution, None)
+            .await
+            .map_err(BlockProductionError::recoverable("poa_data"))?
+            .is_none()
+        {
             return Ok(None);
         }
         let (eth_built_payload, final_treasury) = self
@@ -438,7 +445,8 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
                 final_treasury,
                 reward_address,
             )
-            .await?;
+            .await
+            .map_err(BlockProductionError::recoverable("block_assembly"))?;
         Ok(block_result.map(|(block, stats)| (block, stats, eth_built_payload)))
     }
 }

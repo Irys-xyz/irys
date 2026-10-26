@@ -6,6 +6,7 @@ irys_utils::define_metrics! {
     counter BLOCKS_PRODUCED("irys.block_producer.blocks_produced_total", "Total blocks produced");
     counter BLOCK_PRODUCER_RETRIES("irys.block_producer.retry_attempts_total", "Block production retry attempts");
     counter BLOCK_PRODUCER_REBUILDS("irys.block_producer.rebuilds_total", "Block production rebuilds due to parent changes");
+    counter BLOCK_PRODUCER_DROPPED("irys.block_producer.dropped_total", "Block production attempts dropped after an error; the service keeps running (labelled by reason)");
     counter REORGS("irys.block_tree.reorgs_total", "Chain reorganization events");
     gauge REORG_DEPTH("irys.block_tree.latest_reorg_depth", "Depth of the most recent reorg (blocks discarded from the canonical chain). Mirrors Reth's reth_blockchain_tree_latest_reorg_depth for side-by-side comparison.");
     gauge CANONICAL_TIP_HEIGHT("irys.block_tree.canonical_tip_height", "Height of the canonical chain tip");
@@ -171,6 +172,10 @@ pub(crate) fn record_block_producer_retry() {
 
 pub(crate) fn record_block_producer_rebuild(count: u64) {
     BLOCK_PRODUCER_REBUILDS.add(count, &[]);
+}
+
+pub(crate) fn record_block_producer_dropped(reason: &'static str) {
+    BLOCK_PRODUCER_DROPPED.add(1, &[KeyValue::new("reason", reason)]);
 }
 
 pub(crate) fn record_reorg() {
