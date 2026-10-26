@@ -6006,6 +6006,40 @@ mod shadow_tx_priority_fee_match_tests {
         assert!(SignerRecoverable::recover_signer(&malleated).is_err());
         Ok(())
     }
+
+    /// Validators compare decoded packets, so extraction must reject a shadow tx
+    /// whose input has bytes after the encoded payload.
+    #[test]
+    fn extraction_rejects_trailing_bytes_after_shadow_payload() {
+        use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
+        use reth::primitives::transaction::signature::Signature;
+        use reth_ethereum_primitives::TransactionSigned;
+
+        let packet = stake_packet(0);
+        let sign = |tx: alloy_consensus::TxEip1559| -> TransactionSigned {
+            EthereumTxEnvelope::<TxEip4844>::Eip1559(tx.into_signed(Signature::test_signature()))
+        };
+
+        let canonical = sign(packet.compose(1, 0));
+        let (decoded, _) = extract_leading_shadow_txs(std::slice::from_ref(&canonical))
+            .next()
+            .expect("one item")
+            .expect("canonical input must decode");
+        assert_eq!(decoded, packet);
+
+        let mut with_trailing_byte = packet.compose(1, 0);
+        let mut input = with_trailing_byte.input.to_vec();
+        input.push(0x00);
+        with_trailing_byte.input = input.into();
+        let with_trailing_byte = sign(with_trailing_byte);
+
+        let mut extracted = extract_leading_shadow_txs(std::slice::from_ref(&with_trailing_byte));
+        assert!(
+            extracted.next().expect("one item").is_err(),
+            "trailing byte must be rejected"
+        );
+        assert!(extracted.next().is_none());
+    }
 }
 
 /// Validates that commitment transactions in a block are ordered correctly
