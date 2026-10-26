@@ -744,6 +744,11 @@ where
         evm_block_hash: EvmBlockHash,
         use_trusted_peers_only: bool,
     ) -> GossipResult<()> {
+        // The pulled payload is requested: it goes to the requested tier of
+        // the cache, and a copy already marked as seen is not skipped.
+        self.execution_payload_cache
+            .mark_payload_as_requested(evm_block_hash)
+            .await;
         let mut last_err = None;
         for attempt in 1..=3 {
             match self
@@ -2505,5 +2510,30 @@ mod execution_payload_tests {
                 .seen_execution_payload_from_any_peer(&evm_block_hash)
                 .expect("seen check")
         );
+    }
+
+    /// An EVM payload gossiped before its Irys block must be served when
+    /// validation of that block waits for it.
+    #[tokio::test]
+    async fn early_gossiped_payload_is_served_to_validation() {
+        let (_dir, handler) = test_handler();
+        let (matching, _) = matching_and_mismatched_blocks();
+        let evm_block_hash = matching.hash_slow();
+
+        handler
+            .handle_execution_payload(payload_request(matching.clone()))
+            .await
+            .expect("payload is accepted");
+
+        let payload = tokio::time::timeout(
+            Duration::from_secs(5),
+            handler
+                .execution_payload_cache
+                .wait_for_sealed_block(&evm_block_hash, false),
+        )
+        .await
+        .expect("served from the cache without a network request")
+        .expect("payload is in the cache");
+        assert_eq!(payload.into_block(), matching);
     }
 }

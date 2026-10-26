@@ -7,7 +7,7 @@ use reth::builder::{BeaconOnNewPayloadError, Block as _};
 use reth::consensus::ConsensusError;
 use reth::consensus_common::validation::validate_body_against_header;
 use reth_ethereum_primitives::Block;
-use reth_primitives_traits::SealedBlock;
+use reth_primitives_traits::{InMemorySize as _, SealedBlock};
 #[cfg(feature = "test-utils")]
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -19,6 +19,11 @@ use tracing::{debug, error, instrument};
 const PAYLOAD_CACHE_CAPACITY: usize = 1000;
 const PAYLOAD_RECEIVERS_CAPACITY: usize = 1000;
 const PAYLOAD_REQUESTS_CACHE_CAPACITY: usize = 1000;
+/// Bounds for payloads that arrive before a local request or waiter names
+/// their hash (see [`UnsolicitedPayloads`]). Normal operation needs only a
+/// few: an EVM payload is usually gossiped shortly before its Irys block.
+const UNSOLICITED_PAYLOADS_MAX_COUNT: usize = 64;
+const UNSOLICITED_PAYLOADS_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum RethBlockProvider {
@@ -199,6 +204,7 @@ impl ExecutionPayloadCache {
         Self {
             cache: Arc::new(RwLock::new(ExecutionPayloadCacheInner {
                 payloads: LruCache::new(NonZeroUsize::new(PAYLOAD_CACHE_CAPACITY).expect("payload capacity is not a non-zero usize")),
+                unsolicited_payloads: UnsolicitedPayloads::new(),
                 payloads_currently_requested_from_the_network: LruCache::new(NonZeroUsize::new(PAYLOAD_REQUESTS_CACHE_CAPACITY).expect("payloads currently requested from the network capacity is not a non-zero usize")),
             })),
             // TODO: fix this to use a real RPC client
@@ -216,6 +222,11 @@ impl ExecutionPayloadCache {
     /// withdrawals root. A body that does not match these is rejected and
     /// nothing is stored, so a cached payload is always the exact EVM block
     /// its hash names and a later correct copy is still accepted.
+    ///
+    /// A payload whose hash a local waiter or network request names goes to
+    /// the requested tier. Any other payload goes to the bounded
+    /// [`UnsolicitedPayloads`] tier, so payloads that nothing references
+    /// cannot grow memory without bound or push out requested payloads.
     pub async fn add_payload_to_cache(
         &self,
         sealed_block: SealedBlock<Block>,
@@ -227,13 +238,22 @@ impl ExecutionPayloadCache {
                 source,
             },
         )?;
+        let has_waiter = self.payload_senders.read().await.contains(&evm_block_hash);
         {
             debug!("Adding execution payload to cache: {:?}", evm_block_hash);
             let mut cache = self.cache.write().await;
-            cache.payloads.put(evm_block_hash, sealed_block.clone());
-            cache
+            let was_requested = cache
                 .payloads_currently_requested_from_the_network
-                .pop(&evm_block_hash);
+                .pop(&evm_block_hash)
+                .is_some();
+            if has_waiter || was_requested || cache.payloads.contains(&evm_block_hash) {
+                cache.unsolicited_payloads.remove(&evm_block_hash);
+                cache.payloads.put(evm_block_hash, sealed_block.clone());
+            } else {
+                cache
+                    .unsolicited_payloads
+                    .insert(evm_block_hash, sealed_block.clone());
+            }
         }
         // Wake-side fan-out. Single broadcast onto the watch slot reaches
         // every currently-subscribed waiter; the Sender is then dropped
@@ -250,6 +270,17 @@ impl ExecutionPayloadCache {
         Ok(())
     }
 
+    /// Records that this node asked the network for `evm_block_hash`. The
+    /// payload then goes to the requested tier when it arrives, and a copy
+    /// already marked as seen by gossip is still accepted.
+    pub async fn mark_payload_as_requested(&self, evm_block_hash: B256) {
+        self.cache
+            .write()
+            .await
+            .payloads_currently_requested_from_the_network
+            .put(evm_block_hash, ());
+    }
+
     pub async fn remove_payload_from_cache(&self, evm_block_hash: &B256) {
         debug!(
             "Removing execution payload from cache: {:?}",
@@ -257,6 +288,7 @@ impl ExecutionPayloadCache {
         );
         let mut cache = self.cache.write().await;
         cache.payloads.pop(evm_block_hash);
+        cache.unsolicited_payloads.remove(evm_block_hash);
         cache
             .payloads_currently_requested_from_the_network
             .pop(evm_block_hash);
@@ -267,8 +299,8 @@ impl ExecutionPayloadCache {
     /// Use [ExecutionPayloadCache::wait_for_payload] instead.
     /// This method is used to retrieve the payload from the local cache or EVM node.
     pub async fn get_locally_stored_evm_block(&self, evm_block_hash: &B256) -> Option<Block> {
-        if let Some(sealed_block) = self.cache.write().await.payloads.get(evm_block_hash) {
-            Some(sealed_block.clone_block())
+        if let Some(sealed_block) = self.cached_payload(evm_block_hash, false).await {
+            Some(sealed_block.into_block())
         } else {
             self.reth_payload_provider.evm_block(*evm_block_hash)
         }
@@ -282,10 +314,18 @@ impl ExecutionPayloadCache {
         &self,
         evm_block_hash: &B256,
     ) -> Option<SealedBlock<Block>> {
-        let maybe_sealed = {
-            let mut cache = self.cache.write().await;
-            cache.payloads.get(evm_block_hash).cloned()
-        };
+        self.get_sealed_block(evm_block_hash, false).await
+    }
+
+    /// See [`Self::get_sealed_block_from_cache`]. With `referenced`, the
+    /// caller holds an Irys block that names this hash, so a hit in the
+    /// unsolicited tier moves to the requested tier.
+    async fn get_sealed_block(
+        &self,
+        evm_block_hash: &B256,
+        referenced: bool,
+    ) -> Option<SealedBlock<Block>> {
+        let maybe_sealed = self.cached_payload(evm_block_hash, referenced).await;
 
         if let Some(s) = maybe_sealed {
             Some(s)
@@ -293,6 +333,25 @@ impl ExecutionPayloadCache {
             let block = self.reth_payload_provider.evm_block(*evm_block_hash)?;
             Some(block.seal_slow())
         }
+    }
+
+    /// Looks the payload up in both tiers. With `promote`, a hit in the
+    /// unsolicited tier moves to the requested tier.
+    async fn cached_payload(
+        &self,
+        evm_block_hash: &B256,
+        promote: bool,
+    ) -> Option<SealedBlock<Block>> {
+        let mut cache = self.cache.write().await;
+        if let Some(sealed_block) = cache.payloads.get(evm_block_hash) {
+            return Some(sealed_block.clone());
+        }
+        if !promote {
+            return cache.unsolicited_payloads.get(evm_block_hash).cloned();
+        }
+        let sealed_block = cache.unsolicited_payloads.remove(evm_block_hash)?;
+        cache.payloads.put(*evm_block_hash, sealed_block.clone());
+        Some(sealed_block)
     }
 
     /// Checks if the execution payload is stored in the EVM node.
@@ -340,7 +399,10 @@ impl ExecutionPayloadCache {
         evm_block_hash: &B256,
         request_only_from_trusted_peers: bool,
     ) -> Result<SealedBlock<Block>, ExecutionPayloadWaitError> {
-        if let Some(sealed_block) = self.get_sealed_block_from_cache(evm_block_hash).await {
+        // The caller waits for this hash on behalf of an Irys block that
+        // names it, so a payload that arrived early is promoted out of the
+        // unsolicited tier.
+        if let Some(sealed_block) = self.get_sealed_block(evm_block_hash, true).await {
             return Ok(sealed_block);
         }
 
@@ -364,7 +426,7 @@ impl ExecutionPayloadCache {
         // the same hash. Leaving the sender alone is safe: dropping our own
         // `Receiver` here is a no-op for siblings, and the orphaned sender
         // is bounded by the LRU capacity (1000) and natural eviction.
-        if let Some(sealed_block) = self.get_sealed_block_from_cache(evm_block_hash).await {
+        if let Some(sealed_block) = self.get_sealed_block(evm_block_hash, true).await {
             drop(receiver);
             return Ok(sealed_block);
         }
@@ -450,7 +512,9 @@ impl ExecutionPayloadCache {
     }
 
     pub async fn is_payload_in_cache(&self, evm_block_hash: &B256) -> bool {
-        self.cache.read().await.payloads.contains(evm_block_hash)
+        let cache = self.cache.read().await;
+        cache.payloads.contains(evm_block_hash)
+            || cache.unsolicited_payloads.contains(evm_block_hash)
     }
 
     #[instrument(skip_all)]
@@ -570,14 +634,79 @@ impl ExecutionPayloadCache {
 
 #[derive(Debug)]
 struct ExecutionPayloadCacheInner {
+    /// Payloads whose hash a local waiter or network request named.
     payloads: LruCache<B256, SealedBlock<Block>>,
+    unsolicited_payloads: UnsolicitedPayloads,
     payloads_currently_requested_from_the_network: LruCache<B256, ()>,
+}
+
+/// Payloads that arrived before a local waiter or network request named
+/// their hash: usually an EVM payload gossiped before its Irys block. Any
+/// peer can send these, so this tier is bounded by count and by total
+/// in-memory size, and it is separate from the requested tier so that it
+/// cannot push out payloads that validation waits for.
+///
+/// An evicted payload is not lost for good: validation of the Irys block
+/// that names it requests it from the network again.
+#[derive(Debug)]
+struct UnsolicitedPayloads {
+    /// Each entry keeps its in-memory size for the byte accounting.
+    entries: LruCache<B256, (SealedBlock<Block>, usize)>,
+    total_bytes: usize,
+}
+
+impl UnsolicitedPayloads {
+    fn new() -> Self {
+        Self {
+            entries: LruCache::new(
+                NonZeroUsize::new(UNSOLICITED_PAYLOADS_MAX_COUNT)
+                    .expect("unsolicited payloads capacity is not a non-zero usize"),
+            ),
+            total_bytes: 0,
+        }
+    }
+
+    fn insert(&mut self, evm_block_hash: B256, sealed_block: SealedBlock<Block>) {
+        let size = sealed_block.size();
+        // `push` returns the replaced entry for the same hash, or the entry
+        // evicted by the count bound.
+        if let Some((_, (_, replaced_size))) =
+            self.entries.push(evm_block_hash, (sealed_block, size))
+        {
+            self.total_bytes -= replaced_size;
+        }
+        self.total_bytes += size;
+        // The newest entry always stays, so a single payload larger than
+        // the byte bound is still kept.
+        while self.total_bytes > UNSOLICITED_PAYLOADS_MAX_BYTES && self.entries.len() > 1 {
+            if let Some((_, (_, evicted_size))) = self.entries.pop_lru() {
+                self.total_bytes -= evicted_size;
+            }
+        }
+    }
+
+    fn get(&self, evm_block_hash: &B256) -> Option<&SealedBlock<Block>> {
+        self.entries
+            .peek(evm_block_hash)
+            .map(|(sealed_block, _)| sealed_block)
+    }
+
+    fn remove(&mut self, evm_block_hash: &B256) -> Option<SealedBlock<Block>> {
+        let (sealed_block, size) = self.entries.pop(evm_block_hash)?;
+        self.total_bytes -= size;
+        Some(sealed_block)
+    }
+
+    fn contains(&self, evm_block_hash: &B256) -> bool {
+        self.entries.contains(evm_block_hash)
+    }
 }
 
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use super::*;
     use crate::PeerList;
+    use alloy_primitives::U256;
     use reth_ethereum_primitives::BlockBody;
     use reth_primitives_traits::Header;
 
@@ -904,6 +1033,30 @@ mod tests {
         }
     }
 
+    fn block_with_number(number: u64) -> SealedBlock<Block> {
+        block_with_header(Header {
+            number,
+            ..Default::default()
+        })
+        .seal_slow()
+    }
+
+    async fn in_requested_tier(cache: &ExecutionPayloadCache, evm_block_hash: &B256) -> bool {
+        cache.cache.read().await.payloads.contains(evm_block_hash)
+    }
+
+    async fn add_unsolicited_payloads(
+        cache: &ExecutionPayloadCache,
+        numbers: std::ops::Range<u64>,
+    ) {
+        for number in numbers {
+            cache
+                .add_payload_to_cache(block_with_number(number))
+                .await
+                .expect("payload body matches its header");
+        }
+    }
+
     #[tokio::test]
     async fn payload_with_mismatched_transactions_root_is_not_cached() {
         let cache = test_cache();
@@ -968,5 +1121,114 @@ mod tests {
             .await
             .expect("matching payload is cached");
         assert_eq!(cached, matching);
+    }
+
+    #[tokio::test]
+    async fn unsolicited_payloads_do_not_evict_requested_payloads() {
+        let cache = test_cache();
+        let requested = block_with_number(1);
+        let waited_for = block_with_number(2);
+
+        cache.mark_payload_as_requested(requested.hash()).await;
+        let _waiter = cache.block_receiver(waited_for.hash()).await;
+        cache
+            .add_payload_to_cache(requested.clone())
+            .await
+            .expect("payload body matches its header");
+        cache
+            .add_payload_to_cache(waited_for.clone())
+            .await
+            .expect("payload body matches its header");
+        assert!(in_requested_tier(&cache, &requested.hash()).await);
+        assert!(in_requested_tier(&cache, &waited_for.hash()).await);
+
+        let unsolicited_count = 2 * UNSOLICITED_PAYLOADS_MAX_COUNT as u64;
+        add_unsolicited_payloads(&cache, 1000..1000 + unsolicited_count).await;
+
+        assert!(cache.is_payload_in_cache(&requested.hash()).await);
+        assert!(cache.is_payload_in_cache(&waited_for.hash()).await);
+        assert_eq!(
+            cache.cache.read().await.unsolicited_payloads.entries.len(),
+            UNSOLICITED_PAYLOADS_MAX_COUNT,
+        );
+        assert!(
+            !cache
+                .is_payload_in_cache(&block_with_number(1000).hash())
+                .await,
+            "the oldest unsolicited payload is evicted by the count bound",
+        );
+        assert!(
+            cache
+                .is_payload_in_cache(&block_with_number(1000 + unsolicited_count - 1).hash())
+                .await,
+            "the newest unsolicited payload is kept",
+        );
+    }
+
+    #[tokio::test]
+    async fn unsolicited_payloads_are_bounded_by_total_size() {
+        let cache = test_cache();
+        // `new_unchecked` with a distinct hash skips hashing the large
+        // extra data; the bound depends only on the size.
+        let large_block = |number: u64, extra_data_len: usize| {
+            let block = block_with_header(Header {
+                number,
+                extra_data: vec![0_u8; extra_data_len].into(),
+                ..Default::default()
+            });
+            SealedBlock::new_unchecked(block, B256::from(U256::from(number)))
+        };
+        let quarter_of_bound = UNSOLICITED_PAYLOADS_MAX_BYTES / 4;
+        for number in 0..8 {
+            cache
+                .add_payload_to_cache(large_block(number, quarter_of_bound))
+                .await
+                .expect("payload body matches its header");
+            assert!(
+                cache.cache.read().await.unsolicited_payloads.total_bytes
+                    <= UNSOLICITED_PAYLOADS_MAX_BYTES
+            );
+        }
+        let unsolicited_count = cache.cache.read().await.unsolicited_payloads.entries.len();
+        assert!(unsolicited_count < 4, "byte bound limits the entry count");
+
+        // A single payload above the byte bound is still kept.
+        let oversized = large_block(100, UNSOLICITED_PAYLOADS_MAX_BYTES + 1);
+        cache
+            .add_payload_to_cache(oversized.clone())
+            .await
+            .expect("payload body matches its header");
+        let inner = cache.cache.read().await;
+        assert_eq!(inner.unsolicited_payloads.entries.len(), 1);
+        assert!(inner.unsolicited_payloads.contains(&oversized.hash()));
+        assert_eq!(inner.unsolicited_payloads.total_bytes, oversized.size());
+    }
+
+    /// An EVM payload often arrives before the Irys block that names it. It
+    /// must be served when that block is validated, and from then on it must
+    /// not be evicted by unsolicited payloads.
+    #[tokio::test]
+    async fn early_payload_is_served_and_promoted_when_its_block_arrives() {
+        let cache = test_cache();
+        let early = block_with_number(1);
+        cache
+            .add_payload_to_cache(early.clone())
+            .await
+            .expect("payload body matches its header");
+        assert!(!in_requested_tier(&cache, &early.hash()).await);
+
+        let served = cache
+            .wait_for_sealed_block(&early.hash(), false)
+            .await
+            .expect("early payload is served from the cache");
+        assert_eq!(served, early);
+        assert!(in_requested_tier(&cache, &early.hash()).await);
+
+        add_unsolicited_payloads(
+            &cache,
+            1000..1000 + 2 * UNSOLICITED_PAYLOADS_MAX_COUNT as u64,
+        )
+        .await;
+        assert!(cache.is_payload_in_cache(&early.hash()).await);
     }
 }
