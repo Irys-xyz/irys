@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793034042454,
+  "lastUpdate": 1793056502734,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -19266,6 +19266,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000113,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "92470fd3a90f883efdf31e3966b6a491b929be65",
+          "message": "feat(storage): log submodule migration progress and open storage modules in parallel (#1661)\n\n* feat(database): log submodule migration progress on a time interval\n\nThe v1 to v2 submodule index migration logged a start line and then one\nprogress line every 100_000 rows. On a large module that gap was several\nminutes, and the line had no total, percent, rate, or ETA.\n\nCount path-hash and legacy rows from the MDBX table stat. Log those\ntotals at start, including how far a resumed run has already got. Log\nprogress every 15 seconds for the copy phase and the drop phase: rows\ndone out of the total, percent, interval and overall rows per second,\nand an ETA. Keep the old field names. Finish with the duration and the\ntotals for each phase. Set the existing metrics gauge\nirys_submodule_migration_progress to the fraction done.\n\nThe schema marker and the resume text stay the same.\n\n* feat(chain): open storage modules in parallel\n\ninit_storage_modules opened each storage module in a serial loop, and\neach open blocks on its own v1 index migration. A host with one module\nper drive left the other drives idle.\n\nOpen one scoped thread per module and join every thread before return.\nThe result vector keeps the input order. A failure does not cancel the\nother opens, and the error names every module that failed. There is no\nCPU cap: the module info does not name a device, and a CPU cap would\nleave disks idle.\n\n* fix(database): rate a drop resumed after a restart on the checkpoint clock\n\nA migration restarted in the drop phase has no copy/drop split in its\ncheckpoint, so the rate and ETA used this process's age. After a kill\nthe first progress line then claimed the drop was nearly done. Use the\ncheckpoint's elapsed time, which includes copy time and so errs long,\nand drop the now-unused process clock from the helpers.\n\n* refactor(chain): open storage modules on the tokio blocking pool\n\nThe parallel open used scoped std threads from a sync function. The\ncaller is async, so the whole open, migrations included, also held a\ntokio worker. Run each StorageModule::new in spawn_blocking and await\nthem together. Order, every module attempted, and the combined failure\nmessage are unchanged.\n\n* fix(storage): name each module in parallel-open logs, and drop flaky test bits\n\nEach spawn_blocking open now enters an open_storage_module span with the\nmodule id, parented on the caller's span, so interleaved migration\nprogress lines say which module they are about. Remove the SAMPLE\nprintln output and the empty loop it left, and the 500 ms wall-clock\nbound in drop_resume_eta_uses_the_checkpoint_clock: the 1.5 s checkpoint\nalready separates the clocks, and the bound could fail on a loaded host.\n\n* fix(database): rate a resumed drop from this process only\n\nA restart already in drop has no copy/drop split in the checkpoint.\nThe ETA and the overall rate use the rows and the time this process\nhas spent in drop. An empty sample omits the ETA. The finished line\nomits the split when the copy duration is unknown.\n\n* fix(chain): keep the panic text when a module open fails\n\nJoinError's Display already carries the panic message. Format every\njoin error with that text. The open test also checks an already-v2\nmodule and a rocks directory on an MDBX config.\n\n* test(database): trim duplicate migration progress asserts\n\n* perf(database): pre-read the index file before migrating it\n\n* test(database): drop pre-read asserts that only pin field names\n\n* perf(database): migrate in larger batches to cut fsyncs\n\n* perf(database): warm and pin the index with mdbx_env_warmup before migrating\n\n* perf(database): budget the migration pin by RLIMIT_MEMLOCK\n\nConcurrent submodule migrations share one mlock budget: the soft\nRLIMIT_MEMLOCK minus headroom. A module waits until its data file\nfits, and the reservation returns when the pin is released.\n\n* refactor(database): keep the pin budget on a warmup timeout and fold the pre-read logs\n\n* fix(database): warm the index with a real page-touch load, not oomsafe\n\n* test(database): fail when the index warmup loads nothing\n\n* fix(database): cap an unlimited memlock budget by effective memory\n\nWith RLIMIT_MEMLOCK unlimited or unreadable, the pin budget was\nu64::MAX, so every migrating module pinned its whole index at once and\ncould lock more than RAM or the memory cgroup allows. Budget 1/8 of\nphysical memory capped by every cgroup limit on the process's path\n(v2 memory.max, v1 memory.limit_in_bytes), the same default the testnet\nrollout ran with. Unknown memory pins nothing.\n\n* fix(chain): add irys-testing-utils as a dev-dependency\n\n#1677 dropped irys-testing-utils from irys-chain's dependencies. The\nparallel-open test in storage_module_init.rs still builds its temp dir\nwith TempDirBuilder, so the merge with master no longer compiled. A\ndev-dependency keeps it out of the node build.",
+          "timestamp": "2026-10-26T22:52:21Z",
+          "tree_id": "01107192fce8820e2c2456ac4652007b05008c45",
+          "url": "https://github.com/Irys-xyz/irys/commit/92470fd3a90f883efdf31e3966b6a491b929be65"
+        },
+        "date": 1793056499252,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011915,
+            "range": "± 0.000014",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.12067,
+            "range": "± 0.003002",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.250198,
+            "range": "± 0.061527",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.905697,
+            "range": "± 0.061081",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075804,
+            "range": "± 0.001477",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 783.009841,
+            "range": "± 15.707999",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1016.113134,
+            "range": "± 32.379226",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117937,
+            "range": "± 0.002976",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1190.596055,
+            "range": "± 15.756489",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1525.598254,
+            "range": "± 1.610857",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033415,
+            "range": "± 0.000679",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.948764,
+            "range": "± 0.237411",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.323043,
+            "range": "± 0.258505",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
             "range": "± 0",
             "unit": "ms/iter"
           }
