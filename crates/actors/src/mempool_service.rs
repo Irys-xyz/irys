@@ -2481,12 +2481,6 @@ pub struct MempoolService {
     inner: Arc<Inner>,
 }
 
-impl Default for MempoolService {
-    fn default() -> Self {
-        unimplemented!("don't rely on the default implementation of the `MempoolService`");
-    }
-}
-
 impl MempoolService {
     /// Spawn a new Mempool service
     pub fn spawn_service(
