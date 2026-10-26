@@ -148,8 +148,8 @@ pub(crate) fn block_tree_absence_reason(
 ///
 /// When a parent fails VDF validation, it and its children leave the block
 /// tree, and possibly no validated block brings the local VDF to the
-/// parent's last step. A wait for that step can then stall, and `Stalled`
-/// crashes the node. Thus a block or parent that is not in
+/// parent's last step. A wait for that step then does not complete and ends
+/// as `Stalled`. Thus a block or parent that is not in
 /// `block_tree` finishes the task with the `VdfTaskLeftBlockTree` sentinel:
 /// before the wait, and when the wait ends with an error (the validation
 /// service fires `cancel` when the running task's block or parent leaves the

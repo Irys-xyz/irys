@@ -142,12 +142,10 @@ struct TreeStateAfterParentWait {
 ///   fully valid; a block that is valid on its own is not valid if its chain
 ///   is not.
 /// - Node-fault `InternalFailure`: wait for the parent, then read the tree.
-///   The stages run while the parent has passed only prevalidation, so a
-///   node-fault input can come from a parent header field that the parent's
-///   own validation has not yet checked (e.g. the inherited treasury
-///   balance), or from a tree walk that misses because the block or an
-///   ancestor was removed during validation. Until the parent is fully valid,
-///   such a fault does not show a fault of this node. Thus:
+///   The stages run before the parent has finished validation, and a tree
+///   walk can miss when the block or an ancestor is removed during
+///   validation. A node-fault result is only a fault of this node when the
+///   parent is fully valid and the block is still in the tree. Thus:
 ///   - parent not fully valid (invalid parents are removed from the tree, so
 ///     this is "removed", or the wait was cancelled while the parent was
 ///     pending) → cancel;
@@ -2868,8 +2866,7 @@ mod resolve_stage_result_against_parent_tests {
     use rstest::rstest;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Node fault computed from an unvalidated parent field (inherited
-    /// treasury balance underflow in shadow-tx generation).
+    /// Node-fault result from a stage (shadow-tx generation).
     fn shadow_tx_node_fault() -> ValidationError {
         ValidationError::ShadowTxNodeFault("treasury underflow".to_string())
     }
