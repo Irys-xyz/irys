@@ -780,9 +780,7 @@ where
                         .await
                     {
                         last_err = Some(e);
-                        if attempt < 3 {
-                            continue;
-                        }
+                        continue;
                     }
                     return Ok(());
                 }
@@ -2399,12 +2397,14 @@ mod body_fetch_recovery_tests {
 #[cfg(test)]
 mod execution_payload_tests {
     use super::*;
-    use crate::tests::util::data_handler_stub;
+    use crate::tests::util::{FakeGossipServer, data_handler_stub, peer_list_item};
+    use crate::types::GossipResponse;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::TempDirBuilder;
-    use irys_types::{DatabaseProvider, DbSyncMode, NodeConfig};
+    use irys_types::v2::GossipDataV2;
+    use irys_types::{DatabaseProvider, DbSyncMode, NodeConfig, PeerScore};
     use reth::primitives::Header;
     use reth::primitives::proofs::calculate_ommers_root;
     use reth_ethereum_primitives::BlockBody as EvmBlockBody;
@@ -2509,6 +2509,42 @@ mod execution_payload_tests {
                 .cache
                 .seen_execution_payload_from_any_peer(&evm_block_hash)
                 .expect("seen check")
+        );
+    }
+
+    /// A peer that serves a payload the handler rejects on every attempt
+    /// must surface as an error to the caller, not as success.
+    #[tokio::test]
+    async fn pull_fails_when_every_served_payload_is_rejected() {
+        let (_dir, handler) = test_handler();
+        let (matching, mismatched) = matching_and_mismatched_blocks();
+        let evm_block_hash = matching.hash_slow();
+
+        let server = FakeGossipServer::new();
+        server.set_on_pull_data_request(move |_| {
+            GossipResponse::Accepted(Some(GossipDataV2::ExecutionPayload(mismatched.clone())))
+        });
+        let addr = server.spawn();
+        let peer = peer_list_item(0x41, addr, true, PeerScore::INITIAL);
+        handler.peer_list.add_or_update_peer(peer, true);
+
+        let result = handler
+            .pull_and_add_execution_payload_to_cache(evm_block_hash, false)
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(GossipError::InvalidData(
+                    InvalidDataError::ExecutionPayloadBodyMismatch(_)
+                ))
+            ),
+            "{result:?}"
+        );
+        assert!(
+            !handler
+                .execution_payload_cache
+                .is_payload_in_cache(&evm_block_hash)
+                .await
         );
     }
 
