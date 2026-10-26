@@ -1,11 +1,12 @@
 //! Checked-in hashes and roots from spec §10. The numbers in the rows are the
 //! vector inputs; the hex strings are the expected digests.
 
-use super::{assert_hex, concat_hex, pattern};
+use super::{assert_hex, concat_hex, empty_at_height, pattern};
 use crate::DataTree;
 use crate::MAX_SUBTREE_HEIGHT;
+use crate::SubtreeHeight;
 use crate::geometry::Geometry;
-use crate::hash::{self, empty, leaf, size_witness};
+use crate::hash::{self, leaf, size_witness};
 use crate::types::DataTreeRoot;
 use crate::types::HASH_SIZE;
 use crate::verify::{verify_chunk, verify_segment};
@@ -16,15 +17,18 @@ fn primitive_vectors() {
         leaf(b"").as_bytes(),
         "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
     );
-    assert_eq!(empty(0), leaf(b""));
+    assert_eq!(empty_at_height(0), leaf(b""));
     assert_hex(
-        empty(6).as_bytes(),
+        empty_at_height(6).as_bytes(),
         "2be3cf0551cc6936d461e3dc43f3c4bf50cbee1bc091925254e879f4e7665e94",
     );
     for empty_height in 1..=MAX_SUBTREE_HEIGHT {
         assert_eq!(
-            empty(empty_height),
-            hash::node(&empty(empty_height - 1), &empty(empty_height - 1))
+            empty_at_height(empty_height),
+            hash::node(
+                &empty_at_height(empty_height - 1),
+                &empty_at_height(empty_height - 1)
+            )
         );
     }
     let mainnet = Geometry::MAINNET;
@@ -60,9 +64,12 @@ fn primitive_vectors() {
 }
 
 #[test]
-#[should_panic(expected = "exceeds 8")]
-fn empty_above_8_panics() {
-    let _ = empty(MAX_SUBTREE_HEIGHT + 1);
+fn subtree_height_stops_at_8() {
+    assert_eq!(
+        SubtreeHeight::new(MAX_SUBTREE_HEIGHT).map(SubtreeHeight::get),
+        Some(MAX_SUBTREE_HEIGHT)
+    );
+    assert_eq!(SubtreeHeight::new(MAX_SUBTREE_HEIGHT + 1), None);
 }
 
 #[test]

@@ -10,7 +10,7 @@
 
 use crate::chunk::chunk_root;
 use crate::error::VerifyError;
-use crate::geometry::Geometry;
+use crate::geometry::{Geometry, SubtreeHeight};
 use crate::hash::{self, empty, leaf, node, size_witness};
 use crate::shape::{climb, depth};
 use crate::types::{DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash};
@@ -132,7 +132,9 @@ pub fn verify_segment(
         // Entirely past the data: the sibling must be `empty(ℓ)`. Any other hash
         // fails. A sibling that still holds a data segment is not opened
         // (spec §5, §9).
-        if sibling_start >= data_segments && sibling != empty(level) {
+        if sibling_start >= data_segments
+            && sibling != empty(SubtreeHeight::new(level).expect("ℓ < h <= MAX_SUBTREE_HEIGHT"))
+        {
             return Err(VerifyError::CommitmentMismatch);
         }
         // Bit `ℓ` of `j` picks the side (spec §5). Even: this segment is the left child.

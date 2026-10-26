@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 use sha2::{Digest as _, Sha256};
 
-use crate::geometry::{Geometry, MAX_SUBTREE_HEIGHT};
+use crate::geometry::{Geometry, MAX_SUBTREE_HEIGHT, SubtreeHeight};
 use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash, SizeWitness};
 
 /// `empty(0) ..= empty(MAX_SUBTREE_HEIGHT)` (spec §3, §8).
@@ -93,12 +93,11 @@ pub fn chunk_key(commitment: &DataCommitment, chunk_index: u32) -> ChunkKey {
 /// Root of an empty perfect subtree of height `k` (spec §3, §8).
 ///
 /// `empty(0)` is `leaf("")`. `empty(k)` is `node(empty(k - 1), empty(k - 1))`.
-/// Panics if `k > MAX_SUBTREE_HEIGHT`. A chunk subtree never asks for more:
-/// `segments_per_chunk` is at most [`MAX_SEGMENTS_PER_CHUNK`](crate::geometry::MAX_SEGMENTS_PER_CHUNK),
-/// so its height is at most [`MAX_SUBTREE_HEIGHT`] (spec §2).
+/// [`SubtreeHeight`] holds at most [`MAX_SUBTREE_HEIGHT`], so every height has
+/// a table entry (spec §2).
 ///
 /// `k` is `empty_height`.
-pub fn empty(empty_height: u32) -> NodeHash {
+pub fn empty(empty_height: SubtreeHeight) -> NodeHash {
     static TABLE: LazyLock<[NodeHash; EMPTY_TABLE_LEN]> = LazyLock::new(|| {
         let mut table = [NodeHash::from([0; HASH_SIZE]); EMPTY_TABLE_LEN];
         table[0] = leaf(b"");
@@ -107,11 +106,8 @@ pub fn empty(empty_height: u32) -> NodeHash {
         }
         table
     });
-    assert!(
-        empty_height <= MAX_SUBTREE_HEIGHT,
-        "empty height {empty_height} exceeds {MAX_SUBTREE_HEIGHT}"
-    );
-    TABLE[empty_height as usize]
+    let index = usize::try_from(empty_height.get()).expect("subtree height fits usize");
+    TABLE[index]
 }
 
 /// `node(data_tree_root, size_witness(G, data_size))` (spec §4).

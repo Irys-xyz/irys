@@ -5,7 +5,7 @@
 //! over empty leaves (spec §8).
 
 use crate::error::ChunkLengthError;
-use crate::geometry::{Geometry, MAX_SUBTREE_HEIGHT};
+use crate::geometry::{Geometry, MAX_SUBTREE_HEIGHT, SubtreeHeight};
 use crate::hash::{empty, leaf, node};
 use crate::types::NodeHash;
 
@@ -63,10 +63,11 @@ fn subtree(geometry: &Geometry, bytes: &[u8], start_leaf: u32, subtree_height: u
         .checked_mul(geometry.segment_size())
         .expect("segment start fits u64");
     if range_start >= chunk_length {
-        // Past the bytes: `empty(k)` (spec §4, §8). `subtree_height` is at most
-        // `MAX_SUBTREE_HEIGHT`; `empty` panics above that.
-        debug_assert!(subtree_height <= MAX_SUBTREE_HEIGHT);
-        return empty(subtree_height);
+        // Past the bytes: `empty(k)` (spec §4, §8).
+        return empty(
+            SubtreeHeight::new(subtree_height)
+                .expect("a chunk subtree height is at most MAX_SUBTREE_HEIGHT"),
+        );
     }
     if subtree_height == 0 {
         // `min(segment_size, chunk_length - range_start)` (spec §2). The sum fits:

@@ -11,6 +11,29 @@ pub const MAX_SEGMENTS_PER_CHUNK: u32 = 256;
 /// `log2(MAX_SEGMENTS_PER_CHUNK)`. A chunk subtree is never taller (spec §2).
 pub const MAX_SUBTREE_HEIGHT: u32 = MAX_SEGMENTS_PER_CHUNK.trailing_zeros();
 
+/// Height of a perfect subtree inside one chunk: `0 ..= MAX_SUBTREE_HEIGHT` (spec §2, §3).
+///
+/// [`empty`](crate::hash::empty) takes this type, so no call can ask for a
+/// height that no chunk has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SubtreeHeight(u32);
+
+impl SubtreeHeight {
+    /// `None` above [`MAX_SUBTREE_HEIGHT`].
+    pub const fn new(height: u32) -> Option<Self> {
+        if height <= MAX_SUBTREE_HEIGHT {
+            Some(Self(height))
+        } else {
+            None
+        }
+    }
+
+    /// The height as a number.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// Mainnet and testnet chunk size, 256 KiB (spec §2).
 const MAINNET_CHUNK_SIZE: u64 = 262_144;
 

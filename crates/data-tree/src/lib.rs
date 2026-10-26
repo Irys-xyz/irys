@@ -23,7 +23,7 @@ pub mod verify;
 pub use builder::{DataTree, DataTreeBuilder};
 pub use chunk::chunk_root;
 pub use error::{BuildError, ChunkLengthError, GeometryError, ProofError, SizeError, VerifyError};
-pub use geometry::{Geometry, MAX_SEGMENTS_PER_CHUNK, MAX_SUBTREE_HEIGHT};
+pub use geometry::{Geometry, MAX_SEGMENTS_PER_CHUNK, MAX_SUBTREE_HEIGHT, SubtreeHeight};
 pub use hash::{TreeDomainTag, chunk_key, data_commitment, empty, leaf, node, size_witness};
 pub use shape::depth;
 pub use types::{ChunkKey, DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash, SizeWitness};

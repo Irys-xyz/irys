@@ -10,13 +10,14 @@
 use proptest::prelude::*;
 use rstest::rstest;
 
+use super::empty_at_height;
 use super::strategies;
 use crate::error::VerifyError;
 use crate::geometry::{Geometry, MAX_SUBTREE_HEIGHT};
 use crate::shape::climb;
 use crate::types::{DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash};
 use crate::verify::{verify_chunk, verify_segment};
-use crate::{DataTree, chunk_root, data_commitment, empty, leaf, node, size_witness};
+use crate::{DataTree, chunk_root, data_commitment, leaf, node, size_witness};
 
 /// Byte repeated through the garbage hash in the published attack.
 const GARBAGE_BYTE: u8 = 0xAB;
@@ -40,11 +41,11 @@ fn malformed_last_chunk_of_the_published_attack_is_rejected() {
     let chunk = chunk_bytes(&geometry, &bytes, data_size, 1);
     let segment = &chunk[..];
     let garbage = NodeHash::from([GARBAGE_BYTE; HASH_SIZE]);
-    let left = node(&leaf(segment), &empty(0));
+    let left = node(&leaf(segment), &empty_at_height(0));
     let bad_chunk_root = node(&left, &garbage);
     let chunk_zero = tree.chunk_root(0).unwrap();
     let mut proof = Vec::new();
-    proof.extend_from_slice(empty(0).as_bytes());
+    proof.extend_from_slice(empty_at_height(0).as_bytes());
     proof.extend_from_slice(garbage.as_bytes());
     proof.extend_from_slice(chunk_zero.as_bytes());
     proof.extend_from_slice(size_witness(&geometry, data_size).as_bytes());
@@ -109,8 +110,8 @@ fn empty_region_sibling_replaced_by_another_hash_is_rejected() {
     let data_size = 40;
     let level = 1;
     let segment = last_chunk_segment(&geometry, data_size, 0);
-    let left = node(&leaf(&segment), &empty(0));
-    reject_substitute(&geometry, data_size, 0, level, empty(level + 1));
+    let left = node(&leaf(&segment), &empty_at_height(0));
+    reject_substitute(&geometry, data_size, 0, level, empty_at_height(level + 1));
     reject_substitute(&geometry, data_size, 0, level, left);
 
     // Height 8: the top in-chunk sibling is `empty(7)`. `empty(8)` is the next table entry.
@@ -123,7 +124,7 @@ fn empty_region_sibling_replaced_by_another_hash_is_rejected() {
     let data_size = geometry.chunk_size() + 1;
     let level = geometry.height() - 1;
     assert_eq!(level, MAX_SUBTREE_HEIGHT - 1);
-    reject_substitute(&geometry, data_size, 0, level, empty(level + 1));
+    reject_substitute(&geometry, data_size, 0, level, empty_at_height(level + 1));
 }
 
 /// spec §10 sweeps `1..=199`. `n = 200` is the next size. Every height is
@@ -174,7 +175,7 @@ fn reject_malformed_right_half(geometry: &Geometry, data_size: u64, data_segment
     let chunk = chunk_bytes(geometry, &bytes, data_size, chunk_index);
     let level = geometry.height() - 1;
     let garbage = NodeHash::from([GARBAGE_BYTE; HASH_SIZE]);
-    assert_ne!(garbage, empty(level));
+    assert_ne!(garbage, empty_at_height(level));
 
     let mut checked = 0_u32;
     let mut commitment = None;
@@ -203,7 +204,7 @@ fn reject_malformed_right_half(geometry: &Geometry, data_size: u64, data_segment
         });
         assert_eq!(
             sibling_at(&honest, level),
-            empty(level),
+            empty_at_height(level),
             "n={data_size} j={segment_index}: the right half is empty({level})"
         );
         let bad = replace_sibling(&honest, level, &garbage);
@@ -259,7 +260,7 @@ fn reject_substitute(
     level: u32,
     substitute: NodeHash,
 ) {
-    assert_ne!(substitute, empty(level));
+    assert_ne!(substitute, empty_at_height(level));
     let bytes = tree_bytes(data_size);
     let tree = DataTree::from_bytes(*geometry, &bytes).unwrap();
     let chunk_index = tree.chunk_count() - 1;
@@ -268,7 +269,7 @@ fn reject_substitute(
     let honest = tree
         .segment_proof(chunk_index, segment_index, &chunk)
         .unwrap();
-    assert_eq!(sibling_at(&honest, level), empty(level));
+    assert_eq!(sibling_at(&honest, level), empty_at_height(level));
     let bad = replace_sibling(&honest, level, &substitute);
     let commitment = commitment_from_segment_proof(
         geometry,
@@ -325,10 +326,10 @@ fn reject_one_replaced_sibling(geometry: &Geometry, bytes: &[u8], probe: u64) {
         .unwrap();
     assert_eq!(
         sibling_at(&honest, level),
-        empty(level),
+        empty_at_height(level),
         "builder sibling at level {level} is empty({level})"
     );
-    let substitute = hash_other_than(empty(level), level, &segment, probe);
+    let substitute = hash_other_than(empty_at_height(level), level, &segment, probe);
     let bad = replace_sibling(&honest, level, &substitute);
     let commitment = commitment_from_segment_proof(
         geometry,
@@ -423,7 +424,7 @@ fn commitment_from_segment_proof(
 
 fn hash_other_than(required: NodeHash, level: u32, segment: &[u8], probe: u64) -> NodeHash {
     let choices = [
-        empty(level + 1),
+        empty_at_height(level + 1),
         NodeHash::from([GARBAGE_BYTE; HASH_SIZE]),
         leaf(segment),
     ];
@@ -697,7 +698,7 @@ fn subtree_with_bad_leaf(
     let contains_bad = bad_leaf.is_some_and(|leaf| leaf >= start_leaf && leaf < end_leaf);
     let range_start = u64::from(start_leaf) * geometry.segment_size();
     if !contains_bad && range_start >= chunk_length {
-        return empty(subtree_height);
+        return empty_at_height(subtree_height);
     }
     if subtree_height == 0 {
         if contains_bad {

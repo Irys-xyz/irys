@@ -15,6 +15,9 @@ mod strategies;
 mod tags;
 mod vectors;
 
+use crate::types::NodeHash;
+use crate::{SubtreeHeight, empty};
+
 fn pattern(byte_length: usize) -> Vec<u8> {
     (0..byte_length)
         .map(|byte_index| u8::try_from(byte_index % 251).expect("251 fits in u8"))
@@ -32,4 +35,9 @@ fn concat_hex(lines: &[&str]) -> Vec<u8> {
         out.extend(hex::decode(line).unwrap_or_else(|err| panic!("hex {line}: {err}")));
     }
     out
+}
+
+/// `empty(k)` at a height the test knows is at most `MAX_SUBTREE_HEIGHT`.
+fn empty_at_height(height: u32) -> NodeHash {
+    empty(SubtreeHeight::new(height).expect("test height is at most MAX_SUBTREE_HEIGHT"))
 }

@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use irys_data_tree::{
     DataCommitment, DataTree, DataTreeRoot, Geometry, HASH_SIZE, MAX_SUBTREE_HEIGHT, NodeHash,
-    SizeError, VerifyError, chunk_key, data_commitment, depth, empty, leaf, node, size_witness,
-    verify_chunk, verify_segment,
+    SizeError, SubtreeHeight, VerifyError, chunk_key, data_commitment, depth, empty, leaf, node,
+    size_witness, verify_chunk, verify_segment,
 };
 use serde::Deserialize;
 
@@ -630,7 +630,7 @@ fn check_primitives(file: &VectorFile<PrimitiveCase>) {
             }
             PrimitiveCase::Empty { empty_height, hash } => {
                 assert_eq!(
-                    hex_of(empty(*empty_height).as_bytes()),
+                    hex_of(empty_at_height(*empty_height).as_bytes()),
                     *hash,
                     "empty {empty_height}"
                 );
@@ -1735,7 +1735,7 @@ fn check_mixed_leaf_accepts(cases: &[&SegmentProofCase]) {
     assert_eq!(cases.len(), 2, "segments 0 and 1 of n = 20");
     let geometry = Geometry::TESTING;
     let stand_in = stand_in_hash();
-    assert_ne!(stand_in, empty(0), "the stand-in is not empty(0)");
+    assert_ne!(stand_in, empty_at_height(0), "the stand-in is not empty(0)");
     let mut commitments = Vec::new();
     for (expected_segment, case) in [0_u32, 1].into_iter().zip(cases) {
         let label = format!("mixed leaf segment {expected_segment}");
@@ -1808,17 +1808,22 @@ fn check_pinned_sibling(geometry: &Geometry, case: &NegativeCase) {
     );
     assert_eq!(
         sibling_hash(&proof, level),
-        empty(level),
+        empty_at_height(level),
         "{}: the honest sibling is empty({level})",
         case.name
     );
     if level == 0 {
         let higher = level + 1;
         assert!(higher < geometry.height(), "{}", case.name);
-        assert_eq!(sibling_hash(&proof, higher), empty(higher), "{}", case.name);
+        assert_eq!(
+            sibling_hash(&proof, higher),
+            empty_at_height(higher),
+            "{}",
+            case.name
+        );
     }
     let stand_in = stand_in_hash();
-    assert_ne!(stand_in, empty(level), "{}", case.name);
+    assert_ne!(stand_in, empty_at_height(level), "{}", case.name);
     replace_sibling(&mut proof, level, &stand_in);
     let commitment = commitment_of_unpinned_proof(
         geometry,
@@ -2127,7 +2132,7 @@ fn subtree_with_stand_in_leaf(
     let contains = stand_in_leaf >= start_leaf && stand_in_leaf < end_leaf;
     let range_start = u64::from(start_leaf) * geometry.segment_size();
     if !contains && range_start >= chunk_length {
-        return empty(subtree_height);
+        return empty_at_height(subtree_height);
     }
     if subtree_height == 0 {
         if contains {
@@ -2156,4 +2161,9 @@ fn subtree_with_stand_in_leaf(
         stand_in_leaf,
     );
     node(&left, &right)
+}
+
+/// `empty(k)` at a height the caller knows is at most `MAX_SUBTREE_HEIGHT`.
+fn empty_at_height(height: u32) -> NodeHash {
+    empty(SubtreeHeight::new(height).expect("height is at most MAX_SUBTREE_HEIGHT"))
 }

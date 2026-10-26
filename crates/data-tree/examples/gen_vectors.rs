@@ -16,8 +16,8 @@ use std::process::ExitCode;
 
 use irys_data_tree::{
     DataTree, DataTreeRoot, Geometry, HASH_SIZE, MAX_SUBTREE_HEIGHT, NodeHash, SizeError,
-    VerifyError, chunk_key, data_commitment, depth, empty, leaf, node, size_witness, verify_chunk,
-    verify_segment,
+    SubtreeHeight, VerifyError, chunk_key, data_commitment, depth, empty, leaf, node, size_witness,
+    verify_chunk, verify_segment,
 };
 use serde::Serialize;
 
@@ -290,7 +290,7 @@ fn primitive_cases() -> Vec<PrimitiveCase> {
     for empty_height in 0..=MAX_SUBTREE_HEIGHT {
         cases.push(PrimitiveCase::Empty {
             empty_height,
-            hash: hex_of(empty(empty_height).as_bytes()),
+            hash: hex_of(empty_at_height(empty_height).as_bytes()),
         });
     }
 
@@ -984,20 +984,20 @@ fn pinned_sibling_case(name: &'static str, data_size: u64, level: u32) -> Negati
     );
     assert_eq!(
         sibling_hash(&proof, level),
-        empty(level),
+        empty_at_height(level),
         "{name}: the honest sibling is empty({level})"
     );
     // A higher level stays `empty(ℓ)` here, so the stand-in is the only bad pin.
     if level == 0 {
         let higher = level + 1;
         assert!(higher < geometry.height(), "{name}: a higher level exists");
-        assert_eq!(sibling_hash(&proof, higher), empty(higher));
+        assert_eq!(sibling_hash(&proof, higher), empty_at_height(higher));
         assert!(sibling_start(segment_index, higher) >= data_segments);
     }
     let stand_in = stand_in_hash();
     assert_ne!(
         stand_in,
-        empty(level),
+        empty_at_height(level),
         "{name}: the stand-in is not empty({level})"
     );
     replace_sibling(&mut proof, level, &stand_in);
@@ -1468,7 +1468,7 @@ fn subtree_with_stand_in_leaf(
     let contains = stand_in_leaf >= start_leaf && stand_in_leaf < end_leaf;
     let range_start = u64::from(start_leaf) * geometry.segment_size();
     if !contains && range_start >= chunk_length {
-        return empty(subtree_height);
+        return empty_at_height(subtree_height);
     }
     if subtree_height == 0 {
         if contains {
@@ -2322,4 +2322,9 @@ struct NegativeDraft {
     proof_chunk_index: Option<u32>,
     expected_error: &'static str,
     record_unanchored: bool,
+}
+
+/// `empty(k)` at a height the caller knows is at most `MAX_SUBTREE_HEIGHT`.
+fn empty_at_height(height: u32) -> NodeHash {
+    empty(SubtreeHeight::new(height).expect("height is at most MAX_SUBTREE_HEIGHT"))
 }
