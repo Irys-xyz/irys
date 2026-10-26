@@ -92,6 +92,7 @@ impl CoinGeckoOracle {
 
         let amount = Amount::<(IrysPrice, Usd)>::token(entry.usd)
             .context("failed to convert price to Amount")?;
+        crate::reject_zero_price(amount)?;
 
         let last_updated = entry
             .last_updated_at

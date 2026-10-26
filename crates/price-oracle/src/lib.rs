@@ -43,6 +43,13 @@ fn reject_future_timestamp_at(reported: UnixTimestamp, now_secs: u64) -> eyre::R
     Ok(())
 }
 
+/// Fails when the feed reports a zero price. Validators reject a zero oracle price, so a producer
+/// that adopted it would build blocks no node accepts.
+pub(crate) fn reject_zero_price(amount: Amount<(IrysPrice, Usd)>) -> eyre::Result<()> {
+    eyre::ensure!(!amount.amount.is_zero(), "oracle reported a zero price");
+    Ok(())
+}
+
 pub mod coingecko;
 pub mod coinmarketcap;
 pub mod mock_oracle;
@@ -331,5 +338,21 @@ mod future_timestamp_tests {
         assert!(reject_future_timestamp(now).is_ok());
         let future = UnixTimestamp::from_secs(now.as_secs() + MAX_ORACLE_CLOCK_SKEW_SECS + 10);
         assert!(reject_future_timestamp(future).is_err());
+    }
+}
+
+#[cfg(test)]
+mod zero_price_tests {
+    use super::*;
+    use irys_types::U256;
+
+    #[test]
+    fn rejects_zero_price() {
+        assert!(reject_zero_price(Amount::new(U256::from(0_u64))).is_err());
+    }
+
+    #[test]
+    fn accepts_nonzero_price() {
+        assert!(reject_zero_price(Amount::new(U256::from(1_u64))).is_ok());
     }
 }
