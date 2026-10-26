@@ -1188,15 +1188,27 @@ fn expected_packing_record(config: &Config) -> PackingRecord {
 /// Labels with no packing identity would accept bytes packed for an unknown
 /// miner or partition. A fresh open writes the params file before
 /// `intervals.json`, so only a change from outside the node leaves this state.
+/// A missing or empty file, or one with only `Uninitialized` labels, holds no
+/// packed bytes. `mid_write_intervals.json` only turns spans back to
+/// `Uninitialized`, so this file alone bounds what open would load. The read
+/// does not create or change the file.
 fn refuse_labels_without_packing_params(params_path: &Path) -> eyre::Result<()> {
     let intervals_path = params_path.with_file_name("intervals.json");
-    let labelled = match fs::metadata(&intervals_path) {
-        Ok(meta) => meta.len() > 0,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+    let bytes = match fs::read(&intervals_path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => {
-            return Err(err).wrap_err_with(|| format!("stat {}", intervals_path.display()));
+            return Err(err).wrap_err_with(|| format!("read {}", intervals_path.display()));
         }
     };
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let labels: StorageIntervals = serde_json::from_slice(&bytes)
+        .wrap_err_with(|| format!("parse {}", intervals_path.display()))?;
+    let labelled = labels
+        .iter()
+        .any(|(_, chunk_type)| *chunk_type != ChunkType::Uninitialized);
     ensure!(
         !labelled,
         "{} is missing, but {} labels stored chunks. Restore {PACKING_PARAMS_FILE_NAME}, or stop the node and clear this submodule directory (index, intervals.json, chunks.dat) so it can repack.",
@@ -11073,6 +11085,31 @@ mod tests {
         )
     }
 
+    /// Only `Uninitialized` labels hold no packed bytes, so a missing
+    /// params file is a fresh module.
+    fn unlabelled_module_without_params_opens(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("open_unlabelled_without_params")
+            .build();
+        let config = engine_config(tmp.path(), engine);
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        let mut labels = StorageIntervals::new();
+        labels
+            .insert_merge_touching_if_values_equal(
+                partition_chunk_offset_ii!(0, 3),
+                ChunkType::Uninitialized,
+            )
+            .expect("one label span");
+        fs::write(sub.join("intervals.json"), serde_json::to_vec(&labels)?)?;
+
+        let storage = StorageModule::new(&one_span(3, "sub", None), &config)?;
+        drop(storage);
+        let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+        assert_eq!(loaded.packing_address, config.node_config.miner_address());
+        Ok(())
+    }
+
     fn matching_module_opens(engine: SubmoduleIndexEngine) -> eyre::Result<()> {
         let tmp = TempDirBuilder::new().prefix("open_match_identity").build();
         let config = engine_config(tmp.path(), engine);
@@ -11158,6 +11195,7 @@ mod tests {
             foreign_module_is_refused(engine, ForeignModule::Partition)?;
             foreign_module_is_refused(engine, ForeignModule::Iterations)?;
             labelled_module_without_params_is_refused(engine)?;
+            unlabelled_module_without_params_opens(engine)?;
             matching_module_opens(engine)?;
             fresh_module_opens(engine)?;
             legacy_params_are_filled_on_open(engine)?;
