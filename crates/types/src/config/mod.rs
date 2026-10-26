@@ -507,6 +507,20 @@ impl Config {
             self.consensus.epoch.num_blocks_in_epoch,
         );
 
+        // Fee math multiplies years by epochs_per_year() as plain u64, which
+        // panics under overflow-checks. Zero divisors are rejected above, so
+        // epochs_per_year() cannot panic here.
+        let epochs_per_year = self.consensus.epochs_per_year();
+        ensure!(
+            self.consensus
+                .safe_minimum_number_of_years
+                .checked_mul(epochs_per_year)
+                .is_some(),
+            "safe_minimum_number_of_years ({}) * epochs_per_year ({}) overflows u64",
+            self.consensus.safe_minimum_number_of_years,
+            epochs_per_year
+        );
+
         // NC-0042 / deep-reorg safety: a term-ledger slot's lifetime must exceed
         // the reorg window. Once a slot expires, the promotion filter and refund
         // walk resolve each expired tx's ledger inclusion through the *migrated*
@@ -2233,6 +2247,12 @@ mod validate_tests {
             c.difficulty_adjustment.block_time = u64::MAX / 16;
         },
         "block_time (1152921504606846975) * num_blocks_in_epoch (100) overflows u64"
+    )]
+    #[case::perm_storage_years_overflow_epochs(
+        |c: &mut ConsensusConfig| {
+            c.safe_minimum_number_of_years = u64::MAX;
+        },
+        "safe_minimum_number_of_years"
     )]
     #[case::zero_max_data_tx_chunks(
         |c: &mut ConsensusConfig| {
