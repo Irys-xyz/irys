@@ -261,6 +261,8 @@ pub enum InvalidDataError {
     ExecutionPayloadHashMismatch,
     #[error("Invalid execution payload structure")]
     ExecutionPayloadInvalidStructure,
+    #[error("Execution payload body does not match its header: {0}")]
+    ExecutionPayloadBodyMismatch(String),
     #[error("Invalid ingress proof signature")]
     IngressProofSignature,
     #[error("Invalid ingress proof anchor: {0}")]

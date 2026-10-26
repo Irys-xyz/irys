@@ -14,6 +14,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::RethBlockProvider;
 
 use irys_domain::ExecutionPayloadCache;
+use irys_domain::execution_payload_cache::PayloadBodyMismatchError;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
@@ -1494,10 +1495,10 @@ where
     pub async fn add_execution_payload_to_cache(
         &self,
         sealed_block: reth::primitives::SealedBlock<reth_ethereum_primitives::Block>,
-    ) {
+    ) -> Result<(), PayloadBodyMismatchError> {
         self.execution_payload_provider
             .add_payload_to_cache(sealed_block)
-            .await;
+            .await
     }
 
     pub async fn get_block_header(

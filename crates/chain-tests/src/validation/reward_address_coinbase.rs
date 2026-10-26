@@ -77,7 +77,8 @@ async fn heavy_test_reward_address_not_bound_to_evm_coinbase() -> eyre::Result<(
         .node_ctx
         .block_pool
         .add_execution_payload_to_cache(eth_payload.block().clone())
-        .await;
+        .await
+        .expect("payload body matches its header");
 
     let outcome =
         send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&mismatched), true).await?;

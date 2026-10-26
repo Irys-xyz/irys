@@ -4,6 +4,8 @@ use alloy_rpc_types::engine::ExecutionData;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use lru::LruCache;
 use reth::builder::{BeaconOnNewPayloadError, Block as _};
+use reth::consensus::ConsensusError;
+use reth::consensus_common::validation::validate_body_against_header;
 use reth_ethereum_primitives::Block;
 use reth_primitives_traits::SealedBlock;
 #[cfg(feature = "test-utils")]
@@ -72,6 +74,17 @@ pub enum ExecutionPayloadWaitError {
         evm_block_hash: B256,
         elapsed_ms: u64,
     },
+}
+
+/// The payload body does not match the commitments in its header
+/// (transactions root, ommers hash, withdrawals root). The cache key is the
+/// header hash, so such a body must not be stored under it.
+#[derive(Debug, thiserror::Error)]
+#[error("execution payload {evm_block_hash} body does not match its header: {source}")]
+pub struct PayloadBodyMismatchError {
+    pub evm_block_hash: B256,
+    #[source]
+    pub source: ConsensusError,
 }
 
 impl From<BeaconOnNewPayloadError> for ExecutionPayloadProviderError {
@@ -196,8 +209,24 @@ impl ExecutionPayloadCache {
         }
     }
 
-    pub async fn add_payload_to_cache(&self, sealed_block: SealedBlock<Block>) {
+    /// Adds a payload to the cache and wakes the waiters for its hash.
+    ///
+    /// The payload is keyed by its header hash, which commits to the body
+    /// only through the header's transactions root, ommers hash and
+    /// withdrawals root. A body that does not match these is rejected and
+    /// nothing is stored, so a cached payload is always the exact EVM block
+    /// its hash names and a later correct copy is still accepted.
+    pub async fn add_payload_to_cache(
+        &self,
+        sealed_block: SealedBlock<Block>,
+    ) -> Result<(), PayloadBodyMismatchError> {
         let evm_block_hash = sealed_block.hash();
+        validate_body_against_header(sealed_block.body(), sealed_block.header()).map_err(
+            |source| PayloadBodyMismatchError {
+                evm_block_hash,
+                source,
+            },
+        )?;
         {
             debug!("Adding execution payload to cache: {:?}", evm_block_hash);
             let mut cache = self.cache.write().await;
@@ -218,6 +247,7 @@ impl ExecutionPayloadCache {
         if let Some(sender) = self.payload_senders.write().await.pop(&evm_block_hash) {
             let _ = sender.send(Some(sealed_block.clone()));
         }
+        Ok(())
     }
 
     pub async fn remove_payload_from_cache(&self, evm_block_hash: &B256) {
@@ -548,6 +578,8 @@ struct ExecutionPayloadCacheInner {
 mod tests {
     use super::*;
     use crate::PeerList;
+    use reth_ethereum_primitives::BlockBody;
+    use reth_primitives_traits::Header;
 
     /// Default wait timeout used by these unit tests. Generous enough to
     /// keep the `ReceiverDisrupted` test from racing the new timeout
@@ -688,7 +720,10 @@ mod tests {
         let sealed: SealedBlock<Block> = block.seal_slow();
         let evm_block_hash = sealed.hash();
 
-        cache.add_payload_to_cache(sealed.clone()).await;
+        cache
+            .add_payload_to_cache(sealed.clone())
+            .await
+            .expect("payload body matches its header");
 
         let started = std::time::Instant::now();
         let got = cache
@@ -744,7 +779,10 @@ mod tests {
         );
 
         // Deliver the payload. waiter_b must observe it.
-        cache.add_payload_to_cache(sealed.clone()).await;
+        cache
+            .add_payload_to_cache(sealed.clone())
+            .await
+            .expect("payload body matches its header");
 
         let result = await_receiver(waiter_b, TEST_WAIT_TIMEOUT, evm_block_hash).await;
         let delivered = result.expect("sibling waiter must resolve when payload arrives");
@@ -795,7 +833,10 @@ mod tests {
         let waiter_b = cache.block_receiver(evm_block_hash).await;
 
         // Deliver the payload. waiter_b must observe it normally.
-        cache.add_payload_to_cache(sealed.clone()).await;
+        cache
+            .add_payload_to_cache(sealed.clone())
+            .await
+            .expect("payload body matches its header");
         let result = await_receiver(waiter_b, TEST_WAIT_TIMEOUT, evm_block_hash).await;
         let delivered = result.expect("second waiter must resolve after first waiter cancelled");
         assert_eq!(delivered.hash(), evm_block_hash);
@@ -833,7 +874,10 @@ mod tests {
         // broadcasting `Some(payload)`. `waiter` still holds a
         // `Receiver` clone of the underlying `Shared`, so it sees the
         // value even after the `Sender` is dropped.
-        cache.add_payload_to_cache(sealed.clone()).await;
+        cache
+            .add_payload_to_cache(sealed.clone())
+            .await
+            .expect("payload body matches its header");
 
         // First `changed()` returns Ok (version bumped by send).
         waiter
@@ -846,5 +890,83 @@ mod tests {
             Some(evm_block_hash),
             "watch retention must hand the late waiter the delivered payload",
         );
+    }
+
+    fn test_cache() -> ExecutionPayloadCache {
+        let peer_list = PeerList::test_mock().expect("test PeerList");
+        ExecutionPayloadCache::new(peer_list, RethBlockProvider::new_mock(), TEST_WAIT_TIMEOUT)
+    }
+
+    fn block_with_header(header: Header) -> Block {
+        Block {
+            header,
+            body: BlockBody::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn payload_with_mismatched_transactions_root_is_not_cached() {
+        let cache = test_cache();
+        let sealed = block_with_header(Header {
+            transactions_root: B256::repeat_byte(0x11),
+            ..Default::default()
+        })
+        .seal_slow();
+        let evm_block_hash = sealed.hash();
+
+        let err = cache
+            .add_payload_to_cache(sealed)
+            .await
+            .expect_err("empty body does not match a non-empty transactions root");
+        assert_eq!(err.evm_block_hash, evm_block_hash);
+        assert!(matches!(
+            err.source,
+            ConsensusError::BodyTransactionRootDiff(_)
+        ));
+        assert!(!cache.is_payload_in_cache(&evm_block_hash).await);
+    }
+
+    /// A body that does not match the header shares the header hash with the
+    /// correct body. Rejecting it must leave the hash free for the correct copy.
+    #[tokio::test]
+    async fn matching_payload_is_cached_after_a_mismatched_copy() {
+        let cache = test_cache();
+        let ommers = vec![Header::default()];
+        let header = Header {
+            ommers_hash: reth_primitives_traits::proofs::calculate_ommers_root(&ommers),
+            ..Default::default()
+        };
+        let matching = Block {
+            header: header.clone(),
+            body: BlockBody {
+                ommers,
+                ..Default::default()
+            },
+        }
+        .seal_slow();
+        let mismatched = block_with_header(header).seal_slow();
+        let evm_block_hash = matching.hash();
+        assert_eq!(
+            mismatched.hash(),
+            evm_block_hash,
+            "both copies share the header"
+        );
+
+        let err = cache
+            .add_payload_to_cache(mismatched)
+            .await
+            .expect_err("empty ommers do not match the header ommers hash");
+        assert!(matches!(err.source, ConsensusError::BodyOmmersHashDiff(_)));
+        assert!(!cache.is_payload_in_cache(&evm_block_hash).await);
+
+        cache
+            .add_payload_to_cache(matching.clone())
+            .await
+            .expect("matching body is accepted");
+        let cached = cache
+            .get_sealed_block_from_cache(&evm_block_hash)
+            .await
+            .expect("matching payload is cached");
+        assert_eq!(cached, matching);
     }
 }

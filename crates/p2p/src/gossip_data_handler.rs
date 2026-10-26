@@ -842,9 +842,17 @@ where
             ));
         }
 
+        // The cache rejects a body that does not match the header. Such a
+        // copy is not recorded as seen, so a correct copy with the same hash
+        // is still accepted.
         self.execution_payload_cache
             .add_payload_to_cache(sealed_block)
-            .await;
+            .await
+            .map_err(|err| {
+                GossipError::InvalidData(InvalidDataError::ExecutionPayloadBodyMismatch(
+                    err.to_string(),
+                ))
+            })?;
 
         // Only record as seen after validation and successful cache addition
         self.cache.record_seen(
@@ -2379,6 +2387,123 @@ mod body_fetch_recovery_tests {
             pulls.load(Ordering::SeqCst),
             0,
             "a recently processed block must not be pulled again"
+        );
+    }
+}
+
+#[cfg(test)]
+mod execution_payload_tests {
+    use super::*;
+    use crate::tests::util::data_handler_stub;
+    use irys_domain::PeerList;
+    use irys_domain::chain_sync_state::ChainSyncState;
+    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{DatabaseProvider, DbSyncMode, NodeConfig};
+    use reth::primitives::Header;
+    use reth::primitives::proofs::calculate_ommers_root;
+    use reth_ethereum_primitives::BlockBody as EvmBlockBody;
+
+    type TestHandler =
+        GossipDataHandler<crate::tests::util::MempoolStub, crate::tests::util::BlockDiscoveryStub>;
+
+    fn test_handler() -> (irys_testing_utils::tempfile::TempDir, Arc<TestHandler>) {
+        let dir = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = dir.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(
+                &config.node_config.base_directory,
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("open test db"),
+        ));
+        let peer_list = PeerList::test_mock().expect("peer list");
+        let handler = data_handler_stub(&config, &peer_list, db, ChainSyncState::new(false, false));
+        (dir, handler)
+    }
+
+    fn payload_request(block: Block) -> GossipRequestV2<Block> {
+        let miner_address = IrysAddress::repeat_byte(0x33);
+        GossipRequestV2 {
+            peer_id: IrysPeerId::from(miner_address),
+            miner_address,
+            data: block,
+        }
+    }
+
+    /// Returns a block whose header commits to one ommer, and a copy with
+    /// the same header (so the same hash) but an empty body.
+    fn matching_and_mismatched_blocks() -> (Block, Block) {
+        let ommers = vec![Header::default()];
+        let header = Header {
+            number: 1,
+            ommers_hash: calculate_ommers_root(&ommers),
+            ..Default::default()
+        };
+        let matching = Block {
+            header: header.clone(),
+            body: EvmBlockBody {
+                ommers,
+                ..Default::default()
+            },
+        };
+        let mismatched = Block {
+            header,
+            body: EvmBlockBody::default(),
+        };
+        (matching, mismatched)
+    }
+
+    #[tokio::test]
+    async fn mismatched_payload_is_rejected_and_matching_copy_is_accepted() {
+        let (_dir, handler) = test_handler();
+        let (matching, mismatched) = matching_and_mismatched_blocks();
+        let evm_block_hash = matching.hash_slow();
+        assert_eq!(mismatched.hash_slow(), evm_block_hash);
+
+        let result = handler
+            .handle_execution_payload(payload_request(mismatched))
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(GossipError::InvalidData(
+                    InvalidDataError::ExecutionPayloadBodyMismatch(_)
+                ))
+            ),
+            "{result:?}"
+        );
+        assert!(
+            !handler
+                .execution_payload_cache
+                .is_payload_in_cache(&evm_block_hash)
+                .await
+        );
+        assert!(
+            !handler
+                .cache
+                .seen_execution_payload_from_any_peer(&evm_block_hash)
+                .expect("seen check"),
+            "a rejected copy must not be recorded as seen"
+        );
+
+        handler
+            .handle_execution_payload(payload_request(matching.clone()))
+            .await
+            .expect("matching copy is accepted");
+        let cached = handler
+            .execution_payload_cache
+            .get_sealed_block_from_cache(&evm_block_hash)
+            .await
+            .expect("matching copy is cached");
+        assert_eq!(cached.into_block(), matching);
+        assert!(
+            handler
+                .cache
+                .seen_execution_payload_from_any_peer(&evm_block_hash)
+                .expect("seen check")
         );
     }
 }
