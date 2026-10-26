@@ -80,7 +80,9 @@ impl ApiState {
 }
 
 pub fn routes() -> impl HttpServiceFactory {
+    // CORS covers only the public API; the unauthenticated `/internal/*` routes get none.
     web::scope(API_VERSION)
+        .wrap(Cors::permissive())
         .route("/", web::get().to(index::info_route))
         .route("/ready", web::get().to(index::ready_route))
         .route(
@@ -271,8 +273,7 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
         } else {
             app
         };
-        app.wrap(Cors::permissive())
-            .wrap(TracingLogger::default())
+        app.wrap(TracingLogger::default())
             .wrap(metrics::RequestMetrics)
     })
     .disable_signals()
@@ -414,3 +415,38 @@ pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
 //         assert_eq!(resp.status(), StatusCode::OK);
 //     }
 // }
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+    use actix_web::{http::header, test};
+
+    async fn origin_header_for(path: &str) -> Option<String> {
+        let app = test::init_service(
+            App::new()
+                .service(routes())
+                .service(routes::internal::internal_routes()),
+        )
+        .await;
+        let req = test::TestRequest::default()
+            .method(actix_web::http::Method::OPTIONS)
+            .uri(path)
+            .insert_header((header::ORIGIN, "http://example.com"))
+            .insert_header((header::ACCESS_CONTROL_REQUEST_METHOD, "GET"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        resp.headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .map(|value| value.to_str().unwrap().to_owned())
+    }
+
+    #[actix_web::test]
+    async fn public_routes_allow_cross_origin() {
+        assert!(origin_header_for("/v1/info").await.is_some());
+    }
+
+    #[actix_web::test]
+    async fn internal_routes_do_not_allow_cross_origin() {
+        assert_eq!(origin_header_for("/internal/blocks").await, None);
+    }
+}
