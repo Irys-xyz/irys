@@ -319,7 +319,7 @@ Test geometry, same geometry. The last chunk holds three segments (`s = 3`). The
 
 ## 8. Cost
 
-v2 adds about 11% to hashing a chunk (tx creation) and about 3% to verifying a chunk proof. About 11% is this table's +10.6%. About 3% is this table's +2.61%. This answers the review question "how much time and compute does it add to tx creation and chunk verification?". Both formats spend almost all their time hashing the chunk bytes once. v2 hashes them as 64 segments of 4 KiB instead of one 256 KiB input.
+v2 adds about 11% to hashing a chunk (tx creation) and about 3% to verifying a chunk proof. About 11% is this table's +10.6%. About 3% is this table's +2.61%. Both formats spend almost all their time hashing the chunk bytes once. v2 hashes them as 64 segments of 4 KiB instead of one 256 KiB input.
 
 Rates measured with openssl speed -evp sha256 -bytes N on one core of an Intel i9-13900HK with SHA-NI: 1.82 GB/s on 256 KiB inputs, 1.75 GB/s on 4,097-byte inputs, about 0.15 µs per 65-byte node. 1 GB is 10^9 bytes. The sums use 0.15 µs for every small hash. That rate was measured on a 65-byte node. v1 applies it to each 32-byte hash and each 96-byte hash: a v1 node is four hashes, three of 32 bytes and one of 96 bytes (§9). The 19-byte size witness uses the same rate. That is an assumption of this model.
 
