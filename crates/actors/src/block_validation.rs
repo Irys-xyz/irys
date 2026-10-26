@@ -1673,14 +1673,10 @@ fn expected_ledger_total_chunks(
 /// backstop; this guard just moves the rejection earlier.)
 ///
 /// N MUST be taken at the block's OWN timestamp so this guard agrees with block
-/// production and `data_txs_are_valid`, which both size proofs by N at the block
-/// timestamp. An honestly-produced block therefore always passes this guard,
-/// including the first block after a hardfork that changes N.
-///
-/// Note: the generator still slices by N at the PARENT timestamp, so at an
-/// N-changing boundary it groups proofs by the old N (a reward-attribution
-/// divergence). Reconciling the generator's N-source is a separate concern and
-/// is not required for this guard's correctness.
+/// production, `data_txs_are_valid` and `ShadowTxGenerator`, which all size
+/// proofs by N at the block timestamp. An honestly-produced block therefore
+/// always passes this guard, including the first block after a hardfork that
+/// changes N.
 fn publish_ingress_proof_count_is_valid(
     publish_ledger: &DataTransactionLedger,
     publish_tx_count: usize,
@@ -5687,7 +5683,7 @@ async fn generate_expected_shadow_transactions(
         &block.height,
         &block.reward_address,
         &block.reward_amount,
-        &prev_block,
+        block.timestamp_secs(),
         &block.solution_hash,
         &config.consensus,
         commitment_txs,
@@ -8080,8 +8076,7 @@ mod tests {
     /// hardfork boundary in BOTH directions: the first block after the fork carries
     /// a proof list sized by the block's (new) N, so it passes the guard when N is
     /// taken at the block timestamp — and would be wrongly rejected if N were taken
-    /// at the parent (pre-fork) timestamp. Keying off the parent is the
-    /// `ShadowTxGenerator`'s separate, documented divergence, not this guard's.
+    /// at the parent (pre-fork) timestamp.
     ///
     /// This locks in the guard's arithmetic under each N-source; the call site's
     /// choice of `block.timestamp_secs()` is covered end-to-end elsewhere.

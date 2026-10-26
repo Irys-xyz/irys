@@ -1050,7 +1050,7 @@ pub trait BlockProdStrategy {
             &block_height,
             &reward_address,
             &reward_amount.amount,
-            prev_block_header,
+            timestamp_ms.to_secs(),
             &solution_hash,
             &self.inner().config.consensus,
             &mempool.commitment_txs_to_bill,
