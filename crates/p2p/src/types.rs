@@ -307,6 +307,8 @@ pub enum AdvisoryGossipError {
     ChunkIngress(AdvisoryChunkIngressError),
     #[error("Block pool failed to ingest the block: {0:?}")]
     BlockPoolError(AdvisoryBlockPoolError),
+    #[error("Header fetch for block {0} failed recently, not repeated")]
+    HeaderFetchRecentlyFailed(irys_types::BlockHash),
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;
