@@ -2513,6 +2513,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .reth_node_adapter
             .get_balance_irys(address, block)
             .await
+            .expect("balance read")
     }
 
     /// Get the price for storing data via the price API endpoint

@@ -325,7 +325,7 @@ pub async fn select_best_txs(
             parent_evm_block_id,
             &sorted_commitments,
         )
-        .await,
+        .await?,
     );
 
     // Process sorted commitments
@@ -529,7 +529,7 @@ pub async fn select_best_txs(
             parent_evm_block_id,
             &submit_ledger_txs,
         )
-        .await,
+        .await?,
     );
 
     // Select data transactions in fee-priority order, respecting funding limits

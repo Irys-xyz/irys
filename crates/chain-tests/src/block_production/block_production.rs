@@ -1747,3 +1747,39 @@ async fn own_block_prevalidation_failure_keeps_producer_running() -> eyre::Resul
     node.stop().await;
     Ok(())
 }
+
+/// A failed balance read is an error, not a zero balance: a zero would leave
+/// funded signers out of the block without any signal.
+#[test_log::test(tokio::test)]
+async fn balance_read_at_unknown_block_is_an_error() -> eyre::Result<()> {
+    use alloy_eips::BlockId;
+
+    let node = IrysNodeTest::new_genesis(NodeConfig::testing())
+        .start()
+        .await;
+    let adapter = &node.node_ctx.reth_node_adapter;
+    let signer = node.node_ctx.config.node_config.miner_address();
+    let unknown_block = Some(BlockId::from(alloy_primitives::B256::repeat_byte(0xAB)));
+
+    assert!(
+        adapter
+            .get_balance_irys(signer, unknown_block)
+            .await
+            .is_err(),
+        "an unknown block must not read as a zero balance"
+    );
+    assert!(
+        adapter
+            .get_balances_irys(&[signer], unknown_block)
+            .await
+            .is_err(),
+        "the batch read must surface the error"
+    );
+    adapter
+        .get_balance_irys(signer, None)
+        .await
+        .expect("a latest-state read succeeds");
+
+    node.stop().await;
+    Ok(())
+}
