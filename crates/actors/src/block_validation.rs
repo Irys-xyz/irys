@@ -5097,7 +5097,11 @@ pub async fn shadow_transactions_are_valid(
     let block_miner_address: Address = block.miner_address.into();
     let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
         let (stx, tx_ref) = res?;
-        let tx_signer = tx_ref.clone().into_signed().recover_signer()?;
+        // Qualified call: the inherent `Signed::recover_signer` accepts high-s
+        // (non-EIP-2) signatures; the trait method rejects them.
+        let tx_signer = alloy_consensus::transaction::SignerRecoverable::recover_signer(
+            &tx_ref.clone().into_signed(),
+        )?;
         ensure!(
             block_miner_address == tx_signer,
             "Shadow tx signer is not the miner"
@@ -5924,6 +5928,45 @@ mod shadow_tx_priority_fee_match_tests {
             err.to_string().contains("priority fee mismatch"),
             "error should name the fee mismatch, got: {err}"
         );
+    }
+
+    /// A shadow tx signature in high-s form `(r, n - s, !v)` recovers to the same
+    /// signer under the inherent `Signed::recover_signer`, so the validation path
+    /// must use the `SignerRecoverable` trait method, which rejects it.
+    #[test]
+    fn shadow_tx_high_s_signature_is_rejected() -> eyre::Result<()> {
+        use alloy_consensus::transaction::SignerRecoverable;
+        use alloy_consensus::{SignableTransaction as _, TxLegacy};
+        use alloy_network::TxSignerSync as _;
+        use alloy_signer_local::PrivateKeySigner;
+        use irys_reth::shadow_tx::{SHADOW_TX_DESTINATION_ADDR, encode_prefixed_input};
+        use reth::primitives::transaction::signature::Signature;
+        use reth::revm::primitives::TxKind;
+
+        let secp256k1n = AlloyU256::from_str_radix(
+            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141",
+            16,
+        )?;
+
+        let miner = PrivateKeySigner::random();
+        let mut tx = TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_price: 1,
+            gas_limit: 21_000,
+            to: TxKind::Call(*SHADOW_TX_DESTINATION_ADDR),
+            value: AlloyU256::ZERO,
+            input: encode_prefixed_input(&stake_packet(0)),
+        };
+        let low_s = miner.sign_transaction_sync(&mut tx)?;
+        let normal = tx.clone().into_signed(low_s);
+        assert_eq!(SignerRecoverable::recover_signer(&normal)?, miner.address());
+
+        let high_s = Signature::new(low_s.r(), secp256k1n - low_s.s(), !low_s.v());
+        let malleated = tx.into_signed(high_s);
+        assert_eq!(malleated.recover_signer()?, miner.address());
+        assert!(SignerRecoverable::recover_signer(&malleated).is_err());
+        Ok(())
     }
 }
 
