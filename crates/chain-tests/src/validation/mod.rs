@@ -1349,9 +1349,10 @@ async fn block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
 /// Peer mines a block on top of common state with genesis
 /// But peer does not broadcast execution payload (effectively, block is stuck in validation on the genesis)
 ///
-/// Expectation: genesis mines ahead, and the block validation task for the block that's stuck gets cancelled
+/// Expectation: genesis mines ahead past `block_tree_depth`, the stuck block's parent is pruned
+/// from the block tree, and its validation is cancelled with `ParentMissing`
 #[test_log::test(tokio::test)]
-async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
+async fn heavy_block_validation_cancels_a_block_whose_parent_was_pruned() -> eyre::Result<()> {
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -1396,8 +1397,15 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
 
     assert_validation_error(
         outcome,
-        |e| matches!(e, ValidationError::ValidationCancelled { .. }),
-        "block with versioned_hashes should be rejected",
+        |e| {
+            matches!(
+                e,
+                ValidationError::ValidationCancelled {
+                    reason: irys_actors::block_validation::ValidationCancelReason::ParentMissing
+                }
+            )
+        },
+        "block whose parent was pruned should be cancelled with ParentMissing",
     );
     genesis_node.stop().await;
     peer_node.stop().await;
