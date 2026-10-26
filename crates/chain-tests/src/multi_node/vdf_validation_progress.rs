@@ -356,7 +356,7 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
     );
 
     // Cluster teardown. Peer's validation_service has already panicked,
-    // and the panic hook in testing-utils raised SIGINT — peer is
+    // and the panic hook from irys-utils raised SIGINT — peer is
     // already mid-shutdown. We swallow any teardown errors here; the
     // important assertions above have already passed.
     let _ = peer.stop().await;

@@ -11,8 +11,6 @@ tempfile.workspace = true
 color-eyre.workspace = true
 tracing-error.workspace = true
 rand.workspace = true
-chrono = { version = "0.4.41", default-features = false, features = ["now"] }
-nix = { workspace = true }
 irys-utils = { path = "../utils" }
 irys-types = { path = "../../types" }
 

@@ -5399,7 +5399,6 @@ dependencies = [
  "dotenvy",
  "eyre",
  "irys-chain",
- "irys-testing-utils",
  "irys-types",
  "irys-utils",
  "reth-cli-util",
@@ -5667,11 +5666,9 @@ dependencies = [
 name = "irys-testing-utils"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "color-eyre",
  "irys-types",
  "irys-utils",
- "nix",
  "rand 0.8.5",
  "tempfile",
  "tracing",
@@ -5769,10 +5766,13 @@ dependencies = [
 name = "irys-utils"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "color-eyre",
  "dashmap",
  "eyre",
  "irys-types",
  "metrics",
+ "nix",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
