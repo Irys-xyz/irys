@@ -1381,31 +1381,6 @@ impl AtomicMempoolState {
         found
     }
 
-    pub async fn take_all_valid_txs(
-        &self,
-    ) -> (
-        HashMap<H256, DataTransactionHeader>,
-        HashMap<IrysAddress, Vec<CommitmentTransaction>>,
-    ) {
-        let mut state = match self.write().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(
-                    ?e,
-                    "Mempool write lock contention; take_all_valid_txs returning empty"
-                );
-                return (HashMap::new(), HashMap::new());
-            }
-        };
-        state.recent_valid_tx.clear();
-
-        // Return the transactions directly (they already contain metadata)
-        let data_txs = std::mem::take(&mut state.valid_submit_ledger_tx);
-        let commitment_txs = std::mem::take(&mut state.valid_commitment_tx);
-
-        (data_txs, commitment_txs)
-    }
-
     /// Check if a transaction ID is in the recent valid transactions cache
     pub async fn is_recent_valid_tx(&self, tx_id: &H256) -> bool {
         match self.read().await {
