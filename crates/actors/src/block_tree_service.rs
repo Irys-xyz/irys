@@ -1056,11 +1056,11 @@ impl BlockTreeServiceInner {
                 // canonical chain. Classify from the old tip -> new tip transition, not
                 // from the max-difficulty chain: that chain can be a fork still waiting
                 // for validation, unrelated to the block that just became the tip.
-                let split = cache.find_reorg_split(ReorgTips {
+                let split: ReorgSplit = cache.find_reorg_split(ReorgTips {
                     new_tip: block_hash,
                     old_tip: old_tip_block.block_hash,
                 })?;
-                let split: Option<ReorgSplit> = (!split.old_divergent.is_empty()).then_some(split);
+                let is_reorg = !split.old_divergent.is_empty();
 
                 // A reorg whose fork point predates the post-prune cache window
                 // cannot complete safely. `cache.prune()` below drops every block
@@ -1081,7 +1081,7 @@ impl BlockTreeServiceInner {
                 // least `block_tree_depth` long diverging inside the window — is
                 // pathological (attack / severe partition); halting is correct.
                 // Returning `Err` drives the controlled-shutdown path.
-                if let Some(split) = &split {
+                if is_reorg {
                     let fork_height = split.lca.header().height;
                     if let Err(e) = validate_reorg_within_cache_window(
                         fork_height,
@@ -1106,7 +1106,7 @@ impl BlockTreeServiceInner {
                 // equation, so it's always tip + `depth` that's kept around
                 cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
 
-                if let Some(split) = split {
+                if is_reorg {
                     // Handle blockchain reorganization
                     let fork_block: Arc<IrysBlockHeader> = split.lca.header().clone();
                     let fork_hash: BlockHash = fork_block.block_hash;
@@ -1188,30 +1188,17 @@ impl BlockTreeServiceInner {
                         old_tip_block.height
                     );
 
-                    let new_epoch_block = if self.is_epoch_block(&arc_block) {
-                        Some(arc_block.clone())
-                    } else {
-                        None
-                    };
-
-                    // The block was just confirmed under this same write lock — it
-                    // must be in the cache. A missing entry indicates the invariant
-                    // was violated by a future refactor; abort the confirmation
-                    // path rather than panicking.
-                    let tip_sealed = cache
-                        .blocks
-                        .get(&block_hash)
-                        .map(|meta| Arc::clone(&meta.block))
-                        .ok_or_else(|| {
-                            error!(
-                                block.hash = %block_hash,
-                                "confirmed block missing from cache after tip change"
-                            );
-                            eyre::eyre!(
-                                "confirmed block {block_hash} missing from cache after tip change"
-                            )
-                        })?;
-                    let blocks_to_confirm = vec![tip_sealed];
+                    // The tip can move by more than one block: a validated block that
+                    // did not become the tip (for example, `mark_tip` refused a cumulative
+                    // difficulty tie) joins the canonical chain with its child. The new
+                    // side of the split holds each block after the old tip up to the new
+                    // tip, oldest first. Confirm each one and detect an epoch block among
+                    // them, as on a reorg.
+                    let blocks_to_confirm: Vec<Arc<SealedBlock>> = split.new_divergent;
+                    let new_epoch_block = blocks_to_confirm
+                        .iter()
+                        .find(|sb| self.is_epoch_block(sb.header()))
+                        .map(|sb| Arc::clone(sb.header()));
 
                     (new_epoch_block, None, new_fcu_markers, blocks_to_confirm)
                 }
@@ -2195,6 +2182,12 @@ mod tests {
         /// Retained Reth service receiver; `answer_fork_choice_updates` takes it so a
         /// tip change can complete its FCU round trip.
         reth_service_rx: Option<UnboundedReceiver<Traced<RethServiceMessage>>>,
+        /// Retained mempool receiver, so the tip-change tests can observe every
+        /// `BlockConfirmed`.
+        mempool_rx: UnboundedReceiver<Traced<MempoolServiceMessage>>,
+        /// Retained storage module receiver: epoch block detection sends to it and
+        /// fails when it is closed.
+        storage_modules_rx: UnboundedReceiver<Traced<StorageModuleServiceMessage>>,
         /// Hash of the synthetic genesis seeded into the cache by `new()`.
         /// Use as `previous_block_hash` when inserting test blocks via
         /// `insert_block_in_cache`.
@@ -2252,12 +2245,14 @@ mod tests {
             let (service_senders, service_rx) = crate::test_helpers::build_test_service_senders();
             // Subscribe BEFORE the discard path runs so the broadcast event is
             // observable. Retain the VDF re-anchor receiver so gate tests can
-            // observe a queued request, and the Reth receiver so tip-change tests
-            // can answer the FCU; the rest of `service_rx` drops here.
+            // observe a queued request, and the Reth, mempool and storage module
+            // receivers for the tip-change tests; the rest of `service_rx` drops here.
             let block_state_rx = service_senders.subscribe_block_state_updates();
             let reorg_rx = service_senders.subscribe_reorgs();
             let vdf_reanchor_rx = service_rx.vdf_reanchor;
             let reth_service_rx = Some(service_rx.reth_service);
+            let mempool_rx = service_rx.mempool;
+            let storage_modules_rx = service_rx.storage_modules;
 
             let mut node_config = NodeConfig::testing();
             configure(&mut node_config);
@@ -2319,6 +2314,8 @@ mod tests {
                 vdf_reanchor_rx,
                 reorg_rx,
                 reth_service_rx,
+                mempool_rx,
+                storage_modules_rx,
                 genesis_hash,
                 _tempdir: tmp,
             }
@@ -3709,6 +3706,100 @@ mod tests {
         assert_eq!(block_hashes(&event.new_fork), vec![new_tip.block_hash]);
         assert_eq!(event.fork_parent.block_hash, genesis.block_hash);
         assert_eq!(event.new_tip, new_tip.block_hash);
+    }
+
+    /// The tip moves two blocks at once: an exact cumulative difficulty tie with a
+    /// pending fork kept the tip when `first_new_block` was validated, and its child
+    /// is validated now. The tip move abandons no block, so no `ReorgEvent`, but both
+    /// new blocks join the canonical chain: each one is confirmed, and the epoch block
+    /// among them is detected.
+    #[tokio::test]
+    async fn tip_extension_by_two_blocks_confirms_each_new_block() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().epoch.num_blocks_in_epoch = 2;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (canonical tip) -> first_new_block (epoch block) -> new_tip
+        //         -> pending_fork_start -> pending_fork_max (heaviest, not validated)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let pending_fork_start = h.add_child_block(&genesis, 5_200, true);
+        let first_new_block = h.add_child_block(&old_tip, 5_200, true);
+        // Epoch block detection maps the epoch snapshot's storage modules, which needs
+        // a storage submodule config.
+        h.inner
+            .cache
+            .write()
+            .expect("cache lock for epoch snapshot")
+            .blocks
+            .get_mut(&first_new_block.block_hash)
+            .expect("first new block in cache")
+            .epoch_snapshot = Arc::new(irys_domain::EpochSnapshot {
+            storage_submodules_config: Some(irys_config::StorageSubmodulesConfig {
+                is_using_hardcoded_paths: false,
+                submodule_paths: vec![],
+            }),
+            ..Default::default()
+        });
+        h.inner
+            .on_block_validation_finished(first_new_block.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(
+            h.tip(),
+            old_tip.block_hash,
+            "a tie with the max cumulative difficulty block keeps the tip"
+        );
+
+        let _pending_fork_max = h.add_child_block(&pending_fork_start, 5_400, false);
+        let new_tip = h.add_child_block(&first_new_block, 5_300, true);
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+
+        assert_eq!(
+            h.tip(),
+            new_tip.block_hash,
+            "the tip moves to the new block"
+        );
+        let event = h.reorg_rx.try_recv();
+        assert!(
+            event.is_err(),
+            "a tip extension abandons no block and must not broadcast a ReorgEvent, got {:?}",
+            event.map(|event| block_hashes(&event.old_fork))
+        );
+
+        let mut confirmed = vec![];
+        while let Ok(message) = h.mempool_rx.try_recv() {
+            if let (MempoolServiceMessage::BlockConfirmed(block), _span) = message.into_parts() {
+                confirmed.push(block.header().block_hash);
+            }
+        }
+        assert_eq!(
+            confirmed,
+            vec![first_new_block.block_hash, new_tip.block_hash],
+            "each new canonical block is confirmed, oldest first"
+        );
+
+        let mut epoch_heights = vec![];
+        while let Ok(message) = h.storage_modules_rx.try_recv() {
+            let (
+                StorageModuleServiceMessage::PartitionAssignmentsUpdated { update_height, .. },
+                _span,
+            ) = message.into_parts()
+            else {
+                panic!("block tree sends only partition assignment updates");
+            };
+            epoch_heights.push(update_height);
+        }
+        assert_eq!(
+            epoch_heights,
+            vec![first_new_block.height],
+            "the epoch block among the new canonical blocks is detected"
+        );
     }
 
     /// Regression coverage for the warn/error split in
