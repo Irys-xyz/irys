@@ -1597,6 +1597,20 @@ where
     ) {
         match error {
             GossipError::InvalidData(invalid_data_error) => {
+                // The version rule depends on the local wall clock. Near a hardfork
+                // activation a clock difference makes an honest peer's tx look invalid,
+                // so the sender is not penalised.
+                if matches!(
+                    invalid_data_error,
+                    InvalidDataError::TransactionInvalidVersion { .. }
+                ) {
+                    debug!(
+                        ?peer_miner_address,
+                        ?invalid_data_error,
+                        "Skipping penalty for a version rejected by the local clock",
+                    );
+                    return;
+                }
                 // Anchor errors during sync are caused by the receiver being behind,
                 // not by sender misbehavior — suppress the penalty in that window.
                 if is_syncing
@@ -2282,6 +2296,22 @@ mod tests {
         )),
         false,
         PeerScore::INITIAL - 5,
+    )]
+    #[case::synced_skips_invalid_version(
+        GossipError::InvalidData(crate::types::InvalidDataError::TransactionInvalidVersion {
+            version: 1,
+            minimum: 2,
+        }),
+        false,
+        PeerScore::INITIAL
+    )]
+    #[case::syncing_skips_invalid_version(
+        GossipError::InvalidData(crate::types::InvalidDataError::TransactionInvalidVersion {
+            version: 1,
+            minimum: 2,
+        }),
+        true,
+        PeerScore::INITIAL
     )]
     fn handle_invalid_data_anchor_penalty_suppression(
         #[case] error: GossipError,

@@ -868,6 +868,19 @@ mod tests {
     }
 
     #[test]
+    fn invalid_version_is_still_rejected_as_invalid_data() {
+        let mapped: GossipError = TxIngressError::InvalidVersion {
+            version: 1,
+            minimum: 2,
+        }
+        .into();
+        assert!(matches!(
+            mapped,
+            GossipError::InvalidData(InvalidDataError::TransactionInvalidVersion { .. })
+        ));
+    }
+
+    #[test]
     fn chunk_ingress_overloaded_maps_to_rate_limited() {
         let mapped: GossipError =
             ChunkIngressError::Advisory(AdvisoryChunkIngressError::Overloaded).into();
