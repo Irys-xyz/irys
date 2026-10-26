@@ -75,6 +75,7 @@ impl CoinMarketCapOracle {
         let amount = Amount::<(IrysPrice, Usd)>::token(quote.price)
             .context("failed to convert price to Amount")?;
         let last_updated = chrono_to_unix_timestamp(quote.last_updated);
+        crate::reject_future_timestamp(last_updated)?;
 
         Ok(CoinMarketCapQuote {
             amount,

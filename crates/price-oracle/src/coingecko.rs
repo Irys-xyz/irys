@@ -97,6 +97,7 @@ impl CoinGeckoOracle {
             .last_updated_at
             .ok_or_else(|| eyre!("updated_at field missing"))?;
         let last_updated = UnixTimestamp::from_secs(last_updated);
+        crate::reject_future_timestamp(last_updated)?;
 
         Ok(CoinGeckoQuote {
             amount,

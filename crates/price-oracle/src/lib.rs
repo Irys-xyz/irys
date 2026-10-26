@@ -20,6 +20,29 @@ pub enum PriceOracleError {
     NoOraclesConfigured,
 }
 
+/// Maximum seconds an oracle-reported `last_updated_at` may lead the local wall clock.
+pub const MAX_ORACLE_CLOCK_SKEW_SECS: u64 = 60;
+
+/// Fails when `reported` is more than `MAX_ORACLE_CLOCK_SKEW_SECS` ahead of the local wall clock.
+/// A clock set before the UNIX epoch is treated as time zero.
+pub(crate) fn reject_future_timestamp(reported: UnixTimestamp) -> eyre::Result<()> {
+    let now_secs = UnixTimestamp::now().map_or(0, UnixTimestamp::as_secs);
+    reject_future_timestamp_at(reported, now_secs)
+}
+
+fn reject_future_timestamp_at(reported: UnixTimestamp, now_secs: u64) -> eyre::Result<()> {
+    let latest_accepted = now_secs.saturating_add(MAX_ORACLE_CLOCK_SKEW_SECS);
+    if reported.as_secs() > latest_accepted {
+        eyre::bail!(
+            "oracle timestamp {} is {}s ahead of the local clock (max skew {}s); check the system clock",
+            reported.as_secs(),
+            reported.as_secs() - now_secs,
+            MAX_ORACLE_CLOCK_SKEW_SECS
+        );
+    }
+    Ok(())
+}
+
 pub mod coingecko;
 pub mod coinmarketcap;
 pub mod mock_oracle;
@@ -280,5 +303,33 @@ mod tests {
             aggregator.current_snapshot(),
             Err(PriceOracleError::NoOraclesConfigured)
         ));
+    }
+}
+
+#[cfg(test)]
+mod future_timestamp_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_timestamp_beyond_skew() {
+        let reported = UnixTimestamp::from_secs(1_000 + MAX_ORACLE_CLOCK_SKEW_SECS + 1);
+        let err = reject_future_timestamp_at(reported, 1_000).unwrap_err();
+        assert!(err.to_string().contains("check the system clock"));
+        assert!(reject_future_timestamp_at(UnixTimestamp::from_secs(u64::MAX), 1_000).is_err());
+    }
+
+    #[test]
+    fn accepts_timestamp_within_skew() {
+        let at_limit = UnixTimestamp::from_secs(1_000 + MAX_ORACLE_CLOCK_SKEW_SECS);
+        assert!(reject_future_timestamp_at(at_limit, 1_000).is_ok());
+        assert!(reject_future_timestamp_at(UnixTimestamp::from_secs(500), 1_000).is_ok());
+    }
+
+    #[test]
+    fn live_clock_check() {
+        let now = UnixTimestamp::now().unwrap();
+        assert!(reject_future_timestamp(now).is_ok());
+        let future = UnixTimestamp::from_secs(now.as_secs() + MAX_ORACLE_CLOCK_SKEW_SECS + 10);
+        assert!(reject_future_timestamp(future).is_err());
     }
 }
