@@ -894,19 +894,20 @@ pub enum ValidationCancelReason {
     /// two apart instead of conflating "broadcast channel closed at shutdown"
     /// with "PoA blocking task aborted mid-flight".
     PoAAborted,
-    /// A stage reported a node fault, the parent is fully valid, but this
-    /// block is no longer in the in-memory block tree. Tree walks done by the
-    /// stages can miss when the block or an ancestor is removed during
-    /// validation, so the fault is not confirmed as a fault of this node.
-    /// Local, peer-innocent: the block's validity is unknown.
-    BlockRemovedFromTree,
+    /// Block absent from the in-memory block tree: a stage reported a node
+    /// fault and the parent is fully valid, but the block left the tree
+    /// during validation. Tree walks done by the stages can miss when the
+    /// block or an ancestor is removed during validation, so the fault is
+    /// not confirmed as a fault of this node. Local, peer-innocent: the
+    /// block's validity is unknown.
+    BlockMissing,
 }
 
 impl ValidationCancelReason {
     /// All variants are local-side outcomes. `HeightDifference`,
     /// `ParentMissing`, `ChannelClosed`, `RepeatedCancellation`,
-    /// `PoAAborted`, `BlockRemovedFromTree` — none are statements about the
-    /// peer's block.
+    /// `PoAAborted`, `BlockMissing` — none are statements about the peer's
+    /// block.
     ///
     /// SAFETY CRITICAL: adding a new variant that classifies as Consensus
     /// REQUIRES changing this constant to a method and re-auditing every
@@ -926,7 +927,7 @@ const _: fn() = || {
             ValidationCancelReason::ChannelClosed => {}
             ValidationCancelReason::RepeatedCancellation => {}
             ValidationCancelReason::PoAAborted => {}
-            ValidationCancelReason::BlockRemovedFromTree => {} // New variant? Update IS_INTERNAL above before adding an arm here.
+            ValidationCancelReason::BlockMissing => {} // New variant? Update IS_INTERNAL above before adding an arm here.
         }
     }
 };
@@ -939,7 +940,7 @@ impl std::fmt::Display for ValidationCancelReason {
             Self::ChannelClosed => write!(f, "channel closed"),
             Self::RepeatedCancellation => write!(f, "repeated cancellation"),
             Self::PoAAborted => write!(f, "poa aborted"),
-            Self::BlockRemovedFromTree => write!(f, "block removed from tree"),
+            Self::BlockMissing => write!(f, "block missing"),
         }
     }
 }
@@ -1201,9 +1202,9 @@ impl ValidationError {
             // node fault — that decision should be explicit at the reason
             // site. All current cancellation reasons (`HeightDifference`,
             // `ParentMissing`, `ChannelClosed`, `RepeatedCancellation`,
-            // `PoAAborted`, `BlockRemovedFromTree`) are local-side outcomes
-            // and route to `SoftInternal` — the `IS_INTERNAL` const documents
-            // the invariant and the compile-time tripwire enforces it. No
+            // `PoAAborted`, `BlockMissing`) are local-side outcomes and route to
+            // `SoftInternal` — the `IS_INTERNAL` const documents the
+            // invariant and the compile-time tripwire enforces it. No
             // cancellation reason ever peer-attributes the child block.
             Self::ValidationCancelled { .. } => {
                 if ValidationCancelReason::IS_INTERNAL {
@@ -1343,7 +1344,7 @@ mod metric_label_tests {
             ValidationCancelReason::ChannelClosed,
             ValidationCancelReason::RepeatedCancellation,
             ValidationCancelReason::PoAAborted,
-            ValidationCancelReason::BlockRemovedFromTree,
+            ValidationCancelReason::BlockMissing,
         ] {
             let err = ValidationError::ValidationCancelled { reason };
             assert_eq!(
@@ -2740,7 +2741,7 @@ mod prevalidation_error_classification_tests {
     #[case::parent_missing(ValidationCancelReason::ParentMissing)]
     #[case::repeated_cancellation(ValidationCancelReason::RepeatedCancellation)]
     #[case::poa_aborted(ValidationCancelReason::PoAAborted)]
-    #[case::block_removed_from_tree(ValidationCancelReason::BlockRemovedFromTree)]
+    #[case::block_missing(ValidationCancelReason::BlockMissing)]
     fn validation_cancel_reason_classifier_dispatch(#[case] reason: ValidationCancelReason) {
         // IS_INTERNAL is a const — verified at compile time by the tripwire below.
         // `ValidationError::is_internal_failure` must route through IS_INTERNAL.
@@ -2794,8 +2795,8 @@ mod prevalidation_error_classification_tests {
         ValidationCancelReason::PoAAborted,
         ExpectedRoundtripShape::InternalFailureSoft
     )]
-    #[case::block_removed_from_tree(
-        ValidationCancelReason::BlockRemovedFromTree,
+    #[case::block_missing(
+        ValidationCancelReason::BlockMissing,
         ExpectedRoundtripShape::InternalFailureSoft
     )]
     fn validation_cancel_reason_roundtrip_through_dispatcher(
@@ -3044,7 +3045,7 @@ mod prevalidation_error_classification_tests {
             ValidationCancelReason::ChannelClosed,
             ValidationCancelReason::RepeatedCancellation,
             ValidationCancelReason::PoAAborted,
-            ValidationCancelReason::BlockRemovedFromTree,
+            ValidationCancelReason::BlockMissing,
         ] {
             assert!(
                 !ValidationError::ValidationCancelled { reason }.is_node_fault(),

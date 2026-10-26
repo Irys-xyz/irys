@@ -2075,7 +2075,7 @@ mod tests {
             ValidationCancelReason::ParentMissing,
             ValidationCancelReason::RepeatedCancellation,
             ValidationCancelReason::PoAAborted,
-            ValidationCancelReason::BlockRemovedFromTree,
+            ValidationCancelReason::BlockMissing,
         ] {
             let result: ValidationResult =
                 crate::block_validation::ValidationError::ValidationCancelled { reason }.into();
@@ -3054,9 +3054,7 @@ mod tests {
         crate::block_validation::ValidationCancelReason::RepeatedCancellation
     )]
     #[case::poa_aborted(crate::block_validation::ValidationCancelReason::PoAAborted)]
-    #[case::block_removed_from_tree(
-        crate::block_validation::ValidationCancelReason::BlockRemovedFromTree
-    )]
+    #[case::block_missing(crate::block_validation::ValidationCancelReason::BlockMissing)]
     fn validation_cancelled_softinternal_skips_lru_and_counter(
         #[case] reason: crate::block_validation::ValidationCancelReason,
     ) {

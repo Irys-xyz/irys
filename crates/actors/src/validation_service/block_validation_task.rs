@@ -199,12 +199,12 @@ where
                 return Err(reason);
             }
             if !tree_state.block_in_tree {
-                metrics::record_validation_cancellation("block_removed_from_tree");
+                metrics::record_validation_cancellation("block_missing");
                 warn!(
                     custom.error = %inner,
                     "Node fault not confirmed: block was removed from the block tree"
                 );
-                return Err(ValidationCancelReason::BlockRemovedFromTree);
+                return Err(ValidationCancelReason::BlockMissing);
             }
             Ok(stage_result)
         }
@@ -2971,10 +2971,7 @@ mod resolve_stage_result_against_parent_tests {
             tree_state(parent_valid(), false),
         )
         .await;
-        assert_eq!(
-            result.unwrap_err(),
-            ValidationCancelReason::BlockRemovedFromTree
-        );
+        assert_eq!(result.unwrap_err(), ValidationCancelReason::BlockMissing);
     }
 
     /// The wait is cancelled while the parent is still pending: the node
