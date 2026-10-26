@@ -1,0 +1,3013 @@
+{
+  "description": "Segment proofs: in-chunk siblings, then the chunk proof, one hex string (spec §5, §10). Mainnet geometry, mod251: every segment of every chunk for chunk count 1 and 2 (full uploads); segments (3, 5), (3, 31), (3, 32), and (3, 63) of the 917504-byte upload; and segment (0, 1) of 4097 bytes, which is 1 byte. Testing geometry, mod251: the printed proof at data_size 112, chunk 3, segment 1. Testing geometry, n = 20: segments 0 and 1 verify against the commitment whose leaf 3 is 32 bytes of 0xAB instead of empty(0) (spec §5). replaced_leaf names that leaf.",
+  "cases": [
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 0,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "2a948443a2db29138e28c7bd3c7cfaebf0083305884612730ba1f266044696382e3d3f53ea4985aba7c4759c1534e125308aeb69d306645097d0ce0da74398ffd62d90f74787e1e50ba752482bc5733a7dc5a5fcd4782140dacac27e02fbb7cb8d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 1,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "c46b7e9f32bd7ac69139854bf809012fd58ea09765b26f84425175557b080a312e3d3f53ea4985aba7c4759c1534e125308aeb69d306645097d0ce0da74398ffd62d90f74787e1e50ba752482bc5733a7dc5a5fcd4782140dacac27e02fbb7cb8d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 2,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "a7546d4d58e3b7a06ae91456cf829cce45679b735e4a0afafd5441393751295c4199f3315bb6cef8ee8ff505ca35574761bab4cf7750c701ee452985e0bcc4c8d62d90f74787e1e50ba752482bc5733a7dc5a5fcd4782140dacac27e02fbb7cb8d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 3,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "2fcb46684c58139843eb3a8b0ac2ed8c3ec0e808ede6e506bedab5708c2395734199f3315bb6cef8ee8ff505ca35574761bab4cf7750c701ee452985e0bcc4c8d62d90f74787e1e50ba752482bc5733a7dc5a5fcd4782140dacac27e02fbb7cb8d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 4,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "eb944ff21b02740d0a3f5ed9e4aa6dff7ea0d2074faf1f3b8fca174626f1a7016937e3928de288e542ba497aae4e53dc8d0e3e29b01aeec0d29470221ba6e1e0be0a220b05aa06126f08197d6d272ce080f0c6264077e893d95e572b2902b3288d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 5,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "c34674d97f9b6b2e0e986157d81b2f78c1351fb22b158ccccbd6d8bae63da4fd6937e3928de288e542ba497aae4e53dc8d0e3e29b01aeec0d29470221ba6e1e0be0a220b05aa06126f08197d6d272ce080f0c6264077e893d95e572b2902b3288d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 6,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "91f778e561e241ae0c2659355d4a80be13cfe5418eaf1b791a93618abdb2e11111549ec40ee50b9a145de2fc0615560418680d56d398715a0d42c6c8c7795838be0a220b05aa06126f08197d6d272ce080f0c6264077e893d95e572b2902b3288d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 7,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "4fbe5e041c110b798cc79163d63a4e075587055a1289e1264fb7b4884787bccb11549ec40ee50b9a145de2fc0615560418680d56d398715a0d42c6c8c7795838be0a220b05aa06126f08197d6d272ce080f0c6264077e893d95e572b2902b3288d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 8,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "0bd5c75d6dd54261c1b60c36b5608f15a9dc63f7e17ee47a07499d6a10cd9a1a79cd1884f7a08c03e9e443769f0c63c2575acdbf9557b0cb1cd48128d968d53db014b2d137016553d30074ee1d61f3662aecac63c4433fe67db71f426afced8041e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 9,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "d8c7db60ec7f2dedba16f66de7e5e2c36743e044a8f1d6a638585aed44100f5279cd1884f7a08c03e9e443769f0c63c2575acdbf9557b0cb1cd48128d968d53db014b2d137016553d30074ee1d61f3662aecac63c4433fe67db71f426afced8041e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 10,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "3392c5462109554b5edc6b65238af09cfdb1eddcd06ae14c40d6e495da69c4dc5c881a68da52ceee4bd6451ed3f6540d78d9125d2a617b7d0687bacabf18c339b014b2d137016553d30074ee1d61f3662aecac63c4433fe67db71f426afced8041e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 11,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "101c2f66375a661bb4957fb2b9926f8b4409c37cbf357ffa2ef91df1e17fa2455c881a68da52ceee4bd6451ed3f6540d78d9125d2a617b7d0687bacabf18c339b014b2d137016553d30074ee1d61f3662aecac63c4433fe67db71f426afced8041e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 12,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "95941d2e92cae0a308c982631fe58daad3c0c0a5bf5473ffc5be5a0bc3ef063c202fa93f057364dbe3a0b113b53f77161ef937f43aafa13e5904d27d5e5c583bd97f793c7ad7eafac188ef034df106afa1204949d16bc7d9333a3c9d03a7447841e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 13,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "86b769b43fa54bb37a717529fe0f21a6c9dfabf2e970deee5274c94f8905d6c7202fa93f057364dbe3a0b113b53f77161ef937f43aafa13e5904d27d5e5c583bd97f793c7ad7eafac188ef034df106afa1204949d16bc7d9333a3c9d03a7447841e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 14,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "5a1259d62514d139cf03117d5498eeb13a61b4cfa2818119f0f68c81c711e351cebe8b07463ff67629eb9bfa7890d797f7d959c2d8fa44dbe760f1cadc0b7671d97f793c7ad7eafac188ef034df106afa1204949d16bc7d9333a3c9d03a7447841e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 15,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "8c15e619f991e3f3ee0e97a96dac6465ff7ceece89378e04551092844c7006dfcebe8b07463ff67629eb9bfa7890d797f7d959c2d8fa44dbe760f1cadc0b7671d97f793c7ad7eafac188ef034df106afa1204949d16bc7d9333a3c9d03a7447841e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 16,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "9d02666d62f9fd622be1f7ea6a85eb21fdb7ded5ddff0927d50f0537a2787059979d42e81dda356fe874764ba8e7eb10254b03b63381ef456f6bffd8556e22cfafa5e8b4665f939171eb7f295782d21797d5b91612843502891bbe403fcaddd604099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 17,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "980f3c8a877f981e180523038424760650357582f5f62922f05445e22e861c18979d42e81dda356fe874764ba8e7eb10254b03b63381ef456f6bffd8556e22cfafa5e8b4665f939171eb7f295782d21797d5b91612843502891bbe403fcaddd604099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 18,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "a2dd8e76ccd3680f885e4b1f183605f447f087aa817870cc48435f451eadca9f3be9ccb69cd0cadc6726b3c27c9237076cc1de74abc03f425ee2991d1fbafd1dafa5e8b4665f939171eb7f295782d21797d5b91612843502891bbe403fcaddd604099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 19,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "4cb99fade90f2aa02066300ae3cd6338dabac7bf5c11b3e4e4dbef6c9f3922ec3be9ccb69cd0cadc6726b3c27c9237076cc1de74abc03f425ee2991d1fbafd1dafa5e8b4665f939171eb7f295782d21797d5b91612843502891bbe403fcaddd604099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 20,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "240fea51b653498888f4cb7df1041b1efa8487e2d1b64b49dc1ba4e42801f0f8867ce6e256005cdec69f213c6a9f1e32f5977c902ebbeb64df53ca06cbe59258773ed1dd6981fabea9faf1a4764745c5f7981f3ddef1f5250cb7ee4d37fc919004099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 21,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "3beb0ca5a311704b19b1de33e0e87d3154a2360be61977ea3122ed51024be897867ce6e256005cdec69f213c6a9f1e32f5977c902ebbeb64df53ca06cbe59258773ed1dd6981fabea9faf1a4764745c5f7981f3ddef1f5250cb7ee4d37fc919004099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 22,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "65c8a59c2393c9d4603e7e577561b814444cfef4e35ce47ef835c96dcccd54bf6f1db64ee27b3fe92c2c11bc967ed43ae05caaa6f7db7383e781672c279ce25d773ed1dd6981fabea9faf1a4764745c5f7981f3ddef1f5250cb7ee4d37fc919004099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 23,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "82c3e78e09772502f84c89acd3dd5c2c03111ec7fa01f9f88a4ad30b0e25028b6f1db64ee27b3fe92c2c11bc967ed43ae05caaa6f7db7383e781672c279ce25d773ed1dd6981fabea9faf1a4764745c5f7981f3ddef1f5250cb7ee4d37fc919004099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 24,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "4aacab8a87e0e6ceaccd72b54c0d6aefe7b82b3de1375e7dce9c37426cdc4cb6f4b9d5e1d570c2d57622b00684e2caba2e7f93b8a79cf63b4f728c84459100823cc4444403a56d7fb447239b38b500590ea9d04a3d76032069ffcadf547cff48f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 25,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "cf9d0cb52cc26f27a7f089c76f48e69a8850eef8c6331ac37117d49a192e8134f4b9d5e1d570c2d57622b00684e2caba2e7f93b8a79cf63b4f728c84459100823cc4444403a56d7fb447239b38b500590ea9d04a3d76032069ffcadf547cff48f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 26,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "0fbd23105dbf78dd434f10658d28c9271c3115cbfe656928275822ffbba1a71733f516fe89f685bbf5af7b358dd88beaf46e9eb052a7c97a61c115a37b0b18453cc4444403a56d7fb447239b38b500590ea9d04a3d76032069ffcadf547cff48f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 27,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "6f813e69ae67f163432650536fd066bdb4390b34a3b5a7c89197396e499004a633f516fe89f685bbf5af7b358dd88beaf46e9eb052a7c97a61c115a37b0b18453cc4444403a56d7fb447239b38b500590ea9d04a3d76032069ffcadf547cff48f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 28,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "de3d66899d3cb8563afa65e8953312d01c6792c5f25849c92bcbe363d1f8da7ccf6314846171c68a45e5ef8d6ce795f6e2a623bc41a48b1eb0dbc947c8acb5c8570f3c9eb0f96b840780278745765937df219e2aba2ad1ed5b6ff9de2589a321f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 29,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "8531ae1cefa12a796cb539a7852a3614aa65052d5ddb8f11fe4464c62f1b1b4acf6314846171c68a45e5ef8d6ce795f6e2a623bc41a48b1eb0dbc947c8acb5c8570f3c9eb0f96b840780278745765937df219e2aba2ad1ed5b6ff9de2589a321f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 30,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "60f66b694ec205b44b8b8441c29961731921e9c032bc08dd97ec6101fb280308a0f887c44c9efd3f513eca4462ace8aff50a9bde0a26358237b4adffa794aba2570f3c9eb0f96b840780278745765937df219e2aba2ad1ed5b6ff9de2589a321f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 31,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "e8316555d5fda0e3908b308773c92269b827270687c575fcebf574813f98d68aa0f887c44c9efd3f513eca4462ace8aff50a9bde0a26358237b4adffa794aba2570f3c9eb0f96b840780278745765937df219e2aba2ad1ed5b6ff9de2589a321f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d98286b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 32,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "23c7e71bbbbfd7f15525c7c79d326fd27ea8030bde94b6de1706c42d009fd216d79469130c1bc986194999e54f91fc3a29f68345403c4b4fbbc892e94d23bd65fff44bf2ec45a4eaa24ac3451e6b0249833e591a37cc98e5b94af639b5c211519d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 33,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "5623f4000143a7dd7581e4eceb6f59d5623eb752c403f87c5a2bdf90d5f4e307d79469130c1bc986194999e54f91fc3a29f68345403c4b4fbbc892e94d23bd65fff44bf2ec45a4eaa24ac3451e6b0249833e591a37cc98e5b94af639b5c211519d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 34,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "07db11e4641b9bdd11d3b8bb81988ef6b50a1d93cee30fdab366c3915d06a43dd10feb9a4dbe44da2e9484d751ce2ae8eb6e4cb60016bb663704efcfab342e1efff44bf2ec45a4eaa24ac3451e6b0249833e591a37cc98e5b94af639b5c211519d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 35,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "723fd3ab0ae4d8104638030ee9edeb1bfbddddc49ff5a32105ec045f5d9647bed10feb9a4dbe44da2e9484d751ce2ae8eb6e4cb60016bb663704efcfab342e1efff44bf2ec45a4eaa24ac3451e6b0249833e591a37cc98e5b94af639b5c211519d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 36,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "e9fe508fd3973f1948d87ed8494a485e464a77fac4ed5e4a1a334a337a50393eb6b353a937ac4f546ebe26a2e06b15af4f9d6fd358c564d6de5cf134c3bfa55cca0eb8d96ba3f155e12c02132c58f34c6dcc3368dbb17d3a70bb39e24647642f9d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 37,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "22ba4a8ef439a9b4fff8f94a2a812b92afa740588e78f33d69ba18de0079a403b6b353a937ac4f546ebe26a2e06b15af4f9d6fd358c564d6de5cf134c3bfa55cca0eb8d96ba3f155e12c02132c58f34c6dcc3368dbb17d3a70bb39e24647642f9d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 38,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "16e8b1bd93469fe3176b021c7f496f4a9651f777b9dc83ba267150f503737fe00952951bf8059b341a3f1168fa069a070b70e501e05ac1b2db6c440a162ce418ca0eb8d96ba3f155e12c02132c58f34c6dcc3368dbb17d3a70bb39e24647642f9d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 39,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "ea5e526dce20b3bb212bc87a163f160cc771a5135f33e5fc03c204dfa6805ebd0952951bf8059b341a3f1168fa069a070b70e501e05ac1b2db6c440a162ce418ca0eb8d96ba3f155e12c02132c58f34c6dcc3368dbb17d3a70bb39e24647642f9d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 40,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "dd25c91e66f7f67b7d2f65ab597d5cbf8e83f5b341478484c559bd498a7f0da6dc72517a28658765fed72145dfbc6b69898585ece4cd9c4738c01b046cde021b3bbc9bd6227498ea27957adf159de738a8b6d00630672a88cf9bfc3c7640331b55d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 41,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "b03fcca552e585f8cd8d7ed74fedca157507c71e6cf704a1227749b2a0e5ba31dc72517a28658765fed72145dfbc6b69898585ece4cd9c4738c01b046cde021b3bbc9bd6227498ea27957adf159de738a8b6d00630672a88cf9bfc3c7640331b55d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 42,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "c842df7c654b6cee11d0e4c841b11ac8344fa48aea3f3829995c2fc90d46277556232d948c3e2d2051957748fe375b56976ba6e78cf5abf2a076588ae01a33db3bbc9bd6227498ea27957adf159de738a8b6d00630672a88cf9bfc3c7640331b55d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 43,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "e9b96489f7aca19fdd1528d68f02776eef932f2bc19429f8ac2054857aa8bdb556232d948c3e2d2051957748fe375b56976ba6e78cf5abf2a076588ae01a33db3bbc9bd6227498ea27957adf159de738a8b6d00630672a88cf9bfc3c7640331b55d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 44,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "7086fd3a73c91d263b7665a626f001b805b4916237410417913e15c13a51698ff809e314fbb87a5488a16f777ae737d574cb0d8a40bb76079f3ea7bbc0cbb9d3617601b8d9ddb9150af0fc29a148fbfdca0cd0067ef26c7d660aa766b413a5c555d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 45,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "70ec807377010122bdea18a207178a7b1cf5351c001714116591ac0e5fdb336ff809e314fbb87a5488a16f777ae737d574cb0d8a40bb76079f3ea7bbc0cbb9d3617601b8d9ddb9150af0fc29a148fbfdca0cd0067ef26c7d660aa766b413a5c555d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 46,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "75cdc4b75ba82e46eacfbd7715a3b67db79984317bfab7a07fbfd70d36b062984e38a409893a0073b41c750cbf00a38791489b7860a0250d2cfff071f5937c6c617601b8d9ddb9150af0fc29a148fbfdca0cd0067ef26c7d660aa766b413a5c555d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 47,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "196b9651e3ebc936e40e8e84e6963da9463686a07ef87594fdab2ccc870c64c74e38a409893a0073b41c750cbf00a38791489b7860a0250d2cfff071f5937c6c617601b8d9ddb9150af0fc29a148fbfdca0cd0067ef26c7d660aa766b413a5c555d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 48,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "ef77252fbdd558a6c7a2c443a732818e799865d7d1ba583cc3e51cad288cdb19825f7d0673abc494494e0cc78d6a387afc05f7fc35a132c3610dfb08236f35fcbfd350ecb2969bb73a025bad010ace72cbe1c03edb7ac81f44a5ba52c436a611d531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 49,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "f0e914540959894cf7d4eb9cc4df5ee5a26919114a73f10bcefa17f45a2b9b76825f7d0673abc494494e0cc78d6a387afc05f7fc35a132c3610dfb08236f35fcbfd350ecb2969bb73a025bad010ace72cbe1c03edb7ac81f44a5ba52c436a611d531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 50,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "fb5f0ab7fe740627e81a4b9790b03b496539179bccf5fd43cda91a3477bda9c2002b43ccd7ffdbd6faba0ed9597bb7bc235460023347dbe49bb8330a0178ebf7bfd350ecb2969bb73a025bad010ace72cbe1c03edb7ac81f44a5ba52c436a611d531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 51,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "b250e68c930fef428cbaf88a4df767b0df85201839c27ade079ddca5fa7ce7cc002b43ccd7ffdbd6faba0ed9597bb7bc235460023347dbe49bb8330a0178ebf7bfd350ecb2969bb73a025bad010ace72cbe1c03edb7ac81f44a5ba52c436a611d531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 52,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "289cf3d0344b74892210fa7d4ea92b252ae322b74967d42ed2eb044444e6aa1dd96d7bd3705a8b6542f78294f331f472f8e7cbfecf1bd2bdaf18fac30724aee490f8218bf5881db3ea34b0beb7371b6f3c750fc4bb5f56ac0e14e5bf0455f7fdd531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 53,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "5a9349274f7a5ff1bbab110b79095bb20264442c768b9a43a6472e172d1928a4d96d7bd3705a8b6542f78294f331f472f8e7cbfecf1bd2bdaf18fac30724aee490f8218bf5881db3ea34b0beb7371b6f3c750fc4bb5f56ac0e14e5bf0455f7fdd531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 54,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "87712a791423076df0c7e99b06e24e58dde7b3ecb25593376c8e0f935a3ecbad87d174186b7870615d0ed947b6340a7ded13e733e58e8c258f34a13e111974e290f8218bf5881db3ea34b0beb7371b6f3c750fc4bb5f56ac0e14e5bf0455f7fdd531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 55,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "2fd98ce60e9cd6c6d251c222ab08f1dbb67374b84729b1a3ade6924640d111fd87d174186b7870615d0ed947b6340a7ded13e733e58e8c258f34a13e111974e290f8218bf5881db3ea34b0beb7371b6f3c750fc4bb5f56ac0e14e5bf0455f7fdd531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 56,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "00e239bc31fe19e55ad6460405654fea754d48188a6ae3ac303868d5ae9878c56161e592f8f76720d3946a58d48336c7878c4cea3f21e0abc7bb4725f808d07a1e9041517281a6bce04f629c77ec8ae0a4ea42844fe18d9ff4f133a3b1c3f351aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 57,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "bf97996aa7b308b49fde6518951b935dee1360b29fef8b66a036451b945539046161e592f8f76720d3946a58d48336c7878c4cea3f21e0abc7bb4725f808d07a1e9041517281a6bce04f629c77ec8ae0a4ea42844fe18d9ff4f133a3b1c3f351aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 58,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "1f414ef3e5541a33b336bce237608e45e1ec404b1ddec8e30bed75cdd6876097e778ebba519112752fe1d6419bcfced5fd2ad675c86d0497d225da6d970396201e9041517281a6bce04f629c77ec8ae0a4ea42844fe18d9ff4f133a3b1c3f351aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 59,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "e2cf4c2eb700b9a0bae869250b6f7726ab5b1983a54c32b8a7e20ffca588fabae778ebba519112752fe1d6419bcfced5fd2ad675c86d0497d225da6d970396201e9041517281a6bce04f629c77ec8ae0a4ea42844fe18d9ff4f133a3b1c3f351aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 60,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "37e27943df842919e0a3b7bae195a654f9231dfe7d327867129bfdd39f503d6fad168a033d3e90fcf2ec8927d1860cefe3028520e320449d2f6f095584a45c26b6e744e92117409621b02e357163509ca3c22d3ca6c4548d4b85e8fb81773ba2aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 61,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "cdc6719259b964d0bb2297d93abf1585be097c2697d1cf4abae55868b61cd496ad168a033d3e90fcf2ec8927d1860cefe3028520e320449d2f6f095584a45c26b6e744e92117409621b02e357163509ca3c22d3ca6c4548d4b85e8fb81773ba2aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 62,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "5b7aa159bb71612453fb1175d1788c35280c0a966af0cb74cd0976849319966952f236c12244d042104c988f3ebdb774bcead26b777c26ebc81f97094d62a397b6e744e92117409621b02e357163509ca3c22d3ca6c4548d4b85e8fb81773ba2aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "segment_index": 63,
+      "segment_length": 4096,
+      "chunk_count": 1,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "03a1838e2d3917aabd8b2f09cf27db2265f30906d52440cfbde1e5517da44bd052f236c12244d042104c988f3ebdb774bcead26b777c26ebc81f97094d62a397b6e744e92117409621b02e357163509ca3c22d3ca6c4548d4b85e8fb81773ba2aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7e86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 0,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "2a948443a2db29138e28c7bd3c7cfaebf0083305884612730ba1f266044696382e3d3f53ea4985aba7c4759c1534e125308aeb69d306645097d0ce0da74398ffd62d90f74787e1e50ba752482bc5733a7dc5a5fcd4782140dacac27e02fbb7cb8d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 1,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "c46b7e9f32bd7ac69139854bf809012fd58ea09765b26f84425175557b080a312e3d3f53ea4985aba7c4759c1534e125308aeb69d306645097d0ce0da74398ffd62d90f74787e1e50ba752482bc5733a7dc5a5fcd4782140dacac27e02fbb7cb8d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 2,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "a7546d4d58e3b7a06ae91456cf829cce45679b735e4a0afafd5441393751295c4199f3315bb6cef8ee8ff505ca35574761bab4cf7750c701ee452985e0bcc4c8d62d90f74787e1e50ba752482bc5733a7dc5a5fcd4782140dacac27e02fbb7cb8d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 3,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "2fcb46684c58139843eb3a8b0ac2ed8c3ec0e808ede6e506bedab5708c2395734199f3315bb6cef8ee8ff505ca35574761bab4cf7750c701ee452985e0bcc4c8d62d90f74787e1e50ba752482bc5733a7dc5a5fcd4782140dacac27e02fbb7cb8d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 4,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "eb944ff21b02740d0a3f5ed9e4aa6dff7ea0d2074faf1f3b8fca174626f1a7016937e3928de288e542ba497aae4e53dc8d0e3e29b01aeec0d29470221ba6e1e0be0a220b05aa06126f08197d6d272ce080f0c6264077e893d95e572b2902b3288d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 5,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "c34674d97f9b6b2e0e986157d81b2f78c1351fb22b158ccccbd6d8bae63da4fd6937e3928de288e542ba497aae4e53dc8d0e3e29b01aeec0d29470221ba6e1e0be0a220b05aa06126f08197d6d272ce080f0c6264077e893d95e572b2902b3288d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 6,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "91f778e561e241ae0c2659355d4a80be13cfe5418eaf1b791a93618abdb2e11111549ec40ee50b9a145de2fc0615560418680d56d398715a0d42c6c8c7795838be0a220b05aa06126f08197d6d272ce080f0c6264077e893d95e572b2902b3288d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 7,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "4fbe5e041c110b798cc79163d63a4e075587055a1289e1264fb7b4884787bccb11549ec40ee50b9a145de2fc0615560418680d56d398715a0d42c6c8c7795838be0a220b05aa06126f08197d6d272ce080f0c6264077e893d95e572b2902b3288d69baaaa93e141aafdbae98c76e9ae6bb47773bae3e9daa0a14d4b2df4620e69d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 8,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "0bd5c75d6dd54261c1b60c36b5608f15a9dc63f7e17ee47a07499d6a10cd9a1a79cd1884f7a08c03e9e443769f0c63c2575acdbf9557b0cb1cd48128d968d53db014b2d137016553d30074ee1d61f3662aecac63c4433fe67db71f426afced8041e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 9,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "d8c7db60ec7f2dedba16f66de7e5e2c36743e044a8f1d6a638585aed44100f5279cd1884f7a08c03e9e443769f0c63c2575acdbf9557b0cb1cd48128d968d53db014b2d137016553d30074ee1d61f3662aecac63c4433fe67db71f426afced8041e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 10,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "3392c5462109554b5edc6b65238af09cfdb1eddcd06ae14c40d6e495da69c4dc5c881a68da52ceee4bd6451ed3f6540d78d9125d2a617b7d0687bacabf18c339b014b2d137016553d30074ee1d61f3662aecac63c4433fe67db71f426afced8041e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 11,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "101c2f66375a661bb4957fb2b9926f8b4409c37cbf357ffa2ef91df1e17fa2455c881a68da52ceee4bd6451ed3f6540d78d9125d2a617b7d0687bacabf18c339b014b2d137016553d30074ee1d61f3662aecac63c4433fe67db71f426afced8041e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 12,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "95941d2e92cae0a308c982631fe58daad3c0c0a5bf5473ffc5be5a0bc3ef063c202fa93f057364dbe3a0b113b53f77161ef937f43aafa13e5904d27d5e5c583bd97f793c7ad7eafac188ef034df106afa1204949d16bc7d9333a3c9d03a7447841e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 13,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "86b769b43fa54bb37a717529fe0f21a6c9dfabf2e970deee5274c94f8905d6c7202fa93f057364dbe3a0b113b53f77161ef937f43aafa13e5904d27d5e5c583bd97f793c7ad7eafac188ef034df106afa1204949d16bc7d9333a3c9d03a7447841e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 14,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "5a1259d62514d139cf03117d5498eeb13a61b4cfa2818119f0f68c81c711e351cebe8b07463ff67629eb9bfa7890d797f7d959c2d8fa44dbe760f1cadc0b7671d97f793c7ad7eafac188ef034df106afa1204949d16bc7d9333a3c9d03a7447841e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 15,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "8c15e619f991e3f3ee0e97a96dac6465ff7ceece89378e04551092844c7006dfcebe8b07463ff67629eb9bfa7890d797f7d959c2d8fa44dbe760f1cadc0b7671d97f793c7ad7eafac188ef034df106afa1204949d16bc7d9333a3c9d03a7447841e2c13f010046d1484fae3cae61307f6de91bc1b233a8597f0296547b4930199d3e79d9beabf1f7717928270ed66739008352f376f7dec329840ded4d2e9affe8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 16,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "9d02666d62f9fd622be1f7ea6a85eb21fdb7ded5ddff0927d50f0537a2787059979d42e81dda356fe874764ba8e7eb10254b03b63381ef456f6bffd8556e22cfafa5e8b4665f939171eb7f295782d21797d5b91612843502891bbe403fcaddd604099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 17,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "980f3c8a877f981e180523038424760650357582f5f62922f05445e22e861c18979d42e81dda356fe874764ba8e7eb10254b03b63381ef456f6bffd8556e22cfafa5e8b4665f939171eb7f295782d21797d5b91612843502891bbe403fcaddd604099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 18,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "a2dd8e76ccd3680f885e4b1f183605f447f087aa817870cc48435f451eadca9f3be9ccb69cd0cadc6726b3c27c9237076cc1de74abc03f425ee2991d1fbafd1dafa5e8b4665f939171eb7f295782d21797d5b91612843502891bbe403fcaddd604099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 19,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "4cb99fade90f2aa02066300ae3cd6338dabac7bf5c11b3e4e4dbef6c9f3922ec3be9ccb69cd0cadc6726b3c27c9237076cc1de74abc03f425ee2991d1fbafd1dafa5e8b4665f939171eb7f295782d21797d5b91612843502891bbe403fcaddd604099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 20,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "240fea51b653498888f4cb7df1041b1efa8487e2d1b64b49dc1ba4e42801f0f8867ce6e256005cdec69f213c6a9f1e32f5977c902ebbeb64df53ca06cbe59258773ed1dd6981fabea9faf1a4764745c5f7981f3ddef1f5250cb7ee4d37fc919004099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 21,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "3beb0ca5a311704b19b1de33e0e87d3154a2360be61977ea3122ed51024be897867ce6e256005cdec69f213c6a9f1e32f5977c902ebbeb64df53ca06cbe59258773ed1dd6981fabea9faf1a4764745c5f7981f3ddef1f5250cb7ee4d37fc919004099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 22,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "65c8a59c2393c9d4603e7e577561b814444cfef4e35ce47ef835c96dcccd54bf6f1db64ee27b3fe92c2c11bc967ed43ae05caaa6f7db7383e781672c279ce25d773ed1dd6981fabea9faf1a4764745c5f7981f3ddef1f5250cb7ee4d37fc919004099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 23,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "82c3e78e09772502f84c89acd3dd5c2c03111ec7fa01f9f88a4ad30b0e25028b6f1db64ee27b3fe92c2c11bc967ed43ae05caaa6f7db7383e781672c279ce25d773ed1dd6981fabea9faf1a4764745c5f7981f3ddef1f5250cb7ee4d37fc919004099a7180de7fe57631313c80586a63149b9f38db2097ba20392f170a84b5892f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 24,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "4aacab8a87e0e6ceaccd72b54c0d6aefe7b82b3de1375e7dce9c37426cdc4cb6f4b9d5e1d570c2d57622b00684e2caba2e7f93b8a79cf63b4f728c84459100823cc4444403a56d7fb447239b38b500590ea9d04a3d76032069ffcadf547cff48f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 25,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "cf9d0cb52cc26f27a7f089c76f48e69a8850eef8c6331ac37117d49a192e8134f4b9d5e1d570c2d57622b00684e2caba2e7f93b8a79cf63b4f728c84459100823cc4444403a56d7fb447239b38b500590ea9d04a3d76032069ffcadf547cff48f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 26,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "0fbd23105dbf78dd434f10658d28c9271c3115cbfe656928275822ffbba1a71733f516fe89f685bbf5af7b358dd88beaf46e9eb052a7c97a61c115a37b0b18453cc4444403a56d7fb447239b38b500590ea9d04a3d76032069ffcadf547cff48f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 27,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "6f813e69ae67f163432650536fd066bdb4390b34a3b5a7c89197396e499004a633f516fe89f685bbf5af7b358dd88beaf46e9eb052a7c97a61c115a37b0b18453cc4444403a56d7fb447239b38b500590ea9d04a3d76032069ffcadf547cff48f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 28,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "de3d66899d3cb8563afa65e8953312d01c6792c5f25849c92bcbe363d1f8da7ccf6314846171c68a45e5ef8d6ce795f6e2a623bc41a48b1eb0dbc947c8acb5c8570f3c9eb0f96b840780278745765937df219e2aba2ad1ed5b6ff9de2589a321f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 29,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "8531ae1cefa12a796cb539a7852a3614aa65052d5ddb8f11fe4464c62f1b1b4acf6314846171c68a45e5ef8d6ce795f6e2a623bc41a48b1eb0dbc947c8acb5c8570f3c9eb0f96b840780278745765937df219e2aba2ad1ed5b6ff9de2589a321f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 30,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "60f66b694ec205b44b8b8441c29961731921e9c032bc08dd97ec6101fb280308a0f887c44c9efd3f513eca4462ace8aff50a9bde0a26358237b4adffa794aba2570f3c9eb0f96b840780278745765937df219e2aba2ad1ed5b6ff9de2589a321f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 31,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "e8316555d5fda0e3908b308773c92269b827270687c575fcebf574813f98d68aa0f887c44c9efd3f513eca4462ace8aff50a9bde0a26358237b4adffa794aba2570f3c9eb0f96b840780278745765937df219e2aba2ad1ed5b6ff9de2589a321f5c102c646aa905c6dde0b51bcd45d59efb9680cc08a5f94e93d1993e4e3d06f2f1e4e94c78c5be2648ed89fe7e80850612e066ad5f39447af6e1b489d4e3f70e8e175fd68290ed267501f651f3ed59e5fe707315313dfb6853b966af115d982ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 32,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "23c7e71bbbbfd7f15525c7c79d326fd27ea8030bde94b6de1706c42d009fd216d79469130c1bc986194999e54f91fc3a29f68345403c4b4fbbc892e94d23bd65fff44bf2ec45a4eaa24ac3451e6b0249833e591a37cc98e5b94af639b5c211519d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 33,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "5623f4000143a7dd7581e4eceb6f59d5623eb752c403f87c5a2bdf90d5f4e307d79469130c1bc986194999e54f91fc3a29f68345403c4b4fbbc892e94d23bd65fff44bf2ec45a4eaa24ac3451e6b0249833e591a37cc98e5b94af639b5c211519d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 34,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "07db11e4641b9bdd11d3b8bb81988ef6b50a1d93cee30fdab366c3915d06a43dd10feb9a4dbe44da2e9484d751ce2ae8eb6e4cb60016bb663704efcfab342e1efff44bf2ec45a4eaa24ac3451e6b0249833e591a37cc98e5b94af639b5c211519d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 35,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "723fd3ab0ae4d8104638030ee9edeb1bfbddddc49ff5a32105ec045f5d9647bed10feb9a4dbe44da2e9484d751ce2ae8eb6e4cb60016bb663704efcfab342e1efff44bf2ec45a4eaa24ac3451e6b0249833e591a37cc98e5b94af639b5c211519d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 36,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "e9fe508fd3973f1948d87ed8494a485e464a77fac4ed5e4a1a334a337a50393eb6b353a937ac4f546ebe26a2e06b15af4f9d6fd358c564d6de5cf134c3bfa55cca0eb8d96ba3f155e12c02132c58f34c6dcc3368dbb17d3a70bb39e24647642f9d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 37,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "22ba4a8ef439a9b4fff8f94a2a812b92afa740588e78f33d69ba18de0079a403b6b353a937ac4f546ebe26a2e06b15af4f9d6fd358c564d6de5cf134c3bfa55cca0eb8d96ba3f155e12c02132c58f34c6dcc3368dbb17d3a70bb39e24647642f9d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 38,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "16e8b1bd93469fe3176b021c7f496f4a9651f777b9dc83ba267150f503737fe00952951bf8059b341a3f1168fa069a070b70e501e05ac1b2db6c440a162ce418ca0eb8d96ba3f155e12c02132c58f34c6dcc3368dbb17d3a70bb39e24647642f9d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 39,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "ea5e526dce20b3bb212bc87a163f160cc771a5135f33e5fc03c204dfa6805ebd0952951bf8059b341a3f1168fa069a070b70e501e05ac1b2db6c440a162ce418ca0eb8d96ba3f155e12c02132c58f34c6dcc3368dbb17d3a70bb39e24647642f9d3c3801138c94d51103913fc783f89fbfed7eec64020637a5c356ad6b116473dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 40,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "dd25c91e66f7f67b7d2f65ab597d5cbf8e83f5b341478484c559bd498a7f0da6dc72517a28658765fed72145dfbc6b69898585ece4cd9c4738c01b046cde021b3bbc9bd6227498ea27957adf159de738a8b6d00630672a88cf9bfc3c7640331b55d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 41,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "b03fcca552e585f8cd8d7ed74fedca157507c71e6cf704a1227749b2a0e5ba31dc72517a28658765fed72145dfbc6b69898585ece4cd9c4738c01b046cde021b3bbc9bd6227498ea27957adf159de738a8b6d00630672a88cf9bfc3c7640331b55d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 42,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "c842df7c654b6cee11d0e4c841b11ac8344fa48aea3f3829995c2fc90d46277556232d948c3e2d2051957748fe375b56976ba6e78cf5abf2a076588ae01a33db3bbc9bd6227498ea27957adf159de738a8b6d00630672a88cf9bfc3c7640331b55d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 43,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "e9b96489f7aca19fdd1528d68f02776eef932f2bc19429f8ac2054857aa8bdb556232d948c3e2d2051957748fe375b56976ba6e78cf5abf2a076588ae01a33db3bbc9bd6227498ea27957adf159de738a8b6d00630672a88cf9bfc3c7640331b55d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 44,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "7086fd3a73c91d263b7665a626f001b805b4916237410417913e15c13a51698ff809e314fbb87a5488a16f777ae737d574cb0d8a40bb76079f3ea7bbc0cbb9d3617601b8d9ddb9150af0fc29a148fbfdca0cd0067ef26c7d660aa766b413a5c555d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 45,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "70ec807377010122bdea18a207178a7b1cf5351c001714116591ac0e5fdb336ff809e314fbb87a5488a16f777ae737d574cb0d8a40bb76079f3ea7bbc0cbb9d3617601b8d9ddb9150af0fc29a148fbfdca0cd0067ef26c7d660aa766b413a5c555d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 46,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "75cdc4b75ba82e46eacfbd7715a3b67db79984317bfab7a07fbfd70d36b062984e38a409893a0073b41c750cbf00a38791489b7860a0250d2cfff071f5937c6c617601b8d9ddb9150af0fc29a148fbfdca0cd0067ef26c7d660aa766b413a5c555d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 47,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "196b9651e3ebc936e40e8e84e6963da9463686a07ef87594fdab2ccc870c64c74e38a409893a0073b41c750cbf00a38791489b7860a0250d2cfff071f5937c6c617601b8d9ddb9150af0fc29a148fbfdca0cd0067ef26c7d660aa766b413a5c555d36731ece2ff45eeeaadb8118ea1cbdf1eec299381f42ba343c1a2ca860192dfb2ab942ad9641d160bc4e4902f94d36ef8a27f5ed28eea42db8f3aff7ba95bb3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 48,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "ef77252fbdd558a6c7a2c443a732818e799865d7d1ba583cc3e51cad288cdb19825f7d0673abc494494e0cc78d6a387afc05f7fc35a132c3610dfb08236f35fcbfd350ecb2969bb73a025bad010ace72cbe1c03edb7ac81f44a5ba52c436a611d531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 49,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "f0e914540959894cf7d4eb9cc4df5ee5a26919114a73f10bcefa17f45a2b9b76825f7d0673abc494494e0cc78d6a387afc05f7fc35a132c3610dfb08236f35fcbfd350ecb2969bb73a025bad010ace72cbe1c03edb7ac81f44a5ba52c436a611d531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 50,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "fb5f0ab7fe740627e81a4b9790b03b496539179bccf5fd43cda91a3477bda9c2002b43ccd7ffdbd6faba0ed9597bb7bc235460023347dbe49bb8330a0178ebf7bfd350ecb2969bb73a025bad010ace72cbe1c03edb7ac81f44a5ba52c436a611d531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 51,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "b250e68c930fef428cbaf88a4df767b0df85201839c27ade079ddca5fa7ce7cc002b43ccd7ffdbd6faba0ed9597bb7bc235460023347dbe49bb8330a0178ebf7bfd350ecb2969bb73a025bad010ace72cbe1c03edb7ac81f44a5ba52c436a611d531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 52,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "289cf3d0344b74892210fa7d4ea92b252ae322b74967d42ed2eb044444e6aa1dd96d7bd3705a8b6542f78294f331f472f8e7cbfecf1bd2bdaf18fac30724aee490f8218bf5881db3ea34b0beb7371b6f3c750fc4bb5f56ac0e14e5bf0455f7fdd531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 53,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "5a9349274f7a5ff1bbab110b79095bb20264442c768b9a43a6472e172d1928a4d96d7bd3705a8b6542f78294f331f472f8e7cbfecf1bd2bdaf18fac30724aee490f8218bf5881db3ea34b0beb7371b6f3c750fc4bb5f56ac0e14e5bf0455f7fdd531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 54,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "87712a791423076df0c7e99b06e24e58dde7b3ecb25593376c8e0f935a3ecbad87d174186b7870615d0ed947b6340a7ded13e733e58e8c258f34a13e111974e290f8218bf5881db3ea34b0beb7371b6f3c750fc4bb5f56ac0e14e5bf0455f7fdd531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 55,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "2fd98ce60e9cd6c6d251c222ab08f1dbb67374b84729b1a3ade6924640d111fd87d174186b7870615d0ed947b6340a7ded13e733e58e8c258f34a13e111974e290f8218bf5881db3ea34b0beb7371b6f3c750fc4bb5f56ac0e14e5bf0455f7fdd531c3609d86585d00dc5cdb0d5cd8cdde8d51ae1de855ed9756dca85b011bec986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 56,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "00e239bc31fe19e55ad6460405654fea754d48188a6ae3ac303868d5ae9878c56161e592f8f76720d3946a58d48336c7878c4cea3f21e0abc7bb4725f808d07a1e9041517281a6bce04f629c77ec8ae0a4ea42844fe18d9ff4f133a3b1c3f351aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 57,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "bf97996aa7b308b49fde6518951b935dee1360b29fef8b66a036451b945539046161e592f8f76720d3946a58d48336c7878c4cea3f21e0abc7bb4725f808d07a1e9041517281a6bce04f629c77ec8ae0a4ea42844fe18d9ff4f133a3b1c3f351aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 58,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "1f414ef3e5541a33b336bce237608e45e1ec404b1ddec8e30bed75cdd6876097e778ebba519112752fe1d6419bcfced5fd2ad675c86d0497d225da6d970396201e9041517281a6bce04f629c77ec8ae0a4ea42844fe18d9ff4f133a3b1c3f351aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 59,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "e2cf4c2eb700b9a0bae869250b6f7726ab5b1983a54c32b8a7e20ffca588fabae778ebba519112752fe1d6419bcfced5fd2ad675c86d0497d225da6d970396201e9041517281a6bce04f629c77ec8ae0a4ea42844fe18d9ff4f133a3b1c3f351aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 60,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "37e27943df842919e0a3b7bae195a654f9231dfe7d327867129bfdd39f503d6fad168a033d3e90fcf2ec8927d1860cefe3028520e320449d2f6f095584a45c26b6e744e92117409621b02e357163509ca3c22d3ca6c4548d4b85e8fb81773ba2aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 61,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "cdc6719259b964d0bb2297d93abf1585be097c2697d1cf4abae55868b61cd496ad168a033d3e90fcf2ec8927d1860cefe3028520e320449d2f6f095584a45c26b6e744e92117409621b02e357163509ca3c22d3ca6c4548d4b85e8fb81773ba2aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 62,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "5b7aa159bb71612453fb1175d1788c35280c0a966af0cb74cd0976849319966952f236c12244d042104c988f3ebdb774bcead26b777c26ebc81f97094d62a397b6e744e92117409621b02e357163509ca3c22d3ca6c4548d4b85e8fb81773ba2aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "segment_index": 63,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "03a1838e2d3917aabd8b2f09cf27db2265f30906d52440cfbde1e5517da44bd052f236c12244d042104c988f3ebdb774bcead26b777c26ebc81f97094d62a397b6e744e92117409621b02e357163509ca3c22d3ca6c4548d4b85e8fb81773ba2aeea303c7a3ae61b37c31f1119a746d3251992f124b2293f224ad81bf2ce62ae986567a88ebbae92a047ee95096b7427ddc6a212b0fab464e2e73672dff0dcb3b3be88234961d06abaa02fbef4c66643dcbdd490f1eb9e94d0194660e57d2d7ece6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 0,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "a8335f12e3e9b39a69639fe73fc4fe18ff6aee5b797b6177fbf40065096142230d2b0bb45c9512185e3bf34b3360610396ce06d3bfb93ba8fd389f1c87bcd11172c2f859af53da23111bd55c5fb1f48efe259af260031f9117c9412de6240a5e7aac5a1bca3e11d0f4b44c9b9db25c9eaf52cbd524f53d891c2fcb8dfa674cba94de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 1,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "e9d140d40248d9884b46ca919e853548f4709f115b8932395ac586e36a0a731e0d2b0bb45c9512185e3bf34b3360610396ce06d3bfb93ba8fd389f1c87bcd11172c2f859af53da23111bd55c5fb1f48efe259af260031f9117c9412de6240a5e7aac5a1bca3e11d0f4b44c9b9db25c9eaf52cbd524f53d891c2fcb8dfa674cba94de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 2,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "09ca205f7c0a53e2580305a3a422f3f88eb4115ffe215cb5f1491f0460108ccf1e559d124a08ee22b5101899b9f68f8978a414fc7617dd0c740d58416bf7532f72c2f859af53da23111bd55c5fb1f48efe259af260031f9117c9412de6240a5e7aac5a1bca3e11d0f4b44c9b9db25c9eaf52cbd524f53d891c2fcb8dfa674cba94de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 3,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "0a697ec679731b7bbb593926d2ced38cf493b86a54a254741448ff22f9daa2d81e559d124a08ee22b5101899b9f68f8978a414fc7617dd0c740d58416bf7532f72c2f859af53da23111bd55c5fb1f48efe259af260031f9117c9412de6240a5e7aac5a1bca3e11d0f4b44c9b9db25c9eaf52cbd524f53d891c2fcb8dfa674cba94de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 4,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "c1d9af292b63adf208988dc8865d6889fa18bfd71fb387f8895d97fd38538365f3afc9ad179ee2174b39427def1f4d7614000f7d3f66c6cfe15ad44130245ab95f0852f812d79c3f80a0c710cf8b391714aac805c9decf6f8e09ccb5217638d27aac5a1bca3e11d0f4b44c9b9db25c9eaf52cbd524f53d891c2fcb8dfa674cba94de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 5,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "d4c13b053ca4fff3fbb4d6292f43ab1fd65088f70835a6ef9977be55649d4fb2f3afc9ad179ee2174b39427def1f4d7614000f7d3f66c6cfe15ad44130245ab95f0852f812d79c3f80a0c710cf8b391714aac805c9decf6f8e09ccb5217638d27aac5a1bca3e11d0f4b44c9b9db25c9eaf52cbd524f53d891c2fcb8dfa674cba94de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 6,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "d9417f8354244c411fd28f941b9f43633e29021254d5983908cec41370ecc540333448fbe0eaf22de242856a70c7b611e5a9b8cd674cc4fdcc0384d48bc2cf045f0852f812d79c3f80a0c710cf8b391714aac805c9decf6f8e09ccb5217638d27aac5a1bca3e11d0f4b44c9b9db25c9eaf52cbd524f53d891c2fcb8dfa674cba94de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 7,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "d6cfa19515ef7cbd0d1d2c30cb30b96e1a7da002cb9123bb47df3b99f0245d71333448fbe0eaf22de242856a70c7b611e5a9b8cd674cc4fdcc0384d48bc2cf045f0852f812d79c3f80a0c710cf8b391714aac805c9decf6f8e09ccb5217638d27aac5a1bca3e11d0f4b44c9b9db25c9eaf52cbd524f53d891c2fcb8dfa674cba94de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 8,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "c75111d3d1af987b3bbc30cef8728fe1a26b9c28eed531aec9be497361c976def873f5528f2b53ba8f6bc1ef397164438f8e2c7f7d397cb5cd3c0cef4aafe1cb875d6fde20e36d531902770fd212459ad88308890ef4d0504aeced7a159be0e4a34c26b326caedadd5d89823300a14a4f90480d225d11fa36fdf122746ceb88994de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 9,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "c46e1a8e204360c219fbe602ceaf0cd7f1bf0333744ef535434773d4a669c712f873f5528f2b53ba8f6bc1ef397164438f8e2c7f7d397cb5cd3c0cef4aafe1cb875d6fde20e36d531902770fd212459ad88308890ef4d0504aeced7a159be0e4a34c26b326caedadd5d89823300a14a4f90480d225d11fa36fdf122746ceb88994de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 10,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "ebd784569ea0af6c5b56bef1b979ec69dd7b8f2731bcb680b3792596120a995ec798e24b4572f45586b83791cf85b3cbb369ed37648ce1c915485512350c1365875d6fde20e36d531902770fd212459ad88308890ef4d0504aeced7a159be0e4a34c26b326caedadd5d89823300a14a4f90480d225d11fa36fdf122746ceb88994de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 11,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "288bf6ca42926a8231a5a3e725d0dd967839d1fa5a6ef5f79751968e20de09d0c798e24b4572f45586b83791cf85b3cbb369ed37648ce1c915485512350c1365875d6fde20e36d531902770fd212459ad88308890ef4d0504aeced7a159be0e4a34c26b326caedadd5d89823300a14a4f90480d225d11fa36fdf122746ceb88994de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 12,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "d962c1dc03d202b6243208f36a718e7833a30c6e83bd6eed09790d97dfd8ffbf5ecbce85a6d23d50dcd6224b5cb3ddad2460a7088faa5c40cafd30c648bdbff9015a2a9e749f2449bab526a6d767f9cfd528d94486ffbc699084c92cf87ce105a34c26b326caedadd5d89823300a14a4f90480d225d11fa36fdf122746ceb88994de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 13,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "c5fbc8494c0d07f80eaf6e7567664b25e77269f45c536caf104d680c224daa125ecbce85a6d23d50dcd6224b5cb3ddad2460a7088faa5c40cafd30c648bdbff9015a2a9e749f2449bab526a6d767f9cfd528d94486ffbc699084c92cf87ce105a34c26b326caedadd5d89823300a14a4f90480d225d11fa36fdf122746ceb88994de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 14,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "173381a9418cdb999f3582190931f5c2366c31a0826c9c92f15ab22b50eb7e53dc711ce4d2b5bda8adc3087d0f28940c386022cc1ea226e9be31d67af1c5787d015a2a9e749f2449bab526a6d767f9cfd528d94486ffbc699084c92cf87ce105a34c26b326caedadd5d89823300a14a4f90480d225d11fa36fdf122746ceb88994de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 15,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "4b492b5beed98ea155489f1d07b6339c8ef66803423f2863e3ce3209cd38f05fdc711ce4d2b5bda8adc3087d0f28940c386022cc1ea226e9be31d67af1c5787d015a2a9e749f2449bab526a6d767f9cfd528d94486ffbc699084c92cf87ce105a34c26b326caedadd5d89823300a14a4f90480d225d11fa36fdf122746ceb88994de476ec2d4c45e781c236ac81639113c93b0d59996098085381e0e1d1ff0629570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 16,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "342e27fbc1800f6b6ad6d2569e57e153a22f0e3c384b7f16b0a5b89c83bc3de15d2a0c5c056199e9e3f468fa1723c38b5afc4d6b9abb10f1677cc2502447bacca1344214dccbffdc3c83280b2d1e6042ac79f755273531d9ec98c543d5e7262047daf21435feb34a68963b3c47a6a4548e21003e05acf349b8a253a6944599b624ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 17,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "05afdfac38eccaa6548fe0ac886b0ab9ad515404b65ad2bb02b8313b1bca61d65d2a0c5c056199e9e3f468fa1723c38b5afc4d6b9abb10f1677cc2502447bacca1344214dccbffdc3c83280b2d1e6042ac79f755273531d9ec98c543d5e7262047daf21435feb34a68963b3c47a6a4548e21003e05acf349b8a253a6944599b624ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 18,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "19f2aa5fecefdd36f9bc81e1ad0d090abf1015ce2fc0863ea0ea4d1417c8e9b12600f82d999a2bdf7872a02e0e52714cd13f8424fb90eeb54626300cb3b34b5ea1344214dccbffdc3c83280b2d1e6042ac79f755273531d9ec98c543d5e7262047daf21435feb34a68963b3c47a6a4548e21003e05acf349b8a253a6944599b624ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 19,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "76e11a870fbc9288c0ff080293576e0123e6963feb8c7408963235b37ffbeb7d2600f82d999a2bdf7872a02e0e52714cd13f8424fb90eeb54626300cb3b34b5ea1344214dccbffdc3c83280b2d1e6042ac79f755273531d9ec98c543d5e7262047daf21435feb34a68963b3c47a6a4548e21003e05acf349b8a253a6944599b624ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 20,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "65548e3fa5b1cd23747788770a5a7e9faf3468061889d3e7182a6d6a62cd4569d85fb79767dc6b2fd6aed36139e90bf5f9f9dc87ed6f169d23e4eb14c410315d263179f3d38201bc25e60bdedf3f28c4bb35d16634d7d699bc2aabaf1075b69c47daf21435feb34a68963b3c47a6a4548e21003e05acf349b8a253a6944599b624ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 21,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "8a074a1d077eece2dc78b0894865c740cbf5fbf0d5426215d46664e00ffb0258d85fb79767dc6b2fd6aed36139e90bf5f9f9dc87ed6f169d23e4eb14c410315d263179f3d38201bc25e60bdedf3f28c4bb35d16634d7d699bc2aabaf1075b69c47daf21435feb34a68963b3c47a6a4548e21003e05acf349b8a253a6944599b624ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 22,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "6e41e8652f40851e0461b9ee10f5138a1dd902feb4cfd1caa5275fc30834a5d12811a488756bf6eb3d9158606685776593a64e09f57c34a082ca2aa56200381e263179f3d38201bc25e60bdedf3f28c4bb35d16634d7d699bc2aabaf1075b69c47daf21435feb34a68963b3c47a6a4548e21003e05acf349b8a253a6944599b624ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 23,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "695710855d05383508195d3cc19e0b5a5f74287c2147520f85ecf378f32dc8e82811a488756bf6eb3d9158606685776593a64e09f57c34a082ca2aa56200381e263179f3d38201bc25e60bdedf3f28c4bb35d16634d7d699bc2aabaf1075b69c47daf21435feb34a68963b3c47a6a4548e21003e05acf349b8a253a6944599b624ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 24,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "acad4431186f418c395002ee47bfc6b9bd73b969bc8fe21b1519d592388b51be245561f124974cdb93c448bff3e57349b25fd095776b1788065f2b4146fdd9d09d2f1f31eb267f3a0e817401c49919e133cfc75f6e03cc59714b2db715d081f4325b8f7ae826c5365f2fd93693bec16dbf61a3e4c3871b6a289211cc38b6240024ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 25,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "84a168ef8725d6587be155f365077ba3edd2a68cae76d33a799b9413e200ada7245561f124974cdb93c448bff3e57349b25fd095776b1788065f2b4146fdd9d09d2f1f31eb267f3a0e817401c49919e133cfc75f6e03cc59714b2db715d081f4325b8f7ae826c5365f2fd93693bec16dbf61a3e4c3871b6a289211cc38b6240024ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 26,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "a16560d668b843fb3be99ace41dbd18471f342bd3255a1d21204b35e43f74436b06a625386c00ebefc6a828c70cebe590783bf13009e8b6411e834842bf90f309d2f1f31eb267f3a0e817401c49919e133cfc75f6e03cc59714b2db715d081f4325b8f7ae826c5365f2fd93693bec16dbf61a3e4c3871b6a289211cc38b6240024ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 27,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "71dbfd76e430eaa93e574f9c610c170a963454f8d54a4b78b691552f1db08148b06a625386c00ebefc6a828c70cebe590783bf13009e8b6411e834842bf90f309d2f1f31eb267f3a0e817401c49919e133cfc75f6e03cc59714b2db715d081f4325b8f7ae826c5365f2fd93693bec16dbf61a3e4c3871b6a289211cc38b6240024ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 28,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "0294b123308afe0f8a8840cafcf102e48d5fe02bc223d334cdba109aea84e69bd6fc32b69a52118f79ce75e760637e343474369d1278b997b7657cc65d2a67d40179dd587477583e5bf72747f1da697b94e50ff5612392686f0325e470c547b1325b8f7ae826c5365f2fd93693bec16dbf61a3e4c3871b6a289211cc38b6240024ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 29,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "dcfd4f3826ff2b54a0991038d16633dd9dc1a3be3999e985efbdaaeff734a704d6fc32b69a52118f79ce75e760637e343474369d1278b997b7657cc65d2a67d40179dd587477583e5bf72747f1da697b94e50ff5612392686f0325e470c547b1325b8f7ae826c5365f2fd93693bec16dbf61a3e4c3871b6a289211cc38b6240024ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 30,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "4c1485cfe852e80cea3b28616354dca69eaf1b68d7e3c7b7d1758cd0668aeabd2d06a0b885151a1483f86e898d9d6d90fe79554a80fb31031ef76f66aa9d453d0179dd587477583e5bf72747f1da697b94e50ff5612392686f0325e470c547b1325b8f7ae826c5365f2fd93693bec16dbf61a3e4c3871b6a289211cc38b6240024ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 31,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "e144fcea40fa12fbd13920daa8998a1ba0cc7117b6ca51892b4f2d47de1a16f52d06a0b885151a1483f86e898d9d6d90fe79554a80fb31031ef76f66aa9d453d0179dd587477583e5bf72747f1da697b94e50ff5612392686f0325e470c547b1325b8f7ae826c5365f2fd93693bec16dbf61a3e4c3871b6a289211cc38b6240024ba20093e9d48fd7b7336ecacf1ad69c952afbf4d7774c93ad8f023de324bb69570fb09f19f7e880ab6830c0d1f7f8f10bf28993a0cf43dda0eb2bc0e7661e98e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 32,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "43046322f4a1109591b52f55af8fdfb5498ebd05c9b39098b706b4b9005f0713fa70a472c8965fa8d4f7239a8ac02d138ce1991c6804fe722cd261533f6d6cb837172bc1afffb953ffc6ccb2e357368f4a99a99235d2752e6fa4a1cbdaecb8fb276c65d6eaec5c00e8c6da0906323c0a2a2847359665571c3c55cd6d5ac62305726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 33,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "6e62922aec0185f2fa1f0456a29312e36a979a5eec8a320c76f91ea054726ecefa70a472c8965fa8d4f7239a8ac02d138ce1991c6804fe722cd261533f6d6cb837172bc1afffb953ffc6ccb2e357368f4a99a99235d2752e6fa4a1cbdaecb8fb276c65d6eaec5c00e8c6da0906323c0a2a2847359665571c3c55cd6d5ac62305726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 34,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "cc25307fe2a206a2528b75ead8392dd58f37af910e861dbf8b3bebddbdabdd1739e3681a5b7236c61ac78873ce1c294881e9aa7052e4f1c89226fdcd93da6c1037172bc1afffb953ffc6ccb2e357368f4a99a99235d2752e6fa4a1cbdaecb8fb276c65d6eaec5c00e8c6da0906323c0a2a2847359665571c3c55cd6d5ac62305726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 35,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "895ed628b3b5f85f6c9d69a7a47f567a21bd5ea21bb41d33c31010c5b8b1f28e39e3681a5b7236c61ac78873ce1c294881e9aa7052e4f1c89226fdcd93da6c1037172bc1afffb953ffc6ccb2e357368f4a99a99235d2752e6fa4a1cbdaecb8fb276c65d6eaec5c00e8c6da0906323c0a2a2847359665571c3c55cd6d5ac62305726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 36,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "cdbecc2505434859780afd45e9c25581d5ad734d398ad0f24fef35646fea0ca50cf8c3545778ce684cd210c76ffc05fc83c5fc35cca24508c78b077c41ab60ea5501772018acf7f0d4acc6293b63f232335684ab3ac38e41ace932f57125e77e276c65d6eaec5c00e8c6da0906323c0a2a2847359665571c3c55cd6d5ac62305726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 37,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "cf9b554c49690fc82ab3a5c51d6e403f540bd6dd2643366543fd1365b71b69b90cf8c3545778ce684cd210c76ffc05fc83c5fc35cca24508c78b077c41ab60ea5501772018acf7f0d4acc6293b63f232335684ab3ac38e41ace932f57125e77e276c65d6eaec5c00e8c6da0906323c0a2a2847359665571c3c55cd6d5ac62305726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 38,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "48be7bd9928be271d7ed187d25ab73b8b2e4043a8adc9411925bb7343d6ed318135ee5ddbb92d50f41782d3d22398d3d6224ef77605dd3b25958c161ed9729fc5501772018acf7f0d4acc6293b63f232335684ab3ac38e41ace932f57125e77e276c65d6eaec5c00e8c6da0906323c0a2a2847359665571c3c55cd6d5ac62305726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 39,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "4715205a38a21d3d429066b00771fc3c1f4609c452c6ba5436323dd9e5283a71135ee5ddbb92d50f41782d3d22398d3d6224ef77605dd3b25958c161ed9729fc5501772018acf7f0d4acc6293b63f232335684ab3ac38e41ace932f57125e77e276c65d6eaec5c00e8c6da0906323c0a2a2847359665571c3c55cd6d5ac62305726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 40,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "bbc93717b110d386f4189ff99486de4d10d263d99ed4b0930baccd9eb4c1c3231c4991114cbbafff42b9f2b3d776bab972643e42db6c24f648e2bc7e65ce11fb49fb0c5699e92b81a33a7260fd080514343956dfa3b6aad15556be45cc3c102ec5ebd28ae4875fbee8ec0d76ab2894e9a0fca91482ca215b282f6ef380494a1f726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 41,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "847727d817f01c65caa71cd10a506812d8def0bb067ae86d34e6122409c284091c4991114cbbafff42b9f2b3d776bab972643e42db6c24f648e2bc7e65ce11fb49fb0c5699e92b81a33a7260fd080514343956dfa3b6aad15556be45cc3c102ec5ebd28ae4875fbee8ec0d76ab2894e9a0fca91482ca215b282f6ef380494a1f726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 42,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "340a17da1d179ddbb9fc40b15a9f073af1d05c50ffab780011b38bfc33bb7cb2e6e693c1e8a01ded1de0796eb6317c33293086f54b2624b3b054d24ab84b4c3d49fb0c5699e92b81a33a7260fd080514343956dfa3b6aad15556be45cc3c102ec5ebd28ae4875fbee8ec0d76ab2894e9a0fca91482ca215b282f6ef380494a1f726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 43,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "ef7109d80139d48e63f0bf8ad0095d8784d154ab4c75e4f728a23fa918c1d3bee6e693c1e8a01ded1de0796eb6317c33293086f54b2624b3b054d24ab84b4c3d49fb0c5699e92b81a33a7260fd080514343956dfa3b6aad15556be45cc3c102ec5ebd28ae4875fbee8ec0d76ab2894e9a0fca91482ca215b282f6ef380494a1f726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 44,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "75a8bda1a9034082a2db11c81dad57c0d1e21c6e46d87ab88c98abb95c5f41bd3be697b778c0ad6d8351889639f73dd66ecdf83cb617a824c2d0178021c750cf6348502e98b956206b675beb921ca913064488452e23c3a4b4bb5bebc987efa0c5ebd28ae4875fbee8ec0d76ab2894e9a0fca91482ca215b282f6ef380494a1f726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 45,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "c3a06ed1a5ecdd29ad97648c5d112f4058305189b49ad6bf6531027786970bd43be697b778c0ad6d8351889639f73dd66ecdf83cb617a824c2d0178021c750cf6348502e98b956206b675beb921ca913064488452e23c3a4b4bb5bebc987efa0c5ebd28ae4875fbee8ec0d76ab2894e9a0fca91482ca215b282f6ef380494a1f726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 46,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "3d4fd64409a1d73e201a1570305f3d3e82922be78b37b87e9f042b4ab6ca18d15f2844b61a51761a108ee600965812ebb3b2559c8ff97c13c11795f49b5ffd976348502e98b956206b675beb921ca913064488452e23c3a4b4bb5bebc987efa0c5ebd28ae4875fbee8ec0d76ab2894e9a0fca91482ca215b282f6ef380494a1f726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 47,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "e1dce10cfb2302e383ae18bfe856ea19ad93ff6b1b7df34dec33936b6d364f5c5f2844b61a51761a108ee600965812ebb3b2559c8ff97c13c11795f49b5ffd976348502e98b956206b675beb921ca913064488452e23c3a4b4bb5bebc987efa0c5ebd28ae4875fbee8ec0d76ab2894e9a0fca91482ca215b282f6ef380494a1f726b6790d6f031f426117f67838184882c825c38e4a4c66f05f43cdc0f18f8d904166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 48,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "cb71801ee7bdd4a345d55359d4448fd3332188e22c92b6ed69ebea1f1e882be17ac02c12fa04f6be67db3e4b44945deab5815b6a9dd78c333e4a63e437cdfde0c55e95a11ff3cf1881089ab6e5514f451cd9898c40f0343668d8e27940036f3fefa75e2dd228d9325e37ad5443bbff7c4d9f91ebe5f2ab9be28643d43967f61446aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 49,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "5c6bbda14722e68d388d2749a960ea6c0e23dd9b13b55594291f06fb5025589c7ac02c12fa04f6be67db3e4b44945deab5815b6a9dd78c333e4a63e437cdfde0c55e95a11ff3cf1881089ab6e5514f451cd9898c40f0343668d8e27940036f3fefa75e2dd228d9325e37ad5443bbff7c4d9f91ebe5f2ab9be28643d43967f61446aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 50,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "0026806fdd03cbe2ee245fd9e79211df668c88693527d1776f5a1bcef4f609a36828d46104ced138e2f6946f4bd9e08654c8a98c55ca49f042de37b2c164ec92c55e95a11ff3cf1881089ab6e5514f451cd9898c40f0343668d8e27940036f3fefa75e2dd228d9325e37ad5443bbff7c4d9f91ebe5f2ab9be28643d43967f61446aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 51,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "6ae8c3d4e182bdc569cbc9acab239b60d6cd60fb265bc7e18ceb54ec111963d26828d46104ced138e2f6946f4bd9e08654c8a98c55ca49f042de37b2c164ec92c55e95a11ff3cf1881089ab6e5514f451cd9898c40f0343668d8e27940036f3fefa75e2dd228d9325e37ad5443bbff7c4d9f91ebe5f2ab9be28643d43967f61446aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 52,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "393f25050ab580fb9e55ebfb6f4a97cb76e27c8b62ae29cff5ec9a43477856a5e6f58ba9bb3b0f59c4767821766195083caeca8aca91865ceccbd5492e008c1742d1a48414d6dcc9ee70952063b6991c3746d76b1186e601ba5379babcdca839efa75e2dd228d9325e37ad5443bbff7c4d9f91ebe5f2ab9be28643d43967f61446aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 53,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "6139964fae1dc179647a252904473bdba484d267b646f9d0ca8e4802042ef6bde6f58ba9bb3b0f59c4767821766195083caeca8aca91865ceccbd5492e008c1742d1a48414d6dcc9ee70952063b6991c3746d76b1186e601ba5379babcdca839efa75e2dd228d9325e37ad5443bbff7c4d9f91ebe5f2ab9be28643d43967f61446aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 54,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "2be7c53f4f0179e5135a809007c5d634fd4ac1b51015a6ebd84058bca372d70a803c49f7ea5c972e93525f8545e83e066fe5022dc73e4b81401e44233499cd2642d1a48414d6dcc9ee70952063b6991c3746d76b1186e601ba5379babcdca839efa75e2dd228d9325e37ad5443bbff7c4d9f91ebe5f2ab9be28643d43967f61446aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 55,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "3202c1872347fb0cec73765c069d41f0dbaad2bd8c6d303dada236a8afbe428e803c49f7ea5c972e93525f8545e83e066fe5022dc73e4b81401e44233499cd2642d1a48414d6dcc9ee70952063b6991c3746d76b1186e601ba5379babcdca839efa75e2dd228d9325e37ad5443bbff7c4d9f91ebe5f2ab9be28643d43967f61446aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 56,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "8f957dd2243b0ed498ec181f3c734129346bed5e9e5fd5ca923893b7bdeaeab5bdefa8b83a3812024fa6090422f8ae6bde6b7a01228111f0bc6145b19f78ce70d1ecab47049d76a8ddec8cd882f347751ca22632a9fdf3bc651f7283bc43edc8841ffaa1ebbb9a1707032ce917141c1e67063787cef06fd6000f4bf91c2870dd46aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 57,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "e6df36f7bcf5d4a4c3e2e7d3a929cc1543c48f4de34f6526367aeeb24a380468bdefa8b83a3812024fa6090422f8ae6bde6b7a01228111f0bc6145b19f78ce70d1ecab47049d76a8ddec8cd882f347751ca22632a9fdf3bc651f7283bc43edc8841ffaa1ebbb9a1707032ce917141c1e67063787cef06fd6000f4bf91c2870dd46aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 58,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "5524d07498038886be25ae116bc3b205c98f053dd17783d2fd54411bcb68123a61cd08942f3b38a66a5e76fbb7f3a0d4d8646877893f4d2076d7f227dd378d23d1ecab47049d76a8ddec8cd882f347751ca22632a9fdf3bc651f7283bc43edc8841ffaa1ebbb9a1707032ce917141c1e67063787cef06fd6000f4bf91c2870dd46aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 59,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "b02162b81654fef341f7c0971555f20cc3c27b04f51ac7d1b460d9bcac96fca861cd08942f3b38a66a5e76fbb7f3a0d4d8646877893f4d2076d7f227dd378d23d1ecab47049d76a8ddec8cd882f347751ca22632a9fdf3bc651f7283bc43edc8841ffaa1ebbb9a1707032ce917141c1e67063787cef06fd6000f4bf91c2870dd46aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 60,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "d327f74d61ec2c75da16b7cd2cc02562e2a8186a2a3b1a22cae6f5b83562c747c521b7b82dc4cd0ece35a99c519a362cecef32b1a7f5baf3a7beabc8ed8f90e4d7beb3c3c25e946991df50fc46b7f8d8bd5fe397991af087e9819c1c1c935163841ffaa1ebbb9a1707032ce917141c1e67063787cef06fd6000f4bf91c2870dd46aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 61,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "fd65f7504924215c6ede50837887b825a98b66c9f2831dd52231211df548853bc521b7b82dc4cd0ece35a99c519a362cecef32b1a7f5baf3a7beabc8ed8f90e4d7beb3c3c25e946991df50fc46b7f8d8bd5fe397991af087e9819c1c1c935163841ffaa1ebbb9a1707032ce917141c1e67063787cef06fd6000f4bf91c2870dd46aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 62,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "09591c32d4d5c9e3b72210cb3dbf965c5cb848db2c3161dff89849b9367c65ad2b836ba6e39fed45769ee449c39d5ec04aa85779fa42e8366d2777edbc335352d7beb3c3c25e946991df50fc46b7f8d8bd5fe397991af087e9819c1c1c935163841ffaa1ebbb9a1707032ce917141c1e67063787cef06fd6000f4bf91c2870dd46aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "segment_index": 63,
+      "segment_length": 4096,
+      "chunk_count": 2,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "2117f44db84bae89d7b0a879ff91c38a56d843b8b995c42e5f0bd48a4916c2e02b836ba6e39fed45769ee449c39d5ec04aa85779fa42e8366d2777edbc335352d7beb3c3c25e946991df50fc46b7f8d8bd5fe397991af087e9819c1c1c935163841ffaa1ebbb9a1707032ce917141c1e67063787cef06fd6000f4bf91c2870dd46aa12b939cca5c237f25a19077f698b41709aaef2ac643768bfca8f1b548d9e04166447610aa307febb32bc4f12698002633393b2970c1e2e6df218aa6703e08e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 917504,
+      "chunk_index": 3,
+      "segment_index": 5,
+      "segment_length": 4096,
+      "chunk_count": 4,
+      "data_commitment": "683b214b4775ab4fbe5baa64cf193f50a1ecb06ea3a90f3b3e85a60639c3c91f",
+      "proof": "da8bed0385fd601785a5bf057578ad6c71ebe8e1a0891ca62bc86b7c54f104e13b68a649da9ef244c1809a8b365fff9efd287faa3b73753d806bd481c756f6fec7c2d4dbeb2a14c0bf4e6030913c3b9d3fb2ba24dd78103b3dd3161da17268a1c576b12d14f07b36bc38321089bc6f912dfae6b668699a74bb590b744dc277582f7259193e32324edc987de151efd3df1a569d46d6c58fde0c777b57250192997162ed848f19740e53766ce01ac099523b099d593e0782ddbc5296eece50ec505d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985438a131aaf3445c16ab8b8f66374f8ec253f8bce7acc9efd91f722e2409ef89e"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 917504,
+      "chunk_index": 3,
+      "segment_index": 31,
+      "segment_length": 4096,
+      "chunk_count": 4,
+      "data_commitment": "683b214b4775ab4fbe5baa64cf193f50a1ecb06ea3a90f3b3e85a60639c3c91f",
+      "proof": "63498b4ee653e0ed123d9de385f8eae9d08dde6cac7c045fdb2fee94f0f65386350c71194e95b7bcbe000c5ad6788ee5533b4b4893aa0302cc6a7743953d3c62be488a1e874eb343760cfab7e2323ace7e86f328eb9e8bd5a01a4d2f4a2e5435c10479c83c073422d104390cf37900959b50902beba5405c85ed093be7aa531a547d8737d13690776f0ccabe14c1032c1724f62531bec6519e054c07e269f0437162ed848f19740e53766ce01ac099523b099d593e0782ddbc5296eece50ec505d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985438a131aaf3445c16ab8b8f66374f8ec253f8bce7acc9efd91f722e2409ef89e"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 917504,
+      "chunk_index": 3,
+      "segment_index": 32,
+      "segment_length": 0,
+      "chunk_count": 4,
+      "data_commitment": "683b214b4775ab4fbe5baa64cf193f50a1ecb06ea3a90f3b3e85a60639c3c91f",
+      "proof": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01dfe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072adeb82e155954d6be14592c66ccf7a1ece193eeebcdabaf747b91f44519f09f472960044c62f2354e945e8d78fdd220a05f2c0879f24df6f11ef5cc26b5270a0e4cfabc48c6898a30b1b5d12dda8e09a96e9ea17e80f4b2a050b8a8b4803fbd436ae4ae3ca21e1a5d0cef9bf71befdcb634c77162c3730d48251a618a40ab57835d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985438a131aaf3445c16ab8b8f66374f8ec253f8bce7acc9efd91f722e2409ef89e"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 917504,
+      "chunk_index": 3,
+      "segment_index": 63,
+      "segment_length": 0,
+      "chunk_count": 4,
+      "data_commitment": "683b214b4775ab4fbe5baa64cf193f50a1ecb06ea3a90f3b3e85a60639c3c91f",
+      "proof": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01dfe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072adeb82e155954d6be14592c66ccf7a1ece193eeebcdabaf747b91f44519f09f472960044c62f2354e945e8d78fdd220a05f2c0879f24df6f11ef5cc26b5270a0e4cfabc48c6898a30b1b5d12dda8e09a96e9ea17e80f4b2a050b8a8b4803fbd436ae4ae3ca21e1a5d0cef9bf71befdcb634c77162c3730d48251a618a40ab57835d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985438a131aaf3445c16ab8b8f66374f8ec253f8bce7acc9efd91f722e2409ef89e"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4097,
+      "chunk_index": 0,
+      "segment_index": 1,
+      "segment_length": 1,
+      "chunk_count": 1,
+      "data_commitment": "3262c546bc4db11e05171d083d33fef98a36ddbb18f56ee64fcc2b5f3bb0aade",
+      "proof": "c46b7e9f32bd7ac69139854bf809012fd58ea09765b26f84425175557b080a31fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072adeb82e155954d6be14592c66ccf7a1ece193eeebcdabaf747b91f44519f09f472960044c62f2354e945e8d78fdd220a05f2c0879f24df6f11ef5cc26b5270a0e4cfabc48c6898a30b1b5d12dda8e09a96e9ea17e80f4b2a050b8a8b4803fbd437162ed848f19740e53766ce01ac099523b099d593e0782ddbc5296eece50ec50d9ef83bb9edabf5de0aba49bf8f56026b576f200112a9ee2ded530c3384fc2e1"
+    },
+    {
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 112,
+      "chunk_index": 3,
+      "segment_index": 1,
+      "segment_length": 8,
+      "chunk_count": 4,
+      "data_commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "proof": "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072af8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd8480a98067aa92e3bf32b45c5afa5ff2bf38640d51a0e4e338b938bf735f99b0e9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 20,
+      "chunk_index": 0,
+      "segment_index": 0,
+      "segment_length": 8,
+      "chunk_count": 1,
+      "data_commitment": "ac69dccc89299c60d62ced57fe6744daddcfa9f4e08b32f41cd8520439f3b203",
+      "proof": "3682213b734464998683960f225fe5985a0feef2f693f0f507168debb9d9d6b83d374318acff4f82b4beb2eae03bba8631204c500f3c8f8b457408d627ad01056f3741bb9a5d4676045999c9f2f17541659c19fe62df036687efca5bed67d120",
+      "replaced_leaf": {
+        "leaf_index": 3,
+        "hash": "abababababababababababababababababababababababababababababababab"
+      }
+    },
+    {
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 20,
+      "chunk_index": 0,
+      "segment_index": 1,
+      "segment_length": 8,
+      "chunk_count": 1,
+      "data_commitment": "ac69dccc89299c60d62ced57fe6744daddcfa9f4e08b32f41cd8520439f3b203",
+      "proof": "26d7dcdb54e4b5b32f7ea3bbe360927b0776ca475389591a8d5a47f4a4abdeda3d374318acff4f82b4beb2eae03bba8631204c500f3c8f8b457408d627ad01056f3741bb9a5d4676045999c9f2f17541659c19fe62df036687efca5bed67d120",
+      "replaced_leaf": {
+        "leaf_index": 3,
+        "hash": "abababababababababababababababababababababababababababababababab"
+      }
+    }
+  ]
+}

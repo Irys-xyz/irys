@@ -5244,6 +5244,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "irys-data-tree"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "proptest",
+ "rayon",
+ "rstest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "irys-database"
 version = "0.1.0"
 dependencies = [

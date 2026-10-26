@@ -1,0 +1,2245 @@
+{
+  "description": "Chunk proofs, leaf to root, one lowercase hex string (spec §5, §10). Mainnet geometry, mod251: every chunk of each full upload with chunk count 1 through 17 (chunk count 5, chunk index 4 is the one-sibling proof, spec §4), and chunks 0, 2047, and 4095 of 1 GiB. Testing geometry, mod251: every chunk of the printed 112-byte upload, including chunk 2.",
+  "cases": [
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 262144,
+      "chunk_index": 0,
+      "chunk_count": 1,
+      "depth": 0,
+      "data_commitment": "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+      "proof": "86b2be42530761806437d0632cfb93c56f9294c8cc1c8776ad01d08b3078fa49"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 0,
+      "chunk_count": 2,
+      "depth": 1,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035ace53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 524288,
+      "chunk_index": 1,
+      "chunk_count": 2,
+      "depth": 1,
+      "data_commitment": "fe104140e40088576a484505a118125cca140195d42ac59e7618cf7947172970",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5face53fb5673ee14e4bb2d3056eb079bb9ca85f36c187025c0267fc3900c6e286"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 786432,
+      "chunk_index": 0,
+      "chunk_count": 3,
+      "depth": 2,
+      "data_commitment": "6e86db2c6fe30c16471282f5dace2782017105a301fa47eadc725d9caa7cb75b",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e0355d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56b904f524f97dbe246d4b82f69a930a6eb7b57ebf0a486b4d161d5383f8b04d1c0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 786432,
+      "chunk_index": 1,
+      "chunk_count": 3,
+      "depth": 2,
+      "data_commitment": "6e86db2c6fe30c16471282f5dace2782017105a301fa47eadc725d9caa7cb75b",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5f5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56b904f524f97dbe246d4b82f69a930a6eb7b57ebf0a486b4d161d5383f8b04d1c0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 786432,
+      "chunk_index": 2,
+      "chunk_count": 3,
+      "depth": 1,
+      "data_commitment": "6e86db2c6fe30c16471282f5dace2782017105a301fa47eadc725d9caa7cb75b",
+      "proof": "e2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985904f524f97dbe246d4b82f69a930a6eb7b57ebf0a486b4d161d5383f8b04d1c0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1048576,
+      "chunk_index": 0,
+      "chunk_count": 4,
+      "depth": 2,
+      "data_commitment": "df327a2e54df07bb6bced734c48bab7f9c82bc04768f8f7ce44691705b450333",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea9f4c80484d7ba8f4749f05ff0e1d0ab5e810f8051841ff6919c2696f7b0da4b9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1048576,
+      "chunk_index": 1,
+      "chunk_count": 4,
+      "depth": 2,
+      "data_commitment": "df327a2e54df07bb6bced734c48bab7f9c82bc04768f8f7ce44691705b450333",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea9f4c80484d7ba8f4749f05ff0e1d0ab5e810f8051841ff6919c2696f7b0da4b9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1048576,
+      "chunk_index": 2,
+      "chunk_count": 4,
+      "depth": 2,
+      "data_commitment": "df327a2e54df07bb6bced734c48bab7f9c82bc04768f8f7ce44691705b450333",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339859f4c80484d7ba8f4749f05ff0e1d0ab5e810f8051841ff6919c2696f7b0da4b9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1048576,
+      "chunk_index": 3,
+      "chunk_count": 4,
+      "depth": 2,
+      "data_commitment": "df327a2e54df07bb6bced734c48bab7f9c82bc04768f8f7ce44691705b450333",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339859f4c80484d7ba8f4749f05ff0e1d0ab5e810f8051841ff6919c2696f7b0da4b9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1310720,
+      "chunk_index": 0,
+      "chunk_count": 5,
+      "depth": 3,
+      "data_commitment": "36c380c4cb361fe958b443d27656130e5f57e58b9fd8c80af9a0130a390b83ab",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535eacba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c206b8e9ad27ac3780898008787127cf34d87a4f8312fd746cf6fb418fa9b6a196"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1310720,
+      "chunk_index": 1,
+      "chunk_count": 5,
+      "depth": 3,
+      "data_commitment": "36c380c4cb361fe958b443d27656130e5f57e58b9fd8c80af9a0130a390b83ab",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535eacba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c206b8e9ad27ac3780898008787127cf34d87a4f8312fd746cf6fb418fa9b6a196"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1310720,
+      "chunk_index": 2,
+      "chunk_count": 5,
+      "depth": 3,
+      "data_commitment": "36c380c4cb361fe958b443d27656130e5f57e58b9fd8c80af9a0130a390b83ab",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c206b8e9ad27ac3780898008787127cf34d87a4f8312fd746cf6fb418fa9b6a196"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1310720,
+      "chunk_index": 3,
+      "chunk_count": 5,
+      "depth": 3,
+      "data_commitment": "36c380c4cb361fe958b443d27656130e5f57e58b9fd8c80af9a0130a390b83ab",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c206b8e9ad27ac3780898008787127cf34d87a4f8312fd746cf6fb418fa9b6a196"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1310720,
+      "chunk_index": 4,
+      "chunk_count": 5,
+      "depth": 1,
+      "data_commitment": "36c380c4cb361fe958b443d27656130e5f57e58b9fd8c80af9a0130a390b83ab",
+      "proof": "dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f006b8e9ad27ac3780898008787127cf34d87a4f8312fd746cf6fb418fa9b6a196"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1572864,
+      "chunk_index": 0,
+      "chunk_count": 6,
+      "depth": 3,
+      "data_commitment": "a792cef4f5f36aa6007c64f34cd32d69835228c936ef0021d1c126a95b2e8f98",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8f1af6222f321e0c07155355b980a21b2db7c919f26778e0cd26cabf24ca3506fc"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1572864,
+      "chunk_index": 1,
+      "chunk_count": 6,
+      "depth": 3,
+      "data_commitment": "a792cef4f5f36aa6007c64f34cd32d69835228c936ef0021d1c126a95b2e8f98",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8f1af6222f321e0c07155355b980a21b2db7c919f26778e0cd26cabf24ca3506fc"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1572864,
+      "chunk_index": 2,
+      "chunk_count": 6,
+      "depth": 3,
+      "data_commitment": "a792cef4f5f36aa6007c64f34cd32d69835228c936ef0021d1c126a95b2e8f98",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8f1af6222f321e0c07155355b980a21b2db7c919f26778e0cd26cabf24ca3506fc"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1572864,
+      "chunk_index": 3,
+      "chunk_count": 6,
+      "depth": 3,
+      "data_commitment": "a792cef4f5f36aa6007c64f34cd32d69835228c936ef0021d1c126a95b2e8f98",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8f1af6222f321e0c07155355b980a21b2db7c919f26778e0cd26cabf24ca3506fc"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1572864,
+      "chunk_index": 4,
+      "chunk_count": 6,
+      "depth": 2,
+      "data_commitment": "a792cef4f5f36aa6007c64f34cd32d69835228c936ef0021d1c126a95b2e8f98",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039cdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f01af6222f321e0c07155355b980a21b2db7c919f26778e0cd26cabf24ca3506fc"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1572864,
+      "chunk_index": 5,
+      "chunk_count": 6,
+      "depth": 2,
+      "data_commitment": "a792cef4f5f36aa6007c64f34cd32d69835228c936ef0021d1c126a95b2e8f98",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c2dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f01af6222f321e0c07155355b980a21b2db7c919f26778e0cd26cabf24ca3506fc"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1835008,
+      "chunk_index": 0,
+      "chunk_count": 7,
+      "depth": 3,
+      "data_commitment": "22b01a5a6b652372a57fc1494b39766e567ca55f1f2388b76a7f286c8325d067",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535eae163776e06f72f51bc9d54c96ce984c3615041f8c23218b7a77b90d81e78b9893ceb20c79dc6991149f0fe4510b7e22fb5dcf8019ca6b40625227fd64b18fce9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1835008,
+      "chunk_index": 1,
+      "chunk_count": 7,
+      "depth": 3,
+      "data_commitment": "22b01a5a6b652372a57fc1494b39766e567ca55f1f2388b76a7f286c8325d067",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535eae163776e06f72f51bc9d54c96ce984c3615041f8c23218b7a77b90d81e78b9893ceb20c79dc6991149f0fe4510b7e22fb5dcf8019ca6b40625227fd64b18fce9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1835008,
+      "chunk_index": 2,
+      "chunk_count": 7,
+      "depth": 3,
+      "data_commitment": "22b01a5a6b652372a57fc1494b39766e567ca55f1f2388b76a7f286c8325d067",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985e163776e06f72f51bc9d54c96ce984c3615041f8c23218b7a77b90d81e78b9893ceb20c79dc6991149f0fe4510b7e22fb5dcf8019ca6b40625227fd64b18fce9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1835008,
+      "chunk_index": 3,
+      "chunk_count": 7,
+      "depth": 3,
+      "data_commitment": "22b01a5a6b652372a57fc1494b39766e567ca55f1f2388b76a7f286c8325d067",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e33985e163776e06f72f51bc9d54c96ce984c3615041f8c23218b7a77b90d81e78b9893ceb20c79dc6991149f0fe4510b7e22fb5dcf8019ca6b40625227fd64b18fce9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1835008,
+      "chunk_index": 4,
+      "chunk_count": 7,
+      "depth": 3,
+      "data_commitment": "22b01a5a6b652372a57fc1494b39766e567ca55f1f2388b76a7f286c8325d067",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039c7ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f03ceb20c79dc6991149f0fe4510b7e22fb5dcf8019ca6b40625227fd64b18fce9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1835008,
+      "chunk_index": 5,
+      "chunk_count": 7,
+      "depth": 3,
+      "data_commitment": "22b01a5a6b652372a57fc1494b39766e567ca55f1f2388b76a7f286c8325d067",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c27ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f03ceb20c79dc6991149f0fe4510b7e22fb5dcf8019ca6b40625227fd64b18fce9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1835008,
+      "chunk_index": 6,
+      "chunk_count": 7,
+      "depth": 2,
+      "data_commitment": "22b01a5a6b652372a57fc1494b39766e567ca55f1f2388b76a7f286c8325d067",
+      "proof": "988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f03ceb20c79dc6991149f0fe4510b7e22fb5dcf8019ca6b40625227fd64b18fce9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2097152,
+      "chunk_index": 0,
+      "chunk_count": 8,
+      "depth": 3,
+      "data_commitment": "1ee8ba54de2f4f5e0eb878f18ceacbabc025aab76896d346d405fc6732c7138e",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e6ae5b7923f8c6f1a54a5b3a9c07b2e50a29012f244b101706ee0816b0fe3a10a"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2097152,
+      "chunk_index": 1,
+      "chunk_count": 8,
+      "depth": 3,
+      "data_commitment": "1ee8ba54de2f4f5e0eb878f18ceacbabc025aab76896d346d405fc6732c7138e",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e6ae5b7923f8c6f1a54a5b3a9c07b2e50a29012f244b101706ee0816b0fe3a10a"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2097152,
+      "chunk_index": 2,
+      "chunk_count": 8,
+      "depth": 3,
+      "data_commitment": "1ee8ba54de2f4f5e0eb878f18ceacbabc025aab76896d346d405fc6732c7138e",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e6ae5b7923f8c6f1a54a5b3a9c07b2e50a29012f244b101706ee0816b0fe3a10a"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2097152,
+      "chunk_index": 3,
+      "chunk_count": 8,
+      "depth": 3,
+      "data_commitment": "1ee8ba54de2f4f5e0eb878f18ceacbabc025aab76896d346d405fc6732c7138e",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e6ae5b7923f8c6f1a54a5b3a9c07b2e50a29012f244b101706ee0816b0fe3a10a"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2097152,
+      "chunk_index": 4,
+      "chunk_count": 8,
+      "depth": 3,
+      "data_commitment": "1ee8ba54de2f4f5e0eb878f18ceacbabc025aab76896d346d405fc6732c7138e",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039c7c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f06ae5b7923f8c6f1a54a5b3a9c07b2e50a29012f244b101706ee0816b0fe3a10a"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2097152,
+      "chunk_index": 5,
+      "chunk_count": 8,
+      "depth": 3,
+      "data_commitment": "1ee8ba54de2f4f5e0eb878f18ceacbabc025aab76896d346d405fc6732c7138e",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c27c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f06ae5b7923f8c6f1a54a5b3a9c07b2e50a29012f244b101706ee0816b0fe3a10a"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2097152,
+      "chunk_index": 6,
+      "chunk_count": 8,
+      "depth": 3,
+      "data_commitment": "1ee8ba54de2f4f5e0eb878f18ceacbabc025aab76896d346d405fc6732c7138e",
+      "proof": "29f453d93b717683f46e39a7d84da3c85f4c684c0635f07c04214a1551597836988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f06ae5b7923f8c6f1a54a5b3a9c07b2e50a29012f244b101706ee0816b0fe3a10a"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2097152,
+      "chunk_index": 7,
+      "chunk_count": 8,
+      "depth": 3,
+      "data_commitment": "1ee8ba54de2f4f5e0eb878f18ceacbabc025aab76896d346d405fc6732c7138e",
+      "proof": "7ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f06ae5b7923f8c6f1a54a5b3a9c07b2e50a29012f244b101706ee0816b0fe3a10a"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2359296,
+      "chunk_index": 0,
+      "chunk_count": 9,
+      "depth": 4,
+      "data_commitment": "04c55118f6c79867b5642d633973c1b9fc8a0596f2d3f1aa106f8d78c6d037af",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db4f593dadfbfd076b686970600f8e81868820ca75909ccef2ecfede67fbc81966"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2359296,
+      "chunk_index": 1,
+      "chunk_count": 9,
+      "depth": 4,
+      "data_commitment": "04c55118f6c79867b5642d633973c1b9fc8a0596f2d3f1aa106f8d78c6d037af",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db4f593dadfbfd076b686970600f8e81868820ca75909ccef2ecfede67fbc81966"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2359296,
+      "chunk_index": 2,
+      "chunk_count": 9,
+      "depth": 4,
+      "data_commitment": "04c55118f6c79867b5642d633973c1b9fc8a0596f2d3f1aa106f8d78c6d037af",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db4f593dadfbfd076b686970600f8e81868820ca75909ccef2ecfede67fbc81966"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2359296,
+      "chunk_index": 3,
+      "chunk_count": 9,
+      "depth": 4,
+      "data_commitment": "04c55118f6c79867b5642d633973c1b9fc8a0596f2d3f1aa106f8d78c6d037af",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db4f593dadfbfd076b686970600f8e81868820ca75909ccef2ecfede67fbc81966"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2359296,
+      "chunk_index": 4,
+      "chunk_count": 9,
+      "depth": 4,
+      "data_commitment": "04c55118f6c79867b5642d633973c1b9fc8a0596f2d3f1aa106f8d78c6d037af",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039c7c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f044d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db4f593dadfbfd076b686970600f8e81868820ca75909ccef2ecfede67fbc81966"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2359296,
+      "chunk_index": 5,
+      "chunk_count": 9,
+      "depth": 4,
+      "data_commitment": "04c55118f6c79867b5642d633973c1b9fc8a0596f2d3f1aa106f8d78c6d037af",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c27c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f044d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db4f593dadfbfd076b686970600f8e81868820ca75909ccef2ecfede67fbc81966"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2359296,
+      "chunk_index": 6,
+      "chunk_count": 9,
+      "depth": 4,
+      "data_commitment": "04c55118f6c79867b5642d633973c1b9fc8a0596f2d3f1aa106f8d78c6d037af",
+      "proof": "29f453d93b717683f46e39a7d84da3c85f4c684c0635f07c04214a1551597836988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f044d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db4f593dadfbfd076b686970600f8e81868820ca75909ccef2ecfede67fbc81966"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2359296,
+      "chunk_index": 7,
+      "chunk_count": 9,
+      "depth": 4,
+      "data_commitment": "04c55118f6c79867b5642d633973c1b9fc8a0596f2d3f1aa106f8d78c6d037af",
+      "proof": "7ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f044d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db4f593dadfbfd076b686970600f8e81868820ca75909ccef2ecfede67fbc81966"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2359296,
+      "chunk_index": 8,
+      "chunk_count": 9,
+      "depth": 1,
+      "data_commitment": "04c55118f6c79867b5642d633973c1b9fc8a0596f2d3f1aa106f8d78c6d037af",
+      "proof": "497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a34f593dadfbfd076b686970600f8e81868820ca75909ccef2ecfede67fbc81966"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2621440,
+      "chunk_index": 0,
+      "chunk_count": 10,
+      "depth": 4,
+      "data_commitment": "9cee34505586f438e7d4d54a8720a0e381012bd9fbaaf6764ca95dbd8141185c",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe509b94d8eb8f694fa8aa6a17bbdcbe131ffb4289608d694a5729c433013885b26"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2621440,
+      "chunk_index": 1,
+      "chunk_count": 10,
+      "depth": 4,
+      "data_commitment": "9cee34505586f438e7d4d54a8720a0e381012bd9fbaaf6764ca95dbd8141185c",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe509b94d8eb8f694fa8aa6a17bbdcbe131ffb4289608d694a5729c433013885b26"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2621440,
+      "chunk_index": 2,
+      "chunk_count": 10,
+      "depth": 4,
+      "data_commitment": "9cee34505586f438e7d4d54a8720a0e381012bd9fbaaf6764ca95dbd8141185c",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe509b94d8eb8f694fa8aa6a17bbdcbe131ffb4289608d694a5729c433013885b26"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2621440,
+      "chunk_index": 3,
+      "chunk_count": 10,
+      "depth": 4,
+      "data_commitment": "9cee34505586f438e7d4d54a8720a0e381012bd9fbaaf6764ca95dbd8141185c",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe509b94d8eb8f694fa8aa6a17bbdcbe131ffb4289608d694a5729c433013885b26"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2621440,
+      "chunk_index": 4,
+      "chunk_count": 10,
+      "depth": 4,
+      "data_commitment": "9cee34505586f438e7d4d54a8720a0e381012bd9fbaaf6764ca95dbd8141185c",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039c7c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe509b94d8eb8f694fa8aa6a17bbdcbe131ffb4289608d694a5729c433013885b26"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2621440,
+      "chunk_index": 5,
+      "chunk_count": 10,
+      "depth": 4,
+      "data_commitment": "9cee34505586f438e7d4d54a8720a0e381012bd9fbaaf6764ca95dbd8141185c",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c27c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe509b94d8eb8f694fa8aa6a17bbdcbe131ffb4289608d694a5729c433013885b26"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2621440,
+      "chunk_index": 6,
+      "chunk_count": 10,
+      "depth": 4,
+      "data_commitment": "9cee34505586f438e7d4d54a8720a0e381012bd9fbaaf6764ca95dbd8141185c",
+      "proof": "29f453d93b717683f46e39a7d84da3c85f4c684c0635f07c04214a1551597836988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe509b94d8eb8f694fa8aa6a17bbdcbe131ffb4289608d694a5729c433013885b26"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2621440,
+      "chunk_index": 7,
+      "chunk_count": 10,
+      "depth": 4,
+      "data_commitment": "9cee34505586f438e7d4d54a8720a0e381012bd9fbaaf6764ca95dbd8141185c",
+      "proof": "7ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe509b94d8eb8f694fa8aa6a17bbdcbe131ffb4289608d694a5729c433013885b26"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2621440,
+      "chunk_index": 8,
+      "chunk_count": 10,
+      "depth": 2,
+      "data_commitment": "9cee34505586f438e7d4d54a8720a0e381012bd9fbaaf6764ca95dbd8141185c",
+      "proof": "5643d496fd69440756702c175cb3dd6c447e88baaa70d97c44b1fa07aef225b8497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a309b94d8eb8f694fa8aa6a17bbdcbe131ffb4289608d694a5729c433013885b26"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2621440,
+      "chunk_index": 9,
+      "chunk_count": 10,
+      "depth": 2,
+      "data_commitment": "9cee34505586f438e7d4d54a8720a0e381012bd9fbaaf6764ca95dbd8141185c",
+      "proof": "44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a309b94d8eb8f694fa8aa6a17bbdcbe131ffb4289608d694a5729c433013885b26"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2883584,
+      "chunk_index": 0,
+      "chunk_count": 11,
+      "depth": 4,
+      "data_commitment": "0fd7de38ecf7a41656522daab935bfa6a134af0cdfdb11e96d1c6e0222273c21",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e562ec7215751f9011b161ac06ab2761a5702f33fc99f02b8f695a7e5317f38a8630d565982b096c237160763f5d8faa18de36299bbbdf0b3cc600901f6639f44"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2883584,
+      "chunk_index": 1,
+      "chunk_count": 11,
+      "depth": 4,
+      "data_commitment": "0fd7de38ecf7a41656522daab935bfa6a134af0cdfdb11e96d1c6e0222273c21",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e562ec7215751f9011b161ac06ab2761a5702f33fc99f02b8f695a7e5317f38a8630d565982b096c237160763f5d8faa18de36299bbbdf0b3cc600901f6639f44"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2883584,
+      "chunk_index": 2,
+      "chunk_count": 11,
+      "depth": 4,
+      "data_commitment": "0fd7de38ecf7a41656522daab935bfa6a134af0cdfdb11e96d1c6e0222273c21",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e562ec7215751f9011b161ac06ab2761a5702f33fc99f02b8f695a7e5317f38a8630d565982b096c237160763f5d8faa18de36299bbbdf0b3cc600901f6639f44"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2883584,
+      "chunk_index": 3,
+      "chunk_count": 11,
+      "depth": 4,
+      "data_commitment": "0fd7de38ecf7a41656522daab935bfa6a134af0cdfdb11e96d1c6e0222273c21",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e562ec7215751f9011b161ac06ab2761a5702f33fc99f02b8f695a7e5317f38a8630d565982b096c237160763f5d8faa18de36299bbbdf0b3cc600901f6639f44"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2883584,
+      "chunk_index": 4,
+      "chunk_count": 11,
+      "depth": 4,
+      "data_commitment": "0fd7de38ecf7a41656522daab935bfa6a134af0cdfdb11e96d1c6e0222273c21",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039c7c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0562ec7215751f9011b161ac06ab2761a5702f33fc99f02b8f695a7e5317f38a8630d565982b096c237160763f5d8faa18de36299bbbdf0b3cc600901f6639f44"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2883584,
+      "chunk_index": 5,
+      "chunk_count": 11,
+      "depth": 4,
+      "data_commitment": "0fd7de38ecf7a41656522daab935bfa6a134af0cdfdb11e96d1c6e0222273c21",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c27c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0562ec7215751f9011b161ac06ab2761a5702f33fc99f02b8f695a7e5317f38a8630d565982b096c237160763f5d8faa18de36299bbbdf0b3cc600901f6639f44"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2883584,
+      "chunk_index": 6,
+      "chunk_count": 11,
+      "depth": 4,
+      "data_commitment": "0fd7de38ecf7a41656522daab935bfa6a134af0cdfdb11e96d1c6e0222273c21",
+      "proof": "29f453d93b717683f46e39a7d84da3c85f4c684c0635f07c04214a1551597836988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0562ec7215751f9011b161ac06ab2761a5702f33fc99f02b8f695a7e5317f38a8630d565982b096c237160763f5d8faa18de36299bbbdf0b3cc600901f6639f44"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2883584,
+      "chunk_index": 7,
+      "chunk_count": 11,
+      "depth": 4,
+      "data_commitment": "0fd7de38ecf7a41656522daab935bfa6a134af0cdfdb11e96d1c6e0222273c21",
+      "proof": "7ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0562ec7215751f9011b161ac06ab2761a5702f33fc99f02b8f695a7e5317f38a8630d565982b096c237160763f5d8faa18de36299bbbdf0b3cc600901f6639f44"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2883584,
+      "chunk_index": 8,
+      "chunk_count": 11,
+      "depth": 3,
+      "data_commitment": "0fd7de38ecf7a41656522daab935bfa6a134af0cdfdb11e96d1c6e0222273c21",
+      "proof": "5643d496fd69440756702c175cb3dd6c447e88baaa70d97c44b1fa07aef225b8e112fac6beebb6ee7673054bf032d33397a894bfb1d0355bf8d57e1b366ad4ca497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3630d565982b096c237160763f5d8faa18de36299bbbdf0b3cc600901f6639f44"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2883584,
+      "chunk_index": 9,
+      "chunk_count": 11,
+      "depth": 3,
+      "data_commitment": "0fd7de38ecf7a41656522daab935bfa6a134af0cdfdb11e96d1c6e0222273c21",
+      "proof": "44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0dbe112fac6beebb6ee7673054bf032d33397a894bfb1d0355bf8d57e1b366ad4ca497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3630d565982b096c237160763f5d8faa18de36299bbbdf0b3cc600901f6639f44"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 2883584,
+      "chunk_index": 10,
+      "chunk_count": 11,
+      "depth": 2,
+      "data_commitment": "0fd7de38ecf7a41656522daab935bfa6a134af0cdfdb11e96d1c6e0222273c21",
+      "proof": "439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe5497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3630d565982b096c237160763f5d8faa18de36299bbbdf0b3cc600901f6639f44"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 0,
+      "chunk_count": 12,
+      "depth": 4,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be1c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 1,
+      "chunk_count": 12,
+      "depth": 4,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be1c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 2,
+      "chunk_count": 12,
+      "depth": 4,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be1c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 3,
+      "chunk_count": 12,
+      "depth": 4,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be1c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 4,
+      "chunk_count": 12,
+      "depth": 4,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039c7c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f001be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be1c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 5,
+      "chunk_count": 12,
+      "depth": 4,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c27c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f001be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be1c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 6,
+      "chunk_count": 12,
+      "depth": 4,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "29f453d93b717683f46e39a7d84da3c85f4c684c0635f07c04214a1551597836988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f001be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be1c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 7,
+      "chunk_count": 12,
+      "depth": 4,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "7ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f001be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be1c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 8,
+      "chunk_count": 12,
+      "depth": 3,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "5643d496fd69440756702c175cb3dd6c447e88baaa70d97c44b1fa07aef225b86052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a31c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 9,
+      "chunk_count": 12,
+      "depth": 3,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db6052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a31c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 10,
+      "chunk_count": 12,
+      "depth": 3,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "22d6b7d72506b6084182efa3062324212afc06228c209e8b560e0442c245232e439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe5497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a31c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3145728,
+      "chunk_index": 11,
+      "chunk_count": 12,
+      "depth": 3,
+      "data_commitment": "56e4e924bd3860f5219ad7b7d65270e5b8c3728f8ac6d8fac0eee1c48507c25f",
+      "proof": "e112fac6beebb6ee7673054bf032d33397a894bfb1d0355bf8d57e1b366ad4ca439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe5497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a31c7231d93f263e639b949282ff91749a6780568e3f138e0ac8827d83f8c19e40"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 0,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e630c076f0078fead6eca21bbb24711c2f0ab75a44d533329d49f1e941017a1f4ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 1,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e630c076f0078fead6eca21bbb24711c2f0ab75a44d533329d49f1e941017a1f4ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 2,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e630c076f0078fead6eca21bbb24711c2f0ab75a44d533329d49f1e941017a1f4ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 3,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e630c076f0078fead6eca21bbb24711c2f0ab75a44d533329d49f1e941017a1f4ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 4,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039c7c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0630c076f0078fead6eca21bbb24711c2f0ab75a44d533329d49f1e941017a1f4ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 5,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c27c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0630c076f0078fead6eca21bbb24711c2f0ab75a44d533329d49f1e941017a1f4ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 6,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "29f453d93b717683f46e39a7d84da3c85f4c684c0635f07c04214a1551597836988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0630c076f0078fead6eca21bbb24711c2f0ab75a44d533329d49f1e941017a1f4ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 7,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "7ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0630c076f0078fead6eca21bbb24711c2f0ab75a44d533329d49f1e941017a1f4ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 8,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "5643d496fd69440756702c175cb3dd6c447e88baaa70d97c44b1fa07aef225b86052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de504df8215735b324b4980e08cbd7aa0dad8b075b667b63ec67819f94a4fae033497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 9,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db6052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de504df8215735b324b4980e08cbd7aa0dad8b075b667b63ec67819f94a4fae033497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 10,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "22d6b7d72506b6084182efa3062324212afc06228c209e8b560e0442c245232e439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe5504df8215735b324b4980e08cbd7aa0dad8b075b667b63ec67819f94a4fae033497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 11,
+      "chunk_count": 13,
+      "depth": 4,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "e112fac6beebb6ee7673054bf032d33397a894bfb1d0355bf8d57e1b366ad4ca439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe5504df8215735b324b4980e08cbd7aa0dad8b075b667b63ec67819f94a4fae033497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3407872,
+      "chunk_index": 12,
+      "chunk_count": 13,
+      "depth": 2,
+      "data_commitment": "85349b86786c3dda9cc51551d3785ddbf10a43dac970df09ec1555d3380037d5",
+      "proof": "01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3ac244f25f0f521fcb74c4240c12f12579f27e77d5dee1e3530da9fafcbec7c21"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 0,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5ee0c45f7b053cfa460f721bf1f24464b56d23147c67bc363b2e0d001e02b2e16ac0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 1,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5ee0c45f7b053cfa460f721bf1f24464b56d23147c67bc363b2e0d001e02b2e16ac0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 2,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5ee0c45f7b053cfa460f721bf1f24464b56d23147c67bc363b2e0d001e02b2e16ac0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 3,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5ee0c45f7b053cfa460f721bf1f24464b56d23147c67bc363b2e0d001e02b2e16ac0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 4,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039c7c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0e0c45f7b053cfa460f721bf1f24464b56d23147c67bc363b2e0d001e02b2e16ac0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 5,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c27c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0e0c45f7b053cfa460f721bf1f24464b56d23147c67bc363b2e0d001e02b2e16ac0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 6,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "29f453d93b717683f46e39a7d84da3c85f4c684c0635f07c04214a1551597836988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0e0c45f7b053cfa460f721bf1f24464b56d23147c67bc363b2e0d001e02b2e16ac0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 7,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "7ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f0e0c45f7b053cfa460f721bf1f24464b56d23147c67bc363b2e0d001e02b2e16ac0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 8,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "5643d496fd69440756702c175cb3dd6c447e88baaa70d97c44b1fa07aef225b86052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de5012b030adc46096c920206a634c61a7753c1eddef2811d34b9da2fbf664666d497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 9,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db6052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de5012b030adc46096c920206a634c61a7753c1eddef2811d34b9da2fbf664666d497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 10,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "22d6b7d72506b6084182efa3062324212afc06228c209e8b560e0442c245232e439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe55012b030adc46096c920206a634c61a7753c1eddef2811d34b9da2fbf664666d497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 11,
+      "chunk_count": 14,
+      "depth": 4,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "e112fac6beebb6ee7673054bf032d33397a894bfb1d0355bf8d57e1b366ad4ca439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe55012b030adc46096c920206a634c61a7753c1eddef2811d34b9da2fbf664666d497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 12,
+      "chunk_count": 14,
+      "depth": 3,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "e381173fa630adf0f810fd71f2e1d8c2627b4af803c821efd9b565bbd7be9aad01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3670016,
+      "chunk_index": 13,
+      "chunk_count": 14,
+      "depth": 3,
+      "data_commitment": "590e24cba56ba8e0b49fc8d5eb71c33ae8a92c098bed158dcd83d74ee2bf1aa1",
+      "proof": "504df8215735b324b4980e08cbd7aa0dad8b075b667b63ec67819f94a4fae03301be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c0d0592e3fd608874ccacd8cc6668738cf38bb9bda36c306353f25401ee00e4b"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 0,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e2e14b1e456dcebc89a4062c51426bfac7c5f14b6b43eea14320971dfcc72b7d6bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 1,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e2e14b1e456dcebc89a4062c51426bfac7c5f14b6b43eea14320971dfcc72b7d6bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 2,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e2e14b1e456dcebc89a4062c51426bfac7c5f14b6b43eea14320971dfcc72b7d6bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 3,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e2e14b1e456dcebc89a4062c51426bfac7c5f14b6b43eea14320971dfcc72b7d6bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 4,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039c7c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f02e14b1e456dcebc89a4062c51426bfac7c5f14b6b43eea14320971dfcc72b7d6bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 5,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c27c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f02e14b1e456dcebc89a4062c51426bfac7c5f14b6b43eea14320971dfcc72b7d6bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 6,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "29f453d93b717683f46e39a7d84da3c85f4c684c0635f07c04214a1551597836988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f02e14b1e456dcebc89a4062c51426bfac7c5f14b6b43eea14320971dfcc72b7d6bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 7,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "7ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f02e14b1e456dcebc89a4062c51426bfac7c5f14b6b43eea14320971dfcc72b7d6bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 8,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "5643d496fd69440756702c175cb3dd6c447e88baaa70d97c44b1fa07aef225b86052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de6ee2403358727152b3eb1b4daa4cc60de6bfbf5894c4ad48ce7e80067415a72b497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 9,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db6052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de6ee2403358727152b3eb1b4daa4cc60de6bfbf5894c4ad48ce7e80067415a72b497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 10,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "22d6b7d72506b6084182efa3062324212afc06228c209e8b560e0442c245232e439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe56ee2403358727152b3eb1b4daa4cc60de6bfbf5894c4ad48ce7e80067415a72b497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 11,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "e112fac6beebb6ee7673054bf032d33397a894bfb1d0355bf8d57e1b366ad4ca439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe56ee2403358727152b3eb1b4daa4cc60de6bfbf5894c4ad48ce7e80067415a72b497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 12,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "e381173fa630adf0f810fd71f2e1d8c2627b4af803c821efd9b565bbd7be9aadefc465c2c8f5db8de668d399cd441c47d8404cae79746b73f92744b3bed70faa01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 13,
+      "chunk_count": 15,
+      "depth": 4,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "504df8215735b324b4980e08cbd7aa0dad8b075b667b63ec67819f94a4fae033efc465c2c8f5db8de668d399cd441c47d8404cae79746b73f92744b3bed70faa01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 3932160,
+      "chunk_index": 14,
+      "chunk_count": 15,
+      "depth": 3,
+      "data_commitment": "59bb95032e680e2beb03836e2e3f9b9edc575d451c780748d7e524e03615f0bf",
+      "proof": "5012b030adc46096c920206a634c61a7753c1eddef2811d34b9da2fbf664666d01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3bfb555a3dfbf2c616e7f27b914ff85c8e7c69c0e23434d4cee80798cf312b4da"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 0,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e3e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5f704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 1,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e3e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5f704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 2,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e3e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5f704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 3,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e3e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5f704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 4,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039c7c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f03e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5f704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 5,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c27c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f03e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5f704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 6,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "29f453d93b717683f46e39a7d84da3c85f4c684c0635f07c04214a1551597836988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f03e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5f704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 7,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "7ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f03e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5f704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 8,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "5643d496fd69440756702c175cb3dd6c447e88baaa70d97c44b1fa07aef225b86052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de5c6221be72f9a8a4681067dd910e62ef69d706ed776822ce9919c377f0a30d3a497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 9,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db6052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de5c6221be72f9a8a4681067dd910e62ef69d706ed776822ce9919c377f0a30d3a497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 10,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "22d6b7d72506b6084182efa3062324212afc06228c209e8b560e0442c245232e439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe55c6221be72f9a8a4681067dd910e62ef69d706ed776822ce9919c377f0a30d3a497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 11,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "e112fac6beebb6ee7673054bf032d33397a894bfb1d0355bf8d57e1b366ad4ca439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe55c6221be72f9a8a4681067dd910e62ef69d706ed776822ce9919c377f0a30d3a497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 12,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "e381173fa630adf0f810fd71f2e1d8c2627b4af803c821efd9b565bbd7be9aad85b607ca631146b9958f3d6b0abb4807000a5f34c720013fcf17be9ec55061ca01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 13,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "504df8215735b324b4980e08cbd7aa0dad8b075b667b63ec67819f94a4fae03385b607ca631146b9958f3d6b0abb4807000a5f34c720013fcf17be9ec55061ca01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 14,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "8968036334ac7bf574f5cf4ce334f4c51067578db2b5f2841bf3f230f2f901585012b030adc46096c920206a634c61a7753c1eddef2811d34b9da2fbf664666d01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4194304,
+      "chunk_index": 15,
+      "chunk_count": 16,
+      "depth": 4,
+      "data_commitment": "bd4846a80a1cb9c12f413fc048f925260fc2b256a8b74e2a21e0d60063453054",
+      "proof": "efc465c2c8f5db8de668d399cd441c47d8404cae79746b73f92744b3bed70faa5012b030adc46096c920206a634c61a7753c1eddef2811d34b9da2fbf664666d01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3704ccd54c8dd3941296613f4afa498bff1bbc9f3c3c3d78ea62797ef2e4d39d0"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 0,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e3e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5fc5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 1,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5fa469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e3e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5fc5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 2,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "2a198037e997cb4e672969d543f778fe29e470ccea8680d462cc187dead4abafe2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e3e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5fc5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 3,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "5d0c3d9386bacd8d05f88f215710e1d2c089f97b08ced9ce8356a3132236e56be2237129efe7413a8f2b5b3bd129437346ba4ccb2a7857c171a8a5a683e339857e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e3e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5fc5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 4,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "4b0c7ce8d07091f6a0a662d21b76ad23f50a0e82ceeeb44526553fdb3b1a039c7c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f03e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5fc5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 5,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "cba471352b656c654316ef9183b84ed04f0e0eab998ef947db1d8f9c7e7bc9c27c20175942ce5b473760b17e2c014c0b66081fe56139f80febf50b6217497843dd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f03e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5fc5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 6,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "29f453d93b717683f46e39a7d84da3c85f4c684c0635f07c04214a1551597836988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f03e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5fc5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 7,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "7ccf25f64f6692ff83a33a6f1d2ee6da55631377fd625463310328ccc0e71e57988bbd1e60c7a3a067fe433c3ea725e76e375e74aa5005ba88c6a5b7ef73df8fdd86fea0cfb5c728a78ae84890d769e5e0264032579f7bfe4ec79a1c250857f03e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5fc5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 8,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "5643d496fd69440756702c175cb3dd6c447e88baaa70d97c44b1fa07aef225b86052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de5c6221be72f9a8a4681067dd910e62ef69d706ed776822ce9919c377f0a30d3a497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 9,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "44d5c28e1d36b97e2c895ba086e28647eb3e3907660239c5321345aef558a0db6052b818f069cd24dcc198e057d0adf23ba1c4cd05a97b67c286c26da53813de5c6221be72f9a8a4681067dd910e62ef69d706ed776822ce9919c377f0a30d3a497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 10,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "22d6b7d72506b6084182efa3062324212afc06228c209e8b560e0442c245232e439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe55c6221be72f9a8a4681067dd910e62ef69d706ed776822ce9919c377f0a30d3a497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 11,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "e112fac6beebb6ee7673054bf032d33397a894bfb1d0355bf8d57e1b366ad4ca439d02d62bd0b86b1a474ece3874656f70d12f9ef2b79df0d4fe7905c1fa9fe55c6221be72f9a8a4681067dd910e62ef69d706ed776822ce9919c377f0a30d3a497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 12,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "e381173fa630adf0f810fd71f2e1d8c2627b4af803c821efd9b565bbd7be9aad85b607ca631146b9958f3d6b0abb4807000a5f34c720013fcf17be9ec55061ca01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 13,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "504df8215735b324b4980e08cbd7aa0dad8b075b667b63ec67819f94a4fae03385b607ca631146b9958f3d6b0abb4807000a5f34c720013fcf17be9ec55061ca01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 14,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "8968036334ac7bf574f5cf4ce334f4c51067578db2b5f2841bf3f230f2f901585012b030adc46096c920206a634c61a7753c1eddef2811d34b9da2fbf664666d01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 15,
+      "chunk_count": 17,
+      "depth": 5,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "efc465c2c8f5db8de668d399cd441c47d8404cae79746b73f92744b3bed70faa5012b030adc46096c920206a634c61a7753c1eddef2811d34b9da2fbf664666d01be4aff1b1bed07ff21da5cc23a0b93cd11a93b326ede488228eb826e83d0be497d18c8907e67ebdd631500a09f6e774c72c7e1a2d3c0ad314d99c2923029a3c5fe169f61f1fe0fc99c497c6cfb399dc5adfa8597fc9d44e0188e7d1ae6d598e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 4456448,
+      "chunk_index": 16,
+      "chunk_count": 17,
+      "depth": 1,
+      "data_commitment": "6ce62a195d91e552b64c5c2474fa7090b92cdc08ca99f465a5e73d1780966ca2",
+      "proof": "7cd59031ad9bff8db57ecb574171acdbb659cb29c1daf409ef583fd6a75399f9e9707161c687b527db0f81d790b244edae0127d0d4d575143b5f70cd0226fb20"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1073741824,
+      "chunk_index": 0,
+      "chunk_count": 4096,
+      "depth": 12,
+      "data_commitment": "a38bd8e94ed39b8961fceb029ed4ea2d50f7915b3a8a60b4797c8fbc8a7f0a0a",
+      "proof": "ce6bd31b0258488625fec4c4a15c168e8f74f14eb669c0f8ccaa60894a89e035a469afaa10d49b26f21a5333c4c20b79f530f3e3b0538032e6e47c59d12535ea7e7a0f8d6c29f138cc4e53d2ab80b81afb26b6206be0d03dfc5c92fb3d17bb5e3e923619afda9f86db4b942d5e0d909068d976ede12405e5647b69c3e3d19c5f90f3fec0836144b985f694b147dd2b54d083797772a1f7c95e0a7e50d5e4af884ca0151a5a7d8b7132af0c77c635b025967f68c7b7b915823ae3fe5ea9dabc326fa9ffd243e0f2f5f13ba7c37b22e6aa40017cdd33ccd1ac1ac2a5e6c73f6a1cf4a61303016abd824bfb4c5e53e2970786af4a23eb53c3150417b21d28d08f5bcb415d3613a719dabae8110005d7fdc924c36ed1c0b1a926b07ea00ddf29792fd4e4d4883cca65c5b88c0be245e76de9aa250e95cd94f1372472d248211266fe2f99ea541ac8a03202bfd0d40540797ba6d0036864bf650021634c8d34dfe0660f1e598c86075f9ed75adb5e8ef395f20ac9a5d564246c37a9ce4c0e0301e001a60320a45a420d9a67785d3a0f81c77bdfa76e339bc538cc74ea70045de4f52e"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1073741824,
+      "chunk_index": 2047,
+      "chunk_count": 4096,
+      "depth": 12,
+      "data_commitment": "a38bd8e94ed39b8961fceb029ed4ea2d50f7915b3a8a60b4797c8fbc8a7f0a0a",
+      "proof": "04f21de3d730673ff7677cb58a4f63363b654a2f8262cdb86b5fa58b8b06d312559d46ba0c8d2b0d1abe540065dc07e9f397d4713c03714cef7f17d69f50f808f3948841c2cb42754bae218212eab27661a5ecd0cadfebb85758d6eff261129ba0693c9225032496bc6942ebe41190300c6791525e8cf6ed9d80fca13de0167a5ce3a0e900a88289de738a79a786e68099aebcfbc55d5280cd8d33b8d9c8776995ad73898832cfdd31646ba2327e234b8213d2e2dbc2fbb2b87c8b54d090ac2dd7afa878ecf0c78a4fa42c52579330bdba18fa32374d7b2d9aa903e8249ae3b33b3d53c681f06c550361d83329a185f13a12d29f53f48c7808928e287aa685f0234fdefa14774b8d7a05624c31391a26760813e9ec9c1bae000c281b5e6efb705ccc3a8c2827edc26ae23d7ad6fd3baf3609d1a570129ad5db022f132c2f8344cc08c4acfac68a36f0f3e38a4ae099831c5347218d2459855688b14449876aa60f1e598c86075f9ed75adb5e8ef395f20ac9a5d564246c37a9ce4c0e0301e001a60320a45a420d9a67785d3a0f81c77bdfa76e339bc538cc74ea70045de4f52e"
+    },
+    {
+      "geometry": {
+        "chunk_size": 262144,
+        "segments_per_chunk": 64,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 1073741824,
+      "chunk_index": 4095,
+      "chunk_count": 4096,
+      "depth": 12,
+      "data_commitment": "a38bd8e94ed39b8961fceb029ed4ea2d50f7915b3a8a60b4797c8fbc8a7f0a0a",
+      "proof": "838ee07345536a548205145dca4a34cc9b81e5d686554fb06715c43a936bbf8365d32e22ccb0b11cb66f9a47ac0ecfe586df5206e100ee7ed67b8679500ece698a2586de8ee9fe5a48ddcfe2fd4df92365933cee771877ab283c72d29ea7a6a62486b58c89d49fe7b3e9df77b34097865a08ffaf88bcf49e7e51654eeb0ce417c16c76e85027b6ae7677b9dbcc2c6d489ca142c60bb36ec35c2c91c985e6fc7d221522a22931fe8be440e1482967b8a34b0d42d991d4c23f04cc5aec85dc5a6267c23ff96a3eecf792b86897b2613e83f01d503e51b50dd4ba97975e9dcd633d6fe4e283c95ac036c0913fd2648d78374f8a77e19757c2fa5ea2ff7b9576d7f83ecf6936b77f4fa08fd81246b76468643986cc80ab18528b94abeb80611177e385d0759b7186448659027556ccc3dafb8ec3e992eefb5089a482a16d1fcb33fa2192efcd1c848edd69639a9f5b7c655d0aecb207dee2b0fe492143bb4e1185c0d2d00b408e3bdea7fc2caeada803e6203b5757d2faa1145f599128a215ee0648a60320a45a420d9a67785d3a0f81c77bdfa76e339bc538cc74ea70045de4f52e"
+    },
+    {
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 112,
+      "chunk_index": 0,
+      "chunk_count": 4,
+      "depth": 2,
+      "data_commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "proof": "dba65c84ec0b09a279f3f6b6746c381e48c557caec30fc14cbc8c88d4a7973502a2efc8708bf1f2ba034a22582e3ef5313424c0170be025c5326027b256e61de80a98067aa92e3bf32b45c5afa5ff2bf38640d51a0e4e338b938bf735f99b0e9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 112,
+      "chunk_index": 1,
+      "chunk_count": 4,
+      "depth": 2,
+      "data_commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "proof": "d3e81f198d6bd3782d1941172c89e49721d8f5e33cc709d4f6ba3f54b9e35f822a2efc8708bf1f2ba034a22582e3ef5313424c0170be025c5326027b256e61de80a98067aa92e3bf32b45c5afa5ff2bf38640d51a0e4e338b938bf735f99b0e9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 112,
+      "chunk_index": 2,
+      "chunk_count": 4,
+      "depth": 2,
+      "data_commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "proof": "dbc3c2433981a503f8ffa38629a9ec5d41501618b2afd860af52d6a93e06e8b650cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd8480a98067aa92e3bf32b45c5afa5ff2bf38640d51a0e4e338b938bf735f99b0e9"
+    },
+    {
+      "geometry": {
+        "chunk_size": 32,
+        "segments_per_chunk": 4,
+        "max_data_tx_chunks": 20971520
+      },
+      "pattern": "mod251",
+      "data_size": 112,
+      "chunk_index": 3,
+      "chunk_count": 4,
+      "depth": 2,
+      "data_commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+      "proof": "f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb6550cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd8480a98067aa92e3bf32b45c5afa5ff2bf38640d51a0e4e338b938bf735f99b0e9"
+    }
+  ]
+}
