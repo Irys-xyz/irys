@@ -133,54 +133,36 @@ impl EventHandlers {
         api_client: &ApiClient,
         database_writer: &Option<DatabaseWriter>,
     ) {
-        // Spawn refresh in background with short timeout to avoid blocking UI
+        // Same blocking behaviour as the timer-driven refresh: awaited to completion so
+        // `is_refreshing` is always cleared and results are never cut off.
         let mut refresh_cancel_token = tokio_util::sync::CancellationToken::new();
-        let refresh_future = RefreshManager::refresh_data(
+        let _ = RefreshManager::refresh_data(
             state,
             api_client,
             &mut refresh_cancel_token,
             database_writer,
-        );
-
-        // Run with short timeout to avoid blocking UI
-        let _ = tokio::time::timeout(tokio::time::Duration::from_millis(50), refresh_future).await;
+        )
+        .await;
 
         // Also refresh view-specific data
         match state.current_menu {
             MenuSelection::DataSync => {
-                let _ = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(50),
-                    RefreshManager::refresh_observability_data(state, api_client),
-                )
-                .await;
+                let _ = RefreshManager::refresh_observability_data(state, api_client).await;
             }
             MenuSelection::Mempool => {
-                let _ = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(50),
-                    RefreshManager::refresh_mempool_data(state, api_client, database_writer),
-                )
-                .await;
+                let _ =
+                    RefreshManager::refresh_mempool_data(state, api_client, database_writer).await;
             }
             MenuSelection::Mining => {
-                let _ = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(50),
-                    RefreshManager::refresh_mining_data(state, api_client, database_writer),
-                )
-                .await;
+                let _ =
+                    RefreshManager::refresh_mining_data(state, api_client, database_writer).await;
             }
             MenuSelection::Forks => {
-                let _ = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(50),
-                    RefreshManager::refresh_forks_data(state, api_client, database_writer),
-                )
-                .await;
+                let _ =
+                    RefreshManager::refresh_forks_data(state, api_client, database_writer).await;
             }
             MenuSelection::Config => {
-                let _ = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(50),
-                    RefreshManager::refresh_config_data(state, api_client),
-                )
-                .await;
+                let _ = RefreshManager::refresh_config_data(state, api_client).await;
             }
             MenuSelection::Nodes
             | MenuSelection::Metrics
