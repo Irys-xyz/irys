@@ -149,7 +149,7 @@ pub fn capacity_pack_range_cuda_c(
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
 
-    let entropy_ptr = entropy.as_ptr() as *mut u8;
+    let entropy_ptr = entropy.as_mut_ptr();
 
     // Sanity check: enforce capacity matches CUDA C implementation expectations
     let expected_entropy_capacity =
@@ -165,7 +165,6 @@ pub fn capacity_pack_range_cuda_c(
 
     let blocks = config.blocks;
     let threads_per_block = config.threads_per_block;
-    println!("blocks: {}, threads: {}", blocks, threads_per_block);
 
     unsafe {
         result = capacity_cuda::compute_entropy_chunks_cuda(
@@ -181,12 +180,14 @@ pub fn capacity_pack_range_cuda_c(
             blocks,
             threads_per_block,
         );
-
-        entropy.set_len(entropy.capacity());
     }
     use capacity_cuda::entropy_chunk_errors::*;
     match result {
-        NO_ERROR => Ok(()),
+        NO_ERROR => {
+            // SAFETY: the kernel wrote all `capacity` bytes of the buffer
+            unsafe { entropy.set_len(entropy.capacity()) };
+            Ok(())
+        }
         _ => Err(eyre::eyre!("GPU kernel error: {:?}", &result)),
     }
 }
