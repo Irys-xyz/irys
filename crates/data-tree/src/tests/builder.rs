@@ -254,23 +254,36 @@ fn with_capacity_enormous_hint_matches_new() {
     // The hint is `u32::MAX` one-byte chunks (`Geometry::new(1, 1, u32::MAX)`).
     // Layer 0 would hold `u32::MAX` node hashes, about 128 GiB. When that byte
     // size exceeds `isize::MAX`, `try_reserve_exact` fails before the allocator.
-    // When the size fits, a successful reservation would map it. This test then
-    // runs in a child whose address space is capped below that size, so the
-    // allocator refuses and nothing is mapped.
-    if reservation_fails_before_the_allocator(u32::MAX) {
+    // When the size fits, a successful reservation would map it. If this
+    // process's address-space cap already refuses it, the check runs here.
+    // Otherwise it runs in a child whose address space is capped below that
+    // size, so the allocator refuses and nothing is mapped.
+    if reservation_is_refused(u32::MAX) {
         assert_enormous_hint_matches_new();
+        println!("{CAPPED_CHILD_DONE_MARKER}");
         return;
     }
-    if std::env::var_os("IRYS_DATA_TREE_CAPPED_ADDRESS_SPACE").is_some() {
-        assert_enormous_hint_matches_new();
-        println!("capped-hint-ok");
-        return;
-    }
+    assert!(
+        std::env::var_os(CAPPED_CHILD_ENV).is_none(),
+        "the capped child must refuse the reservation; the address-space cap did not apply"
+    );
     assert_capped_child_matches_new();
 }
 
+/// Set in the capped child, so it does not spawn another child.
+const CAPPED_CHILD_ENV: &str = "IRYS_DATA_TREE_CAPPED_ADDRESS_SPACE";
+
+/// Printed by the capped child when the hint check passes.
+const CAPPED_CHILD_DONE_MARKER: &str = "capped-hint-ok";
+
+/// Exit code of the child shell when `ulimit -v` cannot set the cap.
+/// 77 is the usual "skipped" code of test harnesses.
+#[cfg(target_os = "linux")]
+const CAP_NOT_SET_EXIT_CODE: i32 = 77;
+
 /// `ulimit -v` ceiling for the child, in KiB. 16 GiB fits this test process.
 /// It sits below the ~128 GiB layer-0 reservation of a `u32::MAX` hint.
+#[cfg(target_os = "linux")]
 const CAPPED_ADDRESS_SPACE_KIB: u128 = 16 * 1024 * 1024;
 
 fn assert_enormous_hint_matches_new() {
@@ -295,6 +308,14 @@ fn assert_enormous_hint_matches_new() {
     assert_same_tree(&reserved, &plain.finish().unwrap());
 }
 
+/// `RLIMIT_AS` caps the address space on Linux. Other systems may ignore it,
+/// so the child would map the reservation. There the check is skipped.
+#[cfg(not(target_os = "linux"))]
+fn assert_capped_child_matches_new() {
+    eprintln!("skipped: no address-space cap on this system to refuse the reservation");
+}
+
+#[cfg(target_os = "linux")]
 fn assert_capped_child_matches_new() {
     let reservation_bytes = node_reservation_bytes(u32::MAX);
     let cap_bytes = CAPPED_ADDRESS_SPACE_KIB * 1024;
@@ -303,16 +324,27 @@ fn assert_capped_child_matches_new() {
         "address-space cap ({cap_bytes} bytes) must sit below the hinted reservation ({reservation_bytes} bytes)"
     );
     let exe = std::env::current_exe().expect("test executable");
-    let output = std::process::Command::new("bash")
+    let output = match std::process::Command::new("bash")
         .arg("-c")
-        .arg("ulimit -v \"$1\" && exec \"$2\" --exact \"$3\" --test-threads=1 --nocapture")
+        .arg("ulimit -v \"$1\" || exit \"$4\"; exec \"$2\" --exact \"$3\" --test-threads=1 --nocapture")
         .arg("bash")
         .arg(CAPPED_ADDRESS_SPACE_KIB.to_string())
         .arg(&exe)
         .arg("tests::builder::with_capacity_enormous_hint_matches_new")
-        .env("IRYS_DATA_TREE_CAPPED_ADDRESS_SPACE", "1")
+        .arg(CAP_NOT_SET_EXIT_CODE.to_string())
+        .env(CAPPED_CHILD_ENV, "1")
         .output()
-        .expect("spawn the capped test process");
+    {
+        Ok(output) => output,
+        Err(err) => {
+            eprintln!("skipped: cannot spawn bash to cap the address space: {err}");
+            return;
+        }
+    };
+    if output.status.code() == Some(CAP_NOT_SET_EXIT_CODE) {
+        eprintln!("skipped: ulimit -v could not set the address-space cap");
+        return;
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -321,7 +353,7 @@ fn assert_capped_child_matches_new() {
         output.status
     );
     assert!(
-        stdout.contains("capped-hint-ok"),
+        stdout.contains(CAPPED_CHILD_DONE_MARKER),
         "capped child did not finish the hint check\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
