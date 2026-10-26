@@ -7,6 +7,7 @@ mod cascade_term_balance;
 mod cascade_term_expiry;
 mod commitment_replay;
 mod data_tx_pricing;
+mod duplicate_stake;
 mod ingress_proof_reanchor_dedup;
 mod ingress_proof_validation;
 mod invalid_perm_fee_refund;
@@ -540,14 +541,14 @@ async fn block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.mine_block().await?;
 
-    // Create a stake commitment
+    // Create a stake commitment from an unstaked signer (the genesis miner is
+    // already staked, and a signer has at most one stake)
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let miner_address = genesis_config.signer().address();
     let mut stake =
         CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
-    stake.set_signer(miner_address);
     stake.set_fee(consensus_config.mempool.commitment_fee * 2); // Higher fee
-    genesis_config.signer().sign_commitment(&mut stake)?;
+    test_signer.sign_commitment(&mut stake)?;
 
     // Create a pledge commitment
     let _pledge_count = 0;

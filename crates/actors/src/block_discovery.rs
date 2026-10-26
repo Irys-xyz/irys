@@ -907,6 +907,15 @@ impl BlockDiscoveryServiceInner {
                                     "Unstake not allowed while pledges are active".to_string(),
                                 ));
                             }
+                            CommitmentSnapshotStatus::AlreadyStaked => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    format!(
+                                        "Stake tx {} from signer {} that already has an active or pending stake",
+                                        commitment_tx.id(),
+                                        commitment_tx.signer()
+                                    ),
+                                ));
+                            }
                             CommitmentSnapshotStatus::Unknown => {} // Success case
                         }
 

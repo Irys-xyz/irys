@@ -19,6 +19,7 @@ pub enum CommitmentSnapshotStatus {
     UnpledgePending,    // Duplicate unpledge for same partition in this snapshot
     UnstakePending,     // Duplicate unstake for the signer within this snapshot
     HasActivePledges,   // Unstake not allowed because signer still has pledges
+    AlreadyStaked,      // Stake from a signer that already has an active or pending stake
 }
 
 #[derive(Debug, Default, Clone, Hash)]
@@ -43,6 +44,36 @@ impl CommitmentSnapshot {
                 .commitments
                 .get(signer)
                 .is_some_and(|mc| mc.stake.is_some())
+    }
+
+    /// A signer has at most one stake. For a Stake tx, returns `Accepted` if
+    /// this tx is the signer's stake (active in the epoch snapshot or pending
+    /// locally), `AlreadyStaked` if the signer has a different stake, and
+    /// `None` if the signer has no stake.
+    fn existing_stake_status(
+        &self,
+        stake_tx: &CommitmentTransaction,
+        epoch_snapshot: &EpochSnapshot,
+    ) -> Option<CommitmentSnapshotStatus> {
+        let signer = stake_tx.signer();
+        let existing_stake_id = if epoch_snapshot.is_staked(signer) {
+            epoch_snapshot
+                .commitment_state
+                .stake_commitments
+                .get(&signer)
+                .map(|stake| stake.id)
+        } else {
+            self.commitments
+                .get(&signer)
+                .and_then(|mc| mc.stake.as_ref())
+                .map(CommitmentTransaction::id)
+        }?;
+
+        Some(if existing_stake_id == stake_tx.id() {
+            CommitmentSnapshotStatus::Accepted
+        } else {
+            CommitmentSnapshotStatus::AlreadyStaked
+        })
     }
 
     pub fn new_from_commitments(commitment_txs: Option<Vec<CommitmentTransaction>>) -> Self {
@@ -71,25 +102,9 @@ impl CommitmentSnapshot {
 
         // Handle by the input values commitment type
         let status = match commitment_type {
-            CommitmentTypeV2::Stake => {
-                // If already staked in current epoch, just return Accepted
-                if epoch_snapshot.is_staked(*signer) {
-                    CommitmentSnapshotStatus::Accepted
-                } else {
-                    // Only check local commitments if not staked in current epoch
-                    if let Some(commitments) = self.commitments.get(signer) {
-                        // Check for duplicate stake transaction
-                        if commitments.stake.as_ref().is_some_and(|s| s.id() == txid) {
-                            CommitmentSnapshotStatus::Accepted
-                        } else {
-                            CommitmentSnapshotStatus::Unknown
-                        }
-                    } else {
-                        // No local commitments and not staked in current epoch
-                        CommitmentSnapshotStatus::Unknown
-                    }
-                }
-            }
+            CommitmentTypeV2::Stake => self
+                .existing_stake_status(commitment_tx, epoch_snapshot)
+                .unwrap_or(CommitmentSnapshotStatus::Unknown),
             CommitmentTypeV2::Pledge { .. } | CommitmentTypeV2::Unpledge { .. } => {
                 // For pledges, we need to ensure there's a stake (either current epoch or local)
                 if epoch_snapshot.is_staked(*signer) {
@@ -197,7 +212,6 @@ impl CommitmentSnapshot {
         commitment_tx: &CommitmentTransaction,
         epoch_snapshot: &EpochSnapshot,
     ) -> CommitmentSnapshotStatus {
-        let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer());
         let pledges_in_epoch = epoch_snapshot
             .commitment_state
             .pledge_commitments
@@ -216,22 +230,14 @@ impl CommitmentSnapshot {
         // Handle commitment by type
         match tx_type {
             CommitmentTypeV2::Stake => {
-                // Check existing commitments in epoch service
-                if is_staked_in_current_epoch {
-                    // Already staked in current epoch, no need to add again
-                    return CommitmentSnapshotStatus::Accepted;
-                }
-
-                // Get or create miner commitments entry
-                let miner_commitments = self.commitments.entry(*signer).or_default();
-
-                // Check if already has pending stake
-                if miner_commitments.stake.is_some() {
-                    return CommitmentSnapshotStatus::Accepted;
+                // Re-adding the signer's own stake is idempotent; a different
+                // stake from a signer that already has one is rejected.
+                if let Some(status) = self.existing_stake_status(commitment_tx, epoch_snapshot) {
+                    return status;
                 }
 
                 // Store new stake commitment
-                miner_commitments.stake = Some(commitment_tx.clone());
+                self.commitments.entry(*signer).or_default().stake = Some(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
             CommitmentTypeV2::Pledge {
@@ -829,23 +835,97 @@ mod tests {
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
     }
 
+    /// A signer has at most one stake: a second Stake with a different id is
+    /// rejected while the first is pending locally.
     #[test]
-    fn test_duplicate_stake() {
+    fn second_stake_rejected_while_stake_pending() {
         let mut snapshot = CommitmentSnapshot::default();
+        let epoch_snapshot = EpochSnapshot::default();
         let signer = IrysAddress::random();
 
-        // Add stake
         let stake = create_test_commitment(signer, CommitmentTypeV1::Stake, U256::from(1000));
-        let status = snapshot.add_commitment(&stake, &EpochSnapshot::default());
-        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+        assert_eq!(
+            snapshot.get_commitment_status(&stake, &epoch_snapshot),
+            CommitmentSnapshotStatus::Unknown
+        );
+        assert_eq!(
+            snapshot.add_commitment(&stake, &epoch_snapshot),
+            CommitmentSnapshotStatus::Accepted
+        );
 
-        // Try to add another stake (should be accepted but not added)
-        let stake2 = create_test_commitment(signer, CommitmentTypeV1::Stake, U256::from(1000));
-        let status = snapshot.add_commitment(&stake2, &EpochSnapshot::default());
-        assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+        let second_stake =
+            create_test_commitment(signer, CommitmentTypeV1::Stake, U256::from(1000));
+        assert_eq!(
+            snapshot.get_commitment_status(&second_stake, &epoch_snapshot),
+            CommitmentSnapshotStatus::AlreadyStaked
+        );
+        assert_eq!(
+            snapshot.add_commitment(&second_stake, &epoch_snapshot),
+            CommitmentSnapshotStatus::AlreadyStaked
+        );
 
-        // Verify only one stake exists
-        assert!(snapshot.commitments[&signer].stake.is_some());
+        // Re-adding the pending stake itself stays idempotent.
+        assert_eq!(
+            snapshot.get_commitment_status(&stake, &epoch_snapshot),
+            CommitmentSnapshotStatus::Accepted
+        );
+        assert_eq!(
+            snapshot.add_commitment(&stake, &epoch_snapshot),
+            CommitmentSnapshotStatus::Accepted
+        );
+
+        assert_eq!(
+            snapshot.commitments[&signer]
+                .stake
+                .as_ref()
+                .map(CommitmentTransaction::id),
+            Some(stake.id())
+        );
+        assert_eq!(snapshot.get_epoch_commitments().len(), 1);
+    }
+
+    /// A signer has at most one stake: a Stake with a different id is rejected
+    /// when the signer is already staked in the epoch snapshot.
+    #[test]
+    fn second_stake_rejected_when_staked_in_epoch() {
+        let mut snapshot = CommitmentSnapshot::default();
+        let signer = IrysAddress::random();
+        let stake = create_test_commitment(signer, CommitmentTypeV1::Stake, U256::from(1000));
+
+        let mut epoch_snapshot = EpochSnapshot::default();
+        epoch_snapshot.commitment_state.stake_commitments.insert(
+            signer,
+            StakeEntry {
+                id: stake.id(),
+                commitment_status: CommitmentStatus::Active,
+                signer,
+                amount: U256::from(1000),
+                reward_address: signer,
+            },
+        );
+
+        let second_stake =
+            create_test_commitment(signer, CommitmentTypeV1::Stake, U256::from(1000));
+        assert_eq!(
+            snapshot.get_commitment_status(&second_stake, &epoch_snapshot),
+            CommitmentSnapshotStatus::AlreadyStaked
+        );
+        assert_eq!(
+            snapshot.add_commitment(&second_stake, &epoch_snapshot),
+            CommitmentSnapshotStatus::AlreadyStaked
+        );
+
+        // The active stake itself reads back as Accepted and is not stored again.
+        assert_eq!(
+            snapshot.get_commitment_status(&stake, &epoch_snapshot),
+            CommitmentSnapshotStatus::Accepted
+        );
+        assert_eq!(
+            snapshot.add_commitment(&stake, &epoch_snapshot),
+            CommitmentSnapshotStatus::Accepted
+        );
+
+        assert!(snapshot.get_epoch_commitments().is_empty());
     }
 
     #[test]
