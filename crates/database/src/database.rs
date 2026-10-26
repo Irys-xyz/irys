@@ -286,6 +286,55 @@ mod compact_ingress_leaf_tests {
     }
 
     #[test]
+    fn cache_chunk_verified_skips_a_chunk_whose_data_root_is_gone() -> eyre::Result<()> {
+        let (_dir, db) = open_test_db()?;
+        let data_root = H256::random();
+        let tx_offset = TxChunkOffset::from(0);
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 8,
+            data_path: Base64::default(),
+            bytes: Base64(vec![7_u8; 8]),
+            tx_offset,
+        };
+
+        let outcome = db.update_eyre(|tx| cache_chunk_verified(tx, &chunk))?;
+        assert_eq!(outcome, CacheChunkOutcome::DataRootGone);
+        db.view_eyre(|tx| {
+            assert!(cached_chunk_meta_by_offset(tx, data_root, tx_offset)?.is_none());
+            assert!(cached_chunk_by_chunk_path_hash(tx, &chunk.chunk_path_hash())?.is_none());
+            assert_eq!(tx.entries::<CachedChunksIndex>()?, 0);
+            assert_eq!(tx.entries::<CachedChunks>()?, 0);
+            Ok(())
+        })?;
+
+        db.update_eyre(|tx| {
+            tx.put::<CachedDataRoots>(
+                data_root,
+                CachedDataRoot {
+                    data_size: 8,
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })?;
+        assert_eq!(
+            db.update_eyre(|tx| cache_chunk_verified(tx, &chunk))?,
+            CacheChunkOutcome::Written
+        );
+        assert_eq!(
+            db.update_eyre(|tx| cache_chunk_verified(tx, &chunk))?,
+            CacheChunkOutcome::Duplicate
+        );
+        db.view_eyre(|tx| {
+            assert!(cached_chunk_meta_by_offset(tx, data_root, tx_offset)?.is_some());
+            assert!(cached_chunk_by_chunk_path_hash(tx, &chunk.chunk_path_hash())?.is_some());
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
     fn capacity_eviction_requires_a_durable_storage_offset() -> eyre::Result<()> {
         let (_dir, db) = open_test_db()?;
         let data_root = H256::random();
@@ -1137,34 +1186,47 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
         ));
     }
 
-    cache_chunk_verified(tx, chunk)
+    Ok(cache_chunk_verified(tx, chunk)? == CacheChunkOutcome::Duplicate)
 }
 
-/// Caches a [`UnpackedChunk`] whose data root has already been verified to exist in [`CachedDataRoots`].
+/// What [`cache_chunk_verified`] did with a chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheChunkOutcome {
+    Written,
+    /// Already present in [`CachedChunks`]; nothing was inserted.
+    Duplicate,
+    /// The chunk's data root is absent from [`CachedDataRoots`]; nothing was inserted.
+    DataRootGone,
+}
+
+/// Caches a [`UnpackedChunk`] for callers that check the data root earlier than the commit
+/// (e.g. the write-behind writer).
 ///
-/// # SAFETY REQUIREMENT
-///
-/// The caller MUST ensure the chunk's `data_root` exists in [`CachedDataRoots`] before
-/// calling this function. Failure to do so will leave orphaned chunk data in the cache
-/// with no parent data-root entry. Use [`cache_chunk`] instead if you cannot guarantee this.
-///
-/// Skips the redundant `CachedDataRoots` lookup that [`cache_chunk`] performs, intended for
-/// callers (e.g. the write-behind writer) that have already validated the data root.
-/// Returns `true` if the chunk was a duplicate and was not inserted.
+/// The [`CachedDataRoots`] row is re-read in the same transaction as the writes, so a root
+/// pruned since the caller's check cannot leave orphaned chunk rows. A chunk whose root is
+/// gone is skipped and reported as [`CacheChunkOutcome::DataRootGone`].
 #[tracing::instrument(level = "trace", skip_all)]
 pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
     tx: &T,
     chunk: &UnpackedChunk,
-) -> eyre::Result<IsDuplicate> {
+) -> eyre::Result<CacheChunkOutcome> {
     let data_root = chunk.data_root;
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
+
+    if tx.get::<CachedDataRoots>(data_root)?.is_none() {
+        debug!(
+            "Data root {} is no longer cached, skipping chunk {}",
+            &data_root, &chunk_path_hash
+        );
+        return Ok(CacheChunkOutcome::DataRootGone);
+    }
 
     if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
         warn!(
             "Chunk {} of {} is already cached, skipping..",
             &chunk_path_hash, &data_root
         );
-        return Ok(true);
+        return Ok(CacheChunkOutcome::Duplicate);
     }
 
     let value = CachedChunkIndexEntry {
@@ -1183,7 +1245,7 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
 
     tx.put::<CachedChunksIndex>(data_root, value)?;
     tx.put::<CachedChunks>(chunk_path_hash, chunk.into())?;
-    Ok(false)
+    Ok(CacheChunkOutcome::Written)
 }
 
 /// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxChunkOffset`]
