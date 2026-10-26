@@ -4978,6 +4978,8 @@ dependencies = [
  "irys-utils",
  "irys-vdf",
  "itertools 0.13.0",
+ "jsonrpsee-core",
+ "jsonrpsee-http-client",
  "lru 0.14.0",
  "nodit",
  "openssl",

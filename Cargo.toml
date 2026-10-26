@@ -104,6 +104,8 @@ rust_decimal = "1"
 rust_decimal_macros = "1"
 serde = { version = "1", default-features = false }
 serde_json = "1"
+jsonrpsee-core = { version = "0.26", default-features = false, features = ["client"] }
+jsonrpsee-http-client = { version = "0.26", default-features = false }
 tar = "0.4"
 test-fuzz = "6"
 thiserror = "1"

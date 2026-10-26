@@ -5219,6 +5219,25 @@ pub enum SubmitPayloadError {
     PayloadRejected(String),
 }
 
+/// Maps an engine-client error to a validation outcome. A request that exceeds
+/// the client's size limit fails locally before any byte is sent; its size is
+/// fixed by the block's payload, so the block is rejected. Every other client
+/// error (connection, IO, timeout, server-side failure) is a local fault.
+fn classify_engine_client_error(error: &jsonrpsee_core::client::Error) -> SubmitPayloadError {
+    use jsonrpsee_http_client::transport::Error as HttpTransportError;
+    if let jsonrpsee_core::client::Error::Transport(source) = error
+        && matches!(
+            source.downcast_ref::<HttpTransportError>(),
+            Some(HttpTransportError::RequestTooLarge)
+        )
+    {
+        return SubmitPayloadError::PayloadRejected(
+            "engine request exceeded the engine client's size limit".to_string(),
+        );
+    }
+    SubmitPayloadError::LocalTransport(error.to_string())
+}
+
 /// Submits the EVM payload to reth for execution layer validation.
 /// This should only be called after all consensus layer validations have passed.
 #[tracing::instrument(level = "trace", skip_all, err, fields(
@@ -5267,7 +5286,7 @@ pub async fn submit_payload_to_reth(
                 RequestsOrHash::Requests(Requests::new(vec![])),
             )
             .await
-            .map_err(|e| SubmitPayloadError::LocalTransport(e.to_string()))?;
+            .map_err(|e| classify_engine_client_error(&e))?;
         match payload_status.status {
             alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
                 return Err(SubmitPayloadError::PayloadRejected(validation_error));
@@ -11406,5 +11425,36 @@ mod ingress_proof_local_bytes_tests {
             !err.is_node_fault(),
             "an unmigrated body must not abort the node, got {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod engine_client_error_tests {
+    use super::*;
+    use jsonrpsee_http_client::transport::Error as HttpTransportError;
+
+    #[test]
+    fn oversized_request_is_a_rejected_payload() {
+        let error =
+            jsonrpsee_core::client::Error::Transport(HttpTransportError::RequestTooLarge.into());
+        assert!(matches!(
+            classify_engine_client_error(&error),
+            SubmitPayloadError::PayloadRejected(_)
+        ));
+    }
+
+    #[test]
+    fn connection_failure_is_a_local_transport_failure() {
+        let error = jsonrpsee_core::client::Error::Transport(
+            HttpTransportError::Rejected { status_code: 503 }.into(),
+        );
+        assert!(matches!(
+            classify_engine_client_error(&error),
+            SubmitPayloadError::LocalTransport(_)
+        ));
+        assert!(matches!(
+            classify_engine_client_error(&jsonrpsee_core::client::Error::RequestTimeout),
+            SubmitPayloadError::LocalTransport(_)
+        ));
     }
 }
