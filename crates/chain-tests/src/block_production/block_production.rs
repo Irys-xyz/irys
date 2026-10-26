@@ -1681,3 +1681,69 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
 
     Ok(())
 }
+
+/// A block that fails its own pre-validation drops that solution only. The
+/// producer service replies with a recoverable error and serves the next
+/// solution; it does not stop the node.
+#[test_log::test(tokio::test)]
+async fn own_block_prevalidation_failure_keeps_producer_running() -> eyre::Result<()> {
+    use irys_actors::{BlockProductionError, block_producer::BlockProducerCommand};
+    use irys_types::SendTraced as _;
+
+    let node = IrysNodeTest::new_genesis(NodeConfig::testing())
+        .start()
+        .await;
+    let start_height = node.get_max_difficulty_block().height;
+
+    // Corrupt the PoA chunk. The solution hash still clears the difficulty and
+    // the partition is still ours, so the block is built and sealed, but
+    // pre-validation rejects it (`solution_hash_link_is_valid` recomputes the
+    // hash from the chunk).
+    let mut bad_solution = solution_context(&node.node_ctx).await?;
+    bad_solution.chunk[0] ^= 0xFF;
+
+    let senders = &node.node_ctx.service_senders;
+    senders
+        .block_producer
+        .send_traced(BlockProducerCommand::SetTestBlocksRemaining(Some(1)))?;
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    senders
+        .block_producer
+        .send_traced(BlockProducerCommand::SolutionFound {
+            solution: bad_solution,
+            response: response_tx,
+        })?;
+
+    // A stopped service would drop the sender instead of replying.
+    let reply = response_rx
+        .await
+        .expect("producer service must reply to the rejected solution");
+    let err = reply
+        .map(|_| ())
+        .expect_err("a block that fails pre-validation must not be returned");
+    let production_err = err
+        .downcast_ref::<BlockProductionError>()
+        .unwrap_or_else(|| panic!("expected a BlockProductionError, got: {err:#}"));
+    assert!(
+        matches!(
+            production_err,
+            BlockProductionError::Recoverable {
+                reason: "own_block_rejected",
+                ..
+            }
+        ),
+        "expected an own_block_rejected drop, got: {production_err:?}"
+    );
+    assert_eq!(
+        node.get_max_difficulty_block().height,
+        start_height,
+        "the rejected block must not extend the chain"
+    );
+
+    // The same service produces a block from the next solution.
+    let (block, _, _) = node.mine_block_with_payload().await?;
+    assert_eq!(block.height, start_height + 1);
+
+    node.stop().await;
+    Ok(())
+}
