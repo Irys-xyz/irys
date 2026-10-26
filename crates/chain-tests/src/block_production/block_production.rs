@@ -462,23 +462,57 @@ async fn rewards_get_calculated_correctly() -> eyre::Result<()> {
 
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
-    let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
-    let mut _init_balance = reth_context.get_balance(reward_address, None).await?;
+    let block_time = node
+        .node_ctx
+        .config
+        .consensus
+        .difficulty_adjustment
+        .block_time;
+    let mut prev_evm_block_hash = node.get_max_difficulty_block().evm_block_hash;
 
     for _ in 0..3 {
-        // mine a single block
         let block = node.mine_block().await?;
+        node.wait_for_evm_block(block.evm_block_hash, 10).await?;
 
-        // obtain the EVM timestamp for this block from Reth once indexed
-        let reth_block = node.wait_for_evm_block(block.evm_block_hash, 10).await?;
-        let new_ts = reth_block.header.timestamp as u128;
+        // Empty blocks carry no fees, so the whole balance delta is the block reward.
+        let previous_seconds = (block.height - 1) * block_time;
+        let expected_reward = node
+            .node_ctx
+            .reward_curve
+            .reward_between(
+                u128::from(previous_seconds),
+                u128::from(previous_seconds + block_time),
+            )?
+            .amount;
+        assert!(expected_reward > irys_types::U256::zero());
+        assert_eq!(block.reward_amount, expected_reward);
 
-        prev_ts = Some(new_ts);
-        _init_balance = reth_context.get_balance(reward_address, None).await?;
+        let balance_before = reth_context
+            .get_balance(
+                reward_address,
+                Some(alloy_eips::BlockId::Hash(prev_evm_block_hash.into())),
+            )
+            .await?;
+        let balance_after = reth_context
+            .get_balance(
+                reward_address,
+                Some(alloy_eips::BlockId::Hash(block.evm_block_hash.into())),
+            )
+            .await?;
+        let balance_growth = balance_after
+            .checked_sub(balance_before)
+            .expect("reward address balance must not decrease between consecutive blocks");
+        assert_eq!(
+            balance_growth,
+            U256::from_le_bytes(expected_reward.to_le_bytes()),
+            "reward address balance must grow by exactly the block reward at height {}",
+            block.height
+        );
+
+        prev_evm_block_hash = block.evm_block_hash;
     }
 
-    assert!(prev_ts.is_some());
     node.stop().await;
     Ok(())
 }
