@@ -905,6 +905,9 @@ impl DataSyncServiceInner {
     /// tick cursor. Publish is tried first when the previous refill started a
     /// term module, so a shared peer does not stay on term work. The tick
     /// still refills each queue, stays term-first, and advances the cursors.
+    // Retaining prior requests as span parents makes teardown recurse without bound
+    // and overflow the worker stack. Each refill starts an independent trace.
+    #[tracing::instrument(skip_all, parent = None)]
     fn dispatch_after_release(&mut self) {
         #[cfg(test)]
         if !self.refill_on_release {
@@ -4797,6 +4800,18 @@ mod assignment_follow_tests {
     const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
     fn pipelined() -> Pipelined {
+        pipelined_with_fetcher(|_| {
+            Box::new(|ledger_id| {
+                Arc::new(MockChunkFetcher::new(
+                    usize::try_from(ledger_id).expect("ledger ID fits usize"),
+                ))
+            })
+        })
+    }
+
+    fn pipelined_with_fetcher(
+        factory: impl FnOnce(&[UnpackedChunk]) -> ChunkFetcherFactory,
+    ) -> Pipelined {
         use crate::chunk_ingress_service::ChunkIngressMessage;
 
         let tmp = TempDirBuilder::new().with_tracing().build();
@@ -4859,12 +4874,13 @@ mod assignment_follow_tests {
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         install_epoch(&block_tree_guard, &[slot0]);
+        let chunk_fetcher_factory = factory(&chunks);
         let mut inner = DataSyncServiceInner::new(
             block_tree_guard,
             Arc::new(RwLock::new(vec![Arc::clone(&sm)])),
             peer_list,
             open_db(tmp.path()),
-            Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize))),
+            chunk_fetcher_factory,
             service_senders,
             config,
             tokio::runtime::Handle::current(),
@@ -5210,6 +5226,186 @@ mod assignment_follow_tests {
             20,
             "the finished body's result refilled the slot"
         );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum RefillTrigger {
+        Failed,
+        Fetched,
+        Ingressed,
+    }
+
+    #[derive(Debug)]
+    struct RefillFetcher {
+        body: UnpackedChunk,
+    }
+
+    #[async_trait::async_trait]
+    impl ChunkFetcher for RefillFetcher {
+        async fn fetch_chunk_by_ledger_offset(
+            &self,
+            _offset: irys_types::LedgerChunkOffset,
+            _api_addr: std::net::SocketAddr,
+            _timeout: std::time::Duration,
+        ) -> Result<irys_types::ChunkFormat, super::chunk_fetcher::ChunkFetchError> {
+            // The fixture has no placement index; each fetch delivers a valid body.
+            Ok(irys_types::ChunkFormat::Unpacked(self.body.clone()))
+        }
+
+        async fn fetch_chunk_by_data_root(
+            &self,
+            _data_root: irys_types::DataRoot,
+            _tx_offset: irys_types::TxChunkOffset,
+            _api_addr: std::net::SocketAddr,
+            _timeout: std::time::Duration,
+        ) -> Result<irys_types::ChunkFormat, super::chunk_fetcher::ChunkFetchError> {
+            Err(super::chunk_fetcher::ChunkFetchError::InvalidResponse {
+                message: "the assigned peer must be queried by ledger offset".into(),
+            })
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::info(tracing_subscriber::filter::LevelFilter::INFO)]
+    #[case::trace(tracing_subscriber::filter::LevelFilter::TRACE)]
+    fn repeated_refills_keep_trace_ancestry_bounded(
+        #[case] level: tracing_subscriber::filter::LevelFilter,
+        #[values(
+            RefillTrigger::Failed,
+            RefillTrigger::Fetched,
+            RefillTrigger::Ingressed
+        )]
+        trigger: RefillTrigger,
+    ) -> eyre::Result<()> {
+        use irys_types::Traced;
+        use tracing_subscriber::{layer::SubscriberExt as _, registry::LookupSpan as _};
+
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(level));
+        let registry = dispatch
+            .downcast_ref::<tracing_subscriber::Registry>()
+            .ok_or_else(|| eyre::eyre!("subscriber has no registry"))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()?;
+
+        // Keep the subscriber installed while spawned fetches and the actor are polled.
+        tracing::dispatcher::with_default(&dispatch, || {
+            runtime.block_on(async {
+                let mut t = match trigger {
+                    RefillTrigger::Failed => pipelined(),
+                    RefillTrigger::Fetched | RefillTrigger::Ingressed => {
+                        pipelined_with_fetcher(|chunks| {
+                            let fetcher = Arc::new(RefillFetcher {
+                                body: chunks[0].clone(),
+                            });
+                            Box::new(move |_| Arc::clone(&fetcher) as Arc<dyn ChunkFetcher>)
+                        })
+                    }
+                };
+                t.inner
+                    .active_peer_bandwidth_managers
+                    .write()
+                    .map_err(|e| eyre::eyre!("peer manager lock: {e}"))?
+                    .get_mut(&t.assignee)
+                    .ok_or_else(|| eyre::eyre!("missing assignee"))?
+                    .set_max_concurrency(1);
+                t.inner.max_delivered_bodies = match trigger {
+                    RefillTrigger::Ingressed => 1,
+                    RefillTrigger::Failed | RefillTrigger::Fetched => 64,
+                };
+                t.inner.dispatch_after_release();
+
+                let (actor_tx, actor_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+                let mut peer_rx = t.inner.peer_list.subscribe_to_peer_events();
+                let mut service = super::DataSyncService {
+                    shutdown: shutdown_rx,
+                    msg_rx: actor_rx,
+                    inner: t.inner,
+                };
+                let ingress_count = match trigger {
+                    RefillTrigger::Failed => 0,
+                    RefillTrigger::Fetched | RefillTrigger::Ingressed => 64,
+                };
+                let started = tokio::time::Instant::now();
+                let observe = async {
+                    let mut fetched = 0;
+                    let mut ingressed = 0;
+                    let mut max_depth = 0;
+                    let mut span_ids = Vec::new();
+                    while fetched < 64 || ingressed < ingress_count {
+                        let traced = tokio::time::timeout(WAIT, t.data_sync_rx.recv())
+                            .await?
+                            .ok_or_else(|| eyre::eyre!("data-sync channel closed"))?;
+                        match (&traced.inner, trigger) {
+                            (
+                                DataSyncServiceMessage::ChunkFailed {
+                                    failure_kind:
+                                        super::chunk_fetcher::ChunkFetchFailureKind::NotFound,
+                                    ..
+                                },
+                                RefillTrigger::Failed,
+                            )
+                            | (
+                                DataSyncServiceMessage::ChunkCompleted { .. },
+                                RefillTrigger::Fetched | RefillTrigger::Ingressed,
+                            ) => fetched += 1,
+                            (DataSyncServiceMessage::ChunkIngressed { result: Ok(_), .. }, _) => {
+                                ingressed += 1;
+                            }
+                            _ => eyre::bail!("unexpected completion for {trigger:?}"),
+                        }
+                        let id = traced
+                            .span
+                            .id()
+                            .ok_or_else(|| eyre::eyre!("missing span"))?;
+                        let depth = registry
+                            .span(&id)
+                            .ok_or_else(|| eyre::eyre!("span not registered"))?
+                            .scope()
+                            .count();
+                        max_depth = max_depth.max(depth);
+                        span_ids.push(id);
+
+                        // Forward the real task result unchanged through the production loop.
+                        actor_tx.send(traced)?;
+                        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                        actor_tx.send(Traced::new(DataSyncServiceMessage::GetActivePeersList(
+                            ack_tx,
+                        )))?;
+                        ack_rx.await?;
+                    }
+                    drop(shutdown_tx);
+                    Ok::<_, eyre::Report>((max_depth, span_ids))
+                };
+                let ingress = async {
+                    for _ in 0..ingress_count {
+                        let (_, reply) = tokio::time::timeout(WAIT, t.held_rx.recv())
+                            .await?
+                            .ok_or_else(|| eyre::eyre!("ingress channel closed"))?;
+                        reply
+                            .send(Ok(()))
+                            .map_err(|_| eyre::eyre!("delivery stopped"))?;
+                    }
+                    Ok::<_, eyre::Report>(())
+                };
+                let ((), (max_depth, span_ids), ()) =
+                    tokio::try_join!(service.run_until_stopped(&mut peer_rx), observe, ingress,)?;
+                assert!(
+                    max_depth <= 5,
+                    "successive refills retained prior request spans: depth {max_depth}"
+                );
+                assert_eq!(
+                    tokio::time::Instant::now(),
+                    started,
+                    "refill waited for a tick"
+                );
+                assert_eq!(peer_slot_counts(&service.inner, t.assignee).0, 0);
+                assert!(span_ids.iter().all(|id| registry.span(id).is_none()));
+                Ok(())
+            })
+        })
     }
 
     /// A finished request's slot is used at once, not at the next tick.
