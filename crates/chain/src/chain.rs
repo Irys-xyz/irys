@@ -2104,7 +2104,7 @@ impl IrysNode {
 
         // set up the price oracles (initial price(s) fetched during construction)
         let (price_oracle, price_oracle_handles) =
-            Self::init_price_oracle(&config, &runtime_handle).await;
+            Self::init_price_oracle(&config, &runtime_handle).await?;
 
         // set up the block producer
         let (block_producer_inner, block_producer_handle) = Self::init_block_producer(
@@ -2640,7 +2640,7 @@ impl IrysNode {
     async fn init_price_oracle(
         config: &Config,
         runtime_handle: &tokio::runtime::Handle,
-    ) -> (Arc<IrysPriceOracle>, Vec<irys_types::TokioServiceHandle>) {
+    ) -> eyre::Result<(Arc<IrysPriceOracle>, Vec<irys_types::TokioServiceHandle>)> {
         let oracle_cfgs: Vec<OracleConfig> = if config.node_config.oracles.is_empty() {
             tracing::info!(
                 "No oracles configured — block production will reuse the \
@@ -2675,7 +2675,7 @@ impl IrysNode {
                     poll_interval_ms,
                 } => SingleOracle::new_coinmarketcap(api_key, id, poll_interval_ms)
                     .await
-                    .expect("coinmarketcap initial price"),
+                    .wrap_err("coinmarketcap initial price")?,
                 OracleConfig::CoinGecko {
                     api_key,
                     coin_id,
@@ -2683,14 +2683,14 @@ impl IrysNode {
                     poll_interval_ms,
                 } => SingleOracle::new_coingecko(api_key, coin_id, demo_api_key, poll_interval_ms)
                     .await
-                    .expect("coingecko initial price"),
+                    .wrap_err("coingecko initial price")?,
             };
             let handle = Arc::clone(&oracle).spawn_poller(runtime_handle);
             handles.push(handle);
             instances.push(oracle);
         }
 
-        (IrysPriceOracle::new(instances), handles)
+        Ok((IrysPriceOracle::new(instances), handles))
     }
 
     fn init_block_discovery_service(

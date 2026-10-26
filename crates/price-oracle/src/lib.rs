@@ -84,6 +84,49 @@ pub(crate) async fn read_capped_body(mut response: reqwest::Response) -> eyre::R
     Ok(buf)
 }
 
+/// Attempts for the startup price fetch before the node reports an error.
+pub const INITIAL_FETCH_ATTEMPTS: u32 = 5;
+
+/// Delay before the second startup fetch attempt; doubles after each further failure.
+pub const INITIAL_FETCH_BASE_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Runs `fetch` up to `attempts` times, doubling the delay between failures.
+/// Returns the last error, with the attempt count, once all attempts fail.
+async fn fetch_with_backoff<T, F, Fut>(
+    what: &str,
+    attempts: u32,
+    base_backoff: Duration,
+    mut fetch: F,
+) -> eyre::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = eyre::Result<T>>,
+{
+    let mut backoff = base_backoff;
+    let mut attempt = 1_u32;
+    loop {
+        match fetch().await {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt >= attempts => {
+                return Err(err.wrap_err(format!(
+                    "{what}: initial price fetch failed after {attempts} attempts"
+                )));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    attempt,
+                    ?backoff,
+                    "{what}: initial price fetch failed, retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = backoff.saturating_mul(2);
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
 pub mod coingecko;
 pub mod coinmarketcap;
 pub mod mock_oracle;
@@ -148,7 +191,13 @@ impl SingleOracle {
         let coinmarketcap::CoinMarketCapQuote {
             amount: initial_amount,
             last_updated: initial_last_updated,
-        } = client.current_price().await?;
+        } = fetch_with_backoff(
+            "CoinMarketCap",
+            INITIAL_FETCH_ATTEMPTS,
+            INITIAL_FETCH_BASE_BACKOFF,
+            || client.current_price(),
+        )
+        .await?;
         let poll_interval = Duration::from_millis(poll_interval_ms.max(1));
         Ok(Arc::new(Self {
             source: OracleSource::CoinMarketCap(client),
@@ -171,7 +220,13 @@ impl SingleOracle {
         let coingecko::CoinGeckoQuote {
             amount: initial_amount,
             last_updated: initial_last_updated,
-        } = client.current_price().await?;
+        } = fetch_with_backoff(
+            "CoinGecko",
+            INITIAL_FETCH_ATTEMPTS,
+            INITIAL_FETCH_BASE_BACKOFF,
+            || client.current_price(),
+        )
+        .await?;
         let poll_interval = Duration::from_millis(poll_interval_ms.max(1));
         Ok(Arc::new(Self {
             source: OracleSource::CoinGecko(client),
@@ -441,5 +496,42 @@ mod http_limit_tests {
         .await;
         let resp = build_http_client().get(url).send().await.unwrap();
         assert!(read_capped_body(resp).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod initial_fetch_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[tokio::test]
+    async fn retries_until_success() {
+        let calls = AtomicU32::new(0);
+        let result = fetch_with_backoff("test", 5, Duration::from_millis(1), || async {
+            if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                eyre::bail!("transient")
+            }
+            Ok(7_u32)
+        })
+        .await;
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn fails_after_all_attempts() {
+        let calls = AtomicU32::new(0);
+        let result: eyre::Result<u32> =
+            fetch_with_backoff("test", 3, Duration::from_millis(1), || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                eyre::bail!("down")
+            })
+            .await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("after 3 attempts") && err.contains("down"),
+            "{err}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 }
