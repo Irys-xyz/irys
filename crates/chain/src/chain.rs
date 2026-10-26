@@ -3,7 +3,6 @@ use crate::metrics;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use crate::vdf_seed_source::DbVdfSeedSource;
 use actix_web::dev::Server;
-use base58::ToBase58 as _;
 use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_actors::{
@@ -55,6 +54,7 @@ pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reward_curve::HalvingCurve;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db_with_args;
 use irys_types::BlockHash;
+use irys_types::ToBase58 as _;
 use irys_types::chainspec::irys_chain_spec;
 use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,

@@ -436,7 +436,6 @@ pub fn calibrate_vdf(runs: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base58::FromBase58 as _;
     use proptest::prelude::*;
 
     use tracing::debug;
@@ -512,7 +511,7 @@ mod tests {
     }
 
     fn to_hash(base_58_hash: &str) -> H256 {
-        H256(base_58_hash.from_base58().unwrap().try_into().unwrap())
+        H256::from_base58(base_58_hash)
     }
 
     #[tokio::test]

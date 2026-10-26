@@ -45,18 +45,8 @@ fn main() -> eyre::Result<()> {
         ));
     }
 
-    let tx_bytes = bs58::decode(&tx_id_b58)
-        .into_vec()
+    let tx_id = H256::from_base58_result(&tx_id_b58)
         .with_context(|| format!("decode base58 tx id {tx_id_b58:?}"))?;
-    if tx_bytes.len() != 32 {
-        return Err(eyre!(
-            "tx_id must decode to 32 bytes, got {}",
-            tx_bytes.len()
-        ));
-    }
-    let mut arr = [0_u8; 32];
-    arr.copy_from_slice(&tx_bytes);
-    let tx_id = H256(arr);
 
     let env = DatabaseEnv::open(
         &db_path,

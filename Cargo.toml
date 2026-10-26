@@ -73,7 +73,7 @@ ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix-web = "4.9.0"
 actix-http = "3.9.0"
 awc = "3.5.1"
-base58 = "0.2.0"
+bs58 = "0.5.1"
 tokio-util = "0.7"
 rand = { version = "0.8", features = ["small_rng"] }
 hex = "0.4"

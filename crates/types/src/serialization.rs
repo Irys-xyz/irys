@@ -5,7 +5,6 @@ use crate::ingress::IngressProof;
 use alloy_primitives::{FixedBytes, bytes};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
-use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
 use derive_more::Deref;
 use eyre::Error;
@@ -25,6 +24,49 @@ use serde::{
 use std::fmt;
 use std::{ops::Index, slice::SliceIndex, str::FromStr};
 use uint::construct_uint;
+
+//==============================================================================
+// Base58
+//------------------------------------------------------------------------------
+
+/// Decodes a base58 string into exactly `N` bytes.
+///
+/// This is the only place that decodes base58, so every caller gets the same
+/// length cap and exact-size check. No encoding of `N` bytes is longer than `N * 1366 / 1000 + 1`
+/// characters: that bounds `ceil(N * log58(256))`, the length of `[0xFF; N]`,
+/// and is at least `N`, the length of `[0x00; N]`.
+pub fn decode_base58_exact<const N: usize>(string: &str) -> eyre::Result<[u8; N]> {
+    let max_len = N * 1366 / 1000 + 1;
+    eyre::ensure!(
+        string.len() <= max_len,
+        "base58 string has {} characters, max for {N} bytes is {max_len}",
+        string.len()
+    );
+    let mut bytes = [0_u8; N];
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one sanctioned base58 decode"
+    )]
+    let written = bs58::decode(string)
+        .onto(&mut bytes)
+        .map_err(|e| eyre!("Invalid base58 string: {e}"))?;
+    eyre::ensure!(
+        written == N,
+        "Decoded base58 has {written} bytes, expected {N}"
+    );
+    Ok(bytes)
+}
+
+/// Base58 encoding (Bitcoin alphabet).
+pub trait ToBase58 {
+    fn to_base58(&self) -> String;
+}
+
+impl ToBase58 for [u8] {
+    fn to_base58(&self) -> String {
+        bs58::encode(self).into_string()
+    }
+}
 
 //==============================================================================
 // u64 Type
@@ -228,14 +270,7 @@ impl H256 {
     }
 
     pub fn from_base58_result(string: &str) -> eyre::Result<Self> {
-        let decoded = string
-            .from_base58()
-            .map_err(|e| eyre!("Invalid base58 string: {:?}", &e))?;
-        let array: [u8; 32] = decoded
-            .as_slice()
-            .try_into()
-            .map_err(|_| eyre!("Decoded base58 has {} bytes, expected 32", decoded.len()))?;
-        Ok(Self(array))
+        Ok(Self(decode_base58_exact(string)?))
     }
 }
 
@@ -313,8 +348,8 @@ impl From<Vec<IngressProof>> for IngressProofsList {
 // Address Base58
 //------------------------------------------------------------------------------
 pub mod address_base58_stringify {
+    use super::ToBase58 as _;
     use alloy_primitives::Address;
-    use base58::{FromBase58, ToBase58 as _};
     use serde::{self, Deserialize, Deserializer, Serializer, de};
 
     pub fn serialize<S>(value: &Address, serializer: S) -> Result<S::Ok, S::Error>
@@ -330,19 +365,9 @@ pub mod address_base58_stringify {
     {
         let s: String = Deserialize::deserialize(deserializer)?;
 
-        // Decode the base58 string into bytes
-        let bytes = FromBase58::from_base58(s.as_str())
-            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {e:?}")))?;
-
-        // Ensure the byte array is exactly 20 bytes
-        if bytes.len() != 20 {
-            return Err(de::Error::invalid_length(
-                bytes.len(),
-                &"expected 20 bytes for address",
-            ));
-        }
-
-        Ok(Address::from_slice(&bytes))
+        let bytes = super::decode_base58_exact::<20>(&s)
+            .map_err(|e| de::Error::custom(format!("Failed to decode address: {e}")))?;
+        Ok(Address::from(bytes))
     }
 }
 pub mod option_address_base58_stringify {
@@ -483,15 +508,9 @@ pub trait DecodeHash: Sized {
 
 impl DecodeHash for H256 {
     fn from(base58_string: &str) -> Result<Self, String> {
-        let bytes = FromBase58::from_base58(base58_string)
-            .map_err(|e| format!("Failed to decode from base58 {e:?}"))?;
-        let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-            format!(
-                "Invalid H256 length: expected 32 bytes, got {}",
-                bytes.len()
-            )
-        })?;
-        Ok(Self(arr))
+        decode_base58_exact(base58_string)
+            .map(Self)
+            .map_err(|e| format!("Failed to decode H256: {e}"))
     }
 
     fn empty() -> Self {
@@ -1137,13 +1156,54 @@ mod tests {
 
     #[test]
     fn h256_from_base58_result_returns_err_on_wrong_length() {
-        use base58::ToBase58 as _;
-
         let encoded = [0_u8; 31].to_base58();
         let err = H256::from_base58_result(&encoded).unwrap_err();
         assert!(
             err.to_string().contains("31 bytes, expected 32"),
             "expected length error, got: {err}"
         );
+    }
+
+    /// The cap must admit the longest encodings of `N` bytes, all-zero (`N`
+    /// '1's) and all-0xFF, and reject one character more.
+    fn assert_base58_cap<const N: usize>(cap: usize) {
+        let all_zero = [0_u8; N].to_base58();
+        let all_ff = [0xFF_u8; N].to_base58();
+        assert_eq!(all_zero.len(), N);
+        assert_eq!(all_ff.len(), cap);
+        assert_eq!(decode_base58_exact::<N>(&all_zero).unwrap(), [0_u8; N]);
+        assert_eq!(decode_base58_exact::<N>(&all_ff).unwrap(), [0xFF_u8; N]);
+        let err = decode_base58_exact::<N>(&"1".repeat(cap + 1)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("max for {N} bytes is {cap}")),
+            "expected length-cap error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn base58_cap_matches_longest_encodings() {
+        assert_base58_cap::<20>(28);
+        assert_base58_cap::<32>(44);
+        assert_base58_cap::<65>(89);
+    }
+
+    /// Input over the cap, or under it but decoding to more than `N` bytes,
+    /// is an error.
+    #[rstest::rstest]
+    #[case::ones_over_cap("1".repeat(200))]
+    #[case::ones_then_digits_over_cap(format!("{}zzzz", "1".repeat(100)))]
+    #[case::under_cap_too_many_bytes("1".repeat(44))]
+    fn decode_base58_exact_rejects_oversized_input(#[case] input: String) {
+        assert!(decode_base58_exact::<32>(&input).is_err());
+        assert!(H256::from_base58_result(&input).is_err());
+        assert!(serde_json::from_str::<H256>(&format!("\"{input}\"")).is_err());
+    }
+
+    /// A short input must not be zero-padded up to `N` bytes.
+    #[test]
+    fn decode_base58_exact_rejects_short_input() {
+        assert!(decode_base58_exact::<32>("").is_err());
+        assert!(decode_base58_exact::<32>(&[7_u8; 31].to_base58()).is_err());
     }
 }
