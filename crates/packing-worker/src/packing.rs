@@ -92,6 +92,8 @@ impl PackingWorkerState {
                     irys_types::ConsensusConfig::CHUNK_SIZE,
                     "Chunk size is not aligned with C code"
                 );
+                let chunk_size_usize =
+                    usize::try_from(chunk_size).expect("protocol-fixed chunk_size fits usize");
                 let split = split_interval(&chunk_range, self.0.config.gpu_packing_batch_size)?;
                 let stream = stream::iter(split).map(move |chunk_range_split| {
                     let runtime_handle = runtime_handle.clone();
@@ -108,15 +110,17 @@ impl PackingWorkerState {
                             &start, &end, &num_chunks
                         );
 
-                        let chunk_size_u32 =
-                            u32::try_from(chunk_size).expect("protocol-fixed chunk_size fits u32");
+                        let batch_bytes = usize::try_from(num_chunks)
+                            .ok()
+                            .and_then(|chunks| chunks.checked_mul(chunk_size_usize))
+                            .ok_or_else(|| {
+                                eyre::eyre!(
+                                    "CUDA packing buffer size overflows: {num_chunks} chunks of {chunk_size} bytes"
+                                )
+                            })?;
                         let out = runtime_handle
-                            .spawn_blocking(move || {
-
-                                let mut out: Vec<u8> = Vec::with_capacity(
-                                    usize::try_from(num_chunks * chunk_size_u32)
-                                        .expect("total size fits in usize"),
-                                );
+                            .spawn_blocking(move || -> eyre::Result<Vec<u8>> {
+                                let mut out: Vec<u8> = Vec::with_capacity(batch_bytes);
                                 capacity_pack_range_cuda_c(
                                     num_chunks,
                                     mining_address,
@@ -124,12 +128,12 @@ impl PackingWorkerState {
                                     partition_hash,
                                     entropy_packing_iterations,
                                     chain_id,
-                                    CUDAConfig::from_device_default().unwrap(),
+                                    CUDAConfig::from_device_default()?,
                                     &mut out,
-                                ).unwrap();
-                                out
+                                )?;
+                                Ok(out)
                             })
-                            .await?;
+                            .await??;
                         tracing::debug!(
                             target = "irys::packing::update",
                             packing_job.chunk_range = ?chunk_range,
