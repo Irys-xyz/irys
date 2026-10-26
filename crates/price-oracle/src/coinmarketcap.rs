@@ -24,7 +24,7 @@ impl CoinMarketCapOracle {
     /// Create a new CoinMarketCap oracle client
     #[must_use]
     pub fn new(api_key: String, id: String) -> Self {
-        let client = Client::new();
+        let client = crate::build_http_client();
         Self {
             client,
             api_key,
@@ -59,8 +59,11 @@ impl CoinMarketCapOracle {
             bail!("CoinMarketCap API returned HTTP status {}", resp.status());
         }
 
+        let bytes = crate::read_capped_body(resp)
+            .await
+            .context("failed to read CMC response body")?;
         let body: CoinMarketCapResponse =
-            resp.json().await.context("failed to parse CMC JSON body")?;
+            serde_json::from_slice(&bytes).context("failed to parse CMC JSON body")?;
 
         if let Some(status) = &body.status
             && status.error_code != 0

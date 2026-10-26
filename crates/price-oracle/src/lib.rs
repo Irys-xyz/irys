@@ -50,6 +50,40 @@ pub(crate) fn reject_zero_price(amount: Amount<(IrysPrice, Usd)>) -> eyre::Resul
     Ok(())
 }
 
+/// Total time allowed for one oracle HTTP request, so a hung endpoint cannot wedge the poller.
+pub const ORACLE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Largest oracle response body accepted; real quote responses are a few hundred bytes.
+pub const MAX_ORACLE_RESPONSE_BYTES: u64 = 1024 * 1024;
+
+pub(crate) fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(ORACLE_HTTP_TIMEOUT)
+        .read_timeout(ORACLE_HTTP_TIMEOUT)
+        .build()
+        .expect("reqwest client builds with a fixed timeout")
+}
+
+/// Reads the body, failing once it exceeds `MAX_ORACLE_RESPONSE_BYTES`.
+pub(crate) async fn read_capped_body(mut response: reqwest::Response) -> eyre::Result<Vec<u8>> {
+    let cap = MAX_ORACLE_RESPONSE_BYTES;
+    if let Some(len) = response.content_length() {
+        eyre::ensure!(
+            len <= cap,
+            "oracle response Content-Length {len} exceeds cap of {cap} bytes"
+        );
+    }
+    let mut buf = Vec::new();
+    let mut total = 0_u64;
+    while let Some(chunk) = response.chunk().await? {
+        let chunk_len = u64::try_from(chunk.len())?;
+        total = irys_types::accumulate_response_bytes(total, chunk_len, cap)
+            .map_err(|_| eyre::eyre!("oracle response exceeds cap of {cap} bytes"))?;
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 pub mod coingecko;
 pub mod coinmarketcap;
 pub mod mock_oracle;
@@ -354,5 +388,58 @@ mod zero_price_tests {
     #[test]
     fn accepts_nonzero_price() {
         assert!(reject_zero_price(Amount::new(U256::from(1_u64))).is_ok());
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "simpler tests")]
+mod http_limit_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt as _;
+    use tokio::net::TcpListener;
+
+    /// Serves one canned HTTP response, then closes; returns the URL.
+    async fn serve_once(head: &'static str, body: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut scratch = [0_u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut scratch).await;
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(&body).await;
+            let _ = sock.shutdown().await;
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn reads_body_within_cap() {
+        let url = serve_once(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
+            b"{}".to_vec(),
+        )
+        .await;
+        let resp = build_http_client().get(url).send().await.unwrap();
+        assert_eq!(read_capped_body(resp).await.unwrap(), b"{}");
+    }
+
+    #[tokio::test]
+    async fn rejects_streamed_body_over_cap() {
+        let oversized = vec![b'x'; usize::try_from(MAX_ORACLE_RESPONSE_BYTES).unwrap() + 1];
+        let url = serve_once("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", oversized).await;
+        let resp = build_http_client().get(url).send().await.unwrap();
+        assert!(read_capped_body(resp).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_declared_length_over_cap() {
+        let url = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\n",
+            Vec::new(),
+        )
+        .await;
+        let resp = build_http_client().get(url).send().await.unwrap();
+        assert!(read_capped_body(resp).await.is_err());
     }
 }

@@ -27,7 +27,7 @@ pub struct CoinGeckoOracle {
 impl CoinGeckoOracle {
     #[must_use]
     pub fn new(api_key: String, coin_id: String, use_demo_api: bool) -> Self {
-        let client = Client::new();
+        let client = crate::build_http_client();
         let base_url = if use_demo_api {
             "https://api.coingecko.com/api/v3"
         } else {
@@ -72,7 +72,10 @@ impl CoinGeckoOracle {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = crate::read_capped_body(resp)
+                .await
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
             bail!(
                 "CoinGecko API returned HTTP status {} {} {}",
                 self.url,
@@ -81,10 +84,11 @@ impl CoinGeckoOracle {
             );
         }
 
-        let body: HashMap<String, SimplePriceData> = resp
-            .json()
+        let bytes = crate::read_capped_body(resp)
             .await
-            .context("failed to parse CoinGecko JSON body")?;
+            .context("failed to read CoinGecko response body")?;
+        let body: HashMap<String, SimplePriceData> =
+            serde_json::from_slice(&bytes).context("failed to parse CoinGecko JSON body")?;
 
         let entry = body
             .get(&self.coin_id)
