@@ -764,23 +764,87 @@ impl Drop for MemlockPermit<'_> {
 
 fn memlock_budget() -> &'static MemlockBudget {
     static BUDGET: OnceLock<MemlockBudget> = OnceLock::new();
-    // Headroom is max(soft / 8, 64 MiB). `RLIM_INFINITY` or a failed read does not gate.
     BUDGET.get_or_init(|| {
-        const MIN_HEADROOM: u64 = 64 << 20;
         let mut limit = libc::rlimit {
             rlim_cur: 0,
             rlim_max: 0,
         };
         // SAFETY: `limit` is a writable `rlimit` and outlives the call.
         let rc = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) };
-        let total = if rc != 0 || limit.rlim_cur == libc::RLIM_INFINITY {
-            u64::MAX
-        } else {
-            let soft = limit.rlim_cur;
-            soft.saturating_sub((soft / 8).max(MIN_HEADROOM))
-        };
-        MemlockBudget::new(total)
+        let soft = (rc == 0 && limit.rlim_cur != libc::RLIM_INFINITY).then_some(limit.rlim_cur);
+        MemlockBudget::new(memlock_total(soft, effective_memory()))
     })
+}
+
+/// Headroom is max(soft / 8, 64 MiB). With no finite soft limit (`RLIM_INFINITY` or a failed read),
+/// soft is 1/8 of the process's effective memory: the Linux default, the budget the testnet
+/// rollout measured. Pinning every index at once could otherwise lock more than RAM or the cgroup
+/// allows. Unknown memory pins nothing.
+fn memlock_total(soft: Option<u64>, effective_memory: Option<u64>) -> u64 {
+    const MIN_HEADROOM: u64 = 64 << 20;
+    let Some(soft) = soft.or(effective_memory.map(|bytes| bytes / 8)) else {
+        return 0;
+    };
+    soft.saturating_sub((soft / 8).max(MIN_HEADROOM))
+}
+
+/// Physical memory, capped by every memory cgroup limit on this process's path.
+fn effective_memory() -> Option<u64> {
+    // SAFETY: `sysconf` reads a system constant and takes no pointers.
+    let (pages, page_size) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    let physical = u64::try_from(pages)
+        .ok()
+        .zip(u64::try_from(page_size).ok())
+        .map(|(pages, size)| pages.saturating_mul(size))
+        .filter(|&bytes| bytes > 0);
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|cgroups| {
+            cgroup_memory_limit(&cgroups, |path| std::fs::read_to_string(path).ok())
+        });
+    match (physical, cgroup) {
+        (Some(physical), Some(cgroup)) => Some(physical.min(cgroup)),
+        (physical, cgroup) => physical.or(cgroup),
+    }
+}
+
+/// The smallest memory limit from the process's cgroup up to the root: v2 `memory.max`, or the
+/// v1 memory controller's `memory.limit_in_bytes`. `max` and unreadable files set no limit.
+fn cgroup_memory_limit(
+    proc_self_cgroup: &str,
+    read: impl Fn(&Path) -> Option<String>,
+) -> Option<u64> {
+    let mut lowest: Option<u64> = None;
+    for line in proc_self_cgroup.lines() {
+        let mut fields = line.splitn(3, ':');
+        let (Some(_), Some(controllers), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (root, file) = if controllers.is_empty() {
+            (Path::new("/sys/fs/cgroup"), "memory.max")
+        } else if controllers.split(',').any(|name| name == "memory") {
+            (Path::new("/sys/fs/cgroup/memory"), "memory.limit_in_bytes")
+        } else {
+            continue;
+        };
+        let mut dir = Some(Path::new(path.trim_start_matches('/')));
+        while let Some(relative) = dir {
+            if let Some(bytes) = read(&root.join(relative).join(file))
+                .and_then(|text| text.trim().parse::<u64>().ok())
+            {
+                lowest = Some(lowest.map_or(bytes, |low| low.min(bytes)));
+            }
+            dir = relative.parent();
+        }
+    }
+    lowest
 }
 
 /// Releases the pin on drop. The lock call can pin pages and still return an
@@ -2887,6 +2951,65 @@ mod tests {
         rest.await.expect("rest task");
         release_tx.send(()).expect("holder is waiting");
         holder.await.expect("holder task");
+    }
+
+    /// Break: an unlimited or unreadable memlock soft limit leaves the budget unbounded, so every
+    /// module pins its whole index at once. A finite soft limit must keep its old budget.
+    #[test]
+    fn memlock_total_caps_an_unlimited_soft_limit_by_effective_memory() {
+        const GIB: u64 = 1 << 30;
+        let finite = super::memlock_total(Some(4 * GIB), Some(512 * GIB));
+        assert_eq!(finite, 4 * GIB - GIB / 2, "finite soft limit is unchanged");
+        assert_eq!(
+            super::memlock_total(None, Some(32 * GIB)),
+            finite,
+            "no finite soft limit budgets 1/8 of effective memory"
+        );
+        assert_eq!(
+            super::memlock_total(None, None),
+            0,
+            "unknown memory pins nothing"
+        );
+        assert_eq!(
+            super::memlock_total(Some(32 << 20), None),
+            0,
+            "a soft limit below the 64 MiB headroom pins nothing"
+        );
+    }
+
+    /// Break: only the leaf cgroup is read, `max` parses as a limit, or a v1 memory controller
+    /// line is ignored. The smallest limit on the path wins.
+    #[test]
+    fn cgroup_memory_limit_takes_the_smallest_limit_on_the_path() {
+        let files: std::collections::HashMap<&str, &str> = [
+            (
+                "/sys/fs/cgroup/system.slice/pm2.service/memory.max",
+                "max\n",
+            ),
+            ("/sys/fs/cgroup/system.slice/memory.max", "8589934592\n"),
+            (
+                "/sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes",
+                "4294967296\n",
+            ),
+            (
+                "/sys/fs/cgroup/memory/docker/memory.limit_in_bytes",
+                "9223372036854771712\n",
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let read = |path: &Path| files.get(path.to_str()?).map(|text| (*text).to_owned());
+
+        let v2 = "0::/system.slice/pm2.service\n";
+        assert_eq!(super::cgroup_memory_limit(v2, read), Some(8 << 30));
+        let v1 = "12:cpu,cpuacct:/docker/abc\n4:memory:/docker/abc\n";
+        assert_eq!(super::cgroup_memory_limit(v1, read), Some(4 << 30));
+        assert_eq!(
+            super::cgroup_memory_limit("0::/\n", read),
+            None,
+            "root has no memory.max"
+        );
+        assert_eq!(super::cgroup_memory_limit("3:cpu:/x\n", read), None);
     }
 
     /// A 4-row copy is far below the old 100_000-row log. The start line still
