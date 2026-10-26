@@ -9,13 +9,18 @@
 //! Each batch is one MDBX transaction. The schema row holds the resume point
 //! until the last batch writes [`SUBMODULE_SCHEMA`]. Open does not return
 //! until that row is current, so a caller never reads a half-migrated index.
+//! Before the copy, `mdbx_env_warmup` loads the open environment's pages and
+//! pins them when the process memlock budget has room. The pin is released
+//! when the migration returns.
 
 use std::path::Path;
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use irys_types::{ChunkDataPath, ChunkPathHash, H256, PartitionChunkOffset};
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::mdbx::Error as MdbxError;
+use reth_db::mdbx::ffi;
 use reth_db::transaction::{DbTx, DbTxMut as _};
 use reth_db::{Database as _, DatabaseEnv, DatabaseError};
 
@@ -28,8 +33,15 @@ use super::tables::{
 };
 
 pub(super) const PROGRESS_PREFIX: &str = "irys-submodule-index migrate-v1 ";
-const PROGRESS_LOG_ROWS: u64 = 100_000;
+/// How often a running migration logs rows done, rate, and ETA.
+const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(15);
+/// Row cap for one copy commit and one drop commit.
+const DEFAULT_BATCH_ROWS: usize = 16_384;
+/// Copy and drop value cap. Eight modules at once hold 8 x 64 MiB of values.
+const DEFAULT_BATCH_VALUE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MARKER_BYTES: usize = 512;
+/// Per-module fraction of v1 rows migrated, from 0 to 1.
+const MIGRATION_PROGRESS_METRIC: &str = "irys_submodule_migration_progress";
 
 /// What the schema row was when open began.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,14 +106,18 @@ pub struct SubmoduleMigrationOptions {
     pub fail_after_commits: Option<u32>,
     pub batch_rows: usize,
     pub batch_value_bytes: usize,
+    /// Minimum gap between progress lines. The default is 15 seconds.
+    /// A test can set a shorter gap.
+    pub progress_log_interval: Duration,
 }
 
 impl Default for SubmoduleMigrationOptions {
     fn default() -> Self {
         Self {
             fail_after_commits: None,
-            batch_rows: 2048,
-            batch_value_bytes: 8 * 1024 * 1024,
+            batch_rows: DEFAULT_BATCH_ROWS,
+            batch_value_bytes: DEFAULT_BATCH_VALUE_BYTES,
+            progress_log_interval: PROGRESS_LOG_INTERVAL,
         }
     }
 }
@@ -184,8 +200,26 @@ pub(super) fn ensure_mdbx_schema(
                 elapsed: started.elapsed(),
             }
         }
-        SchemaRow::Absent => run_migration(env, path, options, Progress::new(), started)?,
-        SchemaRow::Progress(progress) => run_migration(env, path, options, progress, started)?,
+        SchemaRow::Absent => run_migration(
+            env,
+            path,
+            options,
+            Progress::new(),
+            Totals {
+                path_hash_rows,
+                legacy_rows,
+            },
+            started,
+        )?,
+        SchemaRow::Progress(progress) => {
+            // Path-hash rows remain, so that total is max(stat, scanned).
+            // Only deleted legacy keys are added back.
+            let totals = Totals {
+                path_hash_rows: path_hash_rows.max(progress.scanned),
+                legacy_rows: legacy_rows.saturating_add(progress.deleted),
+            };
+            run_migration(env, path, options, progress, totals, started)?
+        }
     };
     log_open(path, &stats);
     Ok(stats)
@@ -197,11 +231,31 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Row totals from MDBX `stat`, fixed for the whole run.
+struct Totals {
+    path_hash_rows: u64,
+    legacy_rows: u64,
+}
+
+/// In-memory log window. Not written to the schema row.
+struct Pace {
+    phase: Phase,
+    last_log: Instant,
+    last_done: u64,
+    /// `elapsed_ms` when copy finished, if this process saw that transition.
+    copy_elapsed_ms: Option<u64>,
+    /// Rows already done when this process started.
+    resume_done: u64,
+    /// Checkpoint `elapsed_ms` when this process started.
+    resume_elapsed_ms: u64,
+}
+
 fn run_migration(
     env: &DatabaseEnv,
     path: &Path,
     options: &SubmoduleMigrationOptions,
     mut progress: Progress,
+    totals: Totals,
     started: Instant,
 ) -> eyre::Result<MigrationStats> {
     if options.fail_after_commits == Some(0) {
@@ -213,7 +267,10 @@ fn run_migration(
     if let Some(hook) = DURING_MIGRATION.with(|cell| cell.borrow_mut().take()) {
         hook(path);
     }
-    log_started(path, &progress);
+    // v2, empty, and foreign schemas never call this. The pin drops on every return.
+    let _warmed = pre_read_index_file(env, path);
+    log_started(path, &progress, &totals);
+    set_migration_gauge(path, migration_fraction(&progress, &totals));
     let ctx = MigrateCtx {
         env,
         path,
@@ -221,6 +278,14 @@ fn run_migration(
         batch_value_bytes: options.batch_value_bytes.max(1),
         base_ms: progress.elapsed_ms,
         started,
+    };
+    let mut pace = Pace {
+        phase: progress.phase,
+        last_log: Instant::now(),
+        last_done: rows_done(progress.phase, &progress),
+        copy_elapsed_ms: None,
+        resume_done: rows_done(progress.phase, &progress),
+        resume_elapsed_ms: progress.elapsed_ms,
     };
     let mut commits = 0_u32;
     loop {
@@ -234,6 +299,13 @@ fn run_migration(
                 };
                 apply_copy(&ctx, batch, &mut progress)?;
                 commits += 1;
+                note_progress(
+                    path,
+                    &progress,
+                    &totals,
+                    &mut pace,
+                    options.progress_log_interval,
+                );
                 interrupt_after(options, commits)?;
             }
             Phase::Drop => {
@@ -244,8 +316,17 @@ fn run_migration(
                 };
                 let done = apply_drop(&ctx, batch, &mut progress)?;
                 commits += 1;
+                note_progress(
+                    path,
+                    &progress,
+                    &totals,
+                    &mut pace,
+                    options.progress_log_interval,
+                );
                 interrupt_after(options, commits)?;
                 if done {
+                    log_finished(path, &progress, &pace);
+                    set_migration_gauge(path, 1.0);
                     return Ok(stats_from(&progress));
                 }
             }
@@ -367,7 +448,6 @@ fn apply_copy(ctx: &MigrateCtx<'_>, batch: CopyBatch, progress: &mut Progress) -
     if !batch.rows.is_empty() && batch.next_offset <= progress.next_offset {
         eyre::bail!("submodule index migration cursor did not advance");
     }
-    let scanned_before = progress.scanned;
     let mut open = progress.open;
     let mut closed = Vec::new();
     let write = ctx.env.tx_mut()?;
@@ -414,9 +494,6 @@ fn apply_copy(ctx: &MigrateCtx<'_>, batch: CopyBatch, progress: &mut Progress) -
     touch_elapsed(progress, ctx.base_ms, ctx.started);
     write.put::<Metadata>(MetadataKey::DBSchemaVersion, encode_progress(progress))?;
     write.commit()?;
-    if progress.scanned / PROGRESS_LOG_ROWS != scanned_before / PROGRESS_LOG_ROWS {
-        log_progress(ctx.path, progress);
-    }
     if finished_copy {
         tracing::info!(
             path = %ctx.path.display(),
@@ -617,6 +694,243 @@ pub(super) fn migration_required(env: &DatabaseEnv) -> eyre::Result<bool> {
     })
 }
 
+/// 180 s, 16.16 fixed-point seconds. Zero disables the check.
+const WARMUP_TIMEOUT_16DOT16: std::os::raw::c_uint = 180 << 16;
+// Not `MDBX_warmup_oomsafe`: on Linux it "touches" pages by writev-ing one byte per page to /dev/null, which never
+// reads the buffer, so nothing is loaded (measured on testnet: 4.7 GB "warmed" in 11 ms, then cold random reads).
+// `force` alone reads one byte per page with readahead on for the range, a sequential load.
+const WARMUP_LOAD: ffi::MDBX_warmup_flags_t = ffi::MDBX_warmup_force;
+
+/// A module holds at most one reservation and never waits while holding one.
+struct MemlockBudget {
+    total: u64,
+    held: Mutex<u64>,
+    ready: Condvar,
+}
+
+struct MemlockPermit<'a> {
+    budget: &'a MemlockBudget,
+    bytes: u64,
+}
+
+impl MemlockBudget {
+    fn new(total: u64) -> Self {
+        Self {
+            total,
+            held: Mutex::new(0),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// `None` when `need` exceeds the budget. `on_wait(available)` runs once, under this lock.
+    fn reserve(&self, need: u64, on_wait: impl FnOnce(u64)) -> Option<MemlockPermit<'_>> {
+        if need == 0 || need > self.total {
+            return None;
+        }
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut free = self.total.saturating_sub(*held);
+        if free < need {
+            on_wait(free);
+            while free < need {
+                held = self
+                    .ready
+                    .wait(held)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                free = self.total.saturating_sub(*held);
+            }
+        }
+        *held += need;
+        Some(MemlockPermit {
+            budget: self,
+            bytes: need,
+        })
+    }
+}
+
+impl Drop for MemlockPermit<'_> {
+    fn drop(&mut self) {
+        let mut held = self
+            .budget
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = held.saturating_sub(self.bytes);
+        self.budget.ready.notify_all();
+    }
+}
+
+fn memlock_budget() -> &'static MemlockBudget {
+    static BUDGET: OnceLock<MemlockBudget> = OnceLock::new();
+    BUDGET.get_or_init(|| {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `limit` is a writable `rlimit` and outlives the call.
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) };
+        let soft = (rc == 0 && limit.rlim_cur != libc::RLIM_INFINITY).then_some(limit.rlim_cur);
+        MemlockBudget::new(memlock_total(soft, effective_memory()))
+    })
+}
+
+/// Headroom is max(soft / 8, 64 MiB). With no finite soft limit (`RLIM_INFINITY` or a failed read),
+/// soft is 1/8 of the process's effective memory: the Linux default, the budget the testnet
+/// rollout measured. Pinning every index at once could otherwise lock more than RAM or the cgroup
+/// allows. Unknown memory pins nothing.
+fn memlock_total(soft: Option<u64>, effective_memory: Option<u64>) -> u64 {
+    const MIN_HEADROOM: u64 = 64 << 20;
+    let Some(soft) = soft.or(effective_memory.map(|bytes| bytes / 8)) else {
+        return 0;
+    };
+    soft.saturating_sub((soft / 8).max(MIN_HEADROOM))
+}
+
+/// Physical memory, capped by every memory cgroup limit on this process's path.
+fn effective_memory() -> Option<u64> {
+    // SAFETY: `sysconf` reads a system constant and takes no pointers.
+    let (pages, page_size) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    let physical = u64::try_from(pages)
+        .ok()
+        .zip(u64::try_from(page_size).ok())
+        .map(|(pages, size)| pages.saturating_mul(size))
+        .filter(|&bytes| bytes > 0);
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|cgroups| {
+            cgroup_memory_limit(&cgroups, |path| std::fs::read_to_string(path).ok())
+        });
+    match (physical, cgroup) {
+        (Some(physical), Some(cgroup)) => Some(physical.min(cgroup)),
+        (physical, cgroup) => physical.or(cgroup),
+    }
+}
+
+/// The smallest memory limit from the process's cgroup up to the root: v2 `memory.max`, or the
+/// v1 memory controller's `memory.limit_in_bytes`. `max` and unreadable files set no limit.
+fn cgroup_memory_limit(
+    proc_self_cgroup: &str,
+    read: impl Fn(&Path) -> Option<String>,
+) -> Option<u64> {
+    let mut lowest: Option<u64> = None;
+    for line in proc_self_cgroup.lines() {
+        let mut fields = line.splitn(3, ':');
+        let (Some(_), Some(controllers), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (root, file) = if controllers.is_empty() {
+            (Path::new("/sys/fs/cgroup"), "memory.max")
+        } else if controllers.split(',').any(|name| name == "memory") {
+            (Path::new("/sys/fs/cgroup/memory"), "memory.limit_in_bytes")
+        } else {
+            continue;
+        };
+        let mut dir = Some(Path::new(path.trim_start_matches('/')));
+        while let Some(relative) = dir {
+            if let Some(bytes) = read(&root.join(relative).join(file))
+                .and_then(|text| text.trim().parse::<u64>().ok())
+            {
+                lowest = Some(lowest.map_or(bytes, |low| low.min(bytes)));
+            }
+            dir = relative.parent();
+        }
+    }
+    lowest
+}
+
+/// Releases the pin on drop. The lock call can pin pages and still return an
+/// error (a timeout after `mlock2`), so drop always unlocks, then returns any
+/// reservation still held.
+#[must_use = "dropping the pin releases the page lock"]
+struct WarmupPin<'a> {
+    env: &'a DatabaseEnv,
+    permit: Option<MemlockPermit<'static>>,
+}
+
+impl Drop for WarmupPin<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = env_warmup(self.env, ffi::MDBX_warmup_release) {
+            tracing::warn!(%error, "submodule index pre-read unlock failed");
+        }
+        drop(self.permit.take());
+    }
+}
+
+/// Load the migrating env so the copy's lookups stay resident.
+/// A lock error skips that load. `MDBX_warmup_touchlimit` is not set.
+fn pre_read_index_file<'a>(env: &'a DatabaseEnv, dir: &Path) -> WarmupPin<'a> {
+    let path = dir.join("mdbx.dat");
+    let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    let mut permit = memlock_budget().reserve(bytes, |available| {
+        tracing::info!(
+            path = %path.display(),
+            need = bytes,
+            available,
+            "submodule index waiting for memlock budget"
+        );
+    });
+    let started = Instant::now();
+    let mut locked = false;
+    let mut error: Option<String> = None;
+    if permit.is_some() {
+        match env_warmup(env, WARMUP_LOAD | ffi::MDBX_warmup_lock) {
+            Ok(()) => locked = true,
+            Err(err) => {
+                if !err.starts_with("warmup timed out") {
+                    permit = None;
+                }
+                error = Some(err);
+            }
+        }
+    }
+    if !locked && let Err(err) = env_warmup(env, WARMUP_LOAD) {
+        error = Some(err);
+    }
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    tracing::info!(
+        path = %path.display(),
+        bytes,
+        elapsed_ms,
+        locked,
+        error = error.as_deref().unwrap_or(""),
+        "submodule index pre-read"
+    );
+    WarmupPin { env, permit }
+}
+
+fn env_warmup(env: &DatabaseEnv, flags: ffi::MDBX_warmup_flags_t) -> Result<(), String> {
+    let tx = env.tx().map_err(|error| error.to_string())?;
+    let environment = tx.inner().env().clone();
+    drop(tx);
+    let rc = environment.with_raw_env_ptr(|env_ptr| unsafe {
+        // SAFETY: `environment` is an Arc clone of this open env and outlives
+        // the call. The read transaction is already dropped, so `txn` is null.
+        // libmdbx accepts a live env with a null txn. The pointer is not stored.
+        ffi::mdbx_env_warmup(env_ptr, std::ptr::null(), flags, WARMUP_TIMEOUT_16DOT16)
+    });
+    if rc == 0 {
+        return Ok(());
+    }
+    let detail = if rc == ffi::MDBX_RESULT_TRUE {
+        std::borrow::Cow::Borrowed("warmup timed out")
+    } else {
+        unsafe {
+            // SAFETY: `mdbx_strerror` returns a C string that stays valid for this copy.
+            std::ffi::CStr::from_ptr(ffi::mdbx_strerror(rc)).to_string_lossy()
+        }
+    };
+    Err(format!("{detail} (rc={rc})"))
+}
+
 fn log_open(path: &Path, stats: &MigrationStats) {
     let elapsed_ms = u64::try_from(stats.elapsed.as_millis()).unwrap_or(u64::MAX);
     tracing::info!(
@@ -632,27 +946,246 @@ fn log_open(path: &Path, stats: &MigrationStats) {
     );
 }
 
-fn log_started(path: &Path, progress: &Progress) {
+fn log_started(path: &Path, progress: &Progress, totals: &Totals) {
     let resumed = progress.scanned > 0 || progress.phase == Phase::Drop || progress.deleted > 0;
     tracing::info!(
         path = %path.display(),
         detected = "v1",
         resumed,
+        phase = phase_name(progress.phase),
         path_hash_rows = progress.scanned,
+        path_hash_total = totals.path_hash_rows,
+        legacy_data_paths_done = progress.deleted,
+        legacy_data_paths_total = totals.legacy_rows,
+        elapsed_ms = progress.elapsed_ms,
         "submodule index migration started"
     );
 }
 
-fn log_progress(path: &Path, progress: &Progress) {
-    tracing::info!(
-        path = %path.display(),
-        path_hash_rows = progress.scanned,
-        data_paths_copied = progress.copied,
-        intervals = progress.intervals,
-        legacy_data_paths_deleted = progress.deleted,
-        elapsed_ms = progress.elapsed_ms,
-        "submodule index migration progress"
-    );
+fn note_progress(
+    path: &Path,
+    progress: &Progress,
+    totals: &Totals,
+    pace: &mut Pace,
+    interval: Duration,
+) {
+    // Log the phase this batch belonged to. `apply_copy` flips to drop in
+    // the same batch that finishes the scan.
+    let worked = pace.phase;
+    log_if_due(path, progress, totals, pace, interval);
+    if progress.phase == worked {
+        return;
+    }
+    if worked == Phase::Copy && progress.phase == Phase::Drop {
+        pace.copy_elapsed_ms = Some(progress.elapsed_ms);
+    }
+    pace.phase = progress.phase;
+    pace.last_done = rows_done(progress.phase, progress);
+    pace.last_log = Instant::now();
+}
+
+fn log_if_due(
+    path: &Path,
+    progress: &Progress,
+    totals: &Totals,
+    pace: &mut Pace,
+    interval: Duration,
+) {
+    let since = pace.last_log.elapsed();
+    if since < interval {
+        return;
+    }
+    let phase = pace.phase;
+    let done = rows_done(phase, progress);
+    let total = rows_total(phase, totals);
+    let delta = done.saturating_sub(pace.last_done);
+    let (rate_rows, rate_elapsed, eta) = rate_and_eta(phase, done, total, progress, pace);
+    let overall = per_sec(rate_rows, rate_elapsed);
+    match eta {
+        Some(eta_ms) => tracing::info!(
+            path = %path.display(),
+            phase = phase_name(phase),
+            path_hash_rows = progress.scanned,
+            data_paths_copied = progress.copied,
+            intervals = progress.intervals,
+            legacy_data_paths_deleted = progress.deleted,
+            elapsed_ms = progress.elapsed_ms,
+            rows_done = done,
+            rows_total = total,
+            percent = percent_done(done, total),
+            rows_per_sec_interval = rows_per_sec(delta, since),
+            rows_per_sec_overall = overall,
+            eta_ms,
+            "submodule index migration progress"
+        ),
+        None => tracing::info!(
+            path = %path.display(),
+            phase = phase_name(phase),
+            path_hash_rows = progress.scanned,
+            data_paths_copied = progress.copied,
+            intervals = progress.intervals,
+            legacy_data_paths_deleted = progress.deleted,
+            elapsed_ms = progress.elapsed_ms,
+            rows_done = done,
+            rows_total = total,
+            percent = percent_done(done, total),
+            rows_per_sec_interval = rows_per_sec(delta, since),
+            rows_per_sec_overall = overall,
+            "submodule index migration progress"
+        ),
+    }
+    set_migration_gauge(path, migration_fraction(progress, totals));
+    pace.last_log = Instant::now();
+    pace.last_done = done;
+}
+
+fn log_finished(path: &Path, progress: &Progress, pace: &Pace) {
+    match known_copy_drop_ms(progress, pace) {
+        Some((copy_elapsed_ms, drop_elapsed_ms)) => tracing::info!(
+            path = %path.display(),
+            path_hash_rows = progress.scanned,
+            data_paths_copied = progress.copied,
+            intervals = progress.intervals,
+            legacy_data_paths_deleted = progress.deleted,
+            elapsed_ms = progress.elapsed_ms,
+            copy_rows = progress.scanned,
+            drop_rows = progress.deleted,
+            copy_elapsed_ms,
+            drop_elapsed_ms,
+            copy_elapsed_known = true,
+            "submodule index migration finished"
+        ),
+        None => tracing::info!(
+            path = %path.display(),
+            path_hash_rows = progress.scanned,
+            data_paths_copied = progress.copied,
+            intervals = progress.intervals,
+            legacy_data_paths_deleted = progress.deleted,
+            elapsed_ms = progress.elapsed_ms,
+            copy_rows = progress.scanned,
+            drop_rows = progress.deleted,
+            copy_elapsed_known = false,
+            "submodule index migration finished"
+        ),
+    }
+}
+
+/// Copy duration and drop duration when this process saw the copy finish.
+///
+/// `None` when this process resumed already in drop. The checkpoint has no
+/// copy/drop split, so the finished line omits both durations and the rate
+/// uses only the rows and time from this process.
+fn known_copy_drop_ms(progress: &Progress, pace: &Pace) -> Option<(u64, u64)> {
+    pace.copy_elapsed_ms
+        .map(|copy| (copy, progress.elapsed_ms.saturating_sub(copy)))
+}
+
+/// Rows and milliseconds that the overall rate and the ETA share.
+///
+/// Copy, and a drop this process started, keep the checkpoint clock: it is
+/// the same phase. A drop resumed after a restart uses only this process.
+/// `None` for the ETA means there is no sample yet. Printing 0 would look
+/// like the phase had finished.
+fn rate_and_eta(
+    phase: Phase,
+    done: u64,
+    total: u64,
+    progress: &Progress,
+    pace: &Pace,
+) -> (u64, u64, Option<u64>) {
+    match phase {
+        Phase::Copy => {
+            let elapsed = progress.elapsed_ms;
+            (done, elapsed, Some(eta_ms(done, total, elapsed)))
+        }
+        Phase::Drop => match known_copy_drop_ms(progress, pace) {
+            Some((_, elapsed)) => (done, elapsed, Some(eta_ms(done, total, elapsed))),
+            None => {
+                let rows = done.saturating_sub(pace.resume_done);
+                let elapsed = progress.elapsed_ms.saturating_sub(pace.resume_elapsed_ms);
+                let eta = if rows == 0 || elapsed == 0 {
+                    None
+                } else {
+                    Some(total.saturating_sub(done).saturating_mul(elapsed) / rows)
+                };
+                (rows, elapsed, eta)
+            }
+        },
+    }
+}
+
+fn rows_done(phase: Phase, progress: &Progress) -> u64 {
+    match phase {
+        Phase::Copy => progress.scanned,
+        Phase::Drop => progress.deleted,
+    }
+}
+
+fn rows_total(phase: Phase, totals: &Totals) -> u64 {
+    match phase {
+        Phase::Copy => totals.path_hash_rows,
+        Phase::Drop => totals.legacy_rows,
+    }
+}
+
+fn phase_name(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Copy => "copy",
+        Phase::Drop => "drop",
+    }
+}
+
+fn percent_done(done: u64, total: u64) -> u64 {
+    if total == 0 {
+        return 100;
+    }
+    let capped = done.min(total);
+    capped.saturating_mul(100) / total
+}
+
+fn per_sec(rows: u64, elapsed_ms: u64) -> u64 {
+    if rows == 0 || elapsed_ms == 0 {
+        return 0;
+    }
+    rows.saturating_mul(1000) / elapsed_ms
+}
+
+fn eta_ms(done: u64, total: u64, elapsed_ms: u64) -> u64 {
+    if done == 0 || elapsed_ms == 0 {
+        return 0;
+    }
+    total.saturating_sub(done).saturating_mul(elapsed_ms) / done
+}
+
+fn rows_per_sec(rows: u64, elapsed: Duration) -> u64 {
+    let nanos = elapsed.as_nanos();
+    if rows == 0 || nanos == 0 {
+        return 0;
+    }
+    let rate = u128::from(rows).saturating_mul(1_000_000_000) / nanos;
+    u64::try_from(rate).unwrap_or(u64::MAX)
+}
+
+fn migration_fraction(progress: &Progress, totals: &Totals) -> f64 {
+    let total = totals.path_hash_rows.saturating_add(totals.legacy_rows);
+    if total == 0 {
+        return 1.0;
+    }
+    let done = progress.scanned.saturating_add(progress.deleted);
+    (done as f64) / (total as f64)
+}
+
+fn set_migration_gauge(path: &Path, fraction: f64) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        metrics::describe_gauge!(
+            MIGRATION_PROGRESS_METRIC,
+            "Fraction of one submodule index migrated from schema v1 to v2, from 0 to 1"
+        );
+    });
+    metrics::gauge!(MIGRATION_PROGRESS_METRIC, "module" => path.display().to_string())
+        .set(fraction.clamp(0.0, 1.0));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -907,6 +1440,7 @@ mod tests {
             fail_after_commits,
             batch_rows,
             batch_value_bytes: 8 * 1024 * 1024,
+            progress_log_interval: super::PROGRESS_LOG_INTERVAL,
         }
     }
 
@@ -2021,6 +2555,800 @@ mod tests {
             }
         }
         Ok(())
+    }
+    fn schema_bytes(path: &Path) -> eyre::Result<Vec<u8>> {
+        let env = open_or_create_db(path, SubmoduleTables::ALL, testing_args()?)?;
+        let tx = env.tx()?;
+        Ok(tx
+            .get::<Metadata>(MetadataKey::DBSchemaVersion)?
+            .unwrap_or_default())
+    }
+
+    fn assert_historical_marker(bytes: &[u8], phase: &str) {
+        let text = std::str::from_utf8(bytes).expect("marker utf8");
+        assert!(
+            text.starts_with(super::PROGRESS_PREFIX),
+            "prefix changed: {text:?}"
+        );
+        assert!(
+            text.ends_with('\n'),
+            "marker lost its trailing newline: {text:?}"
+        );
+        let rest = text
+            .strip_prefix(super::PROGRESS_PREFIX)
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap();
+        let mut parts = rest.split(' ');
+        assert_eq!(parts.next(), Some(phase), "{rest}");
+        let fields: Vec<_> = parts.collect();
+        assert_eq!(fields.len(), 6, "marker gained or lost a field: {rest}");
+        assert!(bytes.len() <= super::MAX_MARKER_BYTES, "{}", bytes.len());
+    }
+
+    /// Kill mid-drop, then resume. Totals come from the stat plus the rows
+    /// already deleted. The ETA uses the rows and time of this process, not
+    /// the checkpoint clock (that clock includes the copy).
+    #[test]
+    fn drop_resume_eta_uses_this_process_rate() -> eyre::Result<()> {
+        const ROWS: u32 = 4;
+        let dir = temp("sm-v1-drop-resume");
+        write_contiguous(dir.path(), ROWS)?;
+        super::DURING_MIGRATION.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+            }));
+        });
+        let err = open_submodule_index(
+            dir.path(),
+            testing_args()?,
+            SubmoduleMigrationOptions {
+                progress_log_interval: std::time::Duration::from_secs(3600),
+                ..opts(1, Some(5))
+            },
+        )
+        .expect_err("stop after the first legacy delete");
+        assert!(err.to_string().contains("after 5"), "{err}");
+        let bytes = schema_bytes(dir.path())?;
+        assert_historical_marker(&bytes, "drop");
+        let stored = decode_progress(&bytes).expect("drop marker");
+        assert_eq!(stored.phase, Phase::Drop);
+        assert_eq!(stored.deleted, 1, "first drop commit deletes one key");
+        assert_eq!(stored.scanned, u64::from(ROWS));
+        assert!(
+            stored.elapsed_ms >= 1000,
+            "checkpoint {}",
+            stored.elapsed_ms
+        );
+
+        let capture = LogCapture::default();
+        super::DURING_MIGRATION.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }));
+        });
+        let err = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(
+                dir.path(),
+                testing_args()?,
+                SubmoduleMigrationOptions {
+                    progress_log_interval: std::time::Duration::ZERO,
+                    ..opts(1, Some(1))
+                },
+            )
+        })
+        .expect_err("one more drop commit");
+        assert!(err.to_string().contains("after 1"), "{err}");
+        let events = capture.events.lock().expect("events");
+        let start = find_message(&events, "submodule index migration started");
+        assert!(bool_field(start, "resumed"));
+        assert_eq!(str_field(start, "phase"), "drop");
+        assert_eq!(u64_field(start, "path_hash_rows"), u64::from(ROWS));
+        assert_eq!(u64_field(start, "path_hash_total"), u64::from(ROWS));
+        assert_eq!(u64_field(start, "legacy_data_paths_done"), 1);
+        assert_eq!(u64_field(start, "legacy_data_paths_total"), u64::from(ROWS));
+        let progress = find_message(&events, "submodule index migration progress");
+        assert_eq!(str_field(progress, "phase"), "drop");
+        assert_eq!(u64_field(progress, "rows_done"), 2);
+        assert_eq!(u64_field(progress, "rows_total"), u64::from(ROWS));
+        assert_eq!(u64_field(progress, "percent"), 50);
+        let start_elapsed = u64_field(start, "elapsed_ms");
+        let elapsed = u64_field(progress, "elapsed_ms");
+        let process_elapsed = elapsed - start_elapsed;
+        let process_rows =
+            u64_field(progress, "rows_done") - u64_field(start, "legacy_data_paths_done");
+        assert!(
+            process_elapsed >= 30,
+            "this process slept 30 ms, elapsed {process_elapsed}"
+        );
+        assert_eq!(process_rows, 1);
+        let remaining = u64_field(progress, "rows_total") - u64_field(progress, "rows_done");
+        assert_eq!(
+            u64_field(progress, "eta_ms"),
+            remaining * process_elapsed / process_rows,
+            "checkpoint elapsed is {elapsed} ms"
+        );
+        assert_eq!(
+            u64_field(progress, "rows_per_sec_overall"),
+            process_rows * 1000 / process_elapsed
+        );
+        drop(events);
+
+        let capture = LogCapture::default();
+        let (_env, stats) = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(
+                dir.path(),
+                testing_args()?,
+                SubmoduleMigrationOptions {
+                    progress_log_interval: std::time::Duration::from_secs(3600),
+                    ..opts(1, None)
+                },
+            )
+        })?;
+        assert!(stats.migrated);
+        let events = capture.events.lock().expect("events");
+        let finished = find_message(&events, "submodule index migration finished");
+        assert!(!bool_field(finished, "copy_elapsed_known"));
+        assert!(
+            !has_field(finished, "copy_elapsed_ms"),
+            "unknown copy duration must be omitted: {:?}",
+            finished.fields
+        );
+        assert!(
+            !has_field(finished, "drop_elapsed_ms"),
+            "unknown drop duration must be omitted: {:?}",
+            finished.fields
+        );
+        assert_eq!(u64_field(finished, "copy_rows"), u64::from(ROWS));
+        assert_eq!(u64_field(finished, "drop_rows"), u64::from(ROWS));
+        assert!(u64_field(finished, "elapsed_ms") >= stored.elapsed_ms);
+        Ok(())
+    }
+
+    /// A resumed drop has no copy split. The rate uses this process's rows
+    /// and time. No new rows means no ETA, not an ETA of 0.
+    #[test]
+    fn drop_resume_rate_uses_this_process_and_omits_unknown_eta() {
+        const TOTAL: u64 = 1_303_232;
+        let totals = super::Totals {
+            path_hash_rows: TOTAL,
+            legacy_rows: TOTAL,
+        };
+        let capture = LogCapture::default();
+        tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            // No new rows and no new time. An ETA of 0 would look finished.
+            let mut pace = drop_pace(100, 5_000_000);
+            super::log_if_due(
+                Path::new("no-rows"),
+                &drop_progress(100, 5_000_000, totals.path_hash_rows),
+                &totals,
+                &mut pace,
+                std::time::Duration::ZERO,
+            );
+            let flip_totals = super::Totals {
+                path_hash_rows: 40,
+                legacy_rows: 40,
+            };
+            // A non-zero resume count must stay out of the in-process drop rate.
+            let mut pace = drop_pace(1_000_000, 60_000);
+            pace.copy_elapsed_ms = Some(60_000);
+            super::log_if_due(
+                Path::new("saw-flip"),
+                &drop_progress(5, 75_000, 40),
+                &flip_totals,
+                &mut pace,
+                std::time::Duration::ZERO,
+            );
+        });
+        let events = capture.events.lock().expect("events");
+        let none = find_path(&events, "no-rows");
+        assert!(
+            !has_field(none, "eta_ms"),
+            "eta must be omitted, fields {:?}",
+            none.fields
+        );
+        assert_eq!(u64_field(none, "rows_per_sec_overall"), 0);
+
+        let flip = find_path(&events, "saw-flip");
+        assert_eq!(u64_field(flip, "eta_ms"), 105_000);
+        assert_eq!(u64_field(flip, "rows_done"), 5);
+    }
+
+    fn drop_progress(deleted: u64, elapsed_ms: u64, scanned: u64) -> super::Progress {
+        super::Progress {
+            phase: super::Phase::Drop,
+            next_offset: scanned,
+            open: None,
+            drop_next: None,
+            scanned,
+            copied: scanned,
+            intervals: 1,
+            deleted,
+            elapsed_ms,
+        }
+    }
+
+    fn drop_pace(resume_done: u64, resume_elapsed_ms: u64) -> super::Pace {
+        super::Pace {
+            phase: super::Phase::Drop,
+            last_log: std::time::Instant::now(),
+            last_done: resume_done,
+            copy_elapsed_ms: None,
+            resume_done,
+            resume_elapsed_ms,
+        }
+    }
+
+    /// A v1 open warms the index before the copy starts and logs `locked`.
+    /// A later v2 open of the same directory does not. `bytes` is the data
+    /// file length at the hook, which runs before any migration write.
+    #[test]
+    fn v1_migration_pre_reads_the_index_and_v2_open_does_not() -> eyre::Result<()> {
+        const ROWS: u32 = 4;
+        let dir = temp("sm-v1-preread");
+        let args = testing_args()?;
+        write_contiguous(dir.path(), ROWS)?;
+        let size = std::sync::Arc::new(std::sync::Mutex::new(0_u64));
+        let recorded = size.clone();
+        super::DURING_MIGRATION.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(move |path| {
+                let len = std::fs::metadata(path.join("mdbx.dat"))
+                    .expect("mdbx.dat")
+                    .len();
+                *recorded.lock().expect("size") = len;
+            }));
+        });
+
+        let capture = LogCapture::default();
+        let (env, stats) = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(
+                dir.path(),
+                args.clone(),
+                SubmoduleMigrationOptions::default(),
+            )
+        })?;
+        assert!(stats.migrated);
+        drop(env);
+        let events = capture.events.lock().expect("events");
+        let pre = find_message(&events, "submodule index pre-read");
+        let file_bytes = *size.lock().expect("size");
+        assert_eq!(u64_field(pre, "bytes"), file_bytes);
+        assert!(
+            str_field(pre, "path").ends_with("mdbx.dat"),
+            "{}",
+            str_field(pre, "path")
+        );
+        let pre_at = events
+            .iter()
+            .position(|event| event.message == "submodule index pre-read")
+            .expect("pre-read");
+        let start_at = events
+            .iter()
+            .position(|event| event.message == "submodule index migration started")
+            .expect("started");
+        assert!(
+            pre_at < start_at,
+            "pre-read must log before migration starts"
+        );
+        drop(events);
+
+        let capture = LogCapture::default();
+        let (_env, stats) = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(dir.path(), args, SubmoduleMigrationOptions::default())
+        })?;
+        assert_eq!(stats.detected, DetectedSubmoduleSchema::V2);
+        assert!(!stats.migrated);
+        let events = capture.events.lock().expect("events");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.message != "submodule index pre-read"),
+            "{events:?}"
+        );
+        Ok(())
+    }
+
+    /// Break: `reserve` grants overlapping permits, or drop does not return the
+    /// bytes. The second call must block until the first permit drops.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn second_reservation_waits_until_the_first_drops() {
+        let budget = std::sync::Arc::new(super::MemlockBudget::new(100));
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let budget_first = std::sync::Arc::clone(&budget);
+        let order_first = std::sync::Arc::clone(&order);
+        let first = tokio::task::spawn_blocking(move || {
+            let permit = budget_first
+                .reserve(60, |_| {})
+                .expect("60 bytes fit in a budget of 100");
+            order_first.lock().expect("order").push(1);
+            held_tx.send(()).expect("test holds the channel");
+            release_rx.recv().expect("test releases the first permit");
+            drop(permit);
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("first reservation");
+
+        let budget_second = std::sync::Arc::clone(&budget);
+        let order_second = std::sync::Arc::clone(&order);
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let second = tokio::task::spawn_blocking(move || {
+            let permit = budget_second
+                .reserve(60, |available| {
+                    waiting_tx.send(available).expect("test listens");
+                })
+                .expect("60 bytes fit once the first permit drops");
+            order_second.lock().expect("order").push(2);
+            drop(permit);
+        });
+
+        let available = waiting_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("second reservation waits");
+        assert_eq!(
+            available, 40,
+            "available is the budget minus the first hold"
+        );
+        assert_eq!(*order.lock().expect("order"), [1]);
+        release_tx.send(()).expect("first task is waiting");
+        second.await.expect("second task");
+        first.await.expect("first task");
+        assert_eq!(*order.lock().expect("order"), [1, 2]);
+    }
+
+    /// Break: a request larger than the whole budget waits, or it consumes
+    /// budget. It returns unpinned while another reservation is still held.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reservation_above_the_total_returns_unpinned_immediately() {
+        let budget = std::sync::Arc::new(super::MemlockBudget::new(100));
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let budget_holder = std::sync::Arc::clone(&budget);
+        let holder = tokio::task::spawn_blocking(move || {
+            let permit = budget_holder
+                .reserve(40, |_| {})
+                .expect("40 bytes fit in a budget of 100");
+            held_tx.send(()).expect("test holds the channel");
+            release_rx.recv().expect("test releases the holder");
+            drop(permit);
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("holder reserved");
+
+        let budget_over = std::sync::Arc::clone(&budget);
+        let over = tokio::task::spawn_blocking(move || {
+            budget_over
+                .reserve(101, |_| panic!("a request above the total must not wait"))
+                .is_none()
+        });
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), over)
+            .await
+            .expect("over-budget reserve must not wait for the held permit")
+            .expect("task");
+        assert!(outcome, "a request above the total is unpinned");
+
+        let budget_rest = std::sync::Arc::clone(&budget);
+        let (got_tx, got_rx) = std::sync::mpsc::channel();
+        let rest = tokio::task::spawn_blocking(move || {
+            let permit = budget_rest
+                .reserve(60, |_| panic!("60 bytes fit beside the held 40"))
+                .expect("60 bytes fit in the remaining budget");
+            got_tx.send(()).expect("test holds the channel");
+            drop(permit);
+        });
+        got_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("remaining budget is still free");
+        rest.await.expect("rest task");
+        release_tx.send(()).expect("holder is waiting");
+        holder.await.expect("holder task");
+    }
+
+    /// Break: an unlimited or unreadable memlock soft limit leaves the budget unbounded, so every
+    /// module pins its whole index at once. A finite soft limit must keep its old budget.
+    #[test]
+    fn memlock_total_caps_an_unlimited_soft_limit_by_effective_memory() {
+        const GIB: u64 = 1 << 30;
+        let finite = super::memlock_total(Some(4 * GIB), Some(512 * GIB));
+        assert_eq!(finite, 4 * GIB - GIB / 2, "finite soft limit is unchanged");
+        assert_eq!(
+            super::memlock_total(None, Some(32 * GIB)),
+            finite,
+            "no finite soft limit budgets 1/8 of effective memory"
+        );
+        assert_eq!(
+            super::memlock_total(None, None),
+            0,
+            "unknown memory pins nothing"
+        );
+        assert_eq!(
+            super::memlock_total(Some(32 << 20), None),
+            0,
+            "a soft limit below the 64 MiB headroom pins nothing"
+        );
+    }
+
+    /// Break: only the leaf cgroup is read, `max` parses as a limit, or a v1 memory controller
+    /// line is ignored. The smallest limit on the path wins.
+    #[test]
+    fn cgroup_memory_limit_takes_the_smallest_limit_on_the_path() {
+        let files: std::collections::HashMap<&str, &str> = [
+            (
+                "/sys/fs/cgroup/system.slice/pm2.service/memory.max",
+                "max\n",
+            ),
+            ("/sys/fs/cgroup/system.slice/memory.max", "8589934592\n"),
+            (
+                "/sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes",
+                "4294967296\n",
+            ),
+            (
+                "/sys/fs/cgroup/memory/docker/memory.limit_in_bytes",
+                "9223372036854771712\n",
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let read = |path: &Path| files.get(path.to_str()?).map(|text| (*text).to_owned());
+
+        let v2 = "0::/system.slice/pm2.service\n";
+        assert_eq!(super::cgroup_memory_limit(v2, read), Some(8 << 30));
+        let v1 = "12:cpu,cpuacct:/docker/abc\n4:memory:/docker/abc\n";
+        assert_eq!(super::cgroup_memory_limit(v1, read), Some(4 << 30));
+        assert_eq!(
+            super::cgroup_memory_limit("0::/\n", read),
+            None,
+            "root has no memory.max"
+        );
+        assert_eq!(super::cgroup_memory_limit("3:cpu:/x\n", read), None);
+    }
+
+    /// A 4-row copy is far below the old 100_000-row log. The start line still
+    /// names the total, and a zero interval emits progress without a long sleep.
+    #[test]
+    fn migration_start_logs_the_total_and_progress_follows_the_interval() -> eyre::Result<()> {
+        const ROWS: u32 = 4;
+        let dir = temp("sm-v1-progress");
+        let args = testing_args()?;
+        write_contiguous(dir.path(), ROWS)?;
+        super::DURING_MIGRATION.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            }));
+        });
+
+        let capture = LogCapture::default();
+        let err = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(
+                dir.path(),
+                args.clone(),
+                SubmoduleMigrationOptions {
+                    progress_log_interval: std::time::Duration::ZERO,
+                    ..opts(1, Some(1))
+                },
+            )
+        })
+        .expect_err("one commit then stop");
+        assert!(err.to_string().contains("after 1"), "{err}");
+
+        let events = capture.events.lock().expect("events");
+        let start = find_message(&events, "submodule index migration started");
+        assert_eq!(u64_field(start, "path_hash_total"), u64::from(ROWS));
+        assert_eq!(u64_field(start, "path_hash_rows"), 0);
+        assert!(!bool_field(start, "resumed"));
+        let progress = find_message(&events, "submodule index migration progress");
+        assert_eq!(str_field(progress, "phase"), "copy");
+        let done = u64_field(progress, "rows_done");
+        let total = u64_field(progress, "rows_total");
+        assert_eq!(total, u64::from(ROWS));
+        assert_eq!(done, 1, "the first batch is one row");
+        assert_eq!(u64_field(progress, "percent"), done * 100 / total);
+        let elapsed = u64_field(progress, "elapsed_ms");
+        assert!(
+            elapsed >= 40,
+            "the injected wait is part of monotonic elapsed, got {elapsed}"
+        );
+        assert_eq!(
+            u64_field(progress, "eta_ms"),
+            (total - done) * elapsed / done
+        );
+        assert_eq!(u64_field(progress, "data_paths_copied"), 1);
+        assert_eq!(
+            u64_field(progress, "rows_per_sec_overall"),
+            done.saturating_mul(1000) / elapsed
+        );
+        drop(events);
+
+        let capture = LogCapture::default();
+        let (_env, stats) = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(
+                dir.path(),
+                args,
+                SubmoduleMigrationOptions {
+                    progress_log_interval: std::time::Duration::ZERO,
+                    ..opts(1, None)
+                },
+            )
+        })?;
+        assert!(stats.migrated);
+        assert_eq!(stats.path_hash_rows, u64::from(ROWS));
+        let events = capture.events.lock().expect("events");
+        let start = find_message(&events, "submodule index migration started");
+        assert!(bool_field(start, "resumed"));
+        assert_eq!(u64_field(start, "path_hash_rows"), 1);
+        assert_eq!(u64_field(start, "path_hash_total"), u64::from(ROWS));
+        let drop_line = events.iter().find(|event| {
+            event.message == "submodule index migration progress"
+                && str_field(event, "phase") == "drop"
+        });
+        assert!(drop_line.is_some(), "drop phase logs on the same interval");
+        let finished = find_message(&events, "submodule index migration finished");
+        assert_eq!(u64_field(finished, "copy_rows"), u64::from(ROWS));
+        assert_eq!(u64_field(finished, "drop_rows"), u64::from(ROWS));
+        assert!(bool_field(finished, "copy_elapsed_known"));
+        let copy_ms = u64_field(finished, "copy_elapsed_ms");
+        let drop_ms = u64_field(finished, "drop_elapsed_ms");
+        let elapsed_ms = u64_field(finished, "elapsed_ms");
+        assert_eq!(copy_ms.saturating_add(drop_ms), elapsed_ms);
+        assert_eq!(u64_field(finished, "data_paths_copied"), u64::from(ROWS));
+        assert_eq!(u64_field(finished, "intervals"), 1);
+        Ok(())
+    }
+
+    /// Many batches inside one long interval. Start and finished still log.
+    /// Progress stays silent, so deleting the time gate fails this test.
+    #[test]
+    fn long_interval_emits_start_and_finished_and_no_progress() -> eyre::Result<()> {
+        const ROWS: u32 = 8;
+        assert_eq!(
+            SubmoduleMigrationOptions::default().progress_log_interval,
+            std::time::Duration::from_secs(15)
+        );
+        let dir = temp("sm-v1-long-interval");
+        write_contiguous(dir.path(), ROWS)?;
+        let capture = LogCapture::default();
+        let (_env, stats) = tracing::subscriber::with_default(capture.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
+            open_submodule_index(
+                dir.path(),
+                testing_args()?,
+                SubmoduleMigrationOptions {
+                    progress_log_interval: std::time::Duration::from_secs(3600),
+                    ..opts(1, None)
+                },
+            )
+        })?;
+        assert!(stats.migrated);
+        let events = capture.events.lock().expect("events");
+        find_message(&events, "submodule index migration started");
+        find_message(&events, "submodule index migration finished");
+        let progress = events
+            .iter()
+            .filter(|event| event.message == "submodule index migration progress")
+            .count();
+        assert_eq!(progress, 0, "{events:?}");
+        Ok(())
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture {
+        events: std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>,
+    }
+
+    #[derive(Debug)]
+    struct CapturedEvent {
+        message: String,
+        fields: Vec<(String, String)>,
+    }
+
+    impl tracing::Subscriber for LogCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            let message = visitor
+                .fields
+                .iter()
+                .find(|(key, _)| key == "message")
+                .map(|(_, value)| value.trim_matches('"').to_owned())
+                .unwrap_or_else(|| event.metadata().name().to_owned());
+            self.events.lock().expect("events").push(CapturedEvent {
+                message,
+                fields: visitor.fields,
+            });
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct FieldVisitor {
+        fields: Vec<(String, String)>,
+    }
+
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .push((field.name().to_owned(), format!("{value:?}")));
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .push((field.name().to_owned(), value.to_string()));
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.fields
+                .push((field.name().to_owned(), value.to_string()));
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.fields
+                .push((field.name().to_owned(), value.to_string()));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .push((field.name().to_owned(), value.to_owned()));
+        }
+    }
+
+    fn find_path<'a>(events: &'a [CapturedEvent], path: &str) -> &'a CapturedEvent {
+        events
+            .iter()
+            .find(|event| {
+                event
+                    .fields
+                    .iter()
+                    .any(|(key, value)| key == "path" && value == path)
+            })
+            .unwrap_or_else(|| panic!("missing path {path}; saw {events:?}"))
+    }
+
+    fn find_message<'a>(events: &'a [CapturedEvent], message: &str) -> &'a CapturedEvent {
+        events
+            .iter()
+            .find(|event| event.message == message)
+            .unwrap_or_else(|| panic!("missing {message}; saw {events:?}"))
+    }
+
+    fn field<'a>(event: &'a CapturedEvent, name: &str) -> &'a str {
+        event
+            .fields
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_else(|| panic!("missing {name} on {}: {:?}", event.message, event.fields))
+    }
+
+    fn has_field(event: &CapturedEvent, name: &str) -> bool {
+        event.fields.iter().any(|(key, _)| key == name)
+    }
+
+    fn u64_field(event: &CapturedEvent, name: &str) -> u64 {
+        field(event, name)
+            .parse()
+            .unwrap_or_else(|_| panic!("field {name} = {}", field(event, name)))
+    }
+
+    fn bool_field(event: &CapturedEvent, name: &str) -> bool {
+        match field(event, name) {
+            "true" => true,
+            "false" => false,
+            other => panic!("field {name} = {other}"),
+        }
+    }
+
+    fn str_field<'a>(event: &'a CapturedEvent, name: &str) -> &'a str {
+        field(event, name)
+    }
+
+    /// Warmup must fault the index in. `MDBX_warmup_oomsafe` succeeds without reading.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn warmup_loads_the_index_into_the_page_cache() -> eyre::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let dir = temp("sm-warmup");
+        let path = dir.path();
+        // 64 KiB growth keeps the unread tail past `first_unallocated` under 10%.
+        let args = testing_args()?.with_growth_step(Some(64 * 1024));
+        {
+            let db = open_or_create_db(path, master::MasterV1Tables::ALL, args.clone())?;
+            let tx = db.tx_mut()?;
+            let blob = vec![0xab; 4096];
+            for i in 0..512_u32 {
+                let mut key = [0_u8; 32];
+                key[..4].copy_from_slice(&i.to_le_bytes());
+                tx.put::<master::ChunkDataPathByPathHash>(H256::from(key), blob.clone())?;
+            }
+            tx.commit()?;
+        }
+        let file = path.join("mdbx.dat");
+        let fd = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&file)?;
+        fd.sync_data()?;
+        let rc = unsafe {
+            // SAFETY: `fd` is open. Offset 0 and length 0 advise the whole file.
+            libc::posix_fadvise(fd.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
+        };
+        eyre::ensure!(rc == 0, "posix_fadvise DONTNEED failed: {rc}");
+        drop(fd);
+        let (cold, n) = resident_pages(&file)?;
+        if cold * 2 > n {
+            eprintln!("note: DONTNEED left {cold}/{n} pages resident; skipping");
+            return Ok(());
+        }
+        let db = open_or_create_db(path, master::MasterV1Tables::ALL, args)?;
+        let _pin = super::pre_read_index_file(&db, path);
+        let (hot, pages) = resident_pages(&file)?;
+        // Reads stop at `first_unallocated`. 90% leaves that growth-step tail unread.
+        assert!(
+            hot * 10 >= pages * 9,
+            "residency {hot}/{pages} after warmup (cold {cold}/{n})"
+        );
+        Ok(())
+    }
+
+    /// Resident page count and total pages, from `mincore` on a read-only mmap.
+    #[cfg(target_os = "linux")]
+    fn resident_pages(path: &Path) -> eyre::Result<(usize, usize)> {
+        use std::os::fd::AsRawFd as _;
+        let file = std::fs::File::open(path)?;
+        let len = usize::try_from(file.metadata()?.len())?;
+        let page = usize::try_from(unsafe {
+            // SAFETY: `sysconf` reads a process constant and takes no pointer.
+            libc::sysconf(libc::_SC_PAGESIZE)
+        })?;
+        let map = unsafe {
+            // SAFETY: read-only shared map of this file for `len` bytes. Unmapped below.
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        eyre::ensure!(map != libc::MAP_FAILED && page > 0, "mmap");
+        let pages = len.div_ceil(page);
+        let mut vec = vec![0_u8; pages];
+        let rc = unsafe {
+            // SAFETY: `map` spans `len` and `vec` has one byte per page.
+            libc::mincore(map, len, vec.as_mut_ptr())
+        };
+        let unmap_rc = unsafe {
+            // SAFETY: `map` is the mapping above and is not used again.
+            libc::munmap(map, len)
+        };
+        eyre::ensure!(rc == 0 && unmap_rc == 0, "mincore {rc} munmap {unmap_rc}");
+        Ok((vec.iter().filter(|byte| (**byte & 1) == 1).count(), pages))
     }
 
     /// Copy `IRYS_SUBMODULE_V1_DB` and migrate the copy. The source path is

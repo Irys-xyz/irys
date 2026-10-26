@@ -5100,6 +5100,7 @@ dependencies = [
  "irys-reth-node-bridge",
  "irys-reward-curve",
  "irys-storage",
+ "irys-testing-utils",
  "irys-types",
  "irys-utils",
  "irys-vdf",
@@ -5287,6 +5288,7 @@ dependencies = [
  "tempfile",
  "test-fuzz",
  "test-log",
+ "tokio",
  "tracing",
 ]
 
