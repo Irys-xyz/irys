@@ -196,7 +196,9 @@ impl ChunkMigrationServiceInner {
             })?;
 
         // For each data ledger, retrieve the tx headers and build a map
-        let data_ledger_txids = block_header.get_data_ledger_tx_ids();
+        let data_ledger_txids = block_header.get_data_ledger_tx_ids().map_err(|e| {
+            MigrationError::Other(format!("invalid data ledgers in block {block_hash}: {e}"))
+        })?;
 
         let mut block_tx_map: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
         for (ledger, tx_ids) in data_ledger_txids {

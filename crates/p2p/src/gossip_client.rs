@@ -479,7 +479,9 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
         let commitment_tx_ids = header.commitment_tx_ids();
-        let data_tx_ids_map = header.get_data_ledger_tx_ids();
+        let Ok(data_tx_ids_map) = header.get_data_ledger_tx_ids() else {
+            return Ok(GossipResponse::Rejected(RejectionReason::InvalidData));
+        };
         let data_tx_ids: Vec<H256> = data_tx_ids_map.values().flatten().copied().collect();
 
         let mut commitment_transactions = Vec::new();

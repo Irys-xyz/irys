@@ -1310,7 +1310,7 @@ impl InnerCacheTask {
                 drop(tree);
                 let mut set = HashSet::new();
                 for entry in &canonical {
-                    for tx_ids in entry.header().get_data_ledger_tx_ids().into_values() {
+                    for tx_ids in entry.header().get_data_ledger_tx_ids()?.into_values() {
                         set.extend(tx_ids);
                     }
                 }

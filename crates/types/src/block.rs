@@ -573,15 +573,27 @@ impl IrysBlockHeaderV1 {
 
     /// Retrieves a map of the data transaction ids by ledger type, uses a Vec
     /// to ensure the txids are ordered identically to their order in the block.
-    pub fn get_data_ledger_tx_ids(&self) -> HashMap<DataLedger, Vec<H256>> {
+    /// Errors on an unknown ledger id or a ledger listed more than once.
+    pub fn get_data_ledger_tx_ids(&self) -> eyre::Result<HashMap<DataLedger, Vec<H256>>> {
         let mut data_txids: HashMap<DataLedger, Vec<H256>> = HashMap::new();
         for data_ledger in self.data_ledgers.iter() {
-            data_txids.insert(
-                DataLedger::from_u32(data_ledger.ledger_id).unwrap(),
-                data_ledger.tx_ids.0.clone().into_iter().collect(),
+            let ledger = DataLedger::try_from(data_ledger.ledger_id).map_err(|_| {
+                eyre::eyre!(
+                    "Malformed block {:?}: unknown data ledger id {}",
+                    self.block_hash,
+                    data_ledger.ledger_id
+                )
+            })?;
+            eyre::ensure!(
+                data_txids
+                    .insert(ledger, data_ledger.tx_ids.0.clone())
+                    .is_none(),
+                "Malformed block {:?}: duplicate {:?} data ledger",
+                self.block_hash,
+                ledger,
             );
         }
-        data_txids
+        Ok(data_txids)
     }
 
     /// Returns the transaction IDs for a specific data ledger in their original order
@@ -2209,6 +2221,32 @@ mod tests {
             err.to_string().contains("duplicate Publish data ledger"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_get_data_ledger_tx_ids_rejects_unknown_and_duplicate_ledger_ids() {
+        let mut header = IrysBlockHeader::default();
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers = vec![DataTransactionLedger {
+            ledger_id: DataLedger::Publish.into(),
+            tx_ids: H256List(vec![H256::random()]),
+            ..Default::default()
+        }];
+        let ids = header.get_data_ledger_tx_ids().expect("valid ledgers");
+        assert_eq!(ids.len(), 1);
+
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers.push(DataTransactionLedger {
+            ledger_id: 99,
+            ..Default::default()
+        });
+        let err = header.get_data_ledger_tx_ids().expect_err("unknown id");
+        assert!(err.to_string().contains("unknown data ledger id 99"));
+
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers[1].ledger_id = DataLedger::Publish.into();
+        let err = header.get_data_ledger_tx_ids().expect_err("duplicate id");
+        assert!(err.to_string().contains("duplicate Publish data ledger"));
     }
 
     #[test]

@@ -39,6 +39,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     assert!(
         block1
             .get_data_ledger_tx_ids()
+            .unwrap()
             .get(&DataLedger::Submit)
             .unwrap()
             .contains(&txid)
@@ -123,6 +124,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     assert!(
         !block2
             .get_data_ledger_tx_ids()
+            .unwrap()
             .get(&DataLedger::Submit)
             .unwrap()
             .contains(&txid)

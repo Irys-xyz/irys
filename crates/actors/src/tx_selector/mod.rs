@@ -1412,7 +1412,7 @@ async fn get_pending_submit_ledger_txs(
     // Walk backwards through the canonical chain, removing Submit transactions
     // that have already been included in recent blocks within the anchor expiry window
     while block.height >= min_anchor_height {
-        let block_data_tx_ids = block.get_data_ledger_tx_ids();
+        let block_data_tx_ids = block.get_data_ledger_tx_ids()?;
 
         // Remove term ledger transactions that already exist in this historical block
         // This prevents double-inclusion and ensures we only return truly pending transactions

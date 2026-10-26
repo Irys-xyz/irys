@@ -242,6 +242,7 @@ async fn heavy_cascade_midchain_activation_seeds_term_ledger_slots() -> eyre::Re
     assert!(
         inclusion_block
             .get_data_ledger_tx_ids()
+            .unwrap()
             .get(&DataLedger::OneYear)
             .is_some_and(|ids| ids.contains(&tx.header.id)),
         "the term tx must be included in the block right after the activation epoch block"
