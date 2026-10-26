@@ -222,7 +222,7 @@ depth(c, C):                              // chunk-level siblings in the proof o
 | --- | --- | --- |
 | Chunk (`data_path`) | chunk-level siblings, then `size_witness(G, n)` | `depth(c, C) + 1`; the witness alone when `C = 1` |
 | Segment | `h` in-chunk siblings (level 0 first), then the chunk proof | `h + depth(c, C) + 1` |
-| Multi-segment (`m` segments of one chunk) | `m` independent segment proofs that share one chunk proof. Each segment carries its `h` in-chunk siblings. The shared chunk proof ends with `size_witness(G, n)`, and for `C = 1` it is that witness alone. A segment's full proof is its in-chunk siblings concatenated with the chunk proof. That concatenation is the full proof in every case, including one chunk | `m × h + depth(c, C) + 1` |
+| Multi-segment (`m` segments of one chunk) | `m` independent segment proofs that share one chunk proof. Each segment carries its `h` in-chunk siblings. The shared chunk proof ends with `size_witness(G, n)`, and for `C = 1` it is that witness alone. A segment's full proof is its in-chunk siblings concatenated with the chunk proof. That concatenation is the full proof in every case, including one chunk. The tree defines only these per-segment proof bytes; how a multi-segment answer is framed (segment order, index rules, where the shared chunk proof goes) belongs to the consumer that sends it | `m × h + depth(c, C) + 1` |
 | Size check | `(G, data_commitment, data_tree_root, data_size)`; no proof bytes | none |
 
 ```
