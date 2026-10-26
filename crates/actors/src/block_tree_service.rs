@@ -884,9 +884,7 @@ impl BlockTreeServiceInner {
                 return Ok(());
             }
 
-            let Some((_block_entry, fork_blocks, _)) =
-                cache.get_earliest_not_onchain_in_longest_chain()
-            else {
+            let Some(_) = cache.get_earliest_not_onchain_in_longest_chain() else {
                 if block_hash == old_tip {
                     debug!(
                         "Same Tip Marked current tip {} cdiff: {} height: {}",
@@ -954,11 +952,6 @@ impl BlockTreeServiceInner {
                 }
                 return Ok(());
             };
-
-            // if the old tip isn't in the fork_blocks, it's a reorg
-            let is_reorg = !fork_blocks
-                .iter()
-                .any(|bh| bh.header().block_hash == old_tip);
 
             // Get block info before mutable operations.
             // We just observed the block in cache when computing `height` above (under
@@ -1058,14 +1051,16 @@ impl BlockTreeServiceInner {
                 // Compute the reorg split BEFORE pruning so the parent-walk
                 // sees both lineages in `cache.blocks`. Independent of
                 // `ChainState` flags by construction.
-                let split: Option<ReorgSplit> = if is_reorg {
-                    Some(cache.find_reorg_split(ReorgTips {
-                        new_tip: block_hash,
-                        old_tip: old_tip_block.block_hash,
-                    })?)
-                } else {
-                    None
-                };
+                //
+                // The tip change is a reorg only when it abandons blocks of the old
+                // canonical chain. Classify from the old tip -> new tip transition, not
+                // from the max-difficulty chain: that chain can be a fork still waiting
+                // for validation, unrelated to the block that just became the tip.
+                let split = cache.find_reorg_split(ReorgTips {
+                    new_tip: block_hash,
+                    old_tip: old_tip_block.block_hash,
+                })?;
+                let split: Option<ReorgSplit> = (!split.old_divergent.is_empty()).then_some(split);
 
                 // A reorg whose fork point predates the post-prune cache window
                 // cannot complete safely. `cache.prune()` below drops every block
@@ -2194,6 +2189,12 @@ mod tests {
         /// Retained VDF re-anchor receiver so the gate tests can observe a queued
         /// `ReanchorRequest`; unused by the discard/recovery tests.
         vdf_reanchor_rx: irys_vdf::ReanchorReceiver,
+        /// Subscribed before any test step runs, so the tip-change tests can observe
+        /// every broadcast `ReorgEvent`.
+        reorg_rx: tokio::sync::broadcast::Receiver<ReorgEvent>,
+        /// Retained Reth service receiver; `answer_fork_choice_updates` takes it so a
+        /// tip change can complete its FCU round trip.
+        reth_service_rx: Option<UnboundedReceiver<Traced<RethServiceMessage>>>,
         /// Hash of the synthetic genesis seeded into the cache by `new()`.
         /// Use as `previous_block_hash` when inserting test blocks via
         /// `insert_block_in_cache`.
@@ -2251,9 +2252,12 @@ mod tests {
             let (service_senders, service_rx) = crate::test_helpers::build_test_service_senders();
             // Subscribe BEFORE the discard path runs so the broadcast event is
             // observable. Retain the VDF re-anchor receiver so gate tests can
-            // observe a queued request; the rest of `service_rx` drops here.
+            // observe a queued request, and the Reth receiver so tip-change tests
+            // can answer the FCU; the rest of `service_rx` drops here.
             let block_state_rx = service_senders.subscribe_block_state_updates();
+            let reorg_rx = service_senders.subscribe_reorgs();
             let vdf_reanchor_rx = service_rx.vdf_reanchor;
+            let reth_service_rx = Some(service_rx.reth_service);
 
             let mut node_config = NodeConfig::testing();
             configure(&mut node_config);
@@ -2313,6 +2317,8 @@ mod tests {
                 inner,
                 block_state_rx,
                 vdf_reanchor_rx,
+                reorg_rx,
+                reth_service_rx,
                 genesis_hash,
                 _tempdir: tmp,
             }
@@ -2370,6 +2376,95 @@ mod tests {
                 out.push(event);
             }
             out
+        }
+
+        /// Answer every fork-choice update the service sends, as the Reth service does,
+        /// so a tip change runs to completion.
+        fn answer_fork_choice_updates(&mut self) {
+            let mut reth_service_rx = self
+                .reth_service_rx
+                .take()
+                .expect("Reth service receiver not yet taken");
+            tokio::spawn(async move {
+                while let Some(message) = reth_service_rx.recv().await {
+                    let (message, _span) = message.into_parts();
+                    if let RethServiceMessage::ForkChoice { response, .. } = message {
+                        let _ = response.send(());
+                    }
+                }
+            });
+        }
+
+        /// Add a child of `parent` with `cumulative_diff` to the cache. With
+        /// `schedule_validation` the block waits for its validation result, as a block
+        /// handed to the validation service does.
+        fn add_child_block(
+            &mut self,
+            parent: &IrysBlockHeader,
+            cumulative_diff: u64,
+            schedule_validation: bool,
+        ) -> IrysBlockHeader {
+            use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
+            use irys_testing_utils::IrysBlockHeaderTestExt as _;
+
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = parent.height + 1;
+            header.previous_block_hash = parent.block_hash;
+            header.cumulative_diff = irys_types::U256::from(cumulative_diff);
+            header.test_sign();
+
+            let sealed = Arc::new(SealedBlock::new_unchecked(
+                Arc::new(header.clone()),
+                BlockTransactions::default(),
+            ));
+            let ema = EmaSnapshot::genesis(sealed.header());
+            let mut cache = self
+                .inner
+                .cache
+                .write()
+                .expect("cache lock for child block");
+            cache
+                .add_block(
+                    &sealed,
+                    Arc::new(CommitmentSnapshot::default()),
+                    Arc::new(EpochSnapshot::default()),
+                    ema,
+                )
+                .expect("add child block");
+            if schedule_validation {
+                cache
+                    .mark_block_as_validation_scheduled(&header.block_hash)
+                    .expect("mark ValidationScheduled for child block");
+            }
+            header
+        }
+
+        /// Record the genesis block as migrated, so a tip change can run block migration.
+        fn index_genesis(&self) {
+            self.inner
+                .block_index_guard
+                .read()
+                .push_item(
+                    &irys_types::BlockIndexItem {
+                        block_hash: self.genesis_hash,
+                        num_ledgers: 0,
+                        ledgers: vec![],
+                    },
+                    0,
+                )
+                .expect("index genesis");
+        }
+
+        fn genesis(&self) -> IrysBlockHeader {
+            let cache = self.inner.cache.read().expect("cache lock for genesis");
+            cache
+                .get_block(&self.genesis_hash)
+                .expect("genesis in cache")
+                .clone()
+        }
+
+        fn tip(&self) -> BlockHash {
+            self.inner.cache.read().expect("cache lock for tip").tip
         }
     }
 
@@ -3535,6 +3630,85 @@ mod tests {
             third.is_none(),
             "duplicate Valid for already-recovered hash must not double-count"
         );
+    }
+
+    fn block_hashes(blocks: &[Arc<SealedBlock>]) -> Vec<BlockHash> {
+        blocks
+            .iter()
+            .map(|block| block.header().block_hash)
+            .collect()
+    }
+
+    /// The validated block extends the tip while a heavier fork from below the tip waits
+    /// for validation. The tip moves without abandoning a block, so no `ReorgEvent`.
+    #[tokio::test]
+    async fn tip_extension_with_pending_heavier_fork_is_not_a_reorg() {
+        let mut h = DiscardHarness::new();
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (canonical tip)
+        //         -> pending_fork_start -> pending_fork_max (heaviest, not validated)
+        // old_tip -> new_tip (validated now)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let pending_fork_start = h.add_child_block(&genesis, 5_050, true);
+        let _pending_fork_max = h.add_child_block(&pending_fork_start, 5_300, false);
+        let new_tip = h.add_child_block(&old_tip, 5_200, true);
+
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+
+        assert_eq!(
+            h.tip(),
+            new_tip.block_hash,
+            "the tip moves to the new block"
+        );
+        let event = h.reorg_rx.try_recv();
+        assert!(
+            event.is_err(),
+            "a tip extension abandons no block and must not broadcast a ReorgEvent, got {:?}",
+            event.map(|event| block_hashes(&event.old_fork))
+        );
+    }
+
+    /// The validated block is on a sibling fork of the tip, lighter than a pending fork
+    /// that extends the tip. The tip moves to the sibling fork and abandons the old tip,
+    /// so a `ReorgEvent` must report the old tip as orphaned.
+    #[tokio::test]
+    async fn tip_move_to_sibling_fork_below_pending_max_is_a_reorg() {
+        let mut h = DiscardHarness::new();
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (canonical tip) -> pending_start -> pending_max (heaviest)
+        //         -> new_tip (validated now, heavier than old_tip)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let pending_start = h.add_child_block(&old_tip, 5_200, true);
+        let _pending_max = h.add_child_block(&pending_start, 5_400, false);
+        let new_tip = h.add_child_block(&genesis, 5_150, true);
+
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+
+        assert_eq!(
+            h.tip(),
+            new_tip.block_hash,
+            "the tip moves to the sibling fork"
+        );
+        let event = h
+            .reorg_rx
+            .try_recv()
+            .expect("a tip move that abandons the old tip must broadcast a ReorgEvent");
+        assert_eq!(block_hashes(&event.old_fork), vec![old_tip.block_hash]);
+        assert_eq!(block_hashes(&event.new_fork), vec![new_tip.block_hash]);
+        assert_eq!(event.fork_parent.block_hash, genesis.block_hash);
+        assert_eq!(event.new_tip, new_tip.block_hash);
     }
 
     /// Regression coverage for the warn/error split in
