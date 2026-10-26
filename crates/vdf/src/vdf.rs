@@ -822,8 +822,17 @@ mod tests {
             }
         });
 
-        // wait for some vdf steps
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        vdf_steps_guard
+            .wait_for_step(3, Arc::clone(&cancel), Duration::from_secs(5))
+            .await
+            .expect("VDF should reach step 3");
+
+        // The gate must hold the loop at step 3: step 4 never arrives.
+        let gated = vdf_steps_guard
+            .wait_for_step(4, Arc::clone(&cancel), Duration::from_millis(500))
+            .await;
+        assert!(gated.is_err(), "VDF must not run past step 3");
 
         let step_num = vdf_steps_guard.read().current_step();
 
