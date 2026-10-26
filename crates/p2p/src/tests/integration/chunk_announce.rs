@@ -363,6 +363,7 @@ async fn fetch_chunk_returns_the_served_body() {
             &fake_addr,
             &ChunkAnnouncement::from(&chunk),
             &fixture.peer_list,
+            Duration::from_secs(5),
         )
         .await
         .expect("fetch");
@@ -504,12 +505,11 @@ async fn announcement_over_capacity_is_rate_limited_and_not_recorded() -> eyre::
 
 /// Short limits so the bounded rounds finish quickly in tests.
 ///
-/// The deadline is longer than the gossip client's 5s HTTP timeout
-/// (`GossipService::with_circuit_breaker`). A deadline of 5s cancels the
-/// task during a slow first response, so the next source never runs.
+/// The claim lifetime allows the client's 5s HTTP timeout and source rotation.
 fn fast_limits() -> crate::chunk_announce::ChunkAnnounceLimits {
     crate::chunk_announce::ChunkAnnounceLimits {
-        fetch_deadline: Duration::from_secs(15),
+        claim_ttl: Duration::from_secs(15),
+        local_retry_delay: Duration::from_millis(200),
         later_round_delays: [Duration::from_millis(200), Duration::from_millis(200)],
         ingest_timeout: Duration::from_secs(1),
         overload_backoff: [Duration::from_millis(50); 3],
@@ -966,13 +966,13 @@ async fn parked_fetch_is_fetched_again_in_a_later_round() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn stalled_ingest_ends_by_deadline_and_frees_capacity() -> eyre::Result<()> {
+async fn claim_expiry_during_ingest_frees_capacity() -> eyre::Result<()> {
     let first = valid_chunk(32, 28);
     let second = valid_chunk(32, 29);
     let mut receiver =
         GossipServiceTestFixture::new_with(|nc| nc.p2p_gossip.chunk_fetch_delay_ms = 0);
     receiver.chunk_announce_limits = Some(crate::chunk_announce::ChunkAnnounceLimits {
-        fetch_deadline: Duration::from_secs(2),
+        claim_ttl: Duration::from_secs(2),
         ingest_timeout: Duration::from_secs(30), // longer than the deadline
         max_concurrent_fetches: 1,
         ..fast_limits()
@@ -1190,6 +1190,280 @@ async fn chunk_held_while_awaiting_a_fetch_permit_is_not_fetched() -> eyre::Resu
         "a body held before the permit is not fetched again"
     );
     assert_eq!(handler.chunk_announce.stats().bodies_fetch, 0);
+    handle.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_overload_recovers_without_another_announcement() -> eyre::Result<()> {
+    let chunk = valid_chunk(32, 35);
+    let (receiver, handle) = receiver_for(std::slice::from_ref(&chunk), 0).await;
+    receiver.script_chunk_ingest(
+        (0..16)
+            .map(|_| {
+                ScriptedIngest::Reply(Err(irys_actors::ChunkIngressError::Advisory(
+                    irys_actors::AdvisoryChunkIngressError::Overloaded,
+                )))
+            })
+            .collect(),
+    );
+    let (fake, requests) = serving_fake(vec![chunk.clone()]);
+    let source = add_fake_peer(&receiver, 0x74, spawn_fake(fake).await);
+    let handler = receiver
+        .data_handler()
+        .ok_or_else(|| eyre::eyre!("handler missing"))?;
+
+    assert!(matches!(
+        post_announce(
+            receiver.gossip_addr(),
+            &source,
+            ChunkAnnouncement::from(&chunk)
+        )
+        .await,
+        GossipResponse::Accepted(())
+    ));
+    poll_until(
+        Duration::from_secs(5),
+        "body held after sustained local overload",
+        || held(&receiver, &chunk.chunk_path_hash()),
+    )
+    .await?;
+    assert_eq!(handler.chunk_announce.stats().announcements_received, 1);
+    assert_eq!(handler.chunk_announce.stats().bodies_fetch, 1);
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        5,
+        "reuse each body for the bounded ingress retries"
+    );
+    assert_eq!(handler.chunk_announce.claim_count(), 0);
+    handle.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn queue_wait_does_not_consume_fetch_budget() -> eyre::Result<()> {
+    let chunk = valid_chunk(32, 36);
+    let mut receiver =
+        GossipServiceTestFixture::new_with(|nc| nc.p2p_gossip.chunk_fetch_delay_ms = 0);
+    receiver.chunk_announce_limits = Some(crate::chunk_announce::ChunkAnnounceLimits {
+        fetch_timeout: Duration::from_millis(200),
+        max_concurrent_fetches: 1,
+        ..fast_limits()
+    });
+    cache_root(&receiver, &chunk);
+    let (handle, _) = receiver.run_service();
+    let handler = receiver
+        .data_handler()
+        .ok_or_else(|| eyre::eyre!("handler missing"))?;
+    let occupied = Arc::clone(&handler.chunk_announce.fetch_permits)
+        .acquire_owned()
+        .await?;
+    let (fake, requests) = serving_fake(vec![chunk.clone()]);
+    let source = add_fake_peer(&receiver, 0x75, spawn_fake(fake).await);
+    wait_until_listening(receiver.gossip_addr()).await;
+
+    post_announce(
+        receiver.gossip_addr(),
+        &source,
+        ChunkAnnouncement::from(&chunk),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        handler.chunk_announce.claim_count(),
+        1,
+        "queueing must not expire the network budget"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    drop(occupied);
+    poll_until(Duration::from_secs(5), "queued claim delivered", || {
+        held(&receiver, &chunk.chunk_path_hash())
+    })
+    .await?;
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    handle.stop().await?;
+    Ok(())
+}
+
+#[rstest::rstest]
+#[case::retry(false)]
+#[case::late_commit(true)]
+#[tokio::test]
+async fn ingest_timeout_releases_capacity_while_retaining_recovery(
+    #[case] late_commit: bool,
+) -> eyre::Result<()> {
+    let first = valid_chunk(32, 37);
+    let second = valid_chunk(32, 38);
+    let mut receiver =
+        GossipServiceTestFixture::new_with(|nc| nc.p2p_gossip.chunk_fetch_delay_ms = 0);
+    receiver.chunk_announce_limits = Some(crate::chunk_announce::ChunkAnnounceLimits {
+        max_concurrent_fetches: 1,
+        ingest_timeout: Duration::from_millis(100),
+        local_retry_delay: Duration::from_secs(5),
+        ..fast_limits()
+    });
+    cache_root(&receiver, &first);
+    cache_root(&receiver, &second);
+    receiver.script_chunk_ingest(vec![ScriptedIngest::Stall]);
+    let (handle, _) = receiver.run_service();
+    wait_until_listening(receiver.gossip_addr()).await;
+    let handler = receiver
+        .data_handler()
+        .ok_or_else(|| eyre::eyre!("handler missing"))?;
+    let (fake, requests) = serving_fake(vec![first.clone(), second.clone()]);
+    let source = add_fake_peer(&receiver, 0x76, spawn_fake(fake).await);
+    let claim = ChunkAnnouncement::from(&first);
+    post_announce(receiver.gossip_addr(), &source, claim).await;
+    poll_until(Duration::from_secs(3), "first ingress submitted", || {
+        !receiver
+            .mempool_chunks
+            .read()
+            .expect("chunk store")
+            .is_empty()
+    })
+    .await?;
+    poll_until(
+        Duration::from_secs(3),
+        "active slot released during cooldown",
+        || handler.chunk_announce.fetch_permits.available_permits() == 1,
+    )
+    .await?;
+    assert_eq!(handler.chunk_announce.claim_count(), 1);
+    assert_eq!(handler.chunk_announce.sources(&claim), vec![source.peer_id]);
+    assert!(matches!(
+        post_announce(receiver.gossip_addr(), &source, claim).await,
+        GossipResponse::Accepted(())
+    ));
+    assert_eq!(
+        handler.chunk_announce.claim_count(),
+        1,
+        "duplicate joins recovery"
+    );
+
+    post_announce(
+        receiver.gossip_addr(),
+        &source,
+        ChunkAnnouncement::from(&second),
+    )
+    .await;
+    poll_until(
+        Duration::from_secs(3),
+        "another claim progresses during cooldown",
+        || held(&receiver, &second.chunk_path_hash()),
+    )
+    .await?;
+    assert!(!held(&receiver, &first.chunk_path_hash()));
+    if late_commit {
+        // The original timed-out ingress can still commit while the claim is cooling down.
+        cache_body(&receiver, &first);
+    }
+    poll_until(
+        Duration::from_secs(10),
+        "recovery completed and claims released",
+        || held(&receiver, &first.chunk_path_hash()) && handler.chunk_announce.claim_count() == 0,
+    )
+    .await?;
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        if late_commit { 2 } else { 3 }
+    );
+    assert_eq!(handler.chunk_announce.fetch_permits.available_permits(), 1);
+    handle.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_active_recovery_returns_claim_and_peer_capacity() -> eyre::Result<()> {
+    use crate::chunk_announce::AnnounceDecision;
+
+    let chunk = valid_chunk(32, 39);
+    let mut receiver =
+        GossipServiceTestFixture::new_with(|nc| nc.p2p_gossip.chunk_fetch_delay_ms = 0);
+    receiver.chunk_announce_limits = Some(crate::chunk_announce::ChunkAnnounceLimits {
+        max_claims: 1,
+        max_per_peer: 1,
+        max_concurrent_fetches: 1,
+        ingest_timeout: Duration::from_secs(30),
+        ..fast_limits()
+    });
+    cache_root(&receiver, &chunk);
+    receiver.script_chunk_ingest(vec![ScriptedIngest::Stall]);
+    let (handle, _) = receiver.run_service();
+    let handler = receiver
+        .data_handler()
+        .ok_or_else(|| eyre::eyre!("handler missing"))?;
+    let (fake, _) = serving_fake(vec![chunk.clone()]);
+    let source = add_fake_peer(&receiver, 0x77, spawn_fake(fake).await);
+    let claim = ChunkAnnouncement::from(&chunk);
+    assert_eq!(
+        handler.chunk_announce.admit(&claim, source.peer_id),
+        AnnounceDecision::StartFetch
+    );
+    let task = tokio::spawn(handler.chunk_fetch_task(claim));
+    poll_until(Duration::from_secs(3), "ingress is pending", || {
+        !receiver
+            .mempool_chunks
+            .read()
+            .expect("chunk store")
+            .is_empty()
+    })
+    .await?;
+    assert_eq!(handler.chunk_announce.fetch_permits.available_permits(), 0);
+
+    task.abort();
+    assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+    assert_eq!(handler.chunk_announce.claim_count(), 0);
+    assert_eq!(handler.chunk_announce.fetch_permits.available_permits(), 1);
+    assert_eq!(
+        handler.chunk_announce.admit(&claim, source.peer_id),
+        AnnounceDecision::StartFetch
+    );
+    handler.chunk_announce.finish(&claim);
+    handle.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unpolled_claim_and_duplicate_keep_the_original_expiry() -> eyre::Result<()> {
+    use crate::chunk_announce::AnnounceDecision;
+
+    let chunk = valid_chunk(32, 40);
+    let (receiver, handle) = receiver_for(std::slice::from_ref(&chunk), 0).await;
+    let handler = receiver
+        .data_handler()
+        .ok_or_else(|| eyre::eyre!("handler missing"))?;
+    let claim = ChunkAnnouncement::from(&chunk);
+    let peer = receiver.config.peer_id();
+    tokio::time::pause();
+    assert_eq!(
+        handler.chunk_announce.admit(&claim, peer),
+        AnnounceDecision::StartFetch
+    );
+    let task = handler.chunk_fetch_task(claim);
+    tokio::time::advance(Duration::from_secs(14)).await;
+    assert_eq!(
+        handler.chunk_announce.admit(&claim, peer),
+        AnnounceDecision::Joined
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let expired_at = tokio::time::Instant::now();
+
+    task.await;
+
+    assert_eq!(
+        tokio::time::Instant::now(),
+        expired_at,
+        "an expired claim gets no new budget on first poll"
+    );
+    assert_eq!(handler.chunk_announce.claim_count(), 0);
+    assert!(
+        receiver
+            .mempool_chunks
+            .read()
+            .expect("chunk store")
+            .is_empty()
+    );
+    tokio::time::resume();
     handle.stop().await?;
     Ok(())
 }

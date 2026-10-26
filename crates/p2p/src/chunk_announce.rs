@@ -24,8 +24,12 @@ pub struct ChunkAnnounceLimits {
     pub max_backlog: usize,
     pub max_concurrent_fetches: usize,
     pub max_concurrent_serves: usize,
-    /// Whole-task budget, from the moment the claim is admitted.
-    pub fetch_deadline: Duration,
+    /// Fixed claim lifetime, including queue residence and local recovery.
+    pub claim_ttl: Duration,
+    /// Network budget after acquiring an active slot; the HTTP timeout may be shorter.
+    pub fetch_timeout: Duration,
+    /// Wait after local pressure, with no active slot or body retained.
+    pub local_retry_delay: Duration,
     /// Waits before rounds 2 and 3. Round 1 waits `chunk_fetch_delay_ms`.
     pub later_round_delays: [Duration; 2],
     /// One ingest attempt. A timeout is not a cancellation.
@@ -45,8 +49,9 @@ impl Default for ChunkAnnounceLimits {
             max_backlog: 12,
             max_concurrent_fetches: 32,
             max_concurrent_serves: 16,
-            // Same budget data sync gives one delivered body (DELIVERY_TIMEOUT).
-            fetch_deadline: Duration::from_secs(60),
+            claim_ttl: Duration::from_secs(300),
+            fetch_timeout: Duration::from_secs(60),
+            local_retry_delay: Duration::from_secs(8),
             later_round_delays: [Duration::from_secs(2), Duration::from_secs(8)],
             ingest_timeout: Duration::from_secs(10),
             overload_backoff: [
@@ -180,10 +185,12 @@ impl ChunkAnnounceState {
             }
             Entry::Vacant(entry) => {
                 if !self.try_reserve_claim() {
+                    crate::metrics::record_chunk_announcement_capacity("global");
                     return AnnounceDecision::OverCapacity;
                 }
                 if !self.try_reserve_peer(announcer) {
                     self.claim_count.fetch_sub(1, Ordering::AcqRel);
+                    crate::metrics::record_chunk_announcement_capacity("peer");
                     return AnnounceDecision::OverCapacity;
                 }
                 entry.insert(Claim {
@@ -350,11 +357,13 @@ impl Drop for ArrivingGuard<'_> {
 pub(crate) struct ClaimGuard {
     state: Arc<ChunkAnnounceState>,
     announcement: ChunkAnnouncement,
+    deadline: tokio::time::Instant,
 }
 
 impl ClaimGuard {
     pub(crate) fn new(state: Arc<ChunkAnnounceState>, announcement: ChunkAnnouncement) -> Self {
         Self {
+            deadline: tokio::time::Instant::now() + state.limits.claim_ttl,
             state,
             announcement,
         }
@@ -362,6 +371,10 @@ impl ClaimGuard {
 
     pub(crate) fn announcement(&self) -> &ChunkAnnouncement {
         &self.announcement
+    }
+
+    pub(crate) fn deadline(&self) -> tokio::time::Instant {
+        self.deadline
     }
 }
 
