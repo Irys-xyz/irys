@@ -1779,11 +1779,23 @@ impl GossipClient {
         key: GossipCacheKey,
         context: &str,
     ) {
+        Self::complete_send(peer_list, result, peer_id, circuit_breaker, context);
+        if push_response_accepted(result)
+            && let Err(err) = cache.record_seen(*peer_id, key)
+        {
+            error!("Error recording seen data in cache: {:?}", err);
+        }
+    }
+
+    fn complete_send<T>(
+        peer_list: &PeerList,
+        result: &GossipResult<GossipResponse<T>>,
+        peer_id: &IrysPeerId,
+        circuit_breaker: &CircuitBreakerManager<IrysPeerId>,
+        context: &str,
+    ) {
         Self::handle_score(peer_list, result, peer_id, circuit_breaker);
         if push_response_accepted(result) {
-            if let Err(err) = cache.record_seen(*peer_id, key) {
-                error!("Error recording seen data in cache: {:?}", err);
-            }
             return;
         }
         if push_response_rate_limited(result) {
@@ -2023,20 +2035,29 @@ impl GossipClient {
                                 // The 404 answered the admission above. Settle
                                 // that trial, then push without taking another.
                                 client.circuit_breaker.record_success(&peer_id);
-                                client
+                                let result = client
                                     .push_preserialized_retries(&address, push_route, push_body)
-                                    .await
+                                    .await;
+                                Self::complete_push(
+                                    &peer_list,
+                                    &result,
+                                    &peer_id,
+                                    &client.circuit_breaker,
+                                    &cache,
+                                    gossip_cache_key,
+                                    "chunk fallback push",
+                                );
+                                return;
                             }
                         }
                     }
                 };
-                Self::complete_push(
+                // Announcement acceptance is admission; only body pushes update delivery bookkeeping.
+                Self::complete_send(
                     &peer_list,
                     &result,
                     &peer_id,
                     &client.circuit_breaker,
-                    &cache,
-                    gossip_cache_key,
                     "chunk announcement",
                 );
             }
@@ -2113,6 +2134,7 @@ impl GossipClient {
         address: &SocketAddr,
         announcement: &crate::wire_types::ChunkAnnouncement,
         peer_list: &PeerList,
+        timeout: Duration,
     ) -> GossipResult<Option<UnpackedChunk>> {
         self.admit_pull(peer_id, true)?;
         let url = format!(
@@ -2122,7 +2144,7 @@ impl GossipClient {
         );
         let started = std::time::Instant::now();
         let body = self.create_request_v2(*announcement);
-        let result: GossipResult<GossipResponse<Option<crate::wire_types::UnpackedChunk>>> =
+        let request = async {
             match self
                 .client
                 .post(&url)
@@ -2141,7 +2163,13 @@ impl GossipClient {
                 Err(error) => Err(GossipError::Network(format!(
                     "chunk fetch from {url} failed: {error}"
                 ))),
-            };
+            }
+        };
+        // Settle the breaker on a network deadline, just as on the HTTP client's timeout.
+        let result: GossipResult<GossipResponse<Option<crate::wire_types::UnpackedChunk>>> =
+            tokio::time::timeout(timeout, request)
+                .await
+                .unwrap_or_else(|_| Err(GossipError::Network("chunk fetch timed out".to_owned())));
         Self::handle_data_retrieval_score(
             peer_list,
             &result,
@@ -4896,6 +4924,48 @@ mod tests {
                 &result,
                 &cache,
             );
+        }
+
+        #[tokio::test]
+        async fn accepted_announcement_does_not_record_delivery() -> eyre::Result<()> {
+            let body = serde_json::to_string(&GossipResponse::<()>::Accepted(()))?;
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let client = production_client();
+            let (peer_list, peer_id, peer, initial_score) =
+                peer_aimed_at(8, SocketAddr::from(([127, 0, 0, 1], server.port())));
+            let cache = Arc::new(GossipCache::new());
+            let key = GossipCacheKey::Chunk(H256::zero());
+            let announcement = wire_types::ChunkAnnouncement {
+                data_root: H256::zero(),
+                data_size: 32,
+                tx_offset: irys_types::TxChunkOffset::from(0),
+                chunk_path_hash: H256::zero(),
+            };
+
+            client.send_chunk_announcement_detached(
+                (&peer_id, &peer),
+                announcement,
+                GossipRoutes::Chunk,
+                bytes::Bytes::from_static(b"{}"),
+                &peer_list,
+                Arc::clone(&cache),
+                key,
+            );
+            crate::tests::util::poll_until(Duration::from_secs(5), "offer completed", || {
+                Arc::strong_count(&cache) == 1
+            })
+            .await?;
+
+            let scored = peer_list
+                .get_peer(&peer_id)
+                .ok_or_else(|| eyre::eyre!("peer missing"))?;
+            assert!(scored.is_online, "acceptance still settles peer health");
+            assert!(scored.reputation_score.get() > initial_score);
+            assert!(
+                !cache.peers_that_have_seen(&key)?.contains(&peer_id),
+                "an accepted announcement must leave the peer eligible for a later broadcast"
+            );
+            Ok(())
         }
 
         /// The announcement takes the last half-open trial. A 404 must still

@@ -67,15 +67,17 @@ enum SourceOutcome {
     /// The body was valid but no row exists yet (parked, still committing);
     /// the source is not at fault. Try the next source.
     NextSource,
-    /// Local ingress stayed overloaded; wait for the next round.
-    EndRound,
+    /// Local pressure must not consume a source round or rotate announcers.
+    RetryLocal,
+    /// Active admission is shutting down.
+    Stopped,
 }
 
 enum FetchedIngest {
-    /// Ingress answered, timed out, or rejected; check for the row.
+    /// Ingress answered or rejected; check for the row.
     Settled,
-    /// Every attempt answered `Overloaded`.
-    Overloaded,
+    /// Local overload or timeout; retain the claim after releasing active resources.
+    RetryLocal,
 }
 
 /// Decide whether the outer body-pull retry should continue after an error.
@@ -318,13 +320,12 @@ where
     async fn run_chunk_fetch(self: Arc<Self>, guard: crate::chunk_announce::ClaimGuard) {
         let claim = *guard.announcement();
         let limits = self.chunk_announce.limits();
-        let deadline = tokio::time::Instant::now() + limits.fetch_deadline;
         let delays = [
             Duration::from_millis(self.config.node_config.p2p_gossip.chunk_fetch_delay_ms),
             limits.later_round_delays[0],
             limits.later_round_delays[1],
         ];
-        match tokio::time::timeout_at(deadline, self.fetch_rounds(&claim, delays)).await {
+        match tokio::time::timeout_at(guard.deadline(), self.fetch_rounds(&claim, delays)).await {
             Ok(true) => {}
             Ok(false) => {
                 crate::metrics::record_gossip_pull_failure("chunk", "exhausted");
@@ -337,7 +338,7 @@ where
                 crate::metrics::record_gossip_pull_failure("chunk", "deadline");
                 warn!(
                     chunk.path_hash = %claim.chunk_path_hash,
-                    "announced chunk fetch hit its deadline"
+                    "announced chunk claim expired"
                 );
             }
         }
@@ -360,17 +361,21 @@ where
             if self.chunk_is_held(&hash) {
                 return true;
             }
-            // Each pass pushes a new peer, and the backlog is finite, so
-            // the round ends.
+            // Local pressure preserves the source; the fixed claim lifetime bounds recovery.
             let mut tried = Vec::new();
             while let Some(source) = self.chunk_announce.next_source(claim, &tried) {
-                tried.push(source);
                 match self.fetch_from_source(claim, source).await {
                     SourceOutcome::Held => return true,
                     SourceOutcome::Failed => self.chunk_announce.source_failed(claim, source),
                     SourceOutcome::NextSource => {}
-                    SourceOutcome::EndRound => break,
+                    SourceOutcome::RetryLocal => {
+                        let _phase = crate::metrics::ChunkFetchPhase::start("cooldown");
+                        tokio::time::sleep(self.chunk_announce.limits().local_retry_delay).await;
+                        continue;
+                    }
+                    SourceOutcome::Stopped => return false,
                 }
+                tried.push(source);
             }
         }
         self.chunk_is_held(&hash)
@@ -382,25 +387,39 @@ where
         source: IrysPeerId,
     ) -> SourceOutcome {
         let hash = claim.chunk_path_hash;
+        if self.chunk_is_held(&hash) {
+            return SourceOutcome::Held;
+        }
         let Some(peer) = self.peer_list.peer_by_id(&source) else {
             return SourceOutcome::Failed;
         };
         // Held for the transfer and the ingest only, never across a round's sleep.
-        let Ok(_permit) = Arc::clone(&self.chunk_announce.fetch_permits)
-            .acquire_owned()
-            .await
-        else {
-            return SourceOutcome::EndRound;
+        let permit = {
+            let _phase = crate::metrics::ChunkFetchPhase::start("queue");
+            Arc::clone(&self.chunk_announce.fetch_permits)
+                .acquire_owned()
+                .await
+        };
+        let Ok(_permit) = permit else {
+            return SourceOutcome::Stopped;
         };
         // A push or another source may have committed the row during the wait.
         if self.chunk_is_held(&hash) {
             return SourceOutcome::Held;
         }
-        let body = match self
-            .gossip_client
-            .fetch_chunk(&source, &peer.address.gossip, claim, &self.peer_list)
-            .await
-        {
+        let fetched = {
+            let _phase = crate::metrics::ChunkFetchPhase::start("network");
+            self.gossip_client
+                .fetch_chunk(
+                    &source,
+                    &peer.address.gossip,
+                    claim,
+                    &self.peer_list,
+                    self.chunk_announce.limits().fetch_timeout,
+                )
+                .await
+        };
+        let body = match fetched {
             Ok(Some(body)) => body,
             Ok(None) | Err(_) => return SourceOutcome::Failed,
         };
@@ -413,7 +432,10 @@ where
             );
             return SourceOutcome::Failed;
         }
-        let ingest = self.ingest_fetched_chunk(body).await;
+        let ingest = {
+            let _phase = crate::metrics::ChunkFetchPhase::start("ingest");
+            self.ingest_fetched_chunk(body).await
+        };
         // Possession, not the ingest reply, decides success.
         if self.chunk_is_held(&hash) {
             self.chunk_announce.record_fetch_body();
@@ -424,7 +446,7 @@ where
             return SourceOutcome::Held;
         }
         match ingest {
-            FetchedIngest::Overloaded => SourceOutcome::EndRound,
+            FetchedIngest::RetryLocal => SourceOutcome::RetryLocal,
             FetchedIngest::Settled => SourceOutcome::NextSource,
         }
     }
@@ -436,6 +458,9 @@ where
         let limits = self.chunk_announce.limits();
         let attempts = limits.overload_backoff.len() + 1;
         for attempt in 0..attempts {
+            if self.chunk_is_held(&chunk.chunk_path_hash()) {
+                return FetchedIngest::Settled;
+            }
             let reply = tokio::time::timeout(
                 limits.ingest_timeout,
                 // clone: an Overloaded retry submits this same body again
@@ -445,7 +470,8 @@ where
             match reply {
                 Ok(Err(ChunkIngressError::Advisory(AdvisoryChunkIngressError::Overloaded))) => {
                     let Some(backoff) = limits.overload_backoff.get(attempt) else {
-                        return FetchedIngest::Overloaded;
+                        crate::metrics::record_chunk_local_retry("overloaded");
+                        return FetchedIngest::RetryLocal;
                     };
                     tokio::time::sleep(*backoff).await;
                 }
@@ -454,10 +480,13 @@ where
                     debug!(?error, "fetched chunk rejected by ingress");
                     return FetchedIngest::Settled;
                 }
-                Err(_elapsed) => return FetchedIngest::Settled,
+                Err(_elapsed) => {
+                    crate::metrics::record_chunk_local_retry("ingest_timeout");
+                    return FetchedIngest::RetryLocal;
+                }
             }
         }
-        FetchedIngest::Overloaded
+        FetchedIngest::RetryLocal
     }
 
     /// Serve an announced chunk from the local chunk cache. `data_size` comes
