@@ -15,7 +15,8 @@ use irys_types::{
     Base64, BlockHash, Config, DataCommitment, DataLedger, DataTransactionHeader,
     DataTransactionLedger, H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
     SendTraced as _, TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk,
-    app_state::DatabaseProvider, hash_sha256, validate_path,
+    app_state::DatabaseProvider,
+    data_tree::{Geometry, verify_data_chunk},
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -470,12 +471,7 @@ fn load_chunks_for_migration(
     count: usize,
     config: &Config,
 ) -> Result<LoadedMigrationChunks, MigrationError> {
-    let chunk_size = usize::try_from(config.consensus.chunk_size).map_err(|_| {
-        MigrationError::Other(format!(
-            "configured chunk size {} does not fit usize",
-            config.consensus.chunk_size
-        ))
-    })?;
+    let geometry = config.data_tree_geometry();
     let mut bodies = vec![None; count];
     let mut misses = Vec::new();
     for step in 0..count {
@@ -487,7 +483,7 @@ fn load_chunks_for_migration(
                     data_tree_root,
                     data_size,
                     tx_offset,
-                    chunk_size,
+                    &geometry,
                 ) {
                     Ok(chunk) => bodies[step] = Some(chunk),
                     Err(error) => {
@@ -523,7 +519,7 @@ fn load_chunks_for_migration(
             tx_start,
             &misses,
             &mut bodies,
-            chunk_size,
+            &geometry,
         ) {
             Ok(unread) => submit_unread = unread,
             Err(error) => {
@@ -565,7 +561,7 @@ fn fill_submit_misses(
     tx_start: TxChunkOffset,
     misses: &[usize],
     bodies: &mut [Option<UnpackedChunk>],
-    chunk_size: usize,
+    geometry: &Geometry,
 ) -> Result<bool, MigrationError> {
     let storage_modules = storage_modules_guard.read().clone();
     let mut pending = misses.to_vec();
@@ -650,7 +646,7 @@ fn fill_submit_misses(
                     data_tree_root,
                     data_size,
                     tx_offset,
-                    chunk_size,
+                    geometry,
                 ) {
                     Ok(chunk) => {
                         bodies[step] = Some(chunk);
@@ -830,7 +826,7 @@ pub(crate) fn validate_chunk_for_migration(
     data_tree_root: DataTreeRoot,
     data_size: u64,
     chunk_offset: TxChunkOffset,
-    chunk_size: usize,
+    geometry: &Geometry,
 ) -> Result<UnpackedChunk, MigrationError> {
     let bytes = cached.chunk.ok_or_else(|| {
         MigrationError::Other(format!(
@@ -844,7 +840,7 @@ pub(crate) fn validate_chunk_for_migration(
         data_tree_root,
         data_size,
         chunk_offset,
-        chunk_size,
+        geometry,
     )
 }
 
@@ -854,55 +850,22 @@ pub(crate) fn validate_chunk_parts_for_migration(
     data_tree_root: DataTreeRoot,
     data_size: u64,
     chunk_offset: TxChunkOffset,
-    chunk_size: usize,
+    geometry: &Geometry,
 ) -> Result<UnpackedChunk, MigrationError> {
-    let chunk_size_u64 = u64::try_from(chunk_size)
-        .map_err(|_| MigrationError::Other("configured chunk size exceeds u64".to_string()))?;
-    let min_byte_range = u64::from(*chunk_offset)
-        .checked_mul(chunk_size_u64)
-        .ok_or_else(|| MigrationError::Other("chunk byte range overflow".to_string()))?;
-    let max_byte_range = min_byte_range
-        .checked_add(chunk_size_u64)
-        .map_or(data_size, |end| end.min(data_size));
-    let target_byte_position = max_byte_range.checked_sub(1).ok_or_else(|| {
-        MigrationError::Other(format!(
-            "chunk has an empty byte range for {} offset {}",
-            data_tree_root, chunk_offset
-        ))
-    })?;
-    let validation = validate_path(
-        data_tree_root.0.0,
-        &data_path,
-        u128::from(target_byte_position),
+    verify_data_chunk(
+        geometry,
+        data_tree_root,
+        data_size,
+        chunk_offset,
+        &bytes.0,
+        &data_path.0,
     )
     .map_err(|error| {
         MigrationError::Other(format!(
-            "data path failed revalidation for {} offset {}: {error}",
+            "chunk failed revalidation for {} offset {}: {error}",
             data_tree_root, chunk_offset
         ))
     })?;
-    if validation.min_byte_range != u128::from(min_byte_range)
-        || validation.max_byte_range != u128::from(max_byte_range)
-    {
-        return Err(MigrationError::Other(format!(
-            "chunk byte range mismatch for {} offset {}: expected {}..{}, got {}..{}",
-            data_tree_root,
-            chunk_offset,
-            min_byte_range,
-            max_byte_range,
-            validation.min_byte_range,
-            validation.max_byte_range
-        )));
-    }
-    let expected_len = max_byte_range.saturating_sub(min_byte_range);
-    if u64::try_from(bytes.len()).ok() != Some(expected_len)
-        || validation.leaf_hash != hash_sha256(bytes.as_slice())
-    {
-        return Err(MigrationError::Other(format!(
-            "chunk body failed revalidation for {} offset {}",
-            data_tree_root, chunk_offset
-        )));
-    }
     Ok(UnpackedChunk {
         data_tree_root,
         data_size,
@@ -2856,7 +2819,7 @@ mod tests {
             TxChunkOffset::from(19),
             &[0, 1],
             &mut bodies,
-            usize::try_from(f.config.consensus.chunk_size)?,
+            &f.config.data_tree_geometry(),
         )?;
         assert!(bodies[0].is_none(), "the prefix partition is still entropy");
         assert_eq!(
@@ -2888,7 +2851,7 @@ mod tests {
             TxChunkOffset::from(0),
             &[0, 1],
             &mut bodies,
-            usize::try_from(f.config.consensus.chunk_size)?,
+            &f.config.data_tree_geometry(),
         )?;
         assert_eq!(
             bodies[0].as_ref().map(|chunk| chunk.tx_offset),

@@ -6584,7 +6584,7 @@ async fn ingress_proof_chunk_bytes_from_local(
                 data_root,
                 data_size,
                 tx_offset,
-                config.consensus.chunk_size as usize,
+                &config.data_tree_geometry(),
             ) {
                 Ok(checked) => return Ok((Some(checked.bytes.0), read_failed)),
                 Err(error) => {

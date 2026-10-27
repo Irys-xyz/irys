@@ -1670,8 +1670,8 @@ impl ChunkOrchestrator {
             }
         };
 
-        let Ok(chunk_size) = usize::try_from(self.config.consensus_config().chunk_size) else {
-            warn!(chunk.offset = %start, "configured chunk size does not fit usize");
+        let Ok(geometry) = self.config.consensus_config().data_tree_geometry() else {
+            warn!(chunk.offset = %start, "configured data tree geometry is invalid");
             self.note_local_cache_error(start, &run[1..]);
             return LocalCacheStep::Miss;
         };
@@ -1688,7 +1688,7 @@ impl ChunkOrchestrator {
                         *data_root,
                         *data_size,
                         *tx_offset,
-                        chunk_size,
+                        &geometry,
                     ) {
                         Ok(unpacked) => {
                             hits.push((offset, unpacked));
