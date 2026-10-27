@@ -96,7 +96,7 @@ pub(crate) fn canonical_unpacked_chunk() -> UnpackedChunk {
 pub(crate) fn canonical_ingress_proof() -> IngressProof {
     IngressProof::V1(IngressProofV1 {
         signature: test_signature(),
-        data_root: test_h256(0xDD),
+        data_commitment: irys_types::DataCommitment(test_h256(0xDD)),
         proof: test_h256(0xDE),
         chain_id: 1270,
         anchor: test_h256(0xDF),
