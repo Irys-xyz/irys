@@ -344,6 +344,20 @@ mod tests {
 
         assert_eq!(proof.pre_validate(&commitment)?, signer.address());
         assert!(proof.pre_validate(&other_size).is_err());
+
+        // The signature covers the commitment: a proof whose commitment is
+        // changed after signing no longer recovers the signer.
+        let super::IngressProof::V1(mut tampered) = proof;
+        tampered.data_commitment = other_size;
+        let tampered = super::IngressProof::V1(tampered);
+        assert!(!matches!(
+            tampered.pre_validate(&other_size),
+            Ok(address) if address == signer.address()
+        ));
+        assert!(!matches!(
+            tampered.recover_signer(),
+            Ok(address) if address == signer.address()
+        ));
         Ok(())
     }
 

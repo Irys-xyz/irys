@@ -2223,7 +2223,7 @@ mod tests {
         let (small_meta, small_body) = read(small_commitment)?.expect("small size is cached");
         let (large_meta, large_body) = read(large_commitment)?.expect("large size is cached");
         assert_ne!(small_meta.chunk_key, large_meta.chunk_key);
-        assert_eq!(small_body.chunk, Some(small.bytes.clone()));
+        assert_eq!(small_body.chunk, Some(small.bytes));
         assert_eq!(large_body.chunk, Some(large.bytes.clone()));
 
         db.update_eyre(|tx| delete_cached_chunks_by_data_root(tx, small_commitment))?;
