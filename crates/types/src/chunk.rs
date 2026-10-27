@@ -240,7 +240,7 @@ impl TryInto<UnpackedChunk> for PartialChunk {
         };
 
         Ok(UnpackedChunk {
-            data_tree_root: self.data_tree_root.ok_or(err_fn("data_tree_root"))?,
+            data_tree_root: self.data_tree_root.ok_or(err_fn("data_root"))?,
             data_size: self.data_size.ok_or(err_fn("data_size"))?,
             data_path: self.data_path.ok_or(err_fn("data_path"))?,
             bytes: self.bytes.ok_or(err_fn("bytes"))?,
