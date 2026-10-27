@@ -1537,9 +1537,9 @@ fn prepare_v2_placement<S: SubmoduleStore>(
 /// The stored infos for `data_tree_root` and `data_size`, with their key.
 ///
 /// The converter has no geometry, so it cannot derive a commitment. It
-/// finds the row whose infos name this root and size instead. No row gives
-/// a zero commitment and no infos: the placement then has no info, as
-/// before.
+/// finds the row whose infos name this root and size instead. No row is an
+/// error: a placement must not be written under a commitment that nothing
+/// derived.
 fn stored_commitment_for<S: SubmoduleStore>(
     src: &S,
     data_tree_root: H256,
@@ -1554,7 +1554,10 @@ fn stored_commitment_for<S: SubmoduleStore>(
             return Ok((data_commitment, infos));
         }
     }
-    Ok((DataCommitment::default(), Vec::new()))
+    eyre::bail!(
+        "no tx leaf binding and no data-root info for root {data_tree_root} and size {data_size}; \
+         the converter has no geometry to derive the data commitment"
+    )
 }
 
 /// One RocksDB placement per tx inside a stored interval.
