@@ -1797,7 +1797,8 @@ mod tests {
     #[rstest]
     #[case::not_power_of_two(32, 3)]
     #[case::above_maximum(1 << 20, 512)]
-    #[case::not_a_divisor(48, 32)]
+    #[case::not_a_divisor(96, 64)]
+    #[case::zero(32, 0)]
     fn validate_rejects_an_invalid_data_tree_geometry(
         #[case] chunk_size: u64,
         #[case] segments_per_chunk: u32,
@@ -1808,11 +1809,12 @@ mod tests {
             consensus.chunk_size = chunk_size;
             consensus.segments_per_chunk = segments_per_chunk;
         }
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("an invalid data tree geometry must fail validation");
         assert!(
-            Config::new_with_random_peer_id(node_config)
-                .validate()
-                .is_err(),
-            "an invalid data tree geometry must fail validation"
+            err.to_string().contains("invalid data tree geometry"),
+            "got: {err}"
         );
     }
 
@@ -1824,7 +1826,7 @@ mod tests {
             .validate()
             .expect_err("max_data_tx_chunks must fit in u32")
             .to_string();
-        assert!(err.contains("data tree geometry"), "got: {err}");
+        assert!(err.contains("invalid data tree geometry"), "got: {err}");
     }
 
     #[test]

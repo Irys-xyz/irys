@@ -693,6 +693,7 @@ impl ConsensusConfig {
             safe_minimum_number_of_years: 200,
             // Size of each data chunk in bytes
             chunk_size: 256 * 1024, // 256KiB
+            // 256 KiB chunk / 64 segments = 4 KiB segments (spec §2)
             segments_per_chunk: 64,
             // Defines the number of confirmations before a block is migrated to the index
             block_migration_depth: 6,
@@ -909,6 +910,7 @@ impl ConsensusConfig {
             expected_genesis_hash: None,
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: CHUNK_SIZE,
+            // 32 B chunk / 4 segments = 8 B segments (spec §2)
             segments_per_chunk: 4,
             num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
             num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
@@ -1042,6 +1044,7 @@ impl ConsensusConfig {
             )),
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
+            // 256 KiB chunk / 64 segments = 4 KiB segments (spec §2)
             segments_per_chunk: 64,
             num_chunks_in_partition: Self::CHUNKS_PER_PARTITION_20TB,
             num_chunks_in_recall_range: 400,
