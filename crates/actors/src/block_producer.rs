@@ -221,6 +221,46 @@ fn classify_shadow_tx_error(err: ShadowTxGenError) -> BlockProductionError {
     }
 }
 
+/// Block-discovery errors for our own block. A node fault stops the node, as
+/// it does for a peer's block: `PreValidationError::classify` decides for a
+/// pre-validation error, and a discovery `InternalError` (local DB or channel
+/// failure) is always a node fault. Any other error rejects only this block:
+/// drop it.
+fn classify_own_block_discovery_error(
+    err: BlockDiscoveryError,
+    block_header: &IrysBlockHeader,
+) -> BlockProductionError {
+    // SAFETY: no `_` wildcard. A new variant must be classified here.
+    let is_node_fault = match &err {
+        BlockDiscoveryError::BlockValidationError(pre_err) => pre_err.is_node_fault(),
+        BlockDiscoveryError::InternalError(_) => true,
+        BlockDiscoveryError::PreviousBlockNotFound { .. }
+        | BlockDiscoveryError::DuplicateTransaction(_)
+        | BlockDiscoveryError::MissingTransactions(_)
+        | BlockDiscoveryError::InvalidEpochBlock(_)
+        | BlockDiscoveryError::InvalidCommitmentTransaction(_)
+        | BlockDiscoveryError::InvalidDataLedgersLength(_, _)
+        | BlockDiscoveryError::InvalidBlockHeight { .. }
+        | BlockDiscoveryError::InvalidAnchor { .. }
+        | BlockDiscoveryError::InvalidSignature(_)
+        | BlockDiscoveryError::TransactionIdMismatch { .. } => false,
+    };
+    let source = eyre!(
+        "Newly produced block {} ({}) failed block discovery: {:?}",
+        &block_header.block_hash,
+        &block_header.height,
+        err
+    );
+    if is_node_fault {
+        BlockProductionError::Irrecoverable { source }
+    } else {
+        BlockProductionError::Recoverable {
+            reason: "own_block_rejected",
+            source,
+        }
+    }
+}
+
 mod block_validation_tracker;
 pub mod ledger_expiry;
 pub use block_validation_tracker::BlockValidationTracker;
@@ -1686,54 +1726,27 @@ pub trait BlockProdStrategy {
             }
         }
 
-        // Pre-validation runs before the block enters the tree or gossip, so a
-        // rejected block was never published and dropping it is safe.
-        match self
+        // Pre-validation rejects a bad block before it enters the tree or
+        // gossip, so a rejected block was never published and dropping it is
+        // safe. The only failure after the block enters the tree is a closed
+        // validation-service channel. That occurs only at shutdown or after a
+        // panic that stops the node.
+        if let Err(e) = self
             .inner()
             .block_discovery
             .handle_block(block.clone(), false)
             .await
         {
-            Ok(()) => Ok(()),
-            Err(e @ BlockDiscoveryError::InternalError(_)) => {
-                error!(
-                    block.hash = %block_header.block_hash,
-                    block.height = block_header.height,
-                    block.parent = %block_header.previous_block_hash,
-                    block.solution_hash = %block_header.solution_hash,
-                    "Internal Block discovery error for own block: {:?}",
-                    e
-                );
-                Err(BlockProductionError::Recoverable {
-                    reason: "block_discovery_internal",
-                    source: eyre!(
-                        "Internal Block discovery error for block {} ({}) : {:?}",
-                        &block_header.block_hash,
-                        &block_header.height,
-                        e
-                    ),
-                })
-            }
-            Err(e) => {
-                error!(
-                    block.hash = %block_header.block_hash,
-                    block.height = block_header.height,
-                    block.parent = %block_header.previous_block_hash,
-                    block.solution_hash = %block_header.solution_hash,
-                    "Newly produced block failed pre-validation: {:?}",
-                    e
-                );
-                Err(BlockProductionError::Recoverable {
-                    reason: "own_block_rejected",
-                    source: eyre!(
-                        "Newly produced block {:?} ({}) failed pre-validation: {:?}",
-                        &block_header.block_hash.0,
-                        &block_header.height,
-                        e
-                    ),
-                })
-            }
-        }?;
+            error!(
+                block.hash = %block_header.block_hash,
+                block.height = block_header.height,
+                block.parent = %block_header.previous_block_hash,
+                block.solution_hash = %block_header.solution_hash,
+                "Newly produced block failed block discovery: {:?}",
+                e
+            );
+            return Err(classify_own_block_discovery_error(e, block_header));
+        }
 
         // Gossip the EVM payload
         let execution_payload_gossip_data =
@@ -2524,11 +2537,14 @@ mod tx_path_poa_tests {
 #[cfg(test)]
 mod error_classification_tests {
     use super::{
-        BlockProductionError, check_new_payload_status, classify_payload_error,
-        classify_shadow_tx_error,
+        BlockProductionError, check_new_payload_status, classify_own_block_discovery_error,
+        classify_payload_error, classify_shadow_tx_error,
     };
+    use crate::block_discovery::{BlockDiscoveryError, BlockDiscoveryInternalError};
+    use crate::block_validation::PreValidationError;
     use crate::shadow_tx_generator::ShadowTxGenError;
     use alloy_rpc_types_engine::PayloadStatusEnum;
+    use irys_types::{H256, IrysBlockHeader};
     use reth::revm::primitives::B256;
     use reth_payload_primitives::PayloadBuilderError;
     use rstest::rstest;
@@ -2578,6 +2594,73 @@ mod error_classification_tests {
             ),
             "{err:?}"
         );
+    }
+
+    #[rstest]
+    #[case::cache_poisoned(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::CachePoisoned { at: "test" }),
+        true
+    )]
+    #[case::add_block_failed(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::AddBlockFailed {
+            block_hash: H256::zero(),
+            reason: "test".into(),
+        }),
+        true
+    )]
+    #[case::validation_service_unreachable(
+        BlockDiscoveryError::BlockValidationError(
+            PreValidationError::ValidationServiceUnreachable
+        ),
+        true
+    )]
+    #[case::discovery_database_error(
+        BlockDiscoveryError::InternalError(BlockDiscoveryInternalError::DatabaseError(
+            eyre::eyre!("test")
+        )),
+        true
+    )]
+    #[case::parent_not_in_cache(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::ParentNotInCache {
+            parent_hash: H256::zero(),
+            expected_height: 1,
+        }),
+        false
+    )]
+    #[case::block_signature_invalid(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::BlockSignatureInvalid),
+        false
+    )]
+    #[case::invalid_block_height(
+        BlockDiscoveryError::InvalidBlockHeight {
+            expected: 2,
+            got: 3
+        },
+        false
+    )]
+    fn own_block_discovery_error_is_fatal_only_for_node_faults(
+        #[case] err: BlockDiscoveryError,
+        #[case] fatal: bool,
+    ) {
+        let classified =
+            classify_own_block_discovery_error(err, &IrysBlockHeader::new_mock_header());
+        if fatal {
+            assert!(
+                matches!(classified, BlockProductionError::Irrecoverable { .. }),
+                "{classified:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    classified,
+                    BlockProductionError::Recoverable {
+                        reason: "own_block_rejected",
+                        ..
+                    }
+                ),
+                "{classified:?}"
+            );
+        }
     }
 
     #[rstest]
