@@ -221,12 +221,12 @@ async fn write_chunk_to_assigned_modules(
 }
 
 async fn remember_after_module_writes(
-    recent_valid_chunks: &RwLock<LruCache<ChunkPathHash, ()>>,
-    chunk_path_hash: ChunkPathHash,
+    recent_valid_chunks: &RwLock<LruCache<(DataCommitment, ChunkPathHash), ()>>,
+    recent_chunk: (DataCommitment, ChunkPathHash),
     write_result: Result<(), ChunkIngressError>,
 ) -> Result<(), ChunkIngressError> {
     write_result?;
-    recent_valid_chunks.write().await.put(chunk_path_hash, ());
+    recent_valid_chunks.write().await.put(recent_chunk, ());
     Ok(())
 }
 
@@ -568,7 +568,7 @@ impl ChunkIngressServiceInner {
             .recent_valid_chunks
             .read()
             .await
-            .contains(&chunk_path_hash)
+            .contains(&(data_commitment, chunk_path_hash))
         {
             debug!(
                 "Chunk {} already processed recently, skipping re-gossip",
@@ -926,12 +926,16 @@ impl ChunkIngressServiceInner {
         let write_result = write_chunk_to_assigned_modules(&modules, chunk.as_ref())
             .instrument(info_span!("chunk.write_storage_modules"))
             .await;
-        remember_after_module_writes(&self.recent_valid_chunks, chunk_path_hash, write_result)
-            .await
-            .map_err(|error| IngressFailure {
-                error,
-                body_committed: true,
-            })?;
+        remember_after_module_writes(
+            &self.recent_valid_chunks,
+            (data_commitment, chunk_path_hash),
+            write_result,
+        )
+        .await
+        .map_err(|error| IngressFailure {
+            error,
+            body_committed: true,
+        })?;
 
         // Gossip the chunk before moving onto ingress proof checks
         let chunk_data_root = chunk.data_tree_root;
@@ -1745,7 +1749,7 @@ mod tests {
             bytes: vec![0, 1, 2, 3, 4].into(),
             tx_offset: TxChunkOffset::from(0),
         };
-        let path_hash = chunk.chunk_path_hash();
+        let path_hash = (DataCommitment(data_root), chunk.chunk_path_hash());
         let recent = RwLock::new(LruCache::new(NonZeroUsize::new(8).expect("nonzero")));
 
         storage_module.fail_next_index_commit();
@@ -2701,7 +2705,7 @@ mod tests {
             .recent_valid_chunks
             .write()
             .await
-            .put(seen.chunk_path_hash(), ());
+            .put((claim_key(data_root), seen.chunk_path_hash()), ());
 
         inner
             .process_pending_chunks_for_root(claim_key(data_root))

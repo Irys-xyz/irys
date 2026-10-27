@@ -156,7 +156,11 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) max_control_plane_tasks: u32,
     pub(crate) service_senders: ServiceSenders,
     pub(crate) storage_modules_guard: StorageModulesReadGuard,
-    pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkPathHash, ()>>,
+    /// Chunks already written, by commitment and path. Two commitments of one
+    /// data tree root share chunk paths, so the path alone does not identify
+    /// the chunk.
+    pub(crate) recent_valid_chunks:
+        tokio::sync::RwLock<LruCache<(DataCommitment, ChunkPathHash), ()>>,
     pub(crate) pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
     pub(crate) pending_ingress_proofs: Mutex<PendingIngressProofs>,
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
