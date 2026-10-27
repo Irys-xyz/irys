@@ -25,6 +25,7 @@ use irys_types::{
     ChunkFormat, Config, DataCommitment, DataLedger, IrysAddress, PartitionChunkOffset,
     SendTraced as _, TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk,
     app_state::DatabaseProvider,
+    data_tree::{Geometry, verify_data_chunk},
 };
 use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
@@ -99,30 +100,17 @@ async fn attempt_data_sync_write(
 }
 
 /// The peer body must match its own data path. Ingress can return `Ok`
-/// without this check: a recent-chunk hit keys only the path hash, and a
-/// wrong length returns `Ok` before the leaf hash is compared.
-fn validate_peer_unpacked_chunk(chunk: &UnpackedChunk, chunk_size: u64) -> eyre::Result<()> {
-    let (min_byte, max_byte) =
-        irys_types::expected_chunk_byte_range(chunk.tx_offset, chunk.data_size, chunk_size)
-            .map_err(|error| eyre::eyre!("peer chunk data path range: {error}"))?;
-    let target = u128::from(max_byte - 1);
-    let path = irys_types::validate_path(chunk.data_tree_root.0.0, &chunk.data_path, target)
-        .map_err(|error| eyre::eyre!("peer chunk data path: {error}"))?;
-    let chunk_len = u64::try_from(chunk.bytes.len())
-        .map_err(|_| eyre::eyre!("peer chunk length exceeds u64"))?;
-    let expected_len = max_byte - min_byte;
-    eyre::ensure!(
-        chunk_len == expected_len,
-        "peer chunk length {chunk_len} does not match the data path range {expected_len}"
-    );
-    irys_types::validate_path_byte_range(&path, (min_byte, max_byte))
-        .map_err(|error| eyre::eyre!("peer chunk data path range: {error}"))?;
-    let hash = irys_types::hash_sha256(&chunk.bytes.0);
-    eyre::ensure!(
-        path.leaf_hash == hash,
-        "peer chunk hash does not match the data path leaf"
-    );
-    Ok(())
+/// without this check: a recent-chunk hit keys only the chunk key, not the body.
+fn validate_peer_unpacked_chunk(chunk: &UnpackedChunk, geometry: &Geometry) -> eyre::Result<()> {
+    verify_data_chunk(
+        geometry,
+        chunk.data_tree_root,
+        chunk.data_size,
+        chunk.tx_offset,
+        &chunk.bytes.0,
+        &chunk.data_path.0,
+    )
+    .map_err(|error| eyre::eyre!("peer chunk failed verification: {error}"))
 }
 
 pub(crate) fn ingress_error_is_invalid_peer_data(error: &ChunkIngressError) -> bool {
@@ -228,7 +216,7 @@ fn check_against_placement(
     data_root: DataTreeRoot,
     tx_offset: TxChunkOffset,
     data_size: u64,
-    chunk_size: u64,
+    geometry: &Geometry,
 ) -> Result<UnpackedChunk, DeliveryError> {
     if unpacked.data_tree_root != data_root
         || unpacked.tx_offset != tx_offset
@@ -242,7 +230,7 @@ fn check_against_placement(
             ),
         });
     }
-    validate_peer_unpacked_chunk(&unpacked, chunk_size)
+    validate_peer_unpacked_chunk(&unpacked, geometry)
         .map_err(|error| DeliveryError::InvalidBody(error.to_string()))?;
     Ok(unpacked)
 }
@@ -258,7 +246,7 @@ struct DeliveryPipeline {
     /// Delivered bodies whose task has not finished.
     held_bodies: Arc<AtomicUsize>,
     entropy_packing_iterations: u32,
-    chunk_size: u64,
+    data_tree_geometry: Geometry,
     chain_id: u64,
     /// [`DELIVERY_TIMEOUT`] outside tests.
     timeout: Duration,
@@ -287,7 +275,7 @@ async fn unpack_off_loop(
     chunk: ChunkFormat,
     pipeline: &DeliveryPipeline,
 ) -> Result<UnpackedChunk, DeliveryError> {
-    let chunk_size = usize::try_from(pipeline.chunk_size)
+    let chunk_size = usize::try_from(pipeline.data_tree_geometry.chunk_size())
         .map_err(|_| DeliveryError::Local("chunk size exceeds usize".to_string()))?;
     // Entropy is `chunk_size` bytes. A longer body is the peer's data, rejected
     // before the XOR indexes that buffer.
@@ -348,10 +336,10 @@ async fn process_delivered_body(
             data_root,
             tx_offset,
             data_size,
-            pipeline.chunk_size,
+            &pipeline.data_tree_geometry,
         );
     }
-    validate_peer_unpacked_chunk(&unpacked, pipeline.chunk_size)
+    validate_peer_unpacked_chunk(&unpacked, &pipeline.data_tree_geometry)
         .map_err(|error| DeliveryError::InvalidBody(error.to_string()))?;
     let _permit = Arc::clone(&pipeline.ingress_permits)
         .acquire_owned()
@@ -806,7 +794,7 @@ impl DataSyncServiceInner {
             ingress_permits: Arc::new(tokio::sync::Semaphore::new(DATA_SYNC_INGRESS_PERMITS)),
             held_bodies: Arc::new(AtomicUsize::new(0)),
             entropy_packing_iterations: config.consensus.entropy_packing_iterations,
-            chunk_size: config.consensus.chunk_size,
+            data_tree_geometry: config.data_tree_geometry(),
             chain_id: config.consensus.chain_id,
             timeout: DELIVERY_TIMEOUT,
         };
@@ -2483,7 +2471,9 @@ mod ingress_handoff_tests {
             ingress_permits: Arc::new(tokio::sync::Semaphore::new(1)),
             held_bodies: Arc::default(),
             entropy_packing_iterations: 1_000,
-            chunk_size,
+            // One segment per chunk: any chunk size is a valid geometry.
+            data_tree_geometry: irys_types::data_tree::Geometry::new(chunk_size, 1, 1)
+                .expect("valid test geometry"),
             chain_id: 7,
             timeout: Duration::from_secs(5),
         }
@@ -3388,9 +3378,9 @@ mod peer_chunk_validation_tests {
             ChunkFormat::Unpacked(mismatched),
         )
         .await
-        .expect_err("bytes that miss the leaf hash must not be stored");
+        .expect_err("bytes the proof does not open must not be stored");
         assert!(
-            err.to_string().contains("leaf") || err.to_string().contains("hash"),
+            err.to_string().contains("commitment does not match"),
             "{err}"
         );
         assert!(!sm.is_data_write_pending_at(offset));
@@ -3855,9 +3845,9 @@ mod peer_chunk_validation_tests {
             ChunkFormat::Unpacked(bad_bytes),
         )
         .await
-        .expect_err("bytes that miss the leaf hash must not be stored");
+        .expect_err("bytes the proof does not open must not be stored");
         assert!(
-            error.to_string().contains("leaf") || error.to_string().contains("hash"),
+            error.to_string().contains("commitment does not match"),
             "{error}"
         );
         assert!(!h.sm.is_data_write_pending_at(offset));
