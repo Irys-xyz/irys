@@ -1,11 +1,12 @@
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::Address;
 use alloy_rpc_types_engine::PayloadAttributes;
+use clap::{CommandFactory as _, FromArgMatches as _, parser::ValueSource};
 use irys_database::db::RethDbWrapper;
 use irys_reth::{IrysEngineValidatorBuilder, IrysEthereumNode, IrysPayloadBuilderAttributes};
 use irys_types::NetworkConfigWithDefaults as _;
 use reth::{
-    args::{DatabaseArgs, MetricArgs},
+    args::{DatabaseArgs, MetricArgs, RpcServerArgs},
     revm::primitives::B256,
     rpc::builder::{RethRpcModule, RpcModuleSelection},
     tasks::TaskExecutor,
@@ -110,6 +111,51 @@ fn compute_metrics_addr(
     Ok(addr)
 }
 
+/// Wraps Reth's RPC server flags so `reth.rpc_args` parses like `reth node` RPC flags.
+#[derive(clap::Parser)]
+struct RethRpcFlags {
+    #[command(flatten)]
+    rpc: RpcServerArgs,
+}
+
+/// Clap argument ids of the [`RpcServerArgs`] fields that `run_node` sets.
+/// `reth.rpc_args` must not set them.
+const IRYS_OWNED_RPC_ARGS: [&str; 3] = ["http", "http_addr", "http_corsdomain"];
+
+/// Parses `reth.rpc_args` into Reth's RPC server settings.
+///
+/// Fails if a flag is not valid or sets a field in [`IRYS_OWNED_RPC_ARGS`].
+/// Without `--http.api`, the HTTP RPC serves only the `eth` namespace.
+fn parse_rpc_args(rpc_args: &[String]) -> eyre::Result<RpcServerArgs> {
+    let command = RethRpcFlags::command();
+    let argv = std::iter::once("reth").chain(rpc_args.iter().map(String::as_str));
+    let matches = command
+        .clone()
+        .try_get_matches_from(argv)
+        .map_err(|e| eyre::eyre!("invalid reth.rpc_args: {e}"))?;
+
+    for id in IRYS_OWNED_RPC_ARGS {
+        if matches.value_source(id) == Some(ValueSource::CommandLine) {
+            let flag = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .and_then(|arg| arg.get_long())
+                .unwrap_or(id);
+            eyre::bail!("invalid reth.rpc_args: --{flag} is set by Irys and cannot be changed");
+        }
+    }
+
+    let mut rpc = RethRpcFlags::from_arg_matches(&matches)
+        .map_err(|e| eyre::eyre!("invalid reth.rpc_args: {e}"))?
+        .rpc;
+    if matches.value_source("http_api") != Some(ValueSource::CommandLine) {
+        rpc.http_api = Some(RpcModuleSelection::Selection(HashSet::from([
+            RethRpcModule::Eth,
+        ])));
+    }
+    Ok(rpc)
+}
+
 pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
@@ -118,6 +164,7 @@ pub async fn run_node(
     random_ports: bool,
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
+    reth_config.rpc = parse_rpc_args(&node_config.reth.rpc_args)?;
 
     let unwind_runtime =
         reth::tasks::RuntimeBuilder::new(reth::tasks::RuntimeConfig::default().with_tokio(
@@ -143,9 +190,6 @@ pub async fn run_node(
 
     reth_config.network.discovery.disable_discovery = true;
     reth_config.rpc.http = true;
-    reth_config.rpc.http_api = Some(RpcModuleSelection::Selection(HashSet::from([
-        RethRpcModule::Eth,
-    ])));
 
     reth_config.rpc.http_addr = node_config
         .reth
@@ -271,5 +315,72 @@ mod tests {
         let cfg = irys_types::NodeConfig::testing();
         let addr = compute_metrics_addr(&cfg, true).expect("valid addr");
         assert_eq!(addr.port(), 0);
+    }
+
+    fn to_args(flags: &[&str]) -> Vec<String> {
+        flags.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn rpc_args_empty_serves_only_eth() {
+        let rpc = parse_rpc_args(&[]).expect("empty rpc_args parse");
+        assert_eq!(
+            rpc,
+            RpcServerArgs {
+                http_api: Some(RpcModuleSelection::Selection(HashSet::from([
+                    RethRpcModule::Eth
+                ]))),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn rpc_args_valid_flags_are_applied() {
+        let rpc = parse_rpc_args(&to_args(&[
+            "--http.api=eth,debug",
+            "--rpc.max-tracing-requests=4",
+            "--rpc.gascap",
+            "1000000",
+        ]))
+        .expect("valid rpc_args parse");
+        assert_eq!(
+            rpc.http_api,
+            Some(RpcModuleSelection::Selection(HashSet::from([
+                RethRpcModule::Eth,
+                RethRpcModule::Debug
+            ])))
+        );
+        assert_eq!(rpc.rpc_max_tracing_requests, 4);
+        assert_eq!(rpc.rpc_gas_cap, 1_000_000);
+    }
+
+    #[test]
+    fn rpc_args_unknown_flag_fails() {
+        let err = parse_rpc_args(&to_args(&["--http.no-such-flag"])).unwrap_err();
+        assert!(err.to_string().contains("reth.rpc_args"), "{err}");
+    }
+
+    #[rstest::rstest]
+    #[case("--http", "--http")]
+    #[case("--http.addr=0.0.0.0", "--http.addr")]
+    #[case("--http.corsdomain=example.com", "--http.corsdomain")]
+    fn rpc_args_irys_owned_flag_fails(#[case] arg: &str, #[case] flag: &str) {
+        let err = parse_rpc_args(&to_args(&[arg])).unwrap_err().to_string();
+        assert!(err.contains("reth.rpc_args"), "{err}");
+        assert!(err.contains(&format!("{flag} is set by Irys")), "{err}");
+    }
+
+    /// Each owned id must name a Reth RPC argument, or the check above
+    /// would not see the flag.
+    #[test]
+    fn irys_owned_rpc_args_exist() {
+        let command = RethRpcFlags::command();
+        for id in IRYS_OWNED_RPC_ARGS {
+            assert!(
+                command.get_arguments().any(|arg| arg.get_id() == id),
+                "{id} is not an RpcServerArgs argument"
+            );
+        }
     }
 }

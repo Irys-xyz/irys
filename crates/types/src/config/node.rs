@@ -1040,6 +1040,12 @@ pub struct RethConfig {
     /// Number of additional transaction validation tasks.
     #[serde(default = "default_additional_validation_tasks")]
     pub additional_validation_tasks: usize,
+
+    /// Reth RPC server flags, the same syntax as `reth node` RPC flags,
+    /// e.g. `["--http.api=eth,debug", "--rpc.max-tracing-requests=4"]`.
+    /// Empty by default: the HTTP RPC then serves only the `eth` namespace.
+    #[serde(default)]
+    pub rpc_args: Vec<String>,
 }
 
 fn default_reth_db_sync_mode() -> DbSyncMode {
@@ -1781,6 +1787,7 @@ impl NodeConfig {
                 db_sync_mode: DbSyncMode::UtterlyNoSync,
                 cross_block_cache_size_megabytes: Some(10),
                 additional_validation_tasks: 0,
+                rpc_args: Vec::new(),
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
@@ -1994,6 +2001,7 @@ impl NodeConfig {
                 db_sync_mode: DbSyncMode::Durable,
                 cross_block_cache_size_megabytes: None,
                 additional_validation_tasks: 2,
+                rpc_args: Vec::new(),
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
