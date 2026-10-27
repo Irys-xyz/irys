@@ -8408,8 +8408,8 @@ mod tests {
     }
 
     #[test]
-    fn short_interval_key_fails_the_placement_scans() -> eyre::Result<()> {
-        let dir = temp_dir("submodule_rocks_short_interval_key");
+    fn malformed_interval_key_fails_the_placement_scans() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_malformed_interval_key");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         place_span(&store, 0, 7, H256::repeat_byte(4), 0, 1, 0, &[], None)?;
         assert_eq!(store.read_placements(None, 10)?.len(), 1);
