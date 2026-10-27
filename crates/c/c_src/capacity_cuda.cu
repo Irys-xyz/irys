@@ -168,7 +168,6 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
 {
     unsigned char *d_chunks = NULL;
     unsigned char *d_chunk_id = NULL;
-    cudaEvent_t start = NULL;
     cudaEvent_t stop = NULL;
     entropy_chunk_errors result = CUDA_ERROR;
 
@@ -199,18 +198,20 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
         goto cleanup;
     }
 
-    // The events only time the kernel; failing to create them is still reported.
-    if (cudaEventCreate(&start) != cudaSuccess || cudaEventCreate(&stop) != cudaSuccess) {
+    // The stop event marks the end of the kernel; the host waits on it below.
+    if (cudaEventCreate(&stop) != cudaSuccess) {
         printf("cudaEventCreate failed\n");
         goto cleanup;
     }
 
     // Launch kernel
-    cudaEventRecord(start);
-
     compute_entropy_chunks_cuda_kernel<<<blocks, threads_per_block>>>(d_chunk_id, chunk_offset_start, chunks_count, d_chunks, packing_sha_1_5_s);
 
-    cudaEventRecord(stop);
+    if (cudaEventRecord(stop) != cudaSuccess) {
+        printf("cudaEventRecord failed\n");
+        result = CUDA_KERNEL_LAUNCH_FAILED;
+        goto cleanup;
+    }
 
     // Wait for the stop event to complete
     if (cudaEventSynchronize(stop) != cudaSuccess) {
@@ -237,7 +238,6 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
     result = NO_ERROR;
 
 cleanup:
-    if (start) cudaEventDestroy(start);
     if (stop) cudaEventDestroy(stop);
     cudaFree(d_chunks);
     cudaFree(d_chunk_id);
