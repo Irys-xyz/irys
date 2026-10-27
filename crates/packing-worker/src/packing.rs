@@ -12,6 +12,7 @@ use irys_packing::capacity_pack_range_cuda_c;
 #[cfg(feature = "nvidia")]
 use irys_types::split_interval;
 
+use irys_packing::capacity_single::SHA_HASH_SIZE;
 use irys_types::remote_packing::REMOTE_PACK_WINDOW_CHUNKS;
 
 use crate::types::RemotePackingRequest;
@@ -20,12 +21,17 @@ use crate::worker::{PACKING_TYPE, PackingWorkerState};
 /// Rejects requests with an unsupported chunk size or a range wider than one node window,
 /// before the worker allocates for them. Does not bound `entropy_packing_iterations`.
 ///
-/// The CUDA kernel needs the protocol chunk size; the CPU path accepts `1..=CHUNK_SIZE`.
+/// The CUDA kernel needs the protocol chunk size. The CPU path builds entropy from whole
+/// SHA-256 outputs, so it needs a multiple of `SHA_HASH_SIZE` in `SHA_HASH_SIZE..=CHUNK_SIZE`.
 pub fn validate_request(request: &RemotePackingRequest) -> Result<(), String> {
     let max_chunk_size = irys_types::ConsensusConfig::CHUNK_SIZE;
+    let hash_size = SHA_HASH_SIZE as u64;
     let chunk_size_supported = match PACKING_TYPE {
         PackingType::CUDA => request.chunk_size == max_chunk_size,
-        _ => (1..=max_chunk_size).contains(&request.chunk_size),
+        _ => {
+            (hash_size..=max_chunk_size).contains(&request.chunk_size)
+                && request.chunk_size.is_multiple_of(hash_size)
+        }
     };
     if !chunk_size_supported {
         return Err(format!(
@@ -34,7 +40,7 @@ pub fn validate_request(request: &RemotePackingRequest) -> Result<(), String> {
             if matches!(PACKING_TYPE, PackingType::CUDA) {
                 format!("{max_chunk_size}")
             } else {
-                format!("1..={max_chunk_size}")
+                format!("a multiple of {hash_size} in {hash_size}..={max_chunk_size}")
             }
         ));
     }
@@ -212,6 +218,15 @@ mod tests {
     #[test]
     fn validate_request_accepts_small_chunk_size_on_cpu() {
         assert!(validate_request(&request(32, 0, 10)).is_ok());
+        assert!(validate_request(&request(64, 0, 10)).is_ok());
+    }
+
+    #[cfg(not(feature = "nvidia"))]
+    #[test]
+    fn validate_request_rejects_chunk_size_not_a_multiple_of_the_hash_size_on_cpu() {
+        assert!(validate_request(&request(1, 0, 10)).is_err());
+        assert!(validate_request(&request(31, 0, 10)).is_err());
+        assert!(validate_request(&request(100, 0, 10)).is_err());
     }
 
     #[test]
