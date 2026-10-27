@@ -764,7 +764,7 @@ impl ChunkIngressServiceInner {
             })
             .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
-        // Early out: only generate ingress proofs for confirmed data sizes
+        // Early out: no cache row, no header for this commitment
         let Some(cdr) = cached_data_root else {
             return Ok(());
         };
@@ -773,7 +773,7 @@ impl ChunkIngressServiceInner {
             return Ok(());
         }
 
-        // Be explicit that data_size used from here on is the confirmed data size
+        // The commitment fixes the size, so the cached size is final
         let data_size = cdr.data_size;
 
         let local_address = self.config.irys_signer().address();
@@ -1177,7 +1177,7 @@ mod tests {
         assert!(!should_schedule_pending_drain_after_park(Err(())));
     }
 
-    /// Confirmed-but-not-block-set state: pending tx with chunks staged but
+    /// Not-in-block-set state: pending tx with chunks staged but
     /// no `BlockConfirmed` has populated `block_set` yet.  Today the gate
     /// **short-circuits** — pinning this so a future widening to a
     /// `txid_set` + canonical-metadata fall-through is a deliberate change.
