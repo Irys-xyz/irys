@@ -6,13 +6,13 @@ use super::metrics::{
     record_flush_failure, record_validation_duration,
 };
 
+use irys_data_tree::{SizeError, VerifyError};
 use irys_database::{complete_ingress_leaves, db::IrysDatabaseExt as _};
 use irys_domain::{StorageModule, WriteDataChunkError};
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
     ChunkKey, DataCommitment, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
-    SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256,
-    irys::IrysSigner, validate_path, validate_path_byte_range,
+    SendTraced as _, chunk::UnpackedChunk, data_tree::verify_data_chunk, irys::IrysSigner,
 };
 use irys_utils::ElapsedMs as _;
 use lru::LruCache;
@@ -582,64 +582,24 @@ impl ChunkIngressServiceInner {
             return Err(CriticalChunkIngressError::InvalidDataSize.into());
         }
 
-        let (expected_min_byte_range, expected_max_byte_range) =
-            expected_chunk_byte_range(chunk.tx_offset, data_size, chunk_size)
-                .map_err(|error| CriticalChunkIngressError::InvalidOffset(error.to_string()))?;
-
-        // The header fixes the length of every chunk (spec §2 `chunk_len`). The
-        // length is checked before the proof, as `verify_chunk` does (spec §5).
-        // The size is non-zero and the offset is in range here, so only a size
-        // above the geometry maximum fails `chunk_len`.
-        let expected_chunk_len = geometry
-            .chunk_len(data_size, *chunk.tx_offset)
-            .map_err(|_| CriticalChunkIngressError::InvalidDataSize)?;
+        let validation_start = Instant::now();
         let chunk_len = u64::try_from(chunk.bytes.len())
             .map_err(|_| CriticalChunkIngressError::InvalidChunkSize)?;
-        if chunk_len != expected_chunk_len {
+        if let Err(error) = verify_data_chunk(
+            &geometry,
+            chunk.data_tree_root,
+            data_size,
+            chunk.tx_offset,
+            &chunk.bytes.0,
+            &chunk.data_path.0,
+        ) {
             warn!(
-                "{:?}: tx_offset {} chunk_len {} expected {}",
-                CriticalChunkIngressError::InvalidChunkSize,
-                chunk.tx_offset,
+                %error,
+                chunk.tx_offset = %chunk.tx_offset,
                 chunk_len,
-                expected_chunk_len
+                "Chunk failed verification"
             );
-            return Err(CriticalChunkIngressError::InvalidChunkSize.into());
-        }
-
-        let target_offset = u128::from(expected_max_byte_range - 1);
-        let root_hash = chunk.data_tree_root.0.0;
-        let path_buff = &chunk.data_path;
-
-        info!(
-            "chunk_offset:{} data_size:{} offset:{}",
-            chunk.tx_offset, chunk.data_size, target_offset
-        );
-
-        let validation_start = Instant::now();
-        let path_result = match validate_path(root_hash, path_buff, target_offset)
-            .map_err(|_| CriticalChunkIngressError::InvalidProof)
-        {
-            Err(e) => {
-                error!("error validating path: {:?}", e);
-                return Err(e.into());
-            }
-            Ok(v) => v,
-        };
-
-        validate_path_byte_range(
-            &path_result,
-            (expected_min_byte_range, expected_max_byte_range),
-        )
-        .map_err(|error| CriticalChunkIngressError::InvalidOffset(error.to_string()))?;
-
-        // Check that the leaf hash on the data_path matches the chunk_hash
-        let hash_256 = hash_sha256(&chunk.bytes.0);
-        if path_result.leaf_hash != hash_256 {
-            warn!(
-                "{:?}: leaf_hash does not match hashed chunk_bytes",
-                CriticalChunkIngressError::InvalidDataHash,
-            );
-            return Err(CriticalChunkIngressError::InvalidDataHash.into());
+            return Err(ingest_error_for_verify_failure(error).into());
         }
 
         record_validation_duration(validation_start.elapsed_ms());
@@ -980,6 +940,19 @@ impl CriticalChunkIngressError {
     }
 }
 
+/// Ingest error for a chunk that fails [`verify_data_chunk`]. Each result is
+/// a permanent reject of invalid peer data.
+fn ingest_error_for_verify_failure(error: VerifyError) -> CriticalChunkIngressError {
+    match error {
+        VerifyError::Size(SizeError::DataSizeOutOfRange { .. }) => {
+            CriticalChunkIngressError::InvalidDataSize
+        }
+        VerifyError::Size(error) => CriticalChunkIngressError::InvalidOffset(error.to_string()),
+        VerifyError::InvalidChunkLength { .. } => CriticalChunkIngressError::InvalidChunkSize,
+        _ => CriticalChunkIngressError::InvalidProof,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AdvisoryChunkIngressError {
     PreHeaderOversizedBytes,
@@ -1152,6 +1125,42 @@ mod tests {
         ));
         let other = ChunkIngressError::Critical(CriticalChunkIngressError::Other("sm".into()));
         assert!(!should_restore_pending_chunk_on_drain_error(&other, true));
+    }
+
+    /// Every chunk-verification failure stays a permanent reject of peer data.
+    #[test]
+    fn every_verify_failure_is_a_permanent_reject() {
+        let failures = [
+            VerifyError::Size(SizeError::DataSizeOutOfRange {
+                data_size: 0,
+                max_data_size: 1,
+            }),
+            VerifyError::Size(SizeError::ChunkIndexOutOfRange {
+                chunk_index: 2,
+                chunk_count: 2,
+            }),
+            VerifyError::InvalidChunkLength {
+                expected: 32,
+                actual: 31,
+            },
+            VerifyError::InvalidProofLength {
+                expected: 64,
+                actual: 63,
+            },
+            VerifyError::SizeWitnessMismatch,
+            VerifyError::CommitmentMismatch,
+        ];
+        for failure in failures {
+            let error = ChunkIngressError::Critical(ingest_error_for_verify_failure(failure));
+            assert!(
+                is_permanent_chunk_reject(&error),
+                "{failure:?} -> {error:?}"
+            );
+            assert!(
+                crate::data_sync_service::ingress_error_is_invalid_peer_data(&error),
+                "{failure:?} -> {error:?}"
+            );
+        }
     }
 
     /// Pre-header park (no CDR at first look): any post-park CDR should drain.

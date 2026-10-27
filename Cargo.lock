@@ -4964,6 +4964,7 @@ dependencies = [
  "futures",
  "irys-api-client",
  "irys-config",
+ "irys-data-tree",
  "irys-database",
  "irys-domain",
  "irys-efficient-sampling",

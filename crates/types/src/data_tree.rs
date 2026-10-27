@@ -20,8 +20,9 @@ use crate::{Base64, H256, TxChunkOffset, ensure_proof_layout, hash_sha256, valid
 use alloy_primitives::bytes::BufMut;
 use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Arbitrary;
-/// Re-exported so node crates name the geometry without a direct dependency
-/// on the tree crate.
+/// Re-exported so node crates can name the geometry through `irys-types`.
+/// A crate that matches on the tree crate's error variants depends on it
+/// directly.
 pub use irys_data_tree::Geometry;
 use irys_data_tree::VerifyError;
 use reth_codecs::Compact;
