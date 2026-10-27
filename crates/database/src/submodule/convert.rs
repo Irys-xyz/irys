@@ -5060,6 +5060,7 @@ fn verify_reset_target(
 
 #[cfg(test)]
 mod tests {
+    use irys_types::DataTreeRoot;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -5130,7 +5131,7 @@ mod tests {
     fn tx_at(n: u64, size: u64) -> DataTransactionHeader {
         let mut header = DataTransactionHeader::default();
         header.id = hid(n);
-        header.data_root = hid(n.saturating_add(100));
+        header.data_tree_root = DataTreeRoot(hid(n.saturating_add(100)));
         header.prefix_hash = hid(n.saturating_add(200));
         header.data_size = size;
         header
@@ -7342,8 +7343,8 @@ mod tests {
         let mut right = tx_at(2, 32);
         let data_root = hid(50);
         let prefix = hid(60);
-        left.data_root = data_root;
-        right.data_root = data_root;
+        left.data_tree_root = DataTreeRoot(data_root);
+        right.data_tree_root = DataTreeRoot(data_root);
         left.prefix_hash = prefix;
         right.prefix_hash = prefix;
         let blocks = [
