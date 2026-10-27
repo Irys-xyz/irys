@@ -233,9 +233,12 @@ pub trait ChunkFetcher: Send + Sync + std::fmt::Debug {
         timeout: Duration,
     ) -> Result<ChunkFormat, ChunkFetchError>;
 
+    /// Chunk `tx_offset` of the data with tree root `data_root` and size
+    /// `data_size`. The peer serves that size only.
     async fn fetch_chunk_by_data_root(
         &self,
         data_root: DataTreeRoot,
+        data_size: u64,
         tx_offset: TxChunkOffset,
         api_addr: SocketAddr,
         timeout: Duration,
@@ -349,19 +352,21 @@ impl ChunkFetcher for HttpChunkFetcher {
     async fn fetch_chunk_by_data_root(
         &self,
         data_root: DataTreeRoot,
+        data_size: u64,
         tx_offset: TxChunkOffset,
         api_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<ChunkFormat, ChunkFetchError> {
         // Non-assignee proof generators serve from cache via this route (PR1).
+        // `dataSize` makes the peer serve this size of the root only.
         let url = format!(
-            "http://{}/v1/chunk/data-root/{}/{}/{}",
-            api_addr, self.ledger_id, data_root, *tx_offset
+            "http://{}/v1/chunk/data-root/{}/{}/{}?dataSize={}",
+            api_addr, self.ledger_id, data_root, *tx_offset, data_size
         );
         self.get_chunk_json(
             url,
             timeout,
-            format!("data_root={data_root} tx_offset={tx_offset}"),
+            format!("data_root={data_root} data_size={data_size} tx_offset={tx_offset}"),
         )
         .await
     }
@@ -475,6 +480,7 @@ impl ChunkFetcher for MockChunkFetcher {
     async fn fetch_chunk_by_data_root(
         &self,
         data_root: DataTreeRoot,
+        _data_size: u64,
         tx_offset: TxChunkOffset,
         api_addr: SocketAddr,
         _timeout: Duration,

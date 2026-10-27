@@ -89,6 +89,7 @@ enum FetchMode {
     LedgerOffset(LedgerChunkOffset),
     DataRoot {
         data_root: irys_types::DataTreeRoot,
+        data_size: u64,
         tx_offset: irys_types::TxChunkOffset,
     },
 }
@@ -2139,11 +2140,16 @@ impl ChunkOrchestrator {
                 LedgerChunkOffset::from(start_ledger_offset + u64::from(chunk_offset));
             FetchMode::LedgerOffset(ledger_chunk_offset)
         } else {
+            // The placement's size goes with the request, so the peer serves
+            // the chunk of this commitment and not another size of the root.
             match irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
-                self.storage_module.data_root_and_tx_offset_at(chunk_offset)
+                self.storage_module
+                    .data_root_and_tx_offset_span(chunk_offset, chunk_offset)
+                    .map(|span| span.into_iter().next().flatten())
             }) {
-                Ok(Some((_, data_root, tx_offset))) => FetchMode::DataRoot {
+                Ok(Some((_, data_root, tx_offset, data_size))) => FetchMode::DataRoot {
                     data_root,
+                    data_size,
                     tx_offset,
                 },
                 Ok(None) => {
@@ -2216,10 +2222,13 @@ impl ChunkOrchestrator {
                     }
                     FetchMode::DataRoot {
                         data_root,
+                        data_size,
                         tx_offset,
                     } => {
                         chunk_fetcher
-                            .fetch_chunk_by_data_root(data_root, tx_offset, api_addr, timeout)
+                            .fetch_chunk_by_data_root(
+                                data_root, data_size, tx_offset, api_addr, timeout,
+                            )
                             .await
                     }
                 };

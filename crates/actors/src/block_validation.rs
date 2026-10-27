@@ -7128,13 +7128,15 @@ pub async fn data_txs_are_valid(
 
                     if chunk_bytes.is_none() {
                         for api_addr in api_addrs.iter() {
-                            // Build data_root/offset fetch URL using peer API address
+                            // Build data_root/offset fetch URL using peer API address.
+                            // `dataSize` makes the peer serve this tx's size of the root.
                             let url = format!(
-                                "http://{}/v1/chunk/data-root/{}/{}/{}",
+                                "http://{}/v1/chunk/data-root/{}/{}/{}?dataSize={}",
                                 api_addr,
                                 publish_ledger.ledger_id,
                                 tx_header.data_tree_root,
-                                tx_offset_u32
+                                tx_offset_u32,
+                                tx_header.data_size
                             );
 
                             // Fetch with short timeout
@@ -7196,6 +7198,7 @@ pub async fn data_txs_are_valid(
 
                             // Basic sanity checks before ingest
                             if unpacked.data_tree_root != tx_header.data_tree_root
+                                || unpacked.data_size != tx_header.data_size
                                 || *unpacked.tx_offset != tx_offset_u32
                             {
                                 continue;

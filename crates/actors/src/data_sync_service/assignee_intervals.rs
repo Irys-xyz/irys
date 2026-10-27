@@ -1227,12 +1227,13 @@ mod tests {
             async fn fetch_chunk_by_data_root(
                 &self,
                 root: irys_types::DataTreeRoot,
+                data_size: u64,
                 tx_offset: irys_types::TxChunkOffset,
                 api: SocketAddr,
                 timeout: Duration,
             ) -> Result<irys_types::ChunkFormat, ChunkFetchError> {
                 self.0
-                    .fetch_chunk_by_data_root(root, tx_offset, api, timeout)
+                    .fetch_chunk_by_data_root(root, data_size, tx_offset, api, timeout)
                     .await
             }
             async fn fetch_data_intervals(
