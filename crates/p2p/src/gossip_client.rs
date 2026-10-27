@@ -8,6 +8,7 @@ use crate::types::{GossipError, GossipResult, GossipRoutes};
 use crate::wire_types::{self, GossipResponse, RejectionReason};
 use core::time::Duration;
 use futures::StreamExt as _;
+use irys_domain::execution_payload_cache::PayloadBodyMismatchError;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
@@ -20,6 +21,7 @@ use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use opentelemetry::propagation::Injector;
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
+use reth::consensus_common::validation::validate_body_against_header;
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
@@ -2111,8 +2113,9 @@ impl GossipClient {
         }
     }
 
-    /// A payload whose hash is not the requested one is bogus data from the
-    /// peer: the pull scores the peer down and tries the next one.
+    /// A payload whose hash is not the requested one, or whose body does not
+    /// match its header, is bogus data from the peer: the pull scores the
+    /// peer down and tries the next one.
     fn requested_execution_payload(
         requested_hash: B256,
         gossip_data: GossipDataV2,
@@ -2124,6 +2127,15 @@ impl GossipClient {
                 "Requested execution payload {requested_hash}, got {received_hash}"
             )));
         }
+        validate_body_against_header(&block.body, &block.header).map_err(|source| {
+            PeerNetworkError::UnexpectedData(
+                PayloadBodyMismatchError {
+                    evm_block_hash: requested_hash,
+                    source,
+                }
+                .to_string(),
+            )
+        })?;
         Ok(block)
     }
 

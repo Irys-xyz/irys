@@ -2833,7 +2833,7 @@ mod execution_payload_tests {
         );
     }
 
-    /// A peer that serves a payload the handler rejects on every attempt
+    /// A peer that serves a payload the pull rejects on every attempt
     /// must surface as an error to the caller, not as success.
     #[tokio::test]
     async fn pull_fails_when_every_served_payload_is_rejected() {
@@ -2847,6 +2847,7 @@ mod execution_payload_tests {
         });
         let addr = server.spawn();
         let peer = peer_list_item(0x41, addr, true, PeerScore::INITIAL);
+        let peer_id = peer.peer_id;
         handler.peer_list.add_or_update_peer(peer, true);
 
         let result = handler
@@ -2855,8 +2856,8 @@ mod execution_payload_tests {
         assert!(
             matches!(
                 result,
-                Err(GossipError::InvalidData(
-                    InvalidDataError::ExecutionPayloadBodyMismatch(_)
+                Err(GossipError::PeerNetwork(
+                    PeerNetworkError::FailedToRequestData(_)
                 ))
             ),
             "{result:?}"
@@ -2867,6 +2868,65 @@ mod execution_payload_tests {
                 .is_payload_in_cache(&evm_block_hash)
                 .await
         );
+        let score = handler
+            .peer_list
+            .get_peer(&peer_id)
+            .expect("peer is known")
+            .reputation_score
+            .get();
+        assert!(score < PeerScore::INITIAL, "score {score}");
+    }
+
+    /// A peer that serves a payload with the requested hash but a body that
+    /// does not match its header is scored down, and the pull takes the
+    /// payload from the next peer.
+    #[tokio::test]
+    async fn pull_skips_peer_that_serves_mismatched_body() {
+        let (_dir, handler) = test_handler();
+        let (matching, mismatched) = matching_and_mismatched_blocks();
+        let evm_block_hash = matching.hash_slow();
+
+        let mismatched_server = FakeGossipServer::new();
+        mismatched_server.set_on_pull_data_request(move |_| {
+            GossipResponse::Accepted(Some(GossipDataV2::ExecutionPayload(mismatched.clone())))
+        });
+        let mismatched_peer =
+            peer_list_item(0x41, mismatched_server.spawn(), true, PeerScore::INITIAL);
+        let mismatched_peer_id = mismatched_peer.peer_id;
+        handler.peer_list.add_or_update_peer(mismatched_peer, true);
+
+        // The first request gets no data, so the first round always waits
+        // for the mismatched peer. Later requests get the matching payload.
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = matching.clone();
+        let matching_server = FakeGossipServer::new();
+        matching_server.set_on_pull_data_request(move |_| {
+            if requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                GossipResponse::Accepted(None)
+            } else {
+                GossipResponse::Accepted(Some(GossipDataV2::ExecutionPayload(served.clone())))
+            }
+        });
+        let matching_peer = peer_list_item(0x42, matching_server.spawn(), true, PeerScore::INITIAL);
+        handler.peer_list.add_or_update_peer(matching_peer, true);
+
+        handler
+            .pull_and_add_execution_payload_to_cache(evm_block_hash, false)
+            .await
+            .expect("pull takes the payload from the matching peer");
+        let cached = handler
+            .execution_payload_cache
+            .get_sealed_block_from_cache(&evm_block_hash)
+            .await
+            .expect("matching payload is cached");
+        assert_eq!(cached.into_block(), matching);
+        let score = handler
+            .peer_list
+            .get_peer(&mismatched_peer_id)
+            .expect("peer is known")
+            .reputation_score
+            .get();
+        assert!(score < PeerScore::INITIAL, "score {score}");
     }
 
     /// An EVM payload gossiped before its Irys block must be served when
