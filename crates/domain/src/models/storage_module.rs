@@ -8063,6 +8063,7 @@ impl StorageModule {
                         range.start(),
                         &PendingBodyMigration {
                             data_commitment,
+                            data_tree_root: data_tx.data_tree_root,
                             data_size: data_tx.data_size,
                             start_offset,
                             block_height,
@@ -11939,6 +11940,7 @@ mod tests {
         };
         let pending = PendingBodyMigration {
             data_commitment: DataCommitment(data_root),
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 64,
             start_offset: RelativeChunkOffset(1),
             block_height: 7,
@@ -14420,6 +14422,7 @@ mod tests {
                 PendingBodyMigration {
                     data_commitment: data_tx
                         .data_commitment(&storage_module.config.data_tree_geometry()),
+                    data_tree_root: data_tx.data_tree_root,
                     data_size,
                     start_offset: RelativeChunkOffset(-5),
                     block_height,
