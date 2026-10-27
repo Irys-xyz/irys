@@ -25,7 +25,7 @@ pub enum PriceOracleError {
 /// then fails, so the node does not start when the local clock or the oracle clock is
 /// skewed by more than this bound. A larger bound accepts more skew but also accepts
 /// prices that are stamped further ahead of real time.
-pub const MAX_ORACLE_CLOCK_SKEW_SECS: u64 = 60;
+pub(crate) const MAX_ORACLE_CLOCK_SKEW_SECS: u64 = 60;
 
 /// Fails when `reported` is more than `MAX_ORACLE_CLOCK_SKEW_SECS` ahead of the local wall clock.
 /// A clock set before the UNIX epoch is treated as time zero.
@@ -58,10 +58,10 @@ pub(crate) fn reject_zero_price(amount: Amount<(IrysPrice, Usd)>) -> eyre::Resul
 }
 
 /// Total time allowed for one oracle HTTP request, so a hung endpoint cannot wedge the poller.
-pub const ORACLE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const ORACLE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Largest oracle response body accepted; real quote responses are a few hundred bytes.
-pub const MAX_ORACLE_RESPONSE_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_ORACLE_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 pub(crate) fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -92,10 +92,10 @@ pub(crate) async fn read_capped_body(mut response: reqwest::Response) -> eyre::R
 }
 
 /// Attempts for the startup price fetch before the node reports an error.
-pub const INITIAL_FETCH_ATTEMPTS: u32 = 5;
+pub(crate) const INITIAL_FETCH_ATTEMPTS: u32 = 5;
 
 /// Delay before the second startup fetch attempt; doubles after each further failure.
-pub const INITIAL_FETCH_BASE_BACKOFF: Duration = Duration::from_secs(1);
+pub(crate) const INITIAL_FETCH_BASE_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Runs `fetch` up to `attempts` times, doubling the delay between failures.
 /// Returns the last error, with the attempt count, once all attempts fail.
