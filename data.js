@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793099315339,
+  "lastUpdate": 1793142623533,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -19699,6 +19699,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000146,
             "range": "± 0.000007",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "935126f38f49cca8e8b0629042f1934bbef1c56d",
+          "message": "fix(c): read CUDA device attributes instead of the cudaDeviceProp struct (#1716)\n\n* fix(c): read CUDA device attributes instead of the cudaDeviceProp struct\n\nQuery each device value with cudaDeviceGetAttribute. The Rust code no\nlonger depends on the toolkit's cudaDeviceProp layout, which grows\nbetween CUDA versions and made the old call write past the Rust buffer.\n\n* test(c): check every queried CUDA device attribute\n\n* refactor(c): drop nvidia gates inside the already-gated GPU config module\n\n* refactor(c): name CUDA device attributes with an enum\n\n* feat(c): restore the CUDA device name, block and grid dimensions\n\nThe name is read by a C helper built against the toolkit's own cudaDeviceProp, so no Rust copy of the struct layout is needed. Block and grid dimensions are read as device attributes.\n\n* fix(c): stop watching a build script path that does not exist\n\nThe package's build script is build/main.rs. A rerun-if-changed path that does not exist makes cargo rerun the script on every build, so nvidia builds recompiled irys-c and every crate that depends on it. Cargo already reruns the script when its own source changes.\n\n* test(packing): pack the CPU reference in parallel in the CUDA bench test\n\nThe single-threaded Rust packer needed about two minutes for the 8000 chunks, so the test went past the nextest timeout. It now packs one contiguous range per CPU thread and still compares every chunk.\n\n* test(packing): build the CUDA bench test data on every CPU thread\n\nFilling 2 GiB of random chunk data byte by byte on one thread took most of the setup time. Each thread now fills one contiguous range, and the result check compares whole chunks.",
+          "timestamp": "2026-10-27T22:52:41Z",
+          "tree_id": "d87d228329b6cecdde18cc4e8b5fc9cca51e5b44",
+          "url": "https://github.com/Irys-xyz/irys/commit/935126f38f49cca8e8b0629042f1934bbef1c56d"
+        },
+        "date": 1793142621008,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.016043,
+            "range": "± 0.001856",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.155379,
+            "range": "± 0.015905",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.643253,
+            "range": "± 0.07045",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 11.242882,
+            "range": "± 0.866048",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.086435,
+            "range": "± 0.006443",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 864.364865,
+            "range": "± 31.352539",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1007.130578,
+            "range": "± 14.78341",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119125,
+            "range": "± 0.002685",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1203.137806,
+            "range": "± 12.179657",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1547.904525,
+            "range": "± 15.826156",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034052,
+            "range": "± 0.001306",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.762327,
+            "range": "± 0.434902",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.825242,
+            "range": "± 6.95181",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000145,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
