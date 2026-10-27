@@ -4926,7 +4926,7 @@ pub fn poa_is_valid(
 
         verify_data_chunk(
             &geometry,
-            owning_tx.data_tree_root,
+            owning_tx.data_commitment(&geometry),
             owning_tx.data_size,
             TxChunkOffset(chunk_index),
             chunk_data,

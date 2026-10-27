@@ -370,7 +370,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             // verify the chunk against its proof
             irys_types::data_tree::verify_data_chunk(
                 &config.data_tree_geometry(),
-                tx.header.data_tree_root,
+                tx.header.data_commitment(&config.data_tree_geometry()),
                 tx.header.data_size,
                 chunk.tx_offset,
                 &chunk.bytes.0,

@@ -157,19 +157,19 @@ pub fn chunk_key(data_commitment: DataCommitment, chunk_index: TxChunkOffset) ->
 }
 
 /// Checks that `bytes` is chunk `chunk_index` of the data under
-/// `data_tree_root` and `data_size`, and that `proof` opens it.
+/// `data_commitment` and `data_size`, and that `proof` opens it.
 ///
 /// Every data-chunk check and every check of a stored or received data path
 /// goes through this function. Callers map the error to their own error type.
 ///
-/// The commitment derived here is anchored only when the caller takes
-/// `data_tree_root` and `data_size` from a signature-checked header (spec §6).
-/// A pass on fields the caller has not anchored (for example the root and
-/// size a peer sent with the chunk) is only a filter: an anchored check must
-/// follow before the chunk is trusted.
+/// The check is anchored only when the caller takes `data_commitment` from a
+/// signature-checked header (spec §6), or from a row keyed by it. A commitment
+/// derived from the fields of a chunk message (for example the root and size a
+/// peer sent with the chunk) is only a filter: an anchored check must follow
+/// before the chunk is trusted.
 pub fn verify_data_chunk(
     geometry: &Geometry,
-    data_tree_root: DataTreeRoot,
+    data_commitment: DataCommitment,
     data_size: u64,
     chunk_index: TxChunkOffset,
     bytes: &[u8],
@@ -177,7 +177,7 @@ pub fn verify_data_chunk(
 ) -> Result<(), VerifyError> {
     irys_data_tree::verify_chunk(
         geometry,
-        &data_commitment(geometry, data_tree_root, data_size).into(),
+        &data_commitment.into(),
         data_size,
         chunk_index.0,
         bytes,
@@ -278,7 +278,7 @@ mod tests {
             assert_eq!(
                 verify_data_chunk(
                     &geometry,
-                    header.data_tree_root,
+                    header.data_commitment(&geometry),
                     header.data_size,
                     chunk.tx_offset,
                     &chunk.bytes.0,
@@ -294,7 +294,7 @@ mod tests {
             assert!(
                 verify_data_chunk(
                     &geometry,
-                    header.data_tree_root,
+                    header.data_commitment(&geometry),
                     header.data_size,
                     chunk.tx_offset,
                     &changed,
@@ -318,13 +318,14 @@ mod tests {
         let data: Vec<u8> = (0..data_size).map(|byte| byte as u8).collect();
         let tx = signer.create_transaction(data, H256::zero()).unwrap();
         let root = tx.header.data_tree_root;
+        let commitment = data_commitment(&geometry, root, data_size);
         let chunk = &tx.data_chunks().unwrap()[0];
         let proof = tx.chunk_proof(TxChunkOffset(0)).unwrap().0;
         let other_proof = tx.chunk_proof(TxChunkOffset(1)).unwrap().0;
         let verify = |chunk_index: u32, bytes: &[u8], proof: &[u8]| {
             verify_data_chunk(
                 &geometry,
-                root,
+                commitment,
                 data_size,
                 TxChunkOffset(chunk_index),
                 bytes,
@@ -353,7 +354,7 @@ mod tests {
         assert_eq!(
             verify_data_chunk(
                 &geometry,
-                root,
+                commitment,
                 data_size - 1,
                 TxChunkOffset(0),
                 &chunk.bytes.0,
@@ -370,7 +371,7 @@ mod tests {
         assert_eq!(
             verify_data_chunk(
                 &geometry,
-                DataTreeRoot(H256::random()),
+                data_commitment(&geometry, DataTreeRoot(H256::random()), data_size),
                 data_size,
                 TxChunkOffset(0),
                 &chunk.bytes.0,

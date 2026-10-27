@@ -1030,24 +1030,6 @@ pub fn cached_data_root_by_commitment<T: DbTx>(
     Ok(tx.get::<CachedDataRoots>(data_commitment)?)
 }
 
-/// Every [`CachedDataRoot`] whose `data_tree_root` is `data_tree_root`, with
-/// its key. A root alone does not fix the size, so this walks the whole
-/// table. Only root-only lookups use it.
-pub fn cached_data_roots_by_tree_root<T: DbTx>(
-    tx: &T,
-    data_tree_root: DataTreeRoot,
-) -> eyre::Result<Vec<(DataCommitment, CachedDataRoot)>> {
-    let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
-    let mut matches = Vec::new();
-    for row in cursor.walk(None)? {
-        let (data_commitment, cached) = row?;
-        if cached.data_tree_root == data_tree_root {
-            matches.push((data_commitment, cached));
-        }
-    }
-    Ok(matches)
-}
-
 /// Ensures `block_hash` is present in the `block_set` of an existing
 /// [`CachedDataRoot`] and clears `expiry_height` (matching `cache_data_root`'s
 /// confirmation semantics).  No-op if no entry exists for `data_root` — this
@@ -1378,11 +1360,11 @@ pub fn backfill_cached_ingress_data_hashes(
             if existing.contains(&(data_commitment, entry.index)) {
                 continue;
             }
-            // The cached proof is checked against the tree root and size the
-            // cache row keeps.
-            let Some((data_tree_root, data_size)) = tx
+            // The cached proof is checked against the commitment that keys the
+            // cache row and the size the row keeps.
+            let Some(data_size) = tx
                 .get::<CachedDataRoots>(data_commitment)?
-                .map(|cdr| (cdr.data_tree_root, cdr.data_size))
+                .map(|cdr| cdr.data_size)
             else {
                 continue;
             };

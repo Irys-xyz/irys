@@ -16,7 +16,7 @@ use irys_types::{
     DataTransactionLedger, H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
     SendTraced as _, TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk,
     app_state::DatabaseProvider,
-    data_tree::{Geometry, verify_data_chunk},
+    data_tree::{Geometry, data_commitment, verify_data_chunk},
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -854,7 +854,7 @@ pub(crate) fn validate_chunk_parts_for_migration(
 ) -> Result<UnpackedChunk, MigrationError> {
     verify_data_chunk(
         geometry,
-        data_tree_root,
+        data_commitment(geometry, data_tree_root, data_size),
         data_size,
         chunk_offset,
         &bytes.0,

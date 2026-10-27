@@ -293,7 +293,7 @@ mod tests {
             assert_eq!(
                 verify_data_chunk(
                     &geometry,
-                    tx.header.data_tree_root,
+                    tx.header.data_commitment(&geometry),
                     tx.header.data_size,
                     chunk.tx_offset,
                     &chunk.bytes.0,

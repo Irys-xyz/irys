@@ -856,7 +856,8 @@ async fn internal_chunks_serves_unpacked_proven_range_with_short_reads() -> eyre
         );
         irys_types::data_tree::verify_data_chunk(
             &node.node_ctx.config.data_tree_geometry(),
-            tx.header.data_tree_root,
+            tx.header
+                .data_commitment(&node.node_ctx.config.data_tree_geometry()),
             tx.header.data_size,
             TxChunkOffset::from(u32::try_from(i).unwrap()),
             &chunk.bytes,

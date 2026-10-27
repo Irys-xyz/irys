@@ -104,7 +104,7 @@ async fn attempt_data_sync_write(
 fn validate_peer_unpacked_chunk(chunk: &UnpackedChunk, geometry: &Geometry) -> eyre::Result<()> {
     verify_data_chunk(
         geometry,
-        chunk.data_tree_root,
+        chunk.data_commitment(geometry),
         chunk.data_size,
         chunk.tx_offset,
         &chunk.bytes.0,

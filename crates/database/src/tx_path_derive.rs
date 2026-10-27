@@ -17,7 +17,7 @@ use irys_types::{
     Base64, ChunkDataPath, DataLedger, DataRootLeaf, DataTransactionHeader, DataTransactionLedger,
     DataTreeRoot, H256, HASH_SIZE, Helpers as _, Node, PartitionChunkOffset, Proof,
     ProofDeserialize as _, TxChunkOffset, TxPath,
-    data_tree::{Geometry, verify_data_chunk},
+    data_tree::{Geometry, data_commitment, verify_data_chunk},
     expected_chunk_byte_range, generate_data_root, generate_leaves_from_data_roots, hash_sha256,
     validate_path,
 };
@@ -905,7 +905,7 @@ pub fn cross_check_derived(
     }
     verify_data_chunk(
         geometry,
-        DataTreeRoot(derived.data_root),
+        data_commitment(geometry, DataTreeRoot(derived.data_root), derived.data_size),
         derived.data_size,
         TxChunkOffset(chunk_index),
         chunk_data,

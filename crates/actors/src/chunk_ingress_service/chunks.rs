@@ -586,7 +586,7 @@ impl ChunkIngressServiceInner {
             .map_err(|_| CriticalChunkIngressError::InvalidChunkSize)?;
         if let Err(error) = verify_data_chunk(
             &geometry,
-            chunk.data_tree_root,
+            data_commitment,
             data_size,
             chunk.tx_offset,
             &chunk.bytes.0,

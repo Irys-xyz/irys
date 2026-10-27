@@ -830,7 +830,7 @@ impl PartitionMiningServiceInner {
         if chunk_bytes.len() != chunk_size {
             return None;
         }
-        let (_data_commitment, data_tree_root, data_size, chunk_index) =
+        let (data_commitment, _data_tree_root, data_size, chunk_index) =
             match self.storage_module.data_chunk_location(offset) {
                 Ok(location) => location?,
                 Err(error) => {
@@ -869,7 +869,7 @@ impl PartitionMiningServiceInner {
         }
         verify_data_chunk(
             &geometry,
-            data_tree_root,
+            data_commitment,
             data_size,
             chunk_index,
             &unpacked,
