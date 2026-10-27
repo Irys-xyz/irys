@@ -125,7 +125,7 @@ fn validate_peer_unpacked_chunk(chunk: &UnpackedChunk, chunk_size: u64) -> eyre:
     Ok(())
 }
 
-fn ingress_error_is_invalid_peer_data(error: &ChunkIngressError) -> bool {
+pub(crate) fn ingress_error_is_invalid_peer_data(error: &ChunkIngressError) -> bool {
     matches!(
         error,
         ChunkIngressError::Critical(

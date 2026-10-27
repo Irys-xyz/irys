@@ -559,7 +559,8 @@ impl ChunkIngressServiceInner {
         // The chunk's key: its root and the size it claims. Only a header with
         // that exact (root, size) owns it, so a chunk never checks against
         // another size of the same root.
-        let data_commitment = chunk.data_commitment(&self.config.data_tree_geometry());
+        let geometry = self.config.data_tree_geometry();
+        let data_commitment = chunk.data_commitment(&geometry);
 
         // Early exit if we've already processed this chunk recently
         let chunk_path_hash = chunk.chunk_path_hash();
@@ -780,6 +781,27 @@ impl ChunkIngressServiceInner {
         let (expected_min_byte_range, expected_max_byte_range) =
             expected_chunk_byte_range(chunk.tx_offset, layout_data_size, chunk_size)
                 .map_err(|error| CriticalChunkIngressError::InvalidOffset(error.to_string()))?;
+
+        // The header fixes the length of every chunk (spec §2 `chunk_len`). The
+        // length is checked before the proof, as `verify_chunk` does (spec §5).
+        // The size is non-zero and the offset is in range here, so only a size
+        // above the geometry maximum fails `chunk_len`.
+        let expected_chunk_len = geometry
+            .chunk_len(layout_data_size, *chunk.tx_offset)
+            .map_err(|_| CriticalChunkIngressError::InvalidDataSize)?;
+        let chunk_len = u64::try_from(chunk.bytes.len())
+            .map_err(|_| CriticalChunkIngressError::InvalidChunkSize)?;
+        if chunk_len != expected_chunk_len {
+            warn!(
+                "{:?}: tx_offset {} chunk_len {} expected {}",
+                CriticalChunkIngressError::InvalidChunkSize,
+                chunk.tx_offset,
+                chunk_len,
+                expected_chunk_len
+            );
+            return Err(CriticalChunkIngressError::InvalidChunkSize.into());
+        }
+
         let target_offset = u128::from(expected_max_byte_range - 1);
         let root_hash = chunk.data_tree_root.0.0;
         let path_buff = &chunk.data_path;
@@ -799,24 +821,6 @@ impl ChunkIngressServiceInner {
             }
             Ok(v) => v,
         };
-
-        let chunk_len = u64::try_from(chunk.bytes.len())
-            .map_err(|_| CriticalChunkIngressError::InvalidChunkSize)?;
-
-        // TODO: Mark the data_root as invalid if the chunk is an incorrect size
-        // Someone may have created a data_root that seemed valid, but if the
-        // data_path is valid but the chunk size doesn't mach the protocols
-        // consensus size, then the data_root is actually invalid and no future
-        // chunks from that data_root should be ingressed.
-
-        let expected_chunk_len = expected_max_byte_range - expected_min_byte_range;
-        if chunk_len != expected_chunk_len {
-            error!(
-                "Chunk has wrong size: tx_offset {} chunk_len {} expected {}",
-                chunk.tx_offset, chunk_len, expected_chunk_len
-            );
-            return Ok(());
-        }
 
         let is_last_chunk = expected_max_byte_range == layout_data_size;
         validate_path_byte_range(
@@ -1809,7 +1813,7 @@ mod tests {
         let long_key = size_key(data_root, 96);
 
         // Header A: same root, 64 bytes.
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, 64);
+        insert_cached_data_root(&inner.irys_db, data_root, 64);
         inner
             .handle_chunk_ingress_message(last_chunk.clone())
             .await
@@ -1827,7 +1831,7 @@ mod tests {
         }
 
         // Header B: same root, 96 bytes. Its arrival drains its own commitment.
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, 96);
+        insert_cached_data_root(&inner.irys_db, data_root, 96);
         inner.process_pending_chunks_for_root(long_key).await;
 
         assert!(
@@ -1847,6 +1851,58 @@ mod tests {
         Ok(())
     }
 
+    /// A v1 tree of `data` at the test `chunk_size`: the root and one proof per chunk.
+    fn data_tree_with_proofs(data: &[u8]) -> eyre::Result<(H256, Vec<Vec<u8>>)> {
+        let leaves = irys_types::generate_leaves(std::iter::once(Ok(data.to_vec())), 32)?;
+        let root = irys_types::generate_data_root(leaves)?;
+        let data_root = H256(root.id);
+        let proofs = irys_types::resolve_proofs(root, None)?
+            .into_iter()
+            .map(|proof| proof.proof)
+            .collect();
+        Ok((data_root, proofs))
+    }
+
+    /// A known header fixes the length of each chunk. A body that is not
+    /// `chunk_len(data_size, chunk_index)` bytes is a peer fault, not a silent drop.
+    #[tokio::test]
+    async fn wrong_length_chunk_is_a_peer_fault() -> eyre::Result<()> {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-wrong-length")
+            .build();
+        let (inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        // 40 bytes at `chunk_size` 32: chunk 0 holds 32 bytes, chunk 1 holds 8.
+        let data: Vec<u8> = (0..40_u8).collect();
+        let (data_root, proofs) = data_tree_with_proofs(&data)?;
+        insert_cached_data_root(&inner.irys_db, data_root, 40);
+        let mut nine_bytes = data[32..40].to_vec();
+        nine_bytes.push(0);
+        let chunk = UnpackedChunk {
+            data_tree_root: DataTreeRoot(data_root),
+            data_size: 40,
+            data_path: proofs[1].clone().into(),
+            bytes: nine_bytes.into(),
+            tx_offset: TxChunkOffset::from(1),
+        };
+
+        let error = inner
+            .handle_chunk_ingress_message(chunk)
+            .await
+            .expect_err("a chunk of the wrong length must be rejected");
+        assert!(
+            matches!(
+                error,
+                ChunkIngressError::Critical(CriticalChunkIngressError::InvalidChunkSize)
+            ),
+            "{error:?}"
+        );
+        assert!(
+            crate::data_sync_service::ingress_error_is_invalid_peer_data(&error),
+            "a wrong chunk length is the sender's fault"
+        );
+        Ok(())
+    }
+
     /// Closed cache writer: ingress reaches `queue_write` and fails before the
     /// batch commits. The drain must put that body back and schedule another drain.
     #[tokio::test]
@@ -1859,7 +1915,7 @@ mod tests {
         let data_root = chunk.data_tree_root;
         let data_key = chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING);
         let tx_offset = chunk.tx_offset;
-        insert_unconfirmed_cdr(&inner.irys_db, data_root.0, chunk.data_size);
+        insert_cached_data_root(&inner.irys_db, data_root.0, chunk.data_size);
         inner.pending_chunks.write().await.park(chunk);
 
         inner.process_pending_chunks_for_root(data_key).await;
@@ -1906,7 +1962,7 @@ mod tests {
         let drained = valid_single_chunk(vec![7_u8; 32]);
         let data_root = drained.data_tree_root;
         let data_key = drained.data_commitment(&irys_types::data_tree::Geometry::TESTING);
-        insert_unconfirmed_cdr(&inner.irys_db, data_root.0, drained.data_size);
+        insert_cached_data_root(&inner.irys_db, data_root.0, drained.data_size);
         {
             let mut pending = inner.pending_chunks.write().await;
             for offset in 1..=cap as u32 {
@@ -1964,7 +2020,7 @@ mod tests {
         let drained = valid_single_chunk(vec![7_u8; 32]);
         let data_root = drained.data_tree_root;
         let data_key = drained.data_commitment(&irys_types::data_tree::Geometry::TESTING);
-        insert_unconfirmed_cdr(&inner.irys_db, data_root.0, drained.data_size);
+        insert_cached_data_root(&inner.irys_db, data_root.0, drained.data_size);
         {
             let mut pending = inner.pending_chunks.write().await;
             pending.park(UnpackedChunk {
@@ -2029,7 +2085,7 @@ mod tests {
         let cap = 4_usize;
         let (inner, mut receivers) = test_ingress_inner(&tmp, cap, cap);
         let data_root = H256([0x44; 32]);
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, 32);
+        insert_cached_data_root(&inner.irys_db, data_root, 32);
         park_offsets(&inner, data_root, [0_u32]).await;
         let (popped, ticket) = pop_for_drain(&inner, data_root).await;
         let incoming = chunk_with(data_root, 1, 0xAB, CLAIMED_DATA_SIZE);
@@ -2271,7 +2327,7 @@ mod tests {
         let data_size = chunk.data_size;
         let db = inner.irys_db.clone();
         inner.after_missing_data_size_scan = Some(std::sync::Arc::new(move || {
-            insert_unconfirmed_cdr(&db, data_root.0, data_size);
+            insert_cached_data_root(&db, data_root.0, data_size);
         }));
 
         let err = inner
@@ -2310,7 +2366,7 @@ mod tests {
         > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let slot = std::sync::Arc::clone(&ticket_slot);
         inner.after_missing_data_size_scan = Some(std::sync::Arc::new(move || {
-            insert_unconfirmed_cdr(&db, data_root.0, data_size);
+            insert_cached_data_root(&db, data_root.0, data_size);
             let guard = pending
                 .try_write()
                 .expect("pending lock is free during the scan");
@@ -2450,7 +2506,7 @@ mod tests {
         let cap = 2_usize;
         let (inner, mut receivers) = test_ingress_inner(&tmp, cap, cap);
         let data_root = H256([0x66; 32]);
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, 32);
+        insert_cached_data_root(&inner.irys_db, data_root, 32);
         park_offsets(&inner, data_root, 0..=1).await;
         let popped = chunk_with(data_root, 0, 0xAB, CLAIMED_DATA_SIZE);
 
@@ -3012,7 +3068,7 @@ mod tests {
             .build();
         let (inner, _receivers) = test_ingress_inner(&tmp, 2, 2);
         let data_root = H256([0x22; 32]);
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, 10);
+        insert_cached_data_root(&inner.irys_db, data_root, 10);
         {
             let mut pending = inner.pending_chunks.write().await;
             for offset in 0..2_u32 {
@@ -3059,7 +3115,7 @@ mod tests {
             .build();
         let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
         let data_root = H256([0xC2; 32]);
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, 32);
+        insert_cached_data_root(&inner.irys_db, data_root, 32);
         let mut incoming = chunk_with(data_root, 0, 0xAB, 33);
         // Test config `chunk_size` is 32. One byte over must not park.
         incoming.bytes = vec![1_u8; 33].into();
@@ -3095,7 +3151,7 @@ mod tests {
             .build();
         let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
         let data_root = H256([0xC3; 32]);
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, 32);
+        insert_cached_data_root(&inner.irys_db, data_root, 32);
         let mut incoming = chunk_with(data_root, 0, 0xAB, 64);
         let max_path = inner.config.mempool.max_preheader_data_path_bytes;
         incoming.data_path = vec![0_u8; max_path + 1].into();
@@ -3131,7 +3187,7 @@ mod tests {
             .build();
         let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
         let data_root = H256([0xC4; 32]);
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, 16);
+        insert_cached_data_root(&inner.irys_db, data_root, 16);
         let incoming = chunk_with(data_root, 1, 0xAB, 32);
 
         let err = inner
@@ -3166,7 +3222,7 @@ mod tests {
             .build();
         let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
         let data_root = H256([0xC5; 32]);
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, 32);
+        insert_cached_data_root(&inner.irys_db, data_root, 32);
         // 64 bytes is two chunks of 32, so offset 1 is the last valid offset.
         let mut incoming = chunk_with(data_root, 1, 0xAB, 64);
         incoming.bytes = vec![1_u8; 32].into();
@@ -3264,7 +3320,7 @@ mod tests {
         (inner, receivers)
     }
 
-    fn insert_unconfirmed_cdr(db: &DatabaseProvider, data_root: H256, data_size: u64) {
+    fn insert_cached_data_root(db: &DatabaseProvider, data_root: H256, data_size: u64) {
         use irys_database::cache_data_root;
         use irys_database::db::IrysDatabaseExt as _;
         use irys_types::{
