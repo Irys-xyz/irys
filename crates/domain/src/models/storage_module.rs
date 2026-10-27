@@ -855,6 +855,15 @@ impl DurablePointAtoms {
     }
 }
 
+/// Indexed transaction offsets and those with any unpersisted local placement.
+#[derive(Debug, Default)]
+pub struct ChunkPlacementStatus {
+    /// Candidates covered by at least one indexed placement.
+    pub placed: BTreeSet<TxChunkOffset>,
+    /// Placed candidates for which at least one copy is not persisted `Data`.
+    pub unpersisted: BTreeSet<TxChunkOffset>,
+}
+
 /// Maps a logical partition (fixed size) to physical storage across multiple drives
 #[derive(Debug)]
 pub struct StorageModule {
@@ -3502,23 +3511,41 @@ impl StorageModule {
                 .is_some_and(|log| log.contains_point(offset))
     }
 
-    /// Transaction offsets whose bodies are fsynced as `Data` and already
-    /// stored as `Data` in `intervals.json`.
+    /// Transaction offsets whose every indexed local placement is fsynced
+    /// and stored as `Data` in `intervals.json`.
+    #[cfg(test)]
+    fn durable_tx_offsets_for_data_root(
+        &self,
+        data_root: DataRoot,
+        candidates: &BTreeSet<TxChunkOffset>,
+    ) -> eyre::Result<BTreeSet<TxChunkOffset>> {
+        let mut status = self.chunk_placement_status(data_root, candidates)?;
+        status
+            .placed
+            .retain(|offset| !status.unpersisted.contains(offset));
+        Ok(status.placed)
+    }
+
+    /// Classifies all local placements using one index read per submodule.
+    /// A candidate with no covering placement belongs to neither set.
     ///
     /// Cached-body reclamation uses this. The live label flips at `pwrite`,
     /// and the file can lag by `intervals_persist_secs`. A crash in that lag
     /// reloads the offset as `Uninitialized` and drops its rows. A fresh
     /// upload may have no other replica, so the cache stays until the file
     /// says `Data` ([`Self::is_data_chunk_persisted_at`]).
-    pub fn durable_tx_offsets_for_data_root(
+    ///
+    /// # Errors
+    /// Returns index-read errors or an offset overflow.
+    pub fn chunk_placement_status(
         &self,
         data_root: DataRoot,
         candidates: &BTreeSet<TxChunkOffset>,
-    ) -> eyre::Result<BTreeSet<TxChunkOffset>> {
+    ) -> eyre::Result<ChunkPlacementStatus> {
         // One short lock acquisition per offset rather than holding
         // pending/intervals across the whole loop: this runs on the
         // background prune path and must not stall chunk writes.
-        self.tx_offsets_placed_where(data_root, candidates, |offset| {
+        self.classify_tx_offset_placements(data_root, candidates, |offset| {
             self.is_data_chunk_persisted_at(offset)
         })
     }
@@ -3530,21 +3557,21 @@ impl StorageModule {
         data_root: DataRoot,
         candidates: &BTreeSet<TxChunkOffset>,
     ) -> eyre::Result<BTreeSet<TxChunkOffset>> {
-        self.tx_offsets_placed_where(data_root, candidates, |_| true)
+        Ok(self
+            .classify_tx_offset_placements(data_root, candidates, |_| true)?
+            .placed)
     }
 
-    /// Candidates with a local placement whose partition offset satisfies `keep`.
-    /// Resolves the submodule index once per root.
-    fn tx_offsets_placed_where(
+    fn classify_tx_offset_placements(
         &self,
         data_root: DataRoot,
         candidates: &BTreeSet<TxChunkOffset>,
-        keep: impl Fn(PartitionChunkOffset) -> bool,
-    ) -> eyre::Result<BTreeSet<TxChunkOffset>> {
+        persisted: impl Fn(PartitionChunkOffset) -> bool,
+    ) -> eyre::Result<ChunkPlacementStatus> {
         let infos = self.collect_data_root_infos(data_root)?;
-        let mut out = BTreeSet::new();
+        let mut status = ChunkPlacementStatus::default();
         if infos.0.is_empty() {
-            return Ok(out);
+            return Ok(status);
         }
 
         let chunk_size = self.config.consensus.chunk_size;
@@ -3559,18 +3586,20 @@ impl StorageModule {
                     continue;
                 }
                 let relative_offset = i64::from(info.start_offset.0) + i64::from(raw_offset);
-                if relative_offset < 0 || relative_offset as u64 >= num_chunks_in_partition {
+                if relative_offset < 0 || u64::try_from(relative_offset)? >= num_chunks_in_partition
+                {
                     continue;
                 }
                 let relative_offset = u32::try_from(relative_offset)
                     .map_err(|_| eyre::eyre!("partition-relative chunk offset exceeds u32"))?;
-                if keep(PartitionChunkOffset::from(relative_offset)) {
-                    out.insert(*tx_offset);
+                status.placed.insert(*tx_offset);
+                if !persisted(PartitionChunkOffset::from(relative_offset)) {
+                    status.unpersisted.insert(*tx_offset);
                     break;
                 }
             }
         }
-        Ok(out)
+        Ok(status)
     }
 
     /// `sync_in_progress` carries `()`. A panic while it is held does not
