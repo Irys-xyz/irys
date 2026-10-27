@@ -10,7 +10,6 @@ use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{OptionExt as _, eyre};
 use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_commitment, canonical_commitment_included_height, canonical_submit_height,
@@ -24,8 +23,8 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
-    BlockHash, BoundedFee, CommitmentTypeV2, DataCommitment, DataLedger, DataTransactionHeader,
-    IngressProofsList, IrysTransactionId,
+    BlockHash, BoundedFee, CommitmentTypeV2, DataLedger, DataTransactionHeader, IngressProofsList,
+    IrysTransactionId,
 };
 use irys_types::{Config, H256, IrysTransactionCommon as _, U256, app_state::DatabaseProvider};
 use irys_types::{IrysAddress, SystemLedger, UnixTimestamp};
@@ -901,7 +900,7 @@ async fn get_publish_txs_and_proofs(
     );
 
     {
-        let (publish_txids, cached_data_roots) = ctx
+        let publish_txids = ctx
             .db
             .view_eyre(|tx| {
                 let mut read_cursor = tx
@@ -917,7 +916,6 @@ async fn get_publish_txs_and_proofs(
                     .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
 
                 let mut publish_txids: Vec<H256> = Vec::new();
-                let mut cached_data_roots: HashMap<DataCommitment, CachedDataRoot> = HashMap::new();
 
                 // Loop through all the data commitments with ingress proofs and find corresponding transaction ids
                 for data_commitment in ingress_proofs.keys() {
@@ -930,13 +928,12 @@ async fn get_publish_txs_and_proofs(
                             )
                         })?;
                     if let Some(cached_data_root) = cached_data_root {
-                        let txids = cached_data_root.txid_set.clone();
+                        let txids = cached_data_root.txid_set;
                         trace!(tx.ids = ?txids, "Publish candidates");
                         publish_txids.extend(txids);
-                        cached_data_roots.insert(*data_commitment, cached_data_root);
                     }
                 }
-                Ok((publish_txids, cached_data_roots))
+                Ok(publish_txids)
             })
             .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
 
@@ -988,14 +985,6 @@ async fn get_publish_txs_and_proofs(
         // The Publish cap below selects in this order.
         tx_headers.sort_by(|a, b| {
             BoundedFee::cmp_fee_then_id((&a.user_fee(), &a.id), (&b.user_fee(), &b.id)).reverse()
-        });
-
-        // Filter out any tx headers with the wrong data_size for this data_root
-        let geometry = ctx.config.data_tree_geometry();
-        tx_headers.retain(|tx| {
-            cached_data_roots
-                .get(&tx.data_commitment(&geometry))
-                .is_none_or(|cdr| !cdr.data_size_confirmed || tx.data_size == cdr.data_size)
         });
 
         // Reduce down the parent ancestry to the txs in the Submit ledger — the

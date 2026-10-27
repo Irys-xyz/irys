@@ -9,8 +9,7 @@ use crate::metrics;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use irys_database::{
-    block_header_by_hash, cached_data_root_by_commitment, commitment_tx_by_txid,
-    db::IrysDatabaseExt as _, tx_header_by_txid,
+    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
 };
 use irys_domain::{
     BlockTreeReadGuard, CommitmentSnapshotStatus, block_index_guard::BlockIndexReadGuard,
@@ -437,26 +436,6 @@ impl BlockDiscoveryServiceInner {
                             PreValidationError::IngressProofSignatureInvalid(e.to_string()),
                         )
                     })?;
-
-                    // Check to see if we have a confirmed data_size for the data_root
-                    let cdr = self
-                        .db
-                        .view_eyre(|tx| cached_data_root_by_commitment(tx, data_commitment))
-                        .map_err(BlockDiscoveryInternalError::DatabaseError)?;
-
-                    // If so, compare it with the data_size in the tx
-                    if let Some(cdr) = cdr {
-                        // If the tx data_size doesn't match the confirmed size, this is an invalid promotion
-                        if cdr.data_size_confirmed && cdr.data_size != tx_header.data_size {
-                            return Err(BlockDiscoveryError::BlockValidationError(
-                                PreValidationError::InvalidPromotionDataSizeMismatch {
-                                    txid: tx_header.id,
-                                    got: tx_header.data_size,
-                                    expected: cdr.data_size,
-                                },
-                            ));
-                        }
-                    }
                 }
             }
         }

@@ -146,10 +146,6 @@ pub enum PreValidationError {
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
-    #[error(
-        "Invalid promotion, transaction {txid:?} data size {got:?} does not match confirmed data root size {expected:?}"
-    )]
-    InvalidPromotionDataSizeMismatch { txid: H256, expected: u64, got: u64 },
     #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
     LastDiffTimestampMismatch {
         expected: UnixTimestampMs,
@@ -650,7 +646,6 @@ impl PreValidationError {
             | Self::InvalidLedgerId { .. }
             | Self::InvalidLedgerIdForTx { .. }
             | Self::InvalidPermFeeStructure { .. }
-            | Self::InvalidPromotionDataSizeMismatch { .. }
             | Self::InvalidPromotionPath { .. }
             | Self::InvalidTermFeeStructure { .. }
             | Self::InvalidTransactionSignature(_)
@@ -743,7 +738,6 @@ impl PreValidationError {
             Self::EmaSnapshotError(_) => "ema_snapshot_error",
             Self::IngressProofsMissing => "ingress_proofs_missing",
             Self::IngressProofSignatureInvalid(_) => "ingress_proof_signature_invalid",
-            Self::InvalidPromotionDataSizeMismatch { .. } => "promotion_data_size_mismatch",
             Self::LastDiffTimestampMismatch { .. } => "last_diff_timestamp_mismatch",
             Self::LedgerIdInvalid { .. } => "ledger_id_invalid",
             Self::MerkleProofInvalid(_) => "merkle_proof_invalid",
