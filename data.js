@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793059932587,
+  "lastUpdate": 1793099315339,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -19591,6 +19591,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "65b73a37e47852e9aa03f50ef0310f656df2eae7",
+          "message": "fix: repair the storage-open test and the multiversion bin build (#1708)\n\n* fix(storage): write packing params in the parallel-open test seed\n\nOpen refuses a submodule whose intervals.json labels stored chunks while\npacking_params.toml is missing. The parallel-open test seeded Data labels\nwithout the params file, so every open failed. Write params that match\nthe test config, the same as a live module has.\n\n* fix(multiversion): build the irys bin without a package filter\n\nThe irys bin is now in irys-node, but old revisions still have it in\nirys-chain. The bin name is unique in both trees, so --bin alone builds\neither revision.",
+          "timestamp": "2026-10-27T10:52:26Z",
+          "tree_id": "72283927187402995cfc19850f7af887da5e83c7",
+          "url": "https://github.com/Irys-xyz/irys/commit/65b73a37e47852e9aa03f50ef0310f656df2eae7"
+        },
+        "date": 1793099312277,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015286,
+            "range": "± 0.000763",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.161152,
+            "range": "± 0.011875",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.581109,
+            "range": "± 0.131638",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.570947,
+            "range": "± 1.410233",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.086529,
+            "range": "± 0.003516",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 857.133377,
+            "range": "± 37.815385",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1018.135586,
+            "range": "± 19.116069",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.12511,
+            "range": "± 0.003639",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1200.154673,
+            "range": "± 29.740119",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1554.601503,
+            "range": "± 10.581926",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034828,
+            "range": "± 0.001433",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.69209,
+            "range": "± 0.638589",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.81407,
+            "range": "± 9.990511",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000146,
+            "range": "± 0.000007",
             "unit": "ms/iter"
           }
         ]
