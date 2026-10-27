@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use irys_types::{DataCommitment, DataTreeRoot, H256, PartitionChunkOffset, RelativeChunkOffset};
+use irys_types::{DataCommitment, DataTreeRoot, H256, RelativeChunkOffset};
 
 use super::tables::{OffsetMeta, PendingBodyMigration};
 
@@ -20,11 +20,12 @@ const OFFSET_FLAG_CRC_PRESENT: u8 = 0x02;
 /// Encode one offset row: proof bytes (when stored), then a trailer of the
 /// CRC32C (little-endian, when the flag is set), the flags byte, and
 /// [`OFFSET_META_FORMAT`]. A stored CRC of zero is a real checksum; unknown
-/// is the flag being unset. The leaf is the last 64 bytes of the proof, not
-/// of this value.
+/// is the flag being unset. The proof is a data chunk proof: a non-zero
+/// multiple of 32 bytes, siblings leaf to root, then the size witness. A
+/// one-chunk upload's proof is the 32-byte witness alone.
 ///
-/// The trailer follows the proof so LZ4 sees the shared upper branches of
-/// neighbouring proofs at the start of each value. A measured checksum prefix
+/// The trailer follows the proof so LZ4 sees the upper siblings and the
+/// size witness that neighbouring proofs share. A measured checksum prefix
 /// costs more bytes on that shape. Values are length-delimited, so the format
 /// byte can sit last. The schema marker names the layout.
 pub fn encode_offset_meta(meta: &OffsetMeta) -> eyre::Result<Vec<u8>> {
@@ -100,8 +101,6 @@ pub fn decode_offset_meta(bytes: &[u8]) -> eyre::Result<OffsetMeta> {
 /// Fixed placement fields (64 bytes), then the `data_commitment` (32 bytes).
 pub(super) const PLACEMENT_LEN: usize = 96;
 pub(super) const DATA_ROOT_KEY_LEN: usize = 36;
-/// `content_hash` (32 bytes) then partition offset (u32 big-endian).
-pub(super) const CONTENT_KEY_LEN: usize = 36;
 /// End, tx start and `data_size` (16 bytes), then the data tree root (32 bytes).
 pub(super) const DATA_ROOT_VALUE_LEN: usize = 48;
 /// Commitment (32), size (8), tx start (4), height (8), attempts (4), then the
@@ -197,23 +196,6 @@ pub(super) fn data_root_key(
     key[..32].copy_from_slice(&data_commitment.0.0);
     key[32..].copy_from_slice(&start.to_be_bytes());
     key
-}
-
-pub(super) fn content_key(hash: &H256, offset: PartitionChunkOffset) -> [u8; CONTENT_KEY_LEN] {
-    let mut key = [0_u8; CONTENT_KEY_LEN];
-    key[..32].copy_from_slice(&hash.0);
-    key[32..].copy_from_slice(&offset.0.to_be_bytes());
-    key
-}
-
-pub(super) fn decode_content_key(bytes: &[u8]) -> Option<(H256, PartitionChunkOffset)> {
-    if bytes.len() != CONTENT_KEY_LEN {
-        return None;
-    }
-    let mut hash = [0_u8; 32];
-    hash.copy_from_slice(&bytes[..32]);
-    let offset = u32::from_be_bytes(bytes[32..].try_into().expect("4"));
-    Some((H256(hash), PartitionChunkOffset(offset)))
 }
 
 pub(super) fn decode_data_root_key(bytes: &[u8]) -> eyre::Result<(DataCommitment, u32)> {

@@ -592,7 +592,7 @@ fn measure(
     let settle_ms = timed(|| store.settle_files())?;
     note_mem(engine, "after_settle", &watch);
     if engine == "rocks" {
-        print_column_files(&store, args.chunks)?;
+        print_column_files(&store)?;
         if args.entropy_fill {
             print_entropy_fill_size(&entropy_fill_size(&store, args)?);
         }
@@ -1081,45 +1081,6 @@ fn read_phase(
             open,
             |store, i| {
                 read_recall_rows(store, args, i)?;
-                Ok(())
-            },
-        )?;
-    }
-    // Before rmw_path rewrites proofs. The leaf hash comes from the bytes
-    // this run stored, not from a data-path read that would warm that family.
-    if engine == "rocks" {
-        time_reopen(
-            dir,
-            disk.as_ref(),
-            "content_lookup",
-            args.reads,
-            open,
-            |store, i| {
-                let at = sample_offset(i, data);
-                let proof = data_path_bytes(args, at);
-                let Some(hash) = content_hash_of_proof(&proof) else {
-                    eyre::bail!("content_lookup needs a proof of at least 64 bytes at offset {at}");
-                };
-                let offsets = store.view(|tx| tx.offsets_for_content_hash(hash))?;
-                eyre::ensure!(
-                    offsets.iter().any(|offset| offset.0 == at),
-                    "content lookup missed offset {at}"
-                );
-                Ok(())
-            },
-        )?;
-        time_reopen(
-            dir,
-            disk.as_ref(),
-            "content_miss",
-            args.reads,
-            open,
-            |store, i| {
-                let mut tagged = b"content-miss".to_vec();
-                tagged.extend(i.to_be_bytes());
-                let hash = H256(irys_types::hash_sha256(&tagged));
-                let offsets = store.view(|tx| tx.offsets_for_content_hash(hash))?;
-                eyre::ensure!(offsets.is_empty(), "absent content hash returned a row");
                 Ok(())
             },
         )?;
@@ -1873,7 +1834,7 @@ fn timed(f: impl FnOnce() -> eyre::Result<()>) -> eyre::Result<u128> {
     Ok(started.elapsed().as_millis())
 }
 
-fn print_column_files(store: &SubmoduleIndex, chunks: u32) -> eyre::Result<()> {
+fn print_column_files(store: &SubmoduleIndex) -> eyre::Result<()> {
     let mut files = store.column_file_usage()?;
     files.sort_by(|left, right| left.name.cmp(&right.name));
     let mut sst_files = 0_u64;
@@ -1885,27 +1846,9 @@ fn print_column_files(store: &SubmoduleIndex, chunks: u32) -> eyre::Result<()> {
             "  cf name={} sst_files={} sst_bytes={} blob_files={} blob_bytes={}",
             cf.name, cf.sst_files, cf.sst_bytes, cf.blob_files, cf.blob_bytes
         );
-        if cf.name == "ChunkOffsetsByContentHash" && chunks > 0 {
-            let per_chunk = cf.sst_bytes as f64 / f64::from(chunks);
-            println!(
-                "  cf_per_chunk name={} sst_bytes={} bytes_per_chunk={per_chunk:.2}",
-                cf.name, cf.sst_bytes
-            );
-        }
     }
     println!("  files sst={sst_files} blob={blob_files}");
     Ok(())
-}
-
-/// Leaf `data_hash` of a stored proof. `None` when the bytes are shorter than a leaf.
-fn content_hash_of_proof(proof: &[u8]) -> Option<H256> {
-    const LEAF_LEN: usize = 64;
-    if proof.len() < LEAF_LEN {
-        return None;
-    }
-    let tail = proof[proof.len() - LEAF_LEN..].to_vec();
-    let leaf = irys_types::get_leaf_proof(&irys_types::Base64(tail)).ok()?;
-    irys_types::ProofDeserialize::hash(&leaf).map(H256)
 }
 
 fn mdbx_map_bytes(chunks: u32, path_bytes: usize, worst_case: bool) -> usize {
@@ -2845,10 +2788,9 @@ Presets: {presets}. Each preset other than full-filters, fdatasync-wal-rotate, a
 --data-fraction F (default 1, and 0 < F <= 1) writes transactions, placements, and data rows for the first F × --chunks offsets. The transaction shape is the shape of that prefix. The header prints data_fraction and data_chunks.\n\
 --with-crc stores the proof plus the checksum trailer from encode_offset_meta. It needs --engine rocks.\n\
 {ENTROPY_FILL_HELP}\n\
---reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, span (range plus every proof in it, as paths_in_tx does), entropy_range, recall_rows, rmw_path, rmw_root. RocksDB also times content_lookup and content_miss. The data shapes sample the data region only.\n\
+--reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, span (range plus every proof in it, as paths_in_tx does), entropy_range, recall_rows, rmw_path, rmw_root. The data shapes sample the data region only.\n\
 entropy_range is a cold offset_metas_in_range of --range-len consecutive entropy offsets, sampled over the entropy region. recall_rows is the same call for --range-len offsets at a uniform start over the whole partition, so the window can mix data and entropy rows. Both use the cold-cache reopen the other shapes use. Both are skipped, with a printed reason, when there is no entropy region or the engine is not RocksDB.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_random_open repeats it with the engine left open. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
-content_lookup is a cold prefix seek of a leaf hash that was stored. content_miss seeks a hash that was not stored. Both run only for RocksDB, before rmw_path rewrites proofs.\n\
 Each read line also prints head_p50_us, head_p99_us, and head_max_us for the first 32 samples, and the same for the tail.\n\
 RocksDB prints rocks_bg before and after each shape: running compactions, running flushes, pending flags, and no_file_opens.\n\
 The RocksDB engine line shows max_open_files=-1 file_opening_threads=16. Production open uses the same table cache. The bench open also skips the table-property scan.\n\

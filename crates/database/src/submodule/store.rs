@@ -208,18 +208,6 @@ pub trait SubmoduleRead {
         super::placement::read_placements_for_data_root(self, data_commitment)
     }
 
-    /// Partition offsets whose stored data-proof leaf is `content_hash`.
-    ///
-    /// RocksDB v1 seeks `ChunkOffsetsByContentHash`. The result is sorted.
-    /// An absent hash is an empty vec. MDBX returns an error.
-    // MDBX-SUBMODULE-INDEX: delete this default. MDBX has no content-hash index and returns an error. RocksDB v1 seeks ChunkOffsetsByContentHash.
-    fn offsets_for_content_hash(
-        &self,
-        _content_hash: H256,
-    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
-        eyre::bail!("content-hash offset index is not supported on this schema")
-    }
-
     /// RocksDB v1 stores a packed-chunk checksum in the offset row.
     ///
     /// The default is false. MDBX does not.
@@ -1876,18 +1864,11 @@ mod tests {
         store.view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(offset)))
     }
 
+    /// Every v2 chunk proof length is stored and read back as given: the
+    /// 32-byte size witness of a one-chunk upload, and longer proofs.
     #[test]
-    fn content_hash_lookup_follows_the_schema() -> eyre::Result<()> {
-        each_engine("content_hash_lookup", |store| {
-            let hash = H256::repeat_byte(4);
-            let absent = store.view(|tx| tx.offsets_for_content_hash(hash));
-            // MDBX-SUBMODULE-INDEX: delete this arm. It checks tx-path bytes only MDBX stores.
-            if store.stores_tx_paths() {
-                let err = absent.unwrap_err();
-                assert!(err.to_string().contains("not supported"), "{err}");
-                return Ok(());
-            }
-            assert!(absent?.is_empty());
+    fn every_v2_chunk_proof_length_round_trips() -> eyre::Result<()> {
+        each_engine("v2_proof_lengths", |store| {
             store.update(|tx| {
                 install_placement(
                     tx,
@@ -1899,13 +1880,18 @@ mod tests {
                     11 * 32,
                 )
             })?;
-            let mut leaf = vec![0_u8; 64];
-            leaf[..32].fill(4);
-            store.update(|tx| tx.add_full_data_path(PartitionChunkOffset::from(6), leaf))?;
-            assert_eq!(
-                store.view(|tx| tx.offsets_for_content_hash(hash))?,
-                vec![PartitionChunkOffset::from(6)]
-            );
+            for (offset, hash_count) in [(1_u32, 1_usize), (2, 2), (3, 26)] {
+                let proof = vec![u8::try_from(hash_count)?; hash_count * 32];
+                store.update(|tx| {
+                    tx.add_full_data_path(PartitionChunkOffset::from(offset), proof.clone())
+                })?;
+                assert_eq!(
+                    store
+                        .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(offset)))?,
+                    Some(proof),
+                    "{hash_count} hashes"
+                );
+            }
             Ok(())
         })
     }

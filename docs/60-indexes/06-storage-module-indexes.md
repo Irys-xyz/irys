@@ -114,11 +114,12 @@ does not create a missing family. Restore the directory or reset the
 storage module. A new directory, and a converter target, still create
 the families.
 
-RocksDB v1 stores the placement, the offset row in `ChunkMetaByOffset`,
-and `ChunkOffsetsByContentHash` (the 32-byte leaf hash, then the
-partition offset, with an empty value). The offset row is the data proof
-when one is stored, and the CRC32C of the packed chunk when one was
-written. A checksum with no proof is an entropy row. It is not a data
+RocksDB v1 stores the placement and the offset row in
+`ChunkMetaByOffset`. The offset row is the data proof when one is stored,
+and the CRC32C of the packed chunk when one was written. The data proof
+is a data tree v2 chunk proof: 32-byte hashes, the siblings leaf to root,
+then the size witness. It holds no chunk hash. `ChunkOffsetsByContentHash`
+is retired: it stays empty (see below). A checksum with no proof is an entropy row. It is not a data
 chunk.
 
 RocksDB v1 metadata values are raw. The packing value is 41 bytes:
@@ -130,9 +131,9 @@ byte `01`. `mdbx-to-rocks` writes the packing record when
 The node writes it on open when they are not.
 
 The checksum, a flags byte and a format byte are a trailer after
-the proof, not a header: neighbouring proofs share their upper branches,
-and block compression keeps more of that sharing when each value starts
-with the proof (measured at 1–3 bytes per chunk less than a header; see
+the proof, not a header: neighbouring proofs share their upper siblings
+and the size witness, and block compression keeps more of that sharing
+when each value starts with the proof (measured at 1–3 bytes per chunk less than a header; see
 `encode_offset_meta`). RocksDB v1 does not store the tx path. Mining
 derives that path from the consensus database. MDBX keeps
 `ChunkDataPathByOffset` and stores only the proof.
@@ -207,12 +208,14 @@ No prefix extractor. Bloom is off unless every family has a bloom.
 
 ### ChunkOffsetsByContentHash
 
-Key: leaf content hash, 32 bytes, then the partition offset `u32`. 36
-bytes. The hash is the leaf in the last 64 bytes of the proof. A shorter
-proof has no row. A checksum-only row has no row. The checksum is not
-part of the key.
+Retired. A data tree v2 chunk proof holds no chunk hash, so nothing
+writes or reads this family. It is still opened with the options below,
+so an existing directory keeps its layout and opens. `audit_index`
+reports any row in it as a finding.
 
-Value: empty. A non-empty value is a finding.
+Key: content hash, 32 bytes, then the partition offset `u32`. 36 bytes.
+
+Value: empty.
 
 Prefix extractor `rocksdb.FixedPrefix.32`. Memtable prefix bloom ratio
 0.1. `whole_key_filtering` is false. The bloom is always on, 10 bits per

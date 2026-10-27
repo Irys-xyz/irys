@@ -99,10 +99,6 @@ pub struct EngineEquivalenceReport {
     pub pending_mismatches: u64,
     pub reset_marker_mismatch: u64,
     pub schema_mismatch: u64,
-    /// Parseable proof leaves plus reverse rows examined on the RocksDB v1 side.
-    pub content_offsets_checked: u64,
-    /// A proof leaf with no reverse row, or a reverse row whose proof leaf differs.
-    pub content_offset_mismatches: u64,
     /// Rows with no covering interval. Not a mismatch: the copy omits them, and
     /// `audit_index` rejects a proof or pending job left with no interval.
     pub skipped_orphans: u64,
@@ -141,7 +137,6 @@ impl EngineEquivalenceReport {
             self.pending_mismatches,
             self.reset_marker_mismatch,
             self.schema_mismatch,
-            self.content_offset_mismatches,
             self.mismatch_data_path_hash,
             self.mismatch_tx_path_hash,
             self.skipped_frontier,
@@ -191,8 +186,6 @@ impl std::fmt::Display for EngineEquivalenceReport {
                 ),
                 ("reset_marker_mismatch", &self.reset_marker_mismatch),
                 ("schema_mismatch", &self.schema_mismatch),
-                ("content_offsets_checked", &self.content_offsets_checked),
-                ("content_offset_mismatches", &self.content_offset_mismatches),
                 ("skipped_orphans", &self.skipped_orphans),
                 ("skipped_frontier", &self.skipped_frontier),
                 ("index_audit_findings", &self.index_audit_findings),
@@ -1915,29 +1908,8 @@ where
     verify_placements(v2, v3, db, map, &mut report)?;
     verify_pending_rows(v2, v3, &mut report)?;
     verify_markers(v2, v3, v2_schema, &mut report)?;
-    verify_content_index(v3, &mut report)?;
     note_index_audit(v3, &mut report)?;
     Ok(report)
-}
-
-fn verify_content_index(
-    v3: &RocksSubmoduleStore,
-    report: &mut EngineEquivalenceReport,
-) -> eyre::Result<()> {
-    let audit = v3.audit_content_index()?;
-    report.content_offsets_checked = audit.proofs_with_leaf.saturating_add(audit.reverse_rows);
-    report.content_offset_mismatches = audit.missing_reverse.saturating_add(audit.dangling_reverse);
-    if report.content_offset_mismatches > 0 {
-        note(
-            report,
-            "content_offset",
-            format!(
-                "missing_reverse={} dangling_reverse={}",
-                audit.missing_reverse, audit.dangling_reverse
-            ),
-        );
-    }
-    Ok(())
 }
 
 fn note_index_audit(
@@ -4241,7 +4213,6 @@ fn verify_mdbx_v1_against_rocks(
     note_rocks_placements_absent_from_v1(env, v3, &mut report)?;
     compare_v1_pending(env, v3, &written, &frontier, &mut report)?;
     note_extra_rocks_offset_rows(env, v3, &written, &frontier, &accepted, &mut report)?;
-    verify_content_index(v3, &mut report)?;
     note_index_audit(v3, &mut report)?;
     note_accepted_offset_ranges(accepted.range_count());
     Ok(report)
@@ -5177,7 +5148,6 @@ fn verify_reset_target(
             "reset or empty source".to_owned(),
         );
     }
-    verify_content_index(v3, &mut report)?;
     note_index_audit(v3, &mut report)?;
     Ok(report)
 }
@@ -5554,15 +5524,6 @@ mod tests {
                 tx.get_data_path_by_offset(PartitionChunkOffset(3))?,
                 Some(indexed_data_leaf(3))
             );
-            assert_eq!(
-                tx.offsets_for_content_hash(H256([1_u8; 32]))?,
-                vec![PartitionChunkOffset(0)]
-            );
-            assert_eq!(
-                tx.offsets_for_content_hash(H256([3_u8; 32]))?,
-                vec![PartitionChunkOffset(3)]
-            );
-            assert!(tx.offsets_for_content_hash(H256([9_u8; 32]))?.is_empty());
             let job = tx
                 .get_pending_body_migration(PartitionChunkOffset(0))?
                 .expect("pending");
@@ -5714,11 +5675,9 @@ mod tests {
         assert_eq!(report.tx_paths_checked, 2, "{report}");
         assert_eq!(report.data_roots_checked, 2, "{report}");
         assert_eq!(report.pending_checked, 1, "{report}");
-        assert_eq!(report.content_offset_mismatches, 0, "{report}");
-        assert!(report.content_offsets_checked >= 2, "{report}");
     }
 
-    /// 64-byte data-proof leaf. The first 32 bytes are the content hash.
+    /// Two-hash data proof, every byte of the first hash `byte`.
     fn indexed_data_leaf(byte: u8) -> Vec<u8> {
         let mut leaf = vec![0_u8; 64];
         leaf[..32].fill(byte);
@@ -8815,7 +8774,12 @@ mod tests {
                 }
             }
         };
-        for family in INDEX_FAMILIES {
+        // Nothing writes the retired content-hash family, so it has no row to
+        // change. `audit_index` reports a row there.
+        for family in INDEX_FAMILIES
+            .into_iter()
+            .filter(|family| *family != "ChunkOffsetsByContentHash")
+        {
             refresh_from(&left, &right)?;
             flip_one_stored_byte(&right, family, None)?;
             assert_one(family, &verify_rocks_records(&left, &right)?);
