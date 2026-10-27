@@ -3,7 +3,7 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{cache_chunk_verified, store_ingress_data_hash};
 use irys_types::data_tree::Geometry;
 use irys_types::{
-    ChunkPathHash, DatabaseProvider, H256, IrysAddress, UnpackedChunk, generate_ingress_data_hash,
+    ChunkKey, DatabaseProvider, H256, IrysAddress, UnpackedChunk, generate_ingress_data_hash,
 };
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -20,12 +20,14 @@ struct PendingChunkWrite {
 ///
 /// Chunks are queued via [`queue_write`] and written in batches on a background
 /// task, reducing per-chunk MDBX transaction overhead on the hot ingress path.
-/// A [`DashSet`] tracks pending chunk hashes so the writer can detect
+/// A [`DashSet`] tracks pending chunk keys so the writer can detect
 /// in-flight duplicates without hitting the database.
 #[derive(Debug)]
 pub(crate) struct ChunkDataWriter {
     tx: mpsc::Sender<PendingChunkWrite>,
-    pending_hashes: Arc<DashSet<ChunkPathHash>>,
+    pending_hashes: Arc<DashSet<ChunkKey>>,
+    /// Derives each chunk's `ChunkKey`.
+    geometry: Geometry,
 }
 
 pub(crate) struct QueuedChunkWrite {
@@ -64,7 +66,11 @@ impl ChunkDataWriter {
         };
         runtime_handle.spawn(writer.run());
 
-        Self { tx, pending_hashes }
+        Self {
+            tx,
+            pending_hashes,
+            geometry,
+        }
     }
 
     /// A writer whose channel is already closed, so `queue_write` fails before
@@ -76,6 +82,7 @@ impl ChunkDataWriter {
         Self {
             tx,
             pending_hashes: Arc::new(DashSet::new()),
+            geometry: Geometry::TESTING,
         }
     }
 
@@ -83,13 +90,13 @@ impl ChunkDataWriter {
     ///
     /// Concurrent writes are still committed in shared MDBX batches, but each
     /// caller receives an acknowledgement for the batch containing its own
-    /// chunk. The returned handle also records whether the chunk hash was
+    /// chunk. The returned handle also records whether the chunk key was
     /// already pending (duplicate).
     pub(crate) async fn queue_write(
         &self,
         chunk: Arc<UnpackedChunk>,
     ) -> Result<QueuedChunkWrite, QueueError> {
-        let hash = chunk.chunk_path_hash();
+        let hash = chunk.chunk_key(&self.geometry);
         let is_duplicate = !self.pending_hashes.insert(hash);
         let (done_tx, done_rx) = oneshot::channel();
         if self
@@ -125,7 +132,7 @@ struct BackgroundWriter {
     address: IrysAddress,
     /// Derives each chunk's `data_commitment`, the cache key.
     geometry: Geometry,
-    pending_hashes: Arc<DashSet<ChunkPathHash>>,
+    pending_hashes: Arc<DashSet<ChunkKey>>,
 }
 
 impl BackgroundWriter {
@@ -181,11 +188,11 @@ impl BackgroundWriter {
             return Ok(());
         }
 
-        let hashes: Vec<(ChunkPathHash, H256)> = batch
+        let hashes: Vec<(ChunkKey, H256)> = batch
             .iter()
             .map(|pending| {
                 (
-                    pending.chunk.chunk_path_hash(),
+                    pending.chunk.chunk_key(&self.geometry),
                     generate_ingress_data_hash(&pending.chunk.bytes.0, self.address),
                 )
             })
@@ -193,13 +200,13 @@ impl BackgroundWriter {
 
         let result = self.db.update_eyre(|tx| {
             let mut written = 0_usize;
-            for (pending, (chunk_path_hash, ingress_data_hash)) in batch.iter().zip(&hashes) {
+            for (pending, (chunk_key, ingress_data_hash)) in batch.iter().zip(&hashes) {
                 match cache_chunk_verified(tx, &pending.chunk, &self.geometry) {
                     Ok(is_duplicate) => {
                         if is_duplicate {
                             warn!(
                                 "Duplicate chunk {} of {} in write-behind batch",
-                                chunk_path_hash, pending.chunk.data_tree_root
+                                chunk_key, pending.chunk.data_tree_root
                             );
                         } else {
                             written += 1;
@@ -216,7 +223,7 @@ impl BackgroundWriter {
                     Err(e) => {
                         error!(
                             "Failed to cache chunk {} of {}: {:?}",
-                            chunk_path_hash, pending.chunk.data_tree_root, e
+                            chunk_key, pending.chunk.data_tree_root, e
                         );
                         return Err(e);
                     }
@@ -225,8 +232,8 @@ impl BackgroundWriter {
             Ok(written)
         });
 
-        for (chunk_path_hash, _) in &hashes {
-            self.pending_hashes.remove(chunk_path_hash);
+        for (chunk_key, _) in &hashes {
+            self.pending_hashes.remove(chunk_key);
         }
 
         match result {
@@ -259,6 +266,37 @@ mod tests {
     use irys_types::DataTreeRoot;
     use irys_types::{Base64, H256, TxChunkOffset};
     use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+
+    /// Two indices of one commitment can carry byte-identical proofs. The queue
+    /// identifies chunks by index, so neither is mistaken for the other.
+    #[tokio::test]
+    async fn two_indices_with_identical_proof_bytes_are_both_queued() {
+        // No consumer: entries stay pending, so the duplicate flag is deterministic.
+        let (tx, _rx) = mpsc::channel(4);
+        let writer = ChunkDataWriter {
+            tx,
+            pending_hashes: Arc::new(DashSet::new()),
+            geometry: Geometry::TESTING,
+        };
+        let chunk_at = |index: u32| {
+            Arc::new(UnpackedChunk {
+                data_tree_root: DataTreeRoot(H256([0x61; 32])),
+                data_size: 16,
+                data_path: Base64(vec![1, 2, 3]),
+                bytes: Base64(vec![9_u8; 8]),
+                tx_offset: TxChunkOffset::from(index),
+            })
+        };
+
+        let first = writer.queue_write(chunk_at(0)).await.unwrap();
+        let second = writer.queue_write(chunk_at(1)).await.unwrap();
+        assert!(!first.is_duplicate());
+        assert!(!second.is_duplicate());
+        assert_eq!(writer.pending_hashes.len(), 2);
+
+        let repeat = writer.queue_write(chunk_at(1)).await.unwrap();
+        assert!(repeat.is_duplicate());
+    }
 
     #[test_log::test(tokio::test)]
     async fn validated_leaf_is_persisted_without_a_storage_assignment() -> eyre::Result<()> {

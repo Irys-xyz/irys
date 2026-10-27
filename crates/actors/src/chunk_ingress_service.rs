@@ -23,7 +23,7 @@ use std::time::Duration;
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
-    BlockHash, ChunkPathHash, Config, DataCommitment, TokioServiceHandle, Traced, TxChunkOffset,
+    BlockHash, ChunkKey, Config, DataCommitment, TokioServiceHandle, Traced, TxChunkOffset,
     app_state::DatabaseProvider, chunk::UnpackedChunk,
 };
 use lru::LruCache;
@@ -159,8 +159,7 @@ pub(crate) struct ChunkIngressServiceInner {
     /// Chunks already written, by commitment and path. Two commitments of one
     /// data tree root share chunk paths, so the path alone does not identify
     /// the chunk.
-    pub(crate) recent_valid_chunks:
-        tokio::sync::RwLock<LruCache<(DataCommitment, ChunkPathHash), ()>>,
+    pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkKey, ()>>,
     pub(crate) pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
     pub(crate) pending_ingress_proofs: Mutex<PendingIngressProofs>,
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,

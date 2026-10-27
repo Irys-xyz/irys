@@ -10,7 +10,7 @@ use irys_database::{complete_ingress_leaves, db::IrysDatabaseExt as _};
 use irys_domain::{StorageModule, WriteDataChunkError};
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    ChunkPathHash, DataCommitment, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
+    ChunkKey, DataCommitment, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
     SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256,
     irys::IrysSigner, validate_path, validate_path_byte_range,
 };
@@ -159,8 +159,8 @@ async fn write_chunk_to_assigned_modules(
 }
 
 async fn remember_after_module_writes(
-    recent_valid_chunks: &RwLock<LruCache<(DataCommitment, ChunkPathHash), ()>>,
-    recent_chunk: (DataCommitment, ChunkPathHash),
+    recent_valid_chunks: &RwLock<LruCache<ChunkKey, ()>>,
+    recent_chunk: ChunkKey,
     write_result: Result<(), ChunkIngressError>,
 ) -> Result<(), ChunkIngressError> {
     write_result?;
@@ -495,17 +495,12 @@ impl ChunkIngressServiceInner {
         let data_commitment = chunk.data_commitment(&geometry);
 
         // Early exit if we've already processed this chunk recently
-        let chunk_path_hash = chunk.chunk_path_hash();
+        let chunk_key = chunk.chunk_key(&geometry);
 
-        if self
-            .recent_valid_chunks
-            .read()
-            .await
-            .contains(&(data_commitment, chunk_path_hash))
-        {
+        if self.recent_valid_chunks.read().await.contains(&chunk_key) {
             debug!(
                 "Chunk {} already processed recently, skipping re-gossip",
-                &chunk_path_hash
+                &chunk_key
             );
             record_chunk_duplicate();
             return Ok(());
@@ -704,21 +699,17 @@ impl ChunkIngressServiceInner {
         let write_result = write_chunk_to_assigned_modules(&modules, chunk.as_ref())
             .instrument(info_span!("chunk.write_storage_modules"))
             .await;
-        remember_after_module_writes(
-            &self.recent_valid_chunks,
-            (data_commitment, chunk_path_hash),
-            write_result,
-        )
-        .await
-        .map_err(|error| IngressFailure {
-            error,
-            body_committed: true,
-        })?;
+        remember_after_module_writes(&self.recent_valid_chunks, chunk_key, write_result)
+            .await
+            .map_err(|error| IngressFailure {
+                error,
+                body_committed: true,
+            })?;
 
         // Gossip the chunk before moving onto ingress proof checks
         let chunk_data_root = chunk.data_tree_root;
         let chunk_tx_offset = chunk.tx_offset;
-        let gossip_broadcast_message = GossipBroadcastMessageV2::from(chunk);
+        let gossip_broadcast_message = GossipBroadcastMessageV2::chunk(chunk, &geometry);
 
         if let Err(error) = self
             .service_senders
@@ -1256,7 +1247,7 @@ mod tests {
             bytes: vec![0, 1, 2, 3, 4].into(),
             tx_offset: TxChunkOffset::from(0),
         };
-        let path_hash = (DataCommitment(data_root), chunk.chunk_path_hash());
+        let path_hash = chunk.chunk_key(&irys_types::data_tree::Geometry::TESTING);
         let recent = RwLock::new(LruCache::new(NonZeroUsize::new(8).expect("nonzero")));
 
         storage_module.fail_next_index_commit();
@@ -2230,21 +2221,17 @@ mod tests {
         let cap = 2_usize;
         let (inner, mut receivers) = test_ingress_inner(&tmp, cap, cap);
         let data_root = H256([0x46; 32]);
-        // `chunk_path_hash` is the data_path hash. The two chunks need different
-        // paths or both hit `recent_valid_chunks`.
-        let mut seen = chunk_with(data_root, 0, 0, CLAIMED_DATA_SIZE);
-        seen.data_path = vec![9_u8, 9, 9].into();
+        let seen = chunk_with(data_root, 0, 0, CLAIMED_DATA_SIZE);
         let other = chunk_with(data_root, 1, 1, CLAIMED_DATA_SIZE);
         {
             let mut pending = inner.pending_chunks.write().await;
             pending.park(seen.clone());
             pending.park(other);
         }
-        inner
-            .recent_valid_chunks
-            .write()
-            .await
-            .put((claim_key(data_root), seen.chunk_path_hash()), ());
+        inner.recent_valid_chunks.write().await.put(
+            seen.chunk_key(&irys_types::data_tree::Geometry::TESTING),
+            (),
+        );
 
         inner
             .process_pending_chunks_for_root(claim_key(data_root))

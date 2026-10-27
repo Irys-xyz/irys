@@ -2175,7 +2175,7 @@ mod tests {
         };
         let small = chunk_of_size(64);
         let large = chunk_of_size(96);
-        assert_eq!(small.chunk_path_hash(), large.chunk_path_hash());
+        assert_eq!(small.data_path, large.data_path);
         let small_commitment = data_commitment(&geometry, root, 64);
         let large_commitment = data_commitment(&geometry, root, 96);
         assert_ne!(small_commitment, large_commitment);
