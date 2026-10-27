@@ -1,16 +1,14 @@
-use crate::data_tree::data_commitment;
 use crate::irys::IrysSigner;
 use crate::{
-    DataCommitment, DataTreeRoot, H256, IngressMerkleLeaf, IrysAddress, IrysSignature, Node,
-    Signable, VersionDiscriminant, Versioned, decode_rlp_version, encode_rlp_version,
-    generate_data_root, generate_ingress_leaves, generate_ingress_root_from_leaves,
+    DataCommitment, H256, IngressMerkleLeaf, IrysAddress, IrysSignature, Node, Signable,
+    VersionDiscriminant, Versioned, decode_rlp_version, encode_rlp_version, generate_data_root,
+    generate_ingress_leaves, generate_ingress_root_from_leaves,
 };
 use alloy_primitives::{ChainId, keccak256};
 use alloy_rlp::Encodable as _;
 use arbitrary::Arbitrary;
 use bytes::BufMut;
-use eyre::OptionExt as _;
-use irys_data_tree::Geometry;
+use irys_data_tree::{DataTreeBuilder, Geometry};
 use irys_macros_integer_tagged::IntegerTagged;
 use reth_codecs::Compact;
 #[cfg(feature = "db")]
@@ -166,18 +164,13 @@ impl Decompress for IngressProofV1 {
     }
 }
 
+/// The address-bound ingress tree over `chunks`. It stays on the v1 tree
+/// encoder, so its root does not depend on the data tree.
 pub fn generate_ingress_proof_tree<C: AsRef<[u8]>>(
     chunks: impl Iterator<Item = eyre::Result<C>>,
     address: IrysAddress,
-    and_regular: bool,
-) -> eyre::Result<(Node, Option<Node>)> {
-    let (ingress_leaves, regular_leaves) = generate_ingress_leaves(chunks, address, and_regular)?;
-    let ingress_root = generate_data_root(ingress_leaves)?;
-
-    Ok((
-        ingress_root,
-        regular_leaves.map(generate_data_root).transpose()?,
-    ))
+) -> eyre::Result<Node> {
+    generate_data_root(generate_ingress_leaves(chunks, address)?)
 }
 
 pub fn generate_ingress_proof<C: AsRef<[u8]>>(
@@ -187,7 +180,7 @@ pub fn generate_ingress_proof<C: AsRef<[u8]>>(
     chain_id: u64,
     anchor: H256,
 ) -> eyre::Result<IngressProof> {
-    let (root, _) = generate_ingress_proof_tree(chunks, signer.address(), false)?;
+    let root = generate_ingress_proof_tree(chunks, signer.address())?;
     generate_ingress_proof_from_root(signer, data_commitment, H256(root.id), chain_id, anchor)
 }
 
@@ -226,8 +219,10 @@ pub fn generate_ingress_proof_from_leaves(
 }
 
 /// Rebuilds both trees from `chunks` and checks the signature over the
-/// recomputed data commitment (`geometry` and the summed chunk lengths fix the
-/// size) and ingress root.
+/// recomputed data commitment and ingress root. `chunks` are the upload's
+/// chunks in order; the v2 data tree built from them under `geometry` fixes
+/// the commitment. Chunks that do not form an upload under `geometry` are an
+/// error.
 pub fn verify_ingress_proof<C: AsRef<[u8]>>(
     proof: &IngressProof,
     chunks: impl IntoIterator<Item = C>,
@@ -242,23 +237,16 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
 
     let recovered_address = proof.signature.recover_signer(prehash)?;
 
-    // re-compute the ingress proof & regular trees & roots
-    let mut data_size = 0_u64;
-    let (proof_root, regular_root) = generate_ingress_proof_tree(
+    // One pass over the chunks builds the address-bound tree and the data tree.
+    let mut data_tree = DataTreeBuilder::new(*geometry);
+    let proof_root = generate_ingress_proof_tree(
         chunks.into_iter().map(|chunk| {
-            data_size += chunk.as_ref().len() as u64;
+            data_tree.push_chunk(chunk.as_ref())?;
             Ok(chunk)
         }),
         recovered_address,
-        true,
     )?;
-
-    let data_tree_root = DataTreeRoot(H256(
-        regular_root
-            .ok_or_eyre("expected regular_root to be Some")?
-            .id,
-    ));
-    let data_commitment = data_commitment(geometry, data_tree_root, data_size);
+    let data_commitment = DataCommitment::from(data_tree.finish()?.data_commitment());
 
     // re-compute the prehash (combining data_commitment, proof, and chain_id)
 
@@ -280,12 +268,23 @@ mod tests {
     use rand::Rng as _;
 
     use crate::{
-        ConsensusConfig, DataTreeRoot, H256, IrysAddress, data_tree::data_commitment,
-        generate_data_root, generate_ingress_data_hash, generate_ingress_leaf_from_data_hash,
-        generate_leaves, hash_sha256, ingress::verify_ingress_proof, irys::IrysSigner,
+        ConsensusConfig, DataCommitment, DataTreeRoot, H256, IrysAddress,
+        data_tree::{Geometry, data_commitment},
+        generate_ingress_data_hash, generate_ingress_leaf_from_data_hash,
+        ingress::verify_ingress_proof,
+        irys::IrysSigner,
     };
+    use irys_data_tree::DataTree;
 
     use super::{generate_ingress_proof, generate_ingress_proof_from_leaves};
+
+    /// The commitment of the v2 data tree over `data`.
+    fn upload_commitment(geometry: &Geometry, data: &[u8]) -> DataCommitment {
+        DataTree::from_bytes(*geometry, data)
+            .expect("non-empty data")
+            .data_commitment()
+            .into()
+    }
 
     // The address-bound ingress tree must not change when the data tree moves to v2.
     const ADDRESS_BOUND_ROOT_FOR_FIXED_CHUNKS: [u8; 32] =
@@ -295,10 +294,9 @@ mod tests {
     fn address_bound_root_is_unchanged() -> eyre::Result<()> {
         let address = IrysAddress::from([0x11_u8; 20]);
         let chunks = [vec![0x01_u8; 32], vec![0x02_u8; 32], vec![0x03_u8; 7]];
-        let (root, _) = super::generate_ingress_proof_tree(
+        let root = super::generate_ingress_proof_tree(
             chunks.iter().map(|chunk| Ok(chunk.as_slice())),
             address,
-            false,
         )?;
         assert_eq!(root.id, ADDRESS_BOUND_ROOT_FOR_FIXED_CHUNKS);
         Ok(())
@@ -311,10 +309,7 @@ mod tests {
         let chunks = [vec![1_u8; 32], vec![2_u8; 32], vec![3_u8; 7]];
         let data = chunks.concat();
         let geometry = config.data_tree_geometry()?;
-        let data_size = data.len() as u64;
-        let regular_leaves = generate_leaves(std::iter::once(Ok(data)), 32)?;
-        let data_root = DataTreeRoot(H256(generate_data_root(regular_leaves)?.id));
-        let commitment = data_commitment(&geometry, data_root, data_size);
+        let commitment = upload_commitment(&geometry, &data);
         let anchor = H256::random();
 
         let full = generate_ingress_proof(
@@ -379,28 +374,42 @@ mod tests {
     }
 
     #[test]
-    fn interleave_test() -> eyre::Result<()> {
-        let testing_config = ConsensusConfig::testing();
-        let data_size = (testing_config.chunk_size as f64 * 2.5).round() as usize;
-        let mut data_bytes = vec![0_u8; data_size];
-        rand::thread_rng().fill(&mut data_bytes[..]);
-        let signer = IrysSigner::random_signer(&testing_config);
-        let leaves = generate_leaves(
-            vec![data_bytes].into_iter().map(Ok),
-            testing_config.chunk_size as usize,
+    fn ingress_proof_verifies_against_the_v2_commitment() -> eyre::Result<()> {
+        let config = ConsensusConfig::testing();
+        let geometry = config.data_tree_geometry()?;
+        let signer = IrysSigner::random_signer(&config);
+        let data: Vec<u8> = (0..(geometry.chunk_size() * 2 + 9))
+            .map(|byte| byte as u8)
+            .collect();
+        let tx = signer.create_transaction(data, H256::zero())?;
+        let commitment = tx.header.data_commitment(&geometry);
+        let mut chunks: Vec<Vec<u8>> = tx
+            .data_chunks()?
+            .into_iter()
+            .map(|chunk| chunk.bytes.0)
+            .collect();
+
+        let proof = generate_ingress_proof(
+            &signer,
+            commitment,
+            chunks.iter().map(|chunk| Ok(chunk.as_slice())),
+            config.chain_id,
+            H256::random(),
         )?;
-        let interleave_value = signer.address();
-        let interleave_hash = hash_sha256(&interleave_value.0.0);
+        assert!(verify_ingress_proof(
+            &proof,
+            &chunks,
+            config.chain_id,
+            &geometry
+        )?);
 
-        // interleave the interleave hash with the leaves
-        // TODO improve
-        let mut interleaved = Vec::with_capacity(leaves.len() * 2);
-        for leaf in leaves.iter() {
-            interleaved.push(interleave_hash);
-            interleaved.push(leaf.id)
-        }
-
-        let _interleaved_hash = hash_sha256(interleaved.concat().as_slice());
+        chunks[1][0] ^= 1;
+        assert!(!verify_ingress_proof(
+            &proof,
+            &chunks,
+            config.chain_id,
+            &geometry
+        )?);
         Ok(())
     }
 
@@ -412,19 +421,9 @@ mod tests {
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        // Build a merkle tree and data_root from the chunks
-        let leaves = generate_leaves(
-            vec![data_bytes.clone()].into_iter().map(Ok),
-            testing_config.chunk_size as usize,
-        )
-        .unwrap();
-        let root = generate_data_root(leaves)?;
+        // Build the data tree and its commitment from the data
         let geometry = testing_config.data_tree_geometry()?;
-        let commitment = data_commitment(
-            &geometry,
-            DataTreeRoot(H256(root.id)),
-            data_bytes.len() as u64,
-        );
+        let commitment = upload_commitment(&geometry, &data_bytes);
 
         // Generate an ingress proof with chain_id
         let signer = IrysSigner::random_signer(&testing_config);
@@ -449,14 +448,14 @@ mod tests {
             chain_id,
             &geometry
         )?);
+        // Reversed, the short last chunk comes first, so the chunks are not
+        // an upload under the geometry and the proof does not verify.
         let mut reversed = chunks;
         reversed.reverse();
-        assert!(!verify_ingress_proof(
-            &proof,
-            reversed.iter().as_slice(),
-            chain_id,
-            &geometry
-        )?);
+        assert!(!matches!(
+            verify_ingress_proof(&proof, reversed.iter().as_slice(), chain_id, &geometry),
+            Ok(true)
+        ));
 
         Ok(())
     }
@@ -469,19 +468,9 @@ mod tests {
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        // Build a merkle tree and data_root from the chunks
-        let leaves = generate_leaves(
-            vec![data_bytes.clone()].into_iter().map(Ok),
-            testing_config.chunk_size as usize,
-        )
-        .unwrap();
-        let root = generate_data_root(leaves)?;
+        // Build the data tree and its commitment from the data
         let geometry = testing_config.data_tree_geometry()?;
-        let commitment = data_commitment(
-            &geometry,
-            DataTreeRoot(H256(root.id)),
-            data_bytes.len() as u64,
-        );
+        let commitment = upload_commitment(&geometry, &data_bytes);
 
         let signer = IrysSigner::random_signer(&testing_config);
         let chunks: Vec<Vec<u8>> = data_bytes
