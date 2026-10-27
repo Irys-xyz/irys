@@ -143,9 +143,6 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
     // earlier at tx_offsets 3-5) to appear in storage. This proves that:
     // 1) valid_tx's DataRootInfo has been indexed in the storage module
     // 2) data sync has written cached chunks to the correct positions
-    // Without this wait, chunks 0-2 posted during ingress would be written to
-    // wrong_data_size_tx's storage slots (same data_root) and consumed from cache,
-    // leaving valid_tx's submit offset 3 permanently empty.
     genesis_node
         .wait_for_chunk_in_storage(
             DataLedger::Submit,
@@ -161,6 +158,16 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
     for i in 0..3 {
         let (status, _body) = genesis_node
             .post_chunk_32b_with_status(&valid_tx, i, &chunks)
+            .await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+    }
+
+    // Chunks are keyed by (data_tree_root, data_size). The chunks above claim
+    // valid_tx's size, so they do not fill wrong_data_size_tx. Post the same
+    // bytes again under wrong_data_size_tx's size.
+    for i in 0..3 {
+        let (status, _body) = genesis_node
+            .post_chunk_32b_with_status(&wrong_data_size_tx, i, &chunks)
             .await;
         assert_eq!(status, reqwest::StatusCode::OK);
     }
