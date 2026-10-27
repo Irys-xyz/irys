@@ -1346,12 +1346,12 @@ async fn block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Peer mines a block on top of common state with genesis
-/// But peer does not broadcast execution payload (effectively, block is stuck in validation on the genesis)
+/// Peer mines a block on top of common state with genesis, with gossip disabled.
+/// The test sends the block directly to the genesis validation service, so the block
+/// never enters the genesis block tree.
 ///
-/// Expectation: genesis mines ahead past `block_tree_depth`, the stuck block leaves the block tree
-/// (pruning a parent also removes its non-on-chain children), and its validation is cancelled
-/// with `BlockMissing`
+/// Expectation: the VDF task finds the block missing from the block tree, and its
+/// validation is cancelled with `BlockMissing`
 #[test_log::test(tokio::test)]
 async fn heavy_block_validation_cancels_a_block_missing_from_the_tree() -> eyre::Result<()> {
     let num_blocks_in_epoch = 2;
