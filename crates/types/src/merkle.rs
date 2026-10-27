@@ -1,11 +1,9 @@
 //! Validates merkle tree proofs for Irys transaction data and proof chunks
 
 use crate::Base64;
-use crate::ChunkBytes;
 use crate::H256;
 use crate::IrysAddress;
 use crate::TxChunkOffset;
-use crate::chunked::ChunkedIterator;
 use borsh::BorshDeserialize as _;
 use borsh_derive::BorshDeserialize;
 use eyre::Error;
@@ -113,8 +111,6 @@ impl ProofDeserialize<Self> for BranchProof {
     }
 }
 
-pub const MAX_CHUNK_SIZE: usize = 256 * 1024;
-pub const MIN_CHUNK_SIZE: usize = 32 * 1024;
 pub const HASH_SIZE: usize = 32;
 const NOTE_SIZE: usize = 32;
 
@@ -149,8 +145,8 @@ pub fn get_leaf_proof(path_buff: &Base64) -> Result<LeafProof, Error> {
     Ok(leaf_proof)
 }
 
-pub(crate) const LEAF_PROOF_LEN: usize = HASH_SIZE + NOTE_SIZE;
-pub(crate) const BRANCH_PROOF_LEN: usize = HASH_SIZE * 2 + NOTE_SIZE;
+const LEAF_PROOF_LEN: usize = HASH_SIZE + NOTE_SIZE;
+const BRANCH_PROOF_LEN: usize = HASH_SIZE * 2 + NOTE_SIZE;
 
 /// A proof buffer that fails here is invalid for every target. Returns the
 /// length of the branch section, which precedes the leaf.
@@ -326,128 +322,6 @@ pub fn print_debug(
 
     let max_byte_range = leaf_proof.offset() as u128;
     Ok((leaf_proof.data_hash, min_byte_range, max_byte_range))
-}
-
-/// (is_rightmost_chunk, max_byte_range)
-pub type ChunkInfo = (bool, u64);
-
-/// Validates chunk of data against provided [`Proof`].
-/// Returns a [ChunkInfo] if successful `(is_rightmost_chunk, max_byte_range)`
-pub fn validate_chunk(
-    mut root_id: [u8; HASH_SIZE],
-    chunk_node: &Node,
-    proof: &Proof,
-) -> Result<ChunkInfo, Error> {
-    let mut is_rightmost_chunk = true;
-    let max_byte_range_result: u64;
-
-    match chunk_node {
-        Node {
-            data_hash: Some(data_hash),
-            max_byte_range,
-            ..
-        } => {
-            // Validate that proof has sufficient length to avoid arithmetic underflow
-            let min_required_length = HASH_SIZE + NOTE_SIZE;
-            if proof.proof.len() < min_required_length {
-                return Err(eyre!(
-                    "Invalid proof buffer: length {} is less than the minimum required length {}",
-                    proof.proof.len(),
-                    min_required_length
-                ));
-            }
-
-            // Split proof into branches and leaf. Leaf is at the end and branches are ordered
-            // from root to leaf.
-            let (branches, leaf) = proof
-                .proof
-                .split_at(proof.proof.len() - HASH_SIZE - NOTE_SIZE);
-
-            // Deserialize proof.
-            let branch_proofs: Vec<BranchProof> = branches
-                .chunks(HASH_SIZE * 2 + NOTE_SIZE)
-                .map(|b| BranchProof::try_from_proof_slice(b).unwrap())
-                .collect();
-            let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
-
-            // Validate branches.
-            for branch_proof in branch_proofs.iter() {
-                // Calculate the id from the proof.
-                let id = hash_all_sha256(vec![
-                    &branch_proof.left_id,
-                    &branch_proof.right_id,
-                    &branch_proof.offset().to_note_vec(),
-                ]);
-
-                // Ensure calculated id correct.
-                if id != root_id {
-                    return Err(eyre!("Invalid Branch Proof"));
-                }
-
-                // If the max_byte_range from the proof is greater than the max_byte_range in the data chunk,
-                // then the next id to validate against is from the left.
-                root_id = if max_byte_range > &branch_proof.offset() {
-                    branch_proof.right_id
-                } else {
-                    is_rightmost_chunk = false;
-                    branch_proof.left_id
-                }
-            }
-
-            // Validate leaf data_hash is correct
-            if data_hash != &leaf_proof.data_hash {
-                return Err(eyre!("Invalid Leaf Proof: hash mismatch"));
-            }
-
-            // Validate leaf root id is correct
-            let id = hash_all_sha256(vec![data_hash, &max_byte_range.to_note_vec()]);
-            if id != root_id {
-                return Err(eyre!("Invalid Leaf Proof: root mismatch"));
-            }
-
-            max_byte_range_result = (*max_byte_range).try_into().unwrap();
-        }
-        _ => {
-            unreachable!()
-        }
-    }
-    Ok((is_rightmost_chunk, max_byte_range_result))
-}
-
-/// Generates data chunks from which the calculation of root id starts.
-/// does NOT need to be passed in correctly sized data chunks
-pub fn generate_leaves(
-    data: impl Iterator<Item = eyre::Result<Vec<u8>>>,
-    chunk_size: usize,
-) -> Result<Vec<Node>, Error> {
-    let data_chunks = ChunkedIterator::new(data, chunk_size);
-    generate_leaves_from_chunks(data_chunks)
-}
-
-/// Generates merkle leaves from chunks
-pub fn generate_leaves_from_chunks(
-    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
-) -> Result<Vec<Node>, Error> {
-    let mut leaves = Vec::<Node>::new();
-    let mut min_byte_range = 0;
-    for chunk in chunks {
-        let chunk = chunk?;
-        let data_hash = hash_sha256(&chunk);
-        let max_byte_range = min_byte_range + chunk.len();
-        let max_byte_range_bytes = max_byte_range.to_note_vec();
-        let id = hash_all_sha256(vec![&data_hash, &max_byte_range_bytes]);
-
-        leaves.push(Node {
-            id,
-            data_hash: Some(data_hash),
-            min_byte_range,
-            max_byte_range,
-            left_child: None,
-            right_child: None,
-        });
-        min_byte_range += &chunk.len();
-    }
-    Ok(leaves)
 }
 
 /// Generates the address-bound ingress leaves: each chunk's data hash
@@ -865,31 +739,6 @@ mod tests {
                 "branch proof max_byte_range must equal left_child.max_byte_range"
             );
         }
-    }
-
-    #[test]
-    fn should_return_error_if_proof_is_too_short() {
-        let root_id = [0_u8; HASH_SIZE];
-        let chunk_node = Node {
-            id: root_id,
-            data_hash: Some([1_u8; HASH_SIZE]),
-            min_byte_range: 0,
-            max_byte_range: 100,
-            left_child: None,
-            right_child: None,
-        };
-        let proof = Proof {
-            last_byte_index: 0,
-            proof: vec![0; HASH_SIZE - 1], // Intentionally too short
-        };
-        let result = validate_chunk(root_id, &chunk_node, &proof);
-        let err_text = result
-            .expect_err("expected error for too short proof")
-            .to_string();
-        assert_eq!(
-            &err_text,
-            "Invalid proof buffer: length 31 is less than the minimum required length 64"
-        );
     }
 
     #[test]
