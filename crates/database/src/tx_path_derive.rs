@@ -96,19 +96,21 @@ pub struct LedgerSpan {
 
 /// Classify a consensus schema stamp without reading a tx header.
 ///
-/// V3 is the only readable layout. Older stamps still use `bundle_format` or an
+/// V3 and V4 are the readable layouts: V4 changes only the data cache tables,
+/// not the tx header bytes. Older stamps still use `bundle_format` or an
 /// inline `promoted_height`. Decoding those bytes with this binary panics.
 pub fn tx_header_schema(version: Option<u32>) -> TxHeaderSchema {
     match version {
-        Some(3) => TxHeaderSchema {
+        Some(version @ (3 | 4)) => TxHeaderSchema {
             readable: true,
-            message: "schema V3: tx headers use metadata_format and decode with this binary"
-                .to_owned(),
+            message: format!(
+                "schema V{version}: tx headers use metadata_format and decode with this binary"
+            ),
         },
-        Some(version) if version > 3 => TxHeaderSchema {
+        Some(version) if version > 4 => TxHeaderSchema {
             readable: false,
             message: format!(
-                "schema {version} is newer than V3. This binary refuses it. A read-only open does not migrate."
+                "schema {version} is newer than V4. This binary refuses it. A read-only open does not migrate."
             ),
         },
         other => {
@@ -1605,9 +1607,10 @@ mod tests {
                 schema.message
             );
         }
-        let current = tx_header_schema(Some(3));
+        assert!(tx_header_schema(Some(3)).readable);
+        let current = tx_header_schema(Some(4));
         assert!(current.readable);
-        let newer = tx_header_schema(Some(4));
+        let newer = tx_header_schema(Some(5));
         assert!(!newer.readable);
         assert!(newer.message.contains("newer"));
     }
