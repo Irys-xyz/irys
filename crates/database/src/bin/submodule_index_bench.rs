@@ -24,7 +24,10 @@ use irys_database::submodule::tables::{
 use irys_database::submodule::{
     RocksTuning, SubmoduleIndex, SubmoduleStore as _, encode_offset_meta,
 };
-use irys_types::{DbSyncMode, H256, PartitionChunkOffset, RelativeChunkOffset, TERABYTE};
+use irys_types::{
+    DataCommitment, DataTreeRoot, DbSyncMode, H256, PartitionChunkOffset, RelativeChunkOffset,
+    TERABYTE,
+};
 use reth_db::mdbx::DatabaseArguments;
 
 /// Mainnet partition size (`CHUNKS_PER_PARTITION_20TB`).
@@ -445,6 +448,7 @@ fn run_index_span(args: &Args) -> eyre::Result<()> {
                 &TxLeafBinding {
                     data_root: root,
                     prefix_hash: H256::zero(),
+                    data_commitment: DataCommitment(root),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(PartitionChunkOffset::from(0), end, Some(hash))
@@ -517,6 +521,7 @@ fn write_offset_rows(store: &SubmoduleIndex, chunks: u32, batch: u32) -> eyre::R
                     &TxLeafBinding {
                         data_root: hash,
                         prefix_hash: H256::zero(),
+                        data_commitment: DataCommitment(hash),
                     },
                 )?;
                 tx.set_path_hashes_by_offset(
@@ -774,20 +779,22 @@ fn write_tx_index(store: &SubmoduleIndex, args: &Args, txs_per_commit: u32) -> e
                     &TxLeafBinding {
                         data_root: piece.data_root,
                         prefix_hash: H256::zero(),
+                        data_commitment: DataCommitment(piece.data_root),
                     },
                 )?;
                 tx.add_tx_path_hash_to_offset_range(piece.start, piece.end, Some(piece.tx_hash))?;
                 tx.add_data_root_info(
-                    piece.data_root,
+                    DataCommitment(piece.data_root),
                     &DataRootInfo {
                         start_offset: piece.start_offset,
                         data_size: piece.data_size,
+                        data_tree_root: DataTreeRoot(piece.data_root),
                     },
                 )?;
                 tx.add_pending_body_migration(
                     piece.start,
                     &PendingBodyMigration {
-                        data_root: piece.data_root,
+                        data_commitment: DataCommitment(piece.data_root),
                         data_size: piece.data_size,
                         start_offset: piece.start_offset,
                         block_height: 1,
@@ -1205,8 +1212,9 @@ fn rmw_root_sample(store: &SubmoduleIndex, args: &Args, i: u32) -> eyre::Result<
     let info = DataRootInfo {
         start_offset: RelativeChunkOffset(-1),
         data_size: indexed_data_size(args, 1).saturating_add(u64::from(i) + 1),
+        data_tree_root: DataTreeRoot(root),
     };
-    store.update(|tx| tx.add_data_root_info(root, &info))?;
+    store.update(|tx| tx.add_data_root_info(DataCommitment(root), &info))?;
     Ok(RmwRoot::Wrote)
 }
 
@@ -3569,7 +3577,7 @@ VmHWM:\t   8600000 kB
             let got = store
                 .view(|tx| tx.placement_at(PartitionChunkOffset::from(place.start)))?
                 .expect("placement");
-            assert_eq!(got.data_root, root);
+            assert_eq!(got.data_tree_root.0, root);
             assert_eq!(got.data_size, place.leaves * 256 * 1024);
             assert_eq!(got.tx_start_offset.0, i32::try_from(place.start).unwrap());
             assert_eq!(got.start.0, place.start);
@@ -3636,7 +3644,7 @@ VmHWM:\t   8600000 kB
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
             .expect("placement");
         assert_eq!(after.data_size, before.data_size);
-        assert_eq!(after.data_root, before.data_root);
+        assert_eq!(after.data_tree_root.0, before.data_tree_root.0);
         assert_eq!(after.tx_start_offset, before.tx_start_offset);
         Ok(())
     }

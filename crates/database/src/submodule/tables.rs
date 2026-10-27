@@ -1,6 +1,7 @@
 use crate::metadata::MetadataKey;
 use irys_types::{
-    ChunkDataPath, DataRoot, H256, PartitionChunkOffset, RelativeChunkOffset, TxPath, TxPathHash,
+    ChunkDataPath, DataCommitment, DataTreeRoot, H256, PartitionChunkOffset, RelativeChunkOffset,
+    TxPath, TxPathHash,
 };
 use paste::paste;
 use reth_codecs::Compact;
@@ -13,17 +14,52 @@ use std::fmt;
 
 /// Bytes stored in the submodule `Metadata` schema row after open succeeds.
 ///
-/// A schema v1 directory has no row. Open migrates it and writes this value
-/// only when the new rows are complete. Any other row is refused.
-// MDBX-SUBMODULE-INDEX: delete this MDBX schema v2 marker with the MDBX engine. RocksDB v1 uses SUBMODULE_SCHEMA_ROCKS_V1.
-pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 2\n";
+/// Schema 3 keys data placements by the `data_commitment`. A schema v1
+/// directory has no row. Open migrates it to [`SUBMODULE_SCHEMA_DATA_ROOT_KEYS`]
+/// first. An index with that row and no data rows gets this value. Any other
+/// row is refused.
+// MDBX-SUBMODULE-INDEX: delete this MDBX schema marker with the MDBX engine. RocksDB v1 uses SUBMODULE_SCHEMA_ROCKS_V1.
+pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 3\n";
 
-/// Schema file and metadata row for a RocksDB v1 index.
+/// Schema row of an MDBX index that keys data placements by the data root.
+///
+/// Open stamps [`SUBMODULE_SCHEMA`] over it when the index has no data rows,
+/// and refuses it when it has data rows: those rows cannot be re-keyed, so
+/// the network must reset.
+// MDBX-SUBMODULE-INDEX: delete with the MDBX engine.
+pub(crate) const SUBMODULE_SCHEMA_DATA_ROOT_KEYS: &str = "irys-submodule-index 2\n";
+
+/// Schema file for a RocksDB v1 index.
 ///
 /// The layout stores placements, inline data proofs, chunk checksums in the
 /// offset row, and `ChunkOffsetsByContentHash`. MDBX stays on
 /// [`SUBMODULE_SCHEMA`]. Any other `rocks/SCHEMA` text is refused.
+///
+/// The metadata row held the same text while placements were keyed by the
+/// data root. The row is now [`SUBMODULE_SCHEMA_ROCKS_ROW`]. The file text
+/// does not change: operator tooling reads it to tell a RocksDB v1 directory.
 pub const SUBMODULE_SCHEMA_ROCKS_V1: &str = "irys-submodule-index rocksdb 1\n";
+
+/// Metadata schema row of a RocksDB v1 index that keys placements by the
+/// `data_commitment`.
+///
+/// Open stamps it over a [`SUBMODULE_SCHEMA_ROCKS_V1`] row when the index has
+/// no data rows, and refuses that row when it has data rows. An older binary
+/// refuses this row as an unrecognised layout.
+pub(crate) const SUBMODULE_SCHEMA_ROCKS_ROW: &str =
+    "irys-submodule-index rocksdb 1 data-commitment-keys\n";
+
+/// Error for an index whose data rows are keyed by the data root.
+///
+/// Those rows cannot be re-keyed by the `data_commitment` in place: the
+/// index does not store the geometry, and the stored proofs are for the old
+/// data tree. Entropy and packing state are kept; only data must be reset.
+pub(crate) fn data_root_keyed_index(path: &std::path::Path) -> String {
+    format!(
+        "submodule index {} holds data rows keyed by the data root. This build keys data by the data commitment and cannot convert them. The network must reset: reset this storage module",
+        path.display()
+    )
+}
 
 /// RocksDB column family for a RocksDB v1 offset record.
 ///
@@ -96,10 +132,10 @@ tables! {
         type Value = TxPath;
     }
 
-    /// Maps a data root to the list of DataRootInfos for each occurrence of the data_root
-    /// in the submodule including their submodule relative start_offset and data_size
+    /// Maps a `data_commitment` to the list of DataRootInfos for each occurrence of that
+    /// data in the submodule including their submodule relative start_offset and data_size
     table DataRootInfosByDataRoot {
-        type Key = DataRoot;
+        type Key = DataCommitment;
         type Value = DataRootInfos;
     }
 
@@ -163,12 +199,15 @@ pub struct PackedOffsetRow {
 /// One tx placement as a reader sees it.
 ///
 /// MDBX leaves `ledger`, `block_height`, and `tx_index` empty. The data
-/// root comes from the tx-path leaf binding, and the unclipped start and
-/// `data_size` come from [`DataRootInfo`]. `start` and `end` are the clipped
+/// tree root and commitment come from the tx-path leaf binding, and the
+/// unclipped start and `data_size` come from [`DataRootInfo`]. `start` and `end` are the clipped
 /// interval stored for this submodule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placement {
-    pub data_root: DataRoot,
+    pub data_tree_root: DataTreeRoot,
+    /// Key of the placement's data: `data_tree_root` and `data_size` under
+    /// the consensus geometry.
+    pub data_commitment: DataCommitment,
     pub tx_start_offset: RelativeChunkOffset,
     pub data_size: u64,
     pub ledger: Option<u32>,
@@ -201,6 +240,9 @@ pub struct DataRootInfos(pub Vec<DataRootInfo>);
 pub struct DataRootInfo {
     pub start_offset: RelativeChunkOffset,
     pub data_size: u64, // The data_size from the data transaction that paid to store the data_root at this start_offset
+    /// Root of the data tree. The row key is the commitment of this root and
+    /// `data_size`; the root is kept to build chunks for serving.
+    pub data_tree_root: DataTreeRoot,
 }
 
 /// The `(data_root, prefix_hash)` a tx_path leaf folds from. Stored per tx_path hash so
@@ -210,14 +252,17 @@ pub struct DataRootInfo {
 pub struct TxLeafBinding {
     pub data_root: H256,
     pub prefix_hash: H256,
+    /// Commitment of the tx's data: `data_root` and the tx's `data_size`
+    /// under the consensus geometry. It keys the tx's [`DataRootInfos`] row.
+    pub data_commitment: DataCommitment,
 }
 
 /// One outstanding body-migration job: the chunk bodies a data_root placement
 /// still owes this submodule. See [`PendingBodyMigrationsByOffset`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
 pub struct PendingBodyMigration {
-    /// Which data_root owes bytes at this placement.
-    pub data_root: H256,
+    /// Which data owes bytes at this placement. It keys the chunk cache.
+    pub data_commitment: DataCommitment,
     /// `data_size` of the paying tx; gives the worker its chunk count without a
     /// second lookup.
     pub data_size: u64,
@@ -361,7 +406,7 @@ pub mod v1_fixture {
     pub mod master {
         use crate::metadata::MetadataKey;
         use irys_types::{
-            ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+            ChunkDataPath, ChunkPathHash, H256, PartitionChunkOffset, TxPath, TxPathHash,
         };
         use paste::paste;
         use reth_db::table::TableInfo;
@@ -385,7 +430,7 @@ pub mod v1_fixture {
                 type Value = TxPath;
             }
             table DataRootInfosByDataRoot {
-                type Key = DataRoot;
+                type Key = H256;
                 type Value = DataRootInfos;
             }
             table TxLeafBindingByTxPathHash {
@@ -407,7 +452,7 @@ pub mod v1_fixture {
     pub mod mainnet {
         use crate::metadata::MetadataKey;
         use irys_types::{
-            ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+            ChunkDataPath, ChunkPathHash, H256, PartitionChunkOffset, TxPath, TxPathHash,
         };
         use paste::paste;
         use reth_db::table::TableInfo;
@@ -431,7 +476,7 @@ pub mod v1_fixture {
                 type Value = TxPath;
             }
             table DataRootInfosByDataRoot {
-                type Key = DataRoot;
+                type Key = H256;
                 type Value = DataRootInfos;
             }
             table TxLeafBindingByTxPathHash {

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, H256, PartitionChunkOffset, TxPath, TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataCommitment, H256, PartitionChunkOffset, TxPath, TxPathHash,
 };
 use reth_db::{
     DatabaseEnv,
@@ -385,40 +385,41 @@ where
     Ok(false)
 }
 
-/// get DataRootInfos for the `data_root`
+/// get DataRootInfos for the `data_commitment`
 pub fn get_data_root_infos_for_data_root<T: DbTx>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
 ) -> eyre::Result<Option<DataRootInfos>> {
-    Ok(tx.get::<DataRootInfosByDataRoot>(data_root)?)
+    Ok(tx.get::<DataRootInfosByDataRoot>(data_commitment)?)
 }
 
-/// set (overwrite) the DataRootInfos for the `data_root`
+/// set (overwrite) the DataRootInfos for the `data_commitment`
 ///
 /// An empty list deletes the row. A missing row is an empty list.
 pub fn set_data_root_infos_for_data_root<T: DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     infos: DataRootInfos,
 ) -> eyre::Result<()> {
     if infos.0.is_empty() {
-        tx.delete::<DataRootInfosByDataRoot>(data_root, None)?;
+        tx.delete::<DataRootInfosByDataRoot>(data_commitment, None)?;
         return Ok(());
     }
-    Ok(tx.put::<DataRootInfosByDataRoot>(data_root, infos)?)
+    Ok(tx.put::<DataRootInfosByDataRoot>(data_commitment, infos)?)
 }
 
-/// Track the start_offset and data_size metadata for the `data_root`
+/// Track the start_offset and data_size metadata for the `data_commitment`
 pub fn add_data_root_info<T: DbTxMut + DbTx>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     info: &DataRootInfo,
 ) -> eyre::Result<()> {
-    let mut data_root_infos = get_data_root_infos_for_data_root(tx, data_root)?.unwrap_or_default();
+    let mut data_root_infos =
+        get_data_root_infos_for_data_root(tx, data_commitment)?.unwrap_or_default();
     if !data_root_infos.0.contains(info) {
         data_root_infos.0.push(info.clone());
     }
-    set_data_root_infos_for_data_root(tx, data_root, data_root_infos)?;
+    set_data_root_infos_for_data_root(tx, data_commitment, data_root_infos)?;
     Ok(())
 }
 
@@ -577,9 +578,7 @@ pub fn tx_intervals_overlap_ranges<T: DbTx>(
 ///
 /// The key is a hash. It has no offset order. The value lists placements, so
 /// a span check has to read it.
-pub fn list_data_root_infos<T: DbTx>(
-    tx: &T,
-) -> eyre::Result<Vec<(irys_types::DataRoot, DataRootInfos)>> {
+pub fn list_data_root_infos<T: DbTx>(tx: &T) -> eyre::Result<Vec<(DataCommitment, DataRootInfos)>> {
     let mut cursor = tx.cursor_read::<DataRootInfosByDataRoot>()?;
     Ok(cursor.walk(None)?.collect::<Result<Vec<_>, _>>()?)
 }
@@ -1025,6 +1024,7 @@ mod tests {
     use irys_types::H256;
     use irys_types::PartitionChunkOffset;
     use irys_types::RelativeChunkOffset;
+    use irys_types::{DataCommitment, DataTreeRoot};
     use reth_db::Database as _;
     use reth_db::mdbx::DatabaseArguments;
     use reth_db::transaction::DbTx as _;
@@ -1034,6 +1034,7 @@ mod tests {
         let info = DataRootInfo {
             start_offset: RelativeChunkOffset(0),
             data_size: (i32::MAX as u64) + 1,
+            data_tree_root: DataTreeRoot::default(),
         };
         let err = super::placement_overlaps_inclusive_span(
             &info,
@@ -1047,6 +1048,7 @@ mod tests {
         let narrow = DataRootInfo {
             start_offset: RelativeChunkOffset(0),
             data_size: 1,
+            data_tree_root: DataTreeRoot::default(),
         };
         let err = super::placement_overlaps_inclusive_span(
             &narrow,
@@ -1063,6 +1065,7 @@ mod tests {
         let info = DataRootInfo {
             start_offset: RelativeChunkOffset(0),
             data_size: 10,
+            data_tree_root: DataTreeRoot::default(),
         };
         assert!(super::placement_overlaps_inclusive_span(
             &info,
@@ -1085,6 +1088,7 @@ mod tests {
         let negative = DataRootInfo {
             start_offset: RelativeChunkOffset(-2),
             data_size: 3,
+            data_tree_root: DataTreeRoot::default(),
         };
         assert!(super::placement_overlaps_inclusive_span(
             &negative,
@@ -1118,30 +1122,39 @@ mod tests {
             DataRootInfo {
                 start_offset: RelativeChunkOffset(0),
                 data_size: 0,
+                data_tree_root: DataTreeRoot::default(),
             },
             DataRootInfo {
                 start_offset: RelativeChunkOffset(-20),
                 data_size: 100,
+                data_tree_root: DataTreeRoot::default(),
             },
             DataRootInfo {
                 start_offset: RelativeChunkOffset(10000),
                 data_size: 4000,
+                data_tree_root: DataTreeRoot::default(),
             },
             DataRootInfo {
                 start_offset: RelativeChunkOffset(i32::MIN),
                 data_size: u64::MAX,
+                data_tree_root: DataTreeRoot::default(),
             },
             DataRootInfo {
                 start_offset: RelativeChunkOffset(i32::MAX),
                 data_size: u64::MAX,
+                data_tree_root: DataTreeRoot::default(),
             },
         ];
         let data_root = H256::zero();
-        set_data_root_infos_for_data_root(&write_tx, data_root, DataRootInfos(infos.clone()))?;
+        set_data_root_infos_for_data_root(
+            &write_tx,
+            DataCommitment(data_root),
+            DataRootInfos(infos.clone()),
+        )?;
         write_tx.commit()?;
 
         let infos2 = db
-            .view_eyre(|tx| get_data_root_infos_for_data_root(tx, data_root))?
+            .view_eyre(|tx| get_data_root_infos_for_data_root(tx, DataCommitment(data_root)))?
             .unwrap();
 
         assert_eq!(infos, infos2.0);
@@ -1150,20 +1163,24 @@ mod tests {
         let new_data_root_info = DataRootInfo {
             start_offset: RelativeChunkOffset(1),
             data_size: 100,
+            data_tree_root: DataTreeRoot(data_root),
         };
 
-        db.update_eyre(|tx| add_data_root_info(tx, data_root, &new_data_root_info))?;
+        db.update_eyre(|tx| {
+            add_data_root_info(tx, DataCommitment(data_root), &new_data_root_info)
+        })?;
 
         let infos3 = db
-            .view_eyre(|tx| get_data_root_infos_for_data_root(tx, data_root))?
+            .view_eyre(|tx| get_data_root_infos_for_data_root(tx, DataCommitment(data_root)))?
             .unwrap();
 
         assert_eq!(infos3.0.len(), 6);
         assert_eq!(*infos3.0.last().unwrap(), new_data_root_info);
 
         let random_data_root = H256::random();
-        let missing_infos =
-            db.view_eyre(|tx| get_data_root_infos_for_data_root(tx, random_data_root))?;
+        let missing_infos = db.view_eyre(|tx| {
+            get_data_root_infos_for_data_root(tx, DataCommitment(random_data_root))
+        })?;
 
         assert!(missing_infos.is_none());
 
@@ -1183,7 +1200,7 @@ mod tests {
 
     fn job(data_root: H256, start_offset: i32, block_height: u64) -> PendingBodyMigration {
         PendingBodyMigration {
-            data_root,
+            data_commitment: DataCommitment(data_root),
             data_size: 4_430_000_000,
             start_offset: RelativeChunkOffset(start_offset),
             block_height,
@@ -1199,7 +1216,7 @@ mod tests {
 
         let a = job(H256::random(), -20, 29_875);
         let b = PendingBodyMigration {
-            data_root: H256::random(),
+            data_commitment: DataCommitment(H256::random()),
             data_size: u64::MAX,
             start_offset: RelativeChunkOffset(i32::MIN),
             block_height: u64::MAX,

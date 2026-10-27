@@ -7,8 +7,11 @@
 //! pending body migrations stay as they are.
 //!
 //! Each batch is one MDBX transaction. The schema row holds the resume point
-//! until the last batch writes [`SUBMODULE_SCHEMA`]. Open does not return
-//! until that row is current, so a caller never reads a half-migrated index.
+//! until the last batch writes [`SUBMODULE_SCHEMA_DATA_ROOT_KEYS`], the
+//! schema v2 layout. That layout keys data by the data root, so open then
+//! applies [`upgrade_data_root_keyed_schema`]: no data rows stamps
+//! [`SUBMODULE_SCHEMA`], data rows refuse the open. Open does not return
+//! until the row is current, so a caller never reads a half-migrated index.
 //! Before the copy, `mdbx_env_warmup` loads the open environment's pages and
 //! pins them when the process memlock budget has room. The pin is released
 //! when the migration returns.
@@ -29,8 +32,10 @@ use crate::metadata::MetadataKey;
 
 use super::tables::v1::ChunkDataPathByPathHash;
 use super::tables::{
-    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, Metadata,
-    SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, TxPathInterval, TxPathIntervalByStart,
+    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfosByDataRoot,
+    Metadata, PendingBodyMigrationsByOffset, SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA,
+    SUBMODULE_SCHEMA_DATA_ROOT_KEYS, TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval,
+    TxPathIntervalByStart, data_root_keyed_index,
 };
 
 pub(super) const PROGRESS_PREFIX: &str = "irys-submodule-index migrate-v1 ";
@@ -47,7 +52,7 @@ const MIGRATION_PROGRESS_METRIC: &str = "irys_submodule_migration_progress";
 /// What the schema row was when open began.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetectedSubmoduleSchema {
-    /// No v1 index rows. The schema row was written.
+    /// No data rows. The current schema row was written.
     Empty,
     /// Schema v1 rows were copied into the v2 tables.
     V1,
@@ -167,6 +172,23 @@ pub(super) fn ensure_mdbx_schema(
     };
 
     let stats = match classify(&row) {
+        SchemaRow::DataRootKeys => {
+            let detected = if keeps_data_root_keys() {
+                DetectedSubmoduleSchema::V2
+            } else {
+                upgrade_data_root_keyed_schema(env, path)?;
+                DetectedSubmoduleSchema::Empty
+            };
+            MigrationStats {
+                detected,
+                migrated: false,
+                path_hash_rows,
+                data_paths_copied: 0,
+                intervals_written: 0,
+                legacy_data_paths_deleted: 0,
+                elapsed: started.elapsed(),
+            }
+        }
         SchemaRow::Current => MigrationStats {
             detected: DetectedSubmoduleSchema::V2,
             migrated: false,
@@ -201,17 +223,23 @@ pub(super) fn ensure_mdbx_schema(
                 elapsed: started.elapsed(),
             }
         }
-        SchemaRow::Absent => run_migration(
-            env,
-            path,
-            options,
-            Progress::new(),
-            Totals {
-                path_hash_rows,
-                legacy_rows,
-            },
-            started,
-        )?,
+        SchemaRow::Absent => {
+            let stats = run_migration(
+                env,
+                path,
+                options,
+                Progress::new(),
+                Totals {
+                    path_hash_rows,
+                    legacy_rows,
+                },
+                started,
+            )?;
+            if !keeps_data_root_keys() {
+                upgrade_data_root_keyed_schema(env, path)?;
+            }
+            stats
+        }
         SchemaRow::Progress(progress) => {
             // Path-hash rows remain, so that total is max(stat, scanned).
             // Only deleted legacy keys are added back.
@@ -219,7 +247,11 @@ pub(super) fn ensure_mdbx_schema(
                 path_hash_rows: path_hash_rows.max(progress.scanned),
                 legacy_rows: legacy_rows.saturating_add(progress.deleted),
             };
-            run_migration(env, path, options, progress, totals, started)?
+            let stats = run_migration(env, path, options, progress, totals, started)?;
+            if !keeps_data_root_keys() {
+                upgrade_data_root_keyed_schema(env, path)?;
+            }
+            stats
         }
     };
     log_open(path, &stats);
@@ -230,6 +262,24 @@ pub(super) fn ensure_mdbx_schema(
 thread_local! {
     static DURING_MIGRATION: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+// Tests of the v1 to v2 copy set this to stop at the schema v2 row, so they
+// can read the migrated data rows that the commitment-key step refuses.
+#[cfg(test)]
+thread_local! {
+    static KEEP_DATA_ROOT_KEYS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn keeps_data_root_keys() -> bool {
+    #[cfg(test)]
+    {
+        KEEP_DATA_ROOT_KEYS.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
 }
 
 /// Row totals from MDBX `stat`, fixed for the whole run.
@@ -597,7 +647,7 @@ fn apply_drop(
     if batch.exhausted {
         write.put::<Metadata>(
             MetadataKey::DBSchemaVersion,
-            SUBMODULE_SCHEMA.as_bytes().to_vec(),
+            SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes().to_vec(),
         )?;
         write.commit()?;
         return Ok(true);
@@ -609,7 +659,9 @@ fn apply_drop(
 
 fn refuse_finished_schema<T: DbTx>(tx: &T) -> eyre::Result<()> {
     let row = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)?;
-    if row.as_deref() == Some(SUBMODULE_SCHEMA.as_bytes()) {
+    if row.as_deref() == Some(SUBMODULE_SCHEMA.as_bytes())
+        || row.as_deref() == Some(SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes())
+    {
         eyre::bail!("submodule index migration refuses to replace the current schema row");
     }
     Ok(())
@@ -631,6 +683,46 @@ pub(super) fn converting_sentinel_present(path: &Path) -> eyre::Result<bool> {
     }
     // Any file counts: a crash between create and write leaves it short.
     Ok(true)
+}
+
+/// A [`SUBMODULE_SCHEMA_DATA_ROOT_KEYS`] index keys data by the data root.
+///
+/// With no data rows it holds only metadata, which does not depend on the
+/// key, so the row becomes [`SUBMODULE_SCHEMA`] and every row stays. With
+/// data rows the open is refused: they cannot be re-keyed by the data
+/// commitment here, so the network must reset. The check and the stamp share
+/// one write transaction. `entries` counts rows without decoding them.
+pub(super) fn upgrade_data_root_keyed_schema(env: &DatabaseEnv, path: &Path) -> eyre::Result<()> {
+    let write = env.tx_mut()?;
+    let row = write.get::<Metadata>(MetadataKey::DBSchemaVersion)?;
+    if row.as_deref() != Some(SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes()) {
+        return Ok(());
+    }
+    let data_rows = [
+        write.entries::<ChunkPathHashesByOffset>()?,
+        write.entries::<ChunkDataPathByOffset>()?,
+        write.entries::<TxPathIntervalByStart>()?,
+        write.entries::<TxPathByTxPathHash>()?,
+        write.entries::<DataRootInfosByDataRoot>()?,
+        write.entries::<TxLeafBindingByTxPathHash>()?,
+        write.entries::<PendingBodyMigrationsByOffset>()?,
+    ]
+    .into_iter()
+    .sum::<usize>()
+    .saturating_add(usize::try_from(legacy_row_count(&write)?).unwrap_or(usize::MAX));
+    if data_rows > 0 {
+        eyre::bail!("{}", data_root_keyed_index(path));
+    }
+    write.put::<Metadata>(
+        MetadataKey::DBSchemaVersion,
+        SUBMODULE_SCHEMA.as_bytes().to_vec(),
+    )?;
+    write.commit()?;
+    tracing::info!(
+        path = %path.display(),
+        "submodule index had no data rows; schema row upgraded to data commitment keys"
+    );
+    Ok(())
 }
 
 fn stamp_schema(env: &DatabaseEnv) -> eyre::Result<()> {
@@ -691,7 +783,10 @@ pub(super) fn migration_required(env: &DatabaseEnv) -> eyre::Result<bool> {
     Ok(match classify(&row) {
         SchemaRow::Progress(_) => true,
         SchemaRow::Absent => path_hash_rows > 0 || legacy_rows > 0,
-        SchemaRow::Current | SchemaRow::Foreign | SchemaRow::ConvertIncomplete => false,
+        SchemaRow::Current
+        | SchemaRow::DataRootKeys
+        | SchemaRow::Foreign
+        | SchemaRow::ConvertIncomplete => false,
     })
 }
 
@@ -997,6 +1092,8 @@ impl Progress {
 enum SchemaRow {
     Absent,
     Current,
+    /// Schema v2: data keyed by the data root.
+    DataRootKeys,
     Foreign,
     /// `submodule-index-convert` is copying into this directory.
     ConvertIncomplete,
@@ -1009,6 +1106,9 @@ fn classify(bytes: &Option<Vec<u8>>) -> SchemaRow {
     };
     if bytes.as_slice() == SUBMODULE_SCHEMA.as_bytes() {
         return SchemaRow::Current;
+    }
+    if bytes.as_slice() == SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes() {
+        return SchemaRow::DataRootKeys;
     }
     if bytes.as_slice() == SUBMODULE_CONVERT_INCOMPLETE.as_bytes() {
         return SchemaRow::ConvertIncomplete;
@@ -1161,6 +1261,7 @@ fn parse_hash(text: &str) -> Option<H256> {
 
 #[cfg(test)]
 mod tests {
+    use irys_types::{DataCommitment, DataTreeRoot};
     use std::path::Path;
 
     use irys_testing_utils::utils::TempDirBuilder;
@@ -1179,8 +1280,8 @@ mod tests {
     use super::super::tables::v1_fixture::{mainnet, master};
     use super::super::tables::{
         ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo,
-        DataRootInfos, Metadata, PendingBodyMigration, SUBMODULE_SCHEMA, SubmoduleTables,
-        TxLeafBinding, TxPathIntervalByStart,
+        DataRootInfos, Metadata, PendingBodyMigration, SUBMODULE_SCHEMA,
+        SUBMODULE_SCHEMA_DATA_ROOT_KEYS, SubmoduleTables, TxLeafBinding, TxPathIntervalByStart,
     };
     use super::{
         DetectedSubmoduleSchema, Phase, Progress, SubmoduleMigrationOptions, decode_progress,
@@ -1190,6 +1291,22 @@ mod tests {
     use crate::submodule::{create_or_open_submodule_db, open_submodule_index};
     use crate::submodule::{open_pristine_v1_read_only, verify_submodule_read_equivalence};
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
+
+    /// Stops open at the schema v2 row on this thread until dropped, so a
+    /// v1 copy test reads the rows it migrated. Production open then applies
+    /// the commitment-key step and refuses those data rows.
+    struct KeepDataRootKeys;
+
+    impl Drop for KeepDataRootKeys {
+        fn drop(&mut self) {
+            super::KEEP_DATA_ROOT_KEYS.with(|cell| cell.set(false));
+        }
+    }
+
+    fn keep_data_root_keys() -> KeepDataRootKeys {
+        super::KEEP_DATA_ROOT_KEYS.with(|cell| cell.set(true));
+        KeepDataRootKeys
+    }
 
     fn h(byte: u8) -> H256 {
         H256::repeat_byte(byte)
@@ -1341,6 +1458,7 @@ mod tests {
                 DataRootInfos(vec![DataRootInfo {
                     start_offset: RelativeChunkOffset(3),
                     data_size: 64,
+                    data_tree_root: DataTreeRoot::default(),
                 }]),
             )),
             binding: Some((
@@ -1348,12 +1466,13 @@ mod tests {
                 TxLeafBinding {
                     data_root: h(40),
                     prefix_hash: h(41),
+                    data_commitment: DataCommitment(h(40)),
                 },
             )),
             pending: Some((
                 0,
                 PendingBodyMigration {
-                    data_root: h(40),
+                    data_commitment: DataCommitment(h(40)),
                     data_size: 64,
                     start_offset: RelativeChunkOffset(3),
                     block_height: 9,
@@ -1439,10 +1558,13 @@ mod tests {
             .unwrap();
         assert_eq!(stored.tx_path_hash, Some(tx_a));
         assert_eq!(
-            get_data_root_infos_for_data_root(&tx, h(40))?.unwrap().0,
+            get_data_root_infos_for_data_root(&tx, DataCommitment(h(40)))?
+                .unwrap()
+                .0,
             vec![DataRootInfo {
                 start_offset: RelativeChunkOffset(3),
                 data_size: 64,
+                data_tree_root: DataTreeRoot::default(),
             }]
         );
         assert_eq!(
@@ -1450,6 +1572,7 @@ mod tests {
             Some(TxLeafBinding {
                 data_root: h(40),
                 prefix_hash: h(41),
+                data_commitment: DataCommitment(h(40)),
             })
         );
         assert_eq!(
@@ -1460,7 +1583,7 @@ mod tests {
         );
         assert_eq!(
             schema_of(env)?.as_deref(),
-            Some(SUBMODULE_SCHEMA.as_bytes())
+            Some(SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes())
         );
         assert_eq!(legacy_of(env)?, 0);
         Ok(())
@@ -1590,6 +1713,105 @@ mod tests {
         let real = dir.path().join("real-db.copy");
         std::fs::create_dir(&real)?;
         assert!(require_submodule_index_copy(&real).is_ok());
+        Ok(())
+    }
+
+    /// Writes a schema v2 index (data keyed by the data root) with only
+    /// metadata, plus `data_root_info` when given.
+    fn write_data_root_keyed(
+        path: &Path,
+        data_root_info: Option<(H256, DataRootInfos)>,
+    ) -> eyre::Result<()> {
+        let db = open_or_create_db(path, SubmoduleTables::ALL, testing_args()?)?;
+        let tx = db.tx_mut()?;
+        tx.put::<Metadata>(
+            MetadataKey::DBSchemaVersion,
+            SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes().to_vec(),
+        )?;
+        tx.put::<Metadata>(MetadataKey::PartitionHash, vec![7_u8; 32])?;
+        if let Some((key, infos)) = data_root_info {
+            tx.put::<super::super::tables::DataRootInfosByDataRoot>(DataCommitment(key), infos)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The schema v2 row with no data rows becomes the current row in place.
+    /// Metadata rows stay.
+    #[test]
+    fn submodule_index_without_data_rows_upgrades_in_place() -> eyre::Result<()> {
+        let dir = temp("sm-v2-upgrade-empty");
+        write_data_root_keyed(dir.path(), None)?;
+        let (env, stats) = open_submodule_index(
+            dir.path(),
+            testing_args()?,
+            SubmoduleMigrationOptions::default(),
+        )?;
+        assert_eq!(stats.detected, DetectedSubmoduleSchema::Empty);
+        assert!(!stats.migrated);
+        assert_eq!(
+            schema_of(&env)?.as_deref(),
+            Some(SUBMODULE_SCHEMA.as_bytes())
+        );
+        let tx = env.tx()?;
+        assert_eq!(
+            tx.get::<Metadata>(MetadataKey::PartitionHash)?,
+            Some(vec![7_u8; 32])
+        );
+        Ok(())
+    }
+
+    /// The schema v2 row with a data row refuses to open and changes nothing.
+    #[test]
+    fn submodule_index_with_data_rows_refuses_to_open() -> eyre::Result<()> {
+        let dir = temp("sm-v2-refuse-data");
+        let infos = DataRootInfos(vec![DataRootInfo {
+            start_offset: RelativeChunkOffset(0),
+            data_size: 32,
+            data_tree_root: DataTreeRoot(h(3)),
+        }]);
+        write_data_root_keyed(dir.path(), Some((h(3), infos.clone())))?;
+        let err = open_submodule_index(
+            dir.path(),
+            testing_args()?,
+            SubmoduleMigrationOptions::default(),
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("network must reset"), "{text}");
+
+        let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, testing_args()?)?;
+        assert_eq!(
+            schema_of(&env)?.as_deref(),
+            Some(SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes())
+        );
+        let tx = env.tx()?;
+        assert_eq!(
+            tx.get::<super::super::tables::DataRootInfosByDataRoot>(DataCommitment(h(3)))?,
+            Some(infos)
+        );
+        Ok(())
+    }
+
+    /// A schema v1 index with data rows is copied to the v2 layout, then
+    /// refused: its data is keyed by the data root.
+    #[test]
+    fn v1_index_with_data_rows_refuses_to_open() -> eyre::Result<()> {
+        let dir = temp("sm-v1-refuse-data");
+        write_master(dir.path(), &master_fixture())?;
+        let err = open_submodule_index(
+            dir.path(),
+            testing_args()?,
+            SubmoduleMigrationOptions::default(),
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("network must reset"), "{text}");
+        let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, testing_args()?)?;
+        assert_eq!(
+            schema_of(&env)?.as_deref(),
+            Some(SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes())
+        );
         Ok(())
     }
 
@@ -1749,6 +1971,7 @@ mod tests {
 
     #[test]
     fn v1_rows_open_with_the_same_answers_and_a_second_open_is_current() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         let dir = temp("sm-v1-read");
         let args = testing_args()?;
         write_master(dir.path(), &master_fixture())?;
@@ -1776,6 +1999,7 @@ mod tests {
 
     #[test]
     fn mainnet_v1_without_pending_table_migrates() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         let dir = temp("sm-v1-mainnet");
         let args = testing_args()?;
         let mut fixture = master_fixture();
@@ -1809,6 +2033,7 @@ mod tests {
 
     #[test]
     fn interrupt_before_any_commit_leaves_the_v1_index() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         let dir = temp("sm-v1-fail0");
         let args = testing_args()?;
         write_contiguous(dir.path(), 5)?;
@@ -1844,6 +2069,7 @@ mod tests {
 
     #[test]
     fn interrupt_mid_copy_resumes_one_interval_and_does_not_publish() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         let dir = temp("sm-v1-mid-copy");
         let args = testing_args()?;
         write_contiguous(dir.path(), 5)?;
@@ -1852,7 +2078,7 @@ mod tests {
 
         let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, args.clone())?;
         let raw = schema_of(&env)?.expect("progress marker");
-        assert_ne!(raw.as_slice(), SUBMODULE_SCHEMA.as_bytes());
+        assert_ne!(raw.as_slice(), SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes());
         let progress = decode_progress(&raw).expect("copy marker");
         assert_eq!(progress.phase, Phase::Copy);
         assert_eq!(progress.next_offset, 2);
@@ -1899,6 +2125,7 @@ mod tests {
     /// on top of the current schema row. The next open still serves the rows.
     #[test]
     fn stale_copy_commit_after_finish_keeps_the_schema() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         let dir = temp("sm-stale-copy");
         let args = testing_args()?;
         write_contiguous(dir.path(), 4)?;
@@ -1920,7 +2147,7 @@ mod tests {
         assert_eq!(stats.detected, DetectedSubmoduleSchema::V1);
         assert_eq!(
             schema_of(&env)?.as_deref(),
-            Some(SUBMODULE_SCHEMA.as_bytes())
+            Some(SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes())
         );
         assert_eq!(legacy_of(&env)?, 0);
         let tx = env.tx()?;
@@ -1949,7 +2176,7 @@ mod tests {
         );
         assert_eq!(
             schema_of(&env)?.as_deref(),
-            Some(SUBMODULE_SCHEMA.as_bytes())
+            Some(SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes())
         );
         drop(env);
 
@@ -1972,6 +2199,7 @@ mod tests {
     /// A drop batch must not replace the current schema row either.
     #[test]
     fn stale_drop_commit_after_finish_keeps_the_schema() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         let dir = temp("sm-stale-drop");
         let args = testing_args()?;
         write_contiguous(dir.path(), 4)?;
@@ -2010,7 +2238,7 @@ mod tests {
         );
         assert_eq!(
             schema_of(&env)?.as_deref(),
-            Some(SUBMODULE_SCHEMA.as_bytes())
+            Some(SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes())
         );
         drop(env);
 
@@ -2020,7 +2248,7 @@ mod tests {
         assert!(!stats.migrated);
         assert_eq!(
             schema_of(&env)?.as_deref(),
-            Some(SUBMODULE_SCHEMA.as_bytes())
+            Some(SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes())
         );
         Ok(())
     }
@@ -2030,6 +2258,7 @@ mod tests {
     /// a reader can open.
     #[test]
     fn migration_exclusive_blocks_a_reader_until_the_run_returns() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         if std::env::var_os("IRYS_MIGRATION_EXCLUSIVE_CHILD").is_some() {
             return reader_during_migration();
         }
@@ -2060,7 +2289,7 @@ mod tests {
         assert!(stats.migrated);
         assert_eq!(
             schema_of(&env)?.as_deref(),
-            Some(SUBMODULE_SCHEMA.as_bytes())
+            Some(SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes())
         );
         let status = spawn_reader(&path)?;
         let text = status.text();
@@ -2120,6 +2349,7 @@ mod tests {
 
     #[test]
     fn interrupt_mid_delete_keeps_the_new_index_unpublished() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         let dir = temp("sm-v1-mid-drop");
         let args = testing_args()?;
         write_contiguous(dir.path(), 5)?;
@@ -2128,7 +2358,7 @@ mod tests {
 
         let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, args.clone())?;
         let raw = schema_of(&env)?.expect("progress marker");
-        assert_ne!(raw.as_slice(), SUBMODULE_SCHEMA.as_bytes());
+        assert_ne!(raw.as_slice(), SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes());
         let progress = decode_progress(&raw).expect("drop marker");
         assert_eq!(progress.phase, Phase::Drop);
         assert_eq!(progress.copied, 5);
@@ -2153,7 +2383,7 @@ mod tests {
         assert_eq!(legacy_of(&env)?, 0);
         assert_eq!(
             schema_of(&env)?.as_deref(),
-            Some(SUBMODULE_SCHEMA.as_bytes())
+            Some(SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes())
         );
         Ok(())
     }
@@ -2181,6 +2411,7 @@ mod tests {
 
     #[test]
     fn verify_against_pristine_v1_matches_and_a_corrupt_row_fails() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         let args = testing_args()?;
         assert!(open_pristine_v1_read_only(Path::new("db"), args.clone()).is_err());
 
@@ -2251,6 +2482,7 @@ mod tests {
 
     #[test]
     fn verify_mainnet_v1_without_pending_table_matches() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         let args = testing_args()?;
         let parent = temp("sm-mainnet-verify-copy");
         let pristine = parent.path().join("pristine.copy");
@@ -2355,6 +2587,7 @@ mod tests {
     /// the checkpoint clock (that clock includes the copy).
     #[test]
     fn drop_resume_eta_uses_this_process_rate() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         const ROWS: u32 = 4;
         let dir = temp("sm-v1-drop-resume");
         write_contiguous(dir.path(), ROWS)?;
@@ -2551,6 +2784,7 @@ mod tests {
     /// file length at the hook, which runs before any migration write.
     #[test]
     fn v1_migration_pre_reads_the_index_and_v2_open_does_not() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         const ROWS: u32 = 4;
         let dir = temp("sm-v1-preread");
         let args = testing_args()?;
@@ -2780,6 +3014,7 @@ mod tests {
     /// names the total, and a zero interval emits progress without a long sleep.
     #[test]
     fn migration_start_logs_the_total_and_progress_follows_the_interval() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         const ROWS: u32 = 4;
         let dir = temp("sm-v1-progress");
         let args = testing_args()?;
@@ -2874,6 +3109,7 @@ mod tests {
     /// Progress stays silent, so deleting the time gate fails this test.
     #[test]
     fn long_interval_emits_start_and_finished_and_no_progress() -> eyre::Result<()> {
+        let _keep = keep_data_root_keys();
         const ROWS: u32 = 8;
         assert_eq!(
             SubmoduleMigrationOptions::default().progress_log_interval,

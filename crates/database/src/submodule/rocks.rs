@@ -32,8 +32,8 @@ use std::time::{Duration, Instant};
 
 use eyre::WrapErr as _;
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, DatabaseConfig, H256, PartitionChunkOffset, TxPath,
-    TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataCommitment, DataTreeRoot, DatabaseConfig, H256,
+    PartitionChunkOffset, TxPath, TxPathHash,
 };
 use reth_db::table::{Decode, Decompress, Encode, Table};
 use rocksdb::{
@@ -48,8 +48,8 @@ use super::records::{self, IndexLayout};
 use super::store::PresenceReconcile;
 use super::tables::{
     CHUNK_META_BY_OFFSET_CF, ChunkPathHashes, DataRootInfo, DataRootInfos, OffsetMeta,
-    PackedOffsetRow, PendingBodyMigration, Placement, SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding,
-    unrecognised_rocks_layout,
+    PackedOffsetRow, PendingBodyMigration, Placement, SUBMODULE_SCHEMA_ROCKS_ROW,
+    SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding, unrecognised_rocks_layout,
 };
 use super::{
     SubmoduleRead, SubmoduleStore as _, SubmoduleWrite, tables::Metadata as MetadataTable,
@@ -1349,7 +1349,7 @@ impl RocksSubmoduleStore {
         )?;
         if stamp_schema {
             ensure_feature_flags(&db, &path, true, false)?;
-            ensure_schema_row(&db)?;
+            ensure_schema_row(&db, &path)?;
             let marker = path.join(SCHEMA_FILE);
             if !marker.exists() {
                 write_schema_marker_file(&path, SUBMODULE_SCHEMA_ROCKS_V1)?;
@@ -2051,7 +2051,8 @@ impl RocksSubmoduleStore {
             }
             let decoded = records::decode_placement(value.as_ref())?;
             out.push(Placement {
-                data_root: H256(decoded.data_root),
+                data_tree_root: DataTreeRoot(H256(decoded.data_root)),
+                data_commitment: DataCommitment(H256(decoded.data_commitment)),
                 tx_start_offset: irys_types::RelativeChunkOffset(decoded.tx_start),
                 data_size: decoded.data_size,
                 ledger: records::optional_u32(decoded.ledger),
@@ -2805,7 +2806,7 @@ impl RocksSubmoduleStore {
         };
         let mut findings = Vec::new();
         let mut points =
-            std::collections::BTreeMap::<(H256, u32), records::DataRootPlacement>::new();
+            std::collections::BTreeMap::<(DataCommitment, u32), records::DataRootPlacement>::new();
         {
             let handle = cf_handle(&self.db, Cf::DataRoots)?;
             for item in snap.iterator_cf(&handle, IteratorMode::Start) {
@@ -2819,7 +2820,7 @@ impl RocksSubmoduleStore {
                 findings.push(format!("interval at {start} still awaits a data-root info"));
                 continue;
             }
-            let root = H256(record.data_root);
+            let root = DataCommitment(H256(record.data_commitment));
             match points.get(&(root, *start)) {
                 None => findings.push(format!(
                     "interval at {start} for {root} has no data-root row"
@@ -2827,7 +2828,8 @@ impl RocksSubmoduleStore {
                 Some(point)
                     if point.end != record.end
                         || point.tx_start != record.tx_start
-                        || point.data_size != record.data_size =>
+                        || point.data_size != record.data_size
+                        || point.data_tree_root != record.data_root =>
                 {
                     findings.push(format!(
                         "data-root row {root} at {start} does not match its interval"
@@ -2839,10 +2841,11 @@ impl RocksSubmoduleStore {
         for ((root, start), point) in &points {
             match intervals.get(start) {
                 Some(record)
-                    if H256(record.data_root) == *root
+                    if DataCommitment(H256(record.data_commitment)) == *root
                         && record.end == point.end
                         && record.tx_start == point.tx_start
-                        && record.data_size == point.data_size => {}
+                        && record.data_size == point.data_size
+                        && record.data_root == point.data_tree_root => {}
                 Some(_) => findings.push(format!(
                     "data-root placement {root} at {start} does not match its interval"
                 )),
@@ -2878,10 +2881,10 @@ impl RocksSubmoduleStore {
                     continue;
                 };
                 let job = records::decode_pending(&value)?;
-                if job.data_root != H256(record.data_root) {
+                if job.data_commitment != DataCommitment(H256(record.data_commitment)) {
                     findings.push(format!(
-                        "pending job {offset} data root {} does not match interval {start}",
-                        job.data_root
+                        "pending job {offset} data commitment {} does not match interval {start}",
+                        job.data_commitment
                     ));
                 }
                 if record.data_size != 0 && job.data_size != record.data_size {
@@ -4043,7 +4046,21 @@ fn refuse_unwritable_recovery(path: &Path) -> eyre::Result<()> {
     if let Some(flags) = read_feature_flags(&db)? {
         refuse_unknown_feature_bits(path, &flags, true)?;
     }
-    refuse_present_schema_row(&db)
+    refuse_present_schema_row(&db)?;
+    // Refuse data rows keyed by the data root before the writable open
+    // flushes recovery, so the refused directory keeps its files.
+    if read_schema_row(&db)?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes())
+        && rocks_has_data_rows(&db)?
+    {
+        eyre::bail!("{}", super::tables::data_root_keyed_index(path));
+    }
+    Ok(())
+}
+
+fn read_schema_row(db: &DB) -> eyre::Result<Option<Vec<u8>>> {
+    let handle = cf_handle(db, Cf::Metadata)?;
+    let key = encode_key(MetadataKey::DBSchemaVersion);
+    db.get_cf(&handle, &key).wrap_err("read schema row")
 }
 
 fn read_feature_flags(db: &DB) -> eyre::Result<Option<FeatureBits>> {
@@ -4055,11 +4072,18 @@ fn read_feature_flags(db: &DB) -> eyre::Result<Option<FeatureBits>> {
     }
 }
 
+/// The current row and the data-root keyed row are read. A writable open
+/// upgrades or refuses the data-root keyed row after recovery.
 fn refuse_present_schema_row(db: &DB) -> eyre::Result<()> {
     let handle = cf_handle(db, Cf::Metadata)?;
     let key = encode_key(MetadataKey::DBSchemaVersion);
     match db.get_cf(&handle, &key).wrap_err("read schema row")? {
-        Some(found) if found.as_slice() == SUBMODULE_SCHEMA_ROCKS_V1.as_bytes() => Ok(()),
+        Some(found)
+            if found.as_slice() == SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes()
+                || found.as_slice() == SUBMODULE_SCHEMA_ROCKS_V1.as_bytes() =>
+        {
+            Ok(())
+        }
         Some(found) => eyre::bail!(
             "{}",
             unrecognised_rocks_layout(&String::from_utf8_lossy(&found))
@@ -4091,14 +4115,66 @@ fn ensure_feature_flags(
     }
 }
 
-fn ensure_schema_row(db: &DB) -> eyre::Result<()> {
+fn ensure_schema_row(db: &DB, path: &Path) -> eyre::Result<()> {
+    upgrade_data_root_keyed_row(db, path)?;
     write_schema_row(db, false)
+}
+
+/// A [`SUBMODULE_SCHEMA_ROCKS_V1`] row keys placements by the data root.
+///
+/// With no data rows the index holds only entropy checksums and metadata,
+/// which do not depend on the key, so the row becomes
+/// [`SUBMODULE_SCHEMA_ROCKS_ROW`] and every row stays. With data rows the
+/// open is refused: they cannot be re-keyed here, so the network must reset.
+/// The SCHEMA file keeps its text.
+fn upgrade_data_root_keyed_row(db: &DB, path: &Path) -> eyre::Result<()> {
+    if read_schema_row(db)?.as_deref() != Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()) {
+        return Ok(());
+    }
+    if rocks_has_data_rows(db)? {
+        eyre::bail!("{}", super::tables::data_root_keyed_index(path));
+    }
+    let handle = cf_handle(db, Cf::Metadata)?;
+    let key = encode_key(MetadataKey::DBSchemaVersion);
+    let mut batch = WriteBatch::new();
+    batch.put_cf(&handle, key, SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes());
+    db.write_opt(batch, &write_opts(true, false))
+        .wrap_err("write schema row")?;
+    tracing::info!(
+        path = %path.display(),
+        "submodule index had no data rows; schema row upgraded to data commitment keys"
+    );
+    Ok(())
+}
+
+/// `true` when any family holds a placement, a data-root row, a pending
+/// body job, a content row, or an offset row with a data proof.
+///
+/// Checksum-only offset rows are packed entropy. They do not count.
+fn rocks_has_data_rows(db: &DB) -> eyre::Result<bool> {
+    for cf in [Cf::Interval, Cf::DataRoots, Cf::Pending, Cf::Content] {
+        let handle = cf_handle(db, cf)?;
+        let mut iter = db.raw_iterator_cf_opt(&handle, full_scan_options());
+        iter.seek_to_first();
+        if iter.valid() {
+            return Ok(true);
+        }
+        iter.status().wrap_err("scan for data rows")?;
+    }
+    let handle = cf_handle(db, Cf::OffsetMeta)?;
+    for item in db.iterator_cf_opt(&handle, full_scan_options(), IteratorMode::Start) {
+        let (_key, value) = item.wrap_err("scan offset rows for data proofs")?;
+        if stored_offset_meta(&value)?.proof.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn write_schema_row(db: &DB, disable_wal: bool) -> eyre::Result<()> {
     let handle = cf_handle(db, Cf::Metadata)?;
     let key = encode_key(MetadataKey::DBSchemaVersion);
-    let expected = SUBMODULE_SCHEMA_ROCKS_V1.as_bytes();
+    let expected = SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes();
     match db.get_cf(&handle, &key).wrap_err("read schema row")? {
         Some(found) if found == expected => Ok(()),
         Some(found) => eyre::bail!(
@@ -4824,7 +4900,7 @@ struct Batch<'a> {
     /// Leaf bindings seen in this batch. RocksDB v1 does not store them.
     bindings: HashMap<H256, TxLeafBinding>,
     /// Interval starts in this batch that still need a data-root info.
-    unfilled: Vec<(u32, H256)>,
+    unfilled: Vec<(u32, DataCommitment)>,
     origin: Option<records::PlacementOrigin>,
 }
 
@@ -4896,12 +4972,17 @@ impl<'a> Batch<'a> {
         let existing = self.rows().placement_intervals_touching(start, end)?;
         let next = match tx_path_hash {
             Some(hash) => {
-                let data_root = self.bindings.get(&hash).map(|binding| binding.data_root).ok_or_else(|| {
+                let binding = self.bindings.get(&hash).ok_or_else(|| {
                     eyre::eyre!(
                         "RocksDB v1 interval requires a tx leaf binding in this batch before the interval is written"
                     )
                 })?;
-                Some(records::fresh_placement(end.0, data_root, self.origin))
+                Some(records::fresh_placement(
+                    end.0,
+                    binding.data_root,
+                    binding.data_commitment,
+                    self.origin,
+                ))
             }
             None => None,
         };
@@ -4925,15 +5006,21 @@ impl<'a> Batch<'a> {
         self.unfilled.retain(|(start, _)| !touched.contains(start));
         for start_at in delete {
             if let Some(old) = by_start.get(start_at) {
-                self.delete_data_root_point(&H256(old.value.data_root), *start_at);
+                self.delete_data_root_point(
+                    &DataCommitment(H256(old.value.data_commitment)),
+                    *start_at,
+                );
             }
             self.delete(Cf::Interval, &encode_key(PartitionChunkOffset(*start_at)));
         }
         for row in put {
             if let Some(old) = by_start.get(&row.start)
-                && old.value.data_root != row.value.data_root
+                && old.value.data_commitment != row.value.data_commitment
             {
-                self.delete_data_root_point(&H256(old.value.data_root), row.start);
+                self.delete_data_root_point(
+                    &DataCommitment(H256(old.value.data_commitment)),
+                    row.start,
+                );
             }
             self.put_bytes(
                 Cf::Interval,
@@ -4941,7 +5028,8 @@ impl<'a> Batch<'a> {
                 records::encode_placement(&row.value).to_vec(),
             );
             if records::awaits_info(&row.value) {
-                self.unfilled.push((row.start, H256(row.value.data_root)));
+                self.unfilled
+                    .push((row.start, DataCommitment(H256(row.value.data_commitment))));
             } else {
                 self.put_data_root_point(row);
             }
@@ -4963,8 +5051,11 @@ impl<'a> Batch<'a> {
         self.apply_placement_edit(&existing, &delete, &put)
     }
 
-    fn delete_data_root_point(&mut self, data_root: &H256, start: u32) {
-        self.delete(Cf::DataRoots, &records::data_root_key(data_root, start));
+    fn delete_data_root_point(&mut self, data_commitment: &DataCommitment, start: u32) {
+        self.delete(
+            Cf::DataRoots,
+            &records::data_root_key(data_commitment, start),
+        );
     }
 
     fn put_data_root_point(&mut self, row: &records::PlacementSpan) {
@@ -4972,10 +5063,11 @@ impl<'a> Batch<'a> {
             end: row.value.end,
             tx_start: row.value.tx_start,
             data_size: row.value.data_size,
+            data_tree_root: row.value.data_root,
         };
         self.put_bytes(
             Cf::DataRoots,
-            &records::data_root_key(&H256(row.value.data_root), row.start),
+            &records::data_root_key(&DataCommitment(H256(row.value.data_commitment)), row.start),
             records::encode_data_root(&value).to_vec(),
         );
     }
@@ -4997,6 +5089,13 @@ impl<'a> Batch<'a> {
             eyre::bail!("RocksDB v1 data-root info at {start} has no interval");
         };
         let mut value = records::decode_placement(&bytes)?;
+        if value.data_root != info.data_tree_root.0.0 {
+            eyre::bail!(
+                "RocksDB v1 data-root info at {start} names data tree root {}, but the interval holds {}",
+                info.data_tree_root,
+                H256(value.data_root)
+            );
+        }
         value.tx_start = info.start_offset.0;
         value.data_size = info.data_size;
         self.put_bytes(
@@ -5009,31 +5108,39 @@ impl<'a> Batch<'a> {
         Ok(())
     }
 
-    fn fill_info(&mut self, data_root: H256, info: &DataRootInfo) -> eyre::Result<()> {
+    fn fill_info(
+        &mut self,
+        data_commitment: DataCommitment,
+        info: &DataRootInfo,
+    ) -> eyre::Result<()> {
         Self::reject_empty_info(info)?;
         let starts: Vec<u32> = self
             .unfilled
             .iter()
-            .filter(|(_, root)| *root == data_root)
+            .filter(|(_, commitment)| *commitment == data_commitment)
             .map(|(start, _)| *start)
             .collect();
         let start = match starts.as_slice() {
             [start] => *start,
             [] => eyre::bail!(
-                "RocksDB v1 has no unfilled placement for data root {data_root} in this batch"
+                "RocksDB v1 has no unfilled placement for data commitment {data_commitment} in this batch"
             ),
             _ => eyre::bail!(
-                "RocksDB v1 has more than one unfilled placement for data root {data_root}; name the interval start"
+                "RocksDB v1 has more than one unfilled placement for data commitment {data_commitment}; name the interval start"
             ),
         };
         self.fill_info_at(start, info)
     }
 
-    fn replace_infos(&mut self, data_root: DataRoot, infos: &DataRootInfos) -> eyre::Result<()> {
+    fn replace_infos(
+        &mut self,
+        data_commitment: DataCommitment,
+        infos: &DataRootInfos,
+    ) -> eyre::Result<()> {
         // A data-root row's key is the interval start. Deleting it while that
         // interval remains leaves a placement with no secondary row. Adding a
         // row at `max(tx_start, 0)` invents a key no interval owns.
-        let existing = self.rows().data_root_rows(&data_root)?;
+        let existing = self.rows().data_root_rows(&data_commitment)?;
         for (start, point) in &existing {
             let kept = infos.0.iter().any(|info| {
                 info.start_offset.0 == point.tx_start && info.data_size == point.data_size
@@ -5045,7 +5152,9 @@ impl<'a> Batch<'a> {
                 .rows()
                 .get_raw(Cf::Interval, &encode_key(PartitionChunkOffset(*start)))?
             {
-                Some(bytes) => records::decode_placement(&bytes)?.data_root == data_root.0,
+                Some(bytes) => {
+                    records::decode_placement(&bytes)?.data_commitment == data_commitment.0.0
+                }
                 None => false,
             };
             if still_owned {
@@ -5053,7 +5162,7 @@ impl<'a> Batch<'a> {
                     "RocksDB v1 keeps the data-root row while its interval at {start} exists"
                 );
             }
-            self.delete_data_root_point(&data_root, *start);
+            self.delete_data_root_point(&data_commitment, *start);
         }
         for info in &infos.0 {
             let present = existing.iter().any(|(_, point)| {
@@ -5872,16 +5981,16 @@ impl Rows<'_> {
 
     fn data_root_rows(
         &self,
-        data_root: &H256,
+        data_commitment: &DataCommitment,
     ) -> eyre::Result<Vec<(u32, records::DataRootPlacement)>> {
-        let prefix = data_root.0;
+        let prefix = data_commitment.0.0;
         let raw = self.collect_raw(Cf::DataRoots, Some(&prefix), |key| {
             Ok(key.len() < 32 || key[..32] != prefix)
         })?;
         let mut rows = Vec::new();
         for (key, value) in raw {
-            let (root, start) = records::decode_data_root_key(&key)?;
-            if root != *data_root {
+            let (commitment, start) = records::decode_data_root_key(&key)?;
+            if commitment != *data_commitment {
                 break;
             }
             rows.push((start, records::decode_data_root(&value)?));
@@ -5909,7 +6018,8 @@ impl Rows<'_> {
     fn placement_row(&self, start: u32, value: &records::PlacementRecord) -> Placement {
         use super::tables::Placement;
         Placement {
-            data_root: H256(value.data_root),
+            data_tree_root: DataTreeRoot(H256(value.data_root)),
+            data_commitment: DataCommitment(H256(value.data_commitment)),
             tx_start_offset: irys_types::RelativeChunkOffset(value.tx_start),
             data_size: value.data_size,
             ledger: records::optional_u32(value.ledger),
@@ -5952,14 +6062,14 @@ impl Rows<'_> {
 
     fn placements_for_root(
         &self,
-        data_root: DataRoot,
+        data_commitment: DataCommitment,
     ) -> eyre::Result<Vec<super::tables::Placement>> {
         let mut out = Vec::new();
-        for (start, _) in self.data_root_rows(&data_root)? {
+        for (start, _) in self.data_root_rows(&data_commitment)? {
             if let Some(bytes) =
                 self.get_raw(Cf::Interval, &encode_key(PartitionChunkOffset(start)))?
                 && let Ok(value) = records::decode_placement(&bytes)
-                && value.data_root == data_root.0
+                && value.data_commitment == data_commitment.0.0
             {
                 out.push(self.placement_row(start, &value));
             }
@@ -5968,8 +6078,11 @@ impl Rows<'_> {
         Ok(out)
     }
 
-    fn data_root_info_rows(&self, data_root: DataRoot) -> eyre::Result<Option<DataRootInfos>> {
-        let rows = self.data_root_rows(&data_root)?;
+    fn data_root_info_rows(
+        &self,
+        data_commitment: DataCommitment,
+    ) -> eyre::Result<Option<DataRootInfos>> {
+        let rows = self.data_root_rows(&data_commitment)?;
         if rows.is_empty() {
             return Ok(None);
         }
@@ -5978,6 +6091,7 @@ impl Rows<'_> {
             .map(|(_, point)| DataRootInfo {
                 start_offset: irys_types::RelativeChunkOffset(point.tx_start),
                 data_size: point.data_size,
+                data_tree_root: DataTreeRoot(H256(point.data_tree_root)),
             })
             .collect();
         infos.sort_unstable();
@@ -6073,15 +6187,16 @@ impl Rows<'_> {
         Ok(rows)
     }
 
-    fn all_data_root_rows(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
+    fn all_data_root_rows(&self) -> eyre::Result<Vec<(DataCommitment, DataRootInfos)>> {
         let raw = self.collect_raw(Cf::DataRoots, None, |_| Ok(false))?;
-        let mut grouped: BTreeMap<H256, Vec<DataRootInfo>> = BTreeMap::new();
+        let mut grouped: BTreeMap<DataCommitment, Vec<DataRootInfo>> = BTreeMap::new();
         for (key, value) in raw {
-            let (root, _) = records::decode_data_root_key(&key)?;
+            let (commitment, _) = records::decode_data_root_key(&key)?;
             let point = records::decode_data_root(&value)?;
-            grouped.entry(root).or_default().push(DataRootInfo {
+            grouped.entry(commitment).or_default().push(DataRootInfo {
                 start_offset: irys_types::RelativeChunkOffset(point.tx_start),
                 data_size: point.data_size,
+                data_tree_root: DataTreeRoot(H256(point.data_tree_root)),
             });
         }
         Ok(grouped
@@ -6350,9 +6465,9 @@ impl SubmoduleRead for Rows<'_> {
 
     fn get_data_root_infos_for_data_root(
         &self,
-        data_root: DataRoot,
+        data_commitment: DataCommitment,
     ) -> eyre::Result<Option<DataRootInfos>> {
-        self.data_root_info_rows(data_root)
+        self.data_root_info_rows(data_commitment)
     }
 
     fn get_pending_body_migration(
@@ -6433,8 +6548,11 @@ impl SubmoduleRead for Rows<'_> {
         self.placement_rows_in_range(start, end)
     }
 
-    fn placements_for_data_root(&self, data_root: DataRoot) -> eyre::Result<Vec<Placement>> {
-        self.placements_for_root(data_root)
+    fn placements_for_data_root(
+        &self,
+        data_commitment: DataCommitment,
+    ) -> eyre::Result<Vec<Placement>> {
+        self.placements_for_root(data_commitment)
     }
 
     fn offsets_for_content_hash(
@@ -6501,7 +6619,7 @@ impl SubmoduleRead for Rows<'_> {
         Ok(found.into_iter().collect())
     }
 
-    fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
+    fn data_root_entries(&self) -> eyre::Result<Vec<(DataCommitment, DataRootInfos)>> {
         self.all_data_root_rows()
     }
 }
@@ -6548,17 +6666,17 @@ impl_batch_read! {
     missing_path_hash_ranges(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>>;
     get_full_tx_path(path_hash: TxPathHash) -> eyre::Result<Option<TxPath>>;
     get_tx_leaf_binding(path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>>;
-    get_data_root_infos_for_data_root(data_root: DataRoot) -> eyre::Result<Option<DataRootInfos>>;
+    get_data_root_infos_for_data_root(data_commitment: DataCommitment) -> eyre::Result<Option<DataRootInfos>>;
     get_pending_body_migration(offset: PartitionChunkOffset) -> eyre::Result<Option<PendingBodyMigration>>;
     pending_body_migrations_from(start: Option<PartitionChunkOffset>, limit: Option<usize>) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>>;
     has_pending_in_inclusive_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
     tx_interval_overlaps(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
     has_pending_in_ranges(ranges: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> eyre::Result<bool>;
     tx_intervals_overlap_ranges(ranges: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> eyre::Result<bool>;
-    data_root_entries() -> eyre::Result<Vec<(DataRoot, DataRootInfos)>>;
+    data_root_entries() -> eyre::Result<Vec<(DataCommitment, DataRootInfos)>>;
     placement_at(offset: PartitionChunkOffset) -> eyre::Result<Option<Placement>>;
     placements_in_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<Placement>>;
-    placements_for_data_root(data_root: DataRoot) -> eyre::Result<Vec<Placement>>;
+    placements_for_data_root(data_commitment: DataCommitment) -> eyre::Result<Vec<Placement>>;
     offsets_for_content_hash(content_hash: H256) -> eyre::Result<Vec<PartitionChunkOffset>>;
 }
 
@@ -6722,16 +6840,16 @@ impl SubmoduleWrite for Batch<'_> {
 
     fn set_data_root_infos_for_data_root(
         &mut self,
-        data_root: DataRoot,
+        data_commitment: DataCommitment,
         infos: DataRootInfos,
     ) -> eyre::Result<()> {
-        self.replace_infos(data_root, &infos)
+        self.replace_infos(data_commitment, &infos)
     }
 
     fn add_data_root_info_at(
         &mut self,
         start: PartitionChunkOffset,
-        data_root: DataRoot,
+        data_commitment: DataCommitment,
         info: &DataRootInfo,
     ) -> eyre::Result<()> {
         let key = encode_key(start);
@@ -6739,9 +6857,9 @@ impl SubmoduleWrite for Batch<'_> {
             eyre::bail!("RocksDB v1 data-root info at {} has no interval", start.0);
         };
         let value = records::decode_placement(&bytes)?;
-        if value.data_root != data_root.0 {
+        if value.data_commitment != data_commitment.0.0 {
             eyre::bail!(
-                "RocksDB v1 interval at {} belongs to a different data root",
+                "RocksDB v1 interval at {} belongs to a different data commitment",
                 start.0
             );
         }
@@ -6752,8 +6870,12 @@ impl SubmoduleWrite for Batch<'_> {
         self.layout == IndexLayout::RocksV1
     }
 
-    fn add_data_root_info(&mut self, data_root: DataRoot, info: &DataRootInfo) -> eyre::Result<()> {
-        self.fill_info(data_root, info)
+    fn add_data_root_info(
+        &mut self,
+        data_commitment: DataCommitment,
+        info: &DataRootInfo,
+    ) -> eyre::Result<()> {
+        self.fill_info(data_commitment, info)
     }
 
     fn add_pending_body_migration(
@@ -6842,6 +6964,7 @@ mod tests {
     use super::*;
     use crate::submodule::SubmoduleIndex;
     use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{DataCommitment, DataTreeRoot};
     use irys_types::{H256, RelativeChunkOffset};
 
     fn temp_dir(prefix: &str) -> irys_testing_utils::utils::tempfile::TempDir {
@@ -6924,7 +7047,7 @@ mod tests {
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         store.disable_auto_compaction()?;
         let job = PendingBodyMigration {
-            data_root: H256::repeat_byte(1),
+            data_commitment: DataCommitment(H256::repeat_byte(1)),
             data_size: 32,
             start_offset: RelativeChunkOffset(0),
             block_height: 1,
@@ -7011,7 +7134,7 @@ mod tests {
             let store = RocksSubmoduleStore::open(&path)?;
             store.update(|tx| tx.clear())?;
             let payload = store.schema_bytes()?.expect("schema row");
-            assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
+            assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes());
             assert!(
                 store
                     .view(|tx| tx.get_path_hashes_by_offset(offset))?
@@ -7054,7 +7177,7 @@ mod tests {
         drop(second);
         let reader = RocksSubmoduleStore::open_read_only(&path)?;
         let payload = reader.schema_bytes()?.expect("schema row");
-        assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
+        assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes());
         drop(reader);
         let reopened = RocksSubmoduleStore::open(&path)?;
         drop(reopened);
@@ -7975,14 +8098,16 @@ mod tests {
                 &TxLeafBinding {
                     data_root: root,
                     prefix_hash: H256::zero(),
+                    data_commitment: DataCommitment(root),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(covered, covered, Some(root))?;
             tx.add_data_root_info(
-                root,
+                DataCommitment(root),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(1),
                     data_size: 32,
+                    data_tree_root: DataTreeRoot(root),
                 },
             )
         })?;
@@ -8027,6 +8152,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root,
                     prefix_hash: H256::repeat_byte(1),
+                    data_commitment: DataCommitment(data_root),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -8035,16 +8161,17 @@ mod tests {
                 Some(tx_hash),
             )?;
             tx.add_data_root_info(
-                data_root,
+                DataCommitment(data_root),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(0),
                     data_size: 64,
+                    data_tree_root: DataTreeRoot(data_root),
                 },
             )?;
             tx.add_pending_body_migration(
                 PartitionChunkOffset::from(3),
                 &PendingBodyMigration {
-                    data_root,
+                    data_commitment: DataCommitment(data_root),
                     data_size: 64,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -8091,7 +8218,7 @@ mod tests {
         }
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 2);
         let payload = store.schema_bytes()?.expect("schema row");
-        assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
+        assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes());
         assert!(
             store
                 .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(50_000)))?
@@ -8105,7 +8232,7 @@ mod tests {
         assert!(store.view(|tx| tx.get_full_tx_path(tx_hash))?.is_none());
         assert!(
             store
-                .view(|tx| tx.get_data_root_infos_for_data_root(data_root))?
+                .view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(data_root)))?
                 .is_none()
         );
         assert!(
@@ -8121,7 +8248,7 @@ mod tests {
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 2);
         assert_eq!(
             store.schema_bytes()?.expect("schema row"),
-            SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()
+            SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes()
         );
         Ok(())
     }
@@ -8649,6 +8776,94 @@ mod tests {
         })
     }
 
+    fn put_raw_metadata(
+        store: &RocksSubmoduleStore,
+        key: MetadataKey,
+        value: &[u8],
+    ) -> eyre::Result<()> {
+        let handle = cf_handle(&store.db, Cf::Metadata)?;
+        store.db.put_cf(&handle, encode_key(key), value)?;
+        store.db.flush_cf(&handle)?;
+        Ok(())
+    }
+
+    /// An index from before commitment keys that holds only packed entropy:
+    /// the row is upgraded, the SCHEMA file and every row stay.
+    #[test]
+    fn submodule_index_without_data_rows_upgrades_in_place() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_upgrade_entropy");
+        let path = dir.path().join("index");
+        let partition_hash = [7_u8; 32];
+        let before = {
+            let store = RocksSubmoduleStore::open(&path)?;
+            put_checksums(&store, &[0, 1, 2])?;
+            put_raw_metadata(&store, MetadataKey::PartitionHash, &partition_hash)?;
+            put_raw_metadata(
+                &store,
+                MetadataKey::DBSchemaVersion,
+                SUBMODULE_SCHEMA_ROCKS_V1.as_bytes(),
+            )?;
+            store.view(|tx| {
+                tx.offset_metas_in_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(2),
+                )
+            })?
+        };
+        assert_eq!(before.len(), 3);
+
+        let store = RocksSubmoduleStore::open(&path)?;
+        assert_eq!(
+            store.schema_bytes()?.as_deref(),
+            Some(SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes())
+        );
+        assert_eq!(
+            fs::read_to_string(path.join(SCHEMA_FILE))?,
+            SUBMODULE_SCHEMA_ROCKS_V1
+        );
+        let after = store.view(|tx| {
+            tx.offset_metas_in_range(PartitionChunkOffset::from(0), PartitionChunkOffset::from(2))
+        })?;
+        assert_eq!(after, before, "entropy checksum rows must stay");
+        let handle = cf_handle(&store.db, Cf::Metadata)?;
+        assert_eq!(
+            store
+                .db
+                .get_cf(&handle, encode_key(MetadataKey::PartitionHash))?
+                .as_deref(),
+            Some(partition_hash.as_slice())
+        );
+        Ok(())
+    }
+
+    /// An index from before commitment keys that holds data is refused, and
+    /// its row and data rows stay for the reset.
+    #[test]
+    fn submodule_index_with_data_rows_refuses_to_open() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_refuse_data");
+        let path = dir.path().join("index");
+        {
+            let store = RocksSubmoduleStore::open(&path)?;
+            place_span(&store, 0, 7, H256::repeat_byte(2), 0, 1, 0, &[3], None)?;
+            put_raw_metadata(
+                &store,
+                MetadataKey::DBSchemaVersion,
+                SUBMODULE_SCHEMA_ROCKS_V1.as_bytes(),
+            )?;
+        }
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("network must reset"), "{text}");
+
+        let reader = RocksSubmoduleStore::open_read_only(&path)?;
+        assert_eq!(
+            reader.schema_bytes()?.as_deref(),
+            Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes())
+        );
+        assert_eq!(reader.cf_key_count(Cf::Interval)?, 1);
+        Ok(())
+    }
+
     fn put_raw_offset_key(store: &RocksSubmoduleStore, key: &[u8]) -> eyre::Result<()> {
         let handle = cf_handle(&store.db, Cf::OffsetMeta)?;
         store.db.put_cf(&handle, key, [])?;
@@ -8819,6 +9034,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root,
                     prefix_hash: H256::repeat_byte(1),
+                    data_commitment: DataCommitment(data_root),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -8828,10 +9044,11 @@ mod tests {
             )?;
             let data_size = u64::from(end - start + 1) * 32;
             tx.add_data_root_info(
-                data_root,
+                DataCommitment(data_root),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(i32::try_from(start).expect("start")),
                     data_size,
+                    data_tree_root: DataTreeRoot(data_root),
                 },
             )?;
             for offset in data_at {
@@ -8844,7 +9061,7 @@ mod tests {
                 tx.add_pending_body_migration(
                     PartitionChunkOffset::from(offset),
                     &PendingBodyMigration {
-                        data_root,
+                        data_commitment: DataCommitment(data_root),
                         data_size,
                         start_offset: RelativeChunkOffset(i32::try_from(start).expect("start")),
                         block_height,
@@ -8928,7 +9145,7 @@ mod tests {
         let at_zero = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
             .expect("placement");
-        assert_eq!(at_zero.data_root, root_a);
+        assert_eq!(at_zero.data_tree_root.0, root_a);
         assert_eq!(at_zero.ledger, Some(1));
         assert_eq!(at_zero.block_height, Some(42));
         assert_eq!(at_zero.tx_index, Some(3));
@@ -8939,13 +9156,13 @@ mod tests {
         let left = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
             .expect("left remnant");
-        assert_eq!(left.data_root, root_a);
+        assert_eq!(left.data_tree_root.0, root_a);
         assert_eq!(left.end, PartitionChunkOffset::from(7));
         assert_eq!(left.block_height, Some(42));
         let middle = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(9)))?
             .expect("overwrite");
-        assert_eq!(middle.data_root, root_b);
+        assert_eq!(middle.data_tree_root.0, root_b);
         assert_eq!(middle.ledger, Some(0));
         assert_eq!(middle.tx_index, Some(1));
         assert_eq!(middle.start, PartitionChunkOffset::from(8));
@@ -8953,7 +9170,7 @@ mod tests {
         let right = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(15)))?
             .expect("right remnant");
-        assert_eq!(right.data_root, root_a);
+        assert_eq!(right.data_tree_root.0, root_a);
         assert_eq!(right.start, PartitionChunkOffset::from(12));
         assert_eq!(right.tx_index, Some(3));
 
@@ -8976,7 +9193,7 @@ mod tests {
                 .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(2)))?
                 .is_some()
         );
-        let for_b = store.view(|tx| tx.placements_for_data_root(root_b))?;
+        let for_b = store.view(|tx| tx.placements_for_data_root(DataCommitment(root_b)))?;
         assert_eq!(for_b.len(), 1);
         assert_eq!(for_b[0].start, PartitionChunkOffset::from(8));
 
@@ -9023,6 +9240,7 @@ mod tests {
         let info = DataRootInfo {
             start_offset: RelativeChunkOffset(0),
             data_size: 32,
+            data_tree_root: DataTreeRoot(root),
         };
         let err = store
             .update(|tx| {
@@ -9035,7 +9253,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("leaf binding"), "{err}");
         let err = store
-            .update(|tx| tx.add_data_root_info(root, &info))
+            .update(|tx| tx.add_data_root_info(DataCommitment(root), &info))
             .unwrap_err();
         assert!(err.to_string().contains("no unfilled placement"), "{err}");
         store.update(|tx| {
@@ -9044,6 +9262,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root: root,
                     prefix_hash: H256::repeat_byte(1),
+                    data_commitment: DataCommitment(root),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -9054,10 +9273,13 @@ mod tests {
             let zero = DataRootInfo {
                 start_offset: RelativeChunkOffset(0),
                 data_size: 0,
+                data_tree_root: DataTreeRoot(root),
             };
-            let err = tx.add_data_root_info(root, &zero).unwrap_err();
+            let err = tx
+                .add_data_root_info(DataCommitment(root), &zero)
+                .unwrap_err();
             assert!(err.to_string().contains("data_size of 0"), "{err}");
-            tx.add_data_root_info(root, &info)?;
+            tx.add_data_root_info(DataCommitment(root), &info)?;
             Ok(())
         })?;
         store.update(|tx| tx.add_full_data_path(PartitionChunkOffset::from(5), content_leaf(5)))?;
@@ -9071,7 +9293,7 @@ mod tests {
             tx.add_pending_body_migration(
                 PartitionChunkOffset::from(0),
                 &PendingBodyMigration {
-                    data_root: root,
+                    data_commitment: DataCommitment(root),
                     data_size: 32,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -9109,7 +9331,7 @@ mod tests {
             tx.add_pending_body_migration(
                 PartitionChunkOffset::from(3),
                 &PendingBodyMigration {
-                    data_root: H256::repeat_byte(1),
+                    data_commitment: DataCommitment(H256::repeat_byte(1)),
                     data_size: 32,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -9137,7 +9359,7 @@ mod tests {
             tx.add_pending_body_migration(
                 PartitionChunkOffset::from(3),
                 &PendingBodyMigration {
-                    data_root: H256::repeat_byte(1),
+                    data_commitment: DataCommitment(H256::repeat_byte(1)),
                     data_size: 32,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -9517,7 +9739,7 @@ mod tests {
         let path_bytes = b"data-path".to_vec();
         let root = H256::repeat_byte(3);
         let job = PendingBodyMigration {
-            data_root: root,
+            data_commitment: DataCommitment(root),
             data_size: 32,
             start_offset: RelativeChunkOffset(0),
             block_height: 1,
@@ -10207,6 +10429,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root: root,
                     prefix_hash: H256::zero(),
+                    data_commitment: DataCommitment(root),
                 },
             )?;
             tx.set_path_hashes_by_offset(PartitionChunkOffset::from(offset), hashes)
