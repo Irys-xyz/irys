@@ -1,6 +1,6 @@
 use irys_domain::ChunkType;
 use irys_types::{
-    ChunkFormat, DataLedger, DataTreeRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
+    ChunkFormat, DataCommitment, DataLedger, LedgerChunkOffset, PackedChunk, TxChunkOffset,
 };
 use std::{
     collections::HashMap,
@@ -121,7 +121,7 @@ pub type ChunkFetcherFactory = Box<dyn Fn(u32) -> Arc<dyn ChunkFetcher> + Send +
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChunkFetchError {
-    /// Peer did not have the chunk body (ledger-offset or data_root path).
+    /// Peer did not have the chunk body (ledger-offset or data-commitment path).
     NotFound {
         detail: String,
     },
@@ -219,10 +219,10 @@ pub(crate) async fn read_capped_bytes(
 
 /// Dual fetch addressing for data_sync:
 /// - **Ledger-offset** — assignees with a storage module for the slot
-/// - **Data-root + tx_offset** — ingress-proof signers that may only hold cache
-///   and cannot serve `/chunk/ledger/...`
+/// - **Data commitment + tx_offset** — ingress-proof signers that may only hold
+///   cache and cannot serve `/chunk/ledger/...`
 ///
-/// Ingress-proof gossip is not chunk replication; the data-root path is how
+/// Ingress-proof gossip is not chunk replication; the data-commitment path is how
 /// residual holes recover bodies from proof generators.
 #[async_trait::async_trait]
 pub trait ChunkFetcher: Send + Sync + std::fmt::Debug {
@@ -233,12 +233,10 @@ pub trait ChunkFetcher: Send + Sync + std::fmt::Debug {
         timeout: Duration,
     ) -> Result<ChunkFormat, ChunkFetchError>;
 
-    /// Chunk `tx_offset` of the data with tree root `data_root` and size
-    /// `data_size`. The peer serves that size only.
-    async fn fetch_chunk_by_data_root(
+    /// Chunk `tx_offset` of the data with `data_commitment`.
+    async fn fetch_chunk_by_commitment(
         &self,
-        data_root: DataTreeRoot,
-        data_size: u64,
+        data_commitment: DataCommitment,
         tx_offset: TxChunkOffset,
         api_addr: SocketAddr,
         timeout: Duration,
@@ -349,24 +347,22 @@ impl ChunkFetcher for HttpChunkFetcher {
             .await
     }
 
-    async fn fetch_chunk_by_data_root(
+    async fn fetch_chunk_by_commitment(
         &self,
-        data_root: DataTreeRoot,
-        data_size: u64,
+        data_commitment: DataCommitment,
         tx_offset: TxChunkOffset,
         api_addr: SocketAddr,
         timeout: Duration,
     ) -> Result<ChunkFormat, ChunkFetchError> {
         // Non-assignee proof generators serve from cache via this route (PR1).
-        // `dataSize` makes the peer serve this size of the root only.
         let url = format!(
-            "http://{}/v1/chunk/data-root/{}/{}/{}?dataSize={}",
-            api_addr, self.ledger_id, data_root, *tx_offset, data_size
+            "http://{}/v1/chunk/data-commitment/{}/{}/{}",
+            api_addr, self.ledger_id, data_commitment, *tx_offset
         );
         self.get_chunk_json(
             url,
             timeout,
-            format!("data_root={data_root} data_size={data_size} tx_offset={tx_offset}"),
+            format!("data_commitment={data_commitment} tx_offset={tx_offset}"),
         )
         .await
     }
@@ -444,10 +440,10 @@ impl ChunkFetcher for HttpChunkFetcher {
 pub struct MockChunkFetcher {
     pub ledger_id: usize,
     pub responses: Arc<RwLock<HashMap<LedgerChunkOffset, Result<PackedChunk, ChunkFetchError>>>>,
-    pub data_root_responses:
-        Arc<RwLock<HashMap<(DataTreeRoot, u32), Result<ChunkFormat, ChunkFetchError>>>>,
+    pub commitment_responses:
+        Arc<RwLock<HashMap<(DataCommitment, u32), Result<ChunkFormat, ChunkFetchError>>>>,
     pub request_log: Arc<RwLock<Vec<(LedgerChunkOffset, SocketAddr)>>>,
-    pub data_root_request_log: Arc<RwLock<Vec<(DataTreeRoot, u32, SocketAddr)>>>,
+    pub commitment_request_log: Arc<RwLock<Vec<(DataCommitment, u32, SocketAddr)>>>,
     /// Answer per peer. A peer with no entry has no intervals route.
     pub interval_responses:
         Arc<RwLock<HashMap<SocketAddr, Result<DataIntervalsPage, ChunkFetchError>>>>,
@@ -477,26 +473,25 @@ impl ChunkFetcher for MockChunkFetcher {
         }
     }
 
-    async fn fetch_chunk_by_data_root(
+    async fn fetch_chunk_by_commitment(
         &self,
-        data_root: DataTreeRoot,
-        _data_size: u64,
+        data_commitment: DataCommitment,
         tx_offset: TxChunkOffset,
         api_addr: SocketAddr,
         _timeout: Duration,
     ) -> Result<ChunkFormat, ChunkFetchError> {
-        let key = (data_root, *tx_offset);
-        self.data_root_request_log
+        let key = (data_commitment, *tx_offset);
+        self.commitment_request_log
             .write()
             .unwrap()
-            .push((data_root, *tx_offset, api_addr));
+            .push((data_commitment, *tx_offset, api_addr));
 
-        let responses = self.data_root_responses.read().unwrap();
+        let responses = self.commitment_responses.read().unwrap();
         match responses.get(&key) {
             Some(Ok(chunk)) => Ok(chunk.clone()),
             Some(Err(e)) => Err(e.clone()),
             None => Err(ChunkFetchError::NotFound {
-                detail: format!("data_root={data_root} tx_offset={tx_offset}"),
+                detail: format!("data_commitment={data_commitment} tx_offset={tx_offset}"),
             }),
         }
     }
@@ -531,9 +526,9 @@ impl MockChunkFetcher {
         Self {
             ledger_id,
             responses: Default::default(),
-            data_root_responses: Default::default(),
+            commitment_responses: Default::default(),
             request_log: Default::default(),
-            data_root_request_log: Default::default(),
+            commitment_request_log: Default::default(),
             interval_responses: Default::default(),
             interval_request_log: Default::default(),
         }
@@ -544,16 +539,16 @@ impl MockChunkFetcher {
         self
     }
 
-    pub fn with_data_root_chunk(
+    pub fn with_commitment_chunk(
         self,
-        data_root: DataTreeRoot,
+        data_commitment: DataCommitment,
         tx_offset: TxChunkOffset,
         chunk: ChunkFormat,
     ) -> Self {
-        self.data_root_responses
+        self.commitment_responses
             .write()
             .unwrap()
-            .insert((data_root, *tx_offset), Ok(chunk));
+            .insert((data_commitment, *tx_offset), Ok(chunk));
         self
     }
 

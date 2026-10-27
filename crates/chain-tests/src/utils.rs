@@ -3301,7 +3301,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 if self
                     .node_ctx
                     .chunk_provider
-                    .get_chunk_by_data_root(ledger, data_root, Some(data_size), tx_offset)?
+                    .get_chunk_by_commitment(ledger, data_commitment, tx_offset)?
                     .is_some()
                 {
                     return Ok(());

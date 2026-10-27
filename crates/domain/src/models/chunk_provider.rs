@@ -1,18 +1,15 @@
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::submodule::tables::DataRootInfo;
-use irys_database::{
-    cached_chunk_by_chunk_offset, cached_data_root_by_commitment, cached_data_roots_by_tree_root,
-};
+use irys_database::{cached_chunk_by_chunk_offset, cached_data_root_by_commitment};
 use irys_types::data_tree::data_commitment;
 use irys_types::{
-    ChunkFormat, Config, DataCommitment, DataLedger, DataTreeRoot, LedgerChunkOffset,
-    LedgerChunkRange, PackedChunk, PartitionChunkOffset, RelativeChunkOffset, TxChunkOffset,
-    UnpackedChunk, app_state::DatabaseProvider,
+    ChunkFormat, Config, DataCommitment, DataLedger, LedgerChunkOffset, LedgerChunkRange,
+    PackedChunk, PartitionChunkOffset, RelativeChunkOffset, TxChunkOffset, UnpackedChunk,
+    app_state::DatabaseProvider,
 };
 use nodit::interval::ii;
 use opentelemetry::{KeyValue, global, metrics::Counter};
-use std::collections::BTreeMap;
 use std::sync::{
     LazyLock,
     atomic::{AtomicU64, Ordering},
@@ -122,45 +119,16 @@ pub fn missing_on_disk(error: &eyre::Report) -> bool {
 }
 
 /// How a lookup names the data it wants.
-#[derive(Clone, Copy, Debug)]
-enum PlacementLookup {
-    /// One data commitment: a point lookup.
-    Commitment(DataCommitment),
-    /// Every commitment of one data tree root: a scan of the data-root rows.
-    TreeRoot(DataTreeRoot),
-}
-
-/// Placements of `lookup` in one storage module, with their data commitments.
+/// Placements of `data_commitment` in one storage module.
 fn read_data_root_placements(
     sm: &crate::StorageModule,
-    lookup: PlacementLookup,
-) -> eyre::Result<Vec<(DataCommitment, DataRootInfo)>> {
+    data_commitment: DataCommitment,
+) -> eyre::Result<Vec<DataRootInfo>> {
     #[cfg(test)]
     if take_data_root_index_fault() {
         return Err(eyre::eyre!("injected data root index error"));
     }
-    match lookup {
-        PlacementLookup::Commitment(data_commitment) => Ok(sm
-            .collect_data_root_infos(data_commitment)?
-            .0
-            .into_iter()
-            .map(|info| (data_commitment, info))
-            .collect()),
-        PlacementLookup::TreeRoot(data_root) => sm.collect_data_root_infos_for_tree_root(data_root),
-    }
-}
-
-/// A root-only chunk lookup found chunks of more than one data size at the
-/// offset. The caller must name the size.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "data root {data_tree_root} has chunks of more than one data size at offset {tx_offset} \
-     (sizes {data_sizes:?}); pass dataSize to choose one"
-)]
-pub struct AmbiguousDataSize {
-    pub data_tree_root: DataTreeRoot,
-    pub tx_offset: TxChunkOffset,
-    pub data_sizes: Vec<u64>,
+    Ok(sm.collect_data_root_infos(data_commitment)?.0)
 }
 
 fn unpack_packed(config: &Config, packed: &PackedChunk) -> eyre::Result<UnpackedChunk> {
@@ -450,58 +418,42 @@ impl ChunkProvider {
         }
     }
 
-    /// Chunk for `data_root` at a tx-relative offset.
+    /// Chunk of the data with `data_commitment` at a tx-relative offset.
     ///
-    /// Data is keyed by the data commitment, and a root alone does not fix
-    /// the size. With `data_size`, this is a point lookup of the commitment of
-    /// `(data_root, data_size)`. Without it, the lookup scans the data-root
-    /// rows of every local storage module for `ledger`, and then the cache
-    /// rows, for the commitments whose root is `data_root`. If chunks of more
-    /// than one data size hold the offset, it returns [`AmbiguousDataSize`]
-    /// and serves none of them.
-    ///
+    /// A point lookup: the data commitment fixes the root and the data size.
     /// Local storage modules for `ledger` are first and return packed bytes.
     /// The node chunk cache is the fallback and returns unpacked bytes, so a
     /// node with no assignment can still serve a body it cached.
     /// `Ok(None)` when the offset is outside `[0, chunk_count)` or the
-    /// placement has no body. A stored chunk is returned only when its
-    /// `data_root`, `data_size`, and `tx_offset` are the requested placement.
+    /// placement has no body. A stored chunk is returned only when the
+    /// commitment of its `data_tree_root` and `data_size`, and its `tx_offset`,
+    /// are the requested placement.
     /// A storage read error is returned when no source holds the chunk.
-    pub fn get_chunk_by_data_root(
+    pub fn get_chunk_by_commitment(
         &self,
         ledger: DataLedger,
-        data_root: DataTreeRoot,
-        data_size: Option<u64>,
+        data_commitment: DataCommitment,
         data_tx_offset: TxChunkOffset,
     ) -> eyre::Result<Option<ChunkFormat>> {
         index_read_metrics::with_caller(SERVE_DATA_ROOT, || {
-            self.data_root_in_caller(ledger, data_root, data_size, data_tx_offset)
+            self.commitment_in_caller(ledger, data_commitment, data_tx_offset)
         })
     }
 
-    fn data_root_in_caller(
+    fn commitment_in_caller(
         &self,
         ledger: DataLedger,
-        data_root: DataTreeRoot,
-        data_size: Option<u64>,
+        requested_commitment: DataCommitment,
         data_tx_offset: TxChunkOffset,
     ) -> eyre::Result<Option<ChunkFormat>> {
         debug!(
-            "getting ledger: {:?}, data_root: {}, data_size: {:?}, offset: {}",
-            &ledger, &data_root, &data_size, &data_tx_offset
+            "getting ledger: {:?}, data_commitment: {}, offset: {}",
+            &ledger, &requested_commitment, &data_tx_offset
         );
         let chunk_size = self.config.consensus.chunk_size;
         let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
-        let lookup = match data_size {
-            Some(data_size) => PlacementLookup::Commitment(data_commitment(
-                &self.config.data_tree_geometry(),
-                data_root,
-                data_size,
-            )),
-            None => PlacementLookup::TreeRoot(data_root),
-        };
-        // The first chunk found for each data size that holds the offset.
-        let mut found: BTreeMap<u64, ChunkFormat> = BTreeMap::new();
+        let geometry = self.config.data_tree_geometry();
+        let mut found: Option<ChunkFormat> = None;
         // map hashes to SMs
         let binding = self.storage_modules_guard.read();
         let sms = binding
@@ -518,11 +470,11 @@ impl ChunkProvider {
         // A hit still wins. With no hit, the last error is returned.
         let mut disk_error: Option<eyre::Report> = None;
 
-        for sm in sms {
-            // One read of this root's placements. `generate_full_chunk` stamps
-            // `data_root`, `data_size` and `tx_offset` from the interval that holds
-            // the partition offset; those values are checked below.
-            let data_root_infos = match read_data_root_placements(sm, lookup) {
+        'modules: for sm in sms {
+            // One read of this commitment's placements. `generate_full_chunk`
+            // stamps `data_root`, `data_size` and `tx_offset` from the interval
+            // that holds the partition offset; those values are checked below.
+            let data_root_infos = match read_data_root_placements(sm, requested_commitment) {
                 Ok(infos) => infos,
                 Err(error) => {
                     debug!(error = %error, "data_root index read failed");
@@ -530,10 +482,8 @@ impl ChunkProvider {
                     continue;
                 }
             };
-            for (_, info) in &data_root_infos {
-                if found.contains_key(&info.data_size)
-                    || !tx_offset_within_data_size(data_tx_offset, info.data_size, chunk_size)
-                {
+            for info in &data_root_infos {
+                if !tx_offset_within_data_size(data_tx_offset, info.data_size, chunk_size) {
                     continue;
                 }
                 let Some(partition_offset) = partition_offset_for_placement(
@@ -545,14 +495,16 @@ impl ChunkProvider {
                 };
                 match sm.generate_full_chunk(partition_offset) {
                     Ok(Some(packed)) => {
-                        if packed.data_tree_root != data_root
+                        let chunk_commitment =
+                            data_commitment(&geometry, packed.data_tree_root, packed.data_size);
+                        if chunk_commitment != requested_commitment
                             || packed.tx_offset != data_tx_offset
                             || packed.data_size != info.data_size
                         {
                             debug!(
-                                requested_data_root = %data_root,
+                                requested_commitment = %requested_commitment,
                                 requested_tx_offset = %data_tx_offset,
-                                chunk_data_root = %packed.data_tree_root,
+                                %chunk_commitment,
                                 chunk_tx_offset = %packed.tx_offset,
                                 chunk_data_size = packed.data_size,
                                 placement_data_size = info.data_size,
@@ -561,7 +513,8 @@ impl ChunkProvider {
                             );
                             continue;
                         }
-                        found.insert(info.data_size, ChunkFormat::Packed(packed));
+                        found = Some(ChunkFormat::Packed(packed));
+                        break 'modules;
                     }
                     // No body at this placement. A later placement or the cache
                     // may still hold it.
@@ -583,34 +536,10 @@ impl ChunkProvider {
         // Fall back to the node chunk cache. Non-assignees often never have an SM
         // for this ledger/slot, but may still hold the body after POST /chunk
         // (long enough to generate an ingress proof and to serve residual holes).
-        let cached: Vec<(DataCommitment, u64)> = match (lookup, data_size) {
-            (PlacementLookup::Commitment(data_commitment), Some(data_size)) => {
-                vec![(data_commitment, data_size)]
-            }
-            _ => self
-                .db
-                .view_eyre(|tx| cached_data_roots_by_tree_root(tx, data_root))?
-                .into_iter()
-                .map(|(data_commitment, cdr)| (data_commitment, cdr.data_size))
-                .collect(),
-        };
-        for (data_commitment, cached_data_size) in cached {
-            if found.contains_key(&cached_data_size) {
-                continue;
-            }
-            if let Some(chunk) = self.get_chunk_from_cache(data_commitment, data_tx_offset)? {
-                found.insert(cached_data_size, chunk);
-            }
+        if found.is_none() {
+            found = self.get_chunk_from_cache(requested_commitment, data_tx_offset)?;
         }
-        if found.len() > 1 {
-            return Err(AmbiguousDataSize {
-                data_tree_root: data_root,
-                tx_offset: data_tx_offset,
-                data_sizes: found.into_keys().collect(),
-            }
-            .into());
-        }
-        match (found.into_values().next(), disk_error) {
+        match (found, disk_error) {
             (Some(chunk), _) => Ok(Some(chunk)),
             (None, Some(error)) => Err(error),
             (None, None) => Ok(None),
@@ -714,18 +643,17 @@ impl ChunkProvider {
                     continue;
                 }
             };
-            let data_root_infos =
-                match read_data_root_placements(sm, PlacementLookup::Commitment(data_commitment)) {
-                    Ok(infos) => infos,
-                    Err(error) => {
-                        debug!(error = %error, "data_root index read failed");
-                        disk_error = Some(error);
-                        continue;
-                    }
-                };
+            let data_root_infos = match read_data_root_placements(sm, data_commitment) {
+                Ok(infos) => infos,
+                Err(error) => {
+                    debug!(error = %error, "data_root index read failed");
+                    disk_error = Some(error);
+                    continue;
+                }
+            };
             let mapped_offsets = data_root_infos
                 .iter()
-                .filter_map(|(_, info)| {
+                .filter_map(|info| {
                     checked_add_i32_u64(*info.start_offset, sm_range_start.into())
                     // translate into ledger-relative space
                 })
@@ -782,6 +710,7 @@ mod tests {
     use irys_database::{cache_chunk, cache_data_root};
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::DataTreeRoot;
     use irys_types::SubmoduleIndexEngine;
     use irys_types::{
         Base64, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
@@ -836,14 +765,14 @@ mod tests {
         rand::thread_rng().fill(&mut data_bytes[..]);
         let tx = signed_tx(&config, data_bytes.clone());
         let chunks = tx.data_chunks().unwrap();
-        let data_root = tx.header.data_tree_root;
+        let data_commitment = tx.header.data_commitment(&config.data_tree_geometry());
         let db = create_test_db(&tmp_dir.path().join("irys_db"));
         cache_chunks(&db, &config, &tx, &chunks);
         let chunk_provider = make_provider(config, Vec::new(), db);
 
         for expected in &chunks {
             let served = chunk_provider
-                .get_chunk_by_data_root(DataLedger::Submit, data_root, None, expected.tx_offset)?
+                .get_chunk_by_commitment(DataLedger::Submit, data_commitment, expected.tx_offset)?
                 .expect("cache-backed data_root fetch should find body");
             let unpacked = served
                 .as_unpacked()
@@ -854,7 +783,7 @@ mod tests {
         let missing = TxChunkOffset::from(99_u32);
         assert!(
             chunk_provider
-                .get_chunk_by_data_root(DataLedger::Submit, data_root, None, missing)?
+                .get_chunk_by_commitment(DataLedger::Submit, data_commitment, missing)?
                 .is_none()
         );
         Ok(())
@@ -868,40 +797,30 @@ mod tests {
         }
     }
 
-    /// The data size served at `offset`, `None` for a miss, or the sizes of
-    /// an ambiguous root-only lookup.
+    /// The data size served at `offset` for the commitment of `data_root` and
+    /// `data_size`, `None` for a miss.
     fn lookup_size(
         provider: &ChunkProvider,
         ledger: DataLedger,
         data_root: DataTreeRoot,
-        data_size: Option<u64>,
+        data_size: u64,
         offset: u32,
-    ) -> eyre::Result<Result<Option<u64>, Vec<u64>>> {
-        match provider.get_chunk_by_data_root(
+    ) -> eyre::Result<Option<u64>> {
+        let data_commitment =
+            data_commitment(&provider.config.data_tree_geometry(), data_root, data_size);
+        let chunk = provider.get_chunk_by_commitment(
             ledger,
-            data_root,
-            data_size,
+            data_commitment,
             TxChunkOffset::from(offset),
-        ) {
-            Ok(chunk) => Ok(Ok(chunk.as_ref().map(served_size))),
-            Err(error) => match error.downcast_ref::<AmbiguousDataSize>() {
-                Some(ambiguous) => {
-                    assert_eq!(ambiguous.data_tree_root, data_root);
-                    assert_eq!(ambiguous.tx_offset, TxChunkOffset::from(offset));
-                    Ok(Err(ambiguous.data_sizes.clone()))
-                }
-                None => Err(error),
-            },
-        }
+        )?;
+        Ok(chunk.as_ref().map(served_size))
     }
 
     /// Two sizes of one data tree root are two data commitments. From the
-    /// cache: with `data_size` each size is a point lookup; without it, an
-    /// offset that both sizes hold is ambiguous and one that only one size
-    /// holds is served from that size.
+    /// cache: each commitment serves its own size and its own chunks only.
     #[test]
     // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
-    fn get_by_data_root_from_the_cache_with_two_sizes_of_one_root() -> eyre::Result<()> {
+    fn get_by_commitment_from_the_cache_with_two_sizes_of_one_root() -> eyre::Result<()> {
         let (tmp_dir, config) =
             opened_config("get_by_data_root_two_sizes", SubmoduleIndexEngine::Mdbx);
         let chunk_size = config.consensus.chunk_size as usize;
@@ -951,24 +870,19 @@ mod tests {
         let provider = make_provider(config, Vec::new(), db);
         let ledger = DataLedger::Submit;
 
-        // An offset both sizes hold.
+        // An offset both sizes hold: each commitment serves its own size.
         assert_eq!(
-            lookup_size(&provider, ledger, data_root, None, 1)?,
-            Err(vec![short_size, long_size])
+            lookup_size(&provider, ledger, data_root, short_size, 1)?,
+            Some(short_size)
         );
         assert_eq!(
-            lookup_size(&provider, ledger, data_root, Some(short_size), 1)?,
-            Ok(Some(short_size))
-        );
-        assert_eq!(
-            lookup_size(&provider, ledger, data_root, Some(long_size), 1)?,
-            Ok(Some(long_size))
+            lookup_size(&provider, ledger, data_root, long_size, 1)?,
+            Some(long_size)
         );
         let served = provider
-            .get_chunk_by_data_root(
+            .get_chunk_by_commitment(
                 ledger,
-                data_root,
-                Some(short_size),
+                data_commitment(&geometry, data_root, short_size),
                 TxChunkOffset::from(1_u32),
             )?
             .expect("the short upload holds offset 1");
@@ -979,39 +893,41 @@ mod tests {
 
         // An offset only the long size holds.
         assert_eq!(
-            lookup_size(&provider, ledger, data_root, None, 2)?,
-            Ok(Some(long_size))
+            lookup_size(&provider, ledger, data_root, long_size, 2)?,
+            Some(long_size)
         );
         assert_eq!(
-            lookup_size(&provider, ledger, data_root, Some(long_size), 2)?,
-            Ok(Some(long_size))
-        );
-        assert_eq!(
-            lookup_size(&provider, ledger, data_root, Some(short_size), 2)?,
-            Ok(None)
+            lookup_size(&provider, ledger, data_root, short_size, 2)?,
+            None
         );
         let served = provider
-            .get_chunk_by_data_root(ledger, data_root, None, TxChunkOffset::from(2_u32))?
+            .get_chunk_by_commitment(
+                ledger,
+                data_commitment(&geometry, data_root, long_size),
+                TxChunkOffset::from(2_u32),
+            )?
             .expect("the long upload holds offset 2");
         assert_eq!(served.as_unpacked().expect("cache serves unpacked"), tail);
 
         // No size holds offset 3.
         assert_eq!(
-            lookup_size(&provider, ledger, data_root, None, 3)?,
-            Ok(None)
+            lookup_size(&provider, ledger, data_root, long_size, 3)?,
+            None
+        );
+        assert_eq!(
+            lookup_size(&provider, ledger, data_root, short_size, 3)?,
+            None
         );
         Ok(())
     }
 
-    /// Two sizes of one data tree root placed in a storage module. With
-    /// `data_size` each size is a point lookup of its own placement; without
-    /// it, an offset that both placements hold is ambiguous and one that only
-    /// the longer placement holds is served from it.
+    /// Two sizes of one data tree root placed in a storage module. Each
+    /// commitment is a point lookup of its own placement.
     #[rstest]
     // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
     #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
     #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
-    fn get_by_data_root_from_storage_with_two_sizes_of_one_root(
+    fn get_by_commitment_from_storage_with_two_sizes_of_one_root(
         #[case] engine: SubmoduleIndexEngine,
     ) -> eyre::Result<()> {
         let (tmp_dir, config, storage_module) = opened_publish("data_root_two_sizes_sm", engine)?;
@@ -1055,32 +971,24 @@ mod tests {
         let provider = provider(config, storage_module, &tmp_dir.path().join("irys_db"));
         let ledger = DataLedger::Publish;
 
-        // An offset both placements hold.
+        // An offset both placements hold: each commitment serves its own size.
         assert_eq!(
-            lookup_size(&provider, ledger, data_root, None, 1)?,
-            Err(vec![short_size, long_size])
+            lookup_size(&provider, ledger, data_root, short_size, 1)?,
+            Some(short_size)
         );
         assert_eq!(
-            lookup_size(&provider, ledger, data_root, Some(short_size), 1)?,
-            Ok(Some(short_size))
-        );
-        assert_eq!(
-            lookup_size(&provider, ledger, data_root, Some(long_size), 1)?,
-            Ok(Some(long_size))
+            lookup_size(&provider, ledger, data_root, long_size, 1)?,
+            Some(long_size)
         );
 
         // An offset only the long placement holds.
         assert_eq!(
-            lookup_size(&provider, ledger, data_root, None, 2)?,
-            Ok(Some(long_size))
+            lookup_size(&provider, ledger, data_root, long_size, 2)?,
+            Some(long_size)
         );
         assert_eq!(
-            lookup_size(&provider, ledger, data_root, Some(long_size), 2)?,
-            Ok(Some(long_size))
-        );
-        assert_eq!(
-            lookup_size(&provider, ledger, data_root, Some(short_size), 2)?,
-            Ok(None)
+            lookup_size(&provider, ledger, data_root, short_size, 2)?,
+            None
         );
         Ok(())
     }
@@ -1125,7 +1033,11 @@ mod tests {
         assert_serves_packed(&provider, &config, &chunks_a[1])?;
         assert_serves_packed(&provider, &config, &chunks_b[0])?;
         // First invalid offset of the first tx must not return the neighbor.
-        assert_offset_absent(&provider, tx_a.header.data_tree_root, 2)?;
+        assert_offset_absent(
+            &provider,
+            tx_a.header.data_commitment(&config.data_tree_geometry()),
+            2,
+        )?;
 
         Ok(())
     }
@@ -1168,7 +1080,11 @@ mod tests {
 
         assert_serves_packed(&provider, &config, &chunks_a[2])?;
         assert_serves_packed(&provider, &config, &chunks_b[0])?;
-        assert_offset_absent(&provider, tx_a.header.data_tree_root, 3)?;
+        assert_offset_absent(
+            &provider,
+            tx_a.header.data_commitment(&config.data_tree_geometry()),
+            3,
+        )?;
 
         Ok(())
     }
@@ -1212,7 +1128,11 @@ mod tests {
             .ok_or_else(|| eyre::eyre!("second placement was not stored"))?;
         assert_eq!(second_placement.data_tree_root, data_root);
         assert_eq!(second_placement.tx_offset, TxChunkOffset::from(0_u32));
-        assert_offset_absent(&provider, data_root, 2)?;
+        assert_offset_absent(
+            &provider,
+            tx.header.data_commitment(&config.data_tree_geometry()),
+            2,
+        )?;
 
         Ok(())
     }
@@ -1229,6 +1149,7 @@ mod tests {
         let tx = signed_tx(&config, bytes.clone());
         assert_eq!(tx.data_chunks().unwrap().len(), 2);
         let data_root = tx.header.data_tree_root;
+        let data_commitment = tx.header.data_commitment(&config.data_tree_geometry());
         let chunks = tx.data_chunks().unwrap();
         let past_end = TxChunkOffset::from(2_u32);
 
@@ -1253,15 +1174,18 @@ mod tests {
         let chunk_provider = make_provider(config, Vec::new(), db);
 
         let last = chunk_provider
-            .get_chunk_by_data_root(DataLedger::Submit, data_root, None, chunks[1].tx_offset)?
+            .get_chunk_by_commitment(DataLedger::Submit, data_commitment, chunks[1].tx_offset)?
             .ok_or_else(|| eyre::eyre!("last valid cached chunk missing"))?;
         assert_eq!(
             last.as_unpacked().expect("cache returns unpacked"),
             chunks[1]
         );
 
-        let served =
-            chunk_provider.get_chunk_by_data_root(DataLedger::Submit, data_root, None, past_end)?;
+        let served = chunk_provider.get_chunk_by_commitment(
+            DataLedger::Submit,
+            data_commitment,
+            past_end,
+        )?;
         if let Some(chunk) = served {
             eyre::bail!("cached offset {past_end} past data_size was served: {chunk:?}");
         }
@@ -1386,10 +1310,9 @@ mod tests {
         config: &Config,
         expected: &UnpackedChunk,
     ) -> eyre::Result<()> {
-        let Some(chunk) = provider.get_chunk_by_data_root(
+        let Some(chunk) = provider.get_chunk_by_commitment(
             DataLedger::Publish,
-            DataTreeRoot(expected.data_tree_root.0),
-            None,
+            expected.data_commitment(&config.data_tree_geometry()),
             expected.tx_offset,
         )?
         else {
@@ -1416,17 +1339,16 @@ mod tests {
 
     fn assert_offset_absent(
         provider: &ChunkProvider,
-        data_root: DataTreeRoot,
+        data_commitment: DataCommitment,
         offset: u32,
     ) -> eyre::Result<()> {
-        let served = provider.get_chunk_by_data_root(
+        let served = provider.get_chunk_by_commitment(
             DataLedger::Publish,
-            data_root,
-            None,
+            data_commitment,
             TxChunkOffset::from(offset),
         )?;
         if let Some(chunk) = served {
-            eyre::bail!("tx offset {offset} of {data_root} was served: {chunk:?}");
+            eyre::bail!("tx offset {offset} of {data_commitment} was served: {chunk:?}");
         }
         Ok(())
     }
@@ -1803,10 +1725,10 @@ mod tests {
         );
 
         let error = provider
-            .get_chunk_by_data_root(
+            .get_chunk_by_commitment(
                 DataLedger::Publish,
-                tx.header.data_tree_root,
-                None,
+                tx.header
+                    .data_commitment(&provider.config.data_tree_geometry()),
                 TxChunkOffset::from(1),
             )
             .expect_err("a single-offset cache read still returns the error");
@@ -1815,10 +1737,10 @@ mod tests {
             "{error}"
         );
         let kept = provider
-            .get_chunk_by_data_root(
+            .get_chunk_by_commitment(
                 DataLedger::Publish,
-                tx.header.data_tree_root,
-                None,
+                tx.header
+                    .data_commitment(&provider.config.data_tree_geometry()),
                 TxChunkOffset::from(0),
             )?
             .expect("the neighboring offset is still served");
@@ -1897,10 +1819,9 @@ mod tests {
 
         assert!(
             provider
-                .get_chunk_by_data_root(
+                .get_chunk_by_commitment(
                     DataLedger::Publish,
-                    tx.header.data_tree_root,
-                    None,
+                    tx.header.data_commitment(&config.data_tree_geometry()),
                     TxChunkOffset::from(0),
                 )?
                 .is_some(),
@@ -1908,10 +1829,9 @@ mod tests {
         );
         assert!(
             provider
-                .get_chunk_by_data_root(
+                .get_chunk_by_commitment(
                     DataLedger::Publish,
-                    hole_tx.header.data_tree_root,
-                    None,
+                    hole_tx.header.data_commitment(&config.data_tree_geometry()),
                     TxChunkOffset::from(0),
                 )?
                 .is_none(),
@@ -1929,10 +1849,9 @@ mod tests {
             .set_len(0)?;
 
         let err = provider
-            .get_chunk_by_data_root(
+            .get_chunk_by_commitment(
                 DataLedger::Publish,
-                tx.header.data_tree_root,
-                None,
+                tx.header.data_commitment(&config.data_tree_geometry()),
                 TxChunkOffset::from(0),
             )
             .expect_err("a disk read error is not a missing chunk");
@@ -1967,10 +1886,9 @@ mod tests {
 
         cache_one(&provider.db, &provider.config, &tx, &data);
         let cached = provider
-            .get_chunk_by_data_root(
+            .get_chunk_by_commitment(
                 DataLedger::Publish,
-                tx.header.data_tree_root,
-                None,
+                tx.header.data_commitment(&config.data_tree_geometry()),
                 TxChunkOffset::from(0),
             )?
             .expect("a cache hit is served when the disk read fails");
@@ -2015,10 +1933,9 @@ mod tests {
             create_test_db(&tmp.path().join("empty")),
         );
         let error = only
-            .get_chunk_by_data_root(
+            .get_chunk_by_commitment(
                 DataLedger::Publish,
-                tx.header.data_tree_root,
-                None,
+                tx.header.data_commitment(&config.data_tree_geometry()),
                 TxChunkOffset::from(0),
             )
             .expect_err("an index error with no later module and no cache is returned");
@@ -2034,10 +1951,9 @@ mod tests {
             create_test_db(&tmp.path().join("db")),
         );
         let served = both
-            .get_chunk_by_data_root(
+            .get_chunk_by_commitment(
                 DataLedger::Publish,
-                tx.header.data_tree_root,
-                None,
+                tx.header.data_commitment(&config.data_tree_geometry()),
                 TxChunkOffset::from(0),
             )
             .expect("a later module is tried after an index error")
@@ -2065,10 +1981,10 @@ mod tests {
 
         set_data_root_index_faults(1);
         let served = provider
-            .get_chunk_by_data_root(
+            .get_chunk_by_commitment(
                 DataLedger::Publish,
-                tx.header.data_tree_root,
-                None,
+                tx.header
+                    .data_commitment(&provider.config.data_tree_geometry()),
                 TxChunkOffset::from(0),
             )
             .expect("the cache is tried after an index error")

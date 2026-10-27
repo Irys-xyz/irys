@@ -6,8 +6,8 @@ use actix_web::{
 };
 
 use awc::http::StatusCode;
-use irys_domain::AmbiguousDataSize;
-use irys_types::{ChunkFormat, DataTreeRoot};
+use base58::FromBase58 as _;
+use irys_types::{ChunkFormat, DataCommitment, H256};
 use serde::Deserialize;
 use tracing::debug;
 
@@ -46,44 +46,53 @@ pub async fn get_chunk_by_ledger_offset(
 }
 
 #[derive(Deserialize)]
-pub struct DataRootChunkApiPath {
+pub struct DataCommitmentChunkApiPath {
     ledger_id: u32,
-    data_root: DataTreeRoot,
+    data_commitment: String,
     offset: u32,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DataRootChunkApiQuery {
-    /// The data size of the tx. With it, the lookup is a point lookup of the
-    /// commitment of `(data_root, data_size)`.
-    data_size: Option<u64>,
+/// Parses the base58 text of a data commitment. A malformed one is the
+/// client's error.
+fn parse_data_commitment(text: &str) -> Result<DataCommitment, ApiError> {
+    let invalid = |reason: String| -> ApiError {
+        (
+            format!("Invalid data commitment: {reason}"),
+            StatusCode::BAD_REQUEST,
+        )
+            .into()
+    };
+    let bytes = text
+        .from_base58()
+        .map_err(|_| invalid("not base58".to_owned()))?;
+    let hash: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| invalid(format!("expected 32 bytes, got {}", bytes.len())))?;
+    Ok(DataCommitment(H256(hash)))
 }
 
-/// Chunk `offset` of the data whose tree root is `data_root`.
+/// Chunk `offset` of the data with `data_commitment`.
 ///
-/// Data is keyed by the data commitment, and the root alone does not fix the
-/// size. With `?dataSize=`, the lookup serves that size only. Without it, the
-/// lookup scans the local placements and cache rows of this root. If chunks of
-/// more than one size hold the offset, it returns 400 and asks for `dataSize`.
-pub async fn get_chunk_by_data_root_offset(
+/// Data is keyed by the data commitment, which fixes the tree root and the
+/// data size. The lookup is a point lookup: the local placements of the
+/// commitment, then the chunk cache row of the commitment.
+pub async fn get_chunk_by_data_commitment_offset(
     state: web::Data<ApiState>,
-    path: web::Path<DataRootChunkApiPath>,
-    query: web::Query<DataRootChunkApiQuery>,
+    path: web::Path<DataCommitmentChunkApiPath>,
 ) -> Result<HttpResponse, ApiError> {
     let ledger = crate::routes::parse_ledger_id(path.ledger_id)?;
+    let data_commitment = parse_data_commitment(&path.data_commitment)?;
 
-    data_root_chunk_response(state.chunk_provider.get_chunk_by_data_root(
+    data_commitment_chunk_response(state.chunk_provider.get_chunk_by_commitment(
         ledger,
-        path.data_root,
-        query.data_size,
+        data_commitment,
         path.offset.into(),
     ))
 }
 
-/// HTTP response for a data-root chunk lookup. An ambiguous root-only lookup
-/// is the client's error: it must name the data size.
-fn data_root_chunk_response(
+/// HTTP response for a data commitment chunk lookup.
+fn data_commitment_chunk_response(
     lookup: eyre::Result<Option<ChunkFormat>>,
 ) -> Result<HttpResponse, ApiError> {
     match lookup {
@@ -91,9 +100,6 @@ fn data_root_chunk_response(
             .content_type(ContentType::json())
             .json(chunk)),
         Ok(None) => Err(("Chunk not found", StatusCode::NOT_FOUND).into()),
-        Err(e) if e.downcast_ref::<AmbiguousDataSize>().is_some() => {
-            Err((e.to_string(), StatusCode::BAD_REQUEST).into())
-        }
         Err(e) => Err((
             format!("Error retrieving chunk: {e}"),
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -105,44 +111,59 @@ fn data_root_chunk_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::dev::Service as _;
     use actix_web::{App, ResponseError as _, test};
-    use irys_types::{H256, TxChunkOffset};
+    use base58::ToBase58 as _;
 
-    async fn echo_query(query: web::Query<DataRootChunkApiQuery>) -> HttpResponse {
-        HttpResponse::Ok().json(query.data_size)
-    }
-
-    async fn extracted_size(uri: &str) -> Option<u64> {
-        let app = test::init_service(App::new().route("/chunk", web::get().to(echo_query))).await;
-        let response = app
-            .call(test::TestRequest::get().uri(uri).to_request())
+    async fn commitment_status(uri: &str) -> StatusCode {
+        async fn handler(
+            path: web::Path<DataCommitmentChunkApiPath>,
+        ) -> Result<HttpResponse, ApiError> {
+            let data_commitment = parse_data_commitment(&path.data_commitment)?;
+            // Only the known commitment has a chunk.
+            let known = DataCommitment(H256::repeat_byte(1));
+            data_commitment_chunk_response(Ok(
+                (data_commitment == known).then(|| ChunkFormat::Packed(Default::default()))
+            ))
+        }
+        let app = test::init_service(App::new().route(
+            "/chunk/data-commitment/{ledger_id}/{data_commitment}/{offset}",
+            web::get().to(handler),
+        ))
+        .await;
+        test::call_service(&app, test::TestRequest::get().uri(uri).to_request())
             .await
-            .expect("route call");
-        assert_eq!(response.status(), StatusCode::OK, "{uri}");
-        serde_json::from_slice(&test::read_body(response).await).expect("JSON body")
+            .status()
     }
 
     #[actix_web::test]
-    async fn data_size_query_is_optional_and_camel_case() {
-        assert_eq!(extracted_size("/chunk").await, None);
-        assert_eq!(extracted_size("/chunk?dataSize=96").await, Some(96));
+    async fn commitment_path_is_ok_for_a_known_commitment() {
+        let known = H256::repeat_byte(1).0.to_base58();
+        let uri = format!("/chunk/data-commitment/1/{known}/0");
+        assert_eq!(commitment_status(&uri).await, StatusCode::OK);
     }
 
     #[actix_web::test]
-    async fn ambiguous_data_size_is_a_bad_request_that_asks_for_the_size() {
-        let ambiguous = AmbiguousDataSize {
-            data_tree_root: DataTreeRoot(H256::repeat_byte(1)),
-            tx_offset: TxChunkOffset::from(1_u32),
-            data_sizes: vec![64, 96],
-        };
-        let error = data_root_chunk_response(Err(ambiguous.into())).expect_err("error response");
-        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
-        assert!(error.to_string().contains("dataSize"), "{error}");
+    async fn unknown_commitment_is_not_found() {
+        let unknown = H256::repeat_byte(2).0.to_base58();
+        let uri = format!("/chunk/data-commitment/1/{unknown}/0");
+        assert_eq!(commitment_status(&uri).await, StatusCode::NOT_FOUND);
+    }
 
-        let error = data_root_chunk_response(Err(eyre::eyre!("disk"))).expect_err("error response");
+    #[actix_web::test]
+    async fn malformed_commitment_is_a_bad_request() {
+        for malformed in ["not-base58-0OIl", "abc", ""] {
+            let error = parse_data_commitment(malformed).expect_err("malformed commitment");
+            assert_eq!(error.status_code(), StatusCode::BAD_REQUEST, "{malformed}");
+        }
+        assert_eq!(
+            commitment_status("/chunk/data-commitment/1/abc/0").await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[actix_web::test]
+    async fn storage_error_is_an_internal_error() {
+        let error = data_commitment_chunk_response(Err(eyre::eyre!("disk"))).expect_err("error");
         assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
-        let error = data_root_chunk_response(Ok(None)).expect_err("error response");
-        assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
     }
 }

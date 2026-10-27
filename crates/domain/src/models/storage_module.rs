@@ -8565,32 +8565,6 @@ impl StorageModule {
         Ok(data_root_info_list)
     }
 
-    /// Every `(data_commitment, DataRootInfo)` whose info names
-    /// `data_tree_root`, across all submodules.
-    ///
-    /// A root alone does not fix the size, so this scans every data-root row.
-    /// Only root-only lookups use it; keyed lookups use
-    /// [`Self::collect_data_root_infos`].
-    pub fn collect_data_root_infos_for_tree_root(
-        &self,
-        data_tree_root: DataTreeRoot,
-    ) -> eyre::Result<Vec<(DataCommitment, DataRootInfo)>> {
-        let mut matches = Vec::new();
-        for (_, submodule) in self.submodules.iter() {
-            index_read_metrics::note("data_root");
-            for (data_commitment, infos) in submodule.db.view(|tx| tx.data_root_entries())? {
-                matches.extend(
-                    infos
-                        .0
-                        .into_iter()
-                        .filter(|info| info.data_tree_root == data_tree_root)
-                        .map(|info| (data_commitment, info)),
-                );
-            }
-        }
-        Ok(matches)
-    }
-
     /// Inclusive partition offsets. One entry per offset: `Some` is the unpacked
     /// body, `None` is a hole. The disk read is the same planner as
     /// [`Self::read_chunks`]: one `pread` per contiguous durable run, split on a
@@ -8970,7 +8944,7 @@ impl StorageModule {
     /// require a written chunk body (`data_path_hash` may be missing). That is the residual
     /// Entropy-hole case after tx migration: `tx_path` + `DataRootInfos` present, body never
     /// written. data_sync uses this to address proof-signer peers with
-    /// `GET /chunk/data-root/{ledger}/{data_root}/{tx_offset}` instead of ledger-offset.
+    /// `GET /chunk/data-commitment/{ledger}/{data_commitment}/{tx_offset}` instead of ledger-offset.
     ///
     /// `tx_offset` is derived as `partition_offset - DataRootInfo.start_offset` for the
     /// placement that covers this offset (validated against `data_size`).

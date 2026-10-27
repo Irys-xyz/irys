@@ -1848,7 +1848,7 @@ impl DataSyncServiceInner {
     /// Online peers that signed accepted local ingress proofs for residual data_roots.
     ///
     /// Ingress-proof gossip is **not** chunk replication — these addresses are
-    /// hints for data_sync dual-fetch (data_root path). Cap at
+    /// hints for data_sync dual-fetch (data-commitment path). Cap at
     /// [`MAX_INGRESS_PROOF_SIGNER_PEERS`].
     fn collect_ingress_proof_signer_peers(
         &mut self,

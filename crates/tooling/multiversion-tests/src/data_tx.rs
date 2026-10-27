@@ -89,20 +89,23 @@ struct PriceWire {
 pub fn dev_signer(chain_id: u64, chunk_size: u64) -> Result<IrysSigner, DataTxError> {
     let bytes = hex::decode(DEV_PRIVATE_KEY_HEX)?;
     let signer = SigningKey::from_slice(&bytes).map_err(|_| DataTxError::InvalidKey)?;
-    // The cluster runs a preset geometry; its chunk size names the preset.
-    let data_tree_geometry = [Geometry::MAINNET, Geometry::TESTING]
+    Ok(IrysSigner {
+        signer,
+        chain_id,
+        data_tree_geometry: geometry_for_chunk_size(chunk_size)?,
+    })
+}
+
+/// The cluster runs a preset geometry; its chunk size names the preset.
+pub fn geometry_for_chunk_size(chunk_size: u64) -> Result<Geometry, DataTxError> {
+    [Geometry::MAINNET, Geometry::TESTING]
         .into_iter()
         .find(|geometry| geometry.chunk_size() == chunk_size)
         .ok_or_else(|| {
             DataTxError::TxBuild(format!(
                 "no data tree geometry preset has chunk_size {chunk_size}"
             ))
-        })?;
-    Ok(IrysSigner {
-        signer,
-        chain_id,
-        data_tree_geometry,
-    })
+        })
 }
 
 /// POSTs a signed Publish-ledger data transaction to `api_url` and returns
@@ -739,7 +742,7 @@ async fn fetch_chunk_until_available(
 }
 
 /// For every chunk of `tx`, fetches it back from `api_url` via
-/// `/v1/chunk/data-root/{ledger}/{data_root}/{offset}` and asserts the
+/// `/v1/chunk/data-commitment/{ledger}/{data_commitment}/{offset}` and asserts the
 /// packing-invariant fields (`dataRoot`, `dataSize`, `dataPath`, `txOffset`)
 /// match the chunk we originally built and uploaded.
 ///
@@ -758,13 +761,14 @@ pub async fn assert_chunks_match_original(
     client: &reqwest::Client,
     api_url: &str,
     tx: &DataTransaction,
+    geometry: &Geometry,
     timeout: Duration,
 ) -> Result<(), DataTxError> {
     let chunks = tx
         .data_chunks()
         .map_err(|e| DataTxError::TxBuild(format!("data_chunks(): {e}")))?;
     let ledger_id = DataLedger::Publish as u32;
-    let data_root = tx.header.data_tree_root;
+    let data_commitment = tx.header.data_commitment(geometry);
     // Packing is node-local, so only the packing-invariant identity + Merkle
     // proof are comparable against the original unpacked chunk.
     let schema = SchemaConfig {
@@ -773,7 +777,8 @@ pub async fn assert_chunks_match_original(
     };
 
     for (offset, chunk) in chunks.into_iter().enumerate() {
-        let url = format!("{api_url}/v1/chunk/data-root/{ledger_id}/{data_root}/{offset}");
+        let url =
+            format!("{api_url}/v1/chunk/data-commitment/{ledger_id}/{data_commitment}/{offset}");
         let served = fetch_chunk_until_available(client, &url, tx.header.id, timeout).await?;
         let expected =
             serde_json::to_value(&chunk).map_err(|e| DataTxError::TxBuild(e.to_string()))?;

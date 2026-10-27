@@ -4,8 +4,8 @@ pub use irys_api_server::routes::block::BlockParam;
 use irys_api_server::routes::{anchor::AnchorResponse, price::PriceInfo, tx::PromotionStatus};
 pub use irys_types::CombinedBlockHeader;
 use irys_types::{
-    Base64, BlockHash, ChunkFormat, DataLedger, DataTransaction, DataTreeRoot, H256, TxChunkOffset,
-    UnpackedChunk,
+    Base64, BlockHash, ChunkFormat, DataCommitment, DataLedger, DataTransaction, H256,
+    TxChunkOffset, UnpackedChunk,
 };
 use std::{
     net::SocketAddr,
@@ -50,9 +50,8 @@ pub trait ApiClientExt: ApiClient {
         &self,
         peer: SocketAddr,
         ledger: DataLedger,
-        data_root: DataTreeRoot,
-        offset: u32,            // data root relative offset
-        data_size: Option<u64>, // selects one size when several sizes share the root
+        data_commitment: DataCommitment,
+        offset: u32, // data relative offset
     ) -> eyre::Result<ChunkFormat>;
 
     async fn get_anchor(&self, peer: SocketAddr) -> eyre::Result<BlockHash>;
@@ -165,18 +164,14 @@ impl ApiClientExt for IrysApiClient {
         &self,
         peer: SocketAddr,
         ledger_id: DataLedger,
-        data_root: DataTreeRoot,
-        offset: u32, // data root relative offset
-        data_size: Option<u64>,
+        data_commitment: DataCommitment,
+        offset: u32, // data relative offset
     ) -> eyre::Result<ChunkFormat> {
         let ledger_num = u32::from(ledger_id);
-        let data_size_query = data_size
-            .map(|data_size| format!("?dataSize={data_size}"))
-            .unwrap_or_default();
         self.make_request(
             peer,
             Method::GET,
-            &format!("/chunk/data-root/{ledger_num}/{data_root}/{offset}{data_size_query}"),
+            &format!("/chunk/data-commitment/{ledger_num}/{data_commitment}/{offset}"),
             None::<&()>,
         )
         .await?

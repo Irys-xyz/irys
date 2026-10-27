@@ -22,11 +22,10 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, CommitmentTransaction, DataCommitment, DataLedger,
-    DataTransactionHeader, DataTransactionMetadata, DataTreeRoot, DatabaseProvider,
-    DatabaseVersion, H256, IngressMerkleLeaf, IngressProof, IrysAddress, IrysBlockHeader,
-    IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset,
-    UnixTimestamp, UnpackedChunk, expected_chunk_byte_range, generate_ingress_data_hash,
-    generate_ingress_leaf_from_data_hash,
+    DataTransactionHeader, DataTransactionMetadata, DatabaseProvider, DatabaseVersion, H256,
+    IngressMerkleLeaf, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId,
+    LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    expected_chunk_byte_range, generate_ingress_data_hash, generate_ingress_leaf_from_data_hash,
 };
 use reth_db::TableSet;
 use reth_db::cursor::DbDupCursorRO as _;
@@ -1381,7 +1380,7 @@ pub fn backfill_cached_ingress_data_hashes(
             };
             let validation = verify_data_chunk(
                 geometry,
-                data_tree_root,
+                data_commitment,
                 data_size,
                 entry.index,
                 &bytes.0,

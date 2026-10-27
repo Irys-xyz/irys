@@ -1935,7 +1935,7 @@ async fn local_cache_hit_writes_without_a_peer_request() {
         fetcher.request_log.read().unwrap().is_empty(),
         "a cached body must not ask a peer"
     );
-    assert!(fetcher.data_root_request_log.read().unwrap().is_empty());
+    assert!(fetcher.commitment_request_log.read().unwrap().is_empty());
     assert!(sm.is_data_write_pending_at(offset));
     assert!(matches!(
         orch.chunk_requests[&offset].request_state,
@@ -2297,7 +2297,7 @@ async fn pending_body_offsets_are_skipped_until_the_job_settles() {
         assert_eq!(log.len(), 1);
         assert_eq!(*log[0].0, 3, "only the uncovered hole asks a peer");
     }
-    assert!(fetcher.data_root_request_log.read().unwrap().is_empty());
+    assert!(fetcher.commitment_request_log.read().unwrap().is_empty());
 
     assert!(!orch.dispatch_next());
     assert_eq!(orch.holds_started, 3);

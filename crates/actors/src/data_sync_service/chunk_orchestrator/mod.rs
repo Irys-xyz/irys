@@ -83,13 +83,12 @@ enum DispatchStart {
 
 /// How to request a missing body from a selected peer.
 ///
-/// Assignees use ledger-offset; ingress-proof signers (often no SM) use data_root.
+/// Assignees use ledger-offset; ingress-proof signers (often no SM) use the data commitment.
 #[derive(Debug, Clone, Copy)]
 enum FetchMode {
     LedgerOffset(LedgerChunkOffset),
-    DataRoot {
-        data_root: irys_types::DataTreeRoot,
-        data_size: u64,
+    DataCommitment {
+        data_commitment: irys_types::DataCommitment,
         tx_offset: irys_types::TxChunkOffset,
     },
 }
@@ -2140,16 +2139,15 @@ impl ChunkOrchestrator {
                 LedgerChunkOffset::from(start_ledger_offset + u64::from(chunk_offset));
             FetchMode::LedgerOffset(ledger_chunk_offset)
         } else {
-            // The placement's size goes with the request, so the peer serves
+            // The placement's commitment names the request, so the peer serves
             // the chunk of this commitment and not another size of the root.
             match irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
                 self.storage_module
                     .data_root_and_tx_offset_span(chunk_offset, chunk_offset)
                     .map(|span| span.into_iter().next().flatten())
             }) {
-                Ok(Some((_, data_root, tx_offset, data_size))) => FetchMode::DataRoot {
-                    data_root,
-                    data_size,
+                Ok(Some((data_commitment, _, tx_offset, _))) => FetchMode::DataCommitment {
+                    data_commitment,
                     tx_offset,
                 },
                 Ok(None) => {
@@ -2220,15 +2218,12 @@ impl ChunkOrchestrator {
                             .fetch_chunk_by_ledger_offset(ledger_chunk_offset, api_addr, timeout)
                             .await
                     }
-                    FetchMode::DataRoot {
-                        data_root,
-                        data_size,
+                    FetchMode::DataCommitment {
+                        data_commitment,
                         tx_offset,
                     } => {
                         chunk_fetcher
-                            .fetch_chunk_by_data_root(
-                                data_root, data_size, tx_offset, api_addr, timeout,
-                            )
+                            .fetch_chunk_by_commitment(data_commitment, tx_offset, api_addr, timeout)
                             .await
                     }
                 };
