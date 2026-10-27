@@ -403,6 +403,25 @@ mod tests {
             &geometry
         )?);
 
+        // Same chunks, so the same address-bound root. A proof signed over
+        // the commitment of another size for the same root does not verify.
+        let other_size =
+            data_commitment(&geometry, tx.header.data_tree_root, tx.header.data_size + 1);
+        let other_size_proof = generate_ingress_proof(
+            &signer,
+            other_size,
+            chunks.iter().map(|chunk| Ok(chunk.as_slice())),
+            config.chain_id,
+            H256::random(),
+        )?;
+        assert_eq!(other_size_proof.proof, proof.proof);
+        assert!(!verify_ingress_proof(
+            &other_size_proof,
+            &chunks,
+            config.chain_id,
+            &geometry
+        )?);
+
         chunks[1][0] ^= 1;
         assert!(!verify_ingress_proof(
             &proof,
