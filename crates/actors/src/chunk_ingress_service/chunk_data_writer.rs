@@ -289,7 +289,6 @@ mod tests {
                 data_key,
                 CachedDataRoot {
                     data_size: 8,
-                    data_size_confirmed: true,
                     block_set: vec![H256::random()],
                     ..Default::default()
                 },
@@ -347,7 +346,6 @@ mod tests {
                 data_key,
                 CachedDataRoot {
                     data_size: 8,
-                    data_size_confirmed: true,
                     block_set: vec![H256::random()],
                     ..Default::default()
                 },

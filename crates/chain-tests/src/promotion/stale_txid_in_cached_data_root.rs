@@ -83,7 +83,6 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
         let cached = CachedDataRoot {
             data_size: data_tx.header.data_size,
             data_tree_root: data_root,
-            data_size_confirmed: true,
             txid_set: vec![stale_txid],
             block_set: vec![],
             expiry_height: Some(1000), // far future so prune_data_root_cache won't delete it

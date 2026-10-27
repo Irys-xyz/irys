@@ -905,7 +905,6 @@ mod tests {
         db.update(|tx| -> eyre::Result<()> {
             let cdr = CachedDataRoot {
                 data_size: u64::MAX,
-                data_size_confirmed: true,
                 txid_set: vec![H256::random(), tx_id, H256::random()],
                 block_set: vec![H256::random(), H256::random(), H256::random()],
                 expiry_height: Some(0),

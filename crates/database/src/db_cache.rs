@@ -91,9 +91,6 @@ pub struct CachedDataRoot {
     /// root and `data_size`; the root is kept to build chunks for serving.
     pub data_tree_root: DataTreeRoot,
 
-    /// Has this data_size been confirmed by the data_path of the rightmost chunk in the data_root
-    pub data_size_confirmed: bool,
-
     /// Set of tx.ids that *currently* reference this `data_root` — i.e. the
     /// txs whose chunk-retention needs keep the CDR alive.
     ///
@@ -237,7 +234,7 @@ impl Decode for CachedIngressLeafKey {
 /// Durable compact state sufficient to reconstruct one ingress Merkle leaf.
 ///
 /// The byte boundary is deliberately not stored: it is derived from the
-/// transaction offset, confirmed data size, and consensus chunk size. Only the
+/// transaction offset, data size, and consensus chunk size. Only the
 /// miner-specific data hash is unavailable after the cached body is reclaimed.
 /// Availability of this record says nothing about whether the chunk body is
 /// durably stored; reclamation is gated separately on storage-module state.

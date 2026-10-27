@@ -216,7 +216,6 @@ mod compact_ingress_leaf_tests {
                 CachedDataRoot {
                     data_size: 8,
                     data_tree_root,
-                    data_size_confirmed: true,
                     block_set: vec![H256::random()],
                     ..Default::default()
                 },
@@ -274,7 +273,6 @@ mod compact_ingress_leaf_tests {
                 CachedDataRoot {
                     data_size: 8,
                     data_tree_root,
-                    data_size_confirmed: true,
                     block_set: vec![H256::random()],
                     ..Default::default()
                 },
@@ -969,7 +967,6 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         None => CachedDataRoot {
             data_size: tx_header.data_size,
             data_tree_root: tx_header.data_tree_root,
-            data_size_confirmed: false,
             txid_set: vec![tx_header.id],
             block_set: vec![],
             expiry_height: None,
@@ -2675,7 +2672,6 @@ mod tests {
                 CachedDataRoot {
                     data_size: 64,
                     data_tree_root: Default::default(),
-                    data_size_confirmed: false,
                     txid_set: vec![],
                     block_set: vec![],
                     expiry_height: None,
@@ -2770,7 +2766,6 @@ mod tests {
                 CachedDataRoot {
                     data_size: 64,
                     data_tree_root: Default::default(),
-                    data_size_confirmed: false,
                     txid_set: vec![],
                     block_set: vec![],
                     expiry_height: None,

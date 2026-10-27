@@ -81,7 +81,6 @@ async fn make_publish_candidate(
         let cached = CachedDataRoot {
             data_size: data_tx.header.data_size,
             data_tree_root: data_root,
-            data_size_confirmed: true,
             txid_set: vec![txid],
             block_set: vec![],
             expiry_height: Some(1000),

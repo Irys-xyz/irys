@@ -1104,7 +1104,6 @@ mod tests {
     ) -> CachedDataRoot {
         CachedDataRoot {
             data_size: 64,
-            data_size_confirmed: true,
             txid_set,
             block_set,
             expiry_height,

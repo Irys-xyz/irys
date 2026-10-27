@@ -4114,7 +4114,6 @@ mod tests {
         let data_root = DataCommitment(H256::random());
         let cdr = CachedDataRoot {
             data_size: 64,
-            data_size_confirmed: false,
             txid_set: vec![],
             block_set: vec![],
             expiry_height: None,
@@ -4413,7 +4412,6 @@ mod tests {
             // CachedDataRoot with one pending txid (any_unpromoted = true).
             let cdr = CachedDataRoot {
                 data_size: 64,
-                data_size_confirmed: false,
                 txid_set: vec![txid],
                 block_set: vec![],
                 expiry_height: None,
@@ -4539,7 +4537,6 @@ mod tests {
                     DataCommitment(data_root),
                     CachedDataRoot {
                         data_size: 64,
-                        data_size_confirmed: false,
                         txid_set: vec![txid],
                         block_set: vec![],
                         expiry_height: None,
@@ -4651,7 +4648,6 @@ mod tests {
             // CachedDataRoot with one pending (unpromoted) txid.
             let cdr = irys_database::db_cache::CachedDataRoot {
                 data_size: 64,
-                data_size_confirmed: false,
                 txid_set: vec![txid],
                 block_set: vec![],
                 expiry_height: None,
@@ -4783,7 +4779,6 @@ mod tests {
             // CDR with one pending (unpromoted) txid.
             let cdr = CachedDataRoot {
                 data_size: 64,
-                data_size_confirmed: false,
                 txid_set: vec![txid],
                 block_set: vec![],
                 expiry_height: None,
@@ -5007,7 +5002,6 @@ mod tests {
         let data_root = DataCommitment(H256::random());
         let cdr = CachedDataRoot {
             data_size: 64,
-            data_size_confirmed: false,
             txid_set: txids,
             block_set: vec![],
             expiry_height: Some(100),
@@ -5039,7 +5033,6 @@ mod tests {
         let data_root = DataCommitment(H256::random());
         let cdr = CachedDataRoot {
             data_size: 64,
-            data_size_confirmed: false,
             txid_set: vec![],
             block_set: vec![],
             expiry_height: Some(1),
