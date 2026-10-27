@@ -2826,10 +2826,17 @@ impl RocksSubmoduleStore {
                     "interval at {start} for {root} has no data-root row"
                 )),
                 Some(point)
-                    if point.end != record.end
-                        || point.tx_start != record.tx_start
-                        || point.data_size != record.data_size
-                        || point.data_tree_root != record.data_root =>
+                    if (
+                        point.end,
+                        point.tx_start,
+                        point.data_size,
+                        point.data_tree_root,
+                    ) != (
+                        record.end,
+                        record.tx_start,
+                        record.data_size,
+                        record.data_root,
+                    ) =>
                 {
                     findings.push(format!(
                         "data-root row {root} at {start} does not match its interval"
