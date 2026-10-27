@@ -1301,14 +1301,11 @@ mod tests {
 
         // Three chunks of 32 bytes under one tree root.
         let data: Vec<u8> = (0..96_u8).collect();
-        let leaves = irys_types::generate_leaves(std::iter::once(Ok(data.clone())), 32)?;
-        let root = irys_types::generate_data_root(leaves)?;
-        let data_root = H256(root.id);
-        let proofs = irys_types::resolve_proofs(root, None)?;
+        let (data_root, proofs) = data_tree_with_proofs(&data)?;
         let last_chunk = UnpackedChunk {
             data_tree_root: DataTreeRoot(data_root),
             data_size: 96,
-            data_path: proofs[2].proof.clone().into(),
+            data_path: proofs[2].clone().into(),
             bytes: data[64..96].to_vec().into(),
             tx_offset: TxChunkOffset::from(2),
         };
@@ -1354,16 +1351,14 @@ mod tests {
         Ok(())
     }
 
-    /// A v1 tree of `data` at the test `chunk_size`: the root and one proof per chunk.
+    /// The v2 tree of `data` under the testing geometry: the root and one
+    /// proof per chunk.
     fn data_tree_with_proofs(data: &[u8]) -> eyre::Result<(H256, Vec<Vec<u8>>)> {
-        let leaves = irys_types::generate_leaves(std::iter::once(Ok(data.to_vec())), 32)?;
-        let root = irys_types::generate_data_root(leaves)?;
-        let data_root = H256(root.id);
-        let proofs = irys_types::resolve_proofs(root, None)?
-            .into_iter()
-            .map(|proof| proof.proof)
-            .collect();
-        Ok((data_root, proofs))
+        let tree = irys_data_tree::DataTree::from_bytes(irys_data_tree::Geometry::TESTING, data)?;
+        let proofs = (0..tree.chunk_count())
+            .map(|chunk_index| tree.chunk_proof(chunk_index))
+            .collect::<Result<_, _>>()?;
+        Ok((H256(*tree.data_tree_root().as_bytes()), proofs))
     }
 
     /// A known header fixes the length of each chunk. A body that is not
@@ -1406,11 +1401,13 @@ mod tests {
         Ok(())
     }
 
-    /// Two headers share one tree root with sizes 64 and 96. Each upload's
-    /// chunks check against their own commitment, so feeding both uploads in
-    /// mixed order completes both cache rows.
+    /// Two headers share one tree root with sizes 64 and 96, but the root is
+    /// the 96-byte tree's. The 96-byte upload completes. The 64-byte upload is
+    /// a chunk-aligned prefix of that tree: under v2 the root binds the tree
+    /// shape, so its chunks fail against the 64-byte commitment and each one
+    /// is a peer fault.
     #[tokio::test]
-    async fn same_root_two_sizes_both_complete() -> eyre::Result<()> {
+    async fn same_root_two_sizes_only_the_built_size_completes() -> eyre::Result<()> {
         use irys_database::{cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _};
 
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
@@ -1424,7 +1421,7 @@ mod tests {
             8,
             &tokio::runtime::Handle::current(),
         );
-        // Three chunks of 32 bytes. The 64-byte upload is the first two.
+        // Three chunks of 32 bytes. The 64-byte prefix is the first two.
         let data: Vec<u8> = (0..96_u8).collect();
         let (data_root, proofs) = data_tree_with_proofs(&data)?;
         insert_cached_data_root(&inner.irys_db, data_root, 64);
@@ -1441,32 +1438,112 @@ mod tests {
         };
 
         for (data_size, chunk_index) in [(96, 2), (64, 1), (96, 0), (64, 0), (96, 1)] {
-            inner
+            let result = inner
                 .handle_chunk_ingress_message(chunk_of(data_size, chunk_index))
-                .await
-                .unwrap_or_else(|error| {
-                    panic!("chunk {chunk_index} of the {data_size}-byte upload: {error:?}")
+                .await;
+            if data_size == 96 {
+                result.unwrap_or_else(|error| {
+                    panic!("chunk {chunk_index} of the 96-byte upload: {error:?}")
                 });
+            } else {
+                let error = result.expect_err("a prefix-size chunk must not verify");
+                assert!(
+                    matches!(
+                        error,
+                        ChunkIngressError::Critical(CriticalChunkIngressError::InvalidProof)
+                    ),
+                    "chunk {chunk_index} of the 64-byte upload: {error:?}"
+                );
+                assert!(
+                    crate::data_sync_service::ingress_error_is_invalid_peer_data(&error),
+                    "a prefix-size chunk is the sender's fault"
+                );
+            }
         }
 
         inner.irys_db.view_eyre(|tx| {
-            for (data_size, chunk_count) in [(64_u64, 2_u32), (96, 3)] {
-                for chunk_index in 0..chunk_count {
-                    let (_, cached) = cached_chunk_by_chunk_offset(
+            for chunk_index in 0..3_u32 {
+                let (_, cached) = cached_chunk_by_chunk_offset(
+                    tx,
+                    size_key(data_root, 96),
+                    TxChunkOffset::from(chunk_index),
+                )?
+                .unwrap_or_else(|| panic!("chunk {chunk_index} of the 96-byte upload is cached"));
+                assert_eq!(cached.chunk, Some(chunk_of(96, chunk_index).bytes));
+            }
+            for chunk_index in 0..2_u32 {
+                assert!(
+                    cached_chunk_by_chunk_offset(
                         tx,
-                        size_key(data_root, data_size),
+                        size_key(data_root, 64),
                         TxChunkOffset::from(chunk_index),
                     )?
-                    .unwrap_or_else(|| {
-                        panic!("chunk {chunk_index} of the {data_size}-byte upload is cached")
-                    });
-                    assert_eq!(
-                        cached.chunk,
-                        Some(chunk_of(data_size, chunk_index).bytes),
-                        "chunk {chunk_index} of the {data_size}-byte upload"
-                    );
-                }
+                    .is_none(),
+                    "chunk {chunk_index} of the 64-byte upload is not cached"
+                );
             }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// A header that names a chunk-aligned prefix size of a larger v2 tree
+    /// never completes. Every chunk of the 96-byte tree is offered under the
+    /// 64-byte header. Under v2 the root binds the tree shape: a 64-byte tree
+    /// with this root would need a chunk root equal to an inner node, which
+    /// the domain tags forbid. So no index verifies, the ingress leaves stay
+    /// incomplete, and no ingress proof is made.
+    #[tokio::test]
+    async fn prefix_header_of_a_larger_tree_never_completes() -> eyre::Result<()> {
+        use irys_database::db::IrysDatabaseExt as _;
+
+        const PREFIX_DATA_SIZE: u64 = 64;
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-prefix-header")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            inner.config.data_tree_geometry(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let data: Vec<u8> = (0..96_u8).collect();
+        let (data_root, proofs) = data_tree_with_proofs(&data)?;
+        insert_cached_data_root(&inner.irys_db, data_root, PREFIX_DATA_SIZE);
+
+        for (chunk_index, proof) in proofs.iter().enumerate() {
+            let start = chunk_index * 32;
+            let chunk = UnpackedChunk {
+                data_tree_root: DataTreeRoot(data_root),
+                data_size: PREFIX_DATA_SIZE,
+                data_path: proof.clone().into(),
+                bytes: data[start..start + 32].to_vec().into(),
+                tx_offset: TxChunkOffset::from(u32::try_from(chunk_index)?),
+            };
+            let error = inner
+                .handle_chunk_ingress_message(chunk)
+                .await
+                .expect_err("no chunk of the larger tree verifies under the prefix header");
+            assert!(
+                crate::data_sync_service::ingress_error_is_invalid_peer_data(&error),
+                "chunk {chunk_index}: {error:?}"
+            );
+        }
+
+        let commitment = size_key(data_root, PREFIX_DATA_SIZE);
+        let address = inner.config.irys_signer().address();
+        inner.irys_db.view_eyre(|tx| {
+            assert!(
+                complete_ingress_leaves(tx, commitment, address, PREFIX_DATA_SIZE, 32)?.is_none(),
+                "the prefix header has no complete ingress-leaf set"
+            );
+            assert!(
+                irys_database::ingress_proof_by_commitment_address(tx, commitment, address)?
+                    .is_none(),
+                "the prefix header has no ingress proof"
+            );
             Ok(())
         })?;
         Ok(())
@@ -2820,20 +2897,12 @@ mod tests {
     }
 
     fn valid_single_chunk(bytes: Vec<u8>) -> UnpackedChunk {
-        let chunk_size = bytes.len();
-        let leaves = irys_types::generate_leaves(std::iter::once(Ok(bytes.clone())), chunk_size)
-            .expect("leaves");
-        let root = irys_types::generate_data_root(leaves).expect("root");
-        let data_root = H256(root.id);
-        let proof = irys_types::resolve_proofs(root, None)
-            .expect("proofs")
-            .into_iter()
-            .next()
-            .expect("one proof");
+        let data_size = bytes.len() as u64;
+        let (data_root, proofs) = data_tree_with_proofs(&bytes).expect("one-chunk data tree");
         UnpackedChunk {
             data_tree_root: DataTreeRoot(data_root),
-            data_size: chunk_size as u64,
-            data_path: proof.proof.into(),
+            data_size,
+            data_path: proofs[0].clone().into(),
             bytes: bytes.into(),
             tx_offset: TxChunkOffset::from(0),
         }

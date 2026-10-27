@@ -73,9 +73,11 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
 
     let data_bytes_1 = vec![0_u8; chunk_size * 2];
     let chunks_1: Vec<Vec<u8>> = data_bytes_1.chunks(chunk_size).map(Vec::from).collect();
-    let leaves_1 =
-        irys_types::generate_leaves(vec![data_bytes_1.clone()].into_iter().map(Ok), chunk_size)?;
-    let data_root_1 = H256(irys_types::generate_data_root(leaves_1)?.id);
+    let data_root_1 = signer_a
+        .create_transaction(data_bytes_1.clone(), anchor)?
+        .header
+        .data_tree_root
+        .0;
 
     let data_tx_1 = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
         tx: DataTransactionHeaderV1 {
@@ -123,9 +125,11 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
 
     let data_bytes_2 = vec![1_u8; chunk_size * 2];
     let chunks_2: Vec<Vec<u8>> = data_bytes_2.chunks(chunk_size).map(Vec::from).collect();
-    let leaves_2 =
-        irys_types::generate_leaves(vec![data_bytes_2.clone()].into_iter().map(Ok), chunk_size)?;
-    let data_root_2 = H256(irys_types::generate_data_root(leaves_2)?.id);
+    let data_root_2 = signer_a
+        .create_transaction(data_bytes_2.clone(), anchor)?
+        .header
+        .data_tree_root
+        .0;
     assert_ne!(data_root_1, data_root_2);
 
     let data_tx_2 = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {

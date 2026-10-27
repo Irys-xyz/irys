@@ -1118,10 +1118,11 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
     let anchor = genesis_node.get_anchor().await?;
 
     // Generate data root
-    let leaves =
-        irys_types::generate_leaves(vec![data_bytes.clone()].into_iter().map(Ok), chunk_size)?;
-    let root = irys_types::generate_data_root(leaves)?;
-    let data_root = H256(root.id);
+    let data_root = test_signer
+        .create_transaction(data_bytes.clone(), anchor)?
+        .header
+        .data_tree_root
+        .0;
 
     // Create data transaction header and sign it
     let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {

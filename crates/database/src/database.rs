@@ -61,9 +61,9 @@ mod compact_ingress_leaf_tests {
     use super::*;
     use crate::{db_cache::CachedDataRoot, tables::IrysTables};
     use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::Base64;
     use irys_types::DataTreeRoot;
     use irys_types::data_tree::Geometry;
-    use irys_types::{Base64, generate_data_root, generate_leaves, resolve_proofs};
     use reth_db::mdbx::DatabaseArguments;
     use std::sync::Arc;
 
@@ -188,19 +188,23 @@ mod compact_ingress_leaf_tests {
         })
     }
 
+    /// Root and chunk proof of a one-chunk upload under the testing geometry.
+    fn one_chunk_tree(bytes: &[u8]) -> (DataTreeRoot, Base64) {
+        let tree = irys_data_tree::DataTree::from_bytes(Geometry::TESTING, bytes)
+            .expect("one-chunk data tree");
+        (
+            tree.data_tree_root().into(),
+            Base64(tree.chunk_proof(0).expect("chunk proof")),
+        )
+    }
+
     #[test]
     fn startup_backfill_recovers_legacy_cached_bodies_idempotently() -> eyre::Result<()> {
         let (_dir, db) = open_test_db()?;
         let address = IrysAddress::random();
         let tx_offset = TxChunkOffset::from(0);
-        let chunk_size = 32;
         let bytes = vec![7_u8; 8];
-        let root = generate_data_root(generate_leaves(
-            std::iter::once(Ok(bytes.clone())),
-            chunk_size as usize,
-        )?)?;
-        let data_tree_root = DataTreeRoot(H256(root.id));
-        let data_path = Base64(resolve_proofs(root, None)?.remove(0).proof);
+        let (data_tree_root, data_path) = one_chunk_tree(&bytes);
         let chunk = UnpackedChunk {
             data_tree_root,
             data_size: 8,
@@ -251,17 +255,11 @@ mod compact_ingress_leaf_tests {
     fn startup_backfill_rejects_cached_body_that_does_not_match_path() -> eyre::Result<()> {
         let (_dir, db) = open_test_db()?;
         let address = IrysAddress::random();
-        let chunk_size = 32;
-        let valid_bytes = vec![7_u8; 8];
-        let root = generate_data_root(generate_leaves(
-            std::iter::once(Ok(valid_bytes)),
-            chunk_size as usize,
-        )?)?;
-        let data_tree_root = DataTreeRoot(H256(root.id));
+        let (data_tree_root, data_path) = one_chunk_tree(&[7_u8; 8]);
         let chunk = UnpackedChunk {
             data_tree_root,
             data_size: 8,
-            data_path: Base64(resolve_proofs(root, None)?.remove(0).proof),
+            data_path,
             bytes: Base64(vec![8_u8; 8]),
             tx_offset: TxChunkOffset::from(0),
         };

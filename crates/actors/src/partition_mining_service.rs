@@ -2515,15 +2515,21 @@ mod tests {
         );
     }
 
-    /// Every chunk holds the same bytes, so every proof has the same leaf
-    /// hash and only the leaf note tells the chunks apart. The placement says
-    /// offset 2 is chunk 2. A stored proof for chunk 0 must not bind there.
+    /// Chunks 0 and 2 hold the same bytes, so the chunk bytes do not tell
+    /// them apart. Chunks 1 and 3 differ, so their proofs differ. (When every
+    /// chunk is the same, the proofs are the same too: data tree spec §7.)
+    /// The placement says offset 2 is chunk 2. A stored proof for chunk 0
+    /// must not bind there.
     #[test]
     fn mining_reads_the_chunk_index_from_the_placement() {
         use irys_database::submodule::SubmoduleStore as _;
 
         let chunk_size = 32_usize;
-        let data = vec![7_u8; chunk_size * DATA_CHUNKS as usize];
+        let data = [7_u8, 8, 7, 9]
+            .iter()
+            .flat_map(|byte| vec![*byte; chunk_size])
+            .collect::<Vec<u8>>();
+        assert_eq!(data.len(), chunk_size * DATA_CHUNKS as usize);
         let (_tmp, storage, inner, header) =
             open_data_miner_with_tx_data(U256::zero(), true, Some(data));
         let header = header.expect("indexed header");

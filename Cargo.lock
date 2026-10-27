@@ -5268,6 +5268,7 @@ dependencies = [
  "bytes",
  "eyre",
  "irys-config",
+ "irys-data-tree",
  "irys-testing-utils",
  "irys-types",
  "irys-utils",

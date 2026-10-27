@@ -22922,7 +22922,9 @@ mod tests {
             data_path_at(&storage, 0)?.as_ref() == Some(&path_a),
             "painting the live label dropped the stored path"
         );
-        let (second, root2) = index_pattern(&storage, &[0x22], 1)?;
+        // Two chunks: a one-chunk upload's proof is its size witness alone,
+        // the same for every one-chunk upload of one size (data tree spec §5).
+        let (second, root2) = index_pattern(&storage, &[0x22, 0x33], 1)?;
         let during = serve_during_paused_pwrite(&storage, offset, &second[0])?;
         let served = during.ok_or_else(|| eyre::eyre!("serve omitted the committed body"))?;
         let path_now =

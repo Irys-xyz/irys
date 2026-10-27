@@ -1118,17 +1118,13 @@ mod tests {
     #[test]
     fn cross_check_accepts_the_miners_data_path_and_rejects_a_mismatch() {
         let chunk_size = 32_u64;
-        let bytes = vec![7_u8; chunk_size as usize];
-        let root = generate_data_root(
-            irys_types::generate_leaves(std::iter::once(Ok(bytes)), chunk_size as usize)
-                .expect("leaves"),
+        let tree = irys_data_tree::DataTree::from_bytes(
+            Geometry::TESTING,
+            &vec![7_u8; chunk_size as usize],
         )
-        .expect("data root");
-        let data_root = H256(root.id);
-        let data_path = irys_types::resolve_proofs(root, None)
-            .expect("proofs")
-            .remove(0)
-            .proof;
+        .expect("data tree");
+        let data_root = H256(*tree.data_tree_root().as_bytes());
+        let data_path = tree.chunk_proof(0).expect("chunk proof");
         let mut header = tx_at(1, chunk_size);
         header.data_tree_root = DataTreeRoot(data_root);
         let (tx_root, proof) =
@@ -1285,7 +1281,7 @@ mod tests {
         for (index, &size) in sizes.iter().enumerate() {
             let mut header = tx_at(u64::try_from(index).unwrap_or(0).saturating_add(1), size);
             if size > 0 {
-                let (data_root, _) = data_tree(size, chunk_size);
+                let (data_root, _) = data_tree(size);
                 header.data_tree_root = DataTreeRoot(data_root);
             }
             chunk_total = chunk_total.saturating_add(size.div_ceil(chunk_size));
@@ -1312,9 +1308,9 @@ mod tests {
             );
             let local = usize::try_from(offset - tx_start).unwrap_or(usize::MAX);
             let size = headers[tx_index].data_size;
-            let (data_root, data_proofs) = data_tree(size, chunk_size);
+            let (data_root, data_proofs) = data_tree(size);
             assert_eq!(headers[tx_index].data_tree_root, DataTreeRoot(data_root));
-            let data_path = &data_proofs[local].proof;
+            let data_path = &data_proofs[local];
             let derived = derived_for(
                 &headers, tx_index, &proof, tx_root, data_root, start, tx_start,
             );
@@ -1334,8 +1330,9 @@ mod tests {
                 None,
             );
             // The validator: the tx's raw byte range in the tx_root tree, then
-            // chunk `local` of that tx, each pinned to its exact range, and the
-            // chunk bytes against the leaf hash.
+            // chunk `local` of that tx against the commitment of the derived
+            // data root and size. The data half calls the tree crate, not the
+            // node's chunk seam that `cross_check_derived` uses.
             let raw_start = super::tx_byte_start(&headers, tx_index);
             let raw_end = raw_start + u128::from(size);
             let data_byte = (offset - tx_start) * chunk_size;
@@ -1349,20 +1346,19 @@ mod tests {
                     (tx_path.min_byte_range, tx_path.max_byte_range) == (raw_start, raw_end),
                     "tx leaf range"
                 );
-                let data = validate_path(
-                    data_root.0,
-                    &Base64(data_path.clone()),
-                    u128::from(data_byte),
+                let derived_commitment = irys_data_tree::data_commitment(
+                    &geometry,
+                    &irys_data_tree::DataTreeRoot::from(derived.data_root.0),
+                    derived.data_size,
+                );
+                irys_data_tree::verify_chunk(
+                    &geometry,
+                    &derived_commitment,
+                    derived.data_size,
+                    u32::try_from(local)?,
+                    &chunk_data,
+                    data_path,
                 )?;
-                eyre::ensure!(
-                    (data.min_byte_range, data.max_byte_range)
-                        == (u128::from(chunk_range.0), u128::from(chunk_range.1)),
-                    "data leaf range"
-                );
-                eyre::ensure!(
-                    data.leaf_hash == irys_types::hash_sha256(&chunk_data),
-                    "data leaf hash"
-                );
                 Ok(())
             });
             match (cross, validator) {
@@ -1401,19 +1397,16 @@ mod tests {
         }
     }
 
-    fn data_tree(size: u64, chunk_size: u64) -> (H256, Vec<Proof>) {
+    /// The v2 data tree of `size` bytes of 0x5A under the testing geometry:
+    /// its root and every chunk proof.
+    fn data_tree(size: u64) -> (H256, Vec<Vec<u8>>) {
         let bytes = vec![0x5A_u8; usize::try_from(size).unwrap_or(0)];
-        let root = generate_data_root(
-            irys_types::generate_leaves(
-                std::iter::once(Ok(bytes)),
-                usize::try_from(chunk_size).unwrap_or(1),
-            )
-            .expect("leaves"),
-        )
-        .expect("data root");
-        let data_root = H256(root.id);
-        let proofs = irys_types::resolve_proofs(root, None).expect("data proofs");
-        (data_root, proofs)
+        let tree =
+            irys_data_tree::DataTree::from_bytes(Geometry::TESTING, &bytes).expect("data tree");
+        let proofs = (0..tree.chunk_count())
+            .map(|chunk_index| tree.chunk_proof(chunk_index).expect("chunk proof"))
+            .collect();
+        (H256(*tree.data_tree_root().as_bytes()), proofs)
     }
 
     fn derived_for(

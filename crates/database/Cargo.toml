@@ -62,6 +62,7 @@ path = "src/bin/tx_path_derive_bench.rs"
 
 [dev-dependencies]
 irys-config = { workspace = true, features = ["test-utils"] }
+irys-data-tree.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 test-log.workspace = true
 rand.workspace = true
