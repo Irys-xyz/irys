@@ -143,8 +143,8 @@ pub mod v1 {
                 }
                 Self::IngressProof(ingress_proof) => {
                     format!(
-                        "ingress proof for data_root: {:?} from {:?}",
-                        ingress_proof.data_root,
+                        "ingress proof for data_commitment: {:?} from {:?}",
+                        ingress_proof.data_commitment,
                         ingress_proof.recover_signer()
                     )
                 }
@@ -361,8 +361,8 @@ pub mod v2 {
                 }
                 Self::IngressProof(ingress_proof) => {
                     format!(
-                        "ingress proof for data_root: {:?} from {:?}",
-                        ingress_proof.data_root,
+                        "ingress proof for data_commitment: {:?} from {:?}",
+                        ingress_proof.data_commitment,
                         ingress_proof.recover_signer()
                     )
                 }
