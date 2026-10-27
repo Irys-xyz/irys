@@ -361,14 +361,14 @@ impl ChunkIngressService {
                     NonZeroUsize::new(max_valid_chunks).unwrap(),
                 ));
                 let ingress_address = config.irys_signer().address();
-                let ingress_chunk_size = config.consensus.chunk_size;
+                let ingress_geometry = config.data_tree_geometry();
                 let backfill_db = irys_db.clone();
                 let retry_roots = match handle_for_inner
                     .spawn_blocking(move || {
                         irys_database::backfill_cached_ingress_data_hashes(
                             &backfill_db,
                             ingress_address,
-                            ingress_chunk_size,
+                            &ingress_geometry,
                         )
                     })
                     .await

@@ -17,7 +17,7 @@ use crate::tables::{
 use crate::db::{IrysDatabaseExt as _, IrysDupCursorExt};
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
-use irys_types::data_tree::{Geometry, chunk_key};
+use irys_types::data_tree::{Geometry, chunk_key, verify_data_chunk};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
@@ -26,7 +26,7 @@ use irys_types::{
     DatabaseVersion, H256, IngressMerkleLeaf, IngressProof, IrysAddress, IrysBlockHeader,
     IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset,
     UnixTimestamp, UnpackedChunk, expected_chunk_byte_range, generate_ingress_data_hash,
-    generate_ingress_leaf_from_data_hash, hash_sha256, validate_path,
+    generate_ingress_leaf_from_data_hash,
 };
 use reth_db::TableSet;
 use reth_db::cursor::DbDupCursorRO as _;
@@ -225,7 +225,7 @@ mod compact_ingress_leaf_tests {
         })?;
 
         assert_eq!(
-            backfill_cached_ingress_data_hashes(&db, address, chunk_size)?,
+            backfill_cached_ingress_data_hashes(&db, address, &geometry)?,
             BTreeSet::from([data_root])
         );
         let expected = generate_ingress_data_hash(&chunk.bytes.0, address);
@@ -241,7 +241,7 @@ mod compact_ingress_leaf_tests {
 
         // A second startup sees the existing record and leaves it unchanged.
         assert_eq!(
-            backfill_cached_ingress_data_hashes(&db, address, chunk_size)?,
+            backfill_cached_ingress_data_hashes(&db, address, &geometry)?,
             BTreeSet::from([data_root])
         );
         Ok(())
@@ -281,7 +281,7 @@ mod compact_ingress_leaf_tests {
             Ok(())
         })?;
 
-        assert!(backfill_cached_ingress_data_hashes(&db, address, chunk_size)?.is_empty());
+        assert!(backfill_cached_ingress_data_hashes(&db, address, &geometry)?.is_empty());
         db.view_eyre(|tx| {
             assert!(
                 cached_ingress_leaf(tx, data_root, address, chunk.tx_offset)?.is_none(),
@@ -1346,7 +1346,7 @@ pub fn store_ingress_data_hash<T: DbTx + DbTxMut>(
 pub fn backfill_cached_ingress_data_hashes(
     db: &DatabaseProvider,
     address: IrysAddress,
-    chunk_size: u64,
+    geometry: &Geometry,
 ) -> eyre::Result<BTreeSet<DataCommitment>> {
     let (mut retry_roots, missing) = db.view_eyre(|tx| {
         let mut existing = BTreeSet::new();
@@ -1380,10 +1380,11 @@ pub fn backfill_cached_ingress_data_hashes(
             if existing.contains(&(data_commitment, entry.index)) {
                 continue;
             }
-            // The cached proof is checked against the tree root the cache row keeps.
-            let Some(data_tree_root) = tx
+            // The cached proof is checked against the tree root and size the
+            // cache row keeps.
+            let Some((data_tree_root, data_size)) = tx
                 .get::<CachedDataRoots>(data_commitment)?
-                .map(|cdr| cdr.data_tree_root)
+                .map(|cdr| (cdr.data_tree_root, cdr.data_size))
             else {
                 continue;
             };
@@ -1398,39 +1399,15 @@ pub fn backfill_cached_ingress_data_hashes(
             let Some(bytes) = cached.chunk else {
                 continue;
             };
-            let chunk_len = u64::try_from(bytes.len())?;
-            let validation = (|| {
-                eyre::ensure!(chunk_size > 0, "chunk size must be non-zero");
-                eyre::ensure!(
-                    chunk_len > 0 && chunk_len <= chunk_size,
-                    "cached chunk length {chunk_len} is outside 1..={chunk_size}"
-                );
-                let min_byte_range = u64::from(*entry.index)
-                    .checked_mul(chunk_size)
-                    .ok_or_else(|| eyre::eyre!("cached chunk byte range overflow"))?;
-                let max_byte_range = min_byte_range
-                    .checked_add(chunk_len)
-                    .ok_or_else(|| eyre::eyre!("cached chunk byte range overflow"))?;
-                let path = validate_path(
-                    data_tree_root.0.0,
-                    &cached.data_path,
-                    u128::from(max_byte_range - 1),
-                )?;
-                eyre::ensure!(
-                    path.min_byte_range == u128::from(min_byte_range)
-                        && path.max_byte_range == u128::from(max_byte_range),
-                    "cached data path range does not match its transaction offset and body length"
-                );
-                eyre::ensure!(
-                    path.is_rightmost_chunk || chunk_len == chunk_size,
-                    "non-rightmost cached chunk is not full-sized"
-                );
-                eyre::ensure!(
-                    path.leaf_hash == hash_sha256(&bytes.0),
-                    "cached body does not match its data path"
-                );
-                eyre::Ok(generate_ingress_data_hash(&bytes.0, address))
-            })();
+            let validation = verify_data_chunk(
+                geometry,
+                data_tree_root,
+                data_size,
+                entry.index,
+                &bytes.0,
+                &cached.data_path.0,
+            )
+            .map(|()| generate_ingress_data_hash(&bytes.0, address));
             let ingress_data_hash = match validation {
                 Ok(hash) => hash,
                 Err(error) => {
