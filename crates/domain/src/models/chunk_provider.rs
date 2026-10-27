@@ -118,7 +118,6 @@ pub fn missing_on_disk(error: &eyre::Report) -> bool {
         .any(|source| source.downcast_ref::<ChunkMissingOnDisk>().is_some())
 }
 
-/// How a lookup names the data it wants.
 /// Placements of `data_commitment` in one storage module.
 fn read_data_root_placements(
     sm: &crate::StorageModule,
