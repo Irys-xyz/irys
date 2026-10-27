@@ -905,7 +905,7 @@ fn resolve_tx_by_ledger_offset(
                 block_start_offset: bounds.start_chunk_offset,
                 block_end_offset: bounds.end_chunk_offset,
                 tx_id: attribution.header.id,
-                data_root: attribution.header.data_root,
+                data_root: attribution.header.data_tree_root.0,
                 tx_index,
                 tx_start_offset: attribution.tx_start_offset,
                 tx_end_offset: attribution.tx_end_offset,
@@ -1033,7 +1033,7 @@ fn ledger_tx_range_item(
         block_start_offset: bounds.start_chunk_offset,
         block_end_offset: bounds.end_chunk_offset,
         tx_id: attr.header.id,
-        data_root: attr.header.data_root,
+        data_root: attr.header.data_tree_root.0,
         tx_index,
         tx_start_offset: attr.tx_start_offset,
         tx_end_offset: attr.tx_end_offset,
@@ -1275,6 +1275,7 @@ mod tests {
     use irys_database::Ledgers;
     use irys_domain::PartitionAssignments;
     use irys_types::ConsensusConfig;
+    use irys_types::DataTreeRoot;
     use irys_types::hardfork_config::ForBlock;
     use rstest::rstest;
 
@@ -1712,7 +1713,7 @@ mod tests {
     fn data_tx(seed: u8, data_size: u64) -> DataTransactionHeader {
         let mut header = DataTransactionHeader::default();
         header.id = H256::from([seed; 32]);
-        header.data_root = H256::from([seed.wrapping_add(100); 32]);
+        header.data_tree_root = DataTreeRoot(H256::from([seed.wrapping_add(100); 32]));
         header.data_size = data_size;
         header
     }

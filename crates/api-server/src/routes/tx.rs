@@ -252,7 +252,7 @@ pub async fn get_tx_local_start_offset(
 
     match state
         .chunk_provider
-        .get_ledger_offsets_for_data_root(ledger, tx_header.data_root)
+        .get_ledger_offsets_for_data_root(ledger, tx_header.data_tree_root.0)
     {
         Err(_error) => Err(ApiError::Internal {
             err: String::from("db error"),

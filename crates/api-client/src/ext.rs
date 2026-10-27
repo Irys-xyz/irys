@@ -95,7 +95,7 @@ impl ApiClientExt for IrysApiClient {
             let data = data?;
             let proof = &tx.proofs[idx];
             let unpacked_chunk = UnpackedChunk {
-                data_root: tx.header.data_root,
+                data_tree_root: tx.header.data_tree_root,
                 data_size: tx.header.data_size,
                 data_path: Base64(proof.proof.clone()),
                 bytes: Base64(data),
