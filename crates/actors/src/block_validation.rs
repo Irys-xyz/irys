@@ -6509,7 +6509,8 @@ mod peer_chunk_length_tests {
 ///
 /// A cache row with `chunk: None` is a miss. A storage-module body must name
 /// this data root and tx offset, and it must pass the same content checks as
-/// a body copied out of the cache (path, byte range, length, leaf hash).
+/// a body copied out of the cache (the chunk seam: chunk length and chunk
+/// proof against the commitment of this data root and size).
 /// A mismatch is a miss. `Ok(None)` from a module read is a miss too: the
 /// index can name a chunk before its body is stored.
 ///
@@ -8926,6 +8927,37 @@ mod tests {
                 }
                 other => panic!("{length}: expected MerkleProofInvalid, got {other:?}"),
             }
+        }
+    }
+
+    /// The early bound is exact. A data path of `(max_depth + 1)` hashes
+    /// passes it and fails later, in the chunk seam. One more hash fails the
+    /// early check.
+    #[tokio::test]
+    async fn poa_data_path_length_bound_is_exact() {
+        let (_tmp, mut context) = init().await;
+        let built = index_submit_poas(&mut context, &[vec![3_u8; 32]]);
+        let geometry = context.consensus_config.data_tree_geometry().unwrap();
+        let max_depth = irys_data_tree::depth(0, geometry.max_data_tx_chunks()).unwrap() as usize;
+        let hash_size = irys_data_tree::HASH_SIZE;
+
+        let mut longest = built.poas[0].clone();
+        longest.poa.data_path = Some(Base64(vec![0_u8; (max_depth + 1) * hash_size]));
+        match validate_indexed_poa(&context, &built, &longest) {
+            Err(err @ PreValidationError::MerkleProofInvalid(_)) => {
+                assert!(!err.to_string().contains("data path is"), "{err}");
+                assert!(err.to_string().contains("proof length"), "{err}");
+            }
+            other => panic!("expected a seam MerkleProofInvalid, got {other:?}"),
+        }
+
+        let mut too_long = built.poas[0].clone();
+        too_long.poa.data_path = Some(Base64(vec![0_u8; (max_depth + 2) * hash_size]));
+        match validate_indexed_poa(&context, &built, &too_long) {
+            Err(err @ PreValidationError::MerkleProofInvalid(_)) => {
+                assert!(err.to_string().contains("data path is"), "{err}");
+            }
+            other => panic!("expected the early MerkleProofInvalid, got {other:?}"),
         }
     }
 
