@@ -1,9 +1,9 @@
 use crate::data_tree::data_commitment;
 use crate::irys::IrysSigner;
 use crate::{
-    DataCommitment, DataTreeRoot, H256, IngressMerkleLeaf, IrysAddress, IrysSignature, Node, Signable,
-    VersionDiscriminant, Versioned, decode_rlp_version, encode_rlp_version, generate_data_root,
-    generate_ingress_leaves, generate_ingress_root_from_leaves,
+    DataCommitment, DataTreeRoot, H256, IngressMerkleLeaf, IrysAddress, IrysSignature, Node,
+    Signable, VersionDiscriminant, Versioned, decode_rlp_version, encode_rlp_version,
+    generate_data_root, generate_ingress_leaves, generate_ingress_root_from_leaves,
 };
 use alloy_primitives::{ChainId, keccak256};
 use alloy_rlp::Encodable as _;
@@ -280,9 +280,9 @@ mod tests {
     use rand::Rng as _;
 
     use crate::{
-        ConsensusConfig, DataTreeRoot, H256, data_tree::data_commitment,
-        generate_data_root, generate_ingress_data_hash, generate_ingress_leaf_from_data_hash,
-        generate_leaves, hash_sha256, ingress::verify_ingress_proof, irys::IrysSigner,
+        ConsensusConfig, DataTreeRoot, H256, data_tree::data_commitment, generate_data_root,
+        generate_ingress_data_hash, generate_ingress_leaf_from_data_hash, generate_leaves,
+        hash_sha256, ingress::verify_ingress_proof, irys::IrysSigner,
     };
 
     use super::{generate_ingress_proof, generate_ingress_proof_from_leaves};
@@ -535,13 +535,15 @@ mod prop_ingress_tests {
             any::<u64>(),
             proptest::array::uniform32(any::<u8>()),
         )
-            .prop_map(|(data_commitment, proof, chain_id, anchor)| IngressProofV1 {
-                signature: IrysSignature::default(),
-                data_commitment: DataCommitment(H256(data_commitment)),
-                proof: H256(proof),
-                chain_id,
-                anchor: H256(anchor),
-            })
+            .prop_map(
+                |(data_commitment, proof, chain_id, anchor)| IngressProofV1 {
+                    signature: IrysSignature::default(),
+                    data_commitment: DataCommitment(H256(data_commitment)),
+                    proof: H256(proof),
+                    chain_id,
+                    anchor: H256(anchor),
+                },
+            )
     }
 
     proptest! {

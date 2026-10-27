@@ -1,7 +1,7 @@
 use crate::IrysAddress;
 use crate::{
-    Base64, DataCommitment, DataTreeRoot, H256, LedgerChunkOffset, PartitionChunkOffset, hash_sha256,
-    partition::PartitionHash, string_u64,
+    Base64, DataCommitment, DataTreeRoot, H256, LedgerChunkOffset, PartitionChunkOffset,
+    hash_sha256, partition::PartitionHash, string_u64,
 };
 use arbitrary::Arbitrary;
 use core::fmt;
@@ -286,9 +286,6 @@ pub type ChunkBytes = Vec<u8>;
 
 /// sha256(chunk_data_path)
 pub type ChunkPathHash = H256;
-
-// the root node ID for the merkle tree containing all the transaction's chunks
-pub type DataRoot = H256;
 
 /// The offset of the chunk relative to the first (0th) chunk of the data tree
 #[derive(
