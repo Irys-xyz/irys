@@ -1,8 +1,8 @@
 pub use crate::{
     Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, CommitmentTypeV2, Compact,
-    ConsensusConfig, DataTransactionMetadata, H256, IrysAddress, IrysSignature, Node, Proof,
-    Signature, TxChunkOffset, U256, UnpackedChunk, address_base58_stringify, decode_rlp_version,
-    encode_rlp_version,
+    ConsensusConfig, DataCommitment, DataTransactionMetadata, DataTreeRoot, H256, IrysAddress,
+    IrysSignature, Node, Proof, Signature, TxChunkOffset, U256, UnpackedChunk,
+    address_base58_stringify, decode_rlp_version, encode_rlp_version,
     ingress::IngressProof,
     optional_string_u64, string_u64,
     versioning::{
@@ -291,7 +291,8 @@ pub struct DataTransactionHeaderV1 {
 
     /// The merkle root of the transactions data chunks
     // #[serde(default, with = "address_base58_stringify")]
-    pub data_root: H256,
+    #[serde(rename = "dataRoot")]
+    pub data_tree_root: DataTreeRoot,
 
     /// Size of the transaction data in bytes
     #[serde(with = "string_u64")]
@@ -410,7 +411,7 @@ impl DataTransaction {
         let mut chunks = Vec::with_capacity(self.chunks.len());
         for (idx, chunk) in self.chunks.iter().enumerate() {
             let unpacked_chunk = UnpackedChunk {
-                data_root: self.header.data_root,
+                data_tree_root: self.header.data_tree_root,
                 data_size: self.header.data_size,
                 data_path: Base64(self.proofs[idx].proof.clone()),
                 bytes: Base64(data.0[chunk.min_byte_range..chunk.max_byte_range].to_vec()),
@@ -428,7 +429,7 @@ impl DataTransactionHeaderV1 {
             id: H256::zero(),
             anchor: H256::zero(),
             signer: IrysAddress::default(),
-            data_root: H256::zero(),
+            data_tree_root: DataTreeRoot(H256::zero()),
             data_size: 0,
             prefix_size: 0,
             prefix_hash: H256::zero(),
@@ -464,6 +465,12 @@ impl DataTransactionHeaderV1 {
 
     pub fn total_cost(&self) -> BoundedFee {
         self.perm_fee.unwrap_or_default() + self.term_fee
+    }
+
+    /// The commitment this header's chunks verify against: it binds the signed
+    /// `data_tree_root` and `data_size` under `geometry`.
+    pub fn data_commitment(&self, geometry: &irys_data_tree::Geometry) -> DataCommitment {
+        crate::data_tree::data_commitment(geometry, self.data_tree_root, self.data_size)
     }
 }
 
@@ -928,7 +935,7 @@ mod tests {
             id: H256::zero(),
             anchor: H256::from([1_u8; 32]),
             signer: IrysAddress::default(),
-            data_root: H256::from([3_u8; 32]),
+            data_tree_root: DataTreeRoot(H256::from([3_u8; 32])),
             data_size: 1024,
             prefix_size: 0,
             prefix_hash: H256::zero(),
@@ -1229,7 +1236,7 @@ mod tests {
                 id: H256::from([255_u8; 32]),
                 anchor: H256::from([1_u8; 32]),
                 signer: IrysAddress::default(),
-                data_root: H256::from([3_u8; 32]),
+                data_tree_root: DataTreeRoot(H256::from([3_u8; 32])),
                 data_size: 1024,
                 prefix_size: 0,
                 prefix_hash: H256::zero(),
@@ -1242,6 +1249,50 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         })
+    }
+
+    #[test]
+    fn header_bytes_do_not_change_with_the_rename() {
+        let config = ConsensusConfig::testing();
+        let header = mock_header(&config);
+        let root_hash = H256::from([3_u8; 32]);
+
+        // JSON keeps the `dataRoot` key and the same base58 string as a raw H256.
+        let json = serde_json::to_value(&header).unwrap();
+        assert_eq!(json["dataRoot"], serde_json::to_value(root_hash).unwrap());
+        assert!(json.get("dataTreeRoot").is_none());
+        let from_json: DataTransactionHeader = serde_json::from_value(json).unwrap();
+        assert_eq!(from_json.data_tree_root, DataTreeRoot(root_hash));
+
+        // RLP signing bytes and Compact bytes encode the root exactly like an H256.
+        let mut root_rlp = Vec::new();
+        alloy_rlp::Encodable::encode(&root_hash, &mut root_rlp);
+        let mut header_rlp = Vec::new();
+        alloy_rlp::Encodable::encode(&header, &mut header_rlp);
+        assert!(
+            header_rlp
+                .windows(root_rlp.len())
+                .any(|window| window == root_rlp.as_slice())
+        );
+        let mut compact = Vec::new();
+        header.to_compact(&mut compact);
+        let (decoded, _) = DataTransactionHeader::from_compact(&compact, compact.len());
+        assert_eq!(decoded.data_tree_root, DataTreeRoot(root_hash));
+    }
+
+    #[test]
+    fn data_commitment_uses_the_header_size() {
+        use irys_data_tree::Geometry;
+        let config = ConsensusConfig::testing();
+        let mut header = mock_header(&config);
+        let root = DataTreeRoot(H256::from([7_u8; 32]));
+        let DataTransactionHeader::V1(inner) = &mut header;
+        inner.tx.data_tree_root = root;
+        inner.tx.data_size = 96;
+        assert_eq!(
+            header.data_commitment(&Geometry::TESTING),
+            crate::data_tree::data_commitment(&Geometry::TESTING, root, 96)
+        );
     }
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {

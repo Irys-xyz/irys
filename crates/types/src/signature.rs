@@ -194,6 +194,7 @@ impl alloy_rlp::Decodable for IrysSignature {
 
 #[cfg(test)]
 mod tests {
+    use crate::DataTreeRoot;
 
     use super::*;
     use crate::{
@@ -233,7 +234,7 @@ mod tests {
             tx: crate::DataTransactionHeaderV1 {
                 anchor: H256::from([1_u8; 32]),
                 signer: IrysAddress::ZERO,
-                data_root: H256::from([3_u8; 32]),
+                data_tree_root: DataTreeRoot(H256::from([3_u8; 32])),
                 data_size: 242,
                 prefix_size: 64,
                 prefix_hash: H256::from([7_u8; 32]),
@@ -312,7 +313,7 @@ mod tests {
                     id: Default::default(),
                     anchor: H256::from([1_u8; 32]),
                     signer: IrysAddress::ZERO,
-                    data_root: H256::from([3_u8; 32]),
+                    data_tree_root: DataTreeRoot(H256::from([3_u8; 32])),
                     data_size: 242,
                     prefix_size: 0,
                     prefix_hash: H256::zero(),

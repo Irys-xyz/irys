@@ -124,7 +124,7 @@ pub mod v1 {
         pub fn data_type_and_id(&self) -> String {
             match self {
                 Self::Chunk(chunk) => {
-                    format!("chunk data root {}", chunk.data_root)
+                    format!("chunk data root {}", chunk.data_tree_root)
                 }
                 Self::Transaction(tx) => {
                     format!("transaction {}", tx.id)
@@ -339,7 +339,7 @@ pub mod v2 {
         pub fn data_type_and_id(&self) -> String {
             match self {
                 Self::Chunk(chunk) => {
-                    format!("chunk data root {}", chunk.data_root)
+                    format!("chunk data root {}", chunk.data_tree_root)
                 }
                 Self::Transaction(tx) => {
                     format!("transaction {}", tx.id)

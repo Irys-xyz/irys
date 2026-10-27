@@ -1,3 +1,4 @@
+use crate::DataTreeRoot;
 use crate::{
     Base64, BoundedFee, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
     H256, HandshakeRequest, HandshakeRequestV2, IngressProof, IrysAddress, IrysBlockHeader,
@@ -226,7 +227,7 @@ impl IrysSigner {
             .last()
             .expect("Unable to get last chunk")
             .max_byte_range as u64;
-        header.data_root = data_root;
+        header.data_tree_root = DataTreeRoot(data_root);
         // Stamp the signer's chain_id so builder-produced txs target the configured chain.
         // `DataTransactionHeader::default()` leaves chain_id = 0, and consensus/ingress now
         // reject a foreign chain_id, so an unstamped tx would be refused on its own chain.
@@ -307,7 +308,7 @@ mod tests {
             }
 
             // Ensure every chunk proof (data_path) is valid
-            let root_id = tx.header.data_root.0;
+            let root_id = tx.header.data_tree_root.0.0;
             let proof = tx.proofs[index].clone();
             let proof_result = validate_chunk(root_id, chunk_node, &proof);
             assert!(proof_result.is_ok());

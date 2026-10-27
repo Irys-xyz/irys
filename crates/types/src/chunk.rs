@@ -1,7 +1,7 @@
 use crate::IrysAddress;
 use crate::{
-    Base64, H256, LedgerChunkOffset, PartitionChunkOffset, hash_sha256, partition::PartitionHash,
-    string_u64,
+    Base64, DataTreeRoot, H256, LedgerChunkOffset, PartitionChunkOffset, hash_sha256,
+    partition::PartitionHash, string_u64,
 };
 use arbitrary::Arbitrary;
 use core::fmt;
@@ -53,7 +53,8 @@ pub struct UnpackedChunk {
     /// The root hash for this chunk which should map to the root_hash in the
     /// transaction header. Having this present makes it easier to do cached
     /// chunk lookups by data_root on the ingress node.
-    pub data_root: DataRoot,
+    #[serde(rename = "dataRoot")]
+    pub data_tree_root: DataTreeRoot,
     /// Total size of the data stored by this data_root in bytes. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
@@ -146,7 +147,8 @@ pub struct PackedChunk {
     /// The root hash for this chunk which should map to the root_hash in the
     /// transaction header. Having this present makes it easier to do cached
     /// chunk lookups by data_root on the ingress node.
-    pub data_root: DataRoot,
+    #[serde(rename = "dataRoot")]
+    pub data_tree_root: DataTreeRoot,
     /// Total size of the data stored by this data_root. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
@@ -175,7 +177,8 @@ pub struct PartialChunk {
     /// The root hash for this chunk which should map to the root_hash in the
     /// transaction header. Having this present makes it easier to do cached
     /// chunk lookups by data_root on the ingress node.
-    pub data_root: Option<DataRoot>,
+    #[serde(rename = "data_root")]
+    pub data_tree_root: Option<DataTreeRoot>,
     /// Total size of the data stored by this data_root. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
@@ -200,7 +203,7 @@ pub struct PartialChunk {
 impl PartialChunk {
     /// Check if this partial chunk has enough fields populated to become an unpacked chunk
     pub fn is_full_unpacked_chunk(&self) -> bool {
-        self.data_root.is_some()
+        self.data_tree_root.is_some()
             && self.data_size.is_some()
             && self.data_path.is_some()
             && self.bytes.is_some()
@@ -227,7 +230,7 @@ impl TryInto<UnpackedChunk> for PartialChunk {
         };
 
         Ok(UnpackedChunk {
-            data_root: self.data_root.ok_or(err_fn("data_root"))?,
+            data_tree_root: self.data_tree_root.ok_or(err_fn("data_tree_root"))?,
             data_size: self.data_size.ok_or(err_fn("data_size"))?,
             data_path: self.data_path.ok_or(err_fn("data_path"))?,
             bytes: self.bytes.ok_or(err_fn("bytes"))?,
@@ -248,7 +251,7 @@ impl TryInto<PackedChunk> for PartialChunk {
         };
 
         Ok(PackedChunk {
-            data_root: self.data_root.ok_or(err_fn("data_root"))?,
+            data_tree_root: self.data_tree_root.ok_or(err_fn("data_tree_root"))?,
             data_size: self.data_size.ok_or(err_fn("data_size"))?,
             data_path: self.data_path.ok_or(err_fn("data_path"))?,
             bytes: self.bytes.ok_or(err_fn("bytes"))?,
@@ -488,5 +491,31 @@ mod tests {
             };
             assert_eq!(chunk.end_byte_offset_checked(CHUNK_SIZE), expected);
         }
+    }
+
+    #[test]
+    fn chunk_json_keeps_the_data_root_key() {
+        let root = DataTreeRoot(H256::from([5_u8; 32]));
+        let unpacked = UnpackedChunk {
+            data_tree_root: root,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&unpacked).unwrap();
+        assert_eq!(json["dataRoot"], serde_json::to_value(root.0).unwrap());
+        assert!(json.get("dataTreeRoot").is_none());
+
+        let packed = PackedChunk {
+            data_tree_root: root,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&packed).unwrap();
+        assert_eq!(json["dataRoot"], serde_json::to_value(root.0).unwrap());
+
+        let partial = PartialChunk {
+            data_tree_root: Some(root),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&partial).unwrap();
+        assert_eq!(json["data_root"], serde_json::to_value(root.0).unwrap());
     }
 }
