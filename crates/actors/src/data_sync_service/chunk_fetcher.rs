@@ -1,6 +1,6 @@
 use irys_domain::ChunkType;
 use irys_types::{
-    ChunkFormat, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
+    ChunkFormat, DataLedger, DataTreeRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
 };
 use std::{
     collections::HashMap,
@@ -235,7 +235,7 @@ pub trait ChunkFetcher: Send + Sync + std::fmt::Debug {
 
     async fn fetch_chunk_by_data_root(
         &self,
-        data_root: DataRoot,
+        data_root: DataTreeRoot,
         tx_offset: TxChunkOffset,
         api_addr: SocketAddr,
         timeout: Duration,
@@ -348,7 +348,7 @@ impl ChunkFetcher for HttpChunkFetcher {
 
     async fn fetch_chunk_by_data_root(
         &self,
-        data_root: DataRoot,
+        data_root: DataTreeRoot,
         tx_offset: TxChunkOffset,
         api_addr: SocketAddr,
         timeout: Duration,
@@ -440,9 +440,9 @@ pub struct MockChunkFetcher {
     pub ledger_id: usize,
     pub responses: Arc<RwLock<HashMap<LedgerChunkOffset, Result<PackedChunk, ChunkFetchError>>>>,
     pub data_root_responses:
-        Arc<RwLock<HashMap<(DataRoot, u32), Result<ChunkFormat, ChunkFetchError>>>>,
+        Arc<RwLock<HashMap<(DataTreeRoot, u32), Result<ChunkFormat, ChunkFetchError>>>>,
     pub request_log: Arc<RwLock<Vec<(LedgerChunkOffset, SocketAddr)>>>,
-    pub data_root_request_log: Arc<RwLock<Vec<(DataRoot, u32, SocketAddr)>>>,
+    pub data_root_request_log: Arc<RwLock<Vec<(DataTreeRoot, u32, SocketAddr)>>>,
     /// Answer per peer. A peer with no entry has no intervals route.
     pub interval_responses:
         Arc<RwLock<HashMap<SocketAddr, Result<DataIntervalsPage, ChunkFetchError>>>>,
@@ -474,7 +474,7 @@ impl ChunkFetcher for MockChunkFetcher {
 
     async fn fetch_chunk_by_data_root(
         &self,
-        data_root: DataRoot,
+        data_root: DataTreeRoot,
         tx_offset: TxChunkOffset,
         api_addr: SocketAddr,
         _timeout: Duration,
@@ -540,7 +540,7 @@ impl MockChunkFetcher {
 
     pub fn with_data_root_chunk(
         self,
-        data_root: DataRoot,
+        data_root: DataTreeRoot,
         tx_offset: TxChunkOffset,
         chunk: ChunkFormat,
     ) -> Self {

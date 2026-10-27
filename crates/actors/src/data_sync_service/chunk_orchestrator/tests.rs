@@ -1853,7 +1853,7 @@ fn index_and_settle(sm: &StorageModule, tx: &DataTransaction, last_inclusive: u6
     index_tx(sm, tx, last_inclusive);
     for (key, job) in sm.pending_body_migrations().expect("pending rows") {
         assert!(
-            sm.settle_pending_body_migration(key, job.data_root, job.block_height)
+            sm.settle_pending_body_migration(key, job.data_commitment, job.block_height)
                 .expect("settle")
         );
     }
@@ -1861,7 +1861,12 @@ fn index_and_settle(sm: &StorageModule, tx: &DataTransaction, last_inclusive: u6
 
 fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8], offsets: &[usize]) {
     db.update_eyre(|wtx| {
-        cache_data_root(wtx, &tx.header, None)?;
+        cache_data_root(
+            wtx,
+            &tx.header,
+            None,
+            &irys_types::data_tree::Geometry::TESTING,
+        )?;
         for &i in offsets {
             let node = &tx.chunks[i];
             let chunk = UnpackedChunk {
@@ -1871,7 +1876,7 @@ fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8], off
                 bytes: Base64(data[node.min_byte_range..node.max_byte_range].to_vec()),
                 tx_offset: TxChunkOffset::from(u32::try_from(i).expect("tx offset")),
             };
-            cache_chunk(wtx, &chunk)?;
+            cache_chunk(wtx, &chunk, &irys_types::data_tree::Geometry::TESTING)?;
         }
         Ok(())
     })
@@ -2303,7 +2308,7 @@ async fn pending_body_offsets_are_skipped_until_the_job_settles() {
 
     for (key, job) in sm.pending_body_migrations().expect("pending rows") {
         assert!(
-            sm.settle_pending_body_migration(key, job.data_root, job.block_height)
+            sm.settle_pending_body_migration(key, job.data_commitment, job.block_height)
                 .expect("settle")
         );
     }
@@ -2618,7 +2623,7 @@ async fn release_promotes_held_offsets_only_up_to_the_hot_budget() {
 
     for (key, job) in sm.pending_body_migrations().expect("pending rows") {
         assert!(
-            sm.settle_pending_body_migration(key, job.data_root, job.block_height)
+            sm.settle_pending_body_migration(key, job.data_commitment, job.block_height)
                 .expect("settle")
         );
     }

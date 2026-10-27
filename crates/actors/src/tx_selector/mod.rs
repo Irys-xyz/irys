@@ -24,8 +24,8 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
-    BlockHash, BoundedFee, CommitmentTypeV2, DataLedger, DataTransactionHeader, IngressProofsList,
-    IrysTransactionId,
+    BlockHash, BoundedFee, CommitmentTypeV2, DataCommitment, DataLedger, DataTransactionHeader,
+    IngressProofsList, IrysTransactionId,
 };
 use irys_types::{Config, H256, IrysTransactionCommon as _, U256, app_state::DatabaseProvider};
 use irys_types::{IrysAddress, SystemLedger, UnixTimestamp};
@@ -917,19 +917,23 @@ async fn get_publish_txs_and_proofs(
                     .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
 
                 let mut publish_txids: Vec<H256> = Vec::new();
-                let mut cached_data_roots: HashMap<H256, CachedDataRoot> = HashMap::new();
+                let mut cached_data_roots: HashMap<DataCommitment, CachedDataRoot> = HashMap::new();
 
-                // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
-                for data_root in ingress_proofs.keys() {
-                    let cached_data_root =
-                        cached_data_root_by_data_root(tx, *data_root).map_err(|e| {
-                            eyre!("Failed to read cached data root for {}: {}", data_root, e)
+                // Loop through all the data commitments with ingress proofs and find corresponding transaction ids
+                for data_commitment in ingress_proofs.keys() {
+                    let cached_data_root = cached_data_root_by_data_root(tx, *data_commitment)
+                        .map_err(|e| {
+                            eyre!(
+                                "Failed to read cached data root for {}: {}",
+                                data_commitment,
+                                e
+                            )
                         })?;
                     if let Some(cached_data_root) = cached_data_root {
                         let txids = cached_data_root.txid_set.clone();
                         trace!(tx.ids = ?txids, "Publish candidates");
                         publish_txids.extend(txids);
-                        cached_data_roots.insert(*data_root, cached_data_root);
+                        cached_data_roots.insert(*data_commitment, cached_data_root);
                     }
                 }
                 Ok((publish_txids, cached_data_roots))
@@ -987,9 +991,10 @@ async fn get_publish_txs_and_proofs(
         });
 
         // Filter out any tx headers with the wrong data_size for this data_root
+        let geometry = ctx.config.data_tree_geometry();
         tx_headers.retain(|tx| {
             cached_data_roots
-                .get(&tx.data_tree_root.0)
+                .get(&tx.data_commitment(&geometry))
                 .is_none_or(|cdr| !cdr.data_size_confirmed || tx.data_size == cdr.data_size)
         });
 
@@ -1159,7 +1164,10 @@ async fn get_publish_txs_and_proofs(
             let mut all_proofs = ctx
                 .db
                 .view_eyre(|read_tx| {
-                    ingress_proofs_by_data_root(read_tx, tx_header.data_tree_root.0)
+                    ingress_proofs_by_data_root(
+                        read_tx,
+                        tx_header.data_commitment(&ctx.config.data_tree_geometry()),
+                    )
                 })?
                 .into_iter()
                 .filter(|(_root, cached_proof)| {

@@ -1226,7 +1226,7 @@ mod tests {
             }
             async fn fetch_chunk_by_data_root(
                 &self,
-                root: irys_types::DataRoot,
+                root: irys_types::DataTreeRoot,
                 tx_offset: irys_types::TxChunkOffset,
                 api: SocketAddr,
                 timeout: Duration,

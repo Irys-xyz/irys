@@ -12,10 +12,10 @@ use irys_domain::{
 use irys_storage::ie;
 use irys_types::DataTreeRoot;
 use irys_types::{
-    Base64, BlockHash, Config, DataLedger, DataRoot, DataTransactionHeader, DataTransactionLedger,
-    H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof, SendTraced as _,
-    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
-    hash_sha256, validate_path,
+    Base64, BlockHash, Config, DataCommitment, DataLedger, DataTransactionHeader,
+    DataTransactionLedger, H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof,
+    SendTraced as _, TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk,
+    app_state::DatabaseProvider, hash_sha256, validate_path,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -463,7 +463,8 @@ fn load_chunks_for_migration(
     storage_modules_guard: &StorageModulesReadGuard,
     db: &DatabaseProvider,
     target_ledger: DataLedger,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
+    data_tree_root: DataTreeRoot,
     data_size: u64,
     tx_start: TxChunkOffset,
     count: usize,
@@ -479,15 +480,19 @@ fn load_chunks_for_migration(
     let mut misses = Vec::new();
     for step in 0..count {
         let tx_offset = tx_offset_at(tx_start, step)?;
-        match get_cached_chunk(db, data_root, tx_offset) {
+        match get_cached_chunk(db, data_commitment, tx_offset) {
             Ok(Some((_metadata, cached))) if cached.chunk.is_some() => {
                 match validate_chunk_for_migration(
-                    cached, data_root, data_size, tx_offset, chunk_size,
+                    cached,
+                    data_tree_root,
+                    data_size,
+                    tx_offset,
+                    chunk_size,
                 ) {
                     Ok(chunk) => bodies[step] = Some(chunk),
                     Err(error) => {
                         tracing::warn!(
-                            data_root = %data_root,
+                            data_commitment = %data_commitment,
                             %tx_offset,
                             ?error,
                             "Cached chunk failed migration validation; checking durable fallback"
@@ -499,7 +504,7 @@ fn load_chunks_for_migration(
             Ok(_) => misses.push(step),
             Err(error) => {
                 tracing::warn!(
-                    data_root = %data_root,
+                    data_commitment = %data_commitment,
                     %tx_offset,
                     ?error,
                     "Failed to read cached chunk during migration; checking durable fallback"
@@ -512,7 +517,8 @@ fn load_chunks_for_migration(
     if target_ledger == DataLedger::Publish && !misses.is_empty() {
         match fill_submit_misses(
             storage_modules_guard,
-            data_root,
+            data_commitment,
+            data_tree_root,
             data_size,
             tx_start,
             &misses,
@@ -522,7 +528,7 @@ fn load_chunks_for_migration(
             Ok(unread) => submit_unread = unread,
             Err(error) => {
                 tracing::warn!(
-                    data_root = %data_root,
+                    data_commitment = %data_commitment,
                     ?error,
                     "Submit fallback failed; keeping chunks already loaded"
                 );
@@ -553,7 +559,8 @@ fn tx_offset_at(tx_start: TxChunkOffset, step: usize) -> Result<TxChunkOffset, M
 /// and a miss is still empty: that chunk may sit on the skipped replica.
 fn fill_submit_misses(
     storage_modules_guard: &StorageModulesReadGuard,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
+    data_tree_root: DataTreeRoot,
     data_size: u64,
     tx_start: TxChunkOffset,
     misses: &[usize],
@@ -583,12 +590,12 @@ fn fill_submit_misses(
             }
             let tx_offset = tx_offset_at(tx_start, step)?;
             let placements = match irys_domain::trace_index_read(irys_domain::MIGRATION, || {
-                module.partition_offsets_for_data_root_chunk(data_root, tx_offset)
+                module.partition_offsets_for_data_root_chunk(data_commitment, tx_offset)
             }) {
                 Ok(placements) => placements,
                 Err(error) => {
                     tracing::warn!(
-                        data_root = %data_root,
+                        data_commitment = %data_commitment,
                         %tx_offset,
                         storage_module.id = module.id,
                         ?error,
@@ -613,7 +620,7 @@ fn fill_submit_misses(
                     Ok(read) => read,
                     Err(error) => {
                         tracing::warn!(
-                            data_root = %data_root,
+                            data_commitment = %data_commitment,
                             %tx_offset,
                             storage_module.id = module.id,
                             partition.offset = %place,
@@ -627,9 +634,9 @@ fn fill_submit_misses(
                 let Some(body) = read.into_iter().next().flatten() else {
                     continue;
                 };
-                if body.data_tree_root != DataTreeRoot(data_root) || body.tx_offset != tx_offset {
+                if body.data_tree_root != data_tree_root || body.tx_offset != tx_offset {
                     tracing::warn!(
-                        data_root = %data_root,
+                        data_commitment = %data_commitment,
                         %tx_offset,
                         storage_module.id = module.id,
                         partition.offset = %place,
@@ -640,7 +647,7 @@ fn fill_submit_misses(
                 match validate_chunk_parts_for_migration(
                     body.data_path,
                     body.bytes,
-                    data_root,
+                    data_tree_root,
                     data_size,
                     tx_offset,
                     chunk_size,
@@ -652,7 +659,7 @@ fn fill_submit_misses(
                     }
                     Err(error) => {
                         tracing::warn!(
-                            data_root = %data_root,
+                            data_commitment = %data_commitment,
                             %tx_offset,
                             storage_module.id = module.id,
                             partition.offset = %place,
@@ -775,10 +782,10 @@ fn update_storage_module_indexes(
 
 fn get_cached_chunk(
     db: &DatabaseProvider,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
-    db.view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
+    db.view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_commitment, chunk_offset))
 }
 
 #[cfg(test)]
@@ -820,7 +827,7 @@ fn write_chunks_to_module(
 
 pub(crate) fn validate_chunk_for_migration(
     cached: CachedChunk,
-    data_root: DataRoot,
+    data_tree_root: DataTreeRoot,
     data_size: u64,
     chunk_offset: TxChunkOffset,
     chunk_size: usize,
@@ -828,13 +835,13 @@ pub(crate) fn validate_chunk_for_migration(
     let bytes = cached.chunk.ok_or_else(|| {
         MigrationError::Other(format!(
             "cached chunk body missing for {} offset {}",
-            data_root, chunk_offset
+            data_tree_root, chunk_offset
         ))
     })?;
     validate_chunk_parts_for_migration(
         cached.data_path,
         bytes,
-        data_root,
+        data_tree_root,
         data_size,
         chunk_offset,
         chunk_size,
@@ -844,7 +851,7 @@ pub(crate) fn validate_chunk_for_migration(
 pub(crate) fn validate_chunk_parts_for_migration(
     data_path: Base64,
     bytes: Base64,
-    data_root: DataRoot,
+    data_tree_root: DataTreeRoot,
     data_size: u64,
     chunk_offset: TxChunkOffset,
     chunk_size: usize,
@@ -860,22 +867,26 @@ pub(crate) fn validate_chunk_parts_for_migration(
     let target_byte_position = max_byte_range.checked_sub(1).ok_or_else(|| {
         MigrationError::Other(format!(
             "chunk has an empty byte range for {} offset {}",
-            data_root, chunk_offset
+            data_tree_root, chunk_offset
         ))
     })?;
-    let validation = validate_path(data_root.0, &data_path, u128::from(target_byte_position))
-        .map_err(|error| {
-            MigrationError::Other(format!(
-                "data path failed revalidation for {} offset {}: {error}",
-                data_root, chunk_offset
-            ))
-        })?;
+    let validation = validate_path(
+        data_tree_root.0.0,
+        &data_path,
+        u128::from(target_byte_position),
+    )
+    .map_err(|error| {
+        MigrationError::Other(format!(
+            "data path failed revalidation for {} offset {}: {error}",
+            data_tree_root, chunk_offset
+        ))
+    })?;
     if validation.min_byte_range != u128::from(min_byte_range)
         || validation.max_byte_range != u128::from(max_byte_range)
     {
         return Err(MigrationError::Other(format!(
             "chunk byte range mismatch for {} offset {}: expected {}..{}, got {}..{}",
-            data_root,
+            data_tree_root,
             chunk_offset,
             min_byte_range,
             max_byte_range,
@@ -889,11 +900,11 @@ pub(crate) fn validate_chunk_parts_for_migration(
     {
         return Err(MigrationError::Other(format!(
             "chunk body failed revalidation for {} offset {}",
-            data_root, chunk_offset
+            data_tree_root, chunk_offset
         )));
     }
     Ok(UnpackedChunk {
-        data_tree_root: DataTreeRoot(data_root),
+        data_tree_root,
         data_size,
         data_path,
         bytes,
@@ -1253,7 +1264,12 @@ mod tests {
         /// Put every chunk body of the tx into the node's chunk cache.
         fn seed_cache(&self) -> eyre::Result<()> {
             self.db.update_eyre(|wtx| {
-                cache_data_root(wtx, &self.tx.header, None)?;
+                cache_data_root(
+                    wtx,
+                    &self.tx.header,
+                    None,
+                    &self.config.data_tree_geometry(),
+                )?;
                 for (i, node) in self.tx.chunks.iter().enumerate() {
                     let chunk = UnpackedChunk {
                         data_tree_root: self.tx.header.data_tree_root,
@@ -1262,7 +1278,7 @@ mod tests {
                         bytes: Base64(self.data[node.min_byte_range..node.max_byte_range].to_vec()),
                         tx_offset: TxChunkOffset::from(u32::try_from(i)?),
                     };
-                    cache_chunk(wtx, &chunk)?;
+                    cache_chunk(wtx, &chunk, &self.config.data_tree_geometry())?;
                 }
                 Ok(())
             })
@@ -1358,7 +1374,7 @@ mod tests {
         assert_ne!(f.chunk_type(0), Some(ChunkType::Data));
         assert!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_tree_root.0,
+                f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(0)
             )?
             .is_some()
@@ -1397,14 +1413,17 @@ mod tests {
         let rows = f.rows()?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, PartitionChunkOffset::from(0));
-        assert_eq!(rows[0].1.data_root, f.tx.header.data_tree_root.0);
+        assert_eq!(
+            rows[0].1.data_commitment,
+            f.tx.header.data_commitment(&f.config.data_tree_geometry())
+        );
         assert_eq!(rows[0].1.attempts, 0);
 
         assert!(!f.sm.has_pending_writes());
         assert_ne!(f.chunk_type(0), Some(ChunkType::Data));
         assert_eq!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_tree_root.0,
+                f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(2)
             )?,
             Some(vec![PartitionChunkOffset::from(2)])
@@ -1437,7 +1456,7 @@ mod tests {
         );
         assert!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_tree_root.0,
+                f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(0)
             )?
             .is_none(),
@@ -1504,7 +1523,7 @@ mod tests {
         assert_eq!(rows[0].1.start_offset.0, 4);
         assert_eq!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_tree_root.0,
+                f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(0)
             )?,
             Some(vec![PartitionChunkOffset::from(4)])
@@ -1717,7 +1736,7 @@ mod tests {
         assert_ne!(f.chunk_type(0), Some(ChunkType::Data));
         assert!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_tree_root.0,
+                f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(0)
             )?
             .is_some()
@@ -1746,17 +1765,23 @@ mod tests {
         let sibling_root = H256::repeat_byte(0x42);
         submodule.db.update(|tx| {
             tx.add_data_root_info(
-                f.tx.header.data_tree_root.0,
+                f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(1),
                     data_size: f.tx.header.data_size,
+                    data_tree_root: f.tx.header.data_tree_root,
                 },
             )?;
             tx.add_data_root_info(
-                sibling_root,
+                irys_types::data_tree::data_commitment(
+                    &f.config.data_tree_geometry(),
+                    DataTreeRoot(sibling_root),
+                    chunk_size,
+                ),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(1),
                     data_size: chunk_size,
+                    data_tree_root: DataTreeRoot(sibling_root),
                 },
             )
         })?;
@@ -1780,7 +1805,7 @@ mod tests {
         assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
         assert_eq!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_tree_root.0,
+                f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(0)
             )?,
             Some(vec![
@@ -1878,17 +1903,23 @@ mod tests {
         let sibling_start = i32::try_from(sibling_at)?;
         submodule.db.update(|tx| {
             tx.add_data_root_info(
-                f.tx.header.data_tree_root.0,
+                f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(sibling_start),
                     data_size: chunk_size,
+                    data_tree_root: f.tx.header.data_tree_root,
                 },
             )?;
             tx.add_data_root_info(
-                sibling_root,
+                irys_types::data_tree::data_commitment(
+                    &f.config.data_tree_geometry(),
+                    DataTreeRoot(sibling_root),
+                    chunk_size,
+                ),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(sibling_start),
                     data_size: chunk_size,
+                    data_tree_root: DataTreeRoot(sibling_root),
                 },
             )
         })?;
@@ -2211,7 +2242,7 @@ mod tests {
             let tx =
                 signer.sign_transaction(signer.create_transaction(data.clone(), H256::zero())?)?;
             f.db.update_eyre(|wtx| {
-                cache_data_root(wtx, &tx.header, None)?;
+                cache_data_root(wtx, &tx.header, None, &f.config.data_tree_geometry())?;
                 let node = &tx.chunks[0];
                 cache_chunk(
                     wtx,
@@ -2222,6 +2253,7 @@ mod tests {
                         bytes: Base64(data[node.min_byte_range..node.max_byte_range].to_vec()),
                         tx_offset: TxChunkOffset::from(0),
                     },
+                    &f.config.data_tree_geometry(),
                 )?;
                 Ok(())
             })?;
@@ -2660,7 +2692,7 @@ mod tests {
     /// Drop body-migration rows. The index and any durable bytes stay.
     fn clear_pending(module: &StorageModule) -> eyre::Result<()> {
         for (offset, job) in module.pending_body_migrations()? {
-            module.settle_pending_body_migration(offset, job.data_root, job.block_height)?;
+            module.settle_pending_body_migration(offset, job.data_commitment, job.block_height)?;
         }
         Ok(())
     }
@@ -2790,8 +2822,8 @@ mod tests {
             .map_err(|err| eyre::eyre!("write chunk 19: {err:?}"))?;
         f.sm.force_sync_pending_chunks()?;
         f.db.update_eyre(|wtx| {
-            cache_data_root(wtx, &f.tx.header, None)?;
-            cache_chunk(wtx, &unpacked_at(&f, 18))?;
+            cache_data_root(wtx, &f.tx.header, None, &f.config.data_tree_geometry())?;
+            cache_chunk(wtx, &unpacked_at(&f, 18), &f.config.data_tree_geometry())?;
             Ok(())
         })?;
 
@@ -2799,7 +2831,8 @@ mod tests {
             &f.guard,
             &f.db,
             DataLedger::Publish,
-            f.tx.header.data_tree_root.0,
+            f.tx.header.data_commitment(&f.config.data_tree_geometry()),
+            f.tx.header.data_tree_root,
             f.tx.header.data_size,
             TxChunkOffset::from(18),
             3,
@@ -2842,7 +2875,8 @@ mod tests {
         let mut bodies = vec![None, None];
         fill_submit_misses(
             &guard,
-            f.tx.header.data_tree_root.0,
+            f.tx.header.data_commitment(&f.config.data_tree_geometry()),
+            f.tx.header.data_tree_root,
             f.tx.header.data_size,
             TxChunkOffset::from(19),
             &[0, 1],
@@ -2873,7 +2907,8 @@ mod tests {
         let mut bodies = vec![None, None];
         fill_submit_misses(
             &f.guard,
-            f.tx.header.data_tree_root.0,
+            f.tx.header.data_commitment(&f.config.data_tree_geometry()),
+            f.tx.header.data_tree_root,
             f.tx.header.data_size,
             TxChunkOffset::from(0),
             &[0, 1],
@@ -3054,7 +3089,7 @@ mod tests {
         index_publish(&f, &guard)?;
         broken.fail_data_root_index_reads(true);
         let index_read = broken.partition_offsets_for_data_root_chunk(
-            f.tx.header.data_tree_root.0,
+            f.tx.header.data_commitment(&f.config.data_tree_geometry()),
             TxChunkOffset::from(0),
         );
         assert!(
@@ -3128,7 +3163,7 @@ mod tests {
         index_publish(&f, &guard)?;
         broken.fail_data_root_index_reads(true);
         let index_read = broken.partition_offsets_for_data_root_chunk(
-            f.tx.header.data_tree_root.0,
+            f.tx.header.data_commitment(&f.config.data_tree_geometry()),
             TxChunkOffset::from(0),
         );
         assert!(
@@ -3307,7 +3342,7 @@ mod tests {
         f.sm.clear_data_root_infos_in_range(
             PartitionChunkOffset::from(0),
             PartitionChunkOffset::from(2),
-            &[f.tx.header.data_tree_root.0],
+            &[f.tx.header.data_commitment(&f.config.data_tree_geometry())],
         )?;
         let worker = f.worker();
 

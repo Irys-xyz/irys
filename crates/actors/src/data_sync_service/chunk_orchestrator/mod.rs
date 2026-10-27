@@ -88,7 +88,7 @@ enum DispatchStart {
 enum FetchMode {
     LedgerOffset(LedgerChunkOffset),
     DataRoot {
-        data_root: irys_types::DataRoot,
+        data_root: irys_types::DataTreeRoot,
         tx_offset: irys_types::TxChunkOffset,
     },
 }
@@ -1641,8 +1641,8 @@ impl ChunkOrchestrator {
             let mut rows = Vec::with_capacity(placements.len());
             for placement in &placements {
                 let row = match placement {
-                    Some((data_root, tx_offset, _)) => {
-                        cached_chunk_by_chunk_offset(tx, *data_root, *tx_offset)?
+                    Some((data_commitment, _, tx_offset, _)) => {
+                        cached_chunk_by_chunk_offset(tx, *data_commitment, *tx_offset)?
                             .map(|(_, chunk)| chunk)
                     }
                     None => None,
@@ -1679,7 +1679,7 @@ impl ChunkOrchestrator {
         let mut tail_misses = Vec::new();
         for (index, offset) in run.iter().copied().enumerate() {
             let miss = match (&placements[index], &looked_up[index]) {
-                (Some((data_root, tx_offset, data_size)), Some(cached))
+                (Some((_, data_root, tx_offset, data_size)), Some(cached))
                     if cached.chunk.is_some() =>
                 {
                     match validate_chunk_for_migration(
@@ -2142,7 +2142,7 @@ impl ChunkOrchestrator {
             match irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
                 self.storage_module.data_root_and_tx_offset_at(chunk_offset)
             }) {
-                Ok(Some((data_root, tx_offset))) => FetchMode::DataRoot {
+                Ok(Some((_, data_root, tx_offset))) => FetchMode::DataRoot {
                     data_root,
                     tx_offset,
                 },

@@ -1106,7 +1106,7 @@ mod tests {
     ) -> IngressProof {
         let mut proof = IngressProof::V1(IngressProofV1 {
             signature: Default::default(),
-            data_root,
+            data_commitment: irys_types::DataCommitment(data_root),
             proof: H256::from([12_u8; 32]),
             chain_id: 1_u64,
             anchor,

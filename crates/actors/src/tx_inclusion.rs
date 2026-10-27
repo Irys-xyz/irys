@@ -273,6 +273,7 @@ mod tests {
     };
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_testing_utils::utils::{TempDirBuilder, tempfile};
+    use irys_types::DataCommitment;
     use irys_types::DataTreeRoot;
     use irys_types::{
         BlockTransactions, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
@@ -909,8 +910,9 @@ mod tests {
                 block_set: vec![H256::random(), H256::random(), H256::random()],
                 expiry_height: Some(0),
                 cached_at: UnixTimestamp::from_secs(0),
+                data_tree_root: Default::default(),
             };
-            tx.put::<CachedDataRoots>(data_root, cdr)?;
+            tx.put::<CachedDataRoots>(DataCommitment(data_root), cdr)?;
             Ok(())
         })??;
 

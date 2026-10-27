@@ -47,7 +47,7 @@ impl ChunkIngressFacadeImpl {
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let data_root = ingress_proof.data_root;
+        let data_commitment = ingress_proof.data_commitment;
         self.service
             .send_traced(ChunkIngressMessage::IngestIngressProof(
                 ingress_proof,
@@ -55,14 +55,14 @@ impl ChunkIngressFacadeImpl {
             ))
             .map_err(|_| {
                 IngressProofError::Other(format!(
-                    "Error sending IngestIngressProof message for data_root {:?}",
-                    data_root
+                    "Error sending IngestIngressProof message for data_commitment {:?}",
+                    data_commitment
                 ))
             })?;
         oneshot_rx.await.map_err(|_| {
             IngressProofError::Other(format!(
-                "ChunkIngressService dropped response channel for ingress proof data_root {:?}",
-                data_root
+                "ChunkIngressService dropped response channel for ingress proof data_commitment {:?}",
+                data_commitment
             ))
         })?
     }

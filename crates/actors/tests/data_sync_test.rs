@@ -943,7 +943,7 @@ impl ChunkFetcher for PeerAwareChunkFetcher {
 
     async fn fetch_chunk_by_data_root(
         &self,
-        data_root: irys_types::DataRoot,
+        data_root: irys_types::DataTreeRoot,
         tx_offset: irys_types::TxChunkOffset,
         api_addr: SocketAddr,
         timeout: Duration,

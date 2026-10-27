@@ -140,12 +140,16 @@ impl Inner {
         self.mempool_state.insert_tx_and_mark_valid(tx).await?;
         self.cache_data_root_with_expiry(tx, expiry_height);
         // Notify the ChunkIngressService to process any pending chunks for this data root
-        if let Err(e) = self.service_senders.chunk_ingress.send_traced(
-            ChunkIngressMessage::ProcessPendingChunks(tx.data_tree_root.0),
-        ) {
+        // Drain only the chunks parked under this header's own commitment.
+        let data_commitment = tx.data_commitment(&self.config.data_tree_geometry());
+        if let Err(e) = self
+            .service_senders
+            .chunk_ingress
+            .send_traced(ChunkIngressMessage::ProcessPendingChunks(data_commitment))
+        {
             tracing::warn!(
-                "Failed to send ProcessPendingChunks for data_root {:?}: {:?}",
-                tx.data_tree_root,
+                "Failed to send ProcessPendingChunks for data_commitment {:?}: {:?}",
+                data_commitment,
                 e
             );
         }
@@ -486,11 +490,12 @@ impl Inner {
     /// Caches data_root with expiry, logging success/failure.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_tree_root, expiry_height = expiry_height))]
     fn cache_data_root_with_expiry(&self, tx: &DataTransactionHeader, expiry_height: u64) {
+        let geometry = self.config.data_tree_geometry();
         match self.irys_db.update_eyre(|db_tx| {
-            let mut cdr = irys_database::cache_data_root(db_tx, tx, None)?
+            let mut cdr = irys_database::cache_data_root(db_tx, tx, None, &geometry)?
                 .ok_or_else(|| eyre!("failed to cache data_root"))?;
             cdr.expiry_height = Some(expiry_height);
-            db_tx.put::<CachedDataRoots>(tx.data_tree_root.0, cdr)?;
+            db_tx.put::<CachedDataRoots>(tx.data_commitment(&geometry), cdr)?;
             Ok(())
         }) {
             Ok(()) => {

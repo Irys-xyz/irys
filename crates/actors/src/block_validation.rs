@@ -25,7 +25,6 @@ use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
-use irys_types::DataTreeRoot;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{Amount, calculate_perm_fee_from_config};
 use irys_types::{BlockHash, EvmBlockHash, H256List, LedgerChunkRange};
@@ -42,6 +41,7 @@ use irys_types::{
     validate_path, validate_path_byte_range,
 };
 use irys_types::{CommitmentTypeV2, IrysTransactionCommon, VersionDiscriminant as _};
+use irys_types::{DataCommitment, DataTreeRoot};
 use irys_types::{IngressProof, LedgerChunkOffset, get_ingress_proofs};
 use irys_types::{IrysTransactionId, u256_from_le_bytes as hash_to_number};
 use irys_vdf::last_step_checkpoints_is_valid;
@@ -2144,26 +2144,30 @@ pub async fn prevalidate_block(
     // The proof list was pinned to `count × N` at the top of this function.
     let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
 
-    // Flatten (proof, data_root) pairs across publish txs so the parallel
+    // Flatten (proof, data_commitment) pairs across publish txs so the parallel
     // verify below fans out across every proof rather than per-tx batches.
     let estimated_proofs = publish_ledger
         .required_proof_count
         .map_or(publish_txs.len(), |c| publish_txs.len() * c as usize);
-    let mut ingress_pairs: Vec<(IngressProof, H256)> = Vec::with_capacity(estimated_proofs);
+    let geometry = config.data_tree_geometry();
+    let mut ingress_pairs: Vec<(IngressProof, DataCommitment)> =
+        Vec::with_capacity(estimated_proofs);
     for tx_header in publish_txs.iter() {
         let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id)
             .map_err(|_| PreValidationError::IngressProofsMissing)?;
         for proof in tx_proofs.0 {
-            ingress_pairs.push((proof, tx_header.data_tree_root.0));
+            ingress_pairs.push((proof, tx_header.data_commitment(&geometry)));
         }
     }
     pool.install(|| {
-        ingress_pairs.par_iter().try_for_each(|(proof, data_root)| {
-            proof
-                .pre_validate(data_root)
-                .map(|_| ())
-                .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))
-        })
+        ingress_pairs
+            .par_iter()
+            .try_for_each(|(proof, data_commitment)| {
+                proof
+                    .pre_validate(data_commitment)
+                    .map(|_| ())
+                    .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))
+            })
     })?;
     debug!(
         block.hash = ?block.block_hash,
@@ -6502,12 +6506,14 @@ async fn ingress_proof_chunk_bytes_from_local(
     db: &DatabaseProvider,
     storage_modules: &StorageModulesReadGuard,
     config: &Config,
-    data_root: H256,
+    data_root: DataTreeRoot,
     data_size: u64,
     tx_offset: irys_types::TxChunkOffset,
 ) -> Result<(Option<Vec<u8>>, bool), PreValidationError> {
+    let data_commitment =
+        irys_types::data_tree::data_commitment(&config.data_tree_geometry(), data_root, data_size);
     let cached = db
-        .view_eyre(|tx| irys_database::cached_chunk_by_chunk_offset(tx, data_root, tx_offset))
+        .view_eyre(|tx| irys_database::cached_chunk_by_chunk_offset(tx, data_commitment, tx_offset))
         .map_err(|error| PreValidationError::DatabaseError {
             error: error.to_string(),
         })?;
@@ -6523,7 +6529,8 @@ async fn ingress_proof_chunk_bytes_from_local(
     // miss must stay a miss so the caller can try peers.
     let mut read_failed = false;
     for module in &modules {
-        let offsets = match module.partition_offsets_for_data_root_chunk(data_root, tx_offset) {
+        let offsets = match module.partition_offsets_for_data_root_chunk(data_commitment, tx_offset)
+        {
             Ok(Some(offsets)) => offsets,
             Ok(None) => continue,
             Err(error) => {
@@ -6574,8 +6581,7 @@ async fn ingress_proof_chunk_bytes_from_local(
                     continue;
                 }
             };
-            if unpacked.data_tree_root != DataTreeRoot(data_root) || unpacked.tx_offset != tx_offset
-            {
+            if unpacked.data_tree_root != data_root || unpacked.tx_offset != tx_offset {
                 continue;
             }
             match crate::chunk_migration_service::validate_chunk_parts_for_migration(
@@ -7114,7 +7120,7 @@ pub async fn data_txs_are_valid(
                             db,
                             storage_modules,
                             config,
-                            tx_header.data_tree_root.0,
+                            tx_header.data_tree_root,
                             tx_header.data_size,
                             tx_chunk_offset,
                         )
@@ -7256,7 +7262,7 @@ pub async fn data_txs_are_valid(
                                 db,
                                 storage_modules,
                                 config,
-                                tx_header.data_tree_root.0,
+                                tx_header.data_tree_root,
                                 tx_header.data_size,
                                 tx_chunk_offset,
                             )
@@ -7298,6 +7304,7 @@ pub async fn data_txs_are_valid(
                         proof,
                         &chunks,
                         config.consensus.chain_id,
+                        &config.data_tree_geometry(),
                     )
                     .map_err(|e| PreValidationError::InvalidIngressProof {
                         tx_id: tx_header.id,
@@ -7731,7 +7738,7 @@ pub fn get_assigned_ingress_proofs(
     for ingress_proof in tx_proofs.iter() {
         // Validate ingress proof signature and data_root match the transaction
         let proof_address = ingress_proof
-            .pre_validate(&tx_header.data_tree_root.0)
+            .pre_validate(&tx_header.data_commitment(&config.data_tree_geometry()))
             .map_err(|e| PreValidationError::InvalidIngressProof {
                 tx_id: tx_header.id,
                 reason: e.to_string(),
@@ -10205,9 +10212,13 @@ mod tests {
             block_set: vec![H256::random(), H256::random(), H256::random()],
             expiry_height: Some(0),
             cached_at: UnixTimestamp::from_secs(0),
+            data_tree_root: Default::default(),
         };
         db.update(|tx| -> eyre::Result<()> {
-            tx.put::<CachedDataRoots>(data_root, corrupt_cdr)?;
+            tx.put::<CachedDataRoots>(
+                header.data_commitment(&config.data_tree_geometry()),
+                corrupt_cdr,
+            )?;
             Ok(())
         })??;
 
@@ -10371,7 +10382,7 @@ mod tests {
         let chunk_bytes: [u8; 32] = [0; 32];
         let proof = generate_ingress_proof(
             &signer,
-            data_root,
+            header.data_commitment(&config.data_tree_geometry()),
             std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
             consensus.chain_id,
             H256::zero(),
@@ -10651,7 +10662,12 @@ mod ingress_proof_local_bytes_tests {
 
     fn cache_body(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8]) {
         db.update_eyre(|wtx| {
-            cache_data_root(wtx, &tx.header, None)?;
+            cache_data_root(
+                wtx,
+                &tx.header,
+                None,
+                &irys_types::data_tree::Geometry::TESTING,
+            )?;
             cache_chunk(
                 wtx,
                 &UnpackedChunk {
@@ -10661,6 +10677,7 @@ mod ingress_proof_local_bytes_tests {
                     bytes: Base64(data.to_vec()),
                     tx_offset: TxChunkOffset::from(0_u32),
                 },
+                &irys_types::data_tree::Geometry::TESTING,
             )?;
             Ok(())
         })
@@ -10701,7 +10718,7 @@ mod ingress_proof_local_bytes_tests {
             db,
             modules,
             config,
-            tx.header.data_tree_root.0,
+            DataTreeRoot(tx.header.data_tree_root.0),
             tx.header.data_size,
             TxChunkOffset::from(0_u32),
         )
@@ -10932,7 +10949,7 @@ mod ingress_proof_local_bytes_tests {
             &db,
             &modules,
             &config,
-            tx.header.data_tree_root.0,
+            DataTreeRoot(tx.header.data_tree_root.0),
             tx.header.data_size,
             TxChunkOffset::from(0_u32),
         )
@@ -10997,7 +11014,7 @@ mod ingress_proof_local_bytes_tests {
         let tx = signer.sign_transaction(tx).unwrap();
         let proof = irys_types::ingress::generate_ingress_proof(
             &signer,
-            tx.header.data_tree_root.0,
+            tx.header.data_commitment(&config.data_tree_geometry()),
             std::iter::once(Ok(data.as_slice())),
             config.consensus.chain_id,
             tx.header.anchor,

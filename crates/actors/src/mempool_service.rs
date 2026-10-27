@@ -24,8 +24,8 @@ use irys_types::{
     U256, app_state::DatabaseProvider,
 };
 use irys_types::{
-    CommitmentTransaction, CommitmentValidationError, DataTransactionHeader, IrysAddress,
-    MempoolConfig,
+    CommitmentTransaction, CommitmentValidationError, DataCommitment, DataTransactionHeader,
+    IrysAddress, MempoolConfig,
 };
 use irys_types::{TokioServiceHandle, Traced, TxKnownStatus};
 use lru::LruCache;
@@ -2258,20 +2258,21 @@ impl MempoolState {
 
     /// Revalidates data txs in-place against the current canonical chain.
     /// Removes those that fail `should_prune` and returns a map of
-    /// `data_root → [pruned txids]` so the caller can send a
+    /// `data_commitment → [pruned txids]` so the caller can send a
     /// `PruneTxidsFromCachedDataRoots` message to clean up stale references.
     pub fn revalidate_data_txs(
         &mut self,
+        geometry: &irys_types::data_tree::Geometry,
         mut should_prune: impl FnMut(&DataTransactionHeader) -> bool,
-    ) -> HashMap<H256, Vec<H256>> {
+    ) -> HashMap<DataCommitment, Vec<H256>> {
         let mut expired: Vec<(H256, H256)> = Vec::new();
-        let mut expired_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
+        let mut expired_by_data_root: HashMap<DataCommitment, Vec<H256>> = HashMap::new();
 
         for tx in self.valid_submit_ledger_tx.values() {
             if should_prune(tx) {
                 expired.push((tx.id, tx.anchor));
                 expired_by_data_root
-                    .entry(tx.data_tree_root.0)
+                    .entry(tx.data_commitment(geometry))
                     .or_default()
                     .push(tx.id);
             }

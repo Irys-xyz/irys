@@ -725,7 +725,7 @@ impl PartitionMiningServiceInner {
         Some(match submodule.db.view(|tx| tx.placement_at(offset)) {
             Ok(Some(placement)) => {
                 DerivePlacement::Check(irys_database::tx_path_derive::PlacementCheck {
-                    data_root: placement.data_root,
+                    data_root: placement.data_tree_root.0,
                     ledger: placement.ledger,
                     block_height: placement.block_height,
                     tx_index: placement.tx_index,

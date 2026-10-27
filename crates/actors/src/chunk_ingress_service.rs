@@ -23,7 +23,7 @@ use std::time::Duration;
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
-    BlockHash, ChunkPathHash, Config, DataRoot, TokioServiceHandle, Traced, TxChunkOffset,
+    BlockHash, ChunkPathHash, Config, DataCommitment, TokioServiceHandle, Traced, TxChunkOffset,
     app_state::DatabaseProvider, chunk::UnpackedChunk,
 };
 use lru::LruCache;
@@ -69,10 +69,10 @@ pub enum ChunkIngressMessage {
     IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
     /// Process pending chunks for a data root after its TX header was ingested.
     /// Sent by the mempool when a data TX is successfully validated.
-    ProcessPendingChunks(DataRoot),
+    ProcessPendingChunks(DataCommitment),
     /// Try to generate ingress proofs for data roots just confirmed in a block's
     /// submit ledger. Sent by the mempool service after block confirmation.
-    TryGenerateProofsForConfirmedRoots(Vec<DataRoot>),
+    TryGenerateProofsForConfirmedRoots(Vec<DataCommitment>),
     /// Retry ingress proofs parked because their anchor block was unknown.
     /// Sent when that block is added to the tree (prevalidation) or confirmed.
     ProcessPendingIngressProofs(BlockHash),
@@ -128,11 +128,15 @@ impl ChunkIngressState {
         self.pending_chunks.read().await.len()
     }
 
-    pub async fn pending_contains(&self, data_root: DataRoot, tx_offset: TxChunkOffset) -> bool {
+    pub async fn pending_contains(
+        &self,
+        data_commitment: DataCommitment,
+        tx_offset: TxChunkOffset,
+    ) -> bool {
         self.pending_chunks
             .read()
             .await
-            .get(&data_root)
+            .get(&data_commitment)
             .is_some_and(|chunks| chunks.peek(&tx_offset).is_some())
     }
 }
@@ -216,16 +220,17 @@ impl ChunkIngressServiceInner {
                     warn!("IngestIngressProof response channel closed (caller dropped)");
                 }
             }
-            ChunkIngressMessage::ProcessPendingChunks(data_root) => {
-                self.process_pending_chunks_for_root(data_root).await;
+            ChunkIngressMessage::ProcessPendingChunks(data_commitment) => {
+                self.process_pending_chunks_for_root(data_commitment).await;
             }
-            ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(data_roots) => {
+            ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(data_commitments) => {
                 let chunk_size = self.config.consensus.chunk_size;
-                for data_root in data_roots {
-                    if let Err(e) = self.try_generate_ingress_proof_for_root(data_root, chunk_size)
+                for data_commitment in data_commitments {
+                    if let Err(e) =
+                        self.try_generate_ingress_proof_for_root(data_commitment, chunk_size)
                     {
                         warn!(
-                            ?data_root,
+                            ?data_commitment,
                             "Failed to generate ingress proof after block confirmation: {:?}", e
                         );
                     }
@@ -237,7 +242,7 @@ impl ChunkIngressServiceInner {
         }
     }
 
-    /// Pop and re-ingress any chunks parked for `data_root`.
+    /// Pop and re-ingress any chunks parked for `data_commitment`.
     ///
     /// Invoked by the `ProcessPendingChunks` control-plane message (from TX
     /// postprocess, and from post-park CDR re-check rescue).
@@ -248,21 +253,21 @@ impl ChunkIngressServiceInner {
     /// during the drain when it still fits under the cap. The ticket clears the
     /// flag if this task is cancelled, and schedules one follow-up when that
     /// cancel drops a drain that accepted a new chunk.
-    async fn process_pending_chunks_for_root(&self, data_root: DataRoot) {
+    async fn process_pending_chunks_for_root(&self, data_commitment: DataCommitment) {
         let (chunks, _drain_ticket) = {
             let mut pending = self.pending_chunks.write().await;
-            let Some(chunks_map) = pending.pop(&data_root) else {
+            let Some(chunks_map) = pending.pop(&data_commitment) else {
                 return;
             };
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
-            let mut drain_ticket = pending.begin_drain(data_root, chunks.len());
+            let mut drain_ticket = pending.begin_drain(data_commitment, chunks.len());
             let senders = self.service_senders.clone();
             drain_ticket.set_gained_follow_up(move || {
-                chunks::schedule_pending_drain_retry(senders, data_root);
+                chunks::schedule_pending_drain_retry(senders, data_commitment);
             });
             (chunks, drain_ticket)
         };
-        self.finish_pending_drain(data_root, chunks).await;
+        self.finish_pending_drain(data_commitment, chunks).await;
     }
 }
 
@@ -382,6 +387,7 @@ impl ChunkIngressService {
                 let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
                     irys_db.clone(),
                     ingress_address,
+                    config.data_tree_geometry(),
                     chunk_writer_buffer_size,
                     &handle_for_inner,
                 );
@@ -418,12 +424,12 @@ impl ChunkIngressService {
                 if let Err(error) = handle_for_inner
                     .spawn_blocking(move || {
                         let chunk_size = retry_inner.config.consensus.chunk_size;
-                        for data_root in retry_roots {
+                        for data_commitment in retry_roots {
                             if let Err(error) = retry_inner
-                                .try_generate_ingress_proof_for_root(data_root, chunk_size)
+                                .try_generate_ingress_proof_for_root(data_commitment, chunk_size)
                             {
                                 warn!(
-                                    %data_root,
+                                    %data_commitment,
                                     ?error,
                                     "Failed startup ingress-proof retry after compact-hash backfill"
                                 );
@@ -756,11 +762,11 @@ impl ChunkIngressService {
 mod overload_helpers_tests {
     use super::*;
     use irys_types::DataTreeRoot;
-    use irys_types::{DataRoot, H256, IrysSignature, ingress::IngressProof};
+    use irys_types::{DataCommitment, H256, IrysSignature, ingress::IngressProof};
 
     fn dummy_chunk() -> UnpackedChunk {
         UnpackedChunk {
-            data_tree_root: DataTreeRoot(DataRoot::from([0_u8; 32])),
+            data_tree_root: DataTreeRoot(H256::from([0_u8; 32])),
             data_size: 0,
             tx_offset: 0_u32.into(),
             data_path: Default::default(),
@@ -771,7 +777,7 @@ mod overload_helpers_tests {
     fn dummy_ingress_proof() -> IngressProof {
         IngressProof::V1(irys_types::ingress::IngressProofV1 {
             signature: IrysSignature::default(),
-            data_root: H256::zero(),
+            data_commitment: DataCommitment(H256::zero()),
             proof: H256::zero(),
             chain_id: 0,
             anchor: H256::zero(),
@@ -823,7 +829,7 @@ mod overload_helpers_tests {
     /// processed on a future trigger. Must not panic.
     #[tokio::test]
     async fn process_pending_chunks_overloaded_is_noop() {
-        let msg = ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]));
+        let msg = ChunkIngressMessage::ProcessPendingChunks(DataCommitment(H256::from([1_u8; 32])));
         ChunkIngressService::send_overloaded_errors(msg);
     }
 
@@ -846,13 +852,13 @@ mod overload_helpers_tests {
         );
 
         assert!(
-            !ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]))
+            !ChunkIngressMessage::ProcessPendingChunks(DataCommitment(H256::from([1_u8; 32])))
                 .has_reply_channel()
         );
 
         assert!(
-            !ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(vec![DataRoot::from(
-                [2_u8; 32]
+            !ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(vec![DataCommitment(
+                H256::from([2_u8; 32])
             )])
             .has_reply_channel()
         );
@@ -895,7 +901,7 @@ mod overload_helpers_tests {
         );
         assert_eq!(
             ChunkIngressService::no_permit_action(&ChunkIngressMessage::ProcessPendingChunks(
-                DataRoot::from([1_u8; 32])
+                DataCommitment(H256::from([1_u8; 32]))
             )),
             NoPermitAction::Park
         );
@@ -912,18 +918,30 @@ mod overload_helpers_tests {
         let chunk = dummy_chunk();
         assert!(
             !state
-                .pending_contains(chunk.data_tree_root.0, chunk.tx_offset)
+                .pending_contains(
+                    chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING),
+                    chunk.tx_offset
+                )
                 .await
         );
-        pending.write().await.put(chunk.clone());
+        pending.write().await.put(
+            chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING),
+            chunk.clone(),
+        );
         assert!(
             state
-                .pending_contains(chunk.data_tree_root.0, chunk.tx_offset)
+                .pending_contains(
+                    chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING),
+                    chunk.tx_offset
+                )
                 .await
         );
         assert!(
             !state
-                .pending_contains(chunk.data_tree_root.0, 1_u32.into())
+                .pending_contains(
+                    chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING),
+                    1_u32.into()
+                )
                 .await
         );
     }

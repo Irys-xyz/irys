@@ -73,12 +73,11 @@ pub async fn enqueue_http_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::DataRoot;
-    use irys_types::DataTreeRoot;
+    use irys_types::{DataTreeRoot, H256};
 
     fn dummy_chunk() -> UnpackedChunk {
         UnpackedChunk {
-            data_tree_root: DataTreeRoot(DataRoot::from([0_u8; 32])),
+            data_tree_root: DataTreeRoot(H256::from([0_u8; 32])),
             data_size: 0,
             tx_offset: 0_u32.into(),
             data_path: Default::default(),
