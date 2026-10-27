@@ -16,7 +16,6 @@ pub(crate) const SERVE_DATA_ROOT: &str = "serve_data_root";
 pub(crate) const SERVE_SPAN: &str = "serve_span";
 pub(crate) const RECALL: &str = "recall";
 pub const MIGRATION: &str = "migration";
-pub(crate) const METADATA: &str = "metadata";
 /// Placement of a chunk body onto entropy offsets.
 pub const PLACEMENT: &str = "placement";
 /// Cache reclamation asking which bodies are durable.

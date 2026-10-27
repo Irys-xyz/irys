@@ -54,7 +54,7 @@ use std::{
 };
 use tracing::{debug, error, info, warn};
 
-use super::index_read_metrics::{self, METADATA, MIGRATION, RECALL};
+use super::index_read_metrics::{self, MIGRATION, RECALL};
 use crate::{CircularBuffer, StorageModulesReadGuard};
 
 #[path = "disk_lane.rs"]
@@ -8942,59 +8942,9 @@ impl StorageModule {
         Ok(out)
     }
 
-    /// Returns chunk metadata (data_root and data_path) without reading chunk bytes.
-    ///
-    /// This is more efficient than `generate_full_chunk` when only the merkle proof
-    /// metadata is needed (e.g., for path validation).
-    pub fn get_chunk_metadata(
-        &self,
-        partition_offset: PartitionChunkOffset,
-    ) -> Result<Option<(DataTreeRoot, Base64)>> {
-        index_read_metrics::with_caller(METADATA, || {
-            self.get_chunk_metadata_in_caller(partition_offset)
-        })
-    }
-
-    fn get_chunk_metadata_in_caller(
-        &self,
-        partition_offset: PartitionChunkOffset,
-    ) -> Result<Option<(DataTreeRoot, Base64)>> {
-        index_read_metrics::note_view(1);
-        self.query_submodule_db_by_offset(partition_offset, |tx| {
-            let hashes = tx.get_path_hashes_by_offset(partition_offset)?;
-            let Some(hashes) = hashes else {
-                return Ok(None);
-            };
-            if hashes.data_path_hash.is_none() {
-                return Ok(None);
-            }
-            // The data root comes from the placement. A tx path with no
-            // covering info still resolves through the leaf binding.
-            let data_root = if let Some(placement) = tx.placement_at(partition_offset)? {
-                index_read_metrics::note("tx_path");
-                index_read_metrics::note("tx_leaf");
-                placement.data_tree_root
-            } else {
-                let Some(tx_path_hash) = hashes.tx_path_hash else {
-                    return Ok(None);
-                };
-                let Some((data_root, _)) = data_root_for_tx_path_hash(tx, tx_path_hash)? else {
-                    return Ok(None);
-                };
-                data_root
-            };
-            index_read_metrics::note("data_path");
-            let Some(data_path) = tx.get_data_path_by_offset(partition_offset)? else {
-                return Ok(None);
-            };
-
-            Ok(Some((data_root, Base64::from(data_path))))
-        })
-    }
-
     /// Resolves `(data_root, tx_offset)` for a partition offset from the SM index alone.
     ///
-    /// Unlike [`Self::get_chunk_metadata`] / [`Self::generate_full_chunk`], this does **not**
+    /// Unlike [`Self::generate_full_chunk`], this does **not**
     /// require a written chunk body (`data_path_hash` may be missing). That is the residual
     /// Entropy-hole case after tx migration: `tx_path` + `DataRootInfos` present, body never
     /// written. data_sync uses this to address proof-signer peers with
@@ -16286,12 +16236,6 @@ mod tests {
                 Some(ChunkType::Entropy),
                 "offset {part_off} should still be Entropy (no body written)"
             );
-            // get_chunk_metadata requires data_path — residual holes must return None.
-            assert!(
-                sm.get_chunk_metadata(part_off)?.is_none(),
-                "get_chunk_metadata needs data_path_hash; residual holes have none"
-            );
-
             let resolved = sm
                 .data_root_and_tx_offset_at(part_off)?
                 .expect("residual hole must still resolve data_root + tx_offset");
