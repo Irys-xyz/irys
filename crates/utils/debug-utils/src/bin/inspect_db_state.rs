@@ -16,7 +16,7 @@ use irys_database::reth_db::{
     transaction::DbTx as _,
 };
 use irys_database::tables::{IrysBlockHeaders, IrysDataTxMetadata, MigratedBlockHashes};
-use irys_types::H256;
+use irys_types::{H256, ToBase58 as _};
 use reth_node_core::version::default_client_version;
 use std::path::PathBuf;
 
@@ -36,7 +36,7 @@ fn open_ro(db_path: &PathBuf) -> eyre::Result<DatabaseEnv> {
 }
 
 fn b58(h: &H256) -> String {
-    bs58::encode(h.as_bytes()).into_string()
+    h.as_bytes().to_base58()
 }
 
 fn dump_block(

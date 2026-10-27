@@ -5289,7 +5289,6 @@ dependencies = [
 name = "irys-debug-utils"
 version = "0.1.0"
 dependencies = [
- "bs58",
  "eyre",
  "hex",
  "irys-database",

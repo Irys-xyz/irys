@@ -63,6 +63,10 @@ pub trait ToBase58 {
 }
 
 impl ToBase58 for [u8] {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one sanctioned base58 encode"
+    )]
     fn to_base58(&self) -> String {
         bs58::encode(self).into_string()
     }
