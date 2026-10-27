@@ -40,7 +40,7 @@ pub fn unpack(
     let unpacked_data = unpack_with_entropy(packed_chunk, entropy, chunk_size)?;
 
     Ok(UnpackedChunk {
-        data_root: packed_chunk.data_root,
+        data_tree_root: packed_chunk.data_tree_root,
         data_size: packed_chunk.data_size,
         data_path: packed_chunk.data_path.clone(),
         bytes: Base64(unpacked_data),

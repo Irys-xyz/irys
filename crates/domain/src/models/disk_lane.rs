@@ -1517,7 +1517,7 @@ impl StorageModule {
         }
         let partition_offsets = match super::index_read_metrics::trace_index_read(
             super::index_read_metrics::PLACEMENT,
-            || self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset),
+            || self.partition_offsets_for_data_root_chunk(chunk.data_tree_root.0, chunk.tx_offset),
         ) {
             Ok(Some(offsets)) => offsets,
             Ok(None) => {
@@ -1569,7 +1569,7 @@ impl StorageModule {
                 for (_, submodule) in self.submodules.iter() {
                     let Some(infos) = submodule
                         .db
-                        .view(|tx| tx.get_data_root_infos_for_data_root(chunk.data_root))?
+                        .view(|tx| tx.get_data_root_infos_for_data_root(chunk.data_tree_root.0))?
                     else {
                         continue;
                     };
@@ -3974,6 +3974,7 @@ fn clone_error(error: &WriteDataChunkError) -> WriteDataChunkError {
 
 #[cfg(test)]
 mod tests {
+    use irys_types::DataTreeRoot;
     use std::{
         sync::{
             Arc,
@@ -5000,7 +5001,7 @@ mod tests {
         let data_root = H256::repeat_byte(0x42);
         let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size: 32,
                 ..Default::default()
             },
@@ -5013,7 +5014,7 @@ mod tests {
             0,
         )?;
         Ok(UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 32,
             data_path: vec![4, 3, 2, 1].into(),
             bytes: vec![0x01; 32].into(),
@@ -6298,7 +6299,7 @@ mod tests {
         let path = vec![root_byte, 3, 2, 1];
         let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size: 32,
                 ..Default::default()
             },
@@ -6311,7 +6312,7 @@ mod tests {
             0,
         )?;
         Ok(UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 32,
             data_path: path.into(),
             bytes: vec![body; 32].into(),

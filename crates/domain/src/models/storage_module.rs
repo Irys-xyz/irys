@@ -25,7 +25,7 @@ use irys_database::submodule::{
 use irys_packing::unpack;
 use irys_types::{
     Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config, DataLedger, DataRoot,
-    DataTransactionHeader, DataTransactionLedger, DatabaseConfig, H256, IrysAddress,
+    DataTransactionHeader, DataTransactionLedger, DataTreeRoot, DatabaseConfig, H256, IrysAddress,
     LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange,
     ProofDeserialize as _, RelativeChunkOffset, SubmoduleIndexEngine, TxChunkOffset, TxPath,
     UnpackedChunk, get_leaf_proof, ledger_chunk_offset_ie, max_chunk_offset,
@@ -8021,7 +8021,7 @@ impl StorageModule {
                 tx.add_tx_leaf_binding(
                     tx_path_hash,
                     &TxLeafBinding {
-                        data_root: data_tx.data_root,
+                        data_root: data_tx.data_tree_root.0,
                         prefix_hash: data_tx.prefix_hash,
                     },
                 )?;
@@ -8038,7 +8038,7 @@ impl StorageModule {
                         start_offset,
                         data_size: data_tx.data_size,
                     };
-                    tx.add_data_root_info(data_tx.data_root, &info)?;
+                    tx.add_data_root_info(data_tx.data_tree_root.0, &info)?;
                     // Same txn as the index, so "indexed" can never be true while
                     // "bodies owed" is unrecorded. The body worker drains and
                     // deletes this row; `range.start()` is the key it uses,
@@ -8047,7 +8047,7 @@ impl StorageModule {
                     tx.add_pending_body_migration(
                         range.start(),
                         &PendingBodyMigration {
-                            data_root: data_tx.data_root,
+                            data_root: data_tx.data_tree_root.0,
                             data_size: data_tx.data_size,
                             start_offset,
                             block_height,
@@ -8383,7 +8383,7 @@ impl StorageModule {
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let Some(offsets) =
             index_read_metrics::trace_index_read(index_read_metrics::PLACEMENT, || {
-                self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset)
+                self.partition_offsets_for_data_root_chunk(chunk.data_tree_root.0, chunk.tx_offset)
             })?
         else {
             debug!("Chunks data_root not found in storage module");
@@ -8412,7 +8412,7 @@ impl StorageModule {
     pub fn has_in_flight_index_for(&self, chunk: &UnpackedChunk) -> bool {
         let Ok(Some(offsets)) =
             index_read_metrics::trace_index_read(index_read_metrics::PLACEMENT, || {
-                self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset)
+                self.partition_offsets_for_data_root_chunk(chunk.data_tree_root.0, chunk.tx_offset)
             })
         else {
             return false;
@@ -8593,7 +8593,7 @@ impl StorageModule {
             return Ok(None);
         };
         let packed = PackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size,
             data_path,
             bytes: Base64::from(bytes.clone()),
@@ -8827,7 +8827,7 @@ impl StorageModule {
                             out.insert(
                                 offset,
                                 PackedChunk {
-                                    data_root,
+                                    data_tree_root: DataTreeRoot(data_root),
                                     data_size,
                                     data_path,
                                     bytes: Base64::from(bytes),
@@ -8872,7 +8872,7 @@ impl StorageModule {
             out.insert(
                 offset,
                 PackedChunk {
-                    data_root,
+                    data_tree_root: DataTreeRoot(data_root),
                     data_size,
                     data_path,
                     bytes: Base64::from(bytes),
@@ -10175,6 +10175,7 @@ fn merge_inclusive_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
 mod tests {
     use super::*;
     use irys_testing_utils::{chunk_bytes_gen, utils::TempDirBuilder};
+    use irys_types::DataTreeRoot;
     use irys_types::{
         ConsensusConfig, DataTransactionHeaderV1, DataTransactionLedger, DbSyncMode, H256,
         NodeConfig, SimpleRNG, StorageSyncConfig, TxChunkOffset, irys::IrysSigner,
@@ -10270,7 +10271,7 @@ mod tests {
     fn data_header(data_root: H256, data_size: u64) -> DataTransactionHeader {
         DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size,
                 ..Default::default()
             },
@@ -10280,7 +10281,7 @@ mod tests {
 
     fn five_byte_chunk(data_root: H256) -> UnpackedChunk {
         UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 5,
             data_path: vec![4, 3, 2, 1].into(),
             bytes: vec![0, 1, 2, 3, 4].into(),
@@ -13436,7 +13437,7 @@ mod tests {
         assert!(storage.generate_full_chunk(offset)?.is_some());
         assert!(
             !storage
-                .collect_data_root_infos(header.data_root)?
+                .collect_data_root_infos(header.data_tree_root.0)?
                 .0
                 .is_empty()
         );
@@ -13446,7 +13447,7 @@ mod tests {
                 .iter()
                 .any(|(pending, _)| pending.0 == 0)
         );
-        Ok((bytes, header.data_root))
+        Ok((bytes, header.data_tree_root.0))
     }
 
     fn reopen_assigned(config: &Config, tmp: &std::path::Path) -> eyre::Result<StorageModule> {
@@ -13942,7 +13943,7 @@ mod tests {
         let data_size = chunks * chunk_size;
         let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size,
                 prefix_hash,
                 ..Default::default()
@@ -14741,7 +14742,7 @@ mod tests {
             storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         submodule.db.update(|tx| {
             tx.add_data_root_info(
-                chunk.data_root,
+                chunk.data_tree_root.0,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(1),
                     data_size: 5,
@@ -14781,7 +14782,7 @@ mod tests {
             storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         submodule.db.update(|tx| {
             tx.add_data_root_info(
-                chunk.data_root,
+                chunk.data_tree_root.0,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(1),
                     data_size: 5,
@@ -14824,7 +14825,7 @@ mod tests {
                 0,
             )?;
             storage_module.deposit_data_chunk(&UnpackedChunk {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size: 32,
                 data_path: path.into(),
                 bytes: vec![root_byte; 32].into(),
@@ -14905,7 +14906,7 @@ mod tests {
                 0,
             )?;
             chunks.push(UnpackedChunk {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size: 32,
                 data_path: path.into(),
                 bytes: vec![root_byte; 32].into(),
@@ -14981,7 +14982,7 @@ mod tests {
             0,
         )?;
         storage.deposit_data_chunk(&UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 32,
             data_path: path.into(),
             bytes: vec![byte; 32].into(),
@@ -16112,7 +16113,7 @@ mod tests {
             .create_transaction(data_bytes.clone(), H256::zero())
             .unwrap();
         let tx = irys.sign_transaction(tx).unwrap();
-        let data_root = tx.header.data_root;
+        let data_root = tx.header.data_tree_root;
 
         // Place the tx at partition-relative start 10 → offsets 10, 11, 12.
         let start = 10_u32;
@@ -16145,7 +16146,7 @@ mod tests {
             let resolved = sm
                 .data_root_and_tx_offset_at(part_off)?
                 .expect("residual hole must still resolve data_root + tx_offset");
-            assert_eq!(resolved.0, data_root);
+            assert_eq!(resolved.0, data_root.0);
             assert_eq!(*resolved.1, tx_off);
         }
 
@@ -16154,7 +16155,7 @@ mod tests {
         let min = tx.chunks[mid as usize].min_byte_range;
         let max = tx.chunks[mid as usize].max_byte_range;
         sm.write_data_chunk(&UnpackedChunk {
-            data_root,
+            data_tree_root: data_root,
             data_size: data_size as u64,
             data_path: Base64(tx.proofs[mid as usize].proof.clone()),
             bytes: Base64(data_bytes[min..max].to_vec()),
@@ -16167,7 +16168,7 @@ mod tests {
             let resolved = sm
                 .data_root_and_tx_offset_at(part_off)?
                 .expect("resolution works with or without body");
-            assert_eq!(resolved.0, data_root);
+            assert_eq!(resolved.0, data_root.0);
             assert_eq!(*resolved.1, tx_off);
         }
 
@@ -16534,7 +16535,7 @@ mod tests {
         );
 
         let chunk = UnpackedChunk {
-            data_root: H256::zero(),
+            data_tree_root: DataTreeRoot(H256::zero()),
             data_size,
             data_path: data_path.clone().into(),
             bytes: chunk_data.into(),
@@ -21173,7 +21174,7 @@ mod tests {
         let prefix_hash = H256::zero();
         let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size,
                 prefix_hash,
                 ..Default::default()
@@ -21418,7 +21419,7 @@ mod tests {
                 "{engine:?}: the new root was stored before its body"
             );
             let writable = opened.get_writeable_offsets(&UnpackedChunk {
-                data_root: new_root,
+                data_tree_root: DataTreeRoot(new_root),
                 tx_offset: TxChunkOffset::from(0),
                 ..UnpackedChunk::default()
             })?;
@@ -22375,7 +22376,7 @@ mod tests {
         )?;
         storage.write_data_chunk(&replacement[0])?;
         storage.force_sync_pending_chunks()?;
-        Ok(tx.header.data_root)
+        Ok(tx.header.data_tree_root.0)
     }
 
     /// A serve that already copied the old bytes must return the pair a
@@ -22442,7 +22443,7 @@ mod tests {
                 "served the pre-commit bytes after the new checksum committed"
             );
             eyre::ensure!(
-                served.data_root == new_root,
+                served.data_tree_root == DataTreeRoot(new_root),
                 "served proof is not the committed data root"
             );
             Ok(())
@@ -22586,7 +22587,7 @@ mod tests {
             LedgerChunkRange(ledger_chunk_offset_ii!(0, last)),
             block_height,
         )?;
-        Ok((unpacked, tx.header.data_root))
+        Ok((unpacked, tx.header.data_tree_root.0))
     }
 
     fn packed_prefix(
@@ -22689,7 +22690,7 @@ mod tests {
             .generate_full_chunk(offset)?
             .ok_or_else(|| eyre::eyre!("settled serve omitted the offset"))?;
         eyre::ensure!(
-            stable.data_root == root1 && stable.data_path.0 == path1,
+            stable.data_tree_root == DataTreeRoot(root1) && stable.data_path.0 == path1,
             "{engine:?} settled serve is not the committed pair"
         );
         eyre::ensure!(
@@ -22713,7 +22714,7 @@ mod tests {
         if let Some(chunk) = &after_entropy {
             eyre::bail!(
                 "{engine:?} after entropy: root {root1:?} served {:?} b0 {:02x} path_is_old {}",
-                chunk.data_root,
+                chunk.data_tree_root,
                 chunk.bytes.0.first().copied().unwrap_or(0xff),
                 path_after_entropy
                     .as_ref()
@@ -22735,7 +22736,7 @@ mod tests {
         if let Some(chunk) = &after_index {
             eyre::bail!(
                 "{engine:?} after index, before the body: root {:?} b0 {:02x} path_len {}",
-                chunk.data_root,
+                chunk.data_tree_root,
                 chunk.bytes.0.first().copied().unwrap_or(0xff),
                 chunk.data_path.0.len()
             );
@@ -22746,7 +22747,7 @@ mod tests {
         if let Some(chunk) = &during {
             eyre::bail!(
                 "{engine:?} uncommitted body paired with a stored path: root {:?} b0 {:02x} path_is_old {}",
-                chunk.data_root,
+                chunk.data_tree_root,
                 chunk.bytes.0.first().copied().unwrap_or(0xff),
                 chunk.data_path.0 == path1
             );
@@ -22757,7 +22758,8 @@ mod tests {
         let path_now = data_path_at(&storage, 0)?
             .ok_or_else(|| eyre::eyre!("{engine:?} committed path missing"))?;
         eyre::ensure!(
-            committed.data_root == replacement[0].data_root && committed.data_path.0 == path_now,
+            committed.data_tree_root == replacement[0].data_tree_root
+                && committed.data_path.0 == path_now,
             "{engine:?} committed serve is not the new pair"
         );
         eyre::ensure!(
@@ -22808,7 +22810,7 @@ mod tests {
             "served a data path from before the body commit"
         );
         eyre::ensure!(
-            served.data_root == root2,
+            served.data_tree_root == DataTreeRoot(root2),
             "served proof is not the committed data root"
         );
         let disk = packed_prefix(&storage, offset)?;
@@ -22848,7 +22850,9 @@ mod tests {
             .generate_full_chunk(offset)?
             .ok_or_else(|| eyre::eyre!("settled serve omitted the offset"))?;
         eyre::ensure!(
-            stable.data_root == root1 && stable.data_path.0 == path1 && stable.bytes.0 == packed,
+            stable.data_tree_root == DataTreeRoot(root1)
+                && stable.data_path.0 == path1
+                && stable.bytes.0 == packed,
             "a serve with no later commit did not return the copied pair"
         );
 
@@ -22906,7 +22910,7 @@ mod tests {
                 "served the data path from the previous transaction"
             );
             eyre::ensure!(
-                served.data_root == root2,
+                served.data_tree_root == DataTreeRoot(root2),
                 "served proof is not the committed data root"
             );
             eyre::ensure!(

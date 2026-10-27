@@ -161,7 +161,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         config.consensus.chunk_size,
     );
 
-    let data_root = tx_headers[0].data_root;
+    let data_root = tx_headers[0].data_tree_root;
     let data_size = tx_headers[0].data_size;
     let _ = storage_modules[0].index_transaction_data(&tx_headers[0], tx_path, tx_ledger_range, 0);
 
@@ -177,9 +177,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     verify_tx_path_offsets(submodule, tx_path_hash, tx_partition_range, &[]);
 
-    verify_data_root_start_offset(submodule, data_root, 0);
+    verify_data_root_start_offset(submodule, data_root.0, 0);
 
-    verify_data_root_data_size(submodule, data_root, data_size);
+    verify_data_root_data_size(submodule, data_root.0, data_size);
 
     // Tx:2 - Overlapping case, tx chunks start in one submodule and go to another
     let start_chunk_offset = LedgerChunkOffset::from(num_chunks_in_tx);
@@ -191,7 +191,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         config.consensus.chunk_size,
     );
     let tx_path = &proofs[1].proof;
-    let data_root = tx_headers[1].data_root;
+    let data_root = tx_headers[1].data_tree_root;
     let data_size = tx_headers[1].data_size;
     assert_eq!(data_size, bytes_in_tx);
     let _ = storage_modules[0].index_transaction_data(&tx_headers[1], tx_path, tx_ledger_range, 0);
@@ -216,15 +216,15 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     verify_tx_path_offsets(submodule, tx_path_hash, tx_partition_range, &[5]);
     verify_tx_path_offsets(submodule2, tx_path_hash, tx_partition_range, &[3, 4]);
 
-    verify_data_root_start_offset(submodule, data_root, 3);
-    verify_data_root_start_offset(submodule2, data_root, 3);
+    verify_data_root_start_offset(submodule, data_root.0, 3);
+    verify_data_root_start_offset(submodule2, data_root.0, 3);
 
-    verify_data_root_data_size(submodule, data_root, data_size);
-    verify_data_root_data_size(submodule2, data_root, data_size);
+    verify_data_root_data_size(submodule, data_root.0, data_size);
+    verify_data_root_data_size(submodule2, data_root.0, data_size);
 
     // Tx:3 - Fill up the StorageModule leaving one empty chunk
     let tx_path = &proofs[2].proof;
-    let data_root = tx_headers[2].data_root;
+    let data_root = tx_headers[2].data_tree_root;
     let last_byte_index = proofs[2].last_byte_index as u64;
     let bytes_in_tx =
         (last_byte_index + 1) - (*(tx_ledger_range.end() + 1_u64) * config.consensus.chunk_size);
@@ -262,15 +262,15 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         &[6, 7, 8, 9, 10],
     );
 
-    verify_data_root_start_offset(submodule2, data_root, 6);
-    verify_data_root_start_offset(submodule3, data_root, 6);
+    verify_data_root_start_offset(submodule2, data_root.0, 6);
+    verify_data_root_start_offset(submodule3, data_root.0, 6);
 
-    verify_data_root_data_size(submodule2, data_root, data_size);
-    verify_data_root_data_size(submodule3, data_root, data_size);
+    verify_data_root_data_size(submodule2, data_root.0, data_size);
+    verify_data_root_data_size(submodule3, data_root.0, data_size);
 
     // Tx:4 - Overlap between StorageModules
     let tx_path = &proofs[3].proof;
-    let data_root = tx_headers[3].data_root;
+    let data_root = tx_headers[3].data_tree_root;
     let data_size = tx_headers[3].data_size;
     let last_byte_index = proofs[3].last_byte_index as u64;
     let bytes_in_tx =
@@ -310,15 +310,15 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     verify_tx_path_offsets(submodule4, tx_path_hash, tx_partition_range, &[]);
 
-    verify_data_root_start_offset(submodule3, data_root, 19);
-    verify_data_root_start_offset(submodule4, data_root, -1); // Offset is from previous Partition
+    verify_data_root_start_offset(submodule3, data_root.0, 19);
+    verify_data_root_start_offset(submodule4, data_root.0, -1); // Offset is from previous Partition
 
-    verify_data_root_data_size(submodule3, data_root, data_size);
-    verify_data_root_data_size(submodule4, data_root, data_size);
+    verify_data_root_data_size(submodule3, data_root.0, data_size);
+    verify_data_root_data_size(submodule4, data_root.0, data_size);
 
     // Tx:5 - Perfectly fills the submodule without overlapping
     let tx_path = &proofs[4].proof;
-    let data_root = tx_headers[4].data_root;
+    let data_root = tx_headers[4].data_tree_root;
     let data_size = tx_headers[4].data_size;
     let last_byte_index = proofs[4].last_byte_index as u64;
     let bytes_in_tx =
@@ -339,7 +339,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     verify_tx_path_offsets(submodule4, tx_path_hash, tx_partition_range, &[]);
 
-    verify_data_root_data_size(submodule4, data_root, data_size);
+    verify_data_root_data_size(submodule4, data_root.0, data_size);
 
     // =========================================================================
     // Post Chunks Tests
@@ -377,7 +377,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             assert_eq!(chunk_hash, tx.chunks[i].data_hash.unwrap());
 
             let chunk = UnpackedChunk {
-                data_root: tx.header.data_root,
+                data_tree_root: tx.header.data_tree_root,
                 data_size: chunk_bytes.len() as u64,
                 data_path: Base64(proof.proof.clone()),
                 bytes: chunk_bytes,
@@ -395,7 +395,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // to write data chunks to the storage modules
     let mut ledger_offset: LedgerChunkOffset = LedgerChunkOffset::from(0);
     for tx in &txs {
-        let data_root = tx.header.data_root;
+        let data_root = tx.header.data_tree_root;
         let num_chunks = (tx.header.data_size / config.consensus.chunk_size)
             .try_into()
             .expect("Value exceeds u32::MAX");
@@ -413,7 +413,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                     }
 
                     // Request the chunk from the global db index by  data root & tx relative offset
-                    let res = cached_chunk_by_chunk_offset(tx, data_root, tx_chunk_offset).unwrap();
+                    let res =
+                        cached_chunk_by_chunk_offset(tx, data_root.0, tx_chunk_offset).unwrap();
 
                     // Build a Chunk struct to store in the submodule
                     if let Some((_metadata, chunk)) = res {
@@ -421,7 +422,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                         let chunk_byte_value = chunk_bytes.0[0];
                         info!("chunk_bytes: {:?}", chunk_byte_value);
                         let chunk = UnpackedChunk {
-                            data_root,
+                            data_tree_root: data_root,
                             data_size: chunk_bytes.len() as u64,
                             data_path: chunk.data_path,
                             bytes: chunk_bytes,
