@@ -4,7 +4,7 @@ pub use irys_api_server::routes::block::BlockParam;
 use irys_api_server::routes::{anchor::AnchorResponse, price::PriceInfo, tx::PromotionStatus};
 pub use irys_types::CombinedBlockHeader;
 use irys_types::{
-    Base64, BlockHash, ChunkFormat, DataLedger, DataRoot, DataTransaction, H256, TxChunkOffset,
+    Base64, BlockHash, ChunkFormat, DataLedger, DataTransaction, DataTreeRoot, H256, TxChunkOffset,
     UnpackedChunk,
 };
 use std::{
@@ -50,7 +50,7 @@ pub trait ApiClientExt: ApiClient {
         &self,
         peer: SocketAddr,
         ledger: DataLedger,
-        data_root: DataRoot,
+        data_root: DataTreeRoot,
         offset: u32, // data root relative offset
     ) -> eyre::Result<ChunkFormat>;
 
@@ -164,7 +164,7 @@ impl ApiClientExt for IrysApiClient {
         &self,
         peer: SocketAddr,
         ledger_id: DataLedger,
-        data_root: DataRoot,
+        data_root: DataTreeRoot,
         offset: u32, // data root relative offset
     ) -> eyre::Result<ChunkFormat> {
         let ledger_num = u32::from(ledger_id);

@@ -6,7 +6,7 @@ use actix_web::{
 };
 
 use awc::http::StatusCode;
-use irys_types::{ChunkFormat, H256};
+use irys_types::{ChunkFormat, DataTreeRoot};
 use serde::Deserialize;
 use tracing::debug;
 
@@ -47,10 +47,15 @@ pub async fn get_chunk_by_ledger_offset(
 #[derive(Deserialize)]
 pub struct DataRootChunkApiPath {
     ledger_id: u32,
-    data_root: H256,
+    data_root: DataTreeRoot,
     offset: u32,
 }
 
+/// Chunk `offset` of the data whose tree root is `data_root`.
+///
+/// Data is keyed by the data commitment, and the root alone does not fix the
+/// size. The lookup scans the local placements and cache rows for every
+/// commitment of this root, and serves the first one that holds the offset.
 pub async fn get_chunk_by_data_root_offset(
     state: web::Data<ApiState>,
     path: web::Path<DataRootChunkApiPath>,
