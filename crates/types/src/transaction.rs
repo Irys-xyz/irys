@@ -413,6 +413,8 @@ impl DataTransaction {
             Some(d) => d,
             None => eyre::bail!("missing required tx data"),
         };
+        // A deserialized or default transaction has no tree and no chunk size.
+        let tree = self.tree()?;
         let chunk_size = usize::try_from(self.chunk_size)?;
         data.0
             .chunks(chunk_size)
@@ -422,7 +424,7 @@ impl DataTransaction {
                 Ok(UnpackedChunk {
                     data_tree_root: self.header.data_tree_root,
                     data_size: self.header.data_size,
-                    data_path: self.chunk_proof(chunk_index)?,
+                    data_path: Base64(tree.chunk_proof(chunk_index.0)?),
                     bytes: Base64(bytes.to_vec()),
                     tx_offset: chunk_index,
                 })
@@ -432,11 +434,13 @@ impl DataTransaction {
 
     /// The data path of chunk `chunk_index`.
     pub fn chunk_proof(&self, chunk_index: TxChunkOffset) -> eyre::Result<Base64> {
-        let tree = self
-            .tree
+        Ok(Base64(self.tree()?.chunk_proof(chunk_index.0)?))
+    }
+
+    fn tree(&self) -> eyre::Result<&DataTree> {
+        self.tree
             .as_ref()
-            .ok_or_else(|| eyre::eyre!("transaction has no data tree"))?;
-        Ok(Base64(tree.chunk_proof(chunk_index.0)?))
+            .ok_or_else(|| eyre::eyre!("transaction has no data tree"))
     }
 }
 
@@ -1295,6 +1299,18 @@ mod tests {
         header.to_compact(&mut compact);
         let (decoded, _) = DataTransactionHeader::from_compact(&compact, compact.len());
         assert_eq!(decoded.data_tree_root, DataTreeRoot(root_hash));
+    }
+
+    /// A transaction with data but no tree (deserialized or default) has no
+    /// chunk size. `data_chunks` returns an error; it does not panic.
+    #[test]
+    fn data_chunks_without_a_tree_is_an_error() {
+        let tx = DataTransaction {
+            data: Some(Base64(vec![1_u8; 40])),
+            ..Default::default()
+        };
+        assert!(tx.data_chunks().is_err());
+        assert!(tx.chunk_proof(TxChunkOffset(0)).is_err());
     }
 
     #[test]
