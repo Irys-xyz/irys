@@ -281,7 +281,7 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
     // Build a pre-header chunk with an oversized data_path (> 64 KiB)
     let oversized_path = vec![0_u8; 70_000];
     let chunk = UnpackedChunk {
-        data_root: tx.header.data_root,
+        data_tree_root: tx.header.data_tree_root,
         data_size: tx.header.data_size,
         data_path: Base64(oversized_path),
         bytes: Base64(data),
@@ -348,7 +348,7 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
 
     // Build a pre-header chunk with oversized bytes
     let chunk = UnpackedChunk {
-        data_root: tx.header.data_root,
+        data_tree_root: tx.header.data_tree_root,
         data_size: tx.header.data_size,
         data_path: Base64(vec![]),
         bytes: Base64(data),
@@ -418,7 +418,7 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
     // Fill the pre-header cache to capacity (64 chunks)
     for offset in 0..preheader_cap {
         let chunk = UnpackedChunk {
-            data_root: tx.header.data_root,
+            data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
             data_path: Base64(vec![]),
             bytes: Base64(chunk_bytes.clone()),
@@ -438,7 +438,7 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
 
     genesis_node
         .wait_until_chunk_accepted(
-            tx.header.data_root,
+            tx.header.data_tree_root.0,
             TxChunkOffset::from(preheader_cap.saturating_sub(1)),
             10,
         )
@@ -446,7 +446,7 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
 
     // Now try to add one more chunk - HTTP admits it; the worker rejects the park.
     let overflow_chunk = UnpackedChunk {
-        data_root: tx.header.data_root,
+        data_tree_root: tx.header.data_tree_root,
         data_size: tx.header.data_size,
         data_path: Base64(vec![]),
         bytes: Base64(chunk_bytes),
@@ -468,14 +468,17 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
         !genesis_node
             .node_ctx
             .chunk_ingress_state
-            .pending_contains(tx.header.data_root, TxChunkOffset::from(preheader_cap))
+            .pending_contains(
+                tx.header.data_tree_root.0,
+                TxChunkOffset::from(preheader_cap)
+            )
             .await,
         "overflow pre-header chunk must not remain parked"
     );
     let overflow_cached = genesis_node.node_ctx.db.view_eyre(|db_tx| {
         irys_database::cached_chunk_by_chunk_offset(
             db_tx,
-            tx.header.data_root,
+            tx.header.data_tree_root.0,
             TxChunkOffset::from(preheader_cap),
         )
     })?;
@@ -1349,7 +1352,7 @@ async fn heavy3_mempool_publish_fork_recovery_test(
     let a_blk1_tx1_proof1 = {
         let tx = a_node.node_ctx.db.tx()?;
         // Get the ingress proof from the database
-        tx.get::<IngressProofs>(a_blk1_tx1.header.data_root)?
+        tx.get::<IngressProofs>(a_blk1_tx1.header.data_tree_root.0)?
             .expect("Able to get a_blk1_tx1’s ingress proof from DB")
     };
 

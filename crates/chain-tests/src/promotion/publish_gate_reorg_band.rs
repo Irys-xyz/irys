@@ -68,7 +68,7 @@ async fn make_publish_candidate(
     )?;
     let data_tx = signer.sign_transaction(data_tx)?;
     let txid = data_tx.header.id;
-    let data_root = data_tx.header.data_root;
+    let data_root = data_tx.header.data_tree_root;
 
     // The tx is never posted to the mempool; the publish-candidate lookup falls
     // back to the DB, so the header must be resolvable there (otherwise the
@@ -83,14 +83,14 @@ async fn make_publish_candidate(
             expiry_height: Some(1000),
             cached_at: UnixTimestamp::from_secs(0),
         };
-        db_tx.put::<CachedDataRoots>(data_root, cached)?;
+        db_tx.put::<CachedDataRoots>(data_root.0, cached)?;
         Ok(())
     })?;
 
     let anchor = node.get_anchor().await?;
     let ingress_proof = generate_ingress_proof(
         signer,
-        data_root,
+        data_root.0,
         chunks.iter().copied().map(Ok),
         config.consensus_config().chain_id,
         anchor,

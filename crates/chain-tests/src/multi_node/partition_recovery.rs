@@ -379,7 +379,7 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     ];
     for (ledger, tx) in &shared_txs {
         assert!(
-            has_data_root_in_storage_module(&genesis, *ledger, 0, tx.header.data_root),
+            has_data_root_in_storage_module(&genesis, *ledger, 0, tx.header.data_tree_root.0),
             "{:?}: shared tx data_root should still be indexed after recovery",
             ledger
         );
@@ -424,7 +424,7 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     ];
     for (ledger, tx) in &genesis_orphaned_txs {
         assert!(
-            !has_data_root_in_storage_module(&genesis, *ledger, 0, tx.header.data_root),
+            !has_data_root_in_storage_module(&genesis, *ledger, 0, tx.header.data_tree_root.0),
             "{:?}: genesis orphaned tx data_root should be CLEARED after recovery",
             ledger
         );
@@ -442,10 +442,10 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
         (DataLedger::ThirtyDay, &peer_thirty_day_tx),
     ];
     for (ledger, tx) in &peer_unique_txs {
-        let data_root = tx.header.data_root;
+        let data_root = tx.header.data_tree_root;
         let mut found = false;
         for _ in 0..seconds_to_wait {
-            if has_data_root_in_storage_module(&genesis, *ledger, 0, data_root) {
+            if has_data_root_in_storage_module(&genesis, *ledger, 0, data_root.0) {
                 found = true;
                 break;
             }

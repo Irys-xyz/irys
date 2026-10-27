@@ -753,7 +753,7 @@ pub async fn assert_chunks_match_original(
         .data_chunks()
         .map_err(|e| DataTxError::TxBuild(format!("data_chunks(): {e}")))?;
     let ledger_id = DataLedger::Publish as u32;
-    let data_root = tx.header.data_root;
+    let data_root = tx.header.data_tree_root;
     // Packing is node-local, so only the packing-invariant identity + Merkle
     // proof are comparable against the original unpacked chunk.
     let schema = SchemaConfig {

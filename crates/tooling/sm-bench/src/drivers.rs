@@ -24,6 +24,7 @@
 //! next commit while those chunks are paced. Production indexes on the chunk
 //! migration service and writes bodies on another task.
 
+use irys_types::DataTreeRoot;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -698,7 +699,7 @@ fn build_tx(tag: &[u8], start: u32, chunks: u32, chunk_size: u64) -> BuiltTx {
     let root = keyed(tag, u64::from(start));
     let data_size = u64::from(chunks).saturating_mul(chunk_size);
     let mut header = DataTransactionHeader::default();
-    header.data_root = root;
+    header.data_tree_root = DataTreeRoot(root);
     header.data_size = data_size;
     header.prefix_hash = H256::zero();
     let path_hash = keyed(b"tx-path", u64::from(start));
@@ -852,7 +853,7 @@ fn unpacked(root: H256, data_size: u64, tx_offset: u32, chunk_size: u64) -> Unpa
     data_path.extend_from_slice(&root.0);
     data_path.extend_from_slice(&tx_offset.to_le_bytes());
     UnpackedChunk {
-        data_root: root,
+        data_tree_root: DataTreeRoot(root),
         data_size,
         data_path: Base64(data_path),
         bytes: Base64(vec![0x5A; usize::try_from(chunk_size).unwrap_or(0)]),

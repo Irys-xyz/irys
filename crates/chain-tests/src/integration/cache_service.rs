@@ -111,14 +111,14 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
 
     // upload chunk(s)
     for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
-        let data_root = tx.header.data_root;
+        let data_root = tx.header.data_tree_root;
         let data_size = tx.header.data_size;
         let min = chunk_node.min_byte_range;
         let max = chunk_node.max_byte_range;
         let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
 
         let chunk = UnpackedChunk {
-            data_root,
+            data_tree_root: data_root,
             data_size,
             data_path,
             bytes: Base64(data_bytes[min..max].to_vec()),

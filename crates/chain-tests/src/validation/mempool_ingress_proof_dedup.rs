@@ -1,4 +1,5 @@
 use crate::utils::IrysNodeTest;
+use irys_types::DataTreeRoot;
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{
     DataTransactionHeader, DataTransactionHeaderV1, H256, IrysTransactionCommon as _, NodeConfig,
@@ -81,7 +82,7 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
             id: H256::zero(),
             anchor,
             signer: signer_a.address(),
-            data_root: data_root_1,
+            data_tree_root: DataTreeRoot(data_root_1),
             data_size: data_bytes_1.len() as u64,
             prefix_size: 0,
             prefix_hash: H256::zero(),
@@ -130,7 +131,7 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
             id: H256::zero(),
             anchor,
             signer: signer_a.address(),
-            data_root: data_root_2,
+            data_tree_root: DataTreeRoot(data_root_2),
             data_size: data_bytes_2.len() as u64,
             prefix_size: 0,
             prefix_hash: H256::zero(),

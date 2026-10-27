@@ -56,7 +56,7 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
         .await?;
 
     // Use the data_root of that transaction to compose another with a single chunk data_size
-    let data_root = valid_tx.header.data_root;
+    let data_root = valid_tx.header.data_tree_root;
     let bad_data_size = 32 * 3; // 3 chunks worth
 
     // Query the price endpoint to get required fees
@@ -72,7 +72,7 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
         price_info.term_fee.into(),
     )?;
 
-    wrong_data_size_tx.header.data_root = data_root;
+    wrong_data_size_tx.header.data_tree_root = data_root;
     wrong_data_size_tx.header.data_size = bad_data_size;
     wrong_data_size_tx = genesis_signer.sign_transaction(wrong_data_size_tx)?;
 

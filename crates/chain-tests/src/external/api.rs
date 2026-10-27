@@ -107,7 +107,10 @@ async fn external_api() -> eyre::Result<()> {
     let ingress_proof = loop {
         // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
         let ro_tx = &node.node_ctx.db.0.tx().unwrap();
-        match ro_tx.get::<IngressProofs>(recv_tx.data_root).unwrap() {
+        match ro_tx
+            .get::<IngressProofs>(recv_tx.data_tree_root.0)
+            .unwrap()
+        {
             Some(ip) => break ip,
             None => sleep(Duration::from_millis(100)).await,
         }
@@ -117,7 +120,7 @@ async fn external_api() -> eyre::Result<()> {
         "got ingress proof for data root {}",
         &ingress_proof.proof.data_root
     );
-    assert_eq!(&ingress_proof.proof.data_root, &recv_tx.data_root);
+    assert_eq!(&ingress_proof.proof.data_root, &recv_tx.data_tree_root.0);
 
     let id: String = tx_id.to_string();
 

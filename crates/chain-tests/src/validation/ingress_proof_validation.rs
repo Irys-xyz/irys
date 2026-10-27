@@ -102,7 +102,7 @@ async fn block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Result<()>
             .expect("create mdbx read tx");
         let mut found_proof = None;
         for (root, cached) in walk_all::<IngressProofsTable, _>(&ro_tx).expect("walk proofs") {
-            if root == tx.header.data_root {
+            if root == tx.header.data_tree_root.0 {
                 found_proof = Some(cached.proof.clone());
                 break;
             }
@@ -285,7 +285,7 @@ async fn mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()> {
     // Generate proof from signer B (currently unstaked, but proof is still valid structurally)
     let signer_b_proof = generate_ingress_proof(
         &signer_b,
-        tx.header.data_root,
+        tx.header.data_tree_root.0,
         chunks.iter().map(|c| Ok(c.as_slice())),
         chain_id,
         anchor,
@@ -405,7 +405,7 @@ async fn heavy_mempool_rejects_unstaked_but_accepts_pending_stake_ingress_proofs
     let make_proof = |signer: &IrysSigner, anchor| {
         generate_ingress_proof(
             signer,
-            tx.header.data_root,
+            tx.header.data_tree_root.0,
             chunks.iter().map(|c| Ok(c.as_slice())),
             consensus.chain_id,
             anchor,

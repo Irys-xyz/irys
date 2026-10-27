@@ -1774,14 +1774,15 @@ impl IrysNodeTest<IrysNodeCtx> {
                 };
                 last_header_found = true;
                 let n = ingress_proofs_by_root
-                    .get(&tx_header.data_root)
+                    .get(&tx_header.data_tree_root.0)
                     .map(Vec::len)
                     .unwrap_or(0);
                 last_have = n;
                 if n >= num_proofs {
-                    if let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root) {
+                    if let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_tree_root.0)
+                    {
                         for ingress_proof in tx_proofs.iter() {
-                            assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                            assert_eq!(ingress_proof.proof.data_root, tx_header.data_tree_root.0);
                             tracing::info!(
                                 "proof {} signer: {}",
                                 ingress_proof.proof.id(),
@@ -3015,19 +3016,19 @@ impl IrysNodeTest<IrysNodeCtx> {
                         if let Ok(Some((_meta, cached_chunk))) = self.node_ctx.db.view_eyre(|tx| {
                             irys_database::cached_chunk_by_chunk_offset(
                                 tx,
-                                tx_header.data_root,
+                                tx_header.data_tree_root.0,
                                 tx_chunk_offset,
                             )
                         }) && let Some(bytes) = cached_chunk.chunk
                         {
                             let unpacked = irys_types::UnpackedChunk {
-                                data_root: tx_header.data_root,
+                                data_tree_root: tx_header.data_tree_root,
                                 data_size: tx_header.data_size,
                                 data_path: irys_types::Base64(cached_chunk.data_path.0.clone()),
                                 bytes,
                                 tx_offset: tx_chunk_offset,
                             };
-                            let verify_data_root = unpacked.data_root;
+                            let verify_data_root = unpacked.data_tree_root;
                             let verify_tx_offset = unpacked.tx_offset;
 
                             let (ctx, crx) = tokio::sync::oneshot::channel();
@@ -3054,7 +3055,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                                         .view_eyre(|tx| {
                                             irys_database::cached_chunk_by_chunk_offset(
                                                 tx,
-                                                verify_data_root,
+                                                verify_data_root.0,
                                                 verify_tx_offset,
                                             )
                                         })
@@ -3222,7 +3223,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         chunks: &[[u8; 32]],
     ) -> (reqwest::StatusCode, String) {
         let chunk = UnpackedChunk {
-            data_root: tx.header.data_root,
+            data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
             data_path: Base64(tx.proofs[chunk_index].proof.clone()),
             bytes: Base64(chunks[chunk_index].to_vec()),
@@ -3255,7 +3256,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         debug!("chunk_index: {:?}", chunk_index);
         assert_eq!(status, reqwest::StatusCode::OK);
         let offset = TxChunkOffset::from(u32::try_from(chunk_index).expect("chunk index fits u32"));
-        self.wait_until_chunk_accepted(tx.header.data_root, offset, 10)
+        self.wait_until_chunk_accepted(tx.header.data_tree_root.0, offset, 10)
             .await
             .expect("chunk accepted after POST /v1/chunk 200");
     }
@@ -4481,7 +4482,7 @@ pub async fn post_chunk<T, B>(
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
 {
     let chunk = UnpackedChunk {
-        data_root: tx.header.data_root,
+        data_tree_root: tx.header.data_tree_root,
         data_size: tx.header.data_size,
         data_path: Base64(tx.proofs[chunk_index].proof.clone()),
         bytes: Base64(chunks[chunk_index].to_vec()),

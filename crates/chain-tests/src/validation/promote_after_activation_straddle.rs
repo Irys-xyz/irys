@@ -279,7 +279,7 @@ async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result
     );
     let proof = generate_ingress_proof(
         &genesis_signer,
-        tx.header.data_root,
+        tx.header.data_tree_root.0,
         chunks.iter().map(|c| Ok(c.as_slice())),
         genesis_config.consensus_config().chain_id,
         proof_anchor,

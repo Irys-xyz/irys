@@ -849,7 +849,7 @@ async fn internal_chunks_serves_unpacked_proven_range_with_short_reads() -> eyre
         // and it validates against the tx's committed data_root at this chunk's byte position.
         assert_eq!(chunk.proof, tx.proofs[i].proof, "data_path at offset {i}");
         validate_path(
-            tx.header.data_root.0,
+            tx.header.data_tree_root.0.0,
             &Base64(chunk.proof.clone()),
             start as u128,
         )?;

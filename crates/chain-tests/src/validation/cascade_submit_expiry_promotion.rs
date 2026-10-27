@@ -395,7 +395,7 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
     let chunks: Vec<Vec<u8>> = vec![target_data.into()];
     let proof = generate_ingress_proof(
         &genesis_signer,
-        expired_tx.data_root,
+        expired_tx.data_tree_root.0,
         chunks.iter().map(|c| Ok(c.as_slice())),
         genesis_config.consensus_config().chain_id,
         proof_anchor,

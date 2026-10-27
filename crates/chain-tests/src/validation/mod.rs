@@ -28,6 +28,7 @@ mod unpledge_partition;
 mod unstake_edge_cases;
 mod zero_oracle_price;
 
+use irys_types::DataTreeRoot;
 use std::sync::Arc;
 
 use crate::utils::{
@@ -1128,7 +1129,7 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
             id: H256::zero(),
             anchor,
             signer: test_signer.address(),
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: data_bytes.len() as u64,
             prefix_size: 0,
             prefix_hash: H256::zero(),
@@ -1475,7 +1476,7 @@ async fn publish_tx_rejected_when_db_submit_inclusion_exceeds_parent_height() ->
         metadata: Default::default(),
     });
     fake_tx.data_size = 32;
-    fake_tx.data_root = H256::random();
+    fake_tx.data_tree_root = DataTreeRoot(H256::random());
     fake_tx.anchor = genesis_node.get_anchor().await?;
     let fake_tx = fake_tx.sign(&signer)?;
     let fake_tx_id = fake_tx.id();
