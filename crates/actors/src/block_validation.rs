@@ -10689,7 +10689,11 @@ mod ingress_proof_local_bytes_tests {
         use irys_database::tables::CachedChunks;
         use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
-        let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
+        let path_hash = irys_types::data_tree::chunk_key(
+            tx.header
+                .data_commitment(&irys_types::data_tree::Geometry::TESTING),
+            TxChunkOffset::from(0),
+        );
         db.update_eyre(|wtx| {
             let existing = wtx.get::<CachedChunks>(path_hash)?.expect("cached chunk");
             wtx.put::<CachedChunks>(
@@ -11214,7 +11218,11 @@ mod ingress_proof_local_bytes_tests {
         use irys_database::tables::CachedChunks;
         use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
-        let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
+        let path_hash = irys_types::data_tree::chunk_key(
+            tx.header
+                .data_commitment(&irys_types::data_tree::Geometry::TESTING),
+            TxChunkOffset::from(0),
+        );
         db.update_eyre(|wtx| {
             let existing = wtx.get::<CachedChunks>(path_hash)?.expect("cached chunk");
             wtx.put::<CachedChunks>(

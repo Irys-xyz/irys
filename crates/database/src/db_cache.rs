@@ -2,7 +2,7 @@ use alloy_primitives::aliases::U232;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
 use irys_types::{
-    Base64, ChunkPathHash, Compact, DataCommitment, DataTreeRoot, H256, IrysAddress, TxChunkOffset,
+    Base64, ChunkKey, Compact, DataCommitment, DataTreeRoot, H256, IrysAddress, TxChunkOffset,
     UnixTimestamp, UnpackedChunk, partition::PartitionHash,
 };
 use reth_db::DatabaseError;
@@ -190,9 +190,10 @@ pub struct CachedChunkIndexEntry {
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
-/// structure containing any chunk cache index metadata, like the `chunk_path_hash` for chunk data lookups
+/// structure containing any chunk cache index metadata, like the `chunk_key` for chunk data lookups
 pub struct CachedChunkIndexMetadata {
-    pub chunk_path_hash: ChunkPathHash,
+    /// Key of the body in `CachedChunks`: `chunk_key(data_commitment, chunk index)`.
+    pub chunk_key: ChunkKey,
     /// Last time this index entry was updated
     pub updated_at: UnixTimestamp,
 }

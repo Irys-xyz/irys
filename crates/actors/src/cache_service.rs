@@ -3698,11 +3698,14 @@ mod tests {
         db.update(|wtx| {
             // Manually insert index and chunk entries with controlled timestamps
             let chunk_old = mk_chunk(tx_header_old.data_tree_root.0, 0, 10);
-            let hash_old = chunk_old.chunk_path_hash();
+            let hash_old = irys_types::data_tree::chunk_key(
+                tx_header_old.data_commitment(&irys_types::data_tree::Geometry::TESTING),
+                chunk_old.tx_offset,
+            );
             let idx_old = irys_database::db_cache::CachedChunkIndexEntry {
                 index: chunk_old.tx_offset,
                 meta: irys_database::db_cache::CachedChunkIndexMetadata {
-                    chunk_path_hash: hash_old,
+                    chunk_key: hash_old,
                     updated_at: UnixTimestamp::from_secs(0),
                 },
             };
@@ -3722,11 +3725,14 @@ mod tests {
                 irys_types::generate_ingress_data_hash(&chunk_old.bytes.0, address),
             )?;
             let chunk_new = mk_chunk(tx_header_new.data_tree_root.0, 0, 11);
-            let hash_new = chunk_new.chunk_path_hash();
+            let hash_new = irys_types::data_tree::chunk_key(
+                tx_header_new.data_commitment(&irys_types::data_tree::Geometry::TESTING),
+                chunk_new.tx_offset,
+            );
             let idx_new = irys_database::db_cache::CachedChunkIndexEntry {
                 index: chunk_new.tx_offset,
                 meta: irys_database::db_cache::CachedChunkIndexMetadata {
-                    chunk_path_hash: hash_new,
+                    chunk_key: hash_new,
                     updated_at: UnixTimestamp::from_secs(10),
                 },
             };

@@ -1206,7 +1206,7 @@ mod tests {
             }],
         };
         let cache_key = DataCommitment(H256::from([5_u8; 32]));
-        let chunk_path_hash = H256::from([6_u8; 32]);
+        let chunk_key = irys_types::ChunkKey(H256::from([6_u8; 32]));
         let address = IrysAddress::from_slice(&[7_u8; 20]);
 
         {
@@ -1217,7 +1217,7 @@ mod tests {
             crate::insert_block_index_item(&write_tx, 0, &block_index_item)?;
             write_tx.put::<CachedDataRoots>(cache_key, CachedDataRoot::default())?;
             write_tx.put::<CachedChunksIndex>(cache_key, CachedChunkIndexEntry::default())?;
-            write_tx.put::<CachedChunks>(chunk_path_hash, CachedChunk::default())?;
+            write_tx.put::<CachedChunks>(chunk_key, CachedChunk::default())?;
             write_tx.put::<CachedIngressLeaves>(
                 CachedIngressLeafKey {
                     data_commitment: cache_key,

@@ -17,12 +17,12 @@ use crate::tables::{
 use crate::db::{IrysDatabaseExt as _, IrysDupCursorExt};
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
-use irys_types::data_tree::Geometry;
+use irys_types::data_tree::{Geometry, chunk_key};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataCommitment,
-    DataLedger, DataTransactionHeader, DataTransactionMetadata, DataTreeRoot, DatabaseProvider,
+    BlockHash, BlockHeight, BlockIndexItem, CommitmentTransaction, DataCommitment, DataLedger,
+    DataTransactionHeader, DataTransactionMetadata, DataTreeRoot, DatabaseProvider,
     DatabaseVersion, H256, IngressMerkleLeaf, IngressProof, IrysAddress, IrysBlockHeader,
     IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset,
     UnixTimestamp, UnpackedChunk, expected_chunk_byte_range, generate_ingress_data_hash,
@@ -1196,12 +1196,14 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
     geometry: &Geometry,
 ) -> eyre::Result<IsDuplicate> {
     let data_commitment = chunk.data_commitment(geometry);
-    let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
+    // The body is keyed by (commitment, chunk index). Two commitments of one
+    // data tree root can share a data_path, so each keeps its own body row.
+    let chunk_key = chunk_key(data_commitment, chunk.tx_offset);
 
-    if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
+    if tx.get::<CachedChunks>(chunk_key)?.is_some() {
         warn!(
             "Chunk {} of {} is already cached, skipping..",
-            &chunk_path_hash, &data_commitment
+            &chunk_key, &data_commitment
         );
         return Ok(true);
     }
@@ -1209,7 +1211,7 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
     let value = CachedChunkIndexEntry {
         index: chunk.tx_offset,
         meta: CachedChunkIndexMetadata {
-            chunk_path_hash,
+            chunk_key,
             updated_at: UnixTimestamp::now()
                 .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?,
         },
@@ -1217,11 +1219,11 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
 
     debug!(
         "Caching chunk {} ({}) of {}",
-        &chunk.tx_offset, &chunk_path_hash, &data_commitment
+        &chunk.tx_offset, &chunk_key, &data_commitment
     );
 
     tx.put::<CachedChunksIndex>(data_commitment, value)?;
-    tx.put::<CachedChunks>(chunk_path_hash, chunk.into())?;
+    tx.put::<CachedChunks>(chunk_key, chunk.into())?;
     Ok(false)
 }
 
@@ -1254,20 +1256,12 @@ pub fn cached_chunk_by_chunk_offset<T: DbTx>(
         // the cached chunk always has an entry if the index entry exists
         Ok(Some((
             meta.clone(),
-            tx.get::<CachedChunks>(meta.chunk_path_hash)?
+            tx.get::<CachedChunks>(meta.chunk_key)?
                 .ok_or_else(|| eyre::eyre!("Chunk has an index entry but no data entry"))?,
         )))
     } else {
         Ok(None)
     }
-}
-
-/// Retrieves a [`CachedChunk`] from [`CachedChunks`] using its [`ChunkPathHash`]
-pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
-    tx: &T,
-    key: &ChunkPathHash,
-) -> Result<Option<CachedChunk>, DatabaseError> {
-    tx.get::<CachedChunks>(*key)
 }
 
 /// Retrieves one validated compact ingress leaf for an exact signer and tx offset.
@@ -1424,7 +1418,7 @@ pub fn backfill_cached_ingress_data_hashes(
             else {
                 continue;
             };
-            let Some(cached) = tx.get::<CachedChunks>(entry.meta.chunk_path_hash)? else {
+            let Some(cached) = tx.get::<CachedChunks>(entry.meta.chunk_key)? else {
                 warn!(
                     %data_commitment,
                     tx_offset = %entry.index,
@@ -1483,7 +1477,7 @@ pub fn backfill_cached_ingress_data_hashes(
             missing.push((
                 data_commitment,
                 entry.index,
-                entry.meta.chunk_path_hash,
+                entry.meta.chunk_key,
                 ingress_data_hash,
             ));
         }
@@ -1492,9 +1486,9 @@ pub fn backfill_cached_ingress_data_hashes(
 
     let inserted_roots = db.update_eyre(|tx| {
         let mut inserted_roots = BTreeSet::new();
-        for (data_commitment, tx_offset, chunk_path_hash, ingress_data_hash) in &missing {
+        for (data_commitment, tx_offset, chunk_key, ingress_data_hash) in &missing {
             if tx.get::<CachedDataRoots>(*data_commitment)?.is_none()
-                || tx.get::<CachedChunks>(*chunk_path_hash)?.is_none()
+                || tx.get::<CachedChunks>(*chunk_key)?.is_none()
             {
                 continue;
             }
@@ -1541,7 +1535,7 @@ pub fn delete_ingress_leaves_by_data_root<T: DbTx + DbTxMut>(
     Ok(deleted)
 }
 
-/// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkPathHash`] in [`CachedChunksIndex`]
+/// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkKey`] in [`CachedChunksIndex`]
 /// It also removes the index values
 pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
     tx: &T,
@@ -1553,7 +1547,7 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
     let mut walker = cursor.walk_dup(Some(data_commitment), None)?; // iterate a specific key's subkeys
     while let Some((_k, c)) = walker.next().transpose()? {
         // delete them
-        tx.delete::<CachedChunks>(c.meta.chunk_path_hash, None)?;
+        tx.delete::<CachedChunks>(c.meta.chunk_key, None)?;
         chunks_pruned += 1;
     }
     // delete the key (and all subkeys) from the index
@@ -1621,7 +1615,7 @@ pub fn reclaim_cached_chunks_older_than<T: DbTx + DbTxMut>(
             counts.no_ingress_hash += 1;
             continue;
         }
-        tx.delete::<CachedChunks>(entry.meta.chunk_path_hash, None)?;
+        tx.delete::<CachedChunks>(entry.meta.chunk_key, None)?;
         tx.delete::<CachedChunksIndex>(data_commitment, Some(entry))?;
         counts.deleted += 1;
     }
@@ -1646,7 +1640,7 @@ pub fn delete_unprotected_cached_chunks_older_than<T: DbTxMut>(
         if entry.meta.updated_at >= older_than || !tx_offsets.contains(&entry.index) {
             continue;
         }
-        tx.delete::<CachedChunks>(entry.meta.chunk_path_hash, None)?;
+        tx.delete::<CachedChunks>(entry.meta.chunk_key, None)?;
         tx.delete::<CachedChunksIndex>(data_commitment, Some(entry))?;
         chunks_pruned += 1;
     }
@@ -2183,6 +2177,61 @@ mod tests {
         tx_header_by_txid,
     };
     use reth_db::mdbx::DatabaseArguments;
+
+    /// Two commitments of one data tree root can carry byte-identical chunk
+    /// paths. Each keeps its own index row and body, and pruning one leaves
+    /// the other readable.
+    #[test]
+    fn two_sizes_of_one_root_keep_their_own_cached_bodies() -> eyre::Result<()> {
+        use super::{
+            cache_chunk_verified, cached_chunk_by_chunk_offset, delete_cached_chunks_by_data_root,
+        };
+        use irys_types::data_tree::{Geometry, data_commitment};
+        use irys_types::{Base64, DataTreeRoot, TxChunkOffset, UnpackedChunk};
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let geometry = Geometry::TESTING;
+        let root = DataTreeRoot(H256::repeat_byte(0x2A));
+        let chunk_of_size = |data_size: u64| UnpackedChunk {
+            data_tree_root: root,
+            data_size,
+            data_path: Base64(vec![9_u8; 64]),
+            bytes: Base64(vec![7_u8; 32]),
+            tx_offset: TxChunkOffset::from(0),
+        };
+        let small = chunk_of_size(64);
+        let large = chunk_of_size(96);
+        assert_eq!(small.chunk_path_hash(), large.chunk_path_hash());
+        let small_commitment = data_commitment(&geometry, root, 64);
+        let large_commitment = data_commitment(&geometry, root, 96);
+        assert_ne!(small_commitment, large_commitment);
+
+        let small_was_duplicate =
+            db.update_eyre(|tx| cache_chunk_verified(tx, &small, &geometry))?;
+        let large_was_duplicate =
+            db.update_eyre(|tx| cache_chunk_verified(tx, &large, &geometry))?;
+        assert!(!small_was_duplicate && !large_was_duplicate);
+
+        let read = |commitment| {
+            db.view_eyre(|tx| cached_chunk_by_chunk_offset(tx, commitment, TxChunkOffset::from(0)))
+        };
+        let (small_meta, small_body) = read(small_commitment)?.expect("small size is cached");
+        let (large_meta, large_body) = read(large_commitment)?.expect("large size is cached");
+        assert_ne!(small_meta.chunk_key, large_meta.chunk_key);
+        assert_eq!(small_body.chunk, Some(small.bytes.clone()));
+        assert_eq!(large_body.chunk, Some(large.bytes.clone()));
+
+        db.update_eyre(|tx| delete_cached_chunks_by_data_root(tx, small_commitment))?;
+        assert!(read(small_commitment)?.is_none());
+        let (_, large_body) = read(large_commitment)?.expect("large size survives the prune");
+        assert_eq!(large_body.chunk, Some(large.bytes));
+        Ok(())
+    }
 
     #[test]
     fn block_stream_log_append_read_prune() -> eyre::Result<()> {
