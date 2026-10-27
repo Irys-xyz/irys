@@ -76,7 +76,7 @@ mod tests {
         TxPathInterval, TxPathIntervalByStart,
     };
     use irys_database::{open_or_create_db, submodule_db_args};
-    use irys_domain::StorageModuleInfo;
+    use irys_domain::{PACKING_PARAMS_FILE_NAME, PackingParams, StorageModuleInfo};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::storage::ii;
     use irys_types::{Config, H256, NodeConfig, PartitionChunkOffset};
@@ -132,10 +132,19 @@ mod tests {
         tx.commit()?;
         // Open drops tx intervals when this file is missing. A live module
         // already has it. `Data` keeps the rows the migration just wrote.
-        write_data_intervals(base, name)
+        write_data_intervals(config, base, name)
     }
 
-    fn write_data_intervals(base: &Path, name: &str) -> eyre::Result<()> {
+    /// `Data` labels plus the matching `packing_params.toml`. Open refuses
+    /// labels that have no packing identity.
+    fn write_data_intervals(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
+        PackingParams {
+            packing_address: config.node_config.miner_address(),
+            entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
+            chunk_size: Some(config.consensus.chunk_size),
+            ..Default::default()
+        }
+        .write_to_disk(&base.join(name).join(PACKING_PARAMS_FILE_NAME))?;
         let mut intervals = String::from("[[{\"start\":0,\"end\":");
         intervals.push_str(&(CHUNKS - 1).to_string());
         intervals.push_str("},\"Data\"]]");
@@ -162,7 +171,7 @@ mod tests {
         )?;
         tx.commit()?;
         drop(env);
-        write_data_intervals(base, name)
+        write_data_intervals(config, base, name)
     }
 
     /// `rocks/SCHEMA` with an MDBX config. Open must refuse this directory.
