@@ -1903,6 +1903,137 @@ mod tests {
         Ok(())
     }
 
+    /// Two headers share one tree root with sizes 64 and 96. Each upload's
+    /// chunks check against their own commitment, so feeding both uploads in
+    /// mixed order completes both cache rows.
+    #[tokio::test]
+    async fn same_root_two_sizes_both_complete() -> eyre::Result<()> {
+        use irys_database::{cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _};
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-same-root-two-sizes")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            inner.config.data_tree_geometry(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        // Three chunks of 32 bytes. The 64-byte upload is the first two.
+        let data: Vec<u8> = (0..96_u8).collect();
+        let (data_root, proofs) = data_tree_with_proofs(&data)?;
+        insert_cached_data_root(&inner.irys_db, data_root, 64);
+        insert_cached_data_root(&inner.irys_db, data_root, 96);
+        let chunk_of = |data_size: u64, chunk_index: u32| {
+            let start = chunk_index as usize * 32;
+            UnpackedChunk {
+                data_tree_root: DataTreeRoot(data_root),
+                data_size,
+                data_path: proofs[chunk_index as usize].clone().into(),
+                bytes: data[start..start + 32].to_vec().into(),
+                tx_offset: TxChunkOffset::from(chunk_index),
+            }
+        };
+
+        for (data_size, chunk_index) in [(96, 2), (64, 1), (96, 0), (64, 0), (96, 1)] {
+            inner
+                .handle_chunk_ingress_message(chunk_of(data_size, chunk_index))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("chunk {chunk_index} of the {data_size}-byte upload: {error:?}")
+                });
+        }
+
+        inner.irys_db.view_eyre(|tx| {
+            for (data_size, chunk_count) in [(64_u64, 2_u32), (96, 3)] {
+                for chunk_index in 0..chunk_count {
+                    let (_, cached) = cached_chunk_by_chunk_offset(
+                        tx,
+                        size_key(data_root, data_size),
+                        TxChunkOffset::from(chunk_index),
+                    )?
+                    .unwrap_or_else(|| {
+                        panic!("chunk {chunk_index} of the {data_size}-byte upload is cached")
+                    });
+                    assert_eq!(
+                        cached.chunk,
+                        Some(chunk_of(data_size, chunk_index).bytes),
+                        "chunk {chunk_index} of the {data_size}-byte upload"
+                    );
+                }
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// A chunk whose `data_size` no header names parks under its own
+    /// commitment. It is not checked against the known size of the same root
+    /// and is not a fault. The pending-entry cap evicts it like any other
+    /// chunk that waits for its header.
+    #[tokio::test]
+    async fn chunk_with_an_unknown_size_parks_and_is_not_a_fault() -> eyre::Result<()> {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-unknown-size")
+            .build();
+        let (inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        let data: Vec<u8> = (0..96_u8).collect();
+        let (data_root, proofs) = data_tree_with_proofs(&data)?;
+        insert_cached_data_root(&inner.irys_db, data_root, 64);
+        let unknown_size_chunk = UnpackedChunk {
+            data_tree_root: DataTreeRoot(data_root),
+            data_size: 96,
+            data_path: proofs[2].clone().into(),
+            bytes: data[64..96].to_vec().into(),
+            tx_offset: TxChunkOffset::from(2),
+        };
+
+        inner
+            .handle_chunk_ingress_message(unknown_size_chunk)
+            .await
+            .expect("a chunk whose size no header names parks; it is not a fault");
+        {
+            let pending = inner.pending_chunks.read().await;
+            let parked = pending
+                .get(&size_key(data_root, 96))
+                .expect("the chunk parks under its own commitment");
+            assert!(parked.peek(&TxChunkOffset::from(2)).is_some());
+            assert!(
+                pending.get(&size_key(data_root, 64)).is_none(),
+                "the 64-byte header owns no part of this chunk"
+            );
+        }
+
+        // Other uploads that wait for their headers fill the pending-entry
+        // cap. Each holds two chunks, so the one-chunk entry is evicted first.
+        for other_upload in 1..=PENDING_ENTRY_CAP as u8 {
+            let other_root = H256([other_upload; 32]);
+            for chunk_index in 0..2_u32 {
+                inner
+                    .handle_chunk_ingress_message(chunk_with(
+                        other_root,
+                        chunk_index,
+                        other_upload,
+                        CLAIMED_DATA_SIZE,
+                    ))
+                    .await
+                    .expect("a chunk that waits for its header parks");
+            }
+        }
+        assert!(
+            inner
+                .pending_chunks
+                .read()
+                .await
+                .get(&size_key(data_root, 96))
+                .is_none(),
+            "the full pending-entry cap evicts the parked chunk"
+        );
+        Ok(())
+    }
+
     /// Closed cache writer: ingress reaches `queue_write` and fails before the
     /// batch commits. The drain must put that body back and schedule another drain.
     #[tokio::test]
@@ -2933,6 +3064,9 @@ mod tests {
         expect_no_redrain(&mut receivers).await;
     }
 
+    /// Uploads that `test_ingress_inner` parks at once.
+    const PENDING_ENTRY_CAP: usize = 8;
+
     /// One chunk of the test config (`chunk_size` 32) is not enough for offsets 0..=2.
     const CLAIMED_DATA_SIZE: u64 = 96;
 
@@ -3307,7 +3441,7 @@ mod tests {
             )),
             recent_valid_chunks: RwLock::new(LruCache::new(NonZeroUsize::new(8).expect("nonzero"))),
             pending_chunks: std::sync::Arc::new(RwLock::new(
-                super::super::PriorityPendingChunks::new(8, preheader_cap),
+                super::super::PriorityPendingChunks::new(PENDING_ENTRY_CAP, preheader_cap),
             )),
             pending_ingress_proofs: std::sync::Mutex::new(
                 super::super::pending_ingress_proofs::PendingIngressProofs::new(8),
