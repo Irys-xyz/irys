@@ -8539,7 +8539,7 @@ mod tests {
             block_offset: 0,
             poa: PoaData {
                 tx_path: Some(Base64(tx_paths[0].proof.clone())),
-                data_path: Some(Base64(tx.proofs[0].proof.clone())),
+                data_path: Some(tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap()),
                 chunk: Some(Base64(packed)),
                 ledger_id: Some(DataLedger::Submit.into()),
                 partition_chunk_offset: 0,
@@ -8909,14 +8909,14 @@ mod tests {
                 &context,
                 &left_bytes,
                 &tx_paths[0].proof,
-                &left.proofs[0].proof,
+                &left.chunk_proof(TxChunkOffset::from(0_u32)).unwrap().0,
                 0,
             ),
             pack_chunk_poa(
                 &context,
                 &right_bytes,
                 &tx_paths[2].proof,
-                &right.proofs[0].proof,
+                &right.chunk_proof(TxChunkOffset::from(0_u32)).unwrap().0,
                 1,
             ),
         ];
@@ -9027,14 +9027,16 @@ mod tests {
         let mut block_offset = 0_u64;
         for (tx_index, tx) in txs.iter().enumerate() {
             let tx_bytes = &data[tx_index];
-            for chunk_index in 0..tx.proofs.len() {
+            for chunk_index in 0..tx.data_chunks().unwrap().len() {
                 let start = chunk_index * chunk_size;
                 let end = (start + chunk_size).min(tx_bytes.len());
                 let mut built = pack_chunk_poa(
                     context,
                     &tx_bytes[start..end],
                     &tx_paths[tx_index].proof,
-                    &tx.proofs[chunk_index].proof,
+                    &tx.chunk_proof(TxChunkOffset::from(u32::try_from(chunk_index).unwrap()))
+                        .unwrap()
+                        .0,
                     block_offset,
                 );
                 built.tx_index = tx_index;
@@ -9336,7 +9338,11 @@ mod tests {
 
         let poa = PoaData {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
-            data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
+            data_path: Some(
+                txs[poa_tx_num]
+                    .chunk_proof(TxChunkOffset::from(u32::try_from(poa_chunk_num).unwrap()))
+                    .unwrap(),
+            ),
             chunk: Some(Base64(poa_chunk.clone())),
             ledger_id: Some(DataLedger::Submit.into()),
             partition_chunk_offset: poa_offset.try_into().expect("Value exceeds u32::MAX"),
@@ -9574,7 +9580,10 @@ mod tests {
         let chunk_end_offset = chunk_start_offset + hacked_data.len().min(32); // This chunk's end
 
         // Create fake leaf proof with the entropy-packed hash and correct offset
-        let mut hacked_data_path = txs[poa_tx_num].proofs[poa_chunk_num].proof.clone();
+        let mut hacked_data_path = txs[poa_tx_num]
+            .chunk_proof(TxChunkOffset::from(u32::try_from(poa_chunk_num).unwrap()))
+            .unwrap()
+            .0;
         let hacked_data_path_len = hacked_data_path.len();
         if hacked_data_path_len < 64 {
             hacked_data_path.resize(64, 0);
@@ -10669,7 +10678,7 @@ mod ingress_proof_local_bytes_tests {
                 &UnpackedChunk {
                     data_tree_root: tx.header.data_tree_root,
                     data_size: tx.header.data_size,
-                    data_path: Base64(tx.proofs[0].proof.clone()),
+                    data_path: tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap(),
                     bytes: Base64(data.to_vec()),
                     tx_offset: TxChunkOffset::from(0_u32),
                 },
@@ -10810,7 +10819,7 @@ mod ingress_proof_local_bytes_tests {
         sm.write_data_chunk(&UnpackedChunk {
             data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
-            data_path: Base64(tx.proofs[0].proof.clone()),
+            data_path: tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap(),
             bytes: Base64(data.clone()),
             tx_offset: TxChunkOffset::from(0_u32),
         })
@@ -10875,7 +10884,7 @@ mod ingress_proof_local_bytes_tests {
         sm.write_data_chunk(&UnpackedChunk {
             data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
-            data_path: Base64(tx.proofs[0].proof.clone()),
+            data_path: tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap(),
             bytes: Base64(bytes.to_vec()),
             tx_offset: TxChunkOffset::from(0_u32),
         })
@@ -11092,7 +11101,7 @@ mod ingress_proof_local_bytes_tests {
         let peer_body = serde_json::to_vec(&irys_types::ChunkFormat::Unpacked(UnpackedChunk {
             data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
-            data_path: Base64(tx.proofs[0].proof.clone()),
+            data_path: tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap(),
             bytes: Base64(data.clone()),
             tx_offset: TxChunkOffset::from(0_u32),
         }))
@@ -11311,7 +11320,7 @@ mod ingress_proof_local_bytes_tests {
     fn remember_data_path(sm: &StorageModule, tx: &DataTransaction) {
         use irys_database::submodule::SubmoduleStore as _;
 
-        let path = tx.proofs[0].proof.clone();
+        let path = tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap().0;
         let path_hash = UnpackedChunk::hash_data_path(&path);
         let offset = PartitionChunkOffset::from(0_u32);
         let (_, submodule) = sm.get_submodule_for_offset(offset).unwrap();

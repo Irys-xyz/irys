@@ -1,4 +1,5 @@
 use crate::DataTreeRoot;
+use crate::data_tree::Geometry;
 use crate::{
     Base64, BoundedFee, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
     H256, HandshakeRequest, HandshakeRequestV2, IngressProof, IrysAddress, IrysBlockHeader,
@@ -18,7 +19,8 @@ use k256::ecdsa::SigningKey;
 pub struct IrysSigner {
     pub signer: SigningKey,
     pub chain_id: u64,
-    pub chunk_size: u64,
+    /// The geometry the signer builds data trees with.
+    pub data_tree_geometry: Geometry,
 }
 
 /// Encapsulates an Irys API for doing client type things, making transactions,
@@ -30,7 +32,9 @@ impl IrysSigner {
         Self {
             signer: k256::ecdsa::SigningKey::random(&mut OsRng),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config
+                .data_tree_geometry()
+                .expect("data tree geometry is validated at load"),
         }
     }
 
@@ -51,7 +55,7 @@ impl IrysSigner {
         anchor: H256,     //TODO!: more parameters as they are implemented
         store_data: bool, // whether we should store the data from the iterator in the tx's `data` field
     ) -> Result<DataTransaction> {
-        let mut transaction = self.merklize(data, self.chunk_size as usize, store_data)?;
+        let mut transaction = self.merklize(data, store_data)?;
 
         // TODO: These should be calculated from some pricing params passed in
         // as a parameter
@@ -199,9 +203,9 @@ impl IrysSigner {
     fn merklize(
         &self,
         data: impl Iterator<Item = eyre::Result<Vec<u8>>>,
-        chunk_size: usize,
         store_data: bool,
     ) -> Result<DataTransaction> {
+        let chunk_size = usize::try_from(self.data_tree_geometry.chunk_size())?;
         // TODO: fix the `data` field so we can use "streaming" data sources
         let (data, chunks) = if store_data {
             let data: eyre::Result<Vec<Vec<u8>>> = data.collect();

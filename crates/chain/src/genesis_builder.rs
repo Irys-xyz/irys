@@ -576,7 +576,7 @@ fn signer_from_key(key: &SigningKey, config: &Config) -> IrysSigner {
     IrysSigner {
         signer: key.clone(),
         chain_id: config.consensus.chain_id,
-        chunk_size: config.consensus.chunk_size,
+        data_tree_geometry: config.data_tree_geometry(),
     }
 }
 

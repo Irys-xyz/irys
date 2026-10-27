@@ -7,7 +7,7 @@ use irys_domain::{ChunkType, StorageModule, StorageModuleInfo, StorageSubmodule}
 use irys_storage::*;
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::{
-    Base64, Config, ConsensusConfig, ConsensusOptions, DataCommitment, DataLedger, DataTransaction,
+    Config, ConsensusConfig, ConsensusOptions, DataCommitment, DataLedger, DataTransaction,
     DataTransactionHeader, DataTransactionLedger, H256, LedgerChunkOffset, LedgerChunkRange,
     NodeConfig, PartitionChunkOffset, PartitionChunkRange, TxChunkOffset, UnpackedChunk,
     ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
@@ -361,33 +361,24 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             cache_data_root(wtx, &tx.header, None, &config.data_tree_geometry())?;
             Ok(())
         });
-        let mut prev_byte_offset: u64 = 0;
-        info!("num chunks in tx: {:?}", tx.proofs.len());
-        for (i, proof) in tx.proofs.iter().enumerate() {
-            let chunk_bytes = Base64(
-                tx.data.clone().unwrap().0[prev_byte_offset as usize..=proof.last_byte_index]
-                    .to_vec(),
-            );
-
+        let chunks = tx.data_chunks().unwrap();
+        info!("num chunks in tx: {:?}", chunks.len());
+        for chunk in chunks {
             // verify the chunk length
-            assert_eq!(chunk_bytes.len(), config.consensus.chunk_size as usize);
+            assert_eq!(chunk.bytes.len(), config.consensus.chunk_size as usize);
 
-            // verify the chunk hash
-            let chunk_hash = hash_sha256(&chunk_bytes.0).unwrap();
-            assert_eq!(chunk_hash, tx.chunks[i].data_hash.unwrap());
-
-            let chunk = UnpackedChunk {
-                data_tree_root: tx.header.data_tree_root,
-                data_size: tx.header.data_size,
-                data_path: Base64(proof.proof.clone()),
-                bytes: chunk_bytes,
-                tx_offset: TxChunkOffset::from(
-                    TryInto::<u32>::try_into(i).expect("Value exceeds u32::MAX"),
-                ),
-            };
+            // verify the chunk against its proof
+            irys_types::data_tree::verify_data_chunk(
+                &config.data_tree_geometry(),
+                tx.header.data_tree_root,
+                tx.header.data_size,
+                chunk.tx_offset,
+                &chunk.bytes.0,
+                &chunk.data_path.0,
+            )
+            .unwrap();
 
             let _ = db.update_eyre(|tx| cache_chunk(tx, &chunk, &config.data_tree_geometry()));
-            prev_byte_offset = proof.last_byte_index as u64 + 1; // Update for next iteration
         }
     }
 

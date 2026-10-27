@@ -65,7 +65,7 @@ impl Config {
         IrysSigner {
             signer: self.node_config.mining_key.clone(),
             chain_id: self.consensus.chain_id,
-            chunk_size: self.consensus.chunk_size,
+            data_tree_geometry: self.data_tree_geometry(),
         }
     }
 

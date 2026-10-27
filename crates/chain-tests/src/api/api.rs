@@ -4,10 +4,7 @@ use actix_web::test;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use irys_packing::{PACKING_TYPE, PackingType, unpack};
-use irys_types::{
-    Base64, DataTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset, UnpackedChunk,
-    irys::IrysSigner,
-};
+use irys_types::{DataTransactionHeader, NodeConfig, PackedChunk, irys::IrysSigner};
 use rand::Rng as _;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -93,23 +90,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     info!("Transaction was posted");
 
     // Loop though each of the transaction chunks
-    for (index, chunk_node) in tx.chunks.iter().enumerate() {
-        let data_root = tx.header.data_tree_root;
-        let data_size = tx.header.data_size;
-        let min = chunk_node.min_byte_range;
-        let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[index].proof.clone());
-
-        let chunk = UnpackedChunk {
-            data_tree_root: data_root,
-            data_size,
-            data_path,
-            bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: TxChunkOffset::from(
-                TryInto::<u32>::try_into(index).expect("Value exceeds u32::MAX"),
-            ),
-        };
-
+    for chunk in tx.data_chunks()? {
         // Make a POST request with JSON payload
         let req = test::TestRequest::post()
             .uri("/v1/chunk")

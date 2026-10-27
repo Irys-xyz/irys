@@ -1123,7 +1123,7 @@ mod tests {
         let testing_signer = IrysSigner {
             signer: testing_key,
             chain_id: 0,
-            chunk_size: 0,
+            data_tree_geometry: crate::data_tree::Geometry::TESTING,
         };
         config.genesis.miner_address = testing_signer.address();
         config.genesis.reward_address = testing_signer.address();
@@ -1147,7 +1147,7 @@ mod tests {
         let genesis_signer = IrysSigner {
             signer: genesis_signing_key,
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config.data_tree_geometry().unwrap(),
         };
 
         // Add genesis account to match test
@@ -1172,7 +1172,7 @@ mod tests {
         let signer = IrysSigner {
             signer: signing_key,
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config.data_tree_geometry().unwrap(),
         };
 
         let mining_addr = signer.address();

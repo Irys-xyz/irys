@@ -3228,7 +3228,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         let chunk = UnpackedChunk {
             data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
-            data_path: Base64(tx.proofs[chunk_index].proof.clone()),
+            data_path: tx
+                .chunk_proof(TxChunkOffset::from(u32::try_from(chunk_index).unwrap()))
+                .unwrap(),
             bytes: Base64(chunks[chunk_index].to_vec()),
             tx_offset: TxChunkOffset::from(chunk_index as u32),
         };
@@ -4493,7 +4495,9 @@ pub async fn post_chunk<T, B>(
     let chunk = UnpackedChunk {
         data_tree_root: tx.header.data_tree_root,
         data_size: tx.header.data_size,
-        data_path: Base64(tx.proofs[chunk_index].proof.clone()),
+        data_path: tx
+            .chunk_proof(TxChunkOffset::from(u32::try_from(chunk_index).unwrap()))
+            .unwrap(),
         bytes: Base64(chunks[chunk_index].to_vec()),
         tx_offset: TxChunkOffset::from(chunk_index as u32),
     };

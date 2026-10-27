@@ -10,7 +10,7 @@ use eyre::OptionExt as _;
 use irys_actors::block_stream_service::BlockStreamHandle;
 use irys_types::block_stream::{StreamEvent, StreamFrame};
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, DataLedger, H256, LedgerChunkOffset, NodeConfig, validate_path};
+use irys_types::{DataLedger, H256, LedgerChunkOffset, NodeConfig, TxChunkOffset};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -847,11 +847,20 @@ async fn internal_chunks_serves_unpacked_proven_range_with_short_reads() -> eyre
         );
         // The served proof is the stored data_path, byte-identical to the one the signer built,
         // and it validates against the tx's committed data_root at this chunk's byte position.
-        assert_eq!(chunk.proof, tx.proofs[i].proof, "data_path at offset {i}");
-        validate_path(
-            tx.header.data_tree_root.0.0,
-            &Base64(chunk.proof.clone()),
-            start as u128,
+        assert_eq!(
+            chunk.proof,
+            tx.chunk_proof(TxChunkOffset::from(u32::try_from(i).unwrap()))
+                .unwrap()
+                .0,
+            "data_path at offset {i}"
+        );
+        irys_types::data_tree::verify_data_chunk(
+            &node.node_ctx.config.data_tree_geometry(),
+            tx.header.data_tree_root,
+            tx.header.data_size,
+            TxChunkOffset::from(u32::try_from(i).unwrap()),
+            &chunk.bytes,
+            &chunk.proof,
         )?;
     }
 

@@ -8,7 +8,9 @@
 //! v1 wire-compat bug — exactly what these tests exist to flush out.
 
 use crate::run_config::SchemaConfig;
-use irys_types::{BoundedFee, DataLedger, DataTransaction, H256, U256, irys::IrysSigner};
+use irys_types::{
+    BoundedFee, DataLedger, DataTransaction, H256, U256, data_tree::Geometry, irys::IrysSigner,
+};
 use k256::ecdsa::SigningKey;
 use serde::Deserialize;
 use std::time::Duration;
@@ -87,10 +89,19 @@ struct PriceWire {
 pub fn dev_signer(chain_id: u64, chunk_size: u64) -> Result<IrysSigner, DataTxError> {
     let bytes = hex::decode(DEV_PRIVATE_KEY_HEX)?;
     let signer = SigningKey::from_slice(&bytes).map_err(|_| DataTxError::InvalidKey)?;
+    // The cluster runs a preset geometry; its chunk size names the preset.
+    let data_tree_geometry = [Geometry::MAINNET, Geometry::TESTING]
+        .into_iter()
+        .find(|geometry| geometry.chunk_size() == chunk_size)
+        .ok_or_else(|| {
+            DataTxError::TxBuild(format!(
+                "no data tree geometry preset has chunk_size {chunk_size}"
+            ))
+        })?;
     Ok(IrysSigner {
         signer,
         chain_id,
-        chunk_size,
+        data_tree_geometry,
     })
 }
 

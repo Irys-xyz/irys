@@ -16245,15 +16245,7 @@ mod tests {
 
         // Write only the middle chunk body; outer residual holes still resolve.
         let mid = 1_u32;
-        let min = tx.chunks[mid as usize].min_byte_range;
-        let max = tx.chunks[mid as usize].max_byte_range;
-        sm.write_data_chunk(&UnpackedChunk {
-            data_tree_root: data_root,
-            data_size: data_size as u64,
-            data_path: Base64(tx.proofs[mid as usize].proof.clone()),
-            bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: TxChunkOffset::from(mid),
-        })?;
+        sm.write_data_chunk(&tx.data_chunks()?[mid as usize])?;
         sm.sync_pending_chunks()?;
 
         for tx_off in 0..num_chunks {

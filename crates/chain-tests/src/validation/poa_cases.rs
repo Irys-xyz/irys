@@ -5,7 +5,7 @@ use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
     Base64, DataLedger, DataTransaction, DataTransactionLedger, LedgerChunkOffset, NodeConfig,
-    PoaData,
+    PoaData, TxChunkOffset,
 };
 use tracing::info;
 
@@ -209,9 +209,11 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
             // Create a PoA for the data chunks
             let data_poa = PoaData {
                 tx_path: Some(Base64(tx_path[tx_index].proof.clone())),
-                data_path: Some(Base64(
-                    sorted_txs[tx_index].proofs[chunk_index].proof.clone(),
-                )),
+                data_path: Some(
+                    sorted_txs[tx_index]
+                        .chunk_proof(TxChunkOffset::from(u32::try_from(chunk_index).unwrap()))
+                        .unwrap(),
+                ),
                 chunk: Some(Base64(poa_chunk.clone())),
                 ledger_id: Some(DataLedger::Submit.into()),
                 partition_chunk_offset,
@@ -383,7 +385,7 @@ async fn data_poa_at_tip_validates_via_block_tree_fallback() -> eyre::Result<()>
     // Some(_) to trigger the data-path branch in `poa_is_valid`.
     let data_poa = PoaData {
         tx_path: Some(Base64(tx_path[0].proof.clone())),
-        data_path: Some(Base64(tx.proofs[0].proof.clone())),
+        data_path: Some(tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap()),
         chunk: Some(Base64(poa_chunk)),
         ledger_id: Some(DataLedger::Submit.into()),
         partition_chunk_offset,

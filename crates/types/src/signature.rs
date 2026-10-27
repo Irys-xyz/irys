@@ -226,7 +226,7 @@ mod tests {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
             chain_id: testing_config.chain_id,
-            chunk_size: testing_config.chunk_size,
+            data_tree_geometry: testing_config.data_tree_geometry().unwrap(),
         };
         let addr = IrysAddress::from_slice(hex::decode(DEV_ADDRESS)?.as_slice());
 
@@ -304,7 +304,7 @@ mod tests {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
             chain_id: testing_config.chain_id,
-            chunk_size: testing_config.chunk_size,
+            data_tree_geometry: testing_config.data_tree_geometry().unwrap(),
         };
 
         let original_header =
@@ -391,7 +391,7 @@ mod tests {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
                 .unwrap(),
             chain_id: testing_config.chain_id,
-            chunk_size: testing_config.chunk_size,
+            data_tree_geometry: testing_config.data_tree_geometry().unwrap(),
         };
 
         let mut transaction = CommitmentTransaction::V2(crate::CommitmentV2WithMetadata {

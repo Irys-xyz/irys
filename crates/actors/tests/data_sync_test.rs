@@ -13,12 +13,11 @@ use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_testing_utils::TempDirBuilder;
 use irys_testing_utils::tempfile::TempDir;
 use irys_types::{
-    Base64, Config, ConsensusConfig, DataLedger, DataSyncServiceConfig, DataTransaction, H256,
-    IrysAddress, IrysBlockHeader, IrysPeerId, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
-    PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
-    StorageSyncConfig, TxChunkOffset, UnixTimestamp, UnpackedChunk, hardfork_config::Cascade,
-    irys::IrysSigner, ledger_chunk_offset_ie, partition::PartitionAssignment,
-    partition_chunk_offset_ie,
+    Config, ConsensusConfig, DataLedger, DataSyncServiceConfig, DataTransaction, H256, IrysAddress,
+    IrysBlockHeader, IrysPeerId, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PackedChunk,
+    PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion, StorageSyncConfig,
+    UnixTimestamp, UnpackedChunk, hardfork_config::Cascade, irys::IrysSigner,
+    ledger_chunk_offset_ie, partition::PartitionAssignment, partition_chunk_offset_ie,
 };
 use nodit::Interval;
 use rust_decimal::prelude::ToPrimitive as _;
@@ -580,7 +579,7 @@ impl TestSetup {
         let data_tx = signer
             .create_transaction(data, fake_genesis.block_hash)
             .expect("To make a data transaction");
-        let chunks = Self::create_test_chunks(&data_tx, chunk_size);
+        let chunks = data_tx.data_chunks().unwrap();
 
         // Create an pack a storage module for the data_sync_service to sync
         debug!("Initializing storage module");
@@ -624,7 +623,7 @@ impl TestSetup {
         data_tx: &DataTransaction,
         config: &Config,
     ) -> StorageModule {
-        let num_chunks = data_tx.chunks.len() as u64;
+        let num_chunks = data_tx.data_chunks().unwrap().len() as u64;
         let storage_module_info = StorageModuleInfo {
             id: DataLedger::Publish as usize,
             partition_assignment: Some(*pa),
@@ -725,37 +724,6 @@ impl TestSetup {
 
         debug!("creating block_tree_read_guard");
         BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)))
-    }
-
-    #[must_use]
-    fn create_test_chunks(tx: &DataTransaction, chunk_size: u64) -> Vec<UnpackedChunk> {
-        let mut chunks = Vec::new();
-        let chunk_size = chunk_size as usize;
-        for (chunk_index, _chunk_node) in tx.chunks.iter().enumerate() {
-            let data_root = tx.header.data_tree_root;
-            let data_size = tx.header.data_size;
-
-            let proof = &tx.proofs[chunk_index];
-            let data_path = Base64(proof.proof.clone());
-
-            // Calculate chunk boundaries safely
-            let start_idx = chunk_index * chunk_size;
-            let end_idx = ((chunk_index + 1) * chunk_size).min(tx.data.as_ref().unwrap().len());
-
-            let bytes = Base64(tx.data.as_ref().unwrap().0[start_idx..end_idx].to_vec());
-
-            let chunk = UnpackedChunk {
-                data_tree_root: data_root,
-                data_size,
-                data_path,
-                bytes,
-                tx_offset: TxChunkOffset::from(chunk_index as u32),
-            };
-
-            chunks.push(chunk);
-        }
-
-        chunks
     }
 
     fn create_mock_chunk_fetchers(

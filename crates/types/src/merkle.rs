@@ -172,8 +172,8 @@ pub fn get_leaf_proof(path_buff: &Base64) -> Result<LeafProof, Error> {
     Ok(leaf_proof)
 }
 
-const LEAF_PROOF_LEN: usize = HASH_SIZE + NOTE_SIZE;
-const BRANCH_PROOF_LEN: usize = HASH_SIZE * 2 + NOTE_SIZE;
+pub(crate) const LEAF_PROOF_LEN: usize = HASH_SIZE + NOTE_SIZE;
+pub(crate) const BRANCH_PROOF_LEN: usize = HASH_SIZE * 2 + NOTE_SIZE;
 
 /// A proof buffer that fails here is invalid for every target. Returns the
 /// length of the branch section, which precedes the leaf.

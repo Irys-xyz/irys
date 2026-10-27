@@ -392,9 +392,9 @@ pub struct DataTransaction {
     // TODO: make this compatible with stream/iterator data sources
     pub data: Option<Base64>,
     #[serde(skip)]
-    pub chunks: Vec<Node>,
+    pub(crate) chunks: Vec<Node>,
     #[serde(skip)]
-    pub proofs: Vec<Proof>,
+    pub(crate) proofs: Vec<Proof>,
 }
 
 impl DataTransaction {
@@ -420,6 +420,15 @@ impl DataTransaction {
             chunks.push(unpacked_chunk);
         }
         Ok(chunks)
+    }
+
+    /// The data path of chunk `chunk_index`.
+    pub fn chunk_proof(&self, chunk_index: TxChunkOffset) -> eyre::Result<Base64> {
+        let proof = usize::try_from(chunk_index.0)
+            .ok()
+            .and_then(|index| self.proofs.get(index))
+            .ok_or_else(|| eyre::eyre!("no proof for chunk {chunk_index}"))?;
+        Ok(Base64(proof.proof.clone()))
     }
 }
 
@@ -1136,7 +1145,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config.data_tree_geometry().unwrap(),
         };
 
         // Test signing the header directly using the outer versioned type
@@ -1160,7 +1169,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config.data_tree_geometry().unwrap(),
         };
 
         // Test signing the outer versioned type directly
@@ -1182,7 +1191,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config.data_tree_geometry().unwrap(),
         };
 
         let tx = DataTransaction {
@@ -1211,7 +1220,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config.data_tree_geometry().unwrap(),
         };
 
         let tx = mock_commitment_tx(&config);

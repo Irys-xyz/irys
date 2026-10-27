@@ -93,13 +93,13 @@ impl ApiClientExt for IrysApiClient {
     ) -> eyre::Result<()> {
         for (idx, data) in data.enumerate() {
             let data = data?;
-            let proof = &tx.proofs[idx];
+            let tx_offset = TxChunkOffset::from(std::convert::TryInto::<u32>::try_into(idx)?);
             let unpacked_chunk = UnpackedChunk {
                 data_tree_root: tx.header.data_tree_root,
                 data_size: tx.header.data_size,
-                data_path: Base64(proof.proof.clone()),
+                data_path: tx.chunk_proof(tx_offset)?,
                 bytes: Base64(data),
-                tx_offset: TxChunkOffset::from(std::convert::TryInto::<u32>::try_into(idx)?),
+                tx_offset,
             };
             let now = Instant::now();
             let _response = self

@@ -811,7 +811,7 @@ mod tests {
         rand::thread_rng().fill(&mut data_bytes[..]);
         let tx = signed_tx(&config, data_bytes.clone());
         index_placement(&storage_module, &tx, 49)?;
-        let chunks = unpacked_chunks_for(&tx, &data_bytes);
+        let chunks = tx.data_chunks().unwrap();
         write_chunks(&storage_module, &chunks)?;
         storage_module.sync_pending_chunks()?;
         let provider = provider(
@@ -835,7 +835,7 @@ mod tests {
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
         let tx = signed_tx(&config, data_bytes.clone());
-        let chunks = unpacked_chunks_for(&tx, &data_bytes);
+        let chunks = tx.data_chunks().unwrap();
         let data_root = tx.header.data_tree_root;
         let db = create_test_db(&tmp_dir.path().join("irys_db"));
         cache_chunks(&db, &config, &tx, &chunks);
@@ -906,8 +906,8 @@ mod tests {
             opened_config("get_by_data_root_two_sizes", SubmoduleIndexEngine::Mdbx);
         let chunk_size = config.consensus.chunk_size as usize;
         let bytes = patterned_bytes(0x21, chunk_size * 2);
-        let short_tx = signed_tx(&config, bytes.clone());
-        let short_chunks = unpacked_chunks_for(&short_tx, &bytes);
+        let short_tx = signed_tx(&config, bytes);
+        let short_chunks = short_tx.data_chunks().unwrap();
         let data_root = short_tx.header.data_tree_root;
         let short_size = short_tx.header.data_size;
 
@@ -1020,8 +1020,8 @@ mod tests {
         // The real tree has three chunks. The short header claims the same
         // root with two chunks; its chunks 0 and 1 carry the same data_path.
         let bytes = patterned_bytes(0x63, chunk_size * 3);
-        let long_tx = signed_tx(&config, bytes.clone());
-        let long_chunks = unpacked_chunks_for(&long_tx, &bytes);
+        let long_tx = signed_tx(&config, bytes);
+        let long_chunks = long_tx.data_chunks().unwrap();
         let data_root = long_tx.header.data_tree_root;
         let long_size = long_tx.header.data_size;
         let mut short_header = long_tx.header.clone();
@@ -1100,17 +1100,17 @@ mod tests {
         let bytes_a = patterned_bytes(0xA1, chunk_size * 2);
         let bytes_b = patterned_bytes(0xB2, chunk_size * 2);
         let tx_a = signed_tx(&config, bytes_a.clone());
-        let tx_b = signed_tx(&config, bytes_b.clone());
+        let tx_b = signed_tx(&config, bytes_b);
         assert_ne!(tx_a.header.data_tree_root, tx_b.header.data_tree_root);
-        assert_eq!(tx_a.chunks.len(), 2);
+        assert_eq!(tx_a.data_chunks().unwrap().len(), 2);
         assert_eq!(tx_a.header.data_size, bytes_a.len() as u64);
 
         // First tx occupies ledger offsets 10..=11. The next tx starts at 12,
         // which is `start_offset + chunk_count` for the first tx.
         index_placement(&storage_module, &tx_a, 10)?;
         index_placement(&storage_module, &tx_b, 12)?;
-        let chunks_a = unpacked_chunks_for(&tx_a, &bytes_a);
-        let chunks_b = unpacked_chunks_for(&tx_b, &bytes_b);
+        let chunks_a = tx_a.data_chunks().unwrap();
+        let chunks_b = tx_b.data_chunks().unwrap();
         write_chunks(&storage_module, &chunks_a)?;
         write_chunks(&storage_module, &chunks_b)?;
         storage_module.sync_pending_chunks()?;
@@ -1145,16 +1145,16 @@ mod tests {
         let bytes_a = patterned_bytes(0x11, chunk_size * 2 + short_len);
         let bytes_b = patterned_bytes(0x22, chunk_size);
         let tx_a = signed_tx(&config, bytes_a.clone());
-        let tx_b = signed_tx(&config, bytes_b.clone());
-        assert_eq!(tx_a.chunks.len(), 3);
+        let tx_b = signed_tx(&config, bytes_b);
+        assert_eq!(tx_a.data_chunks().unwrap().len(), 3);
         assert_eq!(tx_a.header.data_size, bytes_a.len() as u64);
 
         // Offsets 20..=22 are the three chunks of A (the last is short).
         // Offset 23 is B, which `start + chunk_count` names.
         index_placement(&storage_module, &tx_a, 20)?;
         index_placement(&storage_module, &tx_b, 23)?;
-        let chunks_a = unpacked_chunks_for(&tx_a, &bytes_a);
-        let chunks_b = unpacked_chunks_for(&tx_b, &bytes_b);
+        let chunks_a = tx_a.data_chunks().unwrap();
+        let chunks_b = tx_b.data_chunks().unwrap();
         assert_eq!(chunks_a[2].bytes.0.len(), short_len);
         write_chunks(&storage_module, &chunks_a)?;
         write_chunks(&storage_module, &chunks_b)?;
@@ -1187,14 +1187,14 @@ mod tests {
         let chunk_size = config.consensus.chunk_size as usize;
 
         let bytes = patterned_bytes(0x42, chunk_size * 2);
-        let tx = signed_tx(&config, bytes.clone());
-        assert_eq!(tx.chunks.len(), 2);
+        let tx = signed_tx(&config, bytes);
+        assert_eq!(tx.data_chunks().unwrap().len(), 2);
 
         // Placements at 30..=31 and 32..=33. Offset 2 of the first placement
         // is partition offset 32, the second placement's chunk 0.
         index_placement(&storage_module, &tx, 30)?;
         index_placement(&storage_module, &tx, 32)?;
-        let chunks = unpacked_chunks_for(&tx, &bytes);
+        let chunks = tx.data_chunks().unwrap();
         write_chunks(&storage_module, &chunks)?;
         storage_module.sync_pending_chunks()?;
 
@@ -1227,9 +1227,9 @@ mod tests {
         let chunk_size = config.consensus.chunk_size as usize;
         let bytes = patterned_bytes(0x7C, chunk_size * 2);
         let tx = signed_tx(&config, bytes.clone());
-        assert_eq!(tx.chunks.len(), 2);
+        assert_eq!(tx.data_chunks().unwrap().len(), 2);
         let data_root = tx.header.data_tree_root;
-        let chunks = unpacked_chunks_for(&tx, &bytes);
+        let chunks = tx.data_chunks().unwrap();
         let past_end = TxChunkOffset::from(2_u32);
 
         let db = create_test_db(&tmp_dir.path().join("irys_db"));
@@ -1354,30 +1354,12 @@ mod tests {
     ) -> eyre::Result<()> {
         let (_tx_root, proofs) =
             DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
-        let chunk_count = tx.chunks.len() as u64;
+        let chunk_count = tx.data_chunks().unwrap().len() as u64;
         let range = LedgerChunkRange(ledger_chunk_offset_ii!(
             ledger_start,
             ledger_start + chunk_count - 1
         ));
         storage_module.index_transaction_data(&tx.header, &proofs[0].proof, range, 0)
-    }
-
-    fn unpacked_chunks_for(tx: &irys_types::DataTransaction, bytes: &[u8]) -> Vec<UnpackedChunk> {
-        let data_root = tx.header.data_tree_root;
-        let data_size = bytes.len() as u64;
-        tx.chunks
-            .iter()
-            .enumerate()
-            .map(|(tx_chunk_offset, chunk_node)| UnpackedChunk {
-                data_tree_root: data_root,
-                data_size,
-                data_path: Base64(tx.proofs[tx_chunk_offset].proof.clone()),
-                bytes: Base64(bytes[chunk_node.min_byte_range..chunk_node.max_byte_range].to_vec()),
-                tx_offset: TxChunkOffset::from(
-                    u32::try_from(tx_chunk_offset).expect("chunk offset exceeds u32"),
-                ),
-            })
-            .collect()
     }
 
     fn write_chunks(storage_module: &StorageModule, chunks: &[UnpackedChunk]) -> eyre::Result<()> {
@@ -1542,7 +1524,7 @@ mod tests {
             &[UnpackedChunk {
                 data_tree_root: tx.header.data_tree_root,
                 data_size: tx.header.data_size,
-                data_path: Base64(tx.proofs[0].proof.clone()),
+                data_path: tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap(),
                 bytes: Base64(data.to_vec()),
                 tx_offset: TxChunkOffset::from(0_u32),
             }],
@@ -1669,7 +1651,11 @@ mod tests {
         let (tx, _data) = one_chunk(&config, 3);
         index_one(&sm, &tx, 0);
         let offset = PartitionChunkOffset(0);
-        remember_data_path(&sm, offset, &tx.proofs[0].proof);
+        remember_data_path(
+            &sm,
+            offset,
+            &tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap().0,
+        );
         let err = sm
             .generate_full_chunks(offset, offset)
             .expect_err("indexed chunk with no bytes");
@@ -1711,7 +1697,11 @@ mod tests {
         let hole = assigned(&config, 0, 0, "hdd0", 4);
         index_one(&hole, &hole_tx, 3);
         let hole_offset = PartitionChunkOffset(3);
-        remember_data_path(&hole, hole_offset, &hole_tx.proofs[0].proof);
+        remember_data_path(
+            &hole,
+            hole_offset,
+            &hole_tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap().0,
+        );
         let err = hole
             .generate_full_chunks(hole_offset, hole_offset)
             .expect_err("indexed chunk with no bytes");
@@ -1775,10 +1765,10 @@ mod tests {
         let chunk_size = config.consensus.chunk_size as usize;
         let sm = assigned(&config, 0, 0, "hdd0", 4);
         let bytes = patterned_bytes(0x5A, chunk_size * 3);
-        let tx = signed_tx(&config, bytes.clone());
-        assert_eq!(tx.chunks.len(), 3);
+        let tx = signed_tx(&config, bytes);
+        assert_eq!(tx.data_chunks().unwrap().len(), 3);
         index_placement(&sm, &tx, 0)?;
-        let chunks = unpacked_chunks_for(&tx, &bytes);
+        let chunks = tx.data_chunks().unwrap();
 
         let db = create_test_db(&tmp.path().join("db"));
         cache_chunks(&db, &config, &tx, &chunks);
@@ -2212,7 +2202,7 @@ mod tests {
         sm.write_data_chunk(&UnpackedChunk {
             data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
-            data_path: Base64(tx.proofs[0].proof.clone()),
+            data_path: tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap(),
             bytes: Base64(bytes.to_vec()),
             tx_offset: TxChunkOffset::from(0_u32),
         })

@@ -1270,14 +1270,7 @@ mod tests {
                     None,
                     &self.config.data_tree_geometry(),
                 )?;
-                for (i, node) in self.tx.chunks.iter().enumerate() {
-                    let chunk = UnpackedChunk {
-                        data_tree_root: self.tx.header.data_tree_root,
-                        data_size: self.tx.header.data_size,
-                        data_path: Base64(self.tx.proofs[i].proof.clone()),
-                        bytes: Base64(self.data[node.min_byte_range..node.max_byte_range].to_vec()),
-                        tx_offset: TxChunkOffset::from(u32::try_from(i)?),
-                    };
+                for chunk in self.tx.data_chunks()? {
                     cache_chunk(wtx, &chunk, &self.config.data_tree_geometry())?;
                 }
                 Ok(())
@@ -2243,18 +2236,7 @@ mod tests {
                 signer.sign_transaction(signer.create_transaction(data.clone(), H256::zero())?)?;
             f.db.update_eyre(|wtx| {
                 cache_data_root(wtx, &tx.header, None, &f.config.data_tree_geometry())?;
-                let node = &tx.chunks[0];
-                cache_chunk(
-                    wtx,
-                    &UnpackedChunk {
-                        data_tree_root: tx.header.data_tree_root,
-                        data_size: tx.header.data_size,
-                        data_path: Base64(tx.proofs[0].proof.clone()),
-                        bytes: Base64(data[node.min_byte_range..node.max_byte_range].to_vec()),
-                        tx_offset: TxChunkOffset::from(0),
-                    },
-                    &f.config.data_tree_geometry(),
-                )?;
+                cache_chunk(wtx, &tx.data_chunks()?[0], &f.config.data_tree_geometry())?;
                 Ok(())
             })?;
             f.sm.index_transaction_data(
@@ -2600,7 +2582,7 @@ mod tests {
         let chunk = UnpackedChunk {
             data_tree_root: f.tx.header.data_tree_root,
             data_size: f.tx.header.data_size,
-            data_path: Base64(f.tx.proofs[0].proof.clone()),
+            data_path: f.tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap(),
             bytes: Base64(f.data.clone()),
             tx_offset: TxChunkOffset::from(0_u32),
         };
@@ -2767,14 +2749,7 @@ mod tests {
     }
 
     fn unpacked_at(f: &Fixture, index: usize) -> UnpackedChunk {
-        let node = &f.tx.chunks[index];
-        UnpackedChunk {
-            data_tree_root: f.tx.header.data_tree_root,
-            data_size: f.tx.header.data_size,
-            data_path: Base64(f.tx.proofs[index].proof.clone()),
-            bytes: Base64(f.data[node.min_byte_range..node.max_byte_range].to_vec()),
-            tx_offset: TxChunkOffset::from(u32::try_from(index).expect("chunk index fits u32")),
-        }
+        f.tx.data_chunks().unwrap()[index].clone()
     }
 
     /// Real entropy, so a later data write unpacks to the original bytes.
