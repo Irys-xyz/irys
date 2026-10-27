@@ -499,6 +499,7 @@ mod v1_to_v2 {
 
 mod v2_to_v3 {
     use super::*;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
         DataTransactionMetadata,
@@ -533,7 +534,7 @@ mod v2_to_v3 {
                 id: v2_header.id,
                 anchor: v2_header.anchor,
                 signer: v2_header.signer,
-                data_root: v2_header.data_root,
+                data_tree_root: DataTreeRoot(v2_header.data_root),
                 data_size: v2_header.data_size,
                 // Historical on-disk field `header_size` is the new `prefix_size`.
                 prefix_size: v2_header.header_size,

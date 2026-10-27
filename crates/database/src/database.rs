@@ -60,6 +60,7 @@ mod compact_ingress_leaf_tests {
     use super::*;
     use crate::{db_cache::CachedDataRoot, tables::IrysTables};
     use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::DataTreeRoot;
     use irys_types::{Base64, generate_data_root, generate_leaves, resolve_proofs};
     use reth_db::mdbx::DatabaseArguments;
     use std::sync::Arc;
@@ -199,7 +200,7 @@ mod compact_ingress_leaf_tests {
         let data_root = H256(root.id);
         let data_path = Base64(resolve_proofs(root, None)?.remove(0).proof);
         let chunk = UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 8,
             data_path,
             bytes: Base64(bytes),
@@ -254,7 +255,7 @@ mod compact_ingress_leaf_tests {
         )?)?;
         let data_root = H256(root.id);
         let chunk = UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 8,
             data_path: Base64(resolve_proofs(root, None)?.remove(0).proof),
             bytes: Base64(vec![8_u8; 8]),
@@ -292,7 +293,7 @@ mod compact_ingress_leaf_tests {
         let address = IrysAddress::random();
         let tx_offset = TxChunkOffset::from(0);
         let chunk = UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 8,
             data_path: Base64::default(),
             bytes: Base64(vec![7_u8; 8]),
@@ -967,10 +968,10 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     tx_header: &DataTransactionHeader,
     block_header: Option<&IrysBlockHeader>,
 ) -> eyre::Result<Option<CachedDataRoot>> {
-    let key = tx_header.data_root;
+    let key = tx_header.data_tree_root;
 
     // Access the current cached entry from the database
-    let result = tx.get::<CachedDataRoots>(key)?;
+    let result = tx.get::<CachedDataRoots>(key.0)?;
 
     // Create or update the CachedDataRoot
     let mut cached_data_root = match result {
@@ -1016,7 +1017,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     }
 
     // Update the database with the modified or new entry
-    tx.put::<CachedDataRoots>(key, cached_data_root.clone())?;
+    tx.put::<CachedDataRoots>(key.0, cached_data_root.clone())?;
 
     // Surface anomalous writes: a CDR with `block_set.is_empty()` and
     // `expiry_height.is_none()` has no lifetime bound and will land in the
@@ -1130,10 +1131,10 @@ type IsDuplicate = bool;
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
 /// This function ensures that the DataRoot exists in CachedDataRoots before storing the chunk.
 pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
-    if tx.get::<CachedDataRoots>(chunk.data_root)?.is_none() {
+    if tx.get::<CachedDataRoots>(chunk.data_tree_root.0)?.is_none() {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            chunk.data_root
+            chunk.data_tree_root
         ));
     }
 
@@ -1156,7 +1157,7 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
     tx: &T,
     chunk: &UnpackedChunk,
 ) -> eyre::Result<IsDuplicate> {
-    let data_root = chunk.data_root;
+    let data_root = chunk.data_tree_root;
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
 
     if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
@@ -1181,7 +1182,7 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
         &chunk.tx_offset, &chunk_path_hash, &data_root
     );
 
-    tx.put::<CachedChunksIndex>(data_root, value)?;
+    tx.put::<CachedChunksIndex>(data_root.0, value)?;
     tx.put::<CachedChunks>(chunk_path_hash, chunk.into())?;
     Ok(false)
 }
@@ -3176,6 +3177,7 @@ mod tests {
             update_data_root_block_set,
         };
         use irys_testing_utils::utils::tempfile;
+        use irys_types::DataTreeRoot;
         use irys_types::{DataTransactionHeader, H256};
         use reth_db::{
             Database as _,
@@ -3210,7 +3212,7 @@ mod tests {
                 DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
                     tx: irys_types::DataTransactionHeaderV1 {
                         id: tx_id,
-                        data_root,
+                        data_tree_root: DataTreeRoot(data_root),
                         data_size: 64,
                         ..Default::default()
                     },

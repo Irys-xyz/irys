@@ -238,7 +238,7 @@ fn derive_tx_path_at_offset_timed(
             tx_index,
             tx_id: chosen.id,
             tx_count: headers.len(),
-            data_root: chosen.data_root,
+            data_root: chosen.data_tree_root.0,
             tx_root,
             ledger_start: bounds.start,
             tx_ledger_start,
@@ -304,7 +304,8 @@ pub fn derive_tx_path_at_offset_cached(
     let proof = resolve_proof_at(&block.root, tx_index)?;
     let chosen = &block.headers[tx_index];
     let leaf = proof_leaf_hash(&proof)?;
-    let expected = DataTransactionLedger::fold_tx_root_leaf(chosen.data_root, chosen.prefix_hash);
+    let expected =
+        DataTransactionLedger::fold_tx_root_leaf(chosen.data_tree_root.0, chosen.prefix_hash);
     eyre::ensure!(
         leaf == expected,
         "proof leaf {leaf} != fold of tx {}",
@@ -321,7 +322,7 @@ pub fn derive_tx_path_at_offset_cached(
             tx_index,
             tx_id: chosen.id,
             tx_count: block.headers.len(),
-            data_root: chosen.data_root,
+            data_root: chosen.data_tree_root.0,
             tx_root: block.tx_root,
             ledger_start: block.bounds.start,
             tx_ledger_start,
@@ -487,7 +488,7 @@ pub fn derive_tx_path_synthetic_with(
             tx_index: leaf_index,
             tx_id: chosen.id,
             tx_count: headers.len(),
-            data_root: chosen.data_root,
+            data_root: chosen.data_tree_root.0,
             tx_root,
             ledger_start: 0,
             tx_ledger_start: 0,
@@ -584,7 +585,7 @@ fn proof_for_headers(
     let proof = resolve_proof_at(&root, index)?;
     let leaf = proof_leaf_hash(&proof)?;
     let expected = DataTransactionLedger::fold_tx_root_leaf(
-        headers[index].data_root,
+        headers[index].data_tree_root.0,
         headers[index].prefix_hash,
     );
     eyre::ensure!(
@@ -968,6 +969,7 @@ mod tests {
         insert_tx_header, open_or_create_db,
     };
     use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         Base64, DataLedger, DataTransactionHeader, DataTransactionLedger, H256, H256List,
         IrysBlockHeader, PartitionChunkOffset, Proof, TxChunkOffset, expected_chunk_byte_range,
@@ -984,7 +986,7 @@ mod tests {
     fn tx_at(n: u64, size: u64) -> DataTransactionHeader {
         let mut header = DataTransactionHeader::default();
         header.id = hid(n);
-        header.data_root = hid(n.saturating_add(100));
+        header.data_tree_root = DataTreeRoot(hid(n.saturating_add(100)));
         header.prefix_hash = hid(n.saturating_add(200));
         header.data_size = size;
         header
@@ -1119,7 +1121,7 @@ mod tests {
             .remove(0)
             .proof;
         let mut header = tx_at(1, chunk_size);
-        header.data_root = data_root;
+        header.data_tree_root = DataTreeRoot(data_root);
         let (tx_root, proof) =
             proof_for_headers(std::slice::from_ref(&header), 0).expect("tx path");
         let derived = super::DerivedTxPath {
@@ -1238,7 +1240,7 @@ mod tests {
             let mut header = tx_at(u64::try_from(index).unwrap_or(0).saturating_add(1), size);
             if size > 0 {
                 let (data_root, _) = data_tree(size, chunk_size);
-                header.data_root = data_root;
+                header.data_tree_root = DataTreeRoot(data_root);
             }
             chunk_total = chunk_total.saturating_add(size.div_ceil(chunk_size));
             headers.push(header);
@@ -1265,7 +1267,7 @@ mod tests {
             let local = usize::try_from(offset - tx_start).unwrap_or(usize::MAX);
             let size = headers[tx_index].data_size;
             let (data_root, data_proofs) = data_tree(size, chunk_size);
-            assert_eq!(headers[tx_index].data_root, data_root);
+            assert_eq!(headers[tx_index].data_tree_root, DataTreeRoot(data_root));
             let data_path = &data_proofs[local].proof;
             let derived = derived_for(
                 &headers, tx_index, &proof, tx_root, data_root, start, tx_start,
