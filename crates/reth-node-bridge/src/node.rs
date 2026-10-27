@@ -8,7 +8,7 @@ use irys_types::NetworkConfigWithDefaults as _;
 use reth::{
     args::{DatabaseArgs, MetricArgs, RpcServerArgs},
     revm::primitives::B256,
-    rpc::builder::{RethRpcModule, RpcModuleSelection},
+    rpc::builder::{RethRpcModule, RpcModuleSelection, TransportRpcModules},
     tasks::TaskExecutor,
 };
 use reth_chainspec::ChainSpec;
@@ -156,6 +156,43 @@ fn parse_rpc_args(rpc_args: &[String]) -> eyre::Result<RpcServerArgs> {
     Ok(rpc)
 }
 
+/// The `debug` namespace methods the Reth RPC serves: reads and traces only.
+/// Every other `debug_*` method is removed, including methods a later Reth adds.
+const DEBUG_RPC_ALLOWED_METHODS: [&str; 20] = [
+    "debug_getRawHeader",
+    "debug_getRawBlock",
+    "debug_getRawTransaction",
+    "debug_getRawTransactions",
+    "debug_getRawReceipts",
+    "debug_getBadBlocks",
+    "debug_traceChain",
+    "debug_traceBlock",
+    "debug_traceBlockByHash",
+    "debug_traceBlockByNumber",
+    "debug_traceTransaction",
+    "debug_traceCall",
+    "debug_traceCallMany",
+    "debug_executionWitness",
+    "debug_executionWitnessByBlockHash",
+    "debug_getBlockAccessList",
+    "debug_chainConfig",
+    "debug_codeByHash",
+    "debug_storageRangeAt",
+    "debug_stateRootWithUpdates",
+];
+
+/// Removes every `debug_*` method not in [`DEBUG_RPC_ALLOWED_METHODS`] from the
+/// http, ws and ipc transports.
+fn remove_unlisted_debug_methods(modules: &mut TransportRpcModules) {
+    let unlisted: Vec<&'static str> = modules
+        .methods_by(|name| name.starts_with("debug_") && !DEBUG_RPC_ALLOWED_METHODS.contains(&name))
+        .method_names()
+        .collect();
+    for name in unlisted {
+        modules.remove_method_from_configured(name);
+    }
+}
+
 pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
@@ -265,6 +302,10 @@ pub async fn run_node(
 
     let handle = builder
         .node(IrysEthereumNode)
+        .extend_rpc_modules(|ctx| {
+            remove_unlisted_debug_methods(ctx.modules);
+            Ok(())
+        })
         .launch_with_debug_capabilities()
         .into_future()
         .in_current_span()
