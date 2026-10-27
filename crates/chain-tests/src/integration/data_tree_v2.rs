@@ -183,10 +183,31 @@ async fn slow_heavy_two_nodes_upload_promote_migrate_sync_and_mine_v2_data() -> 
     }
     let block = data_poa_block.expect("a Publish data PoA occurs within the block budget");
 
-    // The Publish ledger holds only this tx, so the PoA offset must fall inside
-    // its chunks. The bytes are packed, so they are not compared with the data.
+    // Ownership by construction: the Publish ledger holds exactly this tx's
+    // chunks, the PoA names a chunk of the Publish slot that holds them, and
+    // the offset lies inside those chunks. The bytes are packed, so they are
+    // not compared with the data.
+    let tx_chunk_count = data.len().div_ceil(CHUNK_SIZE) as u64;
+    assert_eq!(
+        block.ledger_total_chunks(DataLedger::Publish),
+        tx_chunk_count,
+        "the test tx is the only data in the Publish ledger"
+    );
+    let publish_slot_zero = genesis
+        .node_ctx
+        .storage_modules_guard
+        .read()
+        .iter()
+        .find_map(|module| {
+            let assignment = module.partition_assignment()?;
+            (assignment.ledger_id == Some(u32::from(DataLedger::Publish))
+                && assignment.slot_index == Some(0))
+            .then_some(assignment.partition_hash)
+        })
+        .expect("genesis holds Publish slot 0");
+    assert_eq!(block.poa.partition_hash, publish_slot_zero);
     assert!(
-        (block.poa.partition_chunk_offset as usize) < data.len().div_ceil(CHUNK_SIZE),
+        u64::from(block.poa.partition_chunk_offset) < tx_chunk_count,
         "the PoA offset is a chunk of the test tx"
     );
 
@@ -286,16 +307,18 @@ async fn heavy_same_root_two_sizes_do_not_block_each_other() -> eyre::Result<()>
         !published.contains(&other.header.id),
         "the other-size header never completes"
     );
-    // The other header stays unpromoted in the next block too.
-    node.mine_block().await?;
-    let next = node.mine_block().await?;
-    assert!(
-        !next.data_ledgers[DataLedger::Publish]
-            .tx_ids
-            .0
-            .contains(&other.header.id),
-        "the other-size header is not promoted later"
-    );
+    // The other header stays unpromoted in every later block too.
+    for _ in 0..2 {
+        let later = node.mine_block().await?;
+        assert!(
+            !later.data_ledgers[DataLedger::Publish]
+                .tx_ids
+                .0
+                .contains(&other.header.id),
+            "the other-size header is not promoted at height {}",
+            later.height
+        );
+    }
 
     node.stop().await;
     Ok(())
