@@ -162,8 +162,11 @@ pub fn chunk_key(data_commitment: DataCommitment, chunk_index: TxChunkOffset) ->
 /// Every data-chunk check and every check of a stored or received data path
 /// goes through this function. Callers map the error to their own error type.
 ///
-/// The caller takes `data_tree_root` and `data_size` from a signature-checked
-/// header, so the commitment derived here is anchored (spec §6).
+/// The commitment derived here is anchored only when the caller takes
+/// `data_tree_root` and `data_size` from a signature-checked header (spec §6).
+/// A pass on fields the caller has not anchored (for example the root and
+/// size a peer sent with the chunk) is only a filter: an anchored check must
+/// follow before the chunk is trusted.
 pub fn verify_data_chunk(
     geometry: &Geometry,
     data_tree_root: DataTreeRoot,
