@@ -122,7 +122,8 @@ acquires extents through the same route.
     "ledger_id": 1,
     "offset": 42,            // absolute ledger chunk offset
     "bytes": [7, 0, 255],    // unpacked chunk data, plain integer array (not Base64)
-    "proof": [1, 2, 3]       // the chunk's data_path; validates against the tx's data_root
+    "proof": [1, 2, 3]       // the chunk's data_path: a data tree v2 chunk proof; verify_chunk
+                             // checks it against the commitment of the tx's dataRoot and data_size
   }
 ]
 ```
