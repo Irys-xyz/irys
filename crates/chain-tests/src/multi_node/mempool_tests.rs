@@ -438,7 +438,8 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
 
     genesis_node
         .wait_until_chunk_accepted(
-            tx.header.data_tree_root.0,
+            tx.header.data_tree_root,
+            tx.header.data_size,
             TxChunkOffset::from(preheader_cap.saturating_sub(1)),
             10,
         )
@@ -469,7 +470,8 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
             .node_ctx
             .chunk_ingress_state
             .pending_contains(
-                tx.header.data_tree_root.0,
+                tx.header
+                    .data_commitment(&genesis_node.node_ctx.config.data_tree_geometry()),
                 TxChunkOffset::from(preheader_cap)
             )
             .await,
@@ -478,7 +480,8 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
     let overflow_cached = genesis_node.node_ctx.db.view_eyre(|db_tx| {
         irys_database::cached_chunk_by_chunk_offset(
             db_tx,
-            tx.header.data_tree_root.0,
+            tx.header
+                .data_commitment(&genesis_node.node_ctx.config.data_tree_geometry()),
             TxChunkOffset::from(preheader_cap),
         )
     })?;
@@ -1352,8 +1355,12 @@ async fn heavy3_mempool_publish_fork_recovery_test(
     let a_blk1_tx1_proof1 = {
         let tx = a_node.node_ctx.db.tx()?;
         // Get the ingress proof from the database
-        tx.get::<IngressProofs>(a_blk1_tx1.header.data_tree_root.0)?
-            .expect("Able to get a_blk1_tx1’s ingress proof from DB")
+        tx.get::<IngressProofs>(
+            a_blk1_tx1
+                .header
+                .data_commitment(&a_node.node_ctx.config.data_tree_geometry()),
+        )?
+        .expect("Able to get a_blk1_tx1’s ingress proof from DB")
     };
 
     let a_blk1_tx1_mempool = {

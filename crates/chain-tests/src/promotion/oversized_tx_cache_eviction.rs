@@ -5,21 +5,21 @@ use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
 use irys_database::tables::CachedChunksIndex;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    DataLedger, DataRoot, DatabaseProvider, IrysAddress, NodeConfig, irys::IrysSigner,
+    DataCommitment, DataLedger, DatabaseProvider, IrysAddress, NodeConfig, irys::IrysSigner,
 };
 use reth_db::transaction::DbTx as _;
 use std::time::Duration;
 
-fn cached_chunk_count(db: &DatabaseProvider, data_root: DataRoot) -> eyre::Result<u32> {
+fn cached_chunk_count(db: &DatabaseProvider, data_commitment: DataCommitment) -> eyre::Result<u32> {
     db.view_eyre(|tx| {
         let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-        Ok(cursor.dup_count(data_root)?.unwrap_or(0))
+        Ok(cursor.dup_count(data_commitment)?.unwrap_or(0))
     })
 }
 
 fn ingress_leaf_count(
     db: &DatabaseProvider,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     address: IrysAddress,
     expected_chunks: u32,
 ) -> eyre::Result<usize> {
@@ -27,8 +27,13 @@ fn ingress_leaf_count(
         (0..expected_chunks).try_fold(0_usize, |count, offset| {
             Ok(count
                 + usize::from(
-                    irys_database::cached_ingress_leaf(tx, data_root, address, offset.into())?
-                        .is_some(),
+                    irys_database::cached_ingress_leaf(
+                        tx,
+                        data_commitment,
+                        address,
+                        offset.into(),
+                    )?
+                    .is_some(),
                 ))
         })
     })
@@ -99,7 +104,9 @@ async fn heavy_test_oversized_tx_cache_eviction_allows_promotion() -> eyre::Resu
         price.term_fee.into(),
     )?;
     let tx = signer.sign_transaction(tx)?;
-    let data_root = tx.header.data_tree_root;
+    let data_commitment = tx
+        .header
+        .data_commitment(&node.node_ctx.config.data_tree_geometry());
 
     // Confirm the tx in the Submit ledger so it becomes a promotion candidate.
     node.post_data_tx_raw(&tx.header).await;
@@ -109,16 +116,16 @@ async fn heavy_test_oversized_tx_cache_eviction_allows_promotion() -> eyre::Resu
     // Each validated chunk records its leaf immediately, independent of any
     // storage assignment, and keeps its cached body until the body is durable.
     node.post_chunk_32b(&tx, 0, &data_chunks).await;
-    assert_eq!(cached_chunk_count(&node.node_ctx.db, data_root.0)?, 1);
+    assert_eq!(cached_chunk_count(&node.node_ctx.db, data_commitment)?, 1);
     assert_eq!(
-        ingress_leaf_count(&node.node_ctx.db, data_root.0, ingress_address, 3)?,
+        ingress_leaf_count(&node.node_ctx.db, data_commitment, ingress_address, 3)?,
         1
     );
 
     node.post_chunk_32b(&tx, 1, &data_chunks).await;
-    assert_eq!(cached_chunk_count(&node.node_ctx.db, data_root.0)?, 2);
+    assert_eq!(cached_chunk_count(&node.node_ctx.db, data_commitment)?, 2);
     assert_eq!(
-        ingress_leaf_count(&node.node_ctx.db, data_root.0, ingress_address, 3)?,
+        ingress_leaf_count(&node.node_ctx.db, data_commitment, ingress_address, 3)?,
         2
     );
 
@@ -129,7 +136,7 @@ async fn heavy_test_oversized_tx_cache_eviction_allows_promotion() -> eyre::Resu
     let mut early_chunks_reclaimed = false;
     for _ in 0..10 {
         node.mine_block().await?;
-        if cached_chunk_count(&node.node_ctx.db, data_root.0)? == 0 {
+        if cached_chunk_count(&node.node_ctx.db, data_commitment)? == 0 {
             early_chunks_reclaimed = true;
             break;
         }
@@ -140,7 +147,7 @@ async fn heavy_test_oversized_tx_cache_eviction_allows_promotion() -> eyre::Resu
         "durable early chunk bodies were never capacity-reclaimed"
     );
     assert_eq!(
-        ingress_leaf_count(&node.node_ctx.db, data_root.0, ingress_address, 3)?,
+        ingress_leaf_count(&node.node_ctx.db, data_commitment, ingress_address, 3)?,
         2,
         "reclaiming a body must not discard the leaf derived from it"
     );
@@ -153,12 +160,12 @@ async fn heavy_test_oversized_tx_cache_eviction_allows_promotion() -> eyre::Resu
         .wait_for_idle(Some(Duration::from_secs(10)))
         .await?;
     let leaves_after_restart =
-        ingress_leaf_count(&node.node_ctx.db, data_root.0, ingress_address, 3)?;
+        ingress_leaf_count(&node.node_ctx.db, data_commitment, ingress_address, 3)?;
     assert_eq!(
         leaves_after_restart, 2,
         "compact leaves must survive a restart"
     );
-    let cached_after_restart = cached_chunk_count(&node.node_ctx.db, data_root.0)?;
+    let cached_after_restart = cached_chunk_count(&node.node_ctx.db, data_commitment)?;
     assert_eq!(
         cached_after_restart, 0,
         "proof readiness must not depend on cached chunk bodies"

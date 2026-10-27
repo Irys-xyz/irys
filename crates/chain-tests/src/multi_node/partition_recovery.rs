@@ -4,8 +4,8 @@ use irys_config::submodules::StorageSubmodulesConfig;
 use irys_domain::ChunkType;
 use irys_storage::ii;
 use irys_types::{
-    BoundedFee, DataLedger, DataTransaction, H256, LedgerChunkOffset, NodeConfig,
-    PartitionChunkOffset, UnixTimestamp, hardfork_config::Cascade, irys::IrysSigner,
+    BoundedFee, DataLedger, DataTransaction, LedgerChunkOffset, NodeConfig, PartitionChunkOffset,
+    UnixTimestamp, hardfork_config::Cascade, irys::IrysSigner,
 };
 use irys_vdf::first_divergent_boundary;
 use tracing::info;
@@ -379,7 +379,7 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     ];
     for (ledger, tx) in &shared_txs {
         assert!(
-            has_data_root_in_storage_module(&genesis, *ledger, 0, tx.header.data_tree_root.0),
+            has_data_root_in_storage_module(&genesis, *ledger, 0, &tx.header),
             "{:?}: shared tx data_root should still be indexed after recovery",
             ledger
         );
@@ -424,7 +424,7 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     ];
     for (ledger, tx) in &genesis_orphaned_txs {
         assert!(
-            !has_data_root_in_storage_module(&genesis, *ledger, 0, tx.header.data_tree_root.0),
+            !has_data_root_in_storage_module(&genesis, *ledger, 0, &tx.header),
             "{:?}: genesis orphaned tx data_root should be CLEARED after recovery",
             ledger
         );
@@ -442,10 +442,9 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
         (DataLedger::ThirtyDay, &peer_thirty_day_tx),
     ];
     for (ledger, tx) in &peer_unique_txs {
-        let data_root = tx.header.data_tree_root;
         let mut found = false;
         for _ in 0..seconds_to_wait {
-            if has_data_root_in_storage_module(&genesis, *ledger, 0, data_root.0) {
+            if has_data_root_in_storage_module(&genesis, *ledger, 0, &tx.header) {
                 found = true;
                 break;
             }
@@ -501,8 +500,9 @@ fn has_data_root_in_storage_module(
     node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
     ledger: DataLedger,
     slot_index: usize,
-    data_root: H256,
+    header: &irys_types::DataTransactionHeader,
 ) -> bool {
+    let data_commitment = header.data_commitment(&node.node_ctx.config.data_tree_geometry());
     let sms = node.node_ctx.storage_modules_guard.read();
     for sm in sms.iter() {
         let Some(pa) = sm.partition_assignment() else {
@@ -510,7 +510,7 @@ fn has_data_root_in_storage_module(
         };
         if pa.ledger_id == Some(ledger.into()) && pa.slot_index == Some(slot_index) {
             let result = sm.query_submodule_db_by_offset(PartitionChunkOffset::from(0), |tx| {
-                tx.get_data_root_infos_for_data_root(data_root)
+                tx.get_data_root_infos_for_data_root(data_commitment)
             });
             return matches!(result, Ok(Some(infos)) if !infos.0.is_empty());
         }

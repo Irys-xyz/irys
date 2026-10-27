@@ -534,7 +534,9 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
     // this should be too old, and should be rejected by the API.
     let too_old_ingress_proof = generate_ingress_proof(
         &genesis_signer,
-        data_tx.header.data_tree_root.0,
+        data_tx
+            .header
+            .data_commitment(&config.consensus_config().data_tree_geometry()?),
         chunks.iter().copied().map(Ok),
         config.consensus_config().chain_id,
         genesis_hash,
@@ -826,7 +828,9 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
     // create an ingress proof anchored at the edge case height
     let edge_case_ingress_proof = generate_ingress_proof(
         &genesis_signer,
-        fresh_publish_tx.header.data_tree_root.0,
+        fresh_publish_tx
+            .header
+            .data_commitment(&config.consensus_config().data_tree_geometry()?),
         [[88; 32], [88; 32], [88; 32]].iter().copied().map(Ok),
         config.consensus_config().chain_id,
         edge_case_block.block_hash,

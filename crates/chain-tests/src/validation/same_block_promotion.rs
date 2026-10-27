@@ -96,7 +96,8 @@ async fn heavy_same_block_promotion_accepted_by_peer() -> eyre::Result<()> {
     let anchor = genesis_node.get_anchor().await?;
     let manual_proof = generate_ingress_proof(
         &genesis_signer,
-        tx.header.data_tree_root.0,
+        tx.header
+            .data_commitment(&genesis_config.consensus_config().data_tree_geometry()?),
         chunks.iter().map(|c| Ok(c.as_slice())),
         genesis_config.consensus_config().chain_id,
         anchor,

@@ -108,7 +108,9 @@ async fn external_api() -> eyre::Result<()> {
         // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
         let ro_tx = &node.node_ctx.db.0.tx().unwrap();
         match ro_tx
-            .get::<IngressProofs>(recv_tx.data_tree_root.0)
+            .get::<IngressProofs>(
+                recv_tx.data_commitment(&node.node_ctx.config.data_tree_geometry()),
+            )
             .unwrap()
         {
             Some(ip) => break ip,
@@ -118,9 +120,12 @@ async fn external_api() -> eyre::Result<()> {
 
     info!(
         "got ingress proof for data root {}",
-        &ingress_proof.proof.data_root
+        &ingress_proof.proof.data_commitment
     );
-    assert_eq!(&ingress_proof.proof.data_root, &recv_tx.data_tree_root.0);
+    assert_eq!(
+        ingress_proof.proof.data_commitment,
+        recv_tx.data_commitment(&node.node_ctx.config.data_tree_geometry())
+    );
 
     let id: String = tx_id.to_string();
 

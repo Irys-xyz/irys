@@ -121,7 +121,7 @@ async fn heavy_submit_expiry_resolves_unmigrated_inclusion_via_slow_path() -> ey
     let chunks: Vec<Vec<u8>> = vec![target_data.into()];
     let proof = generate_ingress_proof(
         &genesis_signer,
-        expired_tx.data_tree_root.0,
+        expired_tx.data_commitment(&genesis_config.consensus_config().data_tree_geometry()?),
         chunks.iter().map(|c| Ok(c.as_slice())),
         genesis_config.consensus_config().chain_id,
         proof_anchor,

@@ -474,7 +474,9 @@ async fn promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
     // this should be too old, and should be rejected by the API.
     let too_old_ingress_proof = generate_ingress_proof(
         &genesis_signer,
-        data_tx.header.data_tree_root.0,
+        data_tx
+            .header
+            .data_commitment(&config.consensus_config().data_tree_geometry()?),
         chunks.iter().copied().map(Ok),
         config.consensus_config().chain_id,
         genesis_node.get_block_by_height(0).await?.block_hash,
@@ -496,7 +498,9 @@ async fn promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
     // now we submit an ingress proof with a newer anchor:
     let new_ingress_proof = generate_ingress_proof(
         &genesis_signer,
-        data_tx.header.data_tree_root.0,
+        data_tx
+            .header
+            .data_commitment(&config.consensus_config().data_tree_geometry()?),
         chunks.iter().copied().map(Ok),
         config.consensus_config().chain_id,
         genesis_node.get_anchor().await?,
@@ -656,7 +660,9 @@ async fn test_ingress_proof_anchor_edge_case(
     // create an ingress proof anchored at the edge case height
     let edge_case_ingress_proof = generate_ingress_proof(
         &genesis_signer,
-        edge_data_tx.header.data_tree_root.0,
+        edge_data_tx
+            .header
+            .data_commitment(&config.consensus_config().data_tree_geometry()?),
         chunks.iter().copied().map(Ok),
         config.consensus_config().chain_id,
         edge_case_block.block_hash,

@@ -724,7 +724,8 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
     let chunks_for_proof: Vec<Vec<u8>> = data_for_proof.chunks(chunk_size).map(Vec::from).collect();
     let manual_proof = irys_types::ingress::generate_ingress_proof(
         &genesis_signer,
-        tx.header.data_tree_root.0,
+        tx.header
+            .data_commitment(&genesis_config.consensus_config().data_tree_geometry()?),
         chunks_for_proof.iter().map(|c| Ok(c.as_slice())),
         genesis_config.consensus_config().chain_id,
         genesis_node.get_anchor().await?,

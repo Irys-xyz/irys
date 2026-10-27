@@ -1143,12 +1143,14 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
         metadata: irys_types::DataTransactionMetadata::with_promoted_height(1),
     })
     .sign(&test_signer)?;
+    let geometry = genesis_node.node_ctx.config.data_tree_geometry();
+    let data_commitment = data_tx.data_commitment(&geometry);
 
     // Generate two ingress proofs from the SAME signer (duplicate!)
     let chain_id = 1_u64;
     let proof1 = generate_ingress_proof(
         &test_signer,
-        data_root,
+        data_commitment,
         chunks.clone().into_iter().map(Ok),
         chain_id,
         anchor,
@@ -1159,15 +1161,15 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
     // We'll use the same data but the proof generation creates a different proof hash
     let proof2 = generate_ingress_proof(
         &test_signer,
-        data_root,
+        data_commitment,
         chunks.into_iter().map(Ok),
         chain_id,
         anchor,
     )?;
 
-    // Verify both proofs have the same data_root and can recover the same signer
-    assert_eq!(proof1.data_root, data_root);
-    assert_eq!(proof2.data_root, data_root);
+    // Verify both proofs have the same data commitment and can recover the same signer
+    assert_eq!(proof1.data_commitment, data_commitment);
+    assert_eq!(proof2.data_commitment, data_commitment);
     assert_eq!(proof1.recover_signer()?, test_signer.address());
     assert_eq!(proof2.recover_signer()?, test_signer.address());
 
@@ -1189,7 +1191,7 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
 
         // Store the data transaction
         tx.put::<IrysDataTxHeaders>(data_tx.id, CompactTxHeader(data_tx.clone()))?;
-        irys_database::cache_data_root(tx, &data_tx, None)?;
+        irys_database::cache_data_root(tx, &data_tx, None, &geometry)?;
 
         // Store the ingress proofs (with duplicates from same address)
         for cached_proof in &duplicate_proofs {
