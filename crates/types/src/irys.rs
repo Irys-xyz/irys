@@ -1,10 +1,9 @@
-use crate::DataTreeRoot;
+use crate::chunked::ChunkedIterator;
 use crate::data_tree::Geometry;
 use crate::{
     Base64, BoundedFee, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
     H256, HandshakeRequest, HandshakeRequestV2, IngressProof, IrysAddress, IrysBlockHeader,
-    IrysSignature, Signature, generate_data_root, generate_leaves, resolve_proofs,
-    versioning::Signable as _,
+    IrysSignature, Signature, versioning::Signable as _,
 };
 use alloy_core::primitives::keccak256;
 
@@ -12,6 +11,7 @@ use alloy_primitives::Address;
 use alloy_signer::utils::secret_key_to_address;
 use alloy_signer_local::LocalSigner;
 use eyre::Result;
+use irys_data_tree::DataTreeBuilder;
 use k256::ecdsa::SigningKey;
 
 #[derive(Debug, Clone)]
@@ -198,40 +198,30 @@ impl IrysSigner {
         Ok(())
     }
 
-    /// Builds a merkle tree, with a root, including all the proofs for each
-    /// chunk. The `data` vec does NOT need to yield correctly sized `Vec` chunks.
+    /// Builds the data tree and its root. The `data` iterator does NOT need to
+    /// yield correctly sized `Vec` chunks: it is cut into `chunk_size` pieces.
+    /// Empty data is an error.
     fn merklize(
         &self,
         data: impl Iterator<Item = eyre::Result<Vec<u8>>>,
         store_data: bool,
     ) -> Result<DataTransaction> {
-        let chunk_size = usize::try_from(self.data_tree_geometry.chunk_size())?;
+        let chunk_size = self.data_tree_geometry.chunk_size();
+        let mut builder = DataTreeBuilder::new(self.data_tree_geometry);
         // TODO: fix the `data` field so we can use "streaming" data sources
-        let (data, chunks) = if store_data {
-            let data: eyre::Result<Vec<Vec<u8>>> = data.collect();
-            let data = data?;
-            let chunks = generate_leaves(data.clone().into_iter().map(Ok), chunk_size)?;
-            (Some(data.into_iter().flatten().collect()), chunks)
-        } else {
-            let chunks = generate_leaves(data, chunk_size)?;
-            (None, chunks)
-        };
-        let root = generate_data_root(chunks.clone())?;
-        let data_root = H256(root.id);
-        let proofs = resolve_proofs(root, None)?;
-
-        // Error if the last chunk or proof is zero length.
-        let last_chunk = chunks.last().expect("Unable to get last chunk");
-        if last_chunk.max_byte_range == last_chunk.min_byte_range {
-            return Err(eyre::eyre!("Last chunk cannot be zero length"));
+        let mut stored = store_data.then(Vec::new);
+        for chunk in ChunkedIterator::new(data, usize::try_from(chunk_size)?) {
+            let chunk = chunk?;
+            builder.push_chunk(&chunk)?;
+            if let Some(stored) = stored.as_mut() {
+                stored.extend_from_slice(&chunk);
+            }
         }
+        let tree = builder.finish()?;
 
         let mut header = DataTransactionHeader::default();
-        header.data_size = chunks
-            .last()
-            .expect("Unable to get last chunk")
-            .max_byte_range as u64;
-        header.data_tree_root = DataTreeRoot(data_root);
+        header.data_size = tree.data_size();
+        header.data_tree_root = tree.data_tree_root().into();
         // Stamp the signer's chain_id so builder-produced txs target the configured chain.
         // `DataTransactionHeader::default()` leaves chain_id = 0, and consensus/ingress now
         // reject a foreign chain_id, so an unstamped tx would be refused on its own chain.
@@ -239,9 +229,9 @@ impl IrysSigner {
 
         Ok(DataTransaction {
             header,
-            data: data.map(Base64),
-            chunks,
-            proofs,
+            data: stored.map(Base64),
+            tree: Some(tree),
+            chunk_size,
         })
     }
 }
@@ -259,14 +249,16 @@ pub fn vec_to_chunk_iter(data: Vec<u8>) -> std::iter::Once<eyre::Result<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use super::IrysSigner;
+    use crate::data_tree::verify_data_chunk;
     use crate::versioning::Signable as _;
-    use crate::{H256, hash_sha256, validate_chunk};
+    use crate::{DataTreeRoot, H256};
     use rand::Rng as _;
 
     #[tokio::test]
     async fn create_and_sign_transaction() {
         // Create 2.5 chunks worth of data *  fill the data with random bytes
         let config = crate::ConsensusConfig::testing();
+        let geometry = config.data_tree_geometry().unwrap();
         let data_size = (config.chunk_size as f64 * 2.5).round() as usize;
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
@@ -282,47 +274,33 @@ mod tests {
         // Sign the transaction
         tx = irys.sign_transaction(tx).unwrap();
 
-        assert_eq!(tx.chunks.len(), 3);
-
-        for chunk in &tx.chunks {
-            println!(
-                "min: {}, max: {}",
-                chunk.min_byte_range, chunk.max_byte_range
-            );
-        }
-
-        println!("{}", serde_json::to_string_pretty(&tx.header).unwrap());
+        let chunks = tx.data_chunks().unwrap();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(tx.header.data_size, data_size as u64);
 
         // Make sure the size of the last chunk is just whatever is left over
-        // after chunking the rest of the data at MAX_CHUNK_SIZE intervals.
-        let last_chunk = tx.chunks.last().unwrap();
+        // after chunking the rest of the data at chunk_size intervals.
         assert_eq!(
             data_size % config.chunk_size as usize,
-            last_chunk.max_byte_range - last_chunk.min_byte_range
+            chunks.last().unwrap().bytes.0.len()
         );
 
-        // Validate the chunk proofs
-        for (index, chunk_node) in tx.chunks.iter().enumerate() {
-            let min = chunk_node.min_byte_range;
-            let max = chunk_node.max_byte_range;
-
-            // Ensure max is within bounds of data_bytes
-            if max > data_bytes.len() {
-                panic!("Max byte range exceeds the data_bytes length!");
-            }
-
-            // Ensure every chunk proof (data_path) is valid
-            let root_id = tx.header.data_tree_root.0.0;
-            let proof = tx.proofs[index].clone();
-            let proof_result = validate_chunk(root_id, chunk_node, &proof);
-            assert!(proof_result.is_ok());
-
-            // Ensure the data_hash is valid by hashing the chunk data
-            let chunk_bytes: &[u8] = &data_bytes[min..max];
-            let computed_hash = hash_sha256(chunk_bytes);
-            let data_hash = chunk_node.data_hash.unwrap();
-
-            assert_eq!(data_hash, computed_hash);
+        // Every chunk is its slice of the data, and its proof opens it.
+        for (chunk_index, chunk) in chunks.iter().enumerate() {
+            let start = chunk_index * config.chunk_size as usize;
+            let end = (start + config.chunk_size as usize).min(data_size);
+            assert_eq!(chunk.bytes.0, data_bytes[start..end]);
+            assert_eq!(
+                verify_data_chunk(
+                    &geometry,
+                    tx.header.data_tree_root,
+                    tx.header.data_size,
+                    chunk.tx_offset,
+                    &chunk.bytes.0,
+                    &chunk.data_path.0,
+                ),
+                Ok(())
+            );
         }
 
         // Recover the signer as a way to verify the signature
@@ -330,5 +308,88 @@ mod tests {
         let signer = tx.header.signature.recover_signer(prehash).unwrap();
 
         assert_eq!(signer, tx.header.signer);
+    }
+
+    #[test]
+    fn empty_data_is_an_error() {
+        let config = crate::ConsensusConfig::testing();
+        let signer = IrysSigner::random_signer(&config);
+        assert!(signer.create_transaction(Vec::new(), H256::zero()).is_err());
+    }
+
+    /// Parse one lowercase hex string from a vector file.
+    fn hex_bytes(value: &serde_json::Value) -> Vec<u8> {
+        hex::decode(value.as_str().expect("hex string")).expect("valid hex")
+    }
+
+    fn read_vectors(file_name: &str) -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../data-tree/vectors")
+            .join(file_name);
+        serde_json::from_slice(&std::fs::read(path).expect("vector file")).expect("vector JSON")
+    }
+
+    /// `merklize` builds the tree the crate's vectors fix: the testing
+    /// geometry (`chunk_size` 32, 4 segments), bytes `i mod 251`, 112 bytes.
+    /// The data is fed in uneven pieces, so the cut into chunks is checked too.
+    #[test]
+    fn merklize_matches_the_crate_vectors() {
+        const DATA_SIZE: u64 = 112;
+        const PATTERN_MODULUS: u64 = 251;
+        let config = crate::ConsensusConfig::testing();
+        let geometry = config.data_tree_geometry().unwrap();
+        assert_eq!(
+            geometry.chunk_size(),
+            irys_data_tree::Geometry::TESTING.chunk_size()
+        );
+        assert_eq!(
+            geometry.segments_per_chunk(),
+            irys_data_tree::Geometry::TESTING.segments_per_chunk()
+        );
+        let data: Vec<u8> = (0..DATA_SIZE)
+            .map(|byte| (byte % PATTERN_MODULUS) as u8)
+            .collect();
+        let pieces = [&data[..5], &data[5..70], &data[70..]]
+            .map(|piece| Ok(piece.to_vec()))
+            .into_iter();
+        let signer = IrysSigner::random_signer(&config);
+        let tx = signer
+            .create_transaction_from_iter(pieces, H256::zero(), true)
+            .unwrap();
+        assert_eq!(tx.header.data_size, DATA_SIZE);
+
+        let roots = read_vectors("roots_testing.json");
+        let root_case = roots["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["pattern"] == "mod251" && case["data_size"] == DATA_SIZE)
+            .expect("root vector for 112 bytes");
+        let expected_root = H256::from_slice(&hex_bytes(&root_case["data_tree_root"]));
+        assert_eq!(tx.header.data_tree_root, DataTreeRoot(expected_root));
+
+        let proofs = read_vectors("chunk_proofs.json");
+        let proof_cases: Vec<_> = proofs["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| {
+                case["geometry"]["chunk_size"] == geometry.chunk_size()
+                    && case["pattern"] == "mod251"
+                    && case["data_size"] == DATA_SIZE
+            })
+            .collect();
+        let chunks = tx.data_chunks().unwrap();
+        assert_eq!(proof_cases.len(), chunks.len());
+        for case in proof_cases {
+            let chunk_index = u32::try_from(case["chunk_index"].as_u64().unwrap()).unwrap();
+            let expected_proof = hex_bytes(&case["proof"]);
+            assert_eq!(
+                tx.chunk_proof(crate::TxChunkOffset(chunk_index)).unwrap().0,
+                expected_proof,
+                "chunk {chunk_index}"
+            );
+            assert_eq!(chunks[chunk_index as usize].data_path.0, expected_proof);
+        }
     }
 }

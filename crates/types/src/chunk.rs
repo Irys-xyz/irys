@@ -60,8 +60,8 @@ pub struct UnpackedChunk {
     /// Only the last chunk can be smaller than CHUNK_SIZE.
     #[serde(with = "string_u64")]
     pub data_size: u64,
-    /// Raw bytes of the merkle proof that connects the data_root and the
-    /// chunk hash
+    /// The chunk proof: the sibling hashes from the chunk to the data tree
+    /// root, then the size witness (data tree spec §5)
     pub data_path: Base64,
     /// Raw bytes to be stored, should be CHUNK_SIZE in length unless it is the
     /// last chunk in the transaction
@@ -163,8 +163,8 @@ pub struct PackedChunk {
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
     pub data_size: u64,
-    /// Raw bytes of the merkle proof that connects the data_root and the
-    /// chunk hash
+    /// The chunk proof: the sibling hashes from the chunk to the data tree
+    /// root, then the size witness (data tree spec §5)
     pub data_path: Base64,
     /// Raw bytes to be stored, should be CHUNK_SIZE in length unless it is the
     /// last chunk in the transaction
@@ -193,8 +193,8 @@ pub struct PartialChunk {
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
     pub data_size: Option<u64>,
-    /// Raw bytes of the merkle proof that connects the data_root and the
-    /// chunk hash
+    /// The chunk proof: the sibling hashes from the chunk to the data tree
+    /// root, then the size witness (data tree spec §5)
     pub data_path: Option<Base64>,
     /// Raw bytes to be stored, should be CHUNK_SIZE in length unless it is the
     /// last chunk in the transaction

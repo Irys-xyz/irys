@@ -15,8 +15,7 @@
 //! stored or signed value does not depend on which wrapper holds it. There is
 //! no `From<H256>` and no `Deref`: a raw hash must be wrapped on purpose.
 
-use crate::merkle::{BRANCH_PROOF_LEN, LEAF_PROOF_LEN};
-use crate::{Base64, H256, TxChunkOffset, ensure_proof_layout, hash_sha256, validate_path};
+use crate::{H256, TxChunkOffset};
 use alloy_primitives::bytes::BufMut;
 use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Arbitrary;
@@ -163,11 +162,8 @@ pub fn chunk_key(data_commitment: DataCommitment, chunk_index: TxChunkOffset) ->
 /// Every data-chunk check and every check of a stored or received data path
 /// goes through this function. Callers map the error to their own error type.
 ///
-/// This body runs the v1 checks, in the order of `verify_chunk` (spec §5):
-/// the chunk index and `chunk_len` from `geometry`, the byte length, the
-/// proof layout, then the path climb, the leaf byte range and the leaf hash.
-/// The v2 swap replaces the body with `irys_data_tree::verify_chunk` against
-/// `data_commitment(geometry, data_tree_root, data_size)`.
+/// The caller takes `data_tree_root` and `data_size` from a signature-checked
+/// header, so the commitment derived here is anchored (spec §6).
 pub fn verify_data_chunk(
     geometry: &Geometry,
     data_tree_root: DataTreeRoot,
@@ -176,47 +172,14 @@ pub fn verify_data_chunk(
     bytes: &[u8],
     proof: &[u8],
 ) -> Result<(), VerifyError> {
-    let chunk_length = geometry.chunk_len(data_size, chunk_index.0)?;
-    let actual_length = bytes.len() as u64;
-    if actual_length != chunk_length {
-        return Err(VerifyError::InvalidChunkLength {
-            expected: chunk_length,
-            actual: actual_length,
-        });
-    }
-
-    // v1 has no fixed proof length. `expected` is the nearest well-formed v1
-    // length at or below the supplied length.
-    if ensure_proof_layout(proof).is_err() {
-        let expected = match proof.len().checked_sub(LEAF_PROOF_LEN) {
-            Some(branches_length) => proof.len() - branches_length % BRANCH_PROOF_LEN,
-            None => LEAF_PROOF_LEN,
-        };
-        return Err(VerifyError::InvalidProofLength {
-            expected,
-            actual: proof.len(),
-        });
-    }
-
-    // `chunk_len` succeeded, so the chunk start is below `data_size` and the
-    // chunk end does not overflow.
-    let chunk_start = u64::from(chunk_index.0) * geometry.chunk_size();
-    let chunk_end = chunk_start + chunk_length;
-    let path = validate_path(
-        data_tree_root.0.0,
-        &Base64(proof.to_vec()),
-        u128::from(chunk_end - 1),
+    irys_data_tree::verify_chunk(
+        geometry,
+        &data_commitment(geometry, data_tree_root, data_size).into(),
+        data_size,
+        chunk_index.0,
+        bytes,
+        proof,
     )
-    .map_err(|_| VerifyError::CommitmentMismatch)?;
-    if (path.min_byte_range, path.max_byte_range)
-        != (u128::from(chunk_start), u128::from(chunk_end))
-    {
-        return Err(VerifyError::CommitmentMismatch);
-    }
-    if path.leaf_hash != hash_sha256(bytes) {
-        return Err(VerifyError::CommitmentMismatch);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -342,14 +305,15 @@ mod tests {
     }
 
     #[test]
-    fn seam_maps_each_v1_failure_to_a_verify_error() {
+    fn seam_returns_each_verify_error() {
         let config = crate::ConsensusConfig::testing();
         let geometry = config.data_tree_geometry().unwrap();
         let signer = crate::irys::IrysSigner::random_signer(&config);
         let data_size = geometry.chunk_size() * 2;
-        let tx = signer
-            .create_transaction(vec![3_u8; data_size as usize], H256::zero())
-            .unwrap();
+        // The chunks differ, so their proofs differ (identical chunks can
+        // share a proof, spec §7).
+        let data: Vec<u8> = (0..data_size).map(|byte| byte as u8).collect();
+        let tx = signer.create_transaction(data, H256::zero()).unwrap();
         let root = tx.header.data_tree_root;
         let chunk = &tx.data_chunks().unwrap()[0];
         let proof = tx.chunk_proof(TxChunkOffset(0)).unwrap().0;
@@ -382,6 +346,18 @@ mod tests {
             verify(0, &chunk.bytes.0, &proof[1..]),
             Err(irys_data_tree::VerifyError::InvalidProofLength { .. })
         ));
+        // Another size changes the size witness, so the honest proof fails.
+        assert_eq!(
+            verify_data_chunk(
+                &geometry,
+                root,
+                data_size - 1,
+                TxChunkOffset(0),
+                &chunk.bytes.0,
+                &proof,
+            ),
+            Err(irys_data_tree::VerifyError::SizeWitnessMismatch)
+        );
         // A proof for another chunk does not open this one.
         assert_eq!(
             verify(0, &chunk.bytes.0, &other_proof),

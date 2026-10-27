@@ -13,6 +13,7 @@ pub use crate::{
 
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
+use irys_data_tree::DataTree;
 use irys_macros_integer_tagged::IntegerTagged;
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
@@ -391,10 +392,13 @@ pub struct DataTransaction {
     pub header: DataTransactionHeader,
     // TODO: make this compatible with stream/iterator data sources
     pub data: Option<Base64>,
+    /// The data tree `data` was built into. `None` after deserialization.
     #[serde(skip)]
-    pub(crate) chunks: Vec<Node>,
+    pub(crate) tree: Option<DataTree>,
+    /// The geometry chunk size the tree was built with. `data_chunks` slices
+    /// `data` by it.
     #[serde(skip)]
-    pub(crate) proofs: Vec<Proof>,
+    pub(crate) chunk_size: u64,
 }
 
 impl DataTransaction {
@@ -402,33 +406,37 @@ impl DataTransaction {
         self.header.signature_hash()
     }
 
+    /// Every chunk of `data` with its chunk proof. Chunk `chunk_index` is the
+    /// `chunk_len` bytes from `chunk_index × chunk_size`.
     pub fn data_chunks(&self) -> eyre::Result<Vec<UnpackedChunk>> {
-        // TODO: find a better version
         let data = match &self.data {
             Some(d) => d,
             None => eyre::bail!("missing required tx data"),
         };
-        let mut chunks = Vec::with_capacity(self.chunks.len());
-        for (idx, chunk) in self.chunks.iter().enumerate() {
-            let unpacked_chunk = UnpackedChunk {
-                data_tree_root: self.header.data_tree_root,
-                data_size: self.header.data_size,
-                data_path: Base64(self.proofs[idx].proof.clone()),
-                bytes: Base64(data.0[chunk.min_byte_range..chunk.max_byte_range].to_vec()),
-                tx_offset: TxChunkOffset::from(idx as u32),
-            };
-            chunks.push(unpacked_chunk);
-        }
-        Ok(chunks)
+        let chunk_size = usize::try_from(self.chunk_size)?;
+        data.0
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_index, bytes)| {
+                let chunk_index = TxChunkOffset::from(u32::try_from(chunk_index)?);
+                Ok(UnpackedChunk {
+                    data_tree_root: self.header.data_tree_root,
+                    data_size: self.header.data_size,
+                    data_path: self.chunk_proof(chunk_index)?,
+                    bytes: Base64(bytes.to_vec()),
+                    tx_offset: chunk_index,
+                })
+            })
+            .collect()
     }
 
     /// The data path of chunk `chunk_index`.
     pub fn chunk_proof(&self, chunk_index: TxChunkOffset) -> eyre::Result<Base64> {
-        let proof = usize::try_from(chunk_index.0)
-            .ok()
-            .and_then(|index| self.proofs.get(index))
-            .ok_or_else(|| eyre::eyre!("no proof for chunk {chunk_index}"))?;
-        Ok(Base64(proof.proof.clone()))
+        let tree = self
+            .tree
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("transaction has no data tree"))?;
+        Ok(Base64(tree.chunk_proof(chunk_index.0)?))
     }
 }
 
