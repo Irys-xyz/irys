@@ -56,8 +56,7 @@ pub fn expected_chunk_byte_range(
 }
 
 /// Verifies that a validated Merkle path identifies exactly the expected chunk
-/// range. Rightmost status is checked separately because provisional
-/// transaction metadata may understate the size committed by the data root.
+/// range.
 pub fn validate_path_byte_range(
     path: &ValidatePathResult,
     expected: (u64, u64),

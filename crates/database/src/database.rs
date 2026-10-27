@@ -949,28 +949,6 @@ pub fn commitment_tx_by_txid<T: DbTx>(
         .map(CommitmentTransaction::from))
 }
 
-/// Confirms the data size of a cached data root entry after validating its rightmost chunk.
-///
-/// Updates the entry with the proven data size extracted from the last leaf's merkle proof.
-/// Returns `Ok(Some(entry))` if updated, `Ok(None)` if entry not found.
-pub fn confirm_data_size_for_data_root<T: DbTx + DbTxMut>(
-    tx: &T,
-    data_commitment: &DataCommitment,
-    data_size: u64,
-) -> eyre::Result<Option<CachedDataRoot>> {
-    // Access the current cached entry from the database
-    let result = tx.get::<CachedDataRoots>(*data_commitment)?;
-
-    if let Some(mut cached_data_root) = result {
-        cached_data_root.data_size = data_size;
-        cached_data_root.data_size_confirmed = true;
-        tx.put::<CachedDataRoots>(*data_commitment, cached_data_root.clone())?;
-        Ok(Some(cached_data_root))
-    } else {
-        Ok(None)
-    }
-}
-
 /// Takes a [`DataTransactionHeader`] and caches its `data_commitment` and tx.id in a
 /// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same
 /// `data_commitment` (the same `data_tree_root` and `data_size` under `geometry`).
@@ -1003,11 +981,6 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     // If the entry exists, update the timestamp and add the txid if necessary
     if !cached_data_root.txid_set.contains(&tx_header.id) {
         cached_data_root.txid_set.push(tx_header.id);
-    }
-
-    // If the data_size is not yet confirmed and the tx_headers data_size is larger than the one in the cache, update it
-    if cached_data_root.data_size < tx_header.data_size && !cached_data_root.data_size_confirmed {
-        cached_data_root.data_size = tx_header.data_size;
     }
 
     // If a block header is provided, record it in block_set and clear any
@@ -1396,7 +1369,6 @@ pub fn backfill_cached_ingress_data_hashes(
 
         for data_commitment in leaf_roots {
             if let Some(cdr) = tx.get::<CachedDataRoots>(data_commitment)?
-                && cdr.data_size_confirmed
                 && !cdr.block_set.is_empty()
                 && ingress_proof_by_commitment_address(tx, data_commitment, address)?.is_none()
             {

@@ -6,9 +6,7 @@ use super::metrics::{
     record_flush_failure, record_validation_duration,
 };
 
-use irys_database::{
-    complete_ingress_leaves, confirm_data_size_for_data_root, db::IrysDatabaseExt as _,
-};
+use irys_database::{complete_ingress_leaves, db::IrysDatabaseExt as _};
 use irys_domain::{StorageModule, WriteDataChunkError};
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
@@ -29,51 +27,37 @@ use tracing::{Instrument as _, debug, error, info, info_span, instrument, warn};
 /// unit-testable without standing up the full service.  Returns `true` iff
 /// the caller should short-circuit `try_generate_ingress_proof_for_root`.
 ///
-/// Two checks:
-///   - `!data_size_confirmed`: the rightmost-chunk merkle validation hasn't
-///     attested the size yet, so we don't know which chunks are required.
-///   - `block_set.is_empty()`: cheap "has this data_root been seen in any
-///     block yet?" gate.  `block_set` is a hint with two writers (mempool
-///     `BlockConfirmed` pre-migration forward-fill + `persist_metadata`
-///     canonical writer); a stale `BlockConfirmed` processed after a reorg
-///     can leave an orphan hash here, so non-empty does NOT prove canonical
-///     inclusion.  An over-permissive gate is correctness-safe: ingress
-///     proofs are keyed on `data_root` (see the `IngressProofs` table), so a
-///     proof generated for an orphan-tx data_root remains valid if any future
-///     canonical tx references the same data_root — i.e. speculative, not
-///     wasted.  Canonical truth is re-derived by
-///     `tx_inclusion::find_canonical_ledger_range` at validation /
-///     promotion time.  An empty set, by contrast, means no writer has ever
-///     attached this data_root to a block, so we short-circuit.  After a
-///     reorg that empties block_set, the next canonical confirmation
-///     re-populates it via the mempool `BlockConfirmed` path
-///     (`lifecycle.rs:96`).
+/// The commitment fixes the size, so one check remains: `block_set.is_empty()`,
+/// a cheap "has this data_root been seen in any block yet?" gate.  `block_set`
+/// is a hint with two writers (mempool `BlockConfirmed` pre-migration
+/// forward-fill + `persist_metadata` canonical writer); a stale
+/// `BlockConfirmed` processed after a reorg can leave an orphan hash here, so
+/// non-empty does NOT prove canonical inclusion.  An over-permissive gate is
+/// correctness-safe: ingress proofs are keyed on `data_commitment` (see the
+/// `IngressProofs` table), so a proof generated for an orphan tx remains
+/// valid if any future canonical tx has the same data_commitment — i.e.
+/// speculative, not wasted.  Canonical truth is re-derived by
+/// `tx_inclusion::find_canonical_ledger_range` at validation / promotion time.
+/// An empty set, by contrast, means no writer has ever attached this data_root
+/// to a block, so we short-circuit.  After a reorg that empties block_set, the
+/// next canonical confirmation re-populates it via the mempool
+/// `BlockConfirmed` path (`lifecycle.rs:96`).
 fn should_skip_ingress_proof_generation(cdr: &irys_database::db_cache::CachedDataRoot) -> bool {
-    !cdr.data_size_confirmed || cdr.block_set.is_empty()
+    cdr.block_set.is_empty()
 }
 
 /// Pure post-park rescue decision for the TX/chunk gossip TOCTOU.
 ///
 /// After a chunk is parked, we re-read `CachedDataRoot`. This function decides
 /// whether to schedule another `ProcessPendingChunks` drain:
-/// - `cdr_lookup = Err(_)` → leave parked (do **not** fail the already-accepted park)
-/// - `cdr_lookup = Ok(None)` → leave parked (still waiting for the header)
-/// - `cdr_lookup = Ok(Some(size))` → drain if `required_min_data_size` is `None`
-///   (any CDR is enough) or `size >= required_min_data_size` (oversized-claim park)
+/// - `cdr_found = Err(_)` → leave parked (do **not** fail the already-accepted park)
+/// - `cdr_found = Ok(false)` → leave parked (still waiting for the header)
+/// - `cdr_found = Ok(true)` → drain: the header that owns this commitment arrived
 ///
 /// Extracted so deleting the rescue path without updating tests fails CI.
 #[must_use]
-pub(crate) fn should_schedule_pending_drain_after_park(
-    cdr_lookup: Result<Option<u64>, ()>,
-    required_min_data_size: Option<u64>,
-) -> bool {
-    match cdr_lookup {
-        Err(()) | Ok(None) => false,
-        Ok(Some(data_size)) => match required_min_data_size {
-            None => true,
-            Some(min) => data_size >= min,
-        },
-    }
+pub(crate) fn should_schedule_pending_drain_after_park(cdr_found: Result<bool, ()>) -> bool {
+    matches!(cdr_found, Ok(true))
 }
 
 /// Whether a popped pending chunk must be put back after a drain error.
@@ -192,17 +176,13 @@ impl ChunkIngressServiceInner {
     /// Direct re-entry into `process_pending_chunks_for_root` would recurse
     /// through this async ingress stack (`E0733`), so we always go via the
     /// control-plane channel.
-    fn maybe_rescue_after_park(
-        &self,
-        data_commitment: DataCommitment,
-        required_min_data_size: Option<u64>,
-    ) {
-        let cdr_lookup = self
+    fn maybe_rescue_after_park(&self, data_commitment: DataCommitment) {
+        let cdr_found = self
             .irys_db
             .view_eyre(|read_tx| {
                 irys_database::cached_data_root_by_commitment(read_tx, data_commitment)
             })
-            .map(|opt| opt.map(|cdr| cdr.data_size))
+            .map(|cdr| cdr.is_some())
             .map_err(|e| {
                 warn!(
                     chunk.data_commitment = %data_commitment,
@@ -211,13 +191,12 @@ impl ChunkIngressServiceInner {
                 );
             });
 
-        if !should_schedule_pending_drain_after_park(cdr_lookup, required_min_data_size) {
+        if !should_schedule_pending_drain_after_park(cdr_found) {
             return;
         }
 
         debug!(
             chunk.data_commitment = %data_commitment,
-            ?required_min_data_size,
             "CachedDataRoot usable after park; scheduling ProcessPendingChunks"
         );
         if let Err(e) = self
@@ -233,10 +212,9 @@ impl ChunkIngressServiceInner {
         }
     }
 
-    /// Limits on a chunk parked before its proof is checked.
-    /// The missing-header park and the oversized-claim park both use these
-    /// limits: `bytes` at most `chunk_size`, `data_path` at most the configured
-    /// max, and `tx_offset` valid for the claimed size.
+    /// Limits on a chunk parked before its header arrives, so before its proof
+    /// is checked: `bytes` at most `chunk_size`, `data_path` at most the
+    /// configured max, and `tx_offset` valid for the claimed size.
     fn check_unconfirmed_chunk_bounds(
         &self,
         chunk: &UnpackedChunk,
@@ -548,125 +526,59 @@ impl ChunkIngressServiceInner {
                 CriticalChunkIngressError::DatabaseError
             })?;
 
-        let (data_size, data_size_confirmed) = match cached_data_root {
-            Some(cdr) => (Some(cdr.data_size), cdr.data_size_confirmed),
-            None => (None, false),
-        };
-
         drop(_fetch_size_span);
 
-        let data_size = match data_size {
-            Some(ds) => ds,
-            None => {
-                // We don't have a data_root for this chunk but possibly the transaction containing this
-                // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
-                self.check_unconfirmed_chunk_bounds(chunk.as_ref(), chunk_size)?;
+        let Some(cached_data_root) = cached_data_root else {
+            // We don't have a data_root for this chunk but possibly the transaction containing this
+            // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
+            self.check_unconfirmed_chunk_bounds(chunk.as_ref(), chunk_size)?;
 
-                let preheader_chunks_per_item = std::cmp::min(
-                    max_chunks_per_item,
-                    self.config.mempool.max_preheader_chunks_per_item,
-                );
+            let preheader_chunks_per_item = std::cmp::min(
+                max_chunks_per_item,
+                self.config.mempool.max_preheader_chunks_per_item,
+            );
 
-                // The count check and the insert share one write lock so concurrent
-                // ingress cannot exceed the per-item cap.
-                let data_root = chunk.data_tree_root;
-                let tx_offset = chunk.tx_offset;
-                let during_drain = self
-                    .park_pending_chunk(
-                        data_commitment,
-                        Arc::clone(&chunk),
-                        preheader_chunks_per_item,
-                        role,
-                        "pre-header",
-                    )
-                    .await?;
+            // The count check and the insert share one write lock so concurrent
+            // ingress cannot exceed the per-item cap.
+            let data_root = chunk.data_tree_root;
+            let tx_offset = chunk.tx_offset;
+            let during_drain = self
+                .park_pending_chunk(
+                    data_commitment,
+                    Arc::clone(&chunk),
+                    preheader_chunks_per_item,
+                    role,
+                    "pre-header",
+                )
+                .await?;
 
-                // A parked chunk is not stored. Log that, so Ok is not read as
-                // a completed ingress.
-                info!(
-                    chunk.data_root = %data_root,
-                    chunk.tx_offset = %tx_offset,
-                    "Parked chunk: no CachedDataRoot yet (awaiting tx header / CDR commit)"
-                );
+            // A parked chunk is not stored. Log that, so Ok is not read as
+            // a completed ingress.
+            info!(
+                chunk.data_root = %data_root,
+                chunk.tx_offset = %tx_offset,
+                "Parked chunk: no CachedDataRoot yet (awaiting tx header / CDR commit)"
+            );
 
-                // Close the TX/chunk gossip TOCTOU (see maybe_rescue_after_park).
-                // Any CDR is enough: the header that commits it owns this root.
-                // Skip this while a drain is active. That drain schedules one
-                // follow-up; a second pop now would race its restore.
-                if !during_drain {
-                    self.maybe_rescue_after_park(data_commitment, None);
-                }
-                return Ok(());
+            // Close the TX/chunk gossip TOCTOU (see maybe_rescue_after_park).
+            // Any CDR is enough: the header that commits it owns this root.
+            // Skip this while a drain is active. That drain schedules one
+            // follow-up; a second pop now would race its restore.
+            if !during_drain {
+                self.maybe_rescue_after_park(data_commitment);
             }
+            return Ok(());
         };
 
-        if chunk.data_size > data_size {
-            if data_size_confirmed {
-                // Confirmed size is authoritative - reject mismatched chunks
-                error!(
-                    "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
-                    CriticalChunkIngressError::InvalidDataSize,
-                    data_size,
-                    chunk.data_size
-                );
-                return Err(CriticalChunkIngressError::InvalidDataSize.into());
-            } else {
-                // Unconfirmed: chunk claims larger size than cached.
-                // This may be legitimate (tx with larger size not yet processed).
-                // Park the chunk for the time being — same TOCTOU as the
-                // pre-header path if ProcessPendingChunks runs before this put.
-                // Same cap as that path: `put` would LRU-evict an accepted sibling.
-                // Same body, proof, and offset bounds: this branch returns
-                // before those fields are checked.
-                self.check_unconfirmed_chunk_bounds(chunk.as_ref(), chunk_size)?;
-                let data_root = chunk.data_tree_root;
-                let claimed_size = chunk.data_size;
-                let tx_offset = chunk.tx_offset;
-                let preheader_chunks_per_item = std::cmp::min(
-                    max_chunks_per_item,
-                    self.config.mempool.max_preheader_chunks_per_item,
-                );
-                let during_drain = self
-                    .park_pending_chunk(
-                        data_commitment,
-                        Arc::clone(&chunk),
-                        preheader_chunks_per_item,
-                        role,
-                        "oversized-claim",
-                    )
-                    .await?;
-                info!(
-                    chunk.data_root = %data_root,
-                    chunk.tx_offset = %tx_offset,
-                    claimed_data_size = claimed_size,
-                    cached_data_size = data_size,
-                    "Parked chunk: claims larger data_size than unconfirmed CachedDataRoot"
-                );
-                // Only re-drain if CDR grew enough to accept this claim;
-                // otherwise leave parked for the larger TX's ProcessPendingChunks.
-                // Skip this while a drain is active. That drain schedules one
-                // follow-up; a second pop now would race its restore.
-                if !during_drain {
-                    self.maybe_rescue_after_park(data_commitment, Some(claimed_size));
-                }
-                return Ok(());
-            }
-        }
+        // The commitment binds the size, so the cached size is the size this
+        // chunk claims.
+        let data_size = cached_data_root.data_size;
 
         // Validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
         let _proof_span = info_span!("chunk.validate_proof").entered();
 
-        // Before confirmation, CachedDataRoot holds the largest size claimed by
-        // any header sharing this root. Validate against this chunk's claim so
-        // a rightmost data path can authoritatively correct that provisional
-        // maximum downward. Once confirmed, only the cached size is accepted.
-        let layout_data_size = if data_size_confirmed {
-            data_size
-        } else {
-            chunk.data_size
-        };
-        if layout_data_size == 0 {
+        if data_size == 0 {
             error!(
                 "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
                 CriticalChunkIngressError::InvalidDataSize,
@@ -676,7 +588,7 @@ impl ChunkIngressServiceInner {
         }
 
         let (expected_min_byte_range, expected_max_byte_range) =
-            expected_chunk_byte_range(chunk.tx_offset, layout_data_size, chunk_size)
+            expected_chunk_byte_range(chunk.tx_offset, data_size, chunk_size)
                 .map_err(|error| CriticalChunkIngressError::InvalidOffset(error.to_string()))?;
 
         // The header fixes the length of every chunk (spec §2 `chunk_len`). The
@@ -684,7 +596,7 @@ impl ChunkIngressServiceInner {
         // The size is non-zero and the offset is in range here, so only a size
         // above the geometry maximum fails `chunk_len`.
         let expected_chunk_len = geometry
-            .chunk_len(layout_data_size, *chunk.tx_offset)
+            .chunk_len(data_size, *chunk.tx_offset)
             .map_err(|_| CriticalChunkIngressError::InvalidDataSize)?;
         let chunk_len = u64::try_from(chunk.bytes.len())
             .map_err(|_| CriticalChunkIngressError::InvalidChunkSize)?;
@@ -719,25 +631,11 @@ impl ChunkIngressServiceInner {
             Ok(v) => v,
         };
 
-        let is_last_chunk = expected_max_byte_range == layout_data_size;
         validate_path_byte_range(
             &path_result,
             (expected_min_byte_range, expected_max_byte_range),
         )
         .map_err(|error| CriticalChunkIngressError::InvalidOffset(error.to_string()))?;
-
-        // Once the layout is confirmed, Merkle rightmost status must agree
-        // with the transaction position. Before confirmation, a full prefix
-        // chunk may validly belong to a larger root than an incorrect header
-        // claims; accepting it preserves overlapping-data-root recovery while
-        // the genuinely rightmost path remains the only size authority.
-        if data_size_confirmed && path_result.is_rightmost_chunk != is_last_chunk {
-            return Err(CriticalChunkIngressError::InvalidOffset(
-                "data path rightmost status does not match the confirmed chunk position"
-                    .to_string(),
-            )
-            .into());
-        }
 
         // Check that the leaf hash on the data_path matches the chunk_hash
         let hash_256 = hash_sha256(&chunk.bytes.0);
@@ -747,27 +645,6 @@ impl ChunkIngressServiceInner {
                 CriticalChunkIngressError::InvalidDataHash,
             );
             return Err(CriticalChunkIngressError::InvalidDataHash.into());
-        }
-
-        // A rightmost path attests the declared data size only after its exact
-        // range and body have both been validated.
-        if path_result.is_rightmost_chunk {
-            self.irys_db
-                .update_eyre(|db_tx| {
-                    confirm_data_size_for_data_root(
-                        db_tx,
-                        &data_commitment,
-                        expected_max_byte_range,
-                    )
-                })
-                .map_err(|error| {
-                    error!(
-                        %error,
-                        data_root = %chunk.data_tree_root,
-                        "Failed to confirm data-root size"
-                    );
-                    CriticalChunkIngressError::DatabaseError
-                })?;
         }
 
         record_validation_duration(validation_start.elapsed_ms());
@@ -1221,14 +1098,13 @@ mod tests {
 
     /// Build a `CachedDataRoot` with explicit gate-relevant fields.
     fn cdr_gate_fixture(
-        data_size_confirmed: bool,
         block_set: Vec<H256>,
         txid_set: Vec<H256>,
         expiry_height: Option<u64>,
     ) -> CachedDataRoot {
         CachedDataRoot {
             data_size: 64,
-            data_size_confirmed,
+            data_size_confirmed: true,
             txid_set,
             block_set,
             expiry_height,
@@ -1237,10 +1113,10 @@ mod tests {
         }
     }
 
-    /// Happy path: confirmed size + any block in `block_set` → proceed.
+    /// Happy path: any block in `block_set` → proceed.
     #[test]
-    fn ingress_gate_proceeds_when_size_confirmed_and_block_set_populated() {
-        let cdr = cdr_gate_fixture(true, vec![H256::random()], vec![H256::random()], None);
+    fn ingress_gate_proceeds_when_block_set_populated() {
+        let cdr = cdr_gate_fixture(vec![H256::random()], vec![H256::random()], None);
         assert!(!should_skip_ingress_proof_generation(&cdr));
     }
 
@@ -1291,37 +1167,15 @@ mod tests {
     /// Pre-header park (no CDR at first look): any post-park CDR should drain.
     #[test]
     fn post_park_rescue_schedules_when_any_cdr_appears() {
-        assert!(should_schedule_pending_drain_after_park(Ok(Some(12)), None));
-        assert!(!should_schedule_pending_drain_after_park(Ok(None), None));
+        assert!(should_schedule_pending_drain_after_park(Ok(true)));
+        assert!(!should_schedule_pending_drain_after_park(Ok(false)));
     }
 
     /// DB error after park must leave the chunk parked — not fail the ingest
     /// and not skip rescue via `?` (which would reintroduce the strand).
     #[test]
     fn post_park_rescue_leaves_parked_on_db_error() {
-        assert!(!should_schedule_pending_drain_after_park(Err(()), None));
-        assert!(!should_schedule_pending_drain_after_park(Err(()), Some(12)));
-    }
-
-    /// Oversized-claim park: only drain once CDR has grown to the claim.
-    #[test]
-    fn post_park_rescue_oversized_requires_sufficient_cdr_size() {
-        assert!(!should_schedule_pending_drain_after_park(
-            Ok(Some(10)),
-            Some(12)
-        ));
-        assert!(should_schedule_pending_drain_after_park(
-            Ok(Some(12)),
-            Some(12)
-        ));
-        assert!(should_schedule_pending_drain_after_park(
-            Ok(Some(20)),
-            Some(12)
-        ));
-        assert!(!should_schedule_pending_drain_after_park(
-            Ok(None),
-            Some(12)
-        ));
+        assert!(!should_schedule_pending_drain_after_park(Err(())));
     }
 
     /// Confirmed-but-not-block-set state: pending tx with chunks staged but
@@ -1330,25 +1184,11 @@ mod tests {
     /// `txid_set` + canonical-metadata fall-through is a deliberate change.
     #[test]
     fn ingress_gate_skips_when_txid_set_populated_but_block_set_empty() {
-        let cdr = cdr_gate_fixture(true, vec![], vec![H256::random()], Some(100));
+        let cdr = cdr_gate_fixture(vec![], vec![H256::random()], Some(100));
         assert!(
             should_skip_ingress_proof_generation(&cdr),
             "current contract: empty block_set short-circuits even when txid_set is populated"
         );
-    }
-
-    /// Unconfirmed data_size: skip regardless of `block_set` state.
-    #[test]
-    fn ingress_gate_skips_when_data_size_unconfirmed() {
-        let cdr = cdr_gate_fixture(false, vec![H256::random()], vec![H256::random()], None);
-        assert!(should_skip_ingress_proof_generation(&cdr));
-    }
-
-    /// Both gate inputs negative: skip.
-    #[test]
-    fn ingress_gate_skips_when_both_inputs_negative() {
-        let cdr = cdr_gate_fixture(false, vec![], vec![H256::random()], None);
-        assert!(should_skip_ingress_proof_generation(&cdr));
     }
 
     #[tokio::test]
@@ -1867,78 +1707,6 @@ mod tests {
             msg,
             ChunkIngressMessage::ProcessPendingChunks(root) if root == data_key
         ));
-    }
-
-    /// An oversized-claim chunk that arrives during a drain stays parked when
-    /// the popped set still leaves room. One follow-up runs. The claim is still
-    /// larger than the cached size, so the follow-up puts it back and stops.
-    #[tokio::test]
-    async fn oversized_claim_that_arrives_during_drain_stays_parked_and_one_follow_up_runs() {
-        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
-            .prefix("ingress-drain-claim")
-            .build();
-        let cap = 4_usize;
-        let (inner, mut receivers) = test_ingress_inner(&tmp, cap, cap);
-        let data_root = H256([0x44; 32]);
-        insert_cached_data_root(&inner.irys_db, data_root, 32);
-        park_offsets(&inner, data_root, [0_u32]).await;
-        let (popped, ticket) = pop_for_drain(&inner, data_root).await;
-        let incoming = chunk_with(data_root, 1, 0xAB, CLAIMED_DATA_SIZE);
-
-        inner
-            .handle_chunk_ingress_message(incoming)
-            .await
-            .expect("a claim under the cap must be kept while the root is draining");
-        {
-            let pending = inner.pending_chunks.read().await;
-            let parked = pending
-                .get(&claim_key(data_root))
-                .expect("the claim stays parked during the drain");
-            assert!(parked.peek(&TxChunkOffset::from(1)).is_some());
-            assert!(parked.peek(&TxChunkOffset::from(0)).is_none());
-        }
-
-        inner
-            .finish_pending_drain(claim_key(data_root), popped)
-            .await;
-        drop(ticket);
-
-        {
-            let pending = inner.pending_chunks.read().await;
-            let parked = pending
-                .get(&claim_key(data_root))
-                .expect("popped claim restored");
-            assert_eq!(parked.len(), 2);
-            assert_eq!(
-                parked
-                    .peek(&TxChunkOffset::from(0))
-                    .expect("popped offset 0")
-                    .bytes
-                    .0,
-                vec![0]
-            );
-            assert_eq!(
-                parked
-                    .peek(&TxChunkOffset::from(1))
-                    .expect("arrived claim")
-                    .bytes
-                    .0,
-                vec![0xAB]
-            );
-        }
-        expect_delayed_redrain(&mut receivers, data_root).await;
-
-        inner
-            .process_pending_chunks_for_root(claim_key(data_root))
-            .await;
-        {
-            let pending = inner.pending_chunks.read().await;
-            let parked = pending
-                .get(&claim_key(data_root))
-                .expect("the claim is still larger than the cached size");
-            assert_eq!(parked.len(), 2);
-        }
-        expect_no_redrain(&mut receivers).await;
     }
 
     /// A pre-header chunk that arrives during a drain is still rejected when the
@@ -2824,17 +2592,15 @@ mod tests {
         assert!(claim.peek(&TxChunkOffset::from(2)).is_some());
     }
 
-    /// Unconfirmed cached size, claim one byte larger. The body is not
-    /// proof-checked on this path, so a body over `chunk_size` is rejected
-    /// and not parked.
+    /// A chunk that waits for its header is not proof-checked, so a body
+    /// over `chunk_size` is rejected and not parked.
     #[tokio::test]
-    async fn oversized_claim_rejects_body_over_chunk_size() {
+    async fn preheader_chunk_rejects_body_over_chunk_size() {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("ingress-claim-oversize-bytes")
             .build();
         let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
         let data_root = H256([0xC2; 32]);
-        insert_cached_data_root(&inner.irys_db, data_root, 32);
         let mut incoming = chunk_with(data_root, 0, 0xAB, 33);
         // Test config `chunk_size` is 32. One byte over must not park.
         incoming.bytes = vec![1_u8; 33].into();
@@ -2842,7 +2608,7 @@ mod tests {
         let err = inner
             .handle_chunk_ingress_message(incoming)
             .await
-            .expect_err("a claim whose body exceeds chunk_size must be rejected");
+            .expect_err("a body over chunk_size must be rejected");
         assert!(
             matches!(
                 err,
@@ -2855,22 +2621,21 @@ mod tests {
                 .pending_chunks
                 .read()
                 .await
-                .get(&claim_key(data_root))
+                .get(&size_key(data_root, 33))
                 .is_none(),
-            "a rejected claim must not be parked"
+            "a rejected chunk must not be parked"
         );
         assert!(receivers.chunk_ingress.try_recv().is_err());
     }
 
-    /// Same unconfirmed claim, with a proof longer than the pre-header max.
+    /// A chunk that waits for its header, with a proof longer than the pre-header max.
     #[tokio::test]
-    async fn oversized_claim_rejects_data_path_over_preheader_max() {
+    async fn preheader_chunk_rejects_data_path_over_preheader_max() {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("ingress-claim-oversize-path")
             .build();
         let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
         let data_root = H256([0xC3; 32]);
-        insert_cached_data_root(&inner.irys_db, data_root, 32);
         let mut incoming = chunk_with(data_root, 0, 0xAB, 64);
         let max_path = inner.config.mempool.max_preheader_data_path_bytes;
         incoming.data_path = vec![0_u8; max_path + 1].into();
@@ -2878,7 +2643,7 @@ mod tests {
         let err = inner
             .handle_chunk_ingress_message(incoming)
             .await
-            .expect_err("a claim whose data_path exceeds the pre-header max must be rejected");
+            .expect_err("a data_path over the pre-header max must be rejected");
         assert!(
             matches!(
                 err,
@@ -2891,28 +2656,27 @@ mod tests {
                 .pending_chunks
                 .read()
                 .await
-                .get(&claim_key(data_root))
+                .get(&size_key(data_root, 64))
                 .is_none(),
-            "a rejected claim must not be parked"
+            "a rejected chunk must not be parked"
         );
         assert!(receivers.chunk_ingress.try_recv().is_err());
     }
 
     /// `chunk_size` 32 and `data_size` 32 admit only offset 0.
     #[tokio::test]
-    async fn oversized_claim_rejects_offset_past_claimed_size() {
+    async fn preheader_chunk_rejects_offset_past_claimed_size() {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("ingress-claim-bad-offset")
             .build();
         let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
         let data_root = H256([0xC4; 32]);
-        insert_cached_data_root(&inner.irys_db, data_root, 16);
         let incoming = chunk_with(data_root, 1, 0xAB, 32);
 
         let err = inner
             .handle_chunk_ingress_message(incoming)
             .await
-            .expect_err("a claim whose tx_offset is past the claimed size must be rejected");
+            .expect_err("a tx_offset past the claimed size must be rejected");
         assert!(
             matches!(
                 err,
@@ -2925,23 +2689,22 @@ mod tests {
                 .pending_chunks
                 .read()
                 .await
-                .get(&claim_key(data_root))
+                .get(&size_key(data_root, 32))
                 .is_none(),
-            "a rejected claim must not be parked"
+            "a rejected chunk must not be parked"
         );
         assert!(receivers.chunk_ingress.try_recv().is_err());
     }
 
-    /// A claim inside the body, proof, and offset bounds is still parked.
+    /// A chunk inside the body, proof, and offset bounds is parked.
     /// Bytes equal `chunk_size` and the proof equals the configured max.
     #[tokio::test]
-    async fn oversized_claim_parks_when_body_path_and_offset_fit() {
+    async fn preheader_chunk_parks_when_body_path_and_offset_fit() {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("ingress-claim-bounded")
             .build();
         let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
         let data_root = H256([0xC5; 32]);
-        insert_cached_data_root(&inner.irys_db, data_root, 32);
         // 64 bytes is two chunks of 32, so offset 1 is the last valid offset.
         let mut incoming = chunk_with(data_root, 1, 0xAB, 64);
         incoming.bytes = vec![1_u8; 32].into();
@@ -2951,11 +2714,11 @@ mod tests {
         inner
             .handle_chunk_ingress_message(incoming)
             .await
-            .expect("a bounded oversized claim must still park");
+            .expect("a bounded chunk parks");
         let pending = inner.pending_chunks.read().await;
         let parked = pending
             .get(&size_key(data_root, 64))
-            .expect("claim is parked");
+            .expect("chunk is parked");
         assert_eq!(parked.len(), 1);
         assert_eq!(
             parked
@@ -2969,7 +2732,7 @@ mod tests {
         drop(pending);
         assert!(
             receivers.chunk_ingress.try_recv().is_err(),
-            "cached size is still below the claim, so no drain is scheduled"
+            "no header names this size, so no drain is scheduled"
         );
     }
 
