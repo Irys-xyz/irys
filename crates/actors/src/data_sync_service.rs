@@ -118,7 +118,6 @@ pub(crate) fn ingress_error_is_invalid_peer_data(error: &ChunkIngressError) -> b
         error,
         ChunkIngressError::Critical(
             CriticalChunkIngressError::InvalidProof
-                | CriticalChunkIngressError::InvalidDataHash
                 | CriticalChunkIngressError::InvalidChunkSize
                 | CriticalChunkIngressError::InvalidDataSize
                 | CriticalChunkIngressError::InvalidOffset(_)

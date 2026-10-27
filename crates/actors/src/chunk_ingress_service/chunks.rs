@@ -82,7 +82,6 @@ fn is_permanent_chunk_reject(err: &ChunkIngressError) -> bool {
         err,
         ChunkIngressError::Critical(
             CriticalChunkIngressError::InvalidProof
-                | CriticalChunkIngressError::InvalidDataHash
                 | CriticalChunkIngressError::InvalidChunkSize
                 | CriticalChunkIngressError::InvalidDataSize
                 | CriticalChunkIngressError::InvalidOffset(_)
@@ -916,7 +915,6 @@ impl From<AdvisoryChunkIngressError> for ChunkIngressError {
 #[derive(Debug, Clone)]
 pub enum CriticalChunkIngressError {
     InvalidProof,
-    InvalidDataHash,
     InvalidChunkSize,
     InvalidDataSize,
     InvalidOffset(String),
@@ -929,7 +927,6 @@ impl CriticalChunkIngressError {
     pub fn error_type(&self) -> &'static str {
         match self {
             Self::InvalidProof => "invalid_proof",
-            Self::InvalidDataHash => "invalid_data_hash",
             Self::InvalidChunkSize => "invalid_chunk_size",
             Self::InvalidDataSize => "invalid_data_size",
             Self::InvalidOffset(_) => "invalid_offset",
@@ -1101,7 +1098,6 @@ mod tests {
     fn validation_and_post_commit_errors_do_not_restore_pending_chunk() {
         let validation = [
             ChunkIngressError::Critical(CriticalChunkIngressError::InvalidProof),
-            ChunkIngressError::Critical(CriticalChunkIngressError::InvalidDataHash),
             ChunkIngressError::Critical(CriticalChunkIngressError::InvalidChunkSize),
             ChunkIngressError::Critical(CriticalChunkIngressError::InvalidDataSize),
             ChunkIngressError::Critical(CriticalChunkIngressError::InvalidOffset("offset".into())),
@@ -1256,26 +1252,26 @@ mod tests {
             bytes: vec![0, 1, 2, 3, 4].into(),
             tx_offset: TxChunkOffset::from(0),
         };
-        let path_hash = chunk.chunk_key(&irys_types::data_tree::Geometry::TESTING);
+        let chunk_key = chunk.chunk_key(&irys_types::data_tree::Geometry::TESTING);
         let recent = RwLock::new(LruCache::new(NonZeroUsize::new(8).expect("nonzero")));
 
         storage_module.fail_next_index_commit();
         let first = write_chunk_to_assigned_modules(&[Arc::clone(&storage_module)], &chunk).await;
-        remember_after_module_writes(&recent, path_hash, first)
+        remember_after_module_writes(&recent, chunk_key, first)
             .await
             .expect_err("SM Other must not remember the hash");
         assert!(
-            !recent.read().await.contains(&path_hash),
+            !recent.read().await.contains(&chunk_key),
             "retry must not hit recent_valid_chunks after a failed SM write"
         );
 
         remember_after_module_writes(
             &recent,
-            path_hash,
+            chunk_key,
             write_chunk_to_assigned_modules(&[storage_module], &chunk).await,
         )
         .await?;
-        assert!(recent.read().await.contains(&path_hash));
+        assert!(recent.read().await.contains(&chunk_key));
         Ok(())
     }
 
