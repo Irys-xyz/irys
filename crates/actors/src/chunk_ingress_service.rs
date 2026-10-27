@@ -166,10 +166,6 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
     pub(crate) ingress_proof_generation_state: IngressProofGenerationState,
     http_ingress_open: Arc<Mutex<bool>>,
-    /// Runs after a storage-module scan finds no data size, before the second
-    /// cached-data-root read. Tests commit the header in that window.
-    #[cfg(test)]
-    pub(crate) after_missing_data_size_scan: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl ChunkIngressServiceInner {
@@ -420,8 +416,6 @@ impl ChunkIngressService {
                         chunk_data_writer,
                         ingress_proof_generation_state,
                         http_ingress_open,
-                        #[cfg(test)]
-                        after_missing_data_size_scan: None,
                     }),
                 };
                 let retry_inner = Arc::clone(&service.inner);

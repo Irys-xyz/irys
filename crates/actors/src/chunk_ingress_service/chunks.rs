@@ -12,13 +12,12 @@ use irys_database::{
 use irys_domain::{StorageModule, WriteDataChunkError};
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    ChunkPathHash, DataCommitment, DataLedger, DatabaseProvider, H256, IngressMerkleLeaf,
-    IngressProof, SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256,
+    ChunkPathHash, DataCommitment, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
+    SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256,
     irys::IrysSigner, validate_path, validate_path_byte_range,
 };
 use irys_utils::ElapsedMs as _;
 use lru::LruCache;
-use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -51,15 +50,6 @@ use tracing::{Instrument as _, debug, error, info, info_span, instrument, warn};
 ///     (`lifecycle.rs:96`).
 fn should_skip_ingress_proof_generation(cdr: &irys_database::db_cache::CachedDataRoot) -> bool {
     !cdr.data_size_confirmed || cdr.block_set.is_empty()
-}
-
-/// Represents data_size information and if it comes from the publish ledger.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DataSizeInfo {
-    /// The data_size value
-    pub data_size: u64,
-    /// Whether this data_size is from the publish ledger (trusted)
-    pub is_from_publish_ledger: bool,
 }
 
 /// Pure post-park rescue decision for the TX/chunk gossip TOCTOU.
@@ -119,42 +109,6 @@ fn is_permanent_chunk_reject(err: &ChunkIngressError) -> bool {
                 | AdvisoryChunkIngressError::PreHeaderInvalidOffset(_)
         )
     )
-}
-
-/// Selects the authoritative data_size from multiple storage modules.
-#[must_use]
-pub fn select_data_size_from_storage_modules(
-    storage_module_data: impl IntoIterator<Item = DataSizeInfo>,
-) -> Option<DataSizeInfo> {
-    let mut submit_ledger_max: Option<u64> = None;
-    let mut publish_ledger_max: Option<u64> = None;
-
-    for sm_data in storage_module_data {
-        if sm_data.is_from_publish_ledger {
-            let current_max = publish_ledger_max.unwrap_or(0);
-            if sm_data.data_size > current_max {
-                publish_ledger_max = Some(sm_data.data_size);
-            }
-        } else {
-            let current_max = submit_ledger_max.unwrap_or(0);
-            if sm_data.data_size > current_max {
-                submit_ledger_max = Some(sm_data.data_size);
-            }
-        }
-    }
-
-    // Prefer publish ledger data_size over submit ledger
-    if let Some(ds) = publish_ledger_max {
-        Some(DataSizeInfo {
-            data_size: ds,
-            is_from_publish_ledger: true,
-        })
-    } else {
-        submit_ledger_max.map(|ds| DataSizeInfo {
-            data_size: ds,
-            is_from_publish_ledger: false,
-        })
-    }
 }
 
 async fn write_chunk_to_assigned_modules(
@@ -596,64 +550,7 @@ impl ChunkIngressServiceInner {
 
         let (data_size, data_size_confirmed) = match cached_data_root {
             Some(cdr) => (Some(cdr.data_size), cdr.data_size_confirmed),
-            None => {
-                debug!(
-                    chunk.data_root = ?chunk.data_tree_root,
-                    chunk.tx_offset = ?chunk.tx_offset,
-                    "Checking SMs for data_size"
-                );
-                let storage_modules_guard = self.storage_modules_guard.read();
-
-                // One span for the scan. Rayon workers inherit neither the span
-                // nor the caller thread-local, so each worker enters both.
-                let span = info_span!("index_read", caller = irys_domain::INGRESS_SIZE);
-                let sm_data_sizes: Vec<DataSizeInfo> = span.in_scope(|| {
-                    storage_modules_guard
-                        .par_iter()
-                        .filter_map(|sm| {
-                            span.in_scope(|| {
-                                irys_domain::with_index_caller(irys_domain::INGRESS_SIZE, || {
-                                    let infos = sm.collect_data_root_infos(data_commitment).ok()?;
-                                    if infos.0.is_empty() {
-                                        return None;
-                                    }
-
-                                    let is_from_publish_ledger =
-                                        sm.partition_assignment().is_some_and(|pa| {
-                                            pa.ledger_id == Some(DataLedger::Publish.get_id())
-                                        });
-
-                                    // Find max data_size within this SM's infos
-                                    let max_data_size =
-                                        infos.0.iter().map(|info| info.data_size).max()?;
-
-                                    Some(DataSizeInfo {
-                                        data_size: max_data_size,
-                                        is_from_publish_ledger,
-                                    })
-                                })
-                            })
-                        })
-                        .collect()
-                });
-
-                match select_data_size_from_storage_modules(sm_data_sizes) {
-                    Some(selected) if selected.is_from_publish_ledger => {
-                        (Some(selected.data_size), true)
-                    }
-                    Some(selected) => {
-                        // Submit ledger data needs verification
-                        let confirmed = self.verify_data_size_from_storage_modules(
-                            &storage_modules_guard,
-                            data_commitment,
-                            chunk.data_tree_root,
-                            selected.data_size,
-                        );
-                        (Some(selected.data_size), confirmed)
-                    }
-                    None => self.cached_data_size_after_scan(chunk.as_ref(), data_commitment)?,
-                }
-            }
+            None => (None, false),
         };
 
         drop(_fetch_size_span);
@@ -1108,119 +1005,6 @@ impl ChunkIngressServiceInner {
         }
         Ok(())
     }
-
-    /// The storage-module scan can outlive the header commit. Read the cached
-    /// data root again before parking, or a chunk that sampled `None` stays on
-    /// the park path after the header is visible.
-    fn cached_data_size_after_scan(
-        &self,
-        chunk: &UnpackedChunk,
-        data_commitment: DataCommitment,
-    ) -> Result<(Option<u64>, bool), CriticalChunkIngressError> {
-        #[cfg(test)]
-        if let Some(hook) = &self.after_missing_data_size_scan {
-            hook();
-        }
-        let reread = self
-            .irys_db
-            .view_eyre(|read_tx| {
-                irys_database::cached_data_root_by_commitment(read_tx, data_commitment)
-            })
-            .map_err(|error| {
-                error!(
-                    "Database error re-reading cached data_root for chunk data_root {:?} tx_offset {} after storage-module scan: {:?}",
-                    chunk.data_tree_root, chunk.tx_offset, error
-                );
-                CriticalChunkIngressError::DatabaseError
-            })?;
-        Ok(match reread {
-            Some(cdr) => (Some(cdr.data_size), cdr.data_size_confirmed),
-            None => (None, false),
-        })
-    }
-
-    /// Verifies data_size by fetching the expected last chunk and validating its merkle proof.
-    fn verify_data_size_from_storage_modules(
-        &self,
-        storage_modules: &[std::sync::Arc<irys_domain::StorageModule>],
-        data_commitment: DataCommitment,
-        data_root: irys_types::DataTreeRoot,
-        claimed_data_size: u64,
-    ) -> bool {
-        let chunk_size = self.config.consensus.chunk_size;
-        // Chunk index of the last chunk (0-indexed)
-        let last_chunk_index = claimed_data_size.div_ceil(chunk_size).saturating_sub(1);
-        // Byte offset for path validation (last byte position)
-        let target_byte_offset = u128::from(claimed_data_size.saturating_sub(1));
-
-        // Search storage modules in parallel for a valid rightmost chunk proof.
-        // Same span on every worker: one trace for the scan, not one per module.
-        let span = info_span!("index_read", caller = irys_domain::INGRESS_VERIFY);
-        let confirmed_size = span.in_scope(|| {
-            storage_modules.par_iter().find_map_any(|sm| {
-                span.in_scope(|| {
-                    irys_domain::with_index_caller(irys_domain::INGRESS_VERIFY, || {
-                        let infos = sm
-                            .collect_data_root_infos(data_commitment)
-                            .ok()
-                            .filter(|i| !i.0.is_empty())?;
-
-                        for info in &infos.0 {
-                            let relative_offset = (info.start_offset.0 as i64)
-                                .saturating_add(last_chunk_index as i64);
-                            if relative_offset < 0 {
-                                continue;
-                            }
-
-                            let partition_offset =
-                                irys_types::PartitionChunkOffset::from(relative_offset as u32);
-
-                            // Use get_chunk_metadata to avoid reading chunk bytes - we only need the data_path
-                            let (chunk_data_root, data_path) = sm
-                                .get_chunk_metadata(partition_offset)
-                                .ok()
-                                .flatten()
-                                .filter(|(dr, _)| *dr == data_root)?;
-
-                            if let Ok(result) =
-                                validate_path(chunk_data_root.0.0, &data_path, target_byte_offset)
-                                && result.is_rightmost_chunk
-                            {
-                                return Some(result.max_byte_range as u64);
-                            }
-                        }
-                        None
-                    })
-                })
-            })
-        });
-
-        match confirmed_size {
-            Some(size) => {
-                debug!(
-                    "Verified data_size {} for data_root {:?} via rightmost chunk proof",
-                    size, data_root
-                );
-                // Cache the confirmed data_size so subsequent chunks skip verification
-                if let Err(e) = self.irys_db.update_eyre(|db_tx| {
-                    confirm_data_size_for_data_root(db_tx, &data_commitment, size)
-                }) {
-                    warn!(
-                        "Failed to cache confirmed data_size for {:?}: {:?}",
-                        data_root, e
-                    );
-                }
-                true
-            }
-            None => {
-                debug!(
-                    "Could not verify data_size {} for data_root {:?} - no valid rightmost chunk found",
-                    claimed_data_size, data_root
-                );
-                false
-            }
-        }
-    }
 }
 
 /// Ingress failure, and whether the chunk body is already in the cache.
@@ -1434,8 +1218,6 @@ mod tests {
     use irys_types::DataTreeRoot;
     use irys_types::TxChunkOffset;
     use irys_types::UnixTimestamp;
-    use proptest::prelude::*;
-    use rstest::rstest;
 
     /// Build a `CachedDataRoot` with explicit gate-relevant fields.
     fn cdr_gate_fixture(
@@ -1569,124 +1351,6 @@ mod tests {
         assert!(should_skip_ingress_proof_generation(&cdr));
     }
 
-    /// Helper to create a submit ledger data size entry for test cases
-    fn submit(data_size: u64) -> DataSizeInfo {
-        DataSizeInfo {
-            data_size,
-            is_from_publish_ledger: false,
-        }
-    }
-
-    /// Helper to create a publish ledger data size entry for test cases
-    fn publish(data_size: u64) -> DataSizeInfo {
-        DataSizeInfo {
-            data_size,
-            is_from_publish_ledger: true,
-        }
-    }
-
-    #[rstest]
-    #[case::empty(vec![], None)]
-    #[case::single_submit(
-        vec![submit(1000)],
-        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: false })
-    )]
-    #[case::single_publish(
-        vec![publish(1000)],
-        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
-    )]
-    #[case::multiple_submit_returns_max(
-        vec![submit(500), submit(1000), submit(750)],
-        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: false })
-    )]
-    #[case::multiple_publish_returns_max(
-        vec![publish(500), publish(1000), publish(750)],
-        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
-    )]
-    #[case::submit_only_when_no_publish(
-        vec![submit(5000), submit(10000)],
-        Some(DataSizeInfo { data_size: 10000, is_from_publish_ledger: false })
-    )]
-    // These cases test to make sure the publish ledger is preferred over the submit ledger
-    #[case::publish_preferred_over_larger_submit(
-        vec![submit(10000), publish(1000)],
-        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
-    )]
-    #[case::publish_first_still_preferred(
-        vec![publish(1000), submit(10000)],
-        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
-    )]
-    #[case::interleaved_uses_publish_max(
-        vec![submit(5000), publish(500), submit(10000), publish(1000), submit(7500)],
-        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
-    )]
-    fn select_data_size_cases(
-        #[case] entries: Vec<DataSizeInfo>,
-        #[case] expected: Option<DataSizeInfo>,
-    ) {
-        let result = select_data_size_from_storage_modules(entries);
-        assert_eq!(result, expected);
-    }
-
-    proptest! {
-        /// Property: publish ledger data_size is ALWAYS preferred over submit ledger,
-        /// regardless of the relative sizes.
-        #[test]
-        fn publish_ledger_always_preferred_over_submit(
-            publish_size in 1..u64::MAX,
-            submit_size in 1..u64::MAX,
-        ) {
-            let result = select_data_size_from_storage_modules(vec![
-                submit(submit_size),
-                publish(publish_size),
-            ]);
-
-            let selected = result.expect("Should return Some when data exists");
-            prop_assert_eq!(selected.data_size, publish_size);
-            prop_assert!(selected.is_from_publish_ledger);
-        }
-
-        /// Property: single ledger type always selects max size
-        #[test]
-        fn single_ledger_type_selects_max(
-            sizes in prop::collection::vec(1..u64::MAX, 1..10),
-            is_publish in any::<bool>(),
-        ) {
-            let expected_max = *sizes.iter().max().unwrap();
-            let entries: Vec<_> = sizes
-                .into_iter()
-                .map(|ds| DataSizeInfo {
-                    data_size: ds,
-                    is_from_publish_ledger: is_publish,
-                })
-                .collect();
-
-            let result = select_data_size_from_storage_modules(entries);
-
-            let selected = result.expect("Should return Some when data exists");
-            prop_assert_eq!(selected.data_size, expected_max);
-            prop_assert_eq!(selected.is_from_publish_ledger, is_publish);
-        }
-
-        /// Property: with mixed ledgers, publish ledger max is always selected
-        #[test]
-        fn mixed_ledgers_selects_publish_max(
-            publish_sizes in prop::collection::vec(1..u64::MAX, 1..5),
-            submit_sizes in prop::collection::vec(1..u64::MAX, 1..5),
-        ) {
-            let expected_publish_max = *publish_sizes.iter().max().unwrap();
-
-            let mut entries: Vec<_> = publish_sizes.into_iter().map(publish).collect();
-            entries.extend(submit_sizes.into_iter().map(submit));
-
-            let result = select_data_size_from_storage_modules(entries);
-
-            let selected = result.expect("Should return Some when data exists");
-            prop_assert_eq!(selected.data_size, expected_publish_max);
-            prop_assert!(selected.is_from_publish_ledger);
-        }
-    }
-
     #[tokio::test]
     async fn failed_sm_write_does_not_remember_chunk_for_retry() -> eyre::Result<()> {
         use irys_domain::{StorageModule, StorageModuleInfo};
@@ -1720,7 +1384,7 @@ mod tests {
             &StorageModuleInfo {
                 id: 0,
                 partition_assignment: Some(PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
+                    ledger_id: Some(irys_types::DataLedger::Submit.into()),
                     slot_index: Some(0),
                     miner_address: irys_types::IrysAddress::from([0xAA; 20]),
                     partition_hash: H256::random(),
@@ -2442,85 +2106,6 @@ mod tests {
         }
         expect_delayed_redrain(&mut receivers, data_root).await;
         expect_no_redrain(&mut receivers).await;
-    }
-
-    /// The header can commit while the storage-module scan runs. The second
-    /// read must see it and leave the park path.
-    #[tokio::test]
-    async fn preheader_chunk_uses_data_root_committed_during_the_storage_module_scan() {
-        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
-            .prefix("ingress-reread-cdr")
-            .build();
-        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
-        let chunk = valid_single_chunk(vec![9_u8; 32]);
-        let data_root = chunk.data_tree_root;
-        let data_key = chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING);
-        let data_size = chunk.data_size;
-        let db = inner.irys_db.clone();
-        inner.after_missing_data_size_scan = Some(std::sync::Arc::new(move || {
-            insert_cached_data_root(&db, data_root.0, data_size);
-        }));
-
-        let err = inner
-            .handle_chunk_ingress_message(chunk)
-            .await
-            .expect_err("a visible header takes the write path, and the test writer is closed");
-        assert!(
-            matches!(
-                err,
-                ChunkIngressError::Critical(CriticalChunkIngressError::DatabaseError)
-            ),
-            "{err:?}"
-        );
-        assert!(
-            inner.pending_chunks.read().await.get(&data_key).is_none(),
-            "the chunk must not be parked once the header is visible"
-        );
-    }
-
-    /// The drain can start in the same window. A header that is visible after
-    /// the scan is ingested, not rejected because the root is draining.
-    #[tokio::test]
-    async fn chunk_in_scan_uses_data_root_even_when_the_drain_starts() {
-        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
-            .prefix("ingress-reread-drain")
-            .build();
-        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
-        let chunk = valid_single_chunk(vec![8_u8; 32]);
-        let data_root = chunk.data_tree_root;
-        let data_key = chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING);
-        let data_size = chunk.data_size;
-        let db = inner.irys_db.clone();
-        let pending = std::sync::Arc::clone(&inner.pending_chunks);
-        let ticket_slot: std::sync::Arc<
-            std::sync::Mutex<Option<super::super::pending_chunks::DrainTicket>>,
-        > = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let slot = std::sync::Arc::clone(&ticket_slot);
-        inner.after_missing_data_size_scan = Some(std::sync::Arc::new(move || {
-            insert_cached_data_root(&db, data_root.0, data_size);
-            let guard = pending
-                .try_write()
-                .expect("pending lock is free during the scan");
-            let ticket = guard.begin_drain(data_key, 1);
-            *slot.lock().expect("ticket slot") = Some(ticket);
-        }));
-
-        let err = inner
-            .handle_chunk_ingress_message(chunk)
-            .await
-            .expect_err("a visible header takes the write path, and the test writer is closed");
-        assert!(
-            matches!(
-                err,
-                ChunkIngressError::Critical(CriticalChunkIngressError::DatabaseError)
-            ),
-            "{err:?}"
-        );
-        assert!(
-            inner.pending_chunks.read().await.get(&data_key).is_none(),
-            "the chunk must not be parked once the header is visible"
-        );
-        drop(ticket_slot.lock().expect("ticket slot").take());
     }
 
     /// A chunk that arrives while its root is draining is not a cap reject.
@@ -3449,7 +3034,6 @@ mod tests {
             chunk_data_writer: super::super::chunk_data_writer::ChunkDataWriter::closed_for_test(),
             ingress_proof_generation_state: super::super::IngressProofGenerationState::new(),
             http_ingress_open: std::sync::Arc::new(std::sync::Mutex::new(true)),
-            after_missing_data_size_scan: None,
         };
         (inner, receivers)
     }

@@ -17,10 +17,6 @@ pub(crate) const SERVE_SPAN: &str = "serve_span";
 pub(crate) const RECALL: &str = "recall";
 pub const MIGRATION: &str = "migration";
 pub(crate) const METADATA: &str = "metadata";
-/// Ingress chunk whose data root is missing from the node cache.
-pub const INGRESS_SIZE: &str = "ingress_size";
-/// Ingress check of the rightmost chunk proof for a claimed data size.
-pub const INGRESS_VERIFY: &str = "ingress_verify";
 /// Placement of a chunk body onto entropy offsets.
 pub const PLACEMENT: &str = "placement";
 /// Cache reclamation asking which bodies are durable.
@@ -410,15 +406,15 @@ pub(super) fn note_ingest_stage(stage: &'static str, elapsed: std::time::Duratio
 
 #[cfg(test)]
 mod tests {
-    use super::{DATA_SYNC, INGRESS_SIZE, PLACEMENT, current, with_caller};
+    use super::{CACHE_RECLAIM, DATA_SYNC, PLACEMENT, current, with_caller};
 
     #[test]
     fn caller_restores_after_nesting() {
         assert_eq!(current(), "unknown");
-        with_caller(INGRESS_SIZE, || {
-            assert_eq!(current(), INGRESS_SIZE);
+        with_caller(CACHE_RECLAIM, || {
+            assert_eq!(current(), CACHE_RECLAIM);
             with_caller(DATA_SYNC, || assert_eq!(current(), DATA_SYNC));
-            assert_eq!(current(), INGRESS_SIZE);
+            assert_eq!(current(), CACHE_RECLAIM);
         });
         assert_eq!(current(), "unknown");
     }
