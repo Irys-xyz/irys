@@ -81,6 +81,9 @@ pub struct ConsensusConfig {
     /// Size of each data chunk in bytes
     pub chunk_size: u64,
 
+    /// Segments per chunk in the data tree (spec §2). A power of two, 1 to 256, dividing `chunk_size`.
+    pub segments_per_chunk: u32,
+
     /// Defines how many blocks must pass before a block is marked as finalized
     pub block_migration_depth: u32,
 
@@ -562,6 +565,22 @@ fn sort_json_keys(value: serde_json::Value) -> serde_json::Value {
 }
 
 impl ConsensusConfig {
+    /// The data tree geometry (spec §2) from `chunk_size`, `segments_per_chunk` and
+    /// `mempool.max_data_tx_chunks`. Fails if any rule of the spec is broken.
+    pub fn data_tree_geometry(&self) -> Result<irys_data_tree::Geometry> {
+        let max_data_tx_chunks = u32::try_from(self.mempool.max_data_tx_chunks).map_err(|_| {
+            eyre::eyre!(
+                "mempool.max_data_tx_chunks ({}) must fit in u32",
+                self.mempool.max_data_tx_chunks
+            )
+        })?;
+        Ok(irys_data_tree::Geometry::new(
+            self.chunk_size,
+            self.segments_per_chunk,
+            max_data_tx_chunks,
+        )?)
+    }
+
     /// Produce a deterministic Keccak256 hash of this consensus config.
     ///
     /// Uses canonical JSON serialization with alphabetically sorted keys.
@@ -674,6 +693,7 @@ impl ConsensusConfig {
             safe_minimum_number_of_years: 200,
             // Size of each data chunk in bytes
             chunk_size: 256 * 1024, // 256KiB
+            segments_per_chunk: 64,
             // Defines the number of confirmations before a block is migrated to the index
             block_migration_depth: 6,
             // Number of blocks to retain in the block tree from chain head
@@ -889,6 +909,7 @@ impl ConsensusConfig {
             expected_genesis_hash: None,
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: CHUNK_SIZE,
+            segments_per_chunk: 4,
             num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
             num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
             num_partitions_per_slot: 1,
@@ -1021,6 +1042,7 @@ impl ConsensusConfig {
             )),
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
+            segments_per_chunk: 64,
             num_chunks_in_partition: Self::CHUNKS_PER_PARTITION_20TB,
             num_chunks_in_recall_range: 400,
             num_partitions_per_slot: 10,
@@ -1223,7 +1245,7 @@ mod tests {
         // P2P handshake hash — any mainnet() field or canonical encoding change fails CI.
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("G5heBnSRbPT1tBFUkeHpWuvGZUF1hapEaosBkkgFeiKD"), // spellchecker:disable-line
+            H256::from_base58("ESaJAFCwGJicJGjfJncic1SCmgnHCFB6FjoYMsGKJyZB"), // spellchecker:disable-line
             "mainnet consensus-config hash is consensus-frozen"
         );
     }
@@ -1241,7 +1263,7 @@ mod tests {
         );
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("HN8GRtD7rYKAprfZq6p2eBrixTVFEhyE4NNCPizKukWb"), // spellchecker:disable-line
+            H256::from_base58("5TpL2Ykgss9ghBUBZSfbSmEa4eiGau8DN4aNQSC9DgC9"), // spellchecker:disable-line
             "testnet consensus-config hash is consensus-frozen"
         );
     }
@@ -1459,7 +1481,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("E7fxtrRXiJiBmC9ZFBpDW8SvUiNe85ZGkaJ8AKNHNYYM");
+        let expected_hash = H256::from_base58("6ZZfWWQdLdWANfMLiBNf9cQeAFA6N4Z1ZhbWhUWgFNqT");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,
