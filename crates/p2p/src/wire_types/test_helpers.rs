@@ -1,3 +1,4 @@
+use irys_types::DataTreeRoot;
 use irys_types::RethPeerInfo;
 use irys_types::{
     BlockBody, CommitmentTransactionMetadata, DataTransactionLedger, H256, HandshakeRequestV1,
@@ -84,7 +85,7 @@ pub(crate) fn test_unix_timestamp() -> UnixTimestampMs {
 
 pub(crate) fn canonical_unpacked_chunk() -> UnpackedChunk {
     UnpackedChunk {
-        data_root: test_h256(0xAA),
+        data_tree_root: DataTreeRoot(test_h256(0xAA)),
         data_size: 262144,
         data_path: test_base64(&[0xDE, 0xAD, 0xBE, 0xEF]),
         bytes: test_base64(&[0xCA, 0xFE, 0xBA, 0xBE]),
@@ -263,7 +264,7 @@ pub(crate) fn canonical_data_tx_header_v1_inner() -> DataTransactionHeaderV1 {
         id: test_h256(0x01),
         anchor: test_h256(0x02),
         signer: test_address(0x03),
-        data_root: test_h256(0x04),
+        data_tree_root: DataTreeRoot(test_h256(0x04)),
         data_size: 1048576,
         prefix_size: 256,
         prefix_hash: test_h256(0x05),

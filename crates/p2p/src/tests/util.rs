@@ -567,12 +567,12 @@ pub(crate) fn generate_test_tx() -> DataTransaction {
 pub(crate) fn create_test_chunks(tx: &DataTransaction) -> Vec<UnpackedChunk> {
     let mut chunks = Vec::new();
     for _chunk_node in &tx.chunks {
-        let data_root = tx.header.data_root;
+        let data_root = tx.header.data_tree_root;
         let data_size = tx.header.data_size;
         let data_path = Base64(vec![1, 2, 3]);
 
         let chunk = UnpackedChunk {
-            data_root,
+            data_tree_root: data_root,
             data_size,
             data_path,
             bytes: Base64(vec![1, 2, 3]),
