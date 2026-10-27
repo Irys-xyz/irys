@@ -51,7 +51,8 @@ pub trait ApiClientExt: ApiClient {
         peer: SocketAddr,
         ledger: DataLedger,
         data_root: DataTreeRoot,
-        offset: u32, // data root relative offset
+        offset: u32,            // data root relative offset
+        data_size: Option<u64>, // selects one size when several sizes share the root
     ) -> eyre::Result<ChunkFormat>;
 
     async fn get_anchor(&self, peer: SocketAddr) -> eyre::Result<BlockHash>;
@@ -166,12 +167,16 @@ impl ApiClientExt for IrysApiClient {
         ledger_id: DataLedger,
         data_root: DataTreeRoot,
         offset: u32, // data root relative offset
+        data_size: Option<u64>,
     ) -> eyre::Result<ChunkFormat> {
         let ledger_num = u32::from(ledger_id);
+        let data_size_query = data_size
+            .map(|data_size| format!("?dataSize={data_size}"))
+            .unwrap_or_default();
         self.make_request(
             peer,
             Method::GET,
-            &format!("/chunk/data-root/{ledger_num}/{data_root}/{offset}"),
+            &format!("/chunk/data-root/{ledger_num}/{data_root}/{offset}{data_size_query}"),
             None::<&()>,
         )
         .await?
