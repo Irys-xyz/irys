@@ -1,6 +1,6 @@
 use crate::IrysAddress;
 use crate::{
-    Base64, DataTreeRoot, H256, LedgerChunkOffset, PartitionChunkOffset, hash_sha256,
+    Base64, DataCommitment, DataTreeRoot, H256, LedgerChunkOffset, PartitionChunkOffset, hash_sha256,
     partition::PartitionHash, string_u64,
 };
 use arbitrary::Arbitrary;
@@ -71,6 +71,12 @@ pub struct UnpackedChunk {
 }
 
 impl UnpackedChunk {
+    /// The commitment this chunk claims: its `data_tree_root` and `data_size`
+    /// under `geometry`. Data caches and parking key the chunk by it.
+    pub fn data_commitment(&self, geometry: &irys_data_tree::Geometry) -> DataCommitment {
+        crate::data_tree::data_commitment(geometry, self.data_tree_root, self.data_size)
+    }
+
     pub fn chunk_path_hash(&self) -> ChunkPathHash {
         Self::hash_data_path(&self.data_path.0)
     }

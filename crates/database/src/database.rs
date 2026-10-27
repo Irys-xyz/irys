@@ -18,10 +18,11 @@ use crate::db::{IrysDatabaseExt as _, IrysDupCursorExt};
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::ingress::CachedIngressProof;
+use irys_types::data_tree::Geometry;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
-    DataRoot, DataTransactionHeader, DataTransactionMetadata, DatabaseProvider, DatabaseVersion,
+    BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataCommitment,
+    DataLedger, DataTransactionHeader, DataTransactionMetadata, DatabaseProvider, DatabaseVersion,
     H256, IngressMerkleLeaf, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId,
     IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset, UnixTimestamp,
     UnpackedChunk, expected_chunk_byte_range, generate_ingress_data_hash,
@@ -61,6 +62,7 @@ mod compact_ingress_leaf_tests {
     use crate::{db_cache::CachedDataRoot, tables::IrysTables};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::DataTreeRoot;
+    use irys_types::data_tree::Geometry;
     use irys_types::{Base64, generate_data_root, generate_leaves, resolve_proofs};
     use reth_db::mdbx::DatabaseArguments;
     use std::sync::Arc;
@@ -78,7 +80,7 @@ mod compact_ingress_leaf_tests {
     #[test]
     fn complete_leaves_require_every_position_and_signer() -> eyre::Result<()> {
         let (_dir, db) = open_test_db()?;
-        let data_root = H256::random();
+        let data_root = DataCommitment(H256::random());
         let address = IrysAddress::random();
         let other_address = IrysAddress::random();
         let hashes = [H256::random(), H256::random(), H256::random()];
@@ -137,8 +139,8 @@ mod compact_ingress_leaf_tests {
     #[test]
     fn deleting_ingress_leaves_is_scoped_to_one_data_root() -> eyre::Result<()> {
         let (_dir, db) = open_test_db()?;
-        let target_root = H256::random();
-        let other_root = H256::random();
+        let target_root = DataCommitment(H256::random());
+        let other_root = DataCommitment(H256::random());
         let first_signer = IrysAddress::random();
         let second_signer = IrysAddress::random();
 
@@ -197,26 +199,29 @@ mod compact_ingress_leaf_tests {
             std::iter::once(Ok(bytes.clone())),
             chunk_size as usize,
         )?)?;
-        let data_root = H256(root.id);
+        let data_tree_root = DataTreeRoot(H256(root.id));
         let data_path = Base64(resolve_proofs(root, None)?.remove(0).proof);
         let chunk = UnpackedChunk {
-            data_tree_root: DataTreeRoot(data_root),
+            data_tree_root,
             data_size: 8,
             data_path,
             bytes: Base64(bytes),
             tx_offset,
         };
+        let geometry = Geometry::TESTING;
+        let data_root = chunk.data_commitment(&geometry);
         db.update_eyre(|tx| {
             tx.put::<CachedDataRoots>(
                 data_root,
                 CachedDataRoot {
                     data_size: 8,
+                    data_tree_root,
                     data_size_confirmed: true,
                     block_set: vec![H256::random()],
                     ..Default::default()
                 },
             )?;
-            cache_chunk(tx, &chunk)?;
+            cache_chunk(tx, &chunk, &geometry)?;
             Ok(())
         })?;
 
@@ -253,25 +258,28 @@ mod compact_ingress_leaf_tests {
             std::iter::once(Ok(valid_bytes)),
             chunk_size as usize,
         )?)?;
-        let data_root = H256(root.id);
+        let data_tree_root = DataTreeRoot(H256(root.id));
         let chunk = UnpackedChunk {
-            data_tree_root: DataTreeRoot(data_root),
+            data_tree_root,
             data_size: 8,
             data_path: Base64(resolve_proofs(root, None)?.remove(0).proof),
             bytes: Base64(vec![8_u8; 8]),
             tx_offset: TxChunkOffset::from(0),
         };
+        let geometry = Geometry::TESTING;
+        let data_root = chunk.data_commitment(&geometry);
         db.update_eyre(|tx| {
             tx.put::<CachedDataRoots>(
                 data_root,
                 CachedDataRoot {
                     data_size: 8,
+                    data_tree_root,
                     data_size_confirmed: true,
                     block_set: vec![H256::random()],
                     ..Default::default()
                 },
             )?;
-            cache_chunk(tx, &chunk)?;
+            cache_chunk(tx, &chunk, &geometry)?;
             Ok(())
         })?;
 
@@ -289,25 +297,27 @@ mod compact_ingress_leaf_tests {
     #[test]
     fn capacity_eviction_requires_a_durable_storage_offset() -> eyre::Result<()> {
         let (_dir, db) = open_test_db()?;
-        let data_root = H256::random();
         let address = IrysAddress::random();
         let tx_offset = TxChunkOffset::from(0);
         let chunk = UnpackedChunk {
-            data_tree_root: DataTreeRoot(data_root),
+            data_tree_root: DataTreeRoot(H256::random()),
             data_size: 8,
             data_path: Base64::default(),
             bytes: Base64(vec![7_u8; 8]),
             tx_offset,
         };
+        let geometry = Geometry::TESTING;
+        let data_root = chunk.data_commitment(&geometry);
         db.update_eyre(|tx| {
             tx.put::<CachedDataRoots>(
                 data_root,
                 CachedDataRoot {
                     data_size: 8,
+                    data_tree_root: chunk.data_tree_root,
                     ..Default::default()
                 },
             )?;
-            cache_chunk(tx, &chunk)?;
+            cache_chunk(tx, &chunk, &geometry)?;
             let meta = cached_chunk_meta_by_offset(tx, data_root, tx_offset)?.unwrap();
             tx.delete::<CachedChunksIndex>(data_root, None)?;
             tx.put::<CachedChunksIndex>(
@@ -945,39 +955,42 @@ pub fn commitment_tx_by_txid<T: DbTx>(
 /// Returns `Ok(Some(entry))` if updated, `Ok(None)` if entry not found.
 pub fn confirm_data_size_for_data_root<T: DbTx + DbTxMut>(
     tx: &T,
-    data_root: &H256,
+    data_commitment: &DataCommitment,
     data_size: u64,
 ) -> eyre::Result<Option<CachedDataRoot>> {
     // Access the current cached entry from the database
-    let result = tx.get::<CachedDataRoots>(*data_root)?;
+    let result = tx.get::<CachedDataRoots>(*data_commitment)?;
 
     if let Some(mut cached_data_root) = result {
         cached_data_root.data_size = data_size;
         cached_data_root.data_size_confirmed = true;
-        tx.put::<CachedDataRoots>(*data_root, cached_data_root.clone())?;
+        tx.put::<CachedDataRoots>(*data_commitment, cached_data_root.clone())?;
         Ok(Some(cached_data_root))
     } else {
         Ok(None)
     }
 }
 
-/// Takes a [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
-/// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same `data_root`.
+/// Takes a [`DataTransactionHeader`] and caches its `data_commitment` and tx.id in a
+/// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same
+/// `data_commitment` (the same `data_tree_root` and `data_size` under `geometry`).
 pub fn cache_data_root<T: DbTx + DbTxMut>(
     tx: &T,
     tx_header: &DataTransactionHeader,
     block_header: Option<&IrysBlockHeader>,
+    geometry: &Geometry,
 ) -> eyre::Result<Option<CachedDataRoot>> {
-    let key = tx_header.data_tree_root;
+    let key = tx_header.data_commitment(geometry);
 
     // Access the current cached entry from the database
-    let result = tx.get::<CachedDataRoots>(key.0)?;
+    let result = tx.get::<CachedDataRoots>(key)?;
 
     // Create or update the CachedDataRoot
     let mut cached_data_root = match result {
         Some(existing) => existing,
         None => CachedDataRoot {
             data_size: tx_header.data_size,
+            data_tree_root: tx_header.data_tree_root,
             data_size_confirmed: false,
             txid_set: vec![tx_header.id],
             block_set: vec![],
@@ -1017,7 +1030,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     }
 
     // Update the database with the modified or new entry
-    tx.put::<CachedDataRoots>(key.0, cached_data_root.clone())?;
+    tx.put::<CachedDataRoots>(key, cached_data_root.clone())?;
 
     // Surface anomalous writes: a CDR with `block_set.is_empty()` and
     // `expiry_height.is_none()` has no lifetime bound and will land in the
@@ -1031,7 +1044,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     // this state — warn so operators see them.
     if cached_data_root.block_set.is_empty() && cached_data_root.expiry_height.is_none() {
         warn!(
-            data_root = %key,
+            data_commitment = %key,
             tx.id = %tx_header.id,
             had_block_header = block_header.is_some(),
             "cached_data_root.anomalous_write: block_set empty and expiry_height None — entry has no lifetime bound"
@@ -1044,9 +1057,9 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
 /// Gets a [`CachedDataRoot`] by it's [`DataRoot`] from [`CachedDataRoots`] .
 pub fn cached_data_root_by_data_root<T: DbTx>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
 ) -> eyre::Result<Option<CachedDataRoot>> {
-    Ok(tx.get::<CachedDataRoots>(data_root)?)
+    Ok(tx.get::<CachedDataRoots>(data_commitment)?)
 }
 
 /// Ensures `block_hash` is present in the `block_set` of an existing
@@ -1065,10 +1078,10 @@ pub fn cached_data_root_by_data_root<T: DbTx>(
 /// Returns `true` if the row was modified.
 pub fn update_data_root_block_set<T: DbTx + DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     block_hash: H256,
 ) -> eyre::Result<bool> {
-    let Some(mut cdr) = tx.get::<CachedDataRoots>(data_root)? else {
+    let Some(mut cdr) = tx.get::<CachedDataRoots>(data_commitment)? else {
         return Ok(false);
     };
     let already_present = cdr.block_set.contains(&block_hash);
@@ -1082,7 +1095,7 @@ pub fn update_data_root_block_set<T: DbTx + DbTxMut>(
     if needs_expiry_clear {
         cdr.expiry_height = None;
     }
-    tx.put::<CachedDataRoots>(data_root, cdr)?;
+    tx.put::<CachedDataRoots>(data_commitment, cdr)?;
     Ok(true)
 }
 
@@ -1095,10 +1108,10 @@ pub fn update_data_root_block_set<T: DbTx + DbTxMut>(
 /// Returns `true` if the row was modified.
 pub fn remove_data_root_block_set_entry<T: DbTx + DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     block_hash: H256,
 ) -> eyre::Result<bool> {
-    let Some(mut cdr) = tx.get::<CachedDataRoots>(data_root)? else {
+    let Some(mut cdr) = tx.get::<CachedDataRoots>(data_commitment)? else {
         return Ok(false);
     };
     let before = cdr.block_set.len();
@@ -1107,7 +1120,7 @@ pub fn remove_data_root_block_set_entry<T: DbTx + DbTxMut>(
         return Ok(false);
     }
     let now_anomalous = cdr.block_set.is_empty() && cdr.expiry_height.is_none();
-    tx.put::<CachedDataRoots>(data_root, cdr)?;
+    tx.put::<CachedDataRoots>(data_commitment, cdr)?;
     if now_anomalous {
         // Reorg scrub left the CDR with no canonical block hashes and no
         // pre-confirmation expiry.  Mempool's orphan re-anchor path
@@ -1117,7 +1130,7 @@ pub fn remove_data_root_block_set_entry<T: DbTx + DbTxMut>(
         // sits in the `(None, None)` arm and is only evicted by
         // `prune_data_root_cache` after the local-proof exemption check.
         warn!(
-            %data_root,
+            %data_commitment,
             removed_block_hash = %block_hash,
             "cached_data_root.anomalous_state_after_scrub: block_set now empty and expiry_height None — awaiting mempool orphan re-anchor or prune"
         );
@@ -1129,23 +1142,29 @@ type IsDuplicate = bool;
 
 /// Caches a [`UnpackedChunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
-/// This function ensures that the DataRoot exists in CachedDataRoots before storing the chunk.
-pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
-    if tx.get::<CachedDataRoots>(chunk.data_tree_root.0)?.is_none() {
+/// This function ensures that the chunk's `data_commitment` exists in CachedDataRoots before
+/// storing the chunk.
+pub fn cache_chunk<T: DbTx + DbTxMut>(
+    tx: &T,
+    chunk: &UnpackedChunk,
+    geometry: &Geometry,
+) -> eyre::Result<IsDuplicate> {
+    let data_commitment = chunk.data_commitment(geometry);
+    if tx.get::<CachedDataRoots>(data_commitment)?.is_none() {
         return Err(eyre::eyre!(
-            "Data root {} not found in CachedDataRoots",
-            chunk.data_tree_root
+            "Data commitment {} not found in CachedDataRoots",
+            data_commitment
         ));
     }
 
-    cache_chunk_verified(tx, chunk)
+    cache_chunk_verified(tx, chunk, geometry)
 }
 
-/// Caches a [`UnpackedChunk`] whose data root has already been verified to exist in [`CachedDataRoots`].
+/// Caches a [`UnpackedChunk`] whose `data_commitment` has already been verified to exist in [`CachedDataRoots`].
 ///
 /// # SAFETY REQUIREMENT
 ///
-/// The caller MUST ensure the chunk's `data_root` exists in [`CachedDataRoots`] before
+/// The caller MUST ensure the chunk's `data_commitment` exists in [`CachedDataRoots`] before
 /// calling this function. Failure to do so will leave orphaned chunk data in the cache
 /// with no parent data-root entry. Use [`cache_chunk`] instead if you cannot guarantee this.
 ///
@@ -1156,14 +1175,15 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
 pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
     tx: &T,
     chunk: &UnpackedChunk,
+    geometry: &Geometry,
 ) -> eyre::Result<IsDuplicate> {
-    let data_root = chunk.data_tree_root;
+    let data_commitment = chunk.data_commitment(geometry);
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
 
     if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
         warn!(
             "Chunk {} of {} is already cached, skipping..",
-            &chunk_path_hash, &data_root
+            &chunk_path_hash, &data_commitment
         );
         return Ok(true);
     }
@@ -1179,10 +1199,10 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
 
     debug!(
         "Caching chunk {} ({}) of {}",
-        &chunk.tx_offset, &chunk_path_hash, &data_root
+        &chunk.tx_offset, &chunk_path_hash, &data_commitment
     );
 
-    tx.put::<CachedChunksIndex>(data_root.0, value)?;
+    tx.put::<CachedChunksIndex>(data_commitment, value)?;
     tx.put::<CachedChunks>(chunk_path_hash, chunk.into())?;
     Ok(false)
 }
@@ -1190,12 +1210,12 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
 /// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxChunkOffset`]
 pub fn cached_chunk_meta_by_offset<T: DbTx>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<CachedChunkIndexMetadata>> {
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
     Ok(cursor
-        .seek_by_key_subkey(data_root, *chunk_offset)?
+        .seek_by_key_subkey(data_commitment, *chunk_offset)?
         // make sure we find the exact subkey - dupsort seek can seek to the value, or a value greater than if it doesn't exist.
         .filter(|result| result.index == chunk_offset)
         .map(|index_entry| index_entry.meta))
@@ -1203,13 +1223,13 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
 /// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxChunkOffset`]
 pub fn cached_chunk_by_chunk_offset<T: DbTx>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
     let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
 
     if let Some(index_entry) = cursor
-        .seek_by_key_subkey(data_root, *chunk_offset)?
+        .seek_by_key_subkey(data_commitment, *chunk_offset)?
         .filter(|e| e.index == chunk_offset)
     {
         let meta: CachedChunkIndexMetadata = index_entry.into();
@@ -1235,11 +1255,11 @@ pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
 /// Retrieves one validated compact ingress leaf for an exact signer and tx offset.
 pub fn cached_ingress_leaf<T: DbTx>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     address: IrysAddress,
     tx_offset: TxChunkOffset,
 ) -> Result<Option<CachedIngressLeaf>, DatabaseError> {
-    let key = CachedIngressLeafKey { data_root, address };
+    let key = CachedIngressLeafKey { data_commitment, address };
     let mut cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
     Ok(cursor
         .seek_by_key_subkey(key, *tx_offset)?
@@ -1254,7 +1274,7 @@ pub fn cached_ingress_leaf<T: DbTx>(
 /// is present.
 pub fn complete_ingress_leaves<T>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     address: IrysAddress,
     data_size: u64,
     chunk_size: u64,
@@ -1264,7 +1284,7 @@ where
     T::DupCursor<CachedIngressLeaves>: IrysDupCursorExt<CachedIngressLeaves>,
 {
     let expected_count = crate::db_cache::data_size_to_chunk_count(data_size, chunk_size)?;
-    let key = CachedIngressLeafKey { data_root, address };
+    let key = CachedIngressLeafKey { data_commitment, address };
     let mut cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
     if cursor.dup_count(key)?.unwrap_or(0) != expected_count {
         return Ok(None);
@@ -1295,12 +1315,12 @@ where
 /// [`delete_reclaimable_cached_chunks_older_than`].
 pub fn store_ingress_data_hash<T: DbTx + DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     address: IrysAddress,
     tx_offset: TxChunkOffset,
     ingress_data_hash: H256,
 ) -> Result<(), DatabaseError> {
-    let key = CachedIngressLeafKey { data_root, address };
+    let key = CachedIngressLeafKey { data_commitment, address };
     let mut cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
     // A duplicate gossip delivery must not change an already-validated leaf.
     if let Some(existing) = cursor
@@ -1309,7 +1329,7 @@ pub fn store_ingress_data_hash<T: DbTx + DbTxMut>(
     {
         if existing.ingress_data_hash != ingress_data_hash {
             return Err(DatabaseError::Other(format!(
-                "conflicting ingress leaf for data root {data_root}, address {address}, offset {tx_offset}"
+                "conflicting ingress leaf for data root {data_commitment}, address {address}, offset {tx_offset}"
             )));
         }
         return Ok(());
@@ -1325,18 +1345,18 @@ pub fn store_ingress_data_hash<T: DbTx + DbTxMut>(
 }
 
 /// Backfills compact ingress hashes for validated chunk bodies cached by a
-/// pre-compact-leaf binary and returns roots that should retry proof generation.
+/// pre-compact-leaf binary and returns commitments that should retry proof generation.
 ///
 /// Existing records are scanned first, so ordinary restarts only perform
 /// metadata reads. Chunk bodies are hashed only when the current signer lacks
-/// the exact `(data_root, tx_offset)` record. The write phase rechecks that the
-/// root and body still exist, preventing terminal cache cleanup from racing a
+/// the exact `(data_commitment, tx_offset)` record. The write phase rechecks that the
+/// cache row and body still exist, preventing terminal cache cleanup from racing a
 /// stale backfill snapshot and resurrecting orphan leaf state.
 pub fn backfill_cached_ingress_data_hashes(
     db: &DatabaseProvider,
     address: IrysAddress,
     chunk_size: u64,
-) -> eyre::Result<BTreeSet<DataRoot>> {
+) -> eyre::Result<BTreeSet<DataCommitment>> {
     let (mut retry_roots, missing) = db.view_eyre(|tx| {
         let mut existing = BTreeSet::new();
         let mut retry_roots = BTreeSet::new();
@@ -1347,32 +1367,39 @@ pub fn backfill_cached_ingress_data_hashes(
             if key.address != address {
                 continue;
             }
-            existing.insert((key.data_root, leaf.tx_offset));
-            leaf_roots.insert(key.data_root);
+            existing.insert((key.data_commitment, leaf.tx_offset));
+            leaf_roots.insert(key.data_commitment);
         }
         drop(leaf_walker);
         drop(leaf_cursor);
 
-        for data_root in leaf_roots {
-            if let Some(cdr) = tx.get::<CachedDataRoots>(data_root)?
+        for data_commitment in leaf_roots {
+            if let Some(cdr) = tx.get::<CachedDataRoots>(data_commitment)?
                 && cdr.data_size_confirmed
                 && !cdr.block_set.is_empty()
-                && ingress_proof_by_data_root_address(tx, data_root, address)?.is_none()
+                && ingress_proof_by_data_root_address(tx, data_commitment, address)?.is_none()
             {
-                retry_roots.insert(data_root);
+                retry_roots.insert(data_commitment);
             }
         }
 
         let mut missing = Vec::new();
         let mut chunk_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
         let mut chunk_walker = chunk_cursor.walk(None)?;
-        while let Some((data_root, entry)) = chunk_walker.next().transpose()? {
-            if existing.contains(&(data_root, entry.index)) {
+        while let Some((data_commitment, entry)) = chunk_walker.next().transpose()? {
+            if existing.contains(&(data_commitment, entry.index)) {
                 continue;
             }
+            // The cached proof is checked against the tree root the cache row keeps.
+            let Some(data_tree_root) = tx
+                .get::<CachedDataRoots>(data_commitment)?
+                .map(|cdr| cdr.data_tree_root)
+            else {
+                continue;
+            };
             let Some(cached) = tx.get::<CachedChunks>(entry.meta.chunk_path_hash)? else {
                 warn!(
-                    %data_root,
+                    %data_commitment,
                     tx_offset = %entry.index,
                     "Skipping ingress-hash backfill for an index entry without a cached body"
                 );
@@ -1395,7 +1422,7 @@ pub fn backfill_cached_ingress_data_hashes(
                     .checked_add(chunk_len)
                     .ok_or_else(|| eyre::eyre!("cached chunk byte range overflow"))?;
                 let path = validate_path(
-                    data_root.0,
+                    data_tree_root.0.0,
                     &cached.data_path,
                     u128::from(max_byte_range - 1),
                 )?;
@@ -1418,7 +1445,7 @@ pub fn backfill_cached_ingress_data_hashes(
                 Ok(hash) => hash,
                 Err(error) => {
                     warn!(
-                        %data_root,
+                        %data_commitment,
                         tx_offset = %entry.index,
                         %error,
                         "Skipping invalid cached chunk during ingress-hash backfill"
@@ -1427,7 +1454,7 @@ pub fn backfill_cached_ingress_data_hashes(
                 }
             };
             missing.push((
-                data_root,
+                data_commitment,
                 entry.index,
                 entry.meta.chunk_path_hash,
                 ingress_data_hash,
@@ -1438,14 +1465,20 @@ pub fn backfill_cached_ingress_data_hashes(
 
     let inserted_roots = db.update_eyre(|tx| {
         let mut inserted_roots = BTreeSet::new();
-        for (data_root, tx_offset, chunk_path_hash, ingress_data_hash) in &missing {
-            if tx.get::<CachedDataRoots>(*data_root)?.is_none()
+        for (data_commitment, tx_offset, chunk_path_hash, ingress_data_hash) in &missing {
+            if tx.get::<CachedDataRoots>(*data_commitment)?.is_none()
                 || tx.get::<CachedChunks>(*chunk_path_hash)?.is_none()
             {
                 continue;
             }
-            store_ingress_data_hash(tx, *data_root, address, *tx_offset, *ingress_data_hash)?;
-            inserted_roots.insert(*data_root);
+            store_ingress_data_hash(
+                tx,
+                *data_commitment,
+                address,
+                *tx_offset,
+                *ingress_data_hash,
+            )?;
+            inserted_roots.insert(*data_commitment);
         }
         Ok(inserted_roots)
     })?;
@@ -1456,10 +1489,10 @@ pub fn backfill_cached_ingress_data_hashes(
 /// Deletes every compact leaf associated with a data root, across signer keys.
 pub fn delete_ingress_leaves_by_data_root<T: DbTx + DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
 ) -> eyre::Result<u64> {
     let start = CachedIngressLeafKey {
-        data_root,
+        data_commitment,
         address: IrysAddress::default(),
     };
     let mut cursor = tx.cursor_read::<CachedIngressLeaves>()?;
@@ -1467,7 +1500,7 @@ pub fn delete_ingress_leaves_by_data_root<T: DbTx + DbTxMut>(
     let mut keys = BTreeSet::new();
     let mut deleted = 0_u64;
     while let Some((key, _)) = walker.next().transpose()? {
-        if key.data_root != data_root {
+        if key.data_commitment != data_commitment {
             break;
         }
         keys.insert(key);
@@ -1485,19 +1518,19 @@ pub fn delete_ingress_leaves_by_data_root<T: DbTx + DbTxMut>(
 /// It also removes the index values
 pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
 ) -> eyre::Result<u64> {
     let mut chunks_pruned = 0;
     // get all chunks specified by the `CachedChunksIndex`
     let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
-    let mut walker = cursor.walk_dup(Some(data_root), None)?; // iterate a specific key's subkeys
+    let mut walker = cursor.walk_dup(Some(data_commitment), None)?; // iterate a specific key's subkeys
     while let Some((_k, c)) = walker.next().transpose()? {
         // delete them
         tx.delete::<CachedChunks>(c.meta.chunk_path_hash, None)?;
         chunks_pruned += 1;
     }
     // delete the key (and all subkeys) from the index
-    tx.delete::<CachedChunksIndex>(data_root, None)?;
+    tx.delete::<CachedChunksIndex>(data_commitment, None)?;
     Ok(chunks_pruned)
 }
 
@@ -1507,12 +1540,12 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
 /// rolling upgrade as well as normal writes.
 pub fn delete_reclaimable_cached_chunks_older_than<T: DbTx + DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     address: IrysAddress,
     durable_tx_offsets: &BTreeSet<TxChunkOffset>,
     older_than: UnixTimestamp,
 ) -> eyre::Result<u64> {
-    reclaim_cached_chunks_older_than(tx, data_root, address, durable_tx_offsets, older_than)
+    reclaim_cached_chunks_older_than(tx, data_commitment, address, durable_tx_offsets, older_than)
         .map(|counts| counts.deleted)
 }
 
@@ -1533,16 +1566,16 @@ pub struct ReclaimCounts {
 /// durable body was kept or deleted.
 pub fn reclaim_cached_chunks_older_than<T: DbTx + DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     address: IrysAddress,
     durable_tx_offsets: &BTreeSet<TxChunkOffset>,
     older_than: UnixTimestamp,
 ) -> eyre::Result<ReclaimCounts> {
     let mut counts = ReclaimCounts::default();
-    let leaf_key = CachedIngressLeafKey { data_root, address };
+    let leaf_key = CachedIngressLeafKey { data_commitment, address };
     let mut leaf_cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
     let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
-    let mut walker = cursor.walk_dup(Some(data_root), None)?;
+    let mut walker = cursor.walk_dup(Some(data_commitment), None)?;
     while let Some((_key, entry)) = walker.next().transpose()? {
         if !durable_tx_offsets.contains(&entry.index) {
             continue;
@@ -1559,7 +1592,7 @@ pub fn reclaim_cached_chunks_older_than<T: DbTx + DbTxMut>(
             continue;
         }
         tx.delete::<CachedChunks>(entry.meta.chunk_path_hash, None)?;
-        tx.delete::<CachedChunksIndex>(data_root, Some(entry))?;
+        tx.delete::<CachedChunksIndex>(data_commitment, Some(entry))?;
         counts.deleted += 1;
     }
     // MDBX removes the dupsort key with its final value, preserving the
@@ -1572,19 +1605,19 @@ pub fn reclaim_cached_chunks_older_than<T: DbTx + DbTxMut>(
 /// assigned to store nor proving: their only copy is not here.
 pub fn delete_unprotected_cached_chunks_older_than<T: DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     tx_offsets: &BTreeSet<TxChunkOffset>,
     older_than: UnixTimestamp,
 ) -> eyre::Result<u64> {
     let mut chunks_pruned = 0;
     let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
-    let mut walker = cursor.walk_dup(Some(data_root), None)?;
+    let mut walker = cursor.walk_dup(Some(data_commitment), None)?;
     while let Some((_key, entry)) = walker.next().transpose()? {
         if entry.meta.updated_at >= older_than || !tx_offsets.contains(&entry.index) {
             continue;
         }
         tx.delete::<CachedChunks>(entry.meta.chunk_path_hash, None)?;
-        tx.delete::<CachedChunksIndex>(data_root, Some(entry))?;
+        tx.delete::<CachedChunksIndex>(data_commitment, Some(entry))?;
         chunks_pruned += 1;
     }
     Ok(chunks_pruned)
@@ -1631,11 +1664,11 @@ pub fn delete_peer_list_item<T: DbTxMut>(tx: &T, peer_id: &IrysPeerId) -> eyre::
 ///
 pub fn ingress_proofs_by_data_root<TX: DbTx>(
     read_tx: &TX,
-    data_root: DataRoot,
-) -> eyre::Result<Vec<(DataRoot, CompactCachedIngressProof)>> {
+    data_commitment: DataCommitment,
+) -> eyre::Result<Vec<(DataCommitment, CompactCachedIngressProof)>> {
     let mut cursor = read_tx.cursor_dup_read::<IngressProofs>()?;
-    let walker = cursor.walk_dup(Some(data_root), None)?; // iterate over all subkeys
-    let proofs: Vec<(irys_types::H256, CompactCachedIngressProof)> =
+    let walker = cursor.walk_dup(Some(data_commitment), None)?; // iterate over all subkeys
+    let proofs: Vec<(DataCommitment, CompactCachedIngressProof)> =
         walker.collect::<Result<Vec<_>, DatabaseError>>()?;
 
     Ok(proofs)
@@ -1643,13 +1676,13 @@ pub fn ingress_proofs_by_data_root<TX: DbTx>(
 
 pub fn ingress_proof_by_data_root_address<TX: DbTx>(
     read_tx: &TX,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     address: IrysAddress,
 ) -> eyre::Result<Option<CompactCachedIngressProof>> {
     let mut cursor = read_tx.cursor_dup_read::<IngressProofs>()?;
 
     if let Some(index_entry) = cursor
-        .seek_by_key_subkey(data_root, address)?
+        .seek_by_key_subkey(data_commitment, address)?
         .filter(|e| e.address == address)
     {
         Ok(Some(index_entry))
@@ -1669,12 +1702,12 @@ pub fn ingress_proof_by_data_root_address<TX: DbTx>(
 #[cfg(test)]
 pub(crate) fn delete_ingress_proof_by_signer<T: DbTx + DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     address: IrysAddress,
 ) -> eyre::Result<bool> {
-    // O(1) seek: no need to scan all dup values for this data_root.
-    if let Some(existing) = ingress_proof_by_data_root_address(tx, data_root, address)? {
-        tx.delete::<IngressProofs>(data_root, Some(existing))?;
+    // O(1) seek: no need to scan all dup values for this data_commitment.
+    if let Some(existing) = ingress_proof_by_data_root_address(tx, data_commitment, address)? {
+        tx.delete::<IngressProofs>(data_commitment, Some(existing))?;
         Ok(true)
     } else {
         Ok(false)
@@ -1689,14 +1722,14 @@ pub(crate) fn delete_ingress_proof_by_signer<T: DbTx + DbTxMut>(
 /// Returns `true` if the row was deleted, `false` if absent or content differs.
 pub fn delete_ingress_proof_if_unchanged<T: DbTx + DbTxMut>(
     tx: &T,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     expected: CompactCachedIngressProof,
 ) -> eyre::Result<bool> {
     let address = expected.address;
-    match ingress_proof_by_data_root_address(tx, data_root, address)? {
+    match ingress_proof_by_data_root_address(tx, data_commitment, address)? {
         // Compare inner CachedIngressProof (derives PartialEq); the wrapper does not.
         Some(current) if current.0 == expected.0 => {
-            tx.delete::<IngressProofs>(data_root, Some(current))?;
+            tx.delete::<IngressProofs>(data_commitment, Some(current))?;
             Ok(true)
         }
         _ => Ok(false),
@@ -1717,27 +1750,27 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
     if tx
-        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .get::<CachedDataRoots>(ingress_proof.data_commitment)?
         .is_none()
     {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            ingress_proof.data_root
+            ingress_proof.data_commitment
         ));
     }
 
     // Delete all existing proofs for this signer before inserting, as DupSort
     // tables don't upsert — re-anchoring would otherwise produce duplicates.
     let address = signer.address();
-    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_commitment)?
         .into_iter()
         .filter(|(_, proof)| proof.address == address)
     {
-        tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
+        tx.delete::<IngressProofs>(ingress_proof.data_commitment, Some(existing))?;
     }
 
     tx.put::<IngressProofs>(
-        ingress_proof.data_root,
+        ingress_proof.data_commitment,
         CompactCachedIngressProof(CachedIngressProof {
             address,
             proof: ingress_proof.clone(),
@@ -1752,25 +1785,25 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
     address: IrysAddress,
 ) -> eyre::Result<()> {
     if tx
-        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .get::<CachedDataRoots>(ingress_proof.data_commitment)?
         .is_none()
     {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
-            ingress_proof.data_root
+            ingress_proof.data_commitment
         ));
     }
 
     // Delete all existing proofs for this address before inserting (see store_ingress_proof_checked).
-    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_commitment)?
         .into_iter()
         .filter(|(_, proof)| proof.address == address)
     {
-        tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
+        tx.delete::<IngressProofs>(ingress_proof.data_commitment, Some(existing))?;
     }
 
     tx.put::<IngressProofs>(
-        ingress_proof.data_root,
+        ingress_proof.data_commitment,
         CompactCachedIngressProof(CachedIngressProof {
             address,
             proof: ingress_proof.clone(),
@@ -2568,7 +2601,7 @@ mod tests {
         )
         .unwrap();
 
-        let data_root = H256::random();
+        let data_root = irys_types::DataCommitment(H256::random());
         let addr_a = IrysAddress::random();
         let addr_b = IrysAddress::random();
         let addr_c = IrysAddress::random();
@@ -2576,7 +2609,7 @@ mod tests {
         // Build minimal distinct proofs for addr_a and addr_b.
         let make_proof = |address: IrysAddress, proof_hash: H256| {
             let mut p = irys_types::IngressProof::default();
-            p.data_root = data_root;
+            p.data_commitment = data_root;
             p.proof = proof_hash;
             CompactCachedIngressProof(CachedIngressProof { address, proof: p })
         };
@@ -2590,6 +2623,7 @@ mod tests {
                 data_root,
                 CachedDataRoot {
                     data_size: 64,
+                    data_tree_root: Default::default(),
                     data_size_confirmed: false,
                     txid_set: vec![],
                     block_set: vec![],
@@ -2657,12 +2691,12 @@ mod tests {
         )
         .unwrap();
 
-        let data_root = H256::random();
+        let data_root = irys_types::DataCommitment(H256::random());
         let addr_a = IrysAddress::random();
 
         let make_proof = |proof_hash: H256| {
             let mut p = irys_types::IngressProof::default();
-            p.data_root = data_root;
+            p.data_commitment = data_root;
             p.proof = proof_hash;
             CompactCachedIngressProof(CachedIngressProof {
                 address: addr_a,
@@ -2684,6 +2718,7 @@ mod tests {
                 data_root,
                 CachedDataRoot {
                     data_size: 64,
+                    data_tree_root: Default::default(),
                     data_size_confirmed: false,
                     txid_set: vec![],
                     block_set: vec![],
@@ -3177,8 +3212,8 @@ mod tests {
             update_data_root_block_set,
         };
         use irys_testing_utils::utils::tempfile;
-        use irys_types::DataTreeRoot;
-        use irys_types::{DataTransactionHeader, H256};
+        use irys_types::data_tree::{Geometry, data_commitment};
+        use irys_types::{DataCommitment, DataTransactionHeader, DataTreeRoot, H256};
         use reth_db::{
             Database as _,
             mdbx::DatabaseArguments,
@@ -3197,6 +3232,11 @@ mod tests {
             )
             .unwrap();
             (env, tmp)
+        }
+
+        /// The cache key of a 64-byte upload with this root.
+        fn commitment_of(data_root: H256) -> DataCommitment {
+            data_commitment(&Geometry::TESTING, DataTreeRoot(data_root), 64)
         }
 
         /// Build a CDR for `data_root` with the given txid in its txid_set
@@ -3219,13 +3259,13 @@ mod tests {
                     metadata: Default::default(),
                 });
             db.update(|tx| -> eyre::Result<()> {
-                cache_data_root(tx, &tx_header, None)?;
+                cache_data_root(tx, &tx_header, None, &Geometry::TESTING)?;
                 let mut cdr = tx
-                    .get::<CachedDataRoots>(data_root)?
+                    .get::<CachedDataRoots>(commitment_of(data_root))?
                     .expect("seed_cdr: cache_data_root must produce an entry");
                 cdr.block_set = initial_block_set;
                 cdr.expiry_height = expiry;
-                tx.put::<CachedDataRoots>(data_root, cdr)?;
+                tx.put::<CachedDataRoots>(commitment_of(data_root), cdr)?;
                 Ok(())
             })
             .unwrap()
@@ -3236,7 +3276,7 @@ mod tests {
             db: &reth_db::mdbx::DatabaseEnv,
             data_root: H256,
         ) -> Option<crate::db_cache::CachedDataRoot> {
-            db.view(|tx| tx.get::<CachedDataRoots>(data_root))
+            db.view(|tx| tx.get::<CachedDataRoots>(commitment_of(data_root)))
                 .unwrap()
                 .unwrap()
         }
@@ -3245,7 +3285,7 @@ mod tests {
         fn update_returns_false_when_cdr_missing() {
             let (db, _tmp) = open_db();
             let res = db
-                .update_eyre(|tx| update_data_root_block_set(tx, H256::random(), H256::random()))
+                .update_eyre(|tx| update_data_root_block_set(tx, DataCommitment(H256::random()), H256::random()))
                 .unwrap();
             assert!(!res, "missing CDR must be a no-op returning false");
         }
@@ -3259,7 +3299,7 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![], Some(42));
 
             let res = db
-                .update_eyre(|tx| update_data_root_block_set(tx, data_root, new_hash))
+                .update_eyre(|tx| update_data_root_block_set(tx, commitment_of(data_root), new_hash))
                 .unwrap();
             assert!(res, "append + clear-expiry must report a modification");
 
@@ -3277,7 +3317,7 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![existing_hash], None);
 
             let res = db
-                .update_eyre(|tx| update_data_root_block_set(tx, data_root, existing_hash))
+                .update_eyre(|tx| update_data_root_block_set(tx, commitment_of(data_root), existing_hash))
                 .unwrap();
             assert!(
                 !res,
@@ -3297,7 +3337,7 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![existing_hash], Some(99));
 
             let res = db
-                .update_eyre(|tx| update_data_root_block_set(tx, data_root, existing_hash))
+                .update_eyre(|tx| update_data_root_block_set(tx, commitment_of(data_root), existing_hash))
                 .unwrap();
             assert!(res, "modification reported when expiry is cleared");
 
@@ -3311,7 +3351,7 @@ mod tests {
             let (db, _tmp) = open_db();
             let res = db
                 .update_eyre(|tx| {
-                    remove_data_root_block_set_entry(tx, H256::random(), H256::random())
+                    remove_data_root_block_set_entry(tx, DataCommitment(H256::random()), H256::random())
                 })
                 .unwrap();
             assert!(!res, "missing CDR must be a no-op returning false");
@@ -3326,7 +3366,7 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![other_hash], Some(5));
 
             let res = db
-                .update_eyre(|tx| remove_data_root_block_set_entry(tx, data_root, H256::random()))
+                .update_eyre(|tx| remove_data_root_block_set_entry(tx, commitment_of(data_root), H256::random()))
                 .unwrap();
             assert!(!res, "hash not in block_set must be a no-op");
 
@@ -3351,7 +3391,7 @@ mod tests {
             );
 
             let res = db
-                .update_eyre(|tx| remove_data_root_block_set_entry(tx, data_root, target_hash))
+                .update_eyre(|tx| remove_data_root_block_set_entry(tx, commitment_of(data_root), target_hash))
                 .unwrap();
             assert!(res, "hash present must report a modification");
 
@@ -3378,7 +3418,7 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![only_hash], None);
 
             let res = db
-                .update_eyre(|tx| remove_data_root_block_set_entry(tx, data_root, only_hash))
+                .update_eyre(|tx| remove_data_root_block_set_entry(tx, commitment_of(data_root), only_hash))
                 .unwrap();
             assert!(res, "hash present must report a modification");
 

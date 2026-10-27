@@ -19,7 +19,9 @@ use crate::{H256, TxChunkOffset};
 use alloy_primitives::bytes::BufMut;
 use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Arbitrary;
-use irys_data_tree::Geometry;
+/// Re-exported so node crates name the geometry without a direct dependency
+/// on the tree crate.
+pub use irys_data_tree::Geometry;
 use reth_codecs::Compact;
 #[cfg(feature = "db")]
 use reth_db_api::{
