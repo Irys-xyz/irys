@@ -1251,7 +1251,10 @@ mod tests {
         assert_eq!(read_tx.entries::<CachedIngressLeaves>()?, 0);
         assert_eq!(read_tx.entries::<IngressProofs>()?, 0);
 
-        assert!(crate::tx_header_by_txid(&read_tx, &header.id)?.is_some_and(|stored| stored.eq(&header)));
+        assert!(
+            crate::tx_header_by_txid(&read_tx, &header.id)?
+                .is_some_and(|stored| stored.eq(&header))
+        );
         assert_eq!(
             read_tx
                 .get::<IrysCommitments>(commitment_tx.id())?

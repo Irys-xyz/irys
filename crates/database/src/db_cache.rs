@@ -2,8 +2,8 @@ use alloy_primitives::aliases::U232;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
 use irys_types::{
-    Base64, ChunkPathHash, Compact, DataCommitment, DataTreeRoot, H256, IrysAddress, TxChunkOffset, UnixTimestamp, UnpackedChunk,
-    partition::PartitionHash,
+    Base64, ChunkPathHash, Compact, DataCommitment, DataTreeRoot, H256, IrysAddress, TxChunkOffset,
+    UnixTimestamp, UnpackedChunk, partition::PartitionHash,
 };
 use reth_db::DatabaseError;
 use reth_db::table::{Decode, Encode};

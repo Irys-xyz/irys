@@ -17,8 +17,8 @@ use crate::tables::{
 use crate::db::{IrysDatabaseExt as _, IrysDupCursorExt};
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
-use irys_types::ingress::CachedIngressProof;
 use irys_types::data_tree::Geometry;
+use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataCommitment,
@@ -1259,7 +1259,10 @@ pub fn cached_ingress_leaf<T: DbTx>(
     address: IrysAddress,
     tx_offset: TxChunkOffset,
 ) -> Result<Option<CachedIngressLeaf>, DatabaseError> {
-    let key = CachedIngressLeafKey { data_commitment, address };
+    let key = CachedIngressLeafKey {
+        data_commitment,
+        address,
+    };
     let mut cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
     Ok(cursor
         .seek_by_key_subkey(key, *tx_offset)?
@@ -1284,7 +1287,10 @@ where
     T::DupCursor<CachedIngressLeaves>: IrysDupCursorExt<CachedIngressLeaves>,
 {
     let expected_count = crate::db_cache::data_size_to_chunk_count(data_size, chunk_size)?;
-    let key = CachedIngressLeafKey { data_commitment, address };
+    let key = CachedIngressLeafKey {
+        data_commitment,
+        address,
+    };
     let mut cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
     if cursor.dup_count(key)?.unwrap_or(0) != expected_count {
         return Ok(None);
@@ -1320,7 +1326,10 @@ pub fn store_ingress_data_hash<T: DbTx + DbTxMut>(
     tx_offset: TxChunkOffset,
     ingress_data_hash: H256,
 ) -> Result<(), DatabaseError> {
-    let key = CachedIngressLeafKey { data_commitment, address };
+    let key = CachedIngressLeafKey {
+        data_commitment,
+        address,
+    };
     let mut cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
     // A duplicate gossip delivery must not change an already-validated leaf.
     if let Some(existing) = cursor
@@ -1572,7 +1581,10 @@ pub fn reclaim_cached_chunks_older_than<T: DbTx + DbTxMut>(
     older_than: UnixTimestamp,
 ) -> eyre::Result<ReclaimCounts> {
     let mut counts = ReclaimCounts::default();
-    let leaf_key = CachedIngressLeafKey { data_commitment, address };
+    let leaf_key = CachedIngressLeafKey {
+        data_commitment,
+        address,
+    };
     let mut leaf_cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
     let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
     let mut walker = cursor.walk_dup(Some(data_commitment), None)?;
@@ -3285,7 +3297,9 @@ mod tests {
         fn update_returns_false_when_cdr_missing() {
             let (db, _tmp) = open_db();
             let res = db
-                .update_eyre(|tx| update_data_root_block_set(tx, DataCommitment(H256::random()), H256::random()))
+                .update_eyre(|tx| {
+                    update_data_root_block_set(tx, DataCommitment(H256::random()), H256::random())
+                })
                 .unwrap();
             assert!(!res, "missing CDR must be a no-op returning false");
         }
@@ -3299,7 +3313,9 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![], Some(42));
 
             let res = db
-                .update_eyre(|tx| update_data_root_block_set(tx, commitment_of(data_root), new_hash))
+                .update_eyre(|tx| {
+                    update_data_root_block_set(tx, commitment_of(data_root), new_hash)
+                })
                 .unwrap();
             assert!(res, "append + clear-expiry must report a modification");
 
@@ -3317,7 +3333,9 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![existing_hash], None);
 
             let res = db
-                .update_eyre(|tx| update_data_root_block_set(tx, commitment_of(data_root), existing_hash))
+                .update_eyre(|tx| {
+                    update_data_root_block_set(tx, commitment_of(data_root), existing_hash)
+                })
                 .unwrap();
             assert!(
                 !res,
@@ -3337,7 +3355,9 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![existing_hash], Some(99));
 
             let res = db
-                .update_eyre(|tx| update_data_root_block_set(tx, commitment_of(data_root), existing_hash))
+                .update_eyre(|tx| {
+                    update_data_root_block_set(tx, commitment_of(data_root), existing_hash)
+                })
                 .unwrap();
             assert!(res, "modification reported when expiry is cleared");
 
@@ -3351,7 +3371,11 @@ mod tests {
             let (db, _tmp) = open_db();
             let res = db
                 .update_eyre(|tx| {
-                    remove_data_root_block_set_entry(tx, DataCommitment(H256::random()), H256::random())
+                    remove_data_root_block_set_entry(
+                        tx,
+                        DataCommitment(H256::random()),
+                        H256::random(),
+                    )
                 })
                 .unwrap();
             assert!(!res, "missing CDR must be a no-op returning false");
@@ -3366,7 +3390,9 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![other_hash], Some(5));
 
             let res = db
-                .update_eyre(|tx| remove_data_root_block_set_entry(tx, commitment_of(data_root), H256::random()))
+                .update_eyre(|tx| {
+                    remove_data_root_block_set_entry(tx, commitment_of(data_root), H256::random())
+                })
                 .unwrap();
             assert!(!res, "hash not in block_set must be a no-op");
 
@@ -3391,7 +3417,9 @@ mod tests {
             );
 
             let res = db
-                .update_eyre(|tx| remove_data_root_block_set_entry(tx, commitment_of(data_root), target_hash))
+                .update_eyre(|tx| {
+                    remove_data_root_block_set_entry(tx, commitment_of(data_root), target_hash)
+                })
                 .unwrap();
             assert!(res, "hash present must report a modification");
 
@@ -3418,7 +3446,9 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![only_hash], None);
 
             let res = db
-                .update_eyre(|tx| remove_data_root_block_set_entry(tx, commitment_of(data_root), only_hash))
+                .update_eyre(|tx| {
+                    remove_data_root_block_set_entry(tx, commitment_of(data_root), only_hash)
+                })
                 .unwrap();
             assert!(res, "hash present must report a modification");
 
