@@ -13,8 +13,8 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::IngressProofs;
 use irys_database::{
-    cached_data_root_by_data_root, canonical_commitment_included_height, canonical_submit_height,
-    ingress_proofs_by_data_root, tx_header_by_txid,
+    cached_data_root_by_commitment, canonical_commitment_included_height, canonical_submit_height,
+    ingress_proofs_by_commitment, tx_header_by_txid,
 };
 use irys_domain::{
     BlockIndex, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
@@ -921,7 +921,7 @@ async fn get_publish_txs_and_proofs(
 
                 // Loop through all the data commitments with ingress proofs and find corresponding transaction ids
                 for data_commitment in ingress_proofs.keys() {
-                    let cached_data_root = cached_data_root_by_data_root(tx, *data_commitment)
+                    let cached_data_root = cached_data_root_by_commitment(tx, *data_commitment)
                         .map_err(|e| {
                             eyre!(
                                 "Failed to read cached data root for {}: {}",
@@ -1164,7 +1164,7 @@ async fn get_publish_txs_and_proofs(
             let mut all_proofs = ctx
                 .db
                 .view_eyre(|read_tx| {
-                    ingress_proofs_by_data_root(
+                    ingress_proofs_by_commitment(
                         read_tx,
                         tx_header.data_commitment(&ctx.config.data_tree_geometry()),
                     )

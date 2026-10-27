@@ -590,7 +590,7 @@ fn fill_submit_misses(
             }
             let tx_offset = tx_offset_at(tx_start, step)?;
             let placements = match irys_domain::trace_index_read(irys_domain::MIGRATION, || {
-                module.partition_offsets_for_data_root_chunk(data_commitment, tx_offset)
+                module.partition_offsets_for_commitment_chunk(data_commitment, tx_offset)
             }) {
                 Ok(placements) => placements,
                 Err(error) => {
@@ -1373,7 +1373,7 @@ mod tests {
         assert!(!f.sm.has_pending_writes());
         assert_ne!(f.chunk_type(0), Some(ChunkType::Data));
         assert!(
-            f.sm.partition_offsets_for_data_root_chunk(
+            f.sm.partition_offsets_for_commitment_chunk(
                 f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(0)
             )?
@@ -1422,7 +1422,7 @@ mod tests {
         assert!(!f.sm.has_pending_writes());
         assert_ne!(f.chunk_type(0), Some(ChunkType::Data));
         assert_eq!(
-            f.sm.partition_offsets_for_data_root_chunk(
+            f.sm.partition_offsets_for_commitment_chunk(
                 f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(2)
             )?,
@@ -1455,7 +1455,7 @@ mod tests {
             "a failed previous-item read must not write a pending body row; wrote {rows:?}"
         );
         assert!(
-            f.sm.partition_offsets_for_data_root_chunk(
+            f.sm.partition_offsets_for_commitment_chunk(
                 f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(0)
             )?
@@ -1522,7 +1522,7 @@ mod tests {
         assert_eq!(rows[0].0, PartitionChunkOffset::from(4));
         assert_eq!(rows[0].1.start_offset.0, 4);
         assert_eq!(
-            f.sm.partition_offsets_for_data_root_chunk(
+            f.sm.partition_offsets_for_commitment_chunk(
                 f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(0)
             )?,
@@ -1735,7 +1735,7 @@ mod tests {
 
         assert_ne!(f.chunk_type(0), Some(ChunkType::Data));
         assert!(
-            f.sm.partition_offsets_for_data_root_chunk(
+            f.sm.partition_offsets_for_commitment_chunk(
                 f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(0)
             )?
@@ -1804,7 +1804,7 @@ mod tests {
         assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(1)));
         assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
         assert_eq!(
-            f.sm.partition_offsets_for_data_root_chunk(
+            f.sm.partition_offsets_for_commitment_chunk(
                 f.tx.header.data_commitment(&f.config.data_tree_geometry()),
                 TxChunkOffset::from(0)
             )?,
@@ -3088,7 +3088,7 @@ mod tests {
         ])));
         index_publish(&f, &guard)?;
         broken.fail_data_root_index_reads(true);
-        let index_read = broken.partition_offsets_for_data_root_chunk(
+        let index_read = broken.partition_offsets_for_commitment_chunk(
             f.tx.header.data_commitment(&f.config.data_tree_geometry()),
             TxChunkOffset::from(0),
         );
@@ -3162,7 +3162,7 @@ mod tests {
         ])));
         index_publish(&f, &guard)?;
         broken.fail_data_root_index_reads(true);
-        let index_read = broken.partition_offsets_for_data_root_chunk(
+        let index_read = broken.partition_offsets_for_commitment_chunk(
             f.tx.header.data_commitment(&f.config.data_tree_geometry()),
             TxChunkOffset::from(0),
         );

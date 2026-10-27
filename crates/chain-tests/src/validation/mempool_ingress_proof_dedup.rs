@@ -202,7 +202,7 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
                 }),
             )?;
         }
-        let stored_1 = irys_database::ingress_proofs_by_data_root(tx, data_commitment_1)?;
+        let stored_1 = irys_database::ingress_proofs_by_commitment(tx, data_commitment_1)?;
         assert_eq!(
             stored_1.len(),
             3,
@@ -218,7 +218,7 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
         ] {
             irys_database::store_external_ingress_proof_checked(tx, proof, address)?;
         }
-        let stored_2 = irys_database::ingress_proofs_by_data_root(tx, data_commitment_2)?;
+        let stored_2 = irys_database::ingress_proofs_by_commitment(tx, data_commitment_2)?;
         assert_eq!(
             stored_2.len(),
             2,

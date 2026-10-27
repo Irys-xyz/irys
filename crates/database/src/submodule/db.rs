@@ -386,7 +386,7 @@ where
 }
 
 /// get DataRootInfos for the `data_commitment`
-pub fn get_data_root_infos_for_data_root<T: DbTx>(
+pub fn get_data_root_infos_for_commitment<T: DbTx>(
     tx: &T,
     data_commitment: DataCommitment,
 ) -> eyre::Result<Option<DataRootInfos>> {
@@ -415,7 +415,7 @@ pub fn add_data_root_info<T: DbTxMut + DbTx>(
     info: &DataRootInfo,
 ) -> eyre::Result<()> {
     let mut data_root_infos =
-        get_data_root_infos_for_data_root(tx, data_commitment)?.unwrap_or_default();
+        get_data_root_infos_for_commitment(tx, data_commitment)?.unwrap_or_default();
     if !data_root_infos.0.contains(info) {
         data_root_infos.0.push(info.clone());
     }
@@ -1010,7 +1010,7 @@ mod tests {
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::tables::DataRootInfos;
     use crate::submodule::{
-        add_data_root_info, get_data_root_infos_for_data_root, set_data_root_infos_for_data_root,
+        add_data_root_info, get_data_root_infos_for_commitment, set_data_root_infos_for_data_root,
     };
     use crate::submodule::{
         add_pending_body_migration, clear_submodule_database, del_pending_body_migration,
@@ -1154,7 +1154,7 @@ mod tests {
         write_tx.commit()?;
 
         let infos2 = db
-            .view_eyre(|tx| get_data_root_infos_for_data_root(tx, DataCommitment(data_root)))?
+            .view_eyre(|tx| get_data_root_infos_for_commitment(tx, DataCommitment(data_root)))?
             .unwrap();
 
         assert_eq!(infos, infos2.0);
@@ -1171,7 +1171,7 @@ mod tests {
         })?;
 
         let infos3 = db
-            .view_eyre(|tx| get_data_root_infos_for_data_root(tx, DataCommitment(data_root)))?
+            .view_eyre(|tx| get_data_root_infos_for_commitment(tx, DataCommitment(data_root)))?
             .unwrap();
 
         assert_eq!(infos3.0.len(), 6);
@@ -1179,7 +1179,7 @@ mod tests {
 
         let random_data_root = H256::random();
         let missing_infos = db.view_eyre(|tx| {
-            get_data_root_infos_for_data_root(tx, DataCommitment(random_data_root))
+            get_data_root_infos_for_commitment(tx, DataCommitment(random_data_root))
         })?;
 
         assert!(missing_infos.is_none());

@@ -1273,7 +1273,7 @@ mod tests {
 
     use super::super::db::{
         add_tx_path_hash_to_offset_range, get_data_path_by_offset,
-        get_data_root_infos_for_data_root, get_path_hashes_by_offset, get_pending_body_migration,
+        get_data_root_infos_for_commitment, get_path_hashes_by_offset, get_pending_body_migration,
         get_tx_leaf_binding, get_tx_path_by_offset,
     };
     use super::super::tables::v1::ChunkDataPathByPathHash;
@@ -1559,7 +1559,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored.tx_path_hash, Some(tx_a));
         assert_eq!(
-            get_data_root_infos_for_data_root(&tx, DataCommitment(h(40)))?
+            get_data_root_infos_for_commitment(&tx, DataCommitment(h(40)))?
                 .unwrap()
                 .0,
             vec![DataRootInfo {

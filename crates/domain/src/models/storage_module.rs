@@ -253,7 +253,7 @@ fn data_size_for_offset(
     if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(data_commitment) {
         index_read_metrics::note("data_root");
         let mut loaded = tx
-            .get_data_root_infos_for_data_root(data_commitment)?
+            .get_data_root_infos_for_commitment(data_commitment)?
             .unwrap_or_default();
         loaded.0.sort_unstable();
         entry.insert(loaded);
@@ -898,7 +898,7 @@ pub struct StorageModule {
     reset_incomplete: AtomicBool,
     #[cfg(any(test, feature = "test-utils"))]
     reset_fail_next: AtomicBool,
-    /// `partition_offsets_for_data_root_chunk` fails while this is set.
+    /// `partition_offsets_for_commitment_chunk` fails while this is set.
     #[cfg(any(test, feature = "test-utils"))]
     fail_data_root_index_read: AtomicBool,
     #[cfg(test)]
@@ -3173,7 +3173,7 @@ impl StorageModule {
         self.reset_fail_next.store(true, Ordering::SeqCst);
     }
 
-    /// `partition_offsets_for_data_root_chunk` returns an error while `fail` is set.
+    /// `partition_offsets_for_commitment_chunk` returns an error while `fail` is set.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn fail_data_root_index_reads(&self, fail: bool) {
         self.fail_data_root_index_read.store(fail, Ordering::SeqCst);
@@ -3374,7 +3374,7 @@ impl StorageModule {
     /// `None` means this storage module has no index entry for `data_root`.
     /// `Some([])` means the root is indexed, but this transaction-relative
     /// offset is not funded inside this partition.
-    pub fn partition_offsets_for_data_root_chunk(
+    pub fn partition_offsets_for_commitment_chunk(
         &self,
         data_commitment: DataCommitment,
         tx_offset: TxChunkOffset,
@@ -7868,7 +7868,7 @@ impl StorageModule {
                     return Ok(());
                 }
                 for data_root in data_roots {
-                    let Some(infos) = tx.get_data_root_infos_for_data_root(*data_root)? else {
+                    let Some(infos) = tx.get_data_root_infos_for_commitment(*data_root)? else {
                         continue;
                     };
                     let mut remaining = Vec::new();
@@ -8405,7 +8405,7 @@ impl StorageModule {
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let Some(offsets) =
             index_read_metrics::trace_index_read(index_read_metrics::PLACEMENT, || {
-                self.partition_offsets_for_data_root_chunk(
+                self.partition_offsets_for_commitment_chunk(
                     chunk.data_commitment(&self.config.data_tree_geometry()),
                     chunk.tx_offset,
                 )
@@ -8437,7 +8437,7 @@ impl StorageModule {
     pub fn has_in_flight_index_for(&self, chunk: &UnpackedChunk) -> bool {
         let Ok(Some(offsets)) =
             index_read_metrics::trace_index_read(index_read_metrics::PLACEMENT, || {
-                self.partition_offsets_for_data_root_chunk(
+                self.partition_offsets_for_commitment_chunk(
                     chunk.data_commitment(&self.config.data_tree_geometry()),
                     chunk.tx_offset,
                 )
@@ -8535,7 +8535,7 @@ impl StorageModule {
             index_read_metrics::note("data_commitment");
             if let Some(submodule_index) = submodule
                 .db
-                .view(|tx| tx.get_data_root_infos_for_data_root(data_commitment))?
+                .view(|tx| tx.get_data_root_infos_for_commitment(data_commitment))?
             {
                 data_root_info_list.0.extend(submodule_index.0);
             }
@@ -12083,9 +12083,9 @@ mod tests {
             );
         }
         assert_eq!(
-            submodule
-                .db
-                .view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(seeded.data_root)))?,
+            submodule.db.view(
+                |tx| tx.get_data_root_infos_for_commitment(DataCommitment(seeded.data_root))
+            )?,
             Some(DataRootInfos(vec![seeded.info.clone()]))
         );
         assert!(
@@ -12199,7 +12199,7 @@ mod tests {
         );
         let infos = submodule
             .db
-            .view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(seeded.data_root)))?;
+            .view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(seeded.data_root)))?;
         assert!(infos.as_ref().is_none_or(|infos| infos.0.is_empty()));
         assert!(!module.is_data_root_index_ready_at(PartitionChunkOffset::from(2)));
         Ok(())
@@ -12407,7 +12407,7 @@ mod tests {
                         .is_none()
                 );
                 let infos = reloaded_sub.db.view(|tx| {
-                    tx.get_data_root_infos_for_data_root(DataCommitment(seeded.data_root))
+                    tx.get_data_root_infos_for_commitment(DataCommitment(seeded.data_root))
                 })?;
                 assert!(infos.as_ref().is_none_or(|infos| infos.0.is_empty()));
                 assert!(!reloaded.is_data_root_index_ready_at(PartitionChunkOffset::from(2)));
@@ -14535,7 +14535,7 @@ mod tests {
         }
         assert!(storage_module.pending_body_migrations()?.is_empty());
         assert_eq!(
-            storage_module.partition_offsets_for_data_root_chunk(
+            storage_module.partition_offsets_for_commitment_chunk(
                 data_tx.data_commitment(&storage_module.config.data_tree_geometry()),
                 TxChunkOffset::from(5)
             )?,

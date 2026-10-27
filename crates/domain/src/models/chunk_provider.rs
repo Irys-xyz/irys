@@ -2,7 +2,7 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::submodule::tables::DataRootInfo;
 use irys_database::{
-    cached_chunk_by_chunk_offset, cached_data_root_by_data_root, cached_data_roots_by_tree_root,
+    cached_chunk_by_chunk_offset, cached_data_root_by_commitment, cached_data_roots_by_tree_root,
 };
 use irys_types::{
     ChunkFormat, Config, DataCommitment, DataLedger, DataTreeRoot, LedgerChunkOffset,
@@ -570,7 +570,7 @@ impl ChunkProvider {
         }
         let chunk_size = self.config.consensus.chunk_size;
         self.db.view_eyre(|tx| {
-            let Some(cdr) = cached_data_root_by_data_root(tx, data_commitment)? else {
+            let Some(cdr) = cached_data_root_by_commitment(tx, data_commitment)? else {
                 return Ok(None);
             };
             if !tx_offset_within_data_size(data_tx_offset, cdr.data_size, chunk_size) {

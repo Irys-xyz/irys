@@ -2,7 +2,7 @@ use super::ChunkIngressServiceInner;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::store_ingress_proof;
-use irys_database::{cached_data_root_by_data_root, complete_ingress_leaves};
+use irys_database::{cached_data_root_by_commitment, complete_ingress_leaves};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
@@ -622,7 +622,7 @@ pub fn load_complete_ingress_leaves(
     chunk_size: u64,
 ) -> Result<Vec<IngressMerkleLeaf>, IngressProofGenerationError> {
     let cdr = db
-        .view_eyre(|tx| cached_data_root_by_data_root(tx, data_commitment))
+        .view_eyre(|tx| cached_data_root_by_commitment(tx, data_commitment))
         .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
         .ok_or(IngressProofGenerationError::DataRootUnavailable)?;
 

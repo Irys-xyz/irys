@@ -37,7 +37,7 @@ use super::{
     add_pending_body_migration, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
     add_tx_path_hash_to_offset_range, clear_paths_in_inclusive_range, clear_submodule_database,
     del_path_hashes_by_offset, del_pending_body_migration, first_missing_path_hash_offset_in_tx,
-    get_data_path_by_offset, get_data_root_infos_for_data_root, get_full_tx_path,
+    get_data_path_by_offset, get_data_root_infos_for_commitment, get_full_tx_path,
     get_path_hashes_by_offset, get_pending_body_migration, get_tx_leaf_binding,
     get_tx_path_by_offset, missing_path_hash_ranges_in_tx, path_hashes_in_inclusive_range,
     pending_body_migrations_from, set_data_root_infos_for_data_root, set_path_hashes_by_offset,
@@ -95,7 +95,7 @@ pub trait SubmoduleRead {
 
     fn get_tx_leaf_binding(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>>;
 
-    fn get_data_root_infos_for_data_root(
+    fn get_data_root_infos_for_commitment(
         &self,
         data_commitment: DataCommitment,
     ) -> eyre::Result<Option<DataRootInfos>>;
@@ -974,7 +974,7 @@ macro_rules! mdbx_read_forwards {
             missing_path_hash_ranges(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> = missing_path_hash_ranges_in_tx;
             get_full_tx_path(path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> = get_full_tx_path;
             get_tx_leaf_binding(path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>> = get_tx_leaf_binding;
-            get_data_root_infos_for_data_root(data_commitment: DataCommitment) -> eyre::Result<Option<DataRootInfos>> = get_data_root_infos_for_data_root;
+            get_data_root_infos_for_commitment(data_commitment: DataCommitment) -> eyre::Result<Option<DataRootInfos>> = get_data_root_infos_for_commitment;
             get_pending_body_migration(offset: PartitionChunkOffset) -> eyre::Result<Option<PendingBodyMigration>> = get_pending_body_migration;
             pending_body_migrations_from(start: Option<PartitionChunkOffset>, limit: Option<usize>) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> = pending_body_migrations_from;
             has_pending_in_inclusive_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool> = has_pending_in_inclusive_range;
@@ -2270,13 +2270,13 @@ mod tests {
                     tx.add_data_root_info(DataCommitment(data_root), &second)?;
                 }
                 let infos = tx
-                    .get_data_root_infos_for_data_root(DataCommitment(data_root))?
+                    .get_data_root_infos_for_commitment(DataCommitment(data_root))?
                     .expect("uncommitted appends are visible in this batch");
                 assert_eq!(infos.0.len(), 2);
                 Ok(())
             })?;
-            let infos =
-                store.view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(data_root)))?;
+            let infos = store
+                .view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(data_root)))?;
             assert_eq!(infos.expect("committed list").0.len(), 2);
             Ok(())
         })
@@ -2556,7 +2556,7 @@ mod tests {
             }
             store.update(|tx| tx.add_data_root_info(DataCommitment(root), &info))?;
             assert_eq!(
-                store.view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(root)))?,
+                store.view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(root)))?,
                 Some(DataRootInfos(vec![info.clone()]))
             );
             store.update(|tx| {
@@ -2564,12 +2564,12 @@ mod tests {
             })?;
             assert!(
                 store
-                    .view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(root)))?
+                    .view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(root)))?
                     .is_none()
             );
             store.update(|tx| tx.add_data_root_info(DataCommitment(root), &info))?;
             assert_eq!(
-                store.view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(root)))?,
+                store.view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(root)))?,
                 Some(DataRootInfos(vec![info]))
             );
             Ok(())
@@ -2823,7 +2823,7 @@ mod tests {
                     .is_none()
             );
             let infos = store
-                .view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(root)))?
+                .view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(root)))?
                 .expect("info extent does not overlap the tail");
             assert_eq!(infos.0.len(), 1);
             assert_eq!(infos.0[0].data_size, 32);
@@ -2861,7 +2861,7 @@ mod tests {
                     .is_none()
             );
             assert_eq!(
-                store.view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(root)))?,
+                store.view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(root)))?,
                 Some(DataRootInfos(vec![DataRootInfo {
                     start_offset: RelativeChunkOffset(0),
                     data_size: 10 * 32,
@@ -2885,7 +2885,7 @@ mod tests {
             );
             assert!(
                 store
-                    .view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(root)))?
+                    .view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(root)))?
                     .is_none()
             );
             assert!(
@@ -2932,7 +2932,7 @@ mod tests {
             )?;
             assert_interval_rows(owns, interval_rows_read());
             let infos = store
-                .view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(root)))?
+                .view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(root)))?
                 .expect("remnant keeps the local info");
             assert!(
                 infos.0.iter().any(|info| {
@@ -2953,7 +2953,7 @@ mod tests {
             )?;
             assert_interval_rows(owns, interval_rows_read());
             let infos = store
-                .view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(root)))?
+                .view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(root)))?
                 .expect("the far placement of this root still has an info");
             assert!(
                 infos
@@ -2982,7 +2982,7 @@ mod tests {
             )?;
             assert_interval_rows(owns, interval_rows_read());
             let neg = store
-                .view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(neg_root)))?
+                .view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(neg_root)))?
                 .expect("extent starts before offset 0 and still covers the remnant");
             assert_eq!(neg.0[0].start_offset, RelativeChunkOffset(-4));
             assert_eq!(neg.0[0].data_size, 6 * 32);
@@ -3637,7 +3637,7 @@ mod tests {
                 assert!(store.view(|tx| tx.get_tx_leaf_binding(tx_hash))?.is_none());
             }
             assert_eq!(
-                store.view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(data_root)))?,
+                store.view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(data_root)))?,
                 Some(DataRootInfos(vec![info]))
             );
             assert_eq!(

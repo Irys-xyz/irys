@@ -5,7 +5,7 @@ use crate::chunk_ingress_service::ingress_proofs::{
 };
 use crate::metrics;
 use irys_database::{
-    cached_data_root_by_data_root, delete_ingress_proof_if_unchanged,
+    cached_data_root_by_commitment, delete_ingress_proof_if_unchanged,
     delete_unprotected_cached_chunks_older_than, get_data_tx_metadata,
     reclaim_cached_chunks_older_than, tx_header_by_txid,
 };
@@ -1330,7 +1330,7 @@ impl InnerCacheTask {
             };
 
             for (data_commitment, txids_to_remove) in by_data_commitment {
-                let Some(mut cached) = cached_data_root_by_data_root(db_tx, *data_commitment)? else {
+                let Some(mut cached) = cached_data_root_by_commitment(db_tx, *data_commitment)? else {
                     continue;
                 };
 
@@ -1455,7 +1455,7 @@ impl InnerCacheTask {
                 let CachedIngressProof { address, proof } = compact.0.clone();
 
                 // Associated txids
-                let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_commitment)?
+                let Some(cached_data_root) = cached_data_root_by_commitment(&tx, data_commitment)?
                 else {
                     debug!(ingress_proof.data_commitment = ?data_commitment, "Proof has no cached data root; marking for deletion");
                     to_delete.push((data_commitment, compact, true));
@@ -1561,7 +1561,7 @@ impl InnerCacheTask {
                     // Orphan deletions were scheduled because the data root had no
                     // `CachedDataRoots` entry at scan time. Re-check inside the write tx:
                     // if the root was re-cached since the scan, keep its proof.
-                    if *is_orphan && cached_data_root_by_data_root(rw_tx, *root)?.is_some() {
+                    if *is_orphan && cached_data_root_by_commitment(rw_tx, *root)?.is_some() {
                         return Ok(false);
                     }
                     delete_ingress_proof_if_unchanged(rw_tx, *root, scanned.clone())
@@ -2729,7 +2729,7 @@ mod tests {
         service_task.prune_cache(10)?;
 
         let proofs = db.view_eyre(|rtx| {
-            Ok(irys_database::ingress_proofs_by_data_root(rtx, data_key)?.len())
+            Ok(irys_database::ingress_proofs_by_commitment(rtx, data_key)?.len())
         })?;
         let chunks = db.view_eyre(|rtx| {
             let mut cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
@@ -4463,7 +4463,7 @@ mod tests {
 
         // Sanity: three proofs inserted.
         let initial_count = db.view_eyre(|rtx| {
-            Ok(irys_database::ingress_proofs_by_data_root(rtx, DataCommitment(data_root))?.len())
+            Ok(irys_database::ingress_proofs_by_commitment(rtx, DataCommitment(data_root))?.len())
         })?;
         assert_eq!(initial_count, 3, "expected 3 proofs before pruning");
 
@@ -4492,7 +4492,7 @@ mod tests {
 
         db.view(|rtx| -> eyre::Result<()> {
             let remaining =
-                irys_database::ingress_proofs_by_data_root(rtx, DataCommitment(data_root))?;
+                irys_database::ingress_proofs_by_commitment(rtx, DataCommitment(data_root))?;
             assert_eq!(
                 remaining.len(),
                 2,
@@ -4592,9 +4592,9 @@ mod tests {
 
         db.view(|rtx| -> eyre::Result<()> {
             let low_left =
-                irys_database::ingress_proofs_by_data_root(rtx, DataCommitment(low))?.len();
+                irys_database::ingress_proofs_by_commitment(rtx, DataCommitment(low))?.len();
             let high_left =
-                irys_database::ingress_proofs_by_data_root(rtx, DataCommitment(high))?.len();
+                irys_database::ingress_proofs_by_commitment(rtx, DataCommitment(high))?.len();
             assert_eq!(low_left, 1, "the lower proof is outside this pass");
             assert_eq!(high_left, 0, "the seek key's proof is the one checked");
             Ok(())
@@ -4688,7 +4688,7 @@ mod tests {
         })??;
 
         let initial_count = db.view_eyre(|rtx| {
-            Ok(irys_database::ingress_proofs_by_data_root(rtx, DataCommitment(data_root))?.len())
+            Ok(irys_database::ingress_proofs_by_commitment(rtx, DataCommitment(data_root))?.len())
         })?;
         assert_eq!(initial_count, 2, "expected 2 proofs before pruning");
 
@@ -4717,7 +4717,7 @@ mod tests {
 
         db.view(|rtx| -> eyre::Result<()> {
             let remaining =
-                irys_database::ingress_proofs_by_data_root(rtx, DataCommitment(data_root))?;
+                irys_database::ingress_proofs_by_commitment(rtx, DataCommitment(data_root))?;
             assert_eq!(
                 remaining.len(),
                 1,
@@ -4834,7 +4834,7 @@ mod tests {
 
         // Sanity: three proofs inserted.
         let initial_count = db.view_eyre(|rtx| {
-            Ok(irys_database::ingress_proofs_by_data_root(rtx, DataCommitment(data_root))?.len())
+            Ok(irys_database::ingress_proofs_by_commitment(rtx, DataCommitment(data_root))?.len())
         })?;
         assert_eq!(initial_count, 3, "expected 3 proofs before pruning");
 
@@ -4864,7 +4864,7 @@ mod tests {
         db.view(|rtx| -> eyre::Result<()> {
             // Exactly one proof must remain — addr_a's.
             let remaining =
-                irys_database::ingress_proofs_by_data_root(rtx, DataCommitment(data_root))?;
+                irys_database::ingress_proofs_by_commitment(rtx, DataCommitment(data_root))?;
             assert_eq!(
                 remaining.len(),
                 1,
@@ -4876,9 +4876,9 @@ mod tests {
                 "surviving proof must belong to addr_a"
             );
 
-            // Per-key checks using ingress_proof_by_data_root_address.
+            // Per-key checks using ingress_proof_by_commitment_address.
             assert!(
-                irys_database::ingress_proof_by_data_root_address(
+                irys_database::ingress_proof_by_commitment_address(
                     rtx,
                     DataCommitment(data_root),
                     addr_a
@@ -4887,7 +4887,7 @@ mod tests {
                 "addr_a proof must survive"
             );
             assert!(
-                irys_database::ingress_proof_by_data_root_address(
+                irys_database::ingress_proof_by_commitment_address(
                     rtx,
                     DataCommitment(data_root),
                     addr_b
@@ -4896,7 +4896,7 @@ mod tests {
                 "addr_b expired proof must be deleted"
             );
             assert!(
-                irys_database::ingress_proof_by_data_root_address(
+                irys_database::ingress_proof_by_commitment_address(
                     rtx,
                     DataCommitment(data_root),
                     addr_c

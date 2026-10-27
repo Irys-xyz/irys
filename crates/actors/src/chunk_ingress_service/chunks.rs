@@ -246,7 +246,7 @@ impl ChunkIngressServiceInner {
         let cdr_lookup = self
             .irys_db
             .view_eyre(|read_tx| {
-                irys_database::cached_data_root_by_data_root(read_tx, data_commitment)
+                irys_database::cached_data_root_by_commitment(read_tx, data_commitment)
             })
             .map(|opt| opt.map(|cdr| cdr.data_size))
             .map_err(|e| {
@@ -583,7 +583,7 @@ impl ChunkIngressServiceInner {
         let cached_data_root = self
             .irys_db
             .view_eyre(|read_tx| {
-                irys_database::cached_data_root_by_data_root(read_tx, data_commitment)
+                irys_database::cached_data_root_by_commitment(read_tx, data_commitment)
             })
             .map_err(|e| {
                 error!(
@@ -982,7 +982,7 @@ impl ChunkIngressServiceInner {
         let cached_data_root = self
             .irys_db
             .view_eyre(|read_tx| {
-                irys_database::cached_data_root_by_data_root(read_tx, data_commitment)
+                irys_database::cached_data_root_by_commitment(read_tx, data_commitment)
             })
             .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
@@ -1002,7 +1002,7 @@ impl ChunkIngressServiceInner {
         let existing_local_proof = self
             .irys_db
             .view_eyre(|tx| {
-                irys_database::ingress_proof_by_data_root_address(
+                irys_database::ingress_proof_by_commitment_address(
                     tx,
                     data_commitment,
                     local_address,
@@ -1120,7 +1120,7 @@ impl ChunkIngressServiceInner {
         let reread = self
             .irys_db
             .view_eyre(|read_tx| {
-                irys_database::cached_data_root_by_data_root(read_tx, data_commitment)
+                irys_database::cached_data_root_by_commitment(read_tx, data_commitment)
             })
             .map_err(|error| {
                 error!(

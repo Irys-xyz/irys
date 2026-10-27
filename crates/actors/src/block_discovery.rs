@@ -9,7 +9,7 @@ use crate::metrics;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, commitment_tx_by_txid,
+    block_header_by_hash, cached_data_root_by_commitment, commitment_tx_by_txid,
     db::IrysDatabaseExt as _, tx_header_by_txid,
 };
 use irys_domain::{
@@ -441,7 +441,7 @@ impl BlockDiscoveryServiceInner {
                     // Check to see if we have a confirmed data_size for the data_root
                     let cdr = self
                         .db
-                        .view_eyre(|tx| cached_data_root_by_data_root(tx, data_commitment))
+                        .view_eyre(|tx| cached_data_root_by_commitment(tx, data_commitment))
                         .map_err(BlockDiscoveryInternalError::DatabaseError)?;
 
                     // If so, compare it with the data_size in the tx

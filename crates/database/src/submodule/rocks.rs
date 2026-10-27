@@ -6470,7 +6470,7 @@ impl SubmoduleRead for Rows<'_> {
         Ok(None)
     }
 
-    fn get_data_root_infos_for_data_root(
+    fn get_data_root_infos_for_commitment(
         &self,
         data_commitment: DataCommitment,
     ) -> eyre::Result<Option<DataRootInfos>> {
@@ -6673,7 +6673,7 @@ impl_batch_read! {
     missing_path_hash_ranges(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>>;
     get_full_tx_path(path_hash: TxPathHash) -> eyre::Result<Option<TxPath>>;
     get_tx_leaf_binding(path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>>;
-    get_data_root_infos_for_data_root(data_commitment: DataCommitment) -> eyre::Result<Option<DataRootInfos>>;
+    get_data_root_infos_for_commitment(data_commitment: DataCommitment) -> eyre::Result<Option<DataRootInfos>>;
     get_pending_body_migration(offset: PartitionChunkOffset) -> eyre::Result<Option<PendingBodyMigration>>;
     pending_body_migrations_from(start: Option<PartitionChunkOffset>, limit: Option<usize>) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>>;
     has_pending_in_inclusive_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
@@ -8241,7 +8241,7 @@ mod tests {
         assert!(store.view(|tx| tx.get_full_tx_path(tx_hash))?.is_none());
         assert!(
             store
-                .view(|tx| tx.get_data_root_infos_for_data_root(DataCommitment(data_root)))?
+                .view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(data_root)))?
                 .is_none()
         );
         assert!(

@@ -596,7 +596,7 @@ fn verify_data_root_start_offset(
         .db
         .view(|tx| {
             let data_root_infos = tx
-                .get_data_root_infos_for_data_root(data_commitment)?
+                .get_data_root_infos_for_commitment(data_commitment)?
                 .expect("start offsets not found");
             assert_eq!(data_root_infos.0.len(), 1);
             assert_eq!(data_root_infos.0[0].start_offset, expected_offset.into());
@@ -615,7 +615,7 @@ fn verify_data_root_data_size(
             .db
             .view(|tx| {
                 let data_root_infos = tx
-                    .get_data_root_infos_for_data_root(data_commitment)?
+                    .get_data_root_infos_for_commitment(data_commitment)?
                     .expect("to find metadata for data_root");
                 assert!(!data_root_infos.0.is_empty());
                 Ok(Some(data_root_infos.0[0].data_size))

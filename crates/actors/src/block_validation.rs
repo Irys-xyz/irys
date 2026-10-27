@@ -6529,21 +6529,21 @@ async fn ingress_proof_chunk_bytes_from_local(
     // miss must stay a miss so the caller can try peers.
     let mut read_failed = false;
     for module in &modules {
-        let offsets = match module.partition_offsets_for_data_root_chunk(data_commitment, tx_offset)
-        {
-            Ok(Some(offsets)) => offsets,
-            Ok(None) => continue,
-            Err(error) => {
-                debug!(
-                    error = %error,
-                    %data_root,
-                    %tx_offset,
-                    "storage module placement lookup failed; trying the next module"
-                );
-                read_failed = true;
-                continue;
-            }
-        };
+        let offsets =
+            match module.partition_offsets_for_commitment_chunk(data_commitment, tx_offset) {
+                Ok(Some(offsets)) => offsets,
+                Ok(None) => continue,
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        %data_root,
+                        %tx_offset,
+                        "storage module placement lookup failed; trying the next module"
+                    );
+                    read_failed = true;
+                    continue;
+                }
+            };
         for offset in offsets {
             let packed = match module.generate_full_chunk(offset) {
                 Ok(Some(packed)) => packed,

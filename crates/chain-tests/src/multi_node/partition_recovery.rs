@@ -510,7 +510,7 @@ fn has_data_root_in_storage_module(
         };
         if pa.ledger_id == Some(ledger.into()) && pa.slot_index == Some(slot_index) {
             let result = sm.query_submodule_db_by_offset(PartitionChunkOffset::from(0), |tx| {
-                tx.get_data_root_infos_for_data_root(data_commitment)
+                tx.get_data_root_infos_for_commitment(data_commitment)
             });
             return matches!(result, Ok(Some(infos)) if !infos.0.is_empty());
         }

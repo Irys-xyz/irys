@@ -1518,7 +1518,7 @@ impl StorageModule {
         let partition_offsets = match super::index_read_metrics::trace_index_read(
             super::index_read_metrics::PLACEMENT,
             || {
-                self.partition_offsets_for_data_root_chunk(
+                self.partition_offsets_for_commitment_chunk(
                     chunk.data_commitment(&self.config.data_tree_geometry()),
                     chunk.tx_offset,
                 )
@@ -1561,7 +1561,7 @@ impl StorageModule {
                 return Err(OccupyFailure::Write(WriteDataChunkError::WritesPaused));
             }
             let generation = self.index_write_generation.load(Ordering::SeqCst);
-            // Same funding math as `partition_offsets_for_data_root_chunk`,
+            // Same funding math as `partition_offsets_for_commitment_chunk`,
             // read again under this lock. It uses data-root rows only, so a
             // short test path is not parsed. Reset clears those rows before
             // a later entropy write can take `pending`.
@@ -1575,7 +1575,7 @@ impl StorageModule {
                 for (_, submodule) in self.submodules.iter() {
                     let Some(infos) = submodule
                         .db
-                        .view(|tx| tx.get_data_root_infos_for_data_root(data_commitment))?
+                        .view(|tx| tx.get_data_root_infos_for_commitment(data_commitment))?
                     else {
                         continue;
                     };

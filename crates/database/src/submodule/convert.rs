@@ -1501,7 +1501,7 @@ fn prepare_v2_placement<S: SubmoduleStore>(
         let stored = tx.get_full_tx_path(interval.tx_path_hash)?;
         let binding = tx.get_tx_leaf_binding(interval.tx_path_hash)?;
         let infos = match &binding {
-            Some(binding) => tx.get_data_root_infos_for_data_root(binding.data_commitment)?,
+            Some(binding) => tx.get_data_root_infos_for_commitment(binding.data_commitment)?,
             None => None,
         };
         Ok((stored, binding, infos))
@@ -2159,7 +2159,7 @@ fn compare_one_placement<S: SubmoduleStore>(
         .map(|item| item.data_commitment)
         .unwrap_or(place.data_commitment);
     let infos = v2
-        .view(|tx| tx.get_data_root_infos_for_data_root(info_key))?
+        .view(|tx| tx.get_data_root_infos_for_commitment(info_key))?
         .map(|infos| infos.0)
         .unwrap_or_default();
     let segments = tx_segments(interval.start, interval.end, &infos);

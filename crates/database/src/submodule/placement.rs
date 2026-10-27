@@ -44,7 +44,7 @@ pub(super) fn read_placements_for_data_root<R: SubmoduleRead + ?Sized>(
     reader: &R,
     data_commitment: DataCommitment,
 ) -> eyre::Result<Vec<Placement>> {
-    let Some(infos) = reader.get_data_root_infos_for_data_root(data_commitment)? else {
+    let Some(infos) = reader.get_data_root_infos_for_commitment(data_commitment)? else {
         return Ok(Vec::new());
     };
     let mut infos = infos.0;
@@ -150,7 +150,7 @@ fn placements_for_interval<R: SubmoduleRead + ?Sized>(
     else {
         return Ok(Vec::new());
     };
-    let Some(infos) = reader.get_data_root_infos_for_data_root(data_commitment)? else {
+    let Some(infos) = reader.get_data_root_infos_for_commitment(data_commitment)? else {
         return Ok(Vec::new());
     };
     let mut cuts = vec![interval.start];

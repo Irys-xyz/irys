@@ -1055,7 +1055,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
 }
 
 /// Gets a [`CachedDataRoot`] by its [`DataCommitment`] from [`CachedDataRoots`] .
-pub fn cached_data_root_by_data_root<T: DbTx>(
+pub fn cached_data_root_by_commitment<T: DbTx>(
     tx: &T,
     data_commitment: DataCommitment,
 ) -> eyre::Result<Option<CachedDataRoot>> {
@@ -1398,7 +1398,7 @@ pub fn backfill_cached_ingress_data_hashes(
             if let Some(cdr) = tx.get::<CachedDataRoots>(data_commitment)?
                 && cdr.data_size_confirmed
                 && !cdr.block_set.is_empty()
-                && ingress_proof_by_data_root_address(tx, data_commitment, address)?.is_none()
+                && ingress_proof_by_commitment_address(tx, data_commitment, address)?.is_none()
             {
                 retry_roots.insert(data_commitment);
             }
@@ -1686,7 +1686,7 @@ pub fn delete_peer_list_item<T: DbTxMut>(tx: &T, peer_id: &IrysPeerId) -> eyre::
 
 /// Gets all ingress proofs associated with a specific data_root
 ///
-pub fn ingress_proofs_by_data_root<TX: DbTx>(
+pub fn ingress_proofs_by_commitment<TX: DbTx>(
     read_tx: &TX,
     data_commitment: DataCommitment,
 ) -> eyre::Result<Vec<(DataCommitment, CompactCachedIngressProof)>> {
@@ -1698,7 +1698,7 @@ pub fn ingress_proofs_by_data_root<TX: DbTx>(
     Ok(proofs)
 }
 
-pub fn ingress_proof_by_data_root_address<TX: DbTx>(
+pub fn ingress_proof_by_commitment_address<TX: DbTx>(
     read_tx: &TX,
     data_commitment: DataCommitment,
     address: IrysAddress,
@@ -1730,7 +1730,7 @@ pub(crate) fn delete_ingress_proof_by_signer<T: DbTx + DbTxMut>(
     address: IrysAddress,
 ) -> eyre::Result<bool> {
     // O(1) seek: no need to scan all dup values for this data_commitment.
-    if let Some(existing) = ingress_proof_by_data_root_address(tx, data_commitment, address)? {
+    if let Some(existing) = ingress_proof_by_commitment_address(tx, data_commitment, address)? {
         tx.delete::<IngressProofs>(data_commitment, Some(existing))?;
         Ok(true)
     } else {
@@ -1750,7 +1750,7 @@ pub fn delete_ingress_proof_if_unchanged<T: DbTx + DbTxMut>(
     expected: CompactCachedIngressProof,
 ) -> eyre::Result<bool> {
     let address = expected.address;
-    match ingress_proof_by_data_root_address(tx, data_commitment, address)? {
+    match ingress_proof_by_commitment_address(tx, data_commitment, address)? {
         // Compare inner CachedIngressProof (derives PartialEq); the wrapper does not.
         Some(current) if current.0 == expected.0 => {
             tx.delete::<IngressProofs>(data_commitment, Some(current))?;
@@ -1786,7 +1786,7 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
     // Delete all existing proofs for this signer before inserting, as DupSort
     // tables don't upsert — re-anchoring would otherwise produce duplicates.
     let address = signer.address();
-    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_commitment)?
+    for (_, existing) in ingress_proofs_by_commitment(tx, ingress_proof.data_commitment)?
         .into_iter()
         .filter(|(_, proof)| proof.address == address)
     {
@@ -1819,7 +1819,7 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
     }
 
     // Delete all existing proofs for this address before inserting (see store_ingress_proof_checked).
-    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_commitment)?
+    for (_, existing) in ingress_proofs_by_commitment(tx, ingress_proof.data_commitment)?
         .into_iter()
         .filter(|(_, proof)| proof.address == address)
     {
@@ -2661,8 +2661,8 @@ mod tests {
     #[test]
     fn delete_ingress_proof_by_signer_deletes_only_that_signer() -> eyre::Result<()> {
         use super::{
-            delete_ingress_proof_by_signer, ingress_proof_by_data_root_address,
-            ingress_proofs_by_data_root,
+            delete_ingress_proof_by_signer, ingress_proof_by_commitment_address,
+            ingress_proofs_by_commitment,
         };
         use crate::{
             db::IrysDatabaseExt as _,
@@ -2717,7 +2717,7 @@ mod tests {
 
         // Both rows present initially.
         assert_eq!(
-            db.view_eyre(|tx| ingress_proofs_by_data_root(tx, data_root))?
+            db.view_eyre(|tx| ingress_proofs_by_commitment(tx, data_root))?
                 .len(),
             2,
             "expected 2 proofs after seeding"
@@ -2728,12 +2728,12 @@ mod tests {
         assert!(deleted, "deleting addr_a row must return true");
 
         assert!(
-            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_a))?
+            db.view_eyre(|tx| ingress_proof_by_commitment_address(tx, data_root, addr_a))?
                 .is_none(),
             "addr_a proof must be gone"
         );
         assert!(
-            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_b))?
+            db.view_eyre(|tx| ingress_proof_by_commitment_address(tx, data_root, addr_b))?
                 .is_some(),
             "addr_b proof must survive"
         );
@@ -2753,7 +2753,7 @@ mod tests {
 
     #[test]
     fn delete_ingress_proof_if_unchanged_preserves_refreshed_proof() -> eyre::Result<()> {
-        use super::{delete_ingress_proof_if_unchanged, ingress_proof_by_data_root_address};
+        use super::{delete_ingress_proof_if_unchanged, ingress_proof_by_commitment_address};
         use crate::{
             db::IrysDatabaseExt as _,
             db_cache::CachedDataRoot,
@@ -2825,7 +2825,7 @@ mod tests {
         );
 
         assert!(
-            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_a))?
+            db.view_eyre(|tx| ingress_proof_by_commitment_address(tx, data_root, addr_a))?
                 .is_some(),
             "P2 must still be present after stale CAS"
         );
@@ -2836,7 +2836,7 @@ mod tests {
         assert!(deleted, "matching expected value must return true");
 
         assert!(
-            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_a))?
+            db.view_eyre(|tx| ingress_proof_by_commitment_address(tx, data_root, addr_a))?
                 .is_none(),
             "row must be gone after successful CAS delete"
         );

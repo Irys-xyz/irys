@@ -110,14 +110,14 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
 
     // Verify the stale state is set up correctly
     genesis_node.node_ctx.db.view_eyre(|db_tx| {
-        let cdr = irys_database::cached_data_root_by_data_root(db_tx, data_commitment)?
+        let cdr = irys_database::cached_data_root_by_commitment(db_tx, data_commitment)?
             .expect("CachedDataRoot should exist");
         assert!(
             cdr.txid_set.contains(&stale_txid),
             "CachedDataRoot.txid_set should contain the stale txid"
         );
 
-        let proofs = irys_database::ingress_proofs_by_data_root(db_tx, data_commitment)?;
+        let proofs = irys_database::ingress_proofs_by_commitment(db_tx, data_commitment)?;
         assert!(
             !proofs.is_empty(),
             "IngressProofs should contain a proof for this data_root"
@@ -301,7 +301,7 @@ async fn slow_heavy_stale_txid_in_cached_data_root_does_not_block_after_fix() ->
 
     // Verify CachedDataRoot.txid_set contains our txid
     genesis_node.node_ctx.db.view_eyre(|db_tx| {
-        let cdr = irys_database::cached_data_root_by_data_root(db_tx, data_commitment)?
+        let cdr = irys_database::cached_data_root_by_commitment(db_tx, data_commitment)?
             .expect("CachedDataRoot should exist");
         assert!(cdr.txid_set.contains(&txid));
         Ok(())
@@ -323,7 +323,7 @@ async fn slow_heavy_stale_txid_in_cached_data_root_does_not_block_after_fix() ->
         loop {
             let still_present = genesis_node.node_ctx.db.view_eyre(|db_tx| {
                 Ok(
-                    irys_database::cached_data_root_by_data_root(db_tx, data_commitment)?
+                    irys_database::cached_data_root_by_commitment(db_tx, data_commitment)?
                         .is_some_and(|cdr| cdr.txid_set.contains(&txid)),
                 )
             })?;
@@ -340,7 +340,7 @@ async fn slow_heavy_stale_txid_in_cached_data_root_does_not_block_after_fix() ->
 
     // Verify the txid was pruned from CachedDataRoot.txid_set by Fix B
     genesis_node.node_ctx.db.view_eyre(|db_tx| {
-        match irys_database::cached_data_root_by_data_root(db_tx, data_commitment)? {
+        match irys_database::cached_data_root_by_commitment(db_tx, data_commitment)? {
             Some(cdr) => {
                 assert!(
                     !cdr.txid_set.contains(&txid),

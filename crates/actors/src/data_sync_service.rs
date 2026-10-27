@@ -17,7 +17,7 @@ use chunk_fetcher::ChunkFetchFailureKind;
 use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator, ChunkRequestState};
 use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::ingress_proofs_by_data_root;
+use irys_database::ingress_proofs_by_commitment;
 use irys_domain::{BatchEnqueueItem, BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
 use irys_packing::unpack;
 use irys_types::DataTreeRoot;
@@ -1879,7 +1879,7 @@ impl DataSyncServiceInner {
         for data_root in data_roots {
             let proofs = match self
                 .db
-                .view_eyre(|tx| ingress_proofs_by_data_root(tx, data_root))
+                .view_eyre(|tx| ingress_proofs_by_commitment(tx, data_root))
             {
                 Ok(p) => p,
                 Err(e) => {
