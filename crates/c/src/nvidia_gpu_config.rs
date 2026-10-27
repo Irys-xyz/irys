@@ -186,6 +186,9 @@ mod tests {
         assert!(config.multiprocessor_count > 0);
         assert!(config.compute_capability.0 > 0);
         assert!(config.max_threads_per_block > 0);
+        assert!(config.max_threads_per_multiprocessor > 0);
+        assert!(config.max_blocks_per_multiprocessor > 0);
+        assert!(config.regs_per_multiprocessor > 0);
         assert_eq!(config.warp_size, 32);
     }
 }
