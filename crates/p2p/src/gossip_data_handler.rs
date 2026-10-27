@@ -155,7 +155,7 @@ where
         let source_peer_id = chunk_request.peer_id;
         let chunk = chunk_request.data;
         let chunk_size = chunk.bytes.0.len() as u64;
-        let chunk_path_hash = chunk.chunk_path_hash();
+        let chunk_key = chunk.chunk_key(&self.config.data_tree_geometry());
 
         record_gossip_chunk_received(chunk_size);
 
@@ -167,7 +167,7 @@ where
                 // Success. Mempool will send the tx data to the internal mempool,
                 //  but we still need to update the cache with the source address.
                 self.cache
-                    .record_seen(source_peer_id, GossipCacheKey::Chunk(chunk_path_hash))
+                    .record_seen(source_peer_id, GossipCacheKey::Chunk(chunk_key))
             }
             Err(error) => {
                 record_gossip_inbound_error(error.error_type(), error.is_advisory());
@@ -1021,7 +1021,7 @@ where
 
                 Ok(None)
             }
-            GossipDataRequestV2::Chunk(_chunk_path_hash) => Ok(None),
+            GossipDataRequestV2::Chunk(_chunk_key) => Ok(None),
         }
     }
 

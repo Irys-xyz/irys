@@ -1,5 +1,5 @@
 use crate::{
-    BlockHash, ChunkPathHash, Compact, H256, IrysAddress, IrysPeerId, PeerAddress, ProtocolVersion,
+    BlockHash, ChunkKey, Compact, H256, IrysAddress, IrysPeerId, PeerAddress, ProtocolVersion,
 };
 
 use crate::v2::GossipDataRequestV2;
@@ -761,12 +761,12 @@ impl PeerNetworkSender {
 
     pub async fn request_chunk_from_network(
         &self,
-        chunk_path_hash: ChunkPathHash,
+        chunk_key: ChunkKey,
         use_trusted_peers_only: bool,
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequestV2::Chunk(chunk_path_hash),
+            data_request: GossipDataRequestV2::Chunk(chunk_key),
             use_trusted_peers_only,
             response: sender,
             retries: DATA_REQUEST_RETRIES,

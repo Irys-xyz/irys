@@ -4832,7 +4832,7 @@ mod tests {
         #[test]
         fn pull_kind_label_covers_all_variants() {
             use irys_types::v2::GossipDataRequestV2;
-            use irys_types::{BlockHash, ChunkPathHash, H256};
+            use irys_types::{BlockHash, ChunkKey, H256};
             use reth::revm::primitives::B256;
 
             assert_eq!(
@@ -4848,7 +4848,7 @@ mod tests {
                 "payload"
             );
             assert_eq!(
-                pull_kind_label(&GossipDataRequestV2::Chunk(ChunkPathHash::default())),
+                pull_kind_label(&GossipDataRequestV2::Chunk(ChunkKey::default())),
                 "chunk"
             );
             assert_eq!(

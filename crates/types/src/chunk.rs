@@ -1,6 +1,6 @@
 use crate::IrysAddress;
 use crate::{
-    Base64, DataCommitment, DataTreeRoot, H256, LedgerChunkOffset, PartitionChunkOffset,
+    Base64, ChunkKey, DataCommitment, DataTreeRoot, H256, LedgerChunkOffset, PartitionChunkOffset,
     hash_sha256, partition::PartitionHash, string_u64,
 };
 use arbitrary::Arbitrary;
@@ -77,10 +77,14 @@ impl UnpackedChunk {
         crate::data_tree::data_commitment(geometry, self.data_tree_root, self.data_size)
     }
 
-    pub fn chunk_path_hash(&self) -> ChunkPathHash {
-        Self::hash_data_path(&self.data_path.0)
+    /// Identity of this chunk: its commitment and index. Independent of the
+    /// proof bytes, which two chunks of one commitment can share.
+    pub fn chunk_key(&self, geometry: &irys_data_tree::Geometry) -> ChunkKey {
+        crate::data_tree::chunk_key(self.data_commitment(geometry), self.tx_offset)
     }
 
+    /// `sha256(proof)`. The submodule index uses it to store identical proof
+    /// bytes once; it is not chunk identity.
     pub fn hash_data_path(data_path: &ChunkDataPath) -> ChunkPathHash {
         hash_sha256(data_path).into()
     }
@@ -284,7 +288,8 @@ impl TryInto<PackedChunk> for PartialChunk {
 /// either for testing or due to it being the last unpadded chunk
 pub type ChunkBytes = Vec<u8>;
 
-/// sha256(chunk_data_path)
+/// sha256(chunk_data_path). Not chunk identity (see `ChunkKey`): the submodule index
+/// uses it only to store identical proof bytes once.
 pub type ChunkPathHash = H256;
 
 /// The offset of the chunk relative to the first (0th) chunk of the data tree

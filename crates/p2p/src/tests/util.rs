@@ -817,8 +817,8 @@ async fn handle_get_data_v2(
                     .content_type("application/json")
                     .json(GossipResponse::Accepted(true))
             }
-            GossipDataRequestV2::Chunk(chunk_hash) => {
-                warn!("Chunk request for hash {:?}", chunk_hash);
+            GossipDataRequestV2::Chunk(chunk_key) => {
+                warn!("Chunk request for key {:?}", chunk_key);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(GossipResponse::Accepted(false))

@@ -227,6 +227,7 @@ pub struct TxPathInterval {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
 /// compound value, containing the data path and tx path hashes
+/// `data_path_hash` is `sha256(proof)`: identical proofs are stored once. It is not chunk identity.
 pub struct ChunkPathHashes {
     pub data_path_hash: Option<H256>, // ChunkPathHash - we can't use the alias types as proc_macro just deals with tokens
     pub tx_path_hash: Option<H256>,   // TxPathHash
