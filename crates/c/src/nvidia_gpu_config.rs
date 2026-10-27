@@ -8,25 +8,29 @@ unsafe extern "C" {
     fn cudaSetDevice(device: c_int) -> c_int;
 }
 
-// Numeric values of CUDA's `cudaDeviceAttr` enum (driver_types.h). Attributes are queried
-// one by one so this code does not depend on the toolkit's `cudaDeviceProp` struct layout,
-// which grows between toolkit versions.
-const CUDA_DEV_ATTR_MAX_THREADS_PER_BLOCK: c_int = 1;
-const CUDA_DEV_ATTR_WARP_SIZE: c_int = 10;
-const CUDA_DEV_ATTR_MULTIPROCESSOR_COUNT: c_int = 16;
-const CUDA_DEV_ATTR_MAX_THREADS_PER_MULTIPROCESSOR: c_int = 39;
-const CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MAJOR: c_int = 75;
-const CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MINOR: c_int = 76;
-const CUDA_DEV_ATTR_MAX_REGISTERS_PER_MULTIPROCESSOR: c_int = 82;
-const CUDA_DEV_ATTR_MAX_BLOCKS_PER_MULTIPROCESSOR: c_int = 106;
+/// The subset of CUDA's `cudaDeviceAttr` enum (driver_types.h) that this crate reads, with the
+/// same numeric values. Attributes are queried one by one so this code does not depend on the
+/// toolkit's `cudaDeviceProp` struct layout, which grows between toolkit versions.
+#[derive(Debug, Clone, Copy)]
+#[repr(i32)]
+enum CudaDeviceAttribute {
+    MaxThreadsPerBlock = 1,
+    WarpSize = 10,
+    MultiProcessorCount = 16,
+    MaxThreadsPerMultiProcessor = 39,
+    ComputeCapabilityMajor = 75,
+    ComputeCapabilityMinor = 76,
+    MaxRegistersPerMultiprocessor = 82,
+    MaxBlocksPerMultiprocessor = 106,
+}
 
-fn get_device_attribute(device_id: i32, attribute: c_int, name: &str) -> Result<i32, String> {
+fn get_device_attribute(device_id: i32, attribute: CudaDeviceAttribute) -> Result<i32, String> {
     let mut value: c_int = 0;
-    match unsafe { cudaDeviceGetAttribute(&mut value, attribute, device_id) } {
+    match unsafe { cudaDeviceGetAttribute(&mut value, attribute as c_int, device_id) } {
         0 => Ok(value),
         n => Err(format!(
-            "Failed to get device attribute {} for device {}: error code {}",
-            name, device_id, n
+            "Failed to get device attribute {:?} for device {}: error code {}",
+            attribute, device_id, n
         )),
     }
 }
@@ -56,37 +60,19 @@ pub struct NvidiaGpuConfig {
 impl NvidiaGpuConfig {
     /// Query GPU properties for the specified device
     pub fn query_device(device_id: i32) -> Result<Self, String> {
-        let attr = |attribute: c_int, name: &str| get_device_attribute(device_id, attribute, name);
+        let attr = |attribute| get_device_attribute(device_id, attribute);
         Ok(Self {
             device_id,
             compute_capability: (
-                attr(
-                    CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MAJOR,
-                    "compute capability major",
-                )?,
-                attr(
-                    CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MINOR,
-                    "compute capability minor",
-                )?,
+                attr(CudaDeviceAttribute::ComputeCapabilityMajor)?,
+                attr(CudaDeviceAttribute::ComputeCapabilityMinor)?,
             ),
-            max_threads_per_block: attr(
-                CUDA_DEV_ATTR_MAX_THREADS_PER_BLOCK,
-                "max threads per block",
-            )?,
-            warp_size: attr(CUDA_DEV_ATTR_WARP_SIZE, "warp size")?,
-            multiprocessor_count: attr(CUDA_DEV_ATTR_MULTIPROCESSOR_COUNT, "multiprocessor count")?,
-            max_threads_per_multiprocessor: attr(
-                CUDA_DEV_ATTR_MAX_THREADS_PER_MULTIPROCESSOR,
-                "max threads per multiprocessor",
-            )?,
-            max_blocks_per_multiprocessor: attr(
-                CUDA_DEV_ATTR_MAX_BLOCKS_PER_MULTIPROCESSOR,
-                "max blocks per multiprocessor",
-            )?,
-            regs_per_multiprocessor: attr(
-                CUDA_DEV_ATTR_MAX_REGISTERS_PER_MULTIPROCESSOR,
-                "registers per multiprocessor",
-            )?,
+            max_threads_per_block: attr(CudaDeviceAttribute::MaxThreadsPerBlock)?,
+            warp_size: attr(CudaDeviceAttribute::WarpSize)?,
+            multiprocessor_count: attr(CudaDeviceAttribute::MultiProcessorCount)?,
+            max_threads_per_multiprocessor: attr(CudaDeviceAttribute::MaxThreadsPerMultiProcessor)?,
+            max_blocks_per_multiprocessor: attr(CudaDeviceAttribute::MaxBlocksPerMultiprocessor)?,
+            regs_per_multiprocessor: attr(CudaDeviceAttribute::MaxRegistersPerMultiprocessor)?,
         })
     }
 
