@@ -823,6 +823,9 @@ impl IrysNode {
     pub async fn start(mut self) -> eyre::Result<IrysNodeCtx> {
         // Determine node startup mode (Copy, avoids borrowing self.config)
         let node_mode = self.config.node_config.node_mode;
+        // Resolved before any service starts: once the lifecycle is running, a
+        // failed startup must stop the node rather than return early.
+        let api_probe_addr = Self::api_probe_addr(&self.config.node_config)?;
 
         // Use the irys_db already initialized in new()
         let irys_db = self.irys_db.clone();
@@ -1144,9 +1147,14 @@ impl IrysNode {
 
         // This is going to resolve instantly for a genesis node with 0 blocks,
         //  going to wait for sync otherwise.
-        ctx.sync_service_facade.initial_sync().await?;
+        if let Err(err) = ctx.sync_service_facade.initial_sync().await {
+            // Stop before returning: dropping the context instead leaves the API
+            // and gossip servers answering while the services behind them go away.
+            error!(error = ?err, "Initial sync failed during startup");
+            ctx.stop(ShutdownReason::InitialSyncFailed).await;
+            return Err(eyre::Report::new(err).wrap_err("initial sync failed during node startup"));
+        }
 
-        let api_probe_addr = Self::api_probe_addr(&ctx.config.node_config)?;
         info!(
             startup.phase = "api_ready_wait",
             api.addr = %api_probe_addr,
@@ -1255,10 +1263,21 @@ impl IrysNode {
             let chain_id = ctx.config.consensus.chain_id;
             // let mempool_tx = ctx.service_senders.mempool.clone();
             let (tx, rx) = oneshot::channel();
-            ctx.service_senders
-                .mempool
-                .send_traced(MempoolServiceMessage::GetState(tx))?;
-            let mempool = rx.await?;
+            let mempool = async {
+                ctx.service_senders
+                    .mempool
+                    .send_traced(MempoolServiceMessage::GetState(tx))?;
+                eyre::Ok(rx.await?)
+            }
+            .await;
+            let mempool = match mempool {
+                Ok(mempool) => mempool,
+                Err(err) => {
+                    error!(error = ?err, "Mempool service unavailable during startup");
+                    ctx.stop(ShutdownReason::ServiceExited).await;
+                    return Err(err.wrap_err("mempool service unavailable during node startup"));
+                }
+            };
             let config = ctx.config.clone();
             let vdf_controller = ctx.vdf_controller.clone();
             let storage_modules_guard = ctx.storage_modules_guard.clone();

@@ -1,7 +1,9 @@
 use crate::utils::IrysNodeTest;
+use irys_chain::IrysNode;
 use irys_domain::get_canonical_chain;
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::NodeConfig;
+use std::net::{Ipv4Addr, SocketAddr};
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_can_resume_from_genesis_startup_with_ctx() -> eyre::Result<()> {
@@ -103,5 +105,52 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
     assert_eq!(chain.len(), 3, "we expect the genesis block + 2 new blocks");
 
     ctx.stop().await;
+    Ok(())
+}
+
+/// A peer whose initial sync fails must be stopped before `start` returns the
+/// error. Otherwise its API and gossip servers keep answering requests while the
+/// process tears down the services behind them; on devnet (INC-0004) a peer's
+/// whitelist request then reached a closed mempool channel and panicked.
+#[test_log::test(tokio::test)]
+async fn slow_heavy_failed_initial_sync_stops_the_peer() -> eyre::Result<()> {
+    let genesis = IrysNodeTest::default_async().start().await;
+    // Every sync candidate reports that it is still syncing, as when the whole
+    // network restarts at once.
+    genesis.node_ctx.sync_state.set_is_syncing(true);
+
+    let peer = IrysNodeTest::new(genesis.testing_peer());
+    let (config, http_listener, gossip_listener) = IrysNode::bind_listeners(peer.cfg.clone())?;
+    let ports = [
+        http_listener.local_addr()?.port(),
+        gossip_listener.local_addr()?.port(),
+    ];
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let started = IrysNode::new_with_listeners(config, http_listener, gossip_listener)?
+        .with_runtime_handle(runtime.handle().clone())
+        .start()
+        .await;
+
+    for port in ports {
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        assert!(
+            tokio::net::TcpStream::connect(address).await.is_err(),
+            "{address} still accepts connections after the failed start"
+        );
+    }
+    let Err(error) = started else {
+        panic!("start must fail while every peer is syncing");
+    };
+    assert!(
+        format!("{error:#}").contains("initial sync failed"),
+        "unexpected start error: {error:#}"
+    );
+
+    // Dropping a runtime inside an async context panics.
+    std::thread::spawn(move || drop(runtime));
+    genesis.stop().await;
     Ok(())
 }

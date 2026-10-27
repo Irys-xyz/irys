@@ -117,6 +117,18 @@ fn chunk_fetch_response(
     }
 }
 
+/// A local failure is a server error, not an empty whitelist: an empty list
+/// would replace the caller's whitelist. The fetcher moves on to its next peer.
+fn stake_and_pledge_whitelist_response(result: GossipResult<Vec<IrysAddress>>) -> HttpResponse {
+    match result {
+        Ok(whitelist) => HttpResponse::Ok().json(GossipResponse::Accepted(whitelist)),
+        Err(error) => {
+            tracing::error!("Failed to get the stake and pledge whitelist: {error}");
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
 impl<M, B> GossipServer<M, B>
 where
     M: MempoolFacade,
@@ -1186,11 +1198,12 @@ where
     }
 
     async fn handle_stake_and_pledge_whitelist(server: Data<Self>) -> HttpResponse {
-        let whitelist = server
-            .data_handler
-            .handle_get_stake_and_pledge_whitelist()
-            .await;
-        HttpResponse::Ok().json(GossipResponse::Accepted(whitelist))
+        stake_and_pledge_whitelist_response(
+            server
+                .data_handler
+                .handle_get_stake_and_pledge_whitelist()
+                .await,
+        )
     }
 
     async fn fetch_node_info(server: &Data<Self>) -> Result<NodeInfo, HttpResponse> {
@@ -2221,6 +2234,27 @@ mod tests {
             )))),
             GossipResponse::Rejected(RejectionReason::InvalidData)
         ));
+    }
+
+    #[tokio::test]
+    async fn stake_and_pledge_whitelist_failure_is_not_an_empty_list() {
+        let address = IrysAddress::repeat_byte(7);
+        let accepted = stake_and_pledge_whitelist_response(Ok(vec![address]));
+        assert_eq!(accepted.status(), actix_web::http::StatusCode::OK);
+        let body = actix_web::body::to_bytes(accepted.into_body())
+            .await
+            .expect("whitelist body");
+        let response: GossipResponse<Vec<IrysAddress>> =
+            serde_json::from_slice(&body).expect("whitelist json");
+        assert!(matches!(response, GossipResponse::Accepted(list) if list == vec![address]));
+
+        let failed = stake_and_pledge_whitelist_response(Err(GossipError::Internal(
+            InternalGossipError::Unknown("mempool stopped".into()),
+        )));
+        assert_eq!(
+            failed.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]

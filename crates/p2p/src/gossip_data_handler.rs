@@ -1433,12 +1433,20 @@ where
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<IrysAddress> {
-        self.mempool
+    pub(crate) async fn handle_get_stake_and_pledge_whitelist(
+        &self,
+    ) -> GossipResult<Vec<IrysAddress>> {
+        let whitelist = self
+            .mempool
             .get_stake_and_pledge_whitelist()
             .await
-            .into_iter()
-            .collect()
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "get_stake_and_pledge_whitelist() errored: {}",
+                    e
+                )))
+            })?;
+        Ok(whitelist.into_iter().collect())
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -1729,9 +1737,15 @@ async fn get_block_body<M: MempoolFacade, B: BlockDiscoveryFacade>(
     // Expensive path: reconstruct from mempool/DB
     let maybe_block_header = block_pool.get_block_header(block_hash).await?;
     if let Some(block_header) = &maybe_block_header {
+        let mempool_guard = mempool.get_internal_read_guard().await.map_err(|err| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Mempool unavailable to build block body for block {}: {}",
+                block_hash, err
+            )))
+        })?;
         let block_body = build_block_body_for_processed_block_header(
             block_header,
-            &mempool.get_internal_read_guard().await,
+            &mempool_guard,
             &block_pool.db,
         )
         .await

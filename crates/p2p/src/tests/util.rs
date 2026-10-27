@@ -162,8 +162,8 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn get_stake_and_pledge_whitelist(&self) -> HashSet<IrysAddress> {
-        HashSet::new()
+    async fn get_stake_and_pledge_whitelist(&self) -> Result<HashSet<IrysAddress>> {
+        Ok(HashSet::new())
     }
 
     async fn update_stake_and_pledge_whitelist(
@@ -173,8 +173,8 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn get_internal_read_guard(&self) -> MempoolReadGuard {
-        MempoolReadGuard::new(self.mempool_state.clone())
+    async fn get_internal_read_guard(&self) -> Result<MempoolReadGuard> {
+        Ok(MempoolReadGuard::new(self.mempool_state.clone()))
     }
 }
 
