@@ -1488,11 +1488,13 @@ mod tests {
     }
 
     /// A header that names a chunk-aligned prefix size of a larger v2 tree
-    /// never completes. Every chunk of the 96-byte tree is offered under the
-    /// 64-byte header. Under v2 the root binds the tree shape: a 64-byte tree
-    /// with this root would need a chunk root equal to an inner node, which
-    /// the domain tags forbid. So no index verifies, the ingress leaves stay
-    /// incomplete, and no ingress proof is made.
+    /// never completes. Under v2 the root binds the tree shape. The honest
+    /// proofs of the 96-byte tree carry its size witness, so none verifies
+    /// under the 64-byte header. A forged proof can open chunk 1 (data tree
+    /// spec §6): chunk 2's proof with the 64-byte size witness climbs from
+    /// chunk 2's bytes to the root. Chunk 0 can never verify: it would need
+    /// a chunk root equal to `node(c0, c1)`, which the domain tags forbid.
+    /// So the ingress leaves stay incomplete and no ingress proof is made.
     #[tokio::test]
     async fn prefix_header_of_a_larger_tree_never_completes() -> eyre::Result<()> {
         use irys_database::db::IrysDatabaseExt as _;
@@ -1525,12 +1527,31 @@ mod tests {
             let error = inner
                 .handle_chunk_ingress_message(chunk)
                 .await
-                .expect_err("no chunk of the larger tree verifies under the prefix header");
+                .expect_err("no honest proof of the larger tree verifies under the prefix header");
             assert!(
                 crate::data_sync_service::ingress_error_is_invalid_peer_data(&error),
                 "chunk {chunk_index}: {error:?}"
             );
         }
+
+        // Chunk 2's proof is `[node(c0, c1), size_witness(96)]`. With the
+        // 64-byte witness it opens chunk 2's bytes as chunk 1 of 64 bytes.
+        let mut forged_proof = proofs[2].clone();
+        let witness_start = forged_proof.len() - irys_data_tree::HASH_SIZE;
+        forged_proof[witness_start..].copy_from_slice(
+            irys_data_tree::size_witness(&irys_data_tree::Geometry::TESTING, PREFIX_DATA_SIZE)
+                .as_bytes(),
+        );
+        inner
+            .handle_chunk_ingress_message(UnpackedChunk {
+                data_tree_root: DataTreeRoot(data_root),
+                data_size: PREFIX_DATA_SIZE,
+                data_path: forged_proof.into(),
+                bytes: data[64..96].to_vec().into(),
+                tx_offset: TxChunkOffset::from(1),
+            })
+            .await
+            .expect("the forged proof opens chunk 1 of the prefix size");
 
         let commitment = size_key(data_root, PREFIX_DATA_SIZE);
         let address = inner.config.irys_signer().address();
