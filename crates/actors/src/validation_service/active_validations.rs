@@ -138,121 +138,152 @@ impl PreemptibleVdfTask {
             .await
         {
             Ok(()) => VdfValidationResult::Valid,
-            Err(e) => {
-                // Distinguish three error classes from the VDF wait pathway:
-                // - `Cancelled` (cooperative preemption / shutdown) → requeue.
-                // - `Stalled` (local VDF state did not advance) → PANIC. This is a
-                //   local-infrastructure failure (dead writer thread, poisoned
-                //   lock, paused sync), not block-invalidity evidence. The
-                //   non-cooperative watchdog already panics on the same condition
-                //   inside computational stages because surfacing the block as
-                //   Invalid would drop a block every honest peer accepts and
-                //   fork us off the network — the "never mislabel" rule in
-                //   design/docs/vdf-validation-stall-detection.md. The
-                //   cooperative `Wait*` stages must follow the same policy.
-                // - Anything else (real validation finding) → Invalid.
-                // `spawn_blocking` JoinError (panic or external abort): the typed
-                // `VdfBlockingTaskFailed` sentinel is checked first. A panic in a
-                // blocking verifier thread is a local-infrastructure fault, not
-                // block-invalidity evidence — mislabelling it as `Invalid` would
-                // peer-attribute a node-side crash and fork us off the network.
-                // An external `abort()` (watchdog) is peer-innocent and requeues
-                // like any other cancellation. Mirrors the symmetric PoA pattern at
-                // `classify_poa_join_error` in `block_validation_task.rs`.
-                if let Some(blocking_failed) = e.downcast_ref::<VdfBlockingTaskFailed>() {
-                    if blocking_failed.is_panic {
-                        // Local verifier thread panicked — this is a node fault,
-                        // not block invalidity. Panic here so the never-mislabel
-                        // rule is enforced: the JoinError propagates through the
-                        // spawned VDF task as JoinError::is_panic(), then
-                        // `resume_unwind` in the validation service select loop
-                        // re-raises it onto the service task. The global panic hook
-                        // then raises SIGINT and the shutdown watchdog forces abort.
-                        panic!(
-                            "VDF blocking task panicked (stage={:?}, block={}); local-thread fault — crashing per never-mislabel rule",
-                            blocking_failed.stage,
-                            self.task.sealed_block.header().block_hash,
-                        );
-                    } else {
-                        // is_cancelled() — external abort (watchdog or runtime
-                        // teardown). Peer-innocent: requeue via the same lane as
-                        // cooperative preemption.
-                        metrics::record_validation_cancellation("vdf_blocking_aborted");
-                        VdfValidationResult::Cancelled
-                    }
-                // Stage B parent-eviction race: typed sentinel from
-                // `ensure_vdf_is_valid` surfaces as a SoftInternal-mappable
-                // ParentMissing rather than the panic the prior `.expect`
-                // site produced. Checked before the WaitForStepError downcast
-                // since it can fire at any VDF stage entry, not just the
-                // wait stage.
-                } else if let Some(parent_missing) = e.downcast_ref::<VdfStageBParentMissing>() {
-                    metrics::record_validation_cancellation("vdf_parent_missing");
-                    VdfValidationResult::ParentMissing {
-                        parent_hash: parent_missing.parent_hash,
-                    }
-                // The block or its parent is not in the block tree at the
-                // wait for the parent's last step. Peer-innocent and terminal:
-                // nothing pursues the block any more.
-                } else if let Some(left) = e.downcast_ref::<VdfTaskLeftBlockTree>() {
-                    let label = match left.reason {
-                        crate::block_validation::ValidationCancelReason::BlockMissing => {
-                            "vdf_block_missing"
-                        }
-                        crate::block_validation::ValidationCancelReason::ParentMissing => {
-                            "vdf_left_tree_parent_missing"
-                        }
-                        _ => "vdf_left_block_tree",
-                    };
-                    metrics::record_validation_cancellation(label);
-                    VdfValidationResult::LeftBlockTree {
-                        reason: left.reason,
-                    }
-                // An in-place re-anchor healed the seed buffer mid-validation:
-                // the batches were validated against the pre-heal buffer, so the
-                // send refused to fast-forward them. Peer-innocent — requeue and
-                // revalidate against the healed buffer (never Invalid).
-                } else if e
-                    .downcast_ref::<irys_vdf::VdfReanchorGenerationChanged>()
-                    .is_some()
-                {
-                    metrics::record_validation_cancellation("vdf_reanchor_generation_changed");
-                    VdfValidationResult::Cancelled
-                } else {
-                    match e.downcast_ref::<WaitForStepError>() {
-                        Some(WaitForStepError::Cancelled) => {
-                            metrics::record_validation_cancellation("vdf_preempted");
-                            VdfValidationResult::Cancelled
-                        }
-                        Some(WaitForStepError::Stalled { .. }) => {
-                            metrics::record_validation_cancellation("vdf_stalled");
-                            // See above. Panic propagates through the spawned task
-                            // as JoinError::is_panic(), then `resume_unwind` in the
-                            // validation service select loop re-raises it onto the
-                            // service task. The global panic hook then raises SIGINT
-                            // and the 45s shutdown watchdog forces process abort.
-                            panic!(
-                                "VDF wait stalled (block={}, error={}); local VDF state cannot advance — crashing per never-mislabel rule",
-                                self.task.sealed_block.header().block_hash,
-                                e
-                            );
-                        }
-                        None => {
-                            if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8
-                            {
-                                metrics::record_validation_cancellation("vdf_preempted");
-                                VdfValidationResult::Cancelled
-                            } else {
-                                VdfValidationResult::Invalid(e)
-                            }
-                        }
-                    }
-                }
-            }
+            Err(e) => classify_vdf_error(
+                e,
+                header.block_hash,
+                self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8,
+                self.task
+                    .service_inner
+                    .service_senders
+                    .vdf_reanchor_signals
+                    .is_stopped_for_shutdown(),
+            ),
         };
         metrics::record_vdf_duration_ms(started.elapsed().as_secs_f64() * 1000.0);
 
         (result, self.task)
+    }
+}
+
+/// Maps a failed `ensure_vdf_is_valid` to a verdict. Node-side faults panic under
+/// the never-mislabel rule; only a real validation finding becomes `Invalid`.
+/// `preempted` is the task's cancel flag; `vdf_stopped_for_shutdown` is set once
+/// `run_vdf` has exited on the node shutdown token.
+fn classify_vdf_error(
+    e: eyre::Report,
+    block_hash: BlockHash,
+    preempted: bool,
+    vdf_stopped_for_shutdown: bool,
+) -> VdfValidationResult {
+    // Distinguish three error classes from the VDF wait pathway:
+    // - `Cancelled` (cooperative preemption / shutdown) → requeue.
+    // - `Stalled` (local VDF state did not advance) → PANIC, unless `run_vdf`
+    //   stopped on the shutdown token (then requeue). A stall is a
+    //   local-infrastructure failure (dead writer thread, poisoned
+    //   lock, paused sync), not block-invalidity evidence. The
+    //   non-cooperative watchdog already panics on the same condition
+    //   inside computational stages because surfacing the block as
+    //   Invalid would drop a block every honest peer accepts and
+    //   fork us off the network — the "never mislabel" rule in
+    //   design/docs/vdf-validation-stall-detection.md. The
+    //   cooperative `Wait*` stages must follow the same policy.
+    // - Anything else (real validation finding) → Invalid.
+    // `spawn_blocking` JoinError (panic or external abort): the typed
+    // `VdfBlockingTaskFailed` sentinel is checked first. A panic in a
+    // blocking verifier thread is a local-infrastructure fault, not
+    // block-invalidity evidence — mislabelling it as `Invalid` would
+    // peer-attribute a node-side crash and fork us off the network.
+    // An external `abort()` (watchdog) is peer-innocent and requeues
+    // like any other cancellation. Mirrors the symmetric PoA pattern at
+    // `classify_poa_join_error` in `block_validation_task.rs`.
+    if let Some(blocking_failed) = e.downcast_ref::<VdfBlockingTaskFailed>() {
+        if blocking_failed.is_panic {
+            // Local verifier thread panicked — this is a node fault,
+            // not block invalidity. Panic here so the never-mislabel
+            // rule is enforced: the JoinError propagates through the
+            // spawned VDF task as JoinError::is_panic(), then
+            // `resume_unwind` in the validation service select loop
+            // re-raises it onto the service task. The global panic hook
+            // then raises SIGINT and the shutdown watchdog forces abort.
+            panic!(
+                "VDF blocking task panicked (stage={:?}, block={}); local-thread fault — crashing per never-mislabel rule",
+                blocking_failed.stage, block_hash,
+            );
+        } else {
+            // is_cancelled() — external abort (watchdog or runtime
+            // teardown). Peer-innocent: requeue via the same lane as
+            // cooperative preemption.
+            metrics::record_validation_cancellation("vdf_blocking_aborted");
+            VdfValidationResult::Cancelled
+        }
+    // Stage B parent-eviction race: typed sentinel from
+    // `ensure_vdf_is_valid` surfaces as a SoftInternal-mappable
+    // ParentMissing rather than the panic the prior `.expect`
+    // site produced. Checked before the WaitForStepError downcast
+    // since it can fire at any VDF stage entry, not just the
+    // wait stage.
+    } else if let Some(parent_missing) = e.downcast_ref::<VdfStageBParentMissing>() {
+        metrics::record_validation_cancellation("vdf_parent_missing");
+        VdfValidationResult::ParentMissing {
+            parent_hash: parent_missing.parent_hash,
+        }
+    // The block or its parent is not in the block tree at the
+    // wait for the parent's last step. Peer-innocent and terminal:
+    // nothing pursues the block any more.
+    } else if let Some(left) = e.downcast_ref::<VdfTaskLeftBlockTree>() {
+        let label = match left.reason {
+            crate::block_validation::ValidationCancelReason::BlockMissing => "vdf_block_missing",
+            crate::block_validation::ValidationCancelReason::ParentMissing => {
+                "vdf_left_tree_parent_missing"
+            }
+            _ => "vdf_left_block_tree",
+        };
+        metrics::record_validation_cancellation(label);
+        VdfValidationResult::LeftBlockTree {
+            reason: left.reason,
+        }
+    // An in-place re-anchor healed the seed buffer mid-validation:
+    // the batches were validated against the pre-heal buffer, so the
+    // send refused to fast-forward them. Peer-innocent — requeue and
+    // revalidate against the healed buffer (never Invalid).
+    } else if e
+        .downcast_ref::<irys_vdf::VdfReanchorGenerationChanged>()
+        .is_some()
+    {
+        metrics::record_validation_cancellation("vdf_reanchor_generation_changed");
+        VdfValidationResult::Cancelled
+    // `run_vdf` stopped on the shutdown token while this task was still
+    // draining, so the validated batch could not be fast-forwarded. A
+    // requested stop, not a dead VDF thread: requeue (never Invalid).
+    } else if e
+        .downcast_ref::<irys_vdf::VdfFastForwardStopped>()
+        .is_some()
+    {
+        metrics::record_validation_cancellation("vdf_shutdown");
+        VdfValidationResult::Cancelled
+    } else {
+        match e.downcast_ref::<WaitForStepError>() {
+            Some(WaitForStepError::Cancelled) => {
+                metrics::record_validation_cancellation("vdf_preempted");
+                VdfValidationResult::Cancelled
+            }
+            // The step counter froze because `run_vdf` stopped for shutdown, not
+            // because it died; the validation service has not been stopped yet.
+            Some(WaitForStepError::Stalled { .. }) if vdf_stopped_for_shutdown => {
+                metrics::record_validation_cancellation("vdf_shutdown");
+                VdfValidationResult::Cancelled
+            }
+            Some(WaitForStepError::Stalled { .. }) => {
+                metrics::record_validation_cancellation("vdf_stalled");
+                // See above. Panic propagates through the spawned task
+                // as JoinError::is_panic(), then `resume_unwind` in the
+                // validation service select loop re-raises it onto the
+                // service task. The global panic hook then raises SIGINT
+                // and the 45s shutdown watchdog forces process abort.
+                panic!(
+                    "VDF wait stalled (block={}, error={}); local VDF state cannot advance — crashing per never-mislabel rule",
+                    block_hash, e
+                );
+            }
+            None => {
+                if preempted {
+                    metrics::record_validation_cancellation("vdf_preempted");
+                    VdfValidationResult::Cancelled
+                } else {
+                    VdfValidationResult::Invalid(e)
+                }
+            }
+        }
     }
 }
 
@@ -2847,5 +2878,49 @@ mod tests {
                 "must not reach Stalled"
             );
         }
+    }
+
+    fn fast_forward_stopped() -> eyre::Report {
+        irys_vdf::VdfFastForwardStopped { step: 3004 }.into()
+    }
+
+    fn wait_stalled() -> eyre::Report {
+        WaitForStepError::Stalled {
+            progress_timeout: Duration::from_secs(15),
+            current: 3007,
+            desired: 3009,
+        }
+        .into()
+    }
+
+    /// Once `run_vdf` has stopped on the shutdown token, both paths that used to
+    /// panic during an orderly shutdown requeue the task instead.
+    #[rstest::rstest]
+    #[case::fast_forward_closed(fast_forward_stopped())]
+    #[case::wait_stalled(wait_stalled())]
+    fn vdf_shutdown_stop_requeues_instead_of_panicking(#[case] error: eyre::Report) {
+        let result = classify_vdf_error(error, BlockHash::random(), false, true);
+        assert!(matches!(result, VdfValidationResult::Cancelled));
+    }
+
+    /// The shutdown stop excuses only the VDF thread's absence: a real finding
+    /// in the same window is still `Invalid`.
+    #[test]
+    fn vdf_shutdown_stop_keeps_real_findings_invalid() {
+        let result = classify_vdf_error(
+            eyre::eyre!("step 3005 does not verify"),
+            BlockHash::random(),
+            false,
+            true,
+        );
+        assert!(matches!(result, VdfValidationResult::Invalid(_)));
+    }
+
+    /// Without a shutdown stop, a frozen step counter still means a dead VDF
+    /// thread, and the never-mislabel panic still fires.
+    #[test]
+    #[should_panic(expected = "VDF wait stalled")]
+    fn vdf_stall_still_panics_without_shutdown_stop() {
+        let _ = classify_vdf_error(wait_stalled(), BlockHash::random(), false, false);
     }
 }
