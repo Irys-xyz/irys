@@ -280,12 +280,29 @@ mod tests {
     use rand::Rng as _;
 
     use crate::{
-        ConsensusConfig, DataTreeRoot, H256, data_tree::data_commitment, generate_data_root,
-        generate_ingress_data_hash, generate_ingress_leaf_from_data_hash, generate_leaves,
-        hash_sha256, ingress::verify_ingress_proof, irys::IrysSigner,
+        ConsensusConfig, DataTreeRoot, H256, IrysAddress, data_tree::data_commitment,
+        generate_data_root, generate_ingress_data_hash, generate_ingress_leaf_from_data_hash,
+        generate_leaves, hash_sha256, ingress::verify_ingress_proof, irys::IrysSigner,
     };
 
     use super::{generate_ingress_proof, generate_ingress_proof_from_leaves};
+
+    // The address-bound ingress tree must not change when the data tree moves to v2.
+    const ADDRESS_BOUND_ROOT_FOR_FIXED_CHUNKS: [u8; 32] =
+        alloy_primitives::hex!("b5f96912a85cb07047fc41cf7afafd4ccd33f6fd2449aa3f1e120969fc38ebab");
+
+    #[test]
+    fn address_bound_root_is_unchanged() -> eyre::Result<()> {
+        let address = IrysAddress::from([0x11_u8; 20]);
+        let chunks = [vec![0x01_u8; 32], vec![0x02_u8; 32], vec![0x03_u8; 7]];
+        let (root, _) = super::generate_ingress_proof_tree(
+            chunks.iter().map(|chunk| Ok(chunk.as_slice())),
+            address,
+            false,
+        )?;
+        assert_eq!(root.id, ADDRESS_BOUND_ROOT_FOR_FIXED_CHUNKS);
+        Ok(())
+    }
 
     #[test]
     fn compact_leaves_match_full_body_proof_with_partial_final_chunk() -> eyre::Result<()> {
