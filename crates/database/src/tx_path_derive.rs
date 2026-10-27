@@ -15,9 +15,11 @@ use std::time::{Duration, Instant};
 use eyre::eyre;
 use irys_types::{
     Base64, ChunkDataPath, DataLedger, DataRootLeaf, DataTransactionHeader, DataTransactionLedger,
-    H256, HASH_SIZE, Helpers as _, Node, PartitionChunkOffset, Proof, ProofDeserialize as _,
-    TxChunkOffset, TxPath, expected_chunk_byte_range, generate_data_root,
-    generate_leaves_from_data_roots, hash_sha256, validate_path, validate_path_byte_range,
+    DataTreeRoot, H256, HASH_SIZE, Helpers as _, Node, PartitionChunkOffset, Proof,
+    ProofDeserialize as _, TxChunkOffset, TxPath,
+    data_tree::{Geometry, verify_data_chunk},
+    expected_chunk_byte_range, generate_data_root, generate_leaves_from_data_roots, hash_sha256,
+    validate_path,
 };
 use reth_db::DatabaseEnv;
 use reth_db::cursor::DbCursorRO as _;
@@ -866,16 +868,19 @@ pub struct PlacementCheck {
 
 /// The derived path must prove the same chunk the miner holds.
 ///
+/// `chunk_data` is the miner's unpacked chunk data, `chunk_len` bytes.
 /// `placement` is required on RocksDB v1. A mismatch is an error the caller drops.
 pub fn cross_check_derived(
     derived: &DerivedTxPath,
     ledger_offset: u64,
-    chunk_size: u64,
+    geometry: &Geometry,
     data_path: &[u8],
+    chunk_data: &[u8],
     placement: Option<PlacementCheck>,
 ) -> eyre::Result<()> {
     // The same checks as `poa_is_valid`: the tx leaf covers the tx's raw byte
-    // range, and the data leaf covers exactly the chunk at this offset.
+    // range, and the data path opens exactly the chunk at this offset.
+    let chunk_size = geometry.chunk_size();
     let chunk_index = ledger_offset
         .checked_sub(derived.tx_ledger_start)
         .and_then(|index| u32::try_from(index).ok())
@@ -898,19 +903,20 @@ pub fn cross_check_derived(
     if (tx_path.min_byte_range, tx_path.max_byte_range) != (derived.tx_byte_start, tx_end) {
         eyre::bail!("derived tx path range does not match offset {ledger_offset}");
     }
-    let data = validate_path(
-        derived.data_root.0,
-        &Base64(data_path.to_vec()),
-        u128::from(chunk_range.0),
+    verify_data_chunk(
+        geometry,
+        DataTreeRoot(derived.data_root),
+        derived.data_size,
+        TxChunkOffset(chunk_index),
+        chunk_data,
+        data_path,
     )
     .map_err(|error| {
         eyre!(
-            "data_root mismatch: data path is not under derived data root {}: {error}",
+            "data_root mismatch: data path does not open chunk {chunk_index} under derived data root {}: {error}",
             derived.data_root
         )
     })?;
-    validate_path_byte_range(&data, chunk_range)
-        .map_err(|error| eyre!("data path range does not match offset {ledger_offset}: {error}"))?;
     let Some(placement) = placement else {
         return Ok(());
     };
@@ -972,6 +978,7 @@ mod tests {
     };
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::DataTreeRoot;
+    use irys_types::data_tree::Geometry;
     use irys_types::{
         Base64, DataLedger, DataTransactionHeader, DataTransactionLedger, H256, H256List,
         IrysBlockHeader, PartitionChunkOffset, Proof, TxChunkOffset, expected_chunk_byte_range,
@@ -1149,20 +1156,57 @@ mod tests {
             block_height: Some(4),
             tx_index: Some(0),
         };
-        super::cross_check_derived(&derived, 8, chunk_size, &data_path, Some(placement))
-            .expect("matching path");
+        let geometry = Geometry::TESTING;
+        let chunk_data = vec![7_u8; chunk_size as usize];
+        super::cross_check_derived(
+            &derived,
+            8,
+            &geometry,
+            &data_path,
+            &chunk_data,
+            Some(placement),
+        )
+        .expect("matching path");
 
-        let wrong =
-            super::cross_check_derived(&derived, 8, chunk_size, &[1, 2, 3], Some(placement))
-                .expect_err("bad data path");
+        let wrong = super::cross_check_derived(
+            &derived,
+            8,
+            &geometry,
+            &[1, 2, 3],
+            &chunk_data,
+            Some(placement),
+        )
+        .expect_err("bad data path");
         assert!(wrong.to_string().contains("data_root mismatch"), "{wrong}");
+
+        let other_bytes = vec![8_u8; chunk_size as usize];
+        let wrong_bytes = super::cross_check_derived(
+            &derived,
+            8,
+            &geometry,
+            &data_path,
+            &other_bytes,
+            Some(placement),
+        )
+        .expect_err("other chunk bytes");
+        assert!(
+            wrong_bytes.to_string().contains("data_root mismatch"),
+            "{wrong_bytes}"
+        );
 
         let moved = super::PlacementCheck {
             tx_index: Some(1),
             ..placement
         };
-        let mismatch = super::cross_check_derived(&derived, 8, chunk_size, &data_path, Some(moved))
-            .expect_err("placement");
+        let mismatch = super::cross_check_derived(
+            &derived,
+            8,
+            &geometry,
+            &data_path,
+            &chunk_data,
+            Some(moved),
+        )
+        .expect_err("placement");
         assert!(
             mismatch.to_string().contains("placement mismatch"),
             "{mismatch}"
@@ -1274,15 +1318,27 @@ mod tests {
             let derived = derived_for(
                 &headers, tx_index, &proof, tx_root, data_root, start, tx_start,
             );
-            let cross = super::cross_check_derived(&derived, offset, chunk_size, data_path, None);
-            // The validator: the tx's raw byte range in the tx_root tree, then
-            // chunk `local` of that tx, each pinned to its exact range.
-            let raw_start = super::tx_byte_start(&headers, tx_index);
-            let raw_end = raw_start + u128::from(size);
-            let data_byte = (offset - tx_start) * chunk_size;
+            let geometry = Geometry::TESTING;
+            assert_eq!(geometry.chunk_size(), chunk_size);
             let chunk_range =
                 expected_chunk_byte_range(TxChunkOffset::from(offset - tx_start), size, chunk_size)
                     .expect("chunk range");
+            // `data_tree` fills every byte with 0x5A.
+            let chunk_data = vec![0x5A_u8; (chunk_range.1 - chunk_range.0) as usize];
+            let cross = super::cross_check_derived(
+                &derived,
+                offset,
+                &geometry,
+                data_path,
+                &chunk_data,
+                None,
+            );
+            // The validator: the tx's raw byte range in the tx_root tree, then
+            // chunk `local` of that tx, each pinned to its exact range, and the
+            // chunk bytes against the leaf hash.
+            let raw_start = super::tx_byte_start(&headers, tx_index);
+            let raw_end = raw_start + u128::from(size);
+            let data_byte = (offset - tx_start) * chunk_size;
             let validator = validate_path(
                 tx_root.0,
                 &Base64(proof.proof.clone()),
@@ -1298,18 +1354,27 @@ mod tests {
                     &Base64(data_path.clone()),
                     u128::from(data_byte),
                 )?;
-                irys_types::validate_path_byte_range(&data, chunk_range)?;
-                Ok(data)
+                eyre::ensure!(
+                    (data.min_byte_range, data.max_byte_range)
+                        == (u128::from(chunk_range.0), u128::from(chunk_range.1)),
+                    "data leaf range"
+                );
+                eyre::ensure!(
+                    data.leaf_hash == irys_types::hash_sha256(&chunk_data),
+                    "data leaf hash"
+                );
+                Ok(())
             });
             match (cross, validator) {
-                (Ok(()), Ok(data)) => {
-                    let end = usize::try_from(data.max_byte_range).unwrap_or(usize::MAX);
-                    let rem = end % (chunk_size as usize);
-                    let miner_span = if rem == 0 { chunk_size as usize } else { rem };
+                (Ok(()), Ok(())) => {
+                    // The miner unpacks `chunk_len` bytes for this chunk.
+                    let miner_length = geometry
+                        .chunk_len(size, u32::try_from(local).expect("chunk index"))
+                        .expect("chunk length");
                     assert_eq!(
-                        miner_span as u64,
+                        miner_length,
                         chunk_range.1 - chunk_range.0,
-                        "{name} offset {offset} miner span"
+                        "{name} offset {offset} miner chunk length"
                     );
                     accepted.push(true);
                 }
