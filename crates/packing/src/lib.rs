@@ -734,16 +734,28 @@ mod tests {
         let elapsed = now.elapsed();
         println!("C CUDA implementation: {:.2?}", elapsed);
 
+        // The Rust packer is single-threaded, so pack one contiguous range per CPU thread.
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let chunks_per_thread = num_chunks.div_ceil(threads);
         let now = Instant::now();
-        capacity_pack_range_with_data(
-            &mut chunks_rust,
-            mining_address,
-            chunk_offset,
-            partition_hash.into(),
-            ConsensusConfig::CHUNK_SIZE as usize,
-            testing_config.entropy_packing_iterations,
-            testing_config.chain_id,
-        );
+        std::thread::scope(|scope| {
+            for (range_idx, range) in chunks_rust.chunks_mut(chunks_per_thread).enumerate() {
+                let range_offset =
+                    chunk_offset + (range_idx * chunks_per_thread) as std::ffi::c_ulong;
+                let testing_config = &testing_config;
+                scope.spawn(move || {
+                    capacity_pack_range_with_data(
+                        range,
+                        mining_address,
+                        range_offset,
+                        partition_hash.into(),
+                        ConsensusConfig::CHUNK_SIZE as usize,
+                        testing_config.entropy_packing_iterations,
+                        testing_config.chain_id,
+                    );
+                });
+            }
+        });
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
