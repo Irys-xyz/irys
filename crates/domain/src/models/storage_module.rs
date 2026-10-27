@@ -165,8 +165,12 @@ fn metas_in_tx(
             continue;
         };
         let covered = covering_placement(&placements, &mut placement_index, offset);
-        let (data_root, data_size) = if let Some(placement) = covered {
-            (placement.data_tree_root, placement.data_size)
+        let (data_root, data_size, tx_start_offset) = if let Some(placement) = covered {
+            (
+                placement.data_tree_root,
+                placement.data_size,
+                placement.tx_start_offset,
+            )
         } else {
             // No placement: missing path bytes are skipped. A data root with
             // no info is an error.
@@ -180,8 +184,8 @@ fn metas_in_tx(
             let Some((data_root, data_commitment)) = bound else {
                 continue;
             };
-            let data_size = data_size_for_offset(tx, data_commitment, offset, &mut infos)?;
-            (data_root, data_size)
+            let info = data_root_info_for_offset(tx, data_commitment, offset, &mut infos)?;
+            (data_root, info.data_size, info.start_offset)
         };
         let Some(data_path_hash) = hashes.data_path_hash else {
             continue;
@@ -212,22 +216,20 @@ fn metas_in_tx(
         let Some(path_buff) = path_buff else {
             continue;
         };
-        let proof = get_leaf_proof(&path_buff)?;
-        let tx_offset = match tx_chunk_offset_from_leaf(proof.offset(), chunk_size) {
-            Ok(tx_offset) => tx_offset,
-            Err(error) => {
-                // A zero leaf underflows the chunk index. A leaf past
-                // `u32::MAX` chunks does not fit `TxChunkOffset`. Skip it
-                // instead of failing the span.
-                warn!(
-                    partition.offset = offset.0,
-                    error = %error,
-                    "skipping stored data path with an unusable leaf offset"
-                );
-                index_read_metrics::note_bad_leaf_offset();
-                continue;
-            }
-        };
+        // The placement gives the chunk index. The proof bytes never do.
+        let tx_offset =
+            match chunk_index_in_placement(tx_start_offset, data_size, offset, chunk_size) {
+                Ok(Some(tx_offset)) => tx_offset,
+                outside => {
+                    // Skip it instead of failing the span.
+                    warn!(
+                        partition.offset = offset.0,
+                        ?outside,
+                        "skipping stored data path outside its placement"
+                    );
+                    continue;
+                }
+            };
         out.insert(
             offset,
             (data_root, data_size, path_buff, tx_offset, checksum),
@@ -244,12 +246,13 @@ pub type PlacedChunk = (DataCommitment, DataTreeRoot, TxChunkOffset, u64);
 /// the data path, the tx chunk offset, and the offset checksum.
 type ChunkIndexMeta = (DataTreeRoot, u64, Base64, TxChunkOffset, Option<u32>);
 
-fn data_size_for_offset(
+/// The `DataRootInfo` of `data_commitment` that covers `partition_offset`.
+fn data_root_info_for_offset(
     tx: &dyn SubmoduleRead,
     data_commitment: DataCommitment,
     partition_offset: PartitionChunkOffset,
     cache: &mut HashMap<DataCommitment, DataRootInfos>,
-) -> eyre::Result<u64> {
+) -> eyre::Result<DataRootInfo> {
     if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(data_commitment) {
         index_read_metrics::note("data_root");
         let mut loaded = tx
@@ -264,25 +267,44 @@ fn data_size_for_offset(
         .partition_point(|info| info.start_offset <= partition_offset.into())
         .saturating_sub(1);
     if index < infos.0.len() {
-        Ok(infos.0[index].data_size)
+        Ok(infos.0[index].clone())
     } else {
         Err(eyre!("could not find DataRootInfo for partition_offset"))
     }
 }
 
-/// Chunk index of a data-path leaf, or an error when the leaf note is 0 or
-/// the index does not fit in `u32`.
-fn tx_chunk_offset_from_leaf(
-    leaf_byte_offset: usize,
+/// Chunk index of `partition_offset` in a placement that starts at
+/// `tx_start_offset`: `partition_offset - tx_start_offset`.
+///
+/// `None` when the offset is before the start or the chunk is past
+/// `data_size`. The start can be negative when the tx begins before this
+/// module. A partition offset that does not fit in `i32` is an error.
+fn chunk_index_in_placement(
+    tx_start_offset: RelativeChunkOffset,
+    data_size: u64,
+    partition_offset: PartitionChunkOffset,
     chunk_size: u64,
-) -> eyre::Result<TxChunkOffset> {
-    let bytes = u64::try_from(leaf_byte_offset)
-        .map_err(|_| eyre!("data path leaf offset does not fit in u64"))?;
-    let index =
-        max_chunk_offset(bytes, chunk_size).ok_or_else(|| eyre!("data path leaf offset is 0"))?;
-    u32::try_from(index)
-        .map(TxChunkOffset::from)
-        .map_err(|_| eyre!("data path leaf offset exceeds u32::MAX chunks"))
+) -> eyre::Result<Option<TxChunkOffset>> {
+    let partition_rel = RelativeChunkOffset(i32::try_from(partition_offset.0).map_err(|_| {
+        eyre!(
+            "partition offset {} does not fit in i32",
+            partition_offset.0
+        )
+    })?);
+    if tx_start_offset > partition_rel {
+        return Ok(None);
+    }
+    let tx_offset_i32 = *partition_rel - *tx_start_offset;
+    if tx_offset_i32 < 0 {
+        return Ok(None);
+    }
+    let tx_offset_u32 = u32::try_from(tx_offset_i32)
+        .map_err(|_| eyre!("tx offset {tx_offset_i32} does not fit in u32"))?;
+    let chunk_byte_offset = u64::from(tx_offset_u32).saturating_mul(chunk_size);
+    if chunk_byte_offset >= data_size {
+        return Ok(None);
+    }
+    Ok(Some(TxChunkOffset::from(tx_offset_u32)))
 }
 
 fn paths_in_tx(
@@ -8971,6 +8993,27 @@ impl StorageModule {
         })
     }
 
+    /// Where the data chunk at `partition_offset` sits: its data commitment,
+    /// data tree root, `data_size` and chunk index. All four come from the
+    /// placement that covers the offset, never from the stored proof bytes.
+    ///
+    /// `Ok(None)` has the same meaning as [`Self::data_root_and_tx_offset_at`].
+    pub fn data_chunk_location(
+        &self,
+        partition_offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<(DataCommitment, DataTreeRoot, u64, TxChunkOffset)>> {
+        let chunk_size = self.config.consensus.chunk_size;
+        self.query_submodule_db_by_offset(partition_offset, |tx| {
+            Ok(
+                Self::resolve_placement(tx, partition_offset, chunk_size)?.map(
+                    |(data_commitment, data_tree_root, tx_offset, data_size)| {
+                        (data_commitment, data_tree_root, data_size, tx_offset)
+                    },
+                ),
+            )
+        })
+    }
+
     /// Same resolution as [`Self::data_root_and_tx_offset_at`] for every offset in
     /// the inclusive range `[start, end]`. One submodule view covers each
     /// contiguous slice. `data_size` is the covering placement's funded size.
@@ -9027,42 +9070,26 @@ impl StorageModule {
         Ok(out)
     }
 
-    /// `tx_offset` is `partition_offset - placement.tx_start_offset`.
-    ///
-    /// The offset must fall inside `data_size`. The start can be negative when
-    /// the tx begins before this module. A partition offset that does not fit
-    /// in `i32` is an error.
+    /// Where `placement` puts `partition_offset`. See [`chunk_index_in_placement`].
     fn tx_offset_in_placement(
         placement: &Placement,
         partition_offset: PartitionChunkOffset,
         chunk_size: u64,
     ) -> eyre::Result<Option<PlacedChunk>> {
-        let partition_rel =
-            RelativeChunkOffset(i32::try_from(partition_offset.0).map_err(|_| {
-                eyre!(
-                    "partition offset {} does not fit in i32",
-                    partition_offset.0
-                )
-            })?);
-        if placement.tx_start_offset > partition_rel {
-            return Ok(None);
-        }
-        let tx_offset_i32 = *partition_rel - *placement.tx_start_offset;
-        if tx_offset_i32 < 0 {
-            return Ok(None);
-        }
-        let tx_offset_u32 = u32::try_from(tx_offset_i32)
-            .map_err(|_| eyre!("tx offset {tx_offset_i32} does not fit in u32"))?;
-        let chunk_byte_offset = u64::from(tx_offset_u32).saturating_mul(chunk_size);
-        if chunk_byte_offset >= placement.data_size {
-            return Ok(None);
-        }
-        Ok(Some((
-            placement.data_commitment,
-            placement.data_tree_root,
-            TxChunkOffset::from(tx_offset_u32),
+        Ok(chunk_index_in_placement(
+            placement.tx_start_offset,
             placement.data_size,
-        )))
+            partition_offset,
+            chunk_size,
+        )?
+        .map(|tx_offset| {
+            (
+                placement.data_commitment,
+                placement.data_tree_root,
+                tx_offset,
+                placement.data_size,
+            )
+        }))
     }
 
     /// Placement of one partition offset: `(data_root, tx_offset, data_size)`.

@@ -1830,63 +1830,43 @@ mod tests {
         Ok(())
     }
 
-    /// A stored leaf note of 0 underflows the chunk index. A note past
-    /// `u32::MAX` chunks does not fit `TxChunkOffset`. Neither panics, and a
-    /// span still returns the other offsets.
+    /// The tx offset comes from the placement. A stored leaf note of 0, or one
+    /// past `u32::MAX` chunks, does not change it and does not drop the offset.
     #[test]
-    fn span_omits_a_data_path_with_an_unusable_leaf_offset() -> eyre::Result<()> {
-        let (tmp, config) = opened_span("span-bad-leaf", 8);
+    fn span_takes_the_tx_offset_from_the_placement_not_the_leaf_note() -> eyre::Result<()> {
+        let (_tmp, config) = opened_span("span-placement-offset", 8);
         let sm = assigned(&config, 0, 0, "hdd0", 8);
-        let (good_a, bytes_a) = one_chunk(&config, 1);
-        let (bad_zero, _) = one_chunk(&config, 2);
-        let (good_b, bytes_b) = one_chunk(&config, 3);
-        let (bad_wide, _) = one_chunk(&config, 4);
+        let (zero_note, bytes_zero) = one_chunk(&config, 1);
+        let (wide_note, bytes_wide) = one_chunk(&config, 3);
 
         pack_entropy(&sm, &config, 0);
         pack_entropy(&sm, &config, 2);
-        index_one(&sm, &good_a, 0);
-        index_one(&sm, &bad_zero, 1);
-        index_one(&sm, &good_b, 2);
-        index_one(&sm, &bad_wide, 3);
-        write_one(&sm, &good_a, &bytes_a);
-        write_one(&sm, &good_b, &bytes_b);
+        index_one(&sm, &zero_note, 0);
+        index_one(&sm, &wide_note, 2);
+        write_one(&sm, &zero_note, &bytes_zero);
+        write_one(&sm, &wide_note, &bytes_wide);
         sm.sync_pending_chunks()?;
 
-        remember_data_path(&sm, PartitionChunkOffset(1), &leaf_path(0));
-        let wide = leaf_byte_past_u32_chunks(config.consensus.chunk_size);
-        remember_data_path(&sm, PartitionChunkOffset(3), &leaf_path(wide));
+        let zero_path = leaf_path(0);
+        let wide_path = leaf_path(leaf_byte_past_u32_chunks(config.consensus.chunk_size));
+        remember_data_path(&sm, PartitionChunkOffset(0), &zero_path);
+        remember_data_path(&sm, PartitionChunkOffset(2), &wide_path);
 
-        let before = crate::models::index_read_metrics::bad_leaf_offset_for_test();
-        let packed = sm.generate_full_chunks(PartitionChunkOffset(0), PartitionChunkOffset(3))?;
+        let packed = sm.generate_full_chunks(PartitionChunkOffset(0), PartitionChunkOffset(2))?;
         let offsets: Vec<u32> = packed.keys().map(|offset| offset.0).collect();
         assert_eq!(offsets, vec![0, 2]);
-        assert_eq!(
-            crate::models::index_read_metrics::bad_leaf_offset_for_test() - before,
-            2
-        );
-        assert!(sm.generate_full_chunk(PartitionChunkOffset(1))?.is_none());
-        assert!(sm.generate_full_chunk(PartitionChunkOffset(3))?.is_none());
-
-        let db = create_test_db(&tmp.path().join("db"));
-        let provider = make_provider(config, vec![Arc::new(sm)], db);
-        let span = provider
-            .get_unpacked_chunks_by_ledger_span(
-                DataLedger::Publish,
-                LedgerChunkOffset::from(0),
-                LedgerChunkOffset::from(3),
-            )
-            .expect("a bad leaf must not fail the span");
-        assert_eq!(span.len(), 2, "{span:?}");
-        assert_eq!(*span[0].0, 0);
-        assert_eq!(span[0].1.bytes.0, bytes_a);
-        assert_eq!(*span[1].0, 2);
-        assert_eq!(span[1].1.bytes.0, bytes_b);
-        assert!(
-            provider
-                .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(1))?
-                .is_none()
-        );
-
+        for (offset, path) in [(0, &zero_path), (2, &wide_path)] {
+            let chunk = &packed[&PartitionChunkOffset(offset)];
+            assert_eq!(
+                chunk.data_path.0, *path,
+                "offset {offset} serves its stored path"
+            );
+            assert_eq!(
+                chunk.tx_offset,
+                TxChunkOffset::from(0_u32),
+                "offset {offset} is chunk 0 of its one-chunk placement"
+            );
+        }
         Ok(())
     }
 

@@ -139,32 +139,6 @@ pub(crate) fn note_uncovered_data_path(rows: u64) {
     }
 }
 
-static BAD_LEAF_OFFSET: LazyLock<Counter<u64>> = LazyLock::new(|| {
-    global::meter("irys-domain")
-        .u64_counter("irys.storage.bad_leaf_offset_total")
-        .with_description(
-            "Stored data paths skipped because the leaf offset is not a u32 chunk index",
-        )
-        .build()
-});
-
-#[cfg(test)]
-static BAD_LEAF_OFFSET_TEST: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn note_bad_leaf_offset() {
-    BAD_LEAF_OFFSET.add(1, &[]);
-    #[cfg(test)]
-    {
-        BAD_LEAF_OFFSET_TEST.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-/// Bad leaf offsets skipped since process start. Tests assert a delta.
-#[cfg(test)]
-pub(crate) fn bad_leaf_offset_for_test() -> u64 {
-    BAD_LEAF_OFFSET_TEST.load(Ordering::Relaxed)
-}
-
 /// Proofs dropped since process start. Tests assert a delta. Parallel tests
 /// can add to the same counter.
 #[cfg(test)]
