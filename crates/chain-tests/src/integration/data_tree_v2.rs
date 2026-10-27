@@ -1,9 +1,10 @@
 //! End-to-end data tree v2 behaviour. Every test uses public node APIs only, so
 //! the tests compile and run on either data tree.
 
-use crate::utils::IrysNodeTest;
+use crate::utils::{IrysNodeTest, TimeMode};
 use irys_chain::IrysNodeCtx;
 use irys_domain::ChunkType;
+use irys_p2p::{GossipResponse, RejectionReason};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
     DataLedger, DataTransaction, H256, NodeConfig, TxChunkOffset, UnpackedChunk, irys::IrysSigner,
@@ -104,7 +105,8 @@ async fn slow_heavy_two_nodes_upload_promote_migrate_sync_and_mine_v2_data() -> 
     let mut config = single_node_config().with_consensus(|consensus| {
         // Two replicas per slot: the peer gets a replica of the slot with the data.
         consensus.num_partitions_per_slot = 2;
-        consensus.num_chunks_in_partition = 20;
+        // The 4-chunk upload fills the partition, so every recall range holds data.
+        consensus.num_chunks_in_partition = 4;
         consensus.epoch.num_blocks_in_epoch = 4;
         consensus.epoch.submit_ledger_epoch_length = 1000;
     });
@@ -112,6 +114,7 @@ async fn slow_heavy_two_nodes_upload_promote_migrate_sync_and_mine_v2_data() -> 
     config.fund_genesis_accounts(vec![&peer_signer]);
 
     let genesis = IrysNodeTest::new_genesis(config)
+        .with_time_mode(TimeMode::Accelerated)
         .start_and_wait_for_packing("GENESIS", WAIT_SECONDS)
         .await;
     let genesis_signer = genesis.node_ctx.config.irys_signer();
@@ -167,22 +170,30 @@ async fn slow_heavy_two_nodes_upload_promote_migrate_sync_and_mine_v2_data() -> 
         genesis.get_storage_module_intervals(DataLedger::Submit, 0, ChunkType::Data)
     );
 
-    // Mine until a data PoA appears. One slot is partly filled, so each block
-    // has a fair chance of recalling a data chunk.
-    const MAX_BLOCKS_FOR_DATA_POA: usize = 60;
+    // The partition is full, so a Publish data PoA is likely each block. Other
+    // partitions can still win a block, hence the bound.
+    const MAX_BLOCKS_FOR_DATA_POA: usize = 96;
     let mut data_poa_block = None;
     for _ in 0..MAX_BLOCKS_FOR_DATA_POA {
         let block = genesis.mine_block().await?;
-        peer.wait_until_height(block.height, WAIT_SECONDS).await?;
-        if block.poa.is_data_poa() {
+        if block.poa.is_data_poa() && block.poa.ledger_id == Some(u32::from(DataLedger::Publish)) {
             data_poa_block = Some(block);
             break;
         }
     }
-    let block = data_poa_block.expect("a data PoA occurs within the block budget");
+    let block = data_poa_block.expect("a Publish data PoA occurs within the block budget");
+
+    // The Publish ledger holds only this tx, so the PoA offset must fall inside
+    // its chunks. The bytes are packed, so they are not compared with the data.
+    assert!(
+        (block.poa.partition_chunk_offset as usize) < data.len().div_ceil(CHUNK_SIZE),
+        "the PoA offset is a chunk of the test tx"
+    );
+
+    peer.wait_until_height(block.height, WAIT_SECONDS).await?;
     let on_peer = peer.get_block_by_hash(&block.block_hash)?;
     assert_eq!(on_peer.block_hash, block.block_hash);
-    assert!(on_peer.poa.is_data_poa(), "the peer validated a data PoA");
+    assert_eq!(on_peer.poa, block.poa, "the peer validated the same PoA");
 
     peer.stop().await;
     genesis.stop().await;
@@ -275,6 +286,16 @@ async fn heavy_same_root_two_sizes_do_not_block_each_other() -> eyre::Result<()>
         !published.contains(&other.header.id),
         "the other-size header never completes"
     );
+    // The other header stays unpromoted in the next block too.
+    node.mine_block().await?;
+    let next = node.mine_block().await?;
+    assert!(
+        !next.data_ledgers[DataLedger::Publish]
+            .tx_ids
+            .0
+            .contains(&other.header.id),
+        "the other-size header is not promoted later"
+    );
 
     node.stop().await;
     Ok(())
@@ -314,43 +335,64 @@ async fn heavy_wrong_length_chunk_is_rejected_as_a_peer_fault() -> eyre::Result<
     let score_before = score_before.expect("the receiver lists the sending peer");
 
     let tx_offset = TxChunkOffset::from(0_u32);
-    let short_chunk = UnpackedChunk {
-        data_tree_root: tx.header.data_tree_root,
-        data_size: tx.header.data_size,
-        data_path: tx.chunk_proof(tx_offset)?,
-        bytes: Base64(chunk_bytes(&data, 0)[..9].to_vec()),
-        tx_offset,
+    let data_path = tx.chunk_proof(tx_offset)?;
+    let honest_bytes = chunk_bytes(&data, 0);
+    let gossip_chunk = async |bytes: &[u8]| -> eyre::Result<GossipResponse<()>> {
+        let chunk = UnpackedChunk {
+            data_tree_root: tx.header.data_tree_root,
+            data_size: tx.header.data_size,
+            data_path: data_path.clone(),
+            bytes: Base64(bytes.to_vec()),
+            tx_offset,
+        };
+        let request = serde_json::json!({
+            "peer_id": peer_id,
+            "miner_address": peer_miner_address,
+            "data": chunk,
+        });
+        let url = format!("http://{}/gossip/v2/chunk", genesis.get_gossip_addr());
+        Ok(reqwest::Client::new()
+            .post(&url)
+            .json(&request)
+            .send()
+            .await?
+            .json()
+            .await?)
     };
-    let request = serde_json::json!({
-        "peer_id": peer_id,
-        "miner_address": peer_miner_address,
-        "data": short_chunk,
-    });
-    let url = format!("http://{}/gossip/v2/chunk", genesis.get_gossip_addr());
-    let response: serde_json::Value = reqwest::Client::new()
-        .post(&url)
-        .json(&request)
-        .send()
-        .await?
-        .json()
-        .await?;
-    assert_eq!(
-        response,
-        serde_json::json!({ "Rejected": "InvalidData" }),
-        "the wrong-length chunk is rejected as invalid data"
-    );
+    let score_of = || {
+        genesis
+            .node_ctx
+            .peer_list
+            .get_peer(&peer_id)
+            .expect("peer still listed")
+            .reputation_score
+            .get()
+    };
 
-    let score_after = genesis
-        .node_ctx
-        .peer_list
-        .get_peer(&peer_id)
-        .expect("peer still listed")
-        .reputation_score
-        .get();
+    // The honest proof with the honest bytes one byte short. The wrong-length
+    // chunk goes first: a stored duplicate would be accepted without a check.
+    let response = gossip_chunk(&honest_bytes[..CHUNK_SIZE - 1]).await?;
+    assert!(
+        matches!(
+            response,
+            GossipResponse::Rejected(RejectionReason::InvalidData)
+        ),
+        "the wrong-length chunk is rejected as invalid data: {response:?}"
+    );
+    let score_after = score_of();
     assert!(
         score_after < score_before,
         "peer score is cut: {score_before} -> {score_after}"
     );
+
+    // Control: the same proof with the correctly sized bytes is accepted, and
+    // it costs no score. Only the length differs from the rejected chunk.
+    let response = gossip_chunk(honest_bytes).await?;
+    assert!(
+        matches!(response, GossipResponse::Accepted(())),
+        "the correctly sized chunk is accepted: {response:?}"
+    );
+    assert!(score_of() >= score_after, "an honest chunk costs no score");
 
     peer.stop().await;
     genesis.stop().await;
