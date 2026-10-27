@@ -892,7 +892,7 @@ impl IrysNode {
             if device_count > 1 {
                 warn!("Unable to use multiple GPUs right now - using device 0")
             }
-            info!("Found 1 CUDA GPUs - using device {}", gpu_info.device_id);
+            info!("Found 1 CUDA GPUs - {}", &gpu_info.device_name);
             let gpu_config = CUDAConfig::from_device_default()?;
             info!(
                 "Using blocks: {}, threads per block: {}",

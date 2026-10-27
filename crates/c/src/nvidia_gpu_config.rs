@@ -1,3 +1,4 @@
+use std::ffi::CStr;
 use std::os::raw::c_int;
 
 // CUDA Runtime API bindings (minimal subset)
@@ -15,6 +16,12 @@ unsafe extern "C" {
 #[repr(i32)]
 enum CudaDeviceAttribute {
     MaxThreadsPerBlock = 1,
+    MaxBlockDimX = 2,
+    MaxBlockDimY = 3,
+    MaxBlockDimZ = 4,
+    MaxGridDimX = 5,
+    MaxGridDimY = 6,
+    MaxGridDimZ = 7,
     WarpSize = 10,
     MultiProcessorCount = 16,
     MaxThreadsPerMultiProcessor = 39,
@@ -35,6 +42,25 @@ fn get_device_attribute(device_id: i32, attribute: CudaDeviceAttribute) -> Resul
     }
 }
 
+/// The name of CUDA device `device_id`. CUDA has no device attribute for the name, so a C
+/// helper built with the toolkit's own `cudaDeviceProp` reads it.
+fn get_device_name(device_id: i32) -> Result<String, String> {
+    // `cudaDeviceProp::name` is a 256-byte C string.
+    let mut name = [0_u8; 256];
+    let result = unsafe {
+        crate::capacity_cuda::irys_cuda_device_name(device_id, name.as_mut_ptr().cast(), name.len())
+    };
+    if result != 0 {
+        return Err(format!(
+            "Failed to get the name of device {}: error code {}",
+            device_id, result
+        ));
+    }
+    let name = CStr::from_bytes_until_nul(&name)
+        .map_err(|e| format!("Device {} name is not NUL-terminated: {}", device_id, e))?;
+    Ok(name.to_string_lossy().into_owned())
+}
+
 pub fn set_current_cuda_device_for_thread(device_id: i32) -> Result<(), String> {
     match unsafe { cudaSetDevice(device_id) } {
         0 => Ok(()),
@@ -48,8 +74,11 @@ pub fn set_current_cuda_device_for_thread(device_id: i32) -> Result<(), String> 
 #[derive(Debug)]
 pub struct NvidiaGpuConfig {
     pub device_id: i32,
+    pub device_name: String,
     pub compute_capability: (i32, i32),
     pub max_threads_per_block: i32,
+    pub max_block_dim: (i32, i32, i32),
+    pub max_grid_size: (i32, i32, i32),
     pub warp_size: i32,
     pub multiprocessor_count: i32,
     pub max_threads_per_multiprocessor: i32,
@@ -63,11 +92,22 @@ impl NvidiaGpuConfig {
         let attr = |attribute| get_device_attribute(device_id, attribute);
         Ok(Self {
             device_id,
+            device_name: get_device_name(device_id)?,
             compute_capability: (
                 attr(CudaDeviceAttribute::ComputeCapabilityMajor)?,
                 attr(CudaDeviceAttribute::ComputeCapabilityMinor)?,
             ),
             max_threads_per_block: attr(CudaDeviceAttribute::MaxThreadsPerBlock)?,
+            max_block_dim: (
+                attr(CudaDeviceAttribute::MaxBlockDimX)?,
+                attr(CudaDeviceAttribute::MaxBlockDimY)?,
+                attr(CudaDeviceAttribute::MaxBlockDimZ)?,
+            ),
+            max_grid_size: (
+                attr(CudaDeviceAttribute::MaxGridDimX)?,
+                attr(CudaDeviceAttribute::MaxGridDimY)?,
+                attr(CudaDeviceAttribute::MaxGridDimZ)?,
+            ),
             warp_size: attr(CudaDeviceAttribute::WarpSize)?,
             multiprocessor_count: attr(CudaDeviceAttribute::MultiProcessorCount)?,
             max_threads_per_multiprocessor: attr(CudaDeviceAttribute::MaxThreadsPerMultiProcessor)?,
@@ -132,11 +172,20 @@ impl NvidiaGpuConfig {
     pub fn print_info(&self) {
         println!("GPU Configuration:");
         println!("  Device ID: {}", self.device_id);
+        println!("  Device Name: {}", self.device_name);
         println!(
             "  Compute Capability: {}.{}",
             self.compute_capability.0, self.compute_capability.1
         );
         println!("  Max Threads per Block: {}", self.max_threads_per_block);
+        println!(
+            "  Max Block Dimensions: ({}, {}, {})",
+            self.max_block_dim.0, self.max_block_dim.1, self.max_block_dim.2
+        );
+        println!(
+            "  Max Grid Size: ({}, {}, {})",
+            self.max_grid_size.0, self.max_grid_size.1, self.max_grid_size.2
+        );
         println!("  Warp Size: {}", self.warp_size);
         println!("  Multiprocessor Count: {}", self.multiprocessor_count);
         println!(
@@ -158,9 +207,16 @@ mod tests {
     #[test]
     fn query_device_reads_nonzero_attributes() {
         let config = NvidiaGpuConfig::query_device(0).expect("query device 0");
+        assert!(!config.device_name.is_empty());
         assert!(config.multiprocessor_count > 0);
         assert!(config.compute_capability.0 > 0);
         assert!(config.max_threads_per_block > 0);
+        assert!(
+            config.max_block_dim.0 > 0 && config.max_block_dim.1 > 0 && config.max_block_dim.2 > 0
+        );
+        assert!(
+            config.max_grid_size.0 > 0 && config.max_grid_size.1 > 0 && config.max_grid_size.2 > 0
+        );
         assert!(config.max_threads_per_multiprocessor > 0);
         assert!(config.max_blocks_per_multiprocessor > 0);
         assert!(config.regs_per_multiprocessor > 0);
