@@ -22,10 +22,10 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataCommitment,
-    DataLedger, DataTransactionHeader, DataTransactionMetadata, DatabaseProvider, DatabaseVersion,
-    H256, IngressMerkleLeaf, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId,
-    IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset, UnixTimestamp,
-    UnpackedChunk, expected_chunk_byte_range, generate_ingress_data_hash,
+    DataLedger, DataTransactionHeader, DataTransactionMetadata, DataTreeRoot, DatabaseProvider,
+    DatabaseVersion, H256, IngressMerkleLeaf, IngressProof, IrysAddress, IrysBlockHeader,
+    IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset,
+    UnixTimestamp, UnpackedChunk, expected_chunk_byte_range, generate_ingress_data_hash,
     generate_ingress_leaf_from_data_hash, hash_sha256, validate_path,
 };
 use reth_db::TableSet;
@@ -1060,6 +1060,24 @@ pub fn cached_data_root_by_data_root<T: DbTx>(
     data_commitment: DataCommitment,
 ) -> eyre::Result<Option<CachedDataRoot>> {
     Ok(tx.get::<CachedDataRoots>(data_commitment)?)
+}
+
+/// Every [`CachedDataRoot`] whose `data_tree_root` is `data_tree_root`, with
+/// its key. A root alone does not fix the size, so this walks the whole
+/// table. Only root-only lookups use it.
+pub fn cached_data_roots_by_tree_root<T: DbTx>(
+    tx: &T,
+    data_tree_root: DataTreeRoot,
+) -> eyre::Result<Vec<(DataCommitment, CachedDataRoot)>> {
+    let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
+    let mut matches = Vec::new();
+    for row in cursor.walk(None)? {
+        let (data_commitment, cached) = row?;
+        if cached.data_tree_root == data_tree_root {
+            matches.push((data_commitment, cached));
+        }
+    }
+    Ok(matches)
 }
 
 /// Ensures `block_hash` is present in the `block_set` of an existing

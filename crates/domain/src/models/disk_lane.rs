@@ -1517,7 +1517,12 @@ impl StorageModule {
         }
         let partition_offsets = match super::index_read_metrics::trace_index_read(
             super::index_read_metrics::PLACEMENT,
-            || self.partition_offsets_for_data_root_chunk(chunk.data_tree_root.0, chunk.tx_offset),
+            || {
+                self.partition_offsets_for_data_root_chunk(
+                    chunk.data_commitment(&self.config.data_tree_geometry()),
+                    chunk.tx_offset,
+                )
+            },
         ) {
             Ok(Some(offsets)) => offsets,
             Ok(None) => {
@@ -1560,6 +1565,7 @@ impl StorageModule {
             // read again under this lock. It uses data-root rows only, so a
             // short test path is not parsed. Reset clears those rows before
             // a later entropy write can take `pending`.
+            let data_commitment = chunk.data_commitment(&self.config.data_tree_geometry());
             let still_funded = (|| -> eyre::Result<HashSet<PartitionChunkOffset>> {
                 let raw_tx_offset = u32::from(chunk.tx_offset);
                 let chunk_byte_offset = u64::from(raw_tx_offset)
@@ -1569,7 +1575,7 @@ impl StorageModule {
                 for (_, submodule) in self.submodules.iter() {
                     let Some(infos) = submodule
                         .db
-                        .view(|tx| tx.get_data_root_infos_for_data_root(chunk.data_tree_root.0))?
+                        .view(|tx| tx.get_data_root_infos_for_data_root(data_commitment))?
                     else {
                         continue;
                     };
@@ -2474,7 +2480,7 @@ impl StorageModule {
     /// clipped to this partition. `None` when the offset is not indexed.
     fn tx_range_end(&self, offset: PartitionChunkOffset) -> Option<u32> {
         let placement = self.data_root_and_tx_offset_span(offset, offset).ok()?;
-        let (_root, tx_offset, data_size) = placement.into_iter().next().flatten()?;
+        let (_commitment, _root, tx_offset, data_size) = placement.into_iter().next().flatten()?;
         let chunk = self.config.consensus.chunk_size.max(1);
         let chunks = data_size.div_ceil(chunk);
         if chunks == 0 {
