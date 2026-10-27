@@ -25,7 +25,7 @@ struct PendingChunkWrite {
 #[derive(Debug)]
 pub(crate) struct ChunkDataWriter {
     tx: mpsc::Sender<PendingChunkWrite>,
-    pending_hashes: Arc<DashSet<ChunkKey>>,
+    pending_chunk_keys: Arc<DashSet<ChunkKey>>,
     /// Derives each chunk's `ChunkKey`.
     geometry: Geometry,
 }
@@ -55,20 +55,20 @@ impl ChunkDataWriter {
         runtime_handle: &tokio::runtime::Handle,
     ) -> Self {
         let (tx, rx) = mpsc::channel(buffer_size.max(1));
-        let pending_hashes = Arc::new(DashSet::new());
+        let pending_chunk_keys = Arc::new(DashSet::new());
 
         let writer = BackgroundWriter {
             rx,
             db,
             address,
             geometry,
-            pending_hashes: Arc::clone(&pending_hashes),
+            pending_chunk_keys: Arc::clone(&pending_chunk_keys),
         };
         runtime_handle.spawn(writer.run());
 
         Self {
             tx,
-            pending_hashes,
+            pending_chunk_keys,
             geometry,
         }
     }
@@ -81,7 +81,7 @@ impl ChunkDataWriter {
         drop(rx);
         Self {
             tx,
-            pending_hashes: Arc::new(DashSet::new()),
+            pending_chunk_keys: Arc::new(DashSet::new()),
             geometry: Geometry::TESTING,
         }
     }
@@ -96,8 +96,8 @@ impl ChunkDataWriter {
         &self,
         chunk: Arc<UnpackedChunk>,
     ) -> Result<QueuedChunkWrite, QueueError> {
-        let hash = chunk.chunk_key(&self.geometry);
-        let is_duplicate = !self.pending_hashes.insert(hash);
+        let chunk_key = chunk.chunk_key(&self.geometry);
+        let is_duplicate = !self.pending_chunk_keys.insert(chunk_key);
         let (done_tx, done_rx) = oneshot::channel();
         if self
             .tx
@@ -108,7 +108,7 @@ impl ChunkDataWriter {
             .await
             .is_err()
         {
-            self.pending_hashes.remove(&hash);
+            self.pending_chunk_keys.remove(&chunk_key);
             return Err(QueueError::ChannelClosed);
         }
         Ok(QueuedChunkWrite {
@@ -132,7 +132,7 @@ struct BackgroundWriter {
     address: IrysAddress,
     /// Derives each chunk's `data_commitment`, the cache key.
     geometry: Geometry,
-    pending_hashes: Arc<DashSet<ChunkKey>>,
+    pending_chunk_keys: Arc<DashSet<ChunkKey>>,
 }
 
 impl BackgroundWriter {
@@ -188,7 +188,7 @@ impl BackgroundWriter {
             return Ok(());
         }
 
-        let hashes: Vec<(ChunkKey, H256)> = batch
+        let chunk_key_ingress_hashes: Vec<(ChunkKey, H256)> = batch
             .iter()
             .map(|pending| {
                 (
@@ -200,7 +200,9 @@ impl BackgroundWriter {
 
         let result = self.db.update_eyre(|tx| {
             let mut written = 0_usize;
-            for (pending, (chunk_key, ingress_data_hash)) in batch.iter().zip(&hashes) {
+            for (pending, (chunk_key, ingress_data_hash)) in
+                batch.iter().zip(&chunk_key_ingress_hashes)
+            {
                 match cache_chunk_verified(tx, &pending.chunk, &self.geometry) {
                     Ok(is_duplicate) => {
                         if is_duplicate {
@@ -232,8 +234,8 @@ impl BackgroundWriter {
             Ok(written)
         });
 
-        for (chunk_key, _) in &hashes {
-            self.pending_hashes.remove(chunk_key);
+        for (chunk_key, _) in &chunk_key_ingress_hashes {
+            self.pending_chunk_keys.remove(chunk_key);
         }
 
         match result {
@@ -275,7 +277,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let writer = ChunkDataWriter {
             tx,
-            pending_hashes: Arc::new(DashSet::new()),
+            pending_chunk_keys: Arc::new(DashSet::new()),
             geometry: Geometry::TESTING,
         };
         let chunk_at = |index: u32| {
@@ -292,7 +294,7 @@ mod tests {
         let second = writer.queue_write(chunk_at(1)).await.unwrap();
         assert!(!first.is_duplicate());
         assert!(!second.is_duplicate());
-        assert_eq!(writer.pending_hashes.len(), 2);
+        assert_eq!(writer.pending_chunk_keys.len(), 2);
 
         let repeat = writer.queue_write(chunk_at(1)).await.unwrap();
         assert!(repeat.is_duplicate());
@@ -393,13 +395,13 @@ mod tests {
         })?;
 
         let (command_tx, command_rx) = mpsc::channel(4);
-        let pending_hashes = Arc::new(DashSet::new());
+        let pending_chunk_keys = Arc::new(DashSet::new());
         let background = BackgroundWriter {
             rx: command_rx,
             db: db.clone(),
             address,
             geometry: irys_types::data_tree::Geometry::TESTING,
-            pending_hashes,
+            pending_chunk_keys,
         };
         let (first_done_tx, first_done_rx) = oneshot::channel();
         let (second_done_tx, second_done_rx) = oneshot::channel();
