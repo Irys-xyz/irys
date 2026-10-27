@@ -20,6 +20,7 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_database::ingress_proofs_by_data_root;
 use irys_domain::{BatchEnqueueItem, BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
 use irys_packing::unpack;
+use irys_types::DataTreeRoot;
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, IrysAddress, PartitionChunkOffset, SendTraced as _,
     TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
@@ -82,7 +83,7 @@ async fn attempt_data_sync_write(
                     DataSyncWriteOutcome::AwaitingDurability
                 }
             } else if matches!(
-                sm.collect_data_root_infos(unpacked.data_root),
+                sm.collect_data_root_infos(unpacked.data_tree_root.0),
                 Ok(infos) if infos.0.is_empty()
             ) {
                 // Defensive: empty infos should have been DataRootNotFound Err.
@@ -102,7 +103,7 @@ fn validate_peer_unpacked_chunk(chunk: &UnpackedChunk, chunk_size: u64) -> eyre:
         irys_types::expected_chunk_byte_range(chunk.tx_offset, chunk.data_size, chunk_size)
             .map_err(|error| eyre::eyre!("peer chunk data path range: {error}"))?;
     let target = u128::from(max_byte - 1);
-    let path = irys_types::validate_path(chunk.data_root.0, &chunk.data_path, target)
+    let path = irys_types::validate_path(chunk.data_tree_root.0.0, &chunk.data_path, target)
         .map_err(|error| eyre::eyre!("peer chunk data path: {error}"))?;
     let chunk_len = u64::try_from(chunk.bytes.len())
         .map_err(|_| eyre::eyre!("peer chunk length exceeds u64"))?;
@@ -226,7 +227,7 @@ fn check_against_placement(
     data_size: u64,
     chunk_size: u64,
 ) -> Result<UnpackedChunk, DeliveryError> {
-    if unpacked.data_root != data_root
+    if unpacked.data_tree_root != DataTreeRoot(data_root)
         || unpacked.tx_offset != tx_offset
         || unpacked.data_size != data_size
     {
@@ -234,7 +235,7 @@ fn check_against_placement(
             expected: (data_root, tx_offset, data_size),
             detail: format!(
                 "fetched data_root {} tx_offset {} data_size {} does not match the local data_root {data_root} tx_offset {tx_offset} data_size {data_size}",
-                unpacked.data_root, unpacked.tx_offset, unpacked.data_size,
+                unpacked.data_tree_root, unpacked.tx_offset, unpacked.data_size,
             ),
         });
     }
@@ -599,7 +600,7 @@ pub(crate) fn classify_synced_chunk(
     }
     if irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
         matches!(
-            sm.collect_data_root_infos(unpacked.data_root),
+            sm.collect_data_root_infos(unpacked.data_tree_root.0),
             Ok(infos) if infos.0.is_empty()
         )
     }) {
@@ -1425,14 +1426,15 @@ impl DataSyncServiceInner {
                     .ok()
                     .flatten()
                     .filter(|(root, tx_offset)| {
-                        *root != unpacked_chunk.data_root || *tx_offset != unpacked_chunk.tx_offset
+                        *root != unpacked_chunk.data_tree_root.0
+                            || *tx_offset != unpacked_chunk.tx_offset
                     })
                 });
         if let Some((local_root, local_tx_offset)) = mismatched_placement {
             self.reject_delivered_body(storage_module_id, chunk_offset, peer_addr)?;
             return Err(eyre::eyre!(
                 "data sync rejected peer chunk at offset {chunk_offset}: fetched data_root {} tx_offset {} does not match the local data_root {local_root} tx_offset {local_tx_offset}",
-                unpacked_chunk.data_root,
+                unpacked_chunk.data_tree_root,
                 unpacked_chunk.tx_offset,
             ));
         }
@@ -1538,7 +1540,7 @@ impl DataSyncServiceInner {
                 debug!(
                     storage_module.id = storage_module_id,
                     chunk.offset = %chunk_offset,
-                    chunk.data_root = %unpacked_chunk.data_root,
+                    chunk.data_root = %unpacked_chunk.data_tree_root,
                     ?ledger_id,
                     ?slot_index,
                     ?partition_hash,
@@ -1553,7 +1555,7 @@ impl DataSyncServiceInner {
                 debug!(
                     storage_module.id = storage_module_id,
                     chunk.offset = %chunk_offset,
-                    chunk.data_root = %unpacked_chunk.data_root,
+                    chunk.data_root = %unpacked_chunk.data_tree_root,
                     ?ledger_id,
                     ?slot_index,
                     ?partition_hash,
@@ -1568,7 +1570,7 @@ impl DataSyncServiceInner {
                 warn!(
                     storage_module.id = storage_module_id,
                     chunk.offset = %chunk_offset,
-                    chunk.data_root = %unpacked_chunk.data_root,
+                    chunk.data_root = %unpacked_chunk.data_tree_root,
                     chunk.tx_offset = %unpacked_chunk.tx_offset,
                     ?ledger_id,
                     ?slot_index,
@@ -1588,7 +1590,7 @@ impl DataSyncServiceInner {
                 warn!(
                     storage_module.id = storage_module_id,
                     chunk.offset = %chunk_offset,
-                    chunk.data_root = %unpacked_chunk.data_root,
+                    chunk.data_root = %unpacked_chunk.data_tree_root,
                     chunk.tx_offset = %unpacked_chunk.tx_offset,
                     ?ledger_id,
                     ?slot_index,
@@ -1604,7 +1606,7 @@ impl DataSyncServiceInner {
                 warn!(
                     storage_module.id = storage_module_id,
                     chunk.offset = %chunk_offset,
-                    chunk.data_root = %unpacked_chunk.data_root,
+                    chunk.data_root = %unpacked_chunk.data_tree_root,
                     chunk.tx_offset = %unpacked_chunk.tx_offset,
                     ?ledger_id,
                     ?slot_index,
@@ -2461,6 +2463,7 @@ mod ingress_handoff_tests {
     };
     use crate::chunk_ingress_service::{ChunkIngressError, CriticalChunkIngressError};
     use crate::services::ServiceSenders;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         Base64, ChunkFormat, H256, IrysAddress, PackedChunk, PartitionChunkOffset, TxChunkOffset,
         UnpackedChunk,
@@ -2496,7 +2499,7 @@ mod ingress_handoff_tests {
             7,
         );
         PackedChunk {
-            data_root: H256::repeat_byte(0x31),
+            data_tree_root: DataTreeRoot(H256::repeat_byte(0x31)),
             data_size: chunk_size as u64,
             data_path: Base64(vec![1, 2, 3]),
             bytes: Base64(
@@ -2568,7 +2571,7 @@ mod ingress_handoff_tests {
             .expect("task")
             .expect("unpack");
         assert_eq!(unpacked.bytes.0, data);
-        assert_eq!(unpacked.data_root, packed.data_root);
+        assert_eq!(unpacked.data_tree_root, packed.data_tree_root);
         assert_eq!(unpacked.data_path, packed.data_path);
         assert_eq!(
             permits.available_permits(),
@@ -2770,7 +2773,7 @@ mod ingress_proof_peer_tests {
         let irys = IrysSigner::random_signer(&config.consensus);
         let tx = irys.create_transaction(data_bytes, H256::zero()).unwrap();
         let tx = irys.sign_transaction(tx).unwrap();
-        let data_root = tx.header.data_root;
+        let data_root = tx.header.data_tree_root;
         let (_tx_root, proofs) =
             DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
         sm.index_transaction_data(
@@ -2795,7 +2798,7 @@ mod ingress_proof_peer_tests {
             cache_data_root(wtx, &tx.header, None)?;
             let proof = IngressProof::V1(irys_types::ingress::IngressProofV1 {
                 signature: Default::default(),
-                data_root,
+                data_root: data_root.0,
                 proof: H256::random(),
                 chain_id: config.consensus.chain_id,
                 anchor: H256::zero(),
@@ -2921,6 +2924,7 @@ mod write_outcome_tests {
     use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
     use irys_domain::{StorageModule, StorageModuleInfo, WriteDataChunkError};
     use irys_testing_utils::TempDirBuilder;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         Config, DataLedger, H256, IrysAddress, PartitionChunkOffset, RelativeChunkOffset,
         StorageSyncConfig, TxChunkOffset, UnpackedChunk, partition::PartitionAssignment,
@@ -2956,7 +2960,7 @@ mod write_outcome_tests {
         sm.pack_with_zeros();
 
         let chunk = UnpackedChunk {
-            data_root: H256::random(),
+            data_tree_root: DataTreeRoot(H256::random()),
             data_size: chunk_size,
             data_path: vec![1, 2, 3, 4].into(),
             bytes: vec![0xcd; chunk_size as usize].into(),
@@ -3024,7 +3028,7 @@ mod write_outcome_tests {
             .expect("index data root");
 
         let chunk = UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: chunk_size,
             data_path: vec![1, 2, 3, 4].into(),
             bytes: vec![0xcd; chunk_size as usize].into(),
@@ -3276,7 +3280,7 @@ mod peer_chunk_validation_tests {
             .db
             .update(|db_tx| {
                 db_tx.add_data_root_info(
-                    good.data_root,
+                    good.data_tree_root.0,
                     &DataRootInfo {
                         start_offset: RelativeChunkOffset::from(0_i32),
                         data_size: good.data_size,
@@ -3465,7 +3469,7 @@ mod peer_chunk_validation_tests {
             .expect("local index read")
             .expect("offset 0 is indexed");
         let foreign = foreign_tx.data_chunks().expect("foreign chunk").remove(0);
-        assert_ne!(foreign.data_root, local_root);
+        assert_ne!(foreign.data_tree_root.0, local_root);
         assert_eq!(local_tx_offset, TxChunkOffset::from(0_u32));
         assert_eq!(sm.get_chunk_type(&requested), Some(ChunkType::Entropy));
         assert_eq!(sm.get_chunk_type(&foreign_offset), Some(ChunkType::Entropy));
@@ -3607,7 +3611,7 @@ mod peer_chunk_validation_tests {
                 .db
                 .update(|db_tx| {
                     db_tx.add_data_root_info(
-                        chunk.data_root,
+                        chunk.data_tree_root.0,
                         &DataRootInfo {
                             start_offset: RelativeChunkOffset::from(0_i32),
                             data_size: chunk.data_size,
@@ -3683,7 +3687,7 @@ mod peer_chunk_validation_tests {
             assert_eq!(
                 h.inner.delivery_route(h.sm.id, offset),
                 super::DeliveryRoute::Direct {
-                    data_root: h.chunk.data_root,
+                    data_root: h.chunk.data_tree_root.0,
                     tx_offset: h.chunk.tx_offset,
                     data_size: h.chunk.data_size,
                 },
@@ -3756,7 +3760,7 @@ mod peer_chunk_validation_tests {
         h.inner
             .on_chunk_completed(h.sm.id, offset, peer, ChunkFormat::Unpacked(other))
             .expect("completion");
-        h.sm.rollback_unassigned_range(offset, offset, &[h.chunk.data_root])
+        h.sm.rollback_unassigned_range(offset, offset, &[h.chunk.data_tree_root.0])
             .expect("rollback");
 
         let (msg, _span) = h.data_sync_rx.recv().await.expect("result").into_parts();
@@ -4049,7 +4053,7 @@ mod residual_scan_tests {
             .create_transaction(data, H256::zero())
             .expect("transaction");
         let tx = signer.sign_transaction(tx).expect("signed transaction");
-        let data_root = tx.header.data_root;
+        let data_root = tx.header.data_tree_root;
         let (_tx_root, proofs) =
             DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
         sm.index_transaction_data(
@@ -4079,7 +4083,7 @@ mod residual_scan_tests {
         let elapsed = started.elapsed();
         eprintln!("scale_residual roots={} elapsed={elapsed:?}", roots.len());
         assert!(
-            roots.contains(&data_root),
+            roots.contains(&data_root.0),
             "the low indexed hole must still be reported"
         );
         assert!(

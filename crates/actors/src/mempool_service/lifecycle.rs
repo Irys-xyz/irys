@@ -92,7 +92,7 @@ impl Inner {
             .transactions()
             .get_ledger_txs(DataLedger::Submit)
         {
-            let data_root = submit_tx.data_root;
+            let data_root = submit_tx.data_tree_root;
             match self.irys_db.update_eyre(|db_tx| {
                 irys_database::cache_data_root(db_tx, submit_tx, Some(block.as_ref()))?;
                 Ok(())
@@ -106,7 +106,7 @@ impl Inner {
                         incoming_block.height = block.height,
                         "cached_data_root.write"
                     );
-                    confirmed_data_roots.push(data_root);
+                    confirmed_data_roots.push(data_root.0);
                 }
                 Err(db_error) => {
                     error!(
@@ -376,7 +376,7 @@ impl Inner {
             if self.should_prune_tx(current_height, tx) {
                 expired_data.push((tx.id, tx.anchor));
                 expired_by_data_root
-                    .entry(tx.data_root)
+                    .entry(tx.data_tree_root.0)
                     .or_default()
                     .push(tx.id);
             }
@@ -786,7 +786,7 @@ impl Inner {
         let mut dropped_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
         for tx_id in orphaned_term_txs.iter() {
             if let Some(tx) = orphaned_term_tx_map.remove(tx_id) {
-                let data_root = tx.data_root;
+                let data_root = tx.data_tree_root;
                 match self.handle_data_tx_ingress_message_gossip(tx).await {
                     Ok(_) => {}
                     Err(TxIngressError::Skipped) => {
@@ -795,7 +795,7 @@ impl Inner {
                     Err(e) => {
                         error!("Failed to re-submit orphaned tx {} {:?}", tx_id, &e);
                         dropped_by_data_root
-                            .entry(data_root)
+                            .entry(data_root.0)
                             .or_default()
                             .push(*tx_id);
                     }

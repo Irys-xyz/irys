@@ -991,7 +991,7 @@ impl AtomicMempoolState {
                     id: tx.id,
                     byte_size,
                     chunks: byte_size.div_ceil(chunk_size),
-                    data_root: tx.data_root,
+                    data_root: tx.data_tree_root.0,
                     ledger_id: tx.ledger_id,
                 }
             })
@@ -2271,7 +2271,7 @@ impl MempoolState {
             if should_prune(tx) {
                 expired.push((tx.id, tx.anchor));
                 expired_by_data_root
-                    .entry(tx.data_root)
+                    .entry(tx.data_tree_root.0)
                     .or_default()
                     .push(tx.id);
             }
@@ -2886,6 +2886,7 @@ where
 #[cfg(test)]
 mod bounded_mempool_tests {
     use super::*;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
         DataTransactionMetadata, IrysSignature,
@@ -2902,7 +2903,7 @@ mod bounded_mempool_tests {
                 id: H256::random(),
                 anchor: H256::zero(),
                 signer: IrysAddress::random(),
-                data_root: H256::random(),
+                data_tree_root: DataTreeRoot(H256::random()),
                 data_size: 1024,
                 prefix_size: 0,
                 prefix_hash: H256::zero(),
@@ -3195,6 +3196,7 @@ mod bounded_mempool_tests {
 #[cfg(test)]
 mod test_helpers {
     use super::*;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
         DataTransactionMetadata, IrysSignature,
@@ -3225,7 +3227,7 @@ mod test_helpers {
                 id,
                 anchor: H256::zero(),
                 signer: IrysAddress::random(),
-                data_root: H256::random(),
+                data_tree_root: DataTreeRoot(H256::random()),
                 data_size: 1024,
                 prefix_size: 0,
                 prefix_hash: H256::zero(),

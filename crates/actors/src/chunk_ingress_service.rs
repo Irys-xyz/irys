@@ -755,11 +755,12 @@ impl ChunkIngressService {
 #[cfg(test)]
 mod overload_helpers_tests {
     use super::*;
+    use irys_types::DataTreeRoot;
     use irys_types::{DataRoot, H256, IrysSignature, ingress::IngressProof};
 
     fn dummy_chunk() -> UnpackedChunk {
         UnpackedChunk {
-            data_root: DataRoot::from([0_u8; 32]),
+            data_tree_root: DataTreeRoot(DataRoot::from([0_u8; 32])),
             data_size: 0,
             tx_offset: 0_u32.into(),
             data_path: Default::default(),
@@ -911,15 +912,19 @@ mod overload_helpers_tests {
         let chunk = dummy_chunk();
         assert!(
             !state
-                .pending_contains(chunk.data_root, chunk.tx_offset)
+                .pending_contains(chunk.data_tree_root.0, chunk.tx_offset)
                 .await
         );
         pending.write().await.put(chunk.clone());
         assert!(
             state
-                .pending_contains(chunk.data_root, chunk.tx_offset)
+                .pending_contains(chunk.data_tree_root.0, chunk.tx_offset)
                 .await
         );
-        assert!(!state.pending_contains(chunk.data_root, 1_u32.into()).await);
+        assert!(
+            !state
+                .pending_contains(chunk.data_tree_root.0, 1_u32.into())
+                .await
+        );
     }
 }

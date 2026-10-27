@@ -194,14 +194,14 @@ impl BackgroundWriter {
                         if is_duplicate {
                             warn!(
                                 "Duplicate chunk {} of {} in write-behind batch",
-                                chunk_path_hash, pending.chunk.data_root
+                                chunk_path_hash, pending.chunk.data_tree_root
                             );
                         } else {
                             written += 1;
                         }
                         store_ingress_data_hash(
                             tx,
-                            pending.chunk.data_root,
+                            pending.chunk.data_tree_root.0,
                             self.address,
                             pending.chunk.tx_offset,
                             *ingress_data_hash,
@@ -211,7 +211,7 @@ impl BackgroundWriter {
                     Err(e) => {
                         error!(
                             "Failed to cache chunk {} of {}: {:?}",
-                            chunk_path_hash, pending.chunk.data_root, e
+                            chunk_path_hash, pending.chunk.data_tree_root, e
                         );
                         return Err(e);
                     }
@@ -251,6 +251,7 @@ mod tests {
         tables::{CachedDataRoots, IrysTables},
     };
     use irys_testing_utils::TempDirBuilder;
+    use irys_types::DataTreeRoot;
     use irys_types::{Base64, H256, TxChunkOffset};
     use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
 
@@ -269,7 +270,7 @@ mod tests {
         // The stored repeat-byte hash intentionally conflicts with the hash
         // generated from these bytes, forcing the whole auto-drained batch to fail.
         let chunk = Arc::new(UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 8,
             data_path: Base64::default(),
             bytes: Base64(vec![7_u8; 8]),
@@ -323,7 +324,7 @@ mod tests {
         let address = IrysAddress::random();
         let tx_offset = TxChunkOffset::from(0_u32);
         let chunk = Arc::new(UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 8,
             data_path: Base64::default(),
             bytes: Base64(vec![7_u8; 8]),

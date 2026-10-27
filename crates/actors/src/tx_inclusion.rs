@@ -273,6 +273,7 @@ mod tests {
     };
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_testing_utils::utils::{TempDirBuilder, tempfile};
+    use irys_types::DataTreeRoot;
     use irys_types::{
         BlockTransactions, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
         DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
@@ -338,7 +339,7 @@ mod tests {
         let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },

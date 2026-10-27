@@ -989,7 +989,7 @@ async fn get_publish_txs_and_proofs(
         // Filter out any tx headers with the wrong data_size for this data_root
         tx_headers.retain(|tx| {
             cached_data_roots
-                .get(&tx.data_root)
+                .get(&tx.data_tree_root.0)
                 .is_none_or(|cdr| !cdr.data_size_confirmed || tx.data_size == cdr.data_size)
         });
 
@@ -1100,7 +1100,7 @@ async fn get_publish_txs_and_proofs(
                     Ok(None) => {
                         warn!(
                             tx.id = ?tx_header.id,
-                            tx.data_root = ?tx_header.data_root,
+                            tx.data_root = ?tx_header.data_tree_root,
                             "Unable to find previous submit inclusion for publish candidate"
                         );
                         continue;
@@ -1116,7 +1116,7 @@ async fn get_publish_txs_and_proofs(
                         );
                         warn!(
                             tx.id = ?tx_header.id,
-                            tx.data_root = ?tx_header.data_root,
+                            tx.data_root = ?tx_header.data_tree_root,
                             error = %e,
                             "canonical_submit_height failed for publish candidate; skipping"
                         );
@@ -1146,7 +1146,7 @@ async fn get_publish_txs_and_proofs(
             {
                 warn!(
                     tx.id = ?tx_header.id,
-                    tx.data_root = ?tx_header.data_root,
+                    tx.data_root = ?tx_header.data_tree_root,
                     next_block_height,
                     "Submit-ledger storage expired; tx is non-promotable (would conflict with perm_fee refund) — see NC-0042",
                 );
@@ -1158,7 +1158,9 @@ async fn get_publish_txs_and_proofs(
             // Get all the proofs for this tx
             let mut all_proofs = ctx
                 .db
-                .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
+                .view_eyre(|read_tx| {
+                    ingress_proofs_by_data_root(read_tx, tx_header.data_tree_root.0)
+                })?
                 .into_iter()
                 .filter(|(_root, cached_proof)| {
                     let expired = ChunkIngressServiceInner::is_ingress_proof_expired_static(
@@ -1179,7 +1181,7 @@ async fn get_publish_txs_and_proofs(
             if all_proofs.len() < pre_dedup_len {
                 warn!(
                     tx.id = ?tx_header.id,
-                    tx.data_root = ?tx_header.data_root,
+                    tx.data_root = ?tx_header.data_tree_root,
                     before = pre_dedup_len,
                     after = all_proofs.len(),
                     "Duplicate ingress proof signers detected for data root, deduplicating"
@@ -1248,7 +1250,7 @@ async fn get_publish_txs_and_proofs(
                     );
                     warn!(
                         tx.id = %tx_header.id,
-                        data_root = %tx_header.data_root,
+                        data_root = %tx_header.data_tree_root,
                         current_height,
                         error = %e,
                         "tx_selector.assigned_proofs_lookup_failed"

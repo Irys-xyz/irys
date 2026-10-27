@@ -1865,7 +1865,7 @@ fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8], off
         for &i in offsets {
             let node = &tx.chunks[i];
             let chunk = UnpackedChunk {
-                data_root: tx.header.data_root,
+                data_tree_root: tx.header.data_tree_root,
                 data_size: tx.header.data_size,
                 data_path: Base64(tx.proofs[i].proof.clone()),
                 bytes: Base64(data[node.min_byte_range..node.max_byte_range].to_vec()),

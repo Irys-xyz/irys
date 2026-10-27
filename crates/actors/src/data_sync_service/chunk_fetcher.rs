@@ -746,6 +746,7 @@ mod tests {
 mod response_cap_tests {
     use super::{ChunkFetchError, HttpChunkFetcher};
     use crate::chunk_fetcher::ChunkFetcher as _;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         Base64, ChunkFormat, ConsensusConfig, DEFAULT_MAX_PEER_RESPONSE_BYTES, H256,
         LedgerChunkOffset, TxChunkOffset, UnpackedChunk,
@@ -779,7 +780,7 @@ mod response_cap_tests {
 
     fn chunk_json(byte_len: usize, data_path_len: usize) -> Vec<u8> {
         let chunk = ChunkFormat::Unpacked(UnpackedChunk {
-            data_root: H256::zero(),
+            data_tree_root: DataTreeRoot(H256::zero()),
             data_size: u64::try_from(byte_len).expect("len"),
             data_path: Base64(vec![0xAB; data_path_len]),
             bytes: Base64(vec![0x11; byte_len]),

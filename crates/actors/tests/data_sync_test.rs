@@ -732,7 +732,7 @@ impl TestSetup {
         let mut chunks = Vec::new();
         let chunk_size = chunk_size as usize;
         for (chunk_index, _chunk_node) in tx.chunks.iter().enumerate() {
-            let data_root = tx.header.data_root;
+            let data_root = tx.header.data_tree_root;
             let data_size = tx.header.data_size;
 
             let proof = &tx.proofs[chunk_index];
@@ -745,7 +745,7 @@ impl TestSetup {
             let bytes = Base64(tx.data.as_ref().unwrap().0[start_idx..end_idx].to_vec());
 
             let chunk = UnpackedChunk {
-                data_root,
+                data_tree_root: data_root,
                 data_size,
                 data_path,
                 bytes,
@@ -870,7 +870,7 @@ impl TestSetup {
         let packed_data = packing_xor_vec_u8(entropy_chunk, &chunk.bytes.0)
             .expect("test chunk fits the entropy buffer");
         PackedChunk {
-            data_root: chunk.data_root,
+            data_tree_root: chunk.data_tree_root,
             data_size: chunk.data_size,
             data_path: chunk.data_path.clone(),
             bytes: irys_types::Base64(packed_data),

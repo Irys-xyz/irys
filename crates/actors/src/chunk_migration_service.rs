@@ -10,6 +10,7 @@ use irys_domain::{
     get_overlapped_storage_modules,
 };
 use irys_storage::ie;
+use irys_types::DataTreeRoot;
 use irys_types::{
     Base64, BlockHash, Config, DataLedger, DataRoot, DataTransactionHeader, DataTransactionLedger,
     H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof, SendTraced as _,
@@ -626,7 +627,7 @@ fn fill_submit_misses(
                 let Some(body) = read.into_iter().next().flatten() else {
                     continue;
                 };
-                if body.data_root != data_root || body.tx_offset != tx_offset {
+                if body.data_tree_root != DataTreeRoot(data_root) || body.tx_offset != tx_offset {
                     tracing::warn!(
                         data_root = %data_root,
                         %tx_offset,
@@ -795,7 +796,7 @@ fn write_chunk_to_module(
             e => {
                 error!(
                     "Failed to write chunk for data_root {:?} chunk_offset {} data_size {}: {:?}",
-                    chunk.data_root, chunk.tx_offset, chunk.data_size, e
+                    chunk.data_tree_root, chunk.tx_offset, chunk.data_size, e
                 );
                 MigrationError::ChunkDataWrite
             }
@@ -892,7 +893,7 @@ pub(crate) fn validate_chunk_parts_for_migration(
         )));
     }
     Ok(UnpackedChunk {
-        data_root,
+        data_tree_root: DataTreeRoot(data_root),
         data_size,
         data_path,
         bytes,
@@ -1255,7 +1256,7 @@ mod tests {
                 cache_data_root(wtx, &self.tx.header, None)?;
                 for (i, node) in self.tx.chunks.iter().enumerate() {
                     let chunk = UnpackedChunk {
-                        data_root: self.tx.header.data_root,
+                        data_tree_root: self.tx.header.data_tree_root,
                         data_size: self.tx.header.data_size,
                         data_path: Base64(self.tx.proofs[i].proof.clone()),
                         bytes: Base64(self.data[node.min_byte_range..node.max_byte_range].to_vec()),
@@ -1357,7 +1358,7 @@ mod tests {
         assert_ne!(f.chunk_type(0), Some(ChunkType::Data));
         assert!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_root,
+                f.tx.header.data_tree_root.0,
                 TxChunkOffset::from(0)
             )?
             .is_some()
@@ -1396,14 +1397,14 @@ mod tests {
         let rows = f.rows()?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, PartitionChunkOffset::from(0));
-        assert_eq!(rows[0].1.data_root, f.tx.header.data_root);
+        assert_eq!(rows[0].1.data_root, f.tx.header.data_tree_root.0);
         assert_eq!(rows[0].1.attempts, 0);
 
         assert!(!f.sm.has_pending_writes());
         assert_ne!(f.chunk_type(0), Some(ChunkType::Data));
         assert_eq!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_root,
+                f.tx.header.data_tree_root.0,
                 TxChunkOffset::from(2)
             )?,
             Some(vec![PartitionChunkOffset::from(2)])
@@ -1436,7 +1437,7 @@ mod tests {
         );
         assert!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_root,
+                f.tx.header.data_tree_root.0,
                 TxChunkOffset::from(0)
             )?
             .is_none(),
@@ -1503,7 +1504,7 @@ mod tests {
         assert_eq!(rows[0].1.start_offset.0, 4);
         assert_eq!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_root,
+                f.tx.header.data_tree_root.0,
                 TxChunkOffset::from(0)
             )?,
             Some(vec![PartitionChunkOffset::from(4)])
@@ -1716,7 +1717,7 @@ mod tests {
         assert_ne!(f.chunk_type(0), Some(ChunkType::Data));
         assert!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_root,
+                f.tx.header.data_tree_root.0,
                 TxChunkOffset::from(0)
             )?
             .is_some()
@@ -1745,7 +1746,7 @@ mod tests {
         let sibling_root = H256::repeat_byte(0x42);
         submodule.db.update(|tx| {
             tx.add_data_root_info(
-                f.tx.header.data_root,
+                f.tx.header.data_tree_root.0,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(1),
                     data_size: f.tx.header.data_size,
@@ -1761,7 +1762,7 @@ mod tests {
         })?;
 
         let queued = f.sm.deposit_data_chunks(&[UnpackedChunk {
-            data_root: sibling_root,
+            data_tree_root: DataTreeRoot(sibling_root),
             data_size: chunk_size,
             data_path: Base64(vec![1, 2, 3, 4]),
             bytes: Base64(vec![9_u8; chunk_size as usize]),
@@ -1779,7 +1780,7 @@ mod tests {
         assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
         assert_eq!(
             f.sm.partition_offsets_for_data_root_chunk(
-                f.tx.header.data_root,
+                f.tx.header.data_tree_root.0,
                 TxChunkOffset::from(0)
             )?,
             Some(vec![
@@ -1877,7 +1878,7 @@ mod tests {
         let sibling_start = i32::try_from(sibling_at)?;
         submodule.db.update(|tx| {
             tx.add_data_root_info(
-                f.tx.header.data_root,
+                f.tx.header.data_tree_root.0,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(sibling_start),
                     data_size: chunk_size,
@@ -1892,7 +1893,7 @@ mod tests {
             )
         })?;
         let queued = f.sm.deposit_data_chunks(&[UnpackedChunk {
-            data_root: sibling_root,
+            data_tree_root: DataTreeRoot(sibling_root),
             data_size: chunk_size,
             data_path: Base64(vec![1, 2, 3, 4]),
             bytes: Base64(vec![9_u8; chunk_size as usize]),
@@ -2215,7 +2216,7 @@ mod tests {
                 cache_chunk(
                     wtx,
                     &UnpackedChunk {
-                        data_root: tx.header.data_root,
+                        data_tree_root: tx.header.data_tree_root,
                         data_size: tx.header.data_size,
                         data_path: Base64(tx.proofs[0].proof.clone()),
                         bytes: Base64(data[node.min_byte_range..node.max_byte_range].to_vec()),
@@ -2404,7 +2405,7 @@ mod tests {
         let data_root = H256::random();
         let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size: SPAN * chunk_size,
                 ..Default::default()
             },
@@ -2502,7 +2503,7 @@ mod tests {
         let data_root = H256::random();
         let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size: SPAN * chunk_size,
                 ..Default::default()
             },
@@ -2565,7 +2566,7 @@ mod tests {
         f.sm.pack_with_zeros();
         f.index()?;
         let chunk = UnpackedChunk {
-            data_root: f.tx.header.data_root,
+            data_tree_root: f.tx.header.data_tree_root,
             data_size: f.tx.header.data_size,
             data_path: Base64(f.tx.proofs[0].proof.clone()),
             bytes: Base64(f.data.clone()),
@@ -2736,7 +2737,7 @@ mod tests {
     fn unpacked_at(f: &Fixture, index: usize) -> UnpackedChunk {
         let node = &f.tx.chunks[index];
         UnpackedChunk {
-            data_root: f.tx.header.data_root,
+            data_tree_root: f.tx.header.data_tree_root,
             data_size: f.tx.header.data_size,
             data_path: Base64(f.tx.proofs[index].proof.clone()),
             bytes: Base64(f.data[node.min_byte_range..node.max_byte_range].to_vec()),
@@ -2798,7 +2799,7 @@ mod tests {
             &f.guard,
             &f.db,
             DataLedger::Publish,
-            f.tx.header.data_root,
+            f.tx.header.data_tree_root.0,
             f.tx.header.data_size,
             TxChunkOffset::from(18),
             3,
@@ -2841,7 +2842,7 @@ mod tests {
         let mut bodies = vec![None, None];
         fill_submit_misses(
             &guard,
-            f.tx.header.data_root,
+            f.tx.header.data_tree_root.0,
             f.tx.header.data_size,
             TxChunkOffset::from(19),
             &[0, 1],
@@ -2872,7 +2873,7 @@ mod tests {
         let mut bodies = vec![None, None];
         fill_submit_misses(
             &f.guard,
-            f.tx.header.data_root,
+            f.tx.header.data_tree_root.0,
             f.tx.header.data_size,
             TxChunkOffset::from(0),
             &[0, 1],
@@ -3052,8 +3053,10 @@ mod tests {
         ])));
         index_publish(&f, &guard)?;
         broken.fail_data_root_index_reads(true);
-        let index_read = broken
-            .partition_offsets_for_data_root_chunk(f.tx.header.data_root, TxChunkOffset::from(0));
+        let index_read = broken.partition_offsets_for_data_root_chunk(
+            f.tx.header.data_tree_root.0,
+            TxChunkOffset::from(0),
+        );
         assert!(
             index_read.is_err(),
             "the earlier Submit module's index read must fail, got {index_read:?}"
@@ -3124,8 +3127,10 @@ mod tests {
         ])));
         index_publish(&f, &guard)?;
         broken.fail_data_root_index_reads(true);
-        let index_read = broken
-            .partition_offsets_for_data_root_chunk(f.tx.header.data_root, TxChunkOffset::from(0));
+        let index_read = broken.partition_offsets_for_data_root_chunk(
+            f.tx.header.data_tree_root.0,
+            TxChunkOffset::from(0),
+        );
         assert!(
             index_read.is_err(),
             "the Submit module's index read must fail, got {index_read:?}"
@@ -3302,7 +3307,7 @@ mod tests {
         f.sm.clear_data_root_infos_in_range(
             PartitionChunkOffset::from(0),
             PartitionChunkOffset::from(2),
-            &[f.tx.header.data_root],
+            &[f.tx.header.data_tree_root.0],
         )?;
         let worker = f.worker();
 

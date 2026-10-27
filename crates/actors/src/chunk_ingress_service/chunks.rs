@@ -170,7 +170,7 @@ async fn write_chunk_to_assigned_modules(
                 error!(
                     ?error,
                     storage_module = sm.id,
-                    data_root = ?chunk.data_root,
+                    data_root = ?chunk.data_tree_root,
                     tx_offset = %chunk.tx_offset,
                     "Failed to resolve writeable offsets"
                 );
@@ -189,7 +189,7 @@ async fn write_chunk_to_assigned_modules(
             target: "irys::mempool::chunk_ingress",
             "Writing chunk with offset {} for data_root {} to sm {}",
             &chunk.tx_offset,
-            &chunk.data_root,
+            &chunk.data_tree_root,
             &sm.id
         );
         match sm.write_data_chunk_queued(chunk).await {
@@ -201,7 +201,7 @@ async fn write_chunk_to_assigned_modules(
             Err(error) => {
                 error!(
                     "Failed to write chunk data_root {:?} tx_offset {} to storage_module {}: {:?}",
-                    chunk.data_root, chunk.tx_offset, sm.id, error
+                    chunk.data_tree_root, chunk.tx_offset, sm.id, error
                 );
                 return Err(ChunkIngressError::Critical(
                     CriticalChunkIngressError::Other(format!(
@@ -287,7 +287,7 @@ impl ChunkIngressServiceInner {
         if chunk_len_u64 > chunk_size {
             warn!(
                 "Dropping pre-header chunk for {} at offset {}: bytes.len() {} exceeds chunk_size {}",
-                &chunk.data_root,
+                &chunk.data_tree_root,
                 &chunk.tx_offset,
                 chunk.bytes.len(),
                 chunk_size
@@ -298,7 +298,7 @@ impl ChunkIngressServiceInner {
         if chunk.data_path.0.len() > preheader_data_path_max_bytes {
             warn!(
                 "Dropping pre-header chunk for {} at offset {}: data_path too large ({} > {})",
-                &chunk.data_root,
+                &chunk.data_tree_root,
                 &chunk.tx_offset,
                 chunk.data_path.0.len(),
                 preheader_data_path_max_bytes
@@ -310,7 +310,11 @@ impl ChunkIngressServiceInner {
             let max_offset = chunk.max_valid_offset(chunk_size);
             warn!(
                 "Dropping pre-header chunk for {} at offset {}: tx_offset {} exceeds max valid offset {:?} for data_size {}",
-                &chunk.data_root, &chunk.tx_offset, *chunk.tx_offset, max_offset, chunk.data_size
+                &chunk.data_tree_root,
+                &chunk.tx_offset,
+                *chunk.tx_offset,
+                max_offset,
+                chunk.data_size
             );
             return Err(AdvisoryChunkIngressError::PreHeaderInvalidOffset(format!(
                 "tx_offset {} exceeds max valid offset {:?} for data_size {}",
@@ -333,11 +337,14 @@ impl ChunkIngressServiceInner {
         role: PendingDrainRole,
         kind: &'static str,
     ) -> Result<bool, IngressFailure> {
-        let data_root = chunk.data_root;
+        let data_root = chunk.data_tree_root;
         let tx_offset = chunk.tx_offset;
         let mut pending = self.pending_chunks.write().await;
-        let current = pending.get(&data_root).map(lru::LruCache::len).unwrap_or(0);
-        match pending.drain_admission(&data_root, current, cap, role == PendingDrainRole::Own) {
+        let current = pending
+            .get(&data_root.0)
+            .map(lru::LruCache::len)
+            .unwrap_or(0);
+        match pending.drain_admission(&data_root.0, current, cap, role == PendingDrainRole::Own) {
             super::pending_chunks::DrainAdmission::RejectOwn => {
                 warn!(
                     "Rejecting {kind} chunk for {} at offset {}: data root drain in progress",
@@ -511,7 +518,7 @@ impl ChunkIngressServiceInner {
         schedule_pending_drain_retry(self.service_senders.clone(), data_root);
     }
 
-    #[instrument(level = "info", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
+    #[instrument(level = "info", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_tree_root, chunk.tx_offset = ?chunk.tx_offset))]
     pub(crate) async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
@@ -531,7 +538,7 @@ impl ChunkIngressServiceInner {
         let chunk_size = self.config.consensus.chunk_size;
 
         info!(
-            chunk.data_root = ?chunk.data_root,
+            chunk.data_root = ?chunk.data_tree_root,
             chunk.tx_offset = %chunk.tx_offset,
             chunk.data_size = chunk.data_size,
             "Processing chunk"
@@ -559,12 +566,12 @@ impl ChunkIngressServiceInner {
         let cached_data_root = self
             .irys_db
             .view_eyre(|read_tx| {
-                irys_database::cached_data_root_by_data_root(read_tx, chunk.data_root)
+                irys_database::cached_data_root_by_data_root(read_tx, chunk.data_tree_root.0)
             })
             .map_err(|e| {
                 error!(
                     "Database error fetching cached data_root for chunk data_root {:?} tx_offset {}: {:?}",
-                    chunk.data_root, chunk.tx_offset, e
+                    chunk.data_tree_root, chunk.tx_offset, e
                 );
                 CriticalChunkIngressError::DatabaseError
             })?;
@@ -573,7 +580,7 @@ impl ChunkIngressServiceInner {
             Some(cdr) => (Some(cdr.data_size), cdr.data_size_confirmed),
             None => {
                 debug!(
-                    chunk.data_root = ?chunk.data_root,
+                    chunk.data_root = ?chunk.data_tree_root,
                     chunk.tx_offset = ?chunk.tx_offset,
                     "Checking SMs for data_size"
                 );
@@ -588,7 +595,8 @@ impl ChunkIngressServiceInner {
                         .filter_map(|sm| {
                             span.in_scope(|| {
                                 irys_domain::with_index_caller(irys_domain::INGRESS_SIZE, || {
-                                    let infos = sm.collect_data_root_infos(chunk.data_root).ok()?;
+                                    let infos =
+                                        sm.collect_data_root_infos(chunk.data_tree_root.0).ok()?;
                                     if infos.0.is_empty() {
                                         return None;
                                     }
@@ -620,7 +628,7 @@ impl ChunkIngressServiceInner {
                         // Submit ledger data needs verification
                         let confirmed = self.verify_data_size_from_storage_modules(
                             &storage_modules_guard,
-                            chunk.data_root,
+                            chunk.data_tree_root.0,
                             selected.data_size,
                         );
                         (Some(selected.data_size), confirmed)
@@ -646,7 +654,7 @@ impl ChunkIngressServiceInner {
 
                 // The count check and the insert share one write lock so concurrent
                 // ingress cannot exceed the per-item cap.
-                let data_root = chunk.data_root;
+                let data_root = chunk.data_tree_root;
                 let tx_offset = chunk.tx_offset;
                 let during_drain = self
                     .park_pending_chunk(
@@ -670,7 +678,7 @@ impl ChunkIngressServiceInner {
                 // Skip this while a drain is active. That drain schedules one
                 // follow-up; a second pop now would race its restore.
                 if !during_drain {
-                    self.maybe_rescue_after_park(data_root, None);
+                    self.maybe_rescue_after_park(data_root.0, None);
                 }
                 return Ok(());
             }
@@ -695,7 +703,7 @@ impl ChunkIngressServiceInner {
                 // Same body, proof, and offset bounds: this branch returns
                 // before those fields are checked.
                 self.check_unconfirmed_chunk_bounds(chunk.as_ref(), chunk_size)?;
-                let data_root = chunk.data_root;
+                let data_root = chunk.data_tree_root;
                 let claimed_size = chunk.data_size;
                 let tx_offset = chunk.tx_offset;
                 let preheader_chunks_per_item = std::cmp::min(
@@ -722,7 +730,7 @@ impl ChunkIngressServiceInner {
                 // Skip this while a drain is active. That drain schedules one
                 // follow-up; a second pop now would race its restore.
                 if !during_drain {
-                    self.maybe_rescue_after_park(data_root, Some(claimed_size));
+                    self.maybe_rescue_after_park(data_root.0, Some(claimed_size));
                 }
                 return Ok(());
             }
@@ -745,7 +753,7 @@ impl ChunkIngressServiceInner {
             error!(
                 "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
                 CriticalChunkIngressError::InvalidDataSize,
-                chunk.data_root,
+                chunk.data_tree_root,
             );
             return Err(CriticalChunkIngressError::InvalidDataSize.into());
         }
@@ -754,7 +762,7 @@ impl ChunkIngressServiceInner {
             expected_chunk_byte_range(chunk.tx_offset, layout_data_size, chunk_size)
                 .map_err(|error| CriticalChunkIngressError::InvalidOffset(error.to_string()))?;
         let target_offset = u128::from(expected_max_byte_range - 1);
-        let root_hash = chunk.data_root.0;
+        let root_hash = chunk.data_tree_root.0.0;
         let path_buff = &chunk.data_path;
 
         info!(
@@ -828,14 +836,14 @@ impl ChunkIngressServiceInner {
                 .update_eyre(|db_tx| {
                     confirm_data_size_for_data_root(
                         db_tx,
-                        &chunk.data_root,
+                        &chunk.data_tree_root.0,
                         expected_max_byte_range,
                     )
                 })
                 .map_err(|error| {
                     error!(
                         %error,
-                        data_root = %chunk.data_root,
+                        data_root = %chunk.data_tree_root,
                         "Failed to confirm data-root size"
                     );
                     CriticalChunkIngressError::DatabaseError
@@ -859,7 +867,7 @@ impl ChunkIngressServiceInner {
             Err(e) => {
                 error!(
                     "Failed to queue chunk cache write for data_root {:?} tx_offset {}: {:?}",
-                    chunk.data_root, chunk.tx_offset, e
+                    chunk.data_tree_root, chunk.tx_offset, e
                 );
                 return Err(CriticalChunkIngressError::DatabaseError.into());
             }
@@ -877,7 +885,7 @@ impl ChunkIngressServiceInner {
         if let Err(error) = queued_write.committed().await {
             error!(
                 %error,
-                data_root = %chunk.data_root,
+                data_root = %chunk.data_tree_root,
                 tx_offset = %chunk.tx_offset,
                 "Chunk cache batch failed"
             );
@@ -907,7 +915,7 @@ impl ChunkIngressServiceInner {
             })?;
 
         // Gossip the chunk before moving onto ingress proof checks
-        let chunk_data_root = chunk.data_root;
+        let chunk_data_root = chunk.data_tree_root;
         let chunk_tx_offset = chunk.tx_offset;
         let gossip_broadcast_message = GossipBroadcastMessageV2::from(chunk);
 
@@ -928,7 +936,7 @@ impl ChunkIngressServiceInner {
         // validates every chunk can produce the same proof it could before the
         // compact-leaf refactor. Storage-module durability separately authorizes
         // body reclamation; leaf presence alone is never an eviction fence.
-        self.try_generate_ingress_proof_for_root(chunk_data_root, chunk_size)
+        self.try_generate_ingress_proof_for_root(chunk_data_root.0, chunk_size)
             .map_err(|error| IngressFailure {
                 error,
                 body_committed: true,
@@ -1079,12 +1087,12 @@ impl ChunkIngressServiceInner {
         let reread = self
             .irys_db
             .view_eyre(|read_tx| {
-                irys_database::cached_data_root_by_data_root(read_tx, chunk.data_root)
+                irys_database::cached_data_root_by_data_root(read_tx, chunk.data_tree_root.0)
             })
             .map_err(|error| {
                 error!(
                     "Database error re-reading cached data_root for chunk data_root {:?} tx_offset {} after storage-module scan: {:?}",
-                    chunk.data_root, chunk.tx_offset, error
+                    chunk.data_tree_root, chunk.tx_offset, error
                 );
                 CriticalChunkIngressError::DatabaseError
             })?;
@@ -1370,6 +1378,7 @@ enum PendingDrainRole {
 mod tests {
     use super::*;
     use irys_database::db_cache::CachedDataRoot;
+    use irys_types::DataTreeRoot;
     use irys_types::TxChunkOffset;
     use irys_types::UnixTimestamp;
     use proptest::prelude::*;
@@ -1669,7 +1678,7 @@ mod tests {
         let data_root = H256::random();
         let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size: 5,
                 ..Default::default()
             },
@@ -1682,7 +1691,7 @@ mod tests {
             0,
         )?;
         let chunk = UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 5,
             data_path: vec![4, 3, 2, 1].into(),
             bytes: vec![0, 1, 2, 3, 4].into(),
@@ -1720,16 +1729,16 @@ mod tests {
             .build();
         let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
         let chunk = valid_single_chunk(vec![7_u8; 32]);
-        let data_root = chunk.data_root;
+        let data_root = chunk.data_tree_root;
         let tx_offset = chunk.tx_offset;
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, chunk.data_size);
+        insert_unconfirmed_cdr(&inner.irys_db, data_root.0, chunk.data_size);
         inner.pending_chunks.write().await.put(chunk);
 
-        inner.process_pending_chunks_for_root(data_root).await;
+        inner.process_pending_chunks_for_root(data_root.0).await;
 
         let pending = inner.pending_chunks.read().await;
         let parked = pending
-            .get(&data_root)
+            .get(&data_root.0)
             .and_then(|chunks| chunks.peek(&tx_offset));
         assert!(
             parked.is_some(),
@@ -1751,7 +1760,7 @@ mod tests {
         .into_parts();
         assert!(matches!(
             msg,
-            ChunkIngressMessage::ProcessPendingChunks(root) if root == data_root
+            ChunkIngressMessage::ProcessPendingChunks(root) if root == data_root.0
         ));
     }
 
@@ -1767,13 +1776,13 @@ mod tests {
         let cap = 2_usize;
         let (inner, mut receivers) = test_ingress_inner(&tmp, cap, cap);
         let drained = valid_single_chunk(vec![7_u8; 32]);
-        let data_root = drained.data_root;
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, drained.data_size);
+        let data_root = drained.data_tree_root;
+        insert_unconfirmed_cdr(&inner.irys_db, data_root.0, drained.data_size);
         {
             let mut pending = inner.pending_chunks.write().await;
             for offset in 1..=cap as u32 {
                 pending.put(UnpackedChunk {
-                    data_root,
+                    data_tree_root: data_root,
                     data_size: drained.data_size,
                     data_path: Default::default(),
                     bytes: vec![offset as u8].into(),
@@ -1782,11 +1791,11 @@ mod tests {
             }
         }
 
-        inner.finish_pending_drain(data_root, vec![drained]).await;
+        inner.finish_pending_drain(data_root.0, vec![drained]).await;
 
         let pending = inner.pending_chunks.read().await;
         let parked = pending
-            .get(&data_root)
+            .get(&data_root.0)
             .expect("acknowledged parks stay on the root");
         assert_eq!(parked.len(), cap + 1);
         assert!(
@@ -1810,7 +1819,7 @@ mod tests {
         .into_parts();
         assert!(matches!(
             msg,
-            ChunkIngressMessage::ProcessPendingChunks(root) if root == data_root
+            ChunkIngressMessage::ProcessPendingChunks(root) if root == data_root.0
         ));
     }
 
@@ -1824,19 +1833,19 @@ mod tests {
         let cap = 2_usize;
         let (inner, mut receivers) = test_ingress_inner(&tmp, cap, cap);
         let drained = valid_single_chunk(vec![7_u8; 32]);
-        let data_root = drained.data_root;
-        insert_unconfirmed_cdr(&inner.irys_db, data_root, drained.data_size);
+        let data_root = drained.data_tree_root;
+        insert_unconfirmed_cdr(&inner.irys_db, data_root.0, drained.data_size);
         {
             let mut pending = inner.pending_chunks.write().await;
             pending.put(UnpackedChunk {
-                data_root,
+                data_tree_root: data_root,
                 data_size: drained.data_size,
                 data_path: Default::default(),
                 bytes: vec![1_u8].into(),
                 tx_offset: TxChunkOffset::from(0),
             });
             pending.put(UnpackedChunk {
-                data_root,
+                data_tree_root: data_root,
                 data_size: drained.data_size,
                 data_path: Default::default(),
                 bytes: vec![2_u8].into(),
@@ -1844,10 +1853,10 @@ mod tests {
             });
         }
 
-        inner.finish_pending_drain(data_root, vec![drained]).await;
+        inner.finish_pending_drain(data_root.0, vec![drained]).await;
 
         let pending = inner.pending_chunks.read().await;
-        let parked = pending.get(&data_root).expect("root stays parked");
+        let parked = pending.get(&data_root.0).expect("root stays parked");
         assert_eq!(
             parked.len(),
             cap,
@@ -1875,7 +1884,7 @@ mod tests {
         .into_parts();
         assert!(matches!(
             msg,
-            ChunkIngressMessage::ProcessPendingChunks(root) if root == data_root
+            ChunkIngressMessage::ProcessPendingChunks(root) if root == data_root.0
         ));
     }
 
@@ -2100,11 +2109,11 @@ mod tests {
             .build();
         let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
         let chunk = valid_single_chunk(vec![9_u8; 32]);
-        let data_root = chunk.data_root;
+        let data_root = chunk.data_tree_root;
         let data_size = chunk.data_size;
         let db = inner.irys_db.clone();
         inner.after_missing_data_size_scan = Some(std::sync::Arc::new(move || {
-            insert_unconfirmed_cdr(&db, data_root, data_size);
+            insert_unconfirmed_cdr(&db, data_root.0, data_size);
         }));
 
         let err = inner
@@ -2119,7 +2128,12 @@ mod tests {
             "{err:?}"
         );
         assert!(
-            inner.pending_chunks.read().await.get(&data_root).is_none(),
+            inner
+                .pending_chunks
+                .read()
+                .await
+                .get(&data_root.0)
+                .is_none(),
             "the chunk must not be parked once the header is visible"
         );
     }
@@ -2133,7 +2147,7 @@ mod tests {
             .build();
         let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
         let chunk = valid_single_chunk(vec![8_u8; 32]);
-        let data_root = chunk.data_root;
+        let data_root = chunk.data_tree_root;
         let data_size = chunk.data_size;
         let db = inner.irys_db.clone();
         let pending = std::sync::Arc::clone(&inner.pending_chunks);
@@ -2142,11 +2156,11 @@ mod tests {
         > = std::sync::Arc::new(std::sync::Mutex::new(None));
         let slot = std::sync::Arc::clone(&ticket_slot);
         inner.after_missing_data_size_scan = Some(std::sync::Arc::new(move || {
-            insert_unconfirmed_cdr(&db, data_root, data_size);
+            insert_unconfirmed_cdr(&db, data_root.0, data_size);
             let guard = pending
                 .try_write()
                 .expect("pending lock is free during the scan");
-            let ticket = guard.begin_drain(data_root, 1);
+            let ticket = guard.begin_drain(data_root.0, 1);
             *slot.lock().expect("ticket slot") = Some(ticket);
         }));
 
@@ -2162,7 +2176,12 @@ mod tests {
             "{err:?}"
         );
         assert!(
-            inner.pending_chunks.read().await.get(&data_root).is_none(),
+            inner
+                .pending_chunks
+                .read()
+                .await
+                .get(&data_root.0)
+                .is_none(),
             "the chunk must not be parked once the header is visible"
         );
         drop(ticket_slot.lock().expect("ticket slot").take());
@@ -2664,7 +2683,7 @@ mod tests {
 
     fn chunk_with(data_root: H256, offset: u32, byte: u8, data_size: u64) -> UnpackedChunk {
         UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size,
             data_path: Default::default(),
             bytes: vec![byte].into(),
@@ -2748,22 +2767,22 @@ mod tests {
             .build();
         let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
         let chunk = UnpackedChunk {
-            data_root: H256([0x11; 32]),
+            data_tree_root: DataTreeRoot(H256([0x11; 32])),
             data_size: 33,
             data_path: Default::default(),
             bytes: vec![1_u8; 33].into(),
             tx_offset: TxChunkOffset::from(0),
         };
-        let data_root = chunk.data_root;
+        let data_root = chunk.data_tree_root;
         let tx_offset = chunk.tx_offset;
         inner.pending_chunks.write().await.put(chunk);
 
-        inner.process_pending_chunks_for_root(data_root).await;
+        inner.process_pending_chunks_for_root(data_root.0).await;
 
         let pending = inner.pending_chunks.read().await;
         assert!(
             pending
-                .get(&data_root)
+                .get(&data_root.0)
                 .and_then(|chunks| chunks.peek(&tx_offset))
                 .is_none(),
             "validation failure must stay dropped"
@@ -2784,7 +2803,7 @@ mod tests {
             let mut pending = inner.pending_chunks.write().await;
             for offset in 0..2_u32 {
                 pending.put(UnpackedChunk {
-                    data_root,
+                    data_tree_root: DataTreeRoot(data_root),
                     data_size: 20,
                     data_path: Default::default(),
                     bytes: vec![offset as u8].into(),
@@ -2795,7 +2814,7 @@ mod tests {
         // `CLAIMED_DATA_SIZE` covers offset 2 at the test `chunk_size` of 32.
         // A smaller claim is an invalid offset and never reaches the cap.
         let incoming = UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: CLAIMED_DATA_SIZE,
             data_path: Default::default(),
             bytes: vec![9_u8].into(),
@@ -2830,7 +2849,7 @@ mod tests {
         let data_root = H256([0x33; 32]);
         insert_unconfirmed_cdr(&inner.irys_db, data_root, 10);
         inner.pending_chunks.write().await.put(UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 20,
             data_path: Default::default(),
             bytes: vec![1_u8].into(),
@@ -2838,7 +2857,7 @@ mod tests {
         });
         // `CLAIMED_DATA_SIZE` covers offset 1 at the test `chunk_size` of 32.
         let incoming = UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: CLAIMED_DATA_SIZE,
             data_path: Default::default(),
             bytes: vec![2_u8].into(),
@@ -3063,7 +3082,7 @@ mod tests {
 
         let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 data_size,
                 ..Default::default()
             },
@@ -3085,7 +3104,7 @@ mod tests {
             .next()
             .expect("one proof");
         UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: chunk_size as u64,
             data_path: proof.proof.into(),
             bytes: bytes.into(),

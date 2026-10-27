@@ -1977,6 +1977,7 @@ impl ChunkCacheService {
 
 #[cfg(test)]
 mod tests {
+    use irys_types::DataTreeRoot;
     /// Cache tests exercise pruning policy, not storage placement; an empty
     /// module set means "nothing is durably stored locally".
     fn test_storage_modules_guard() -> StorageModulesReadGuard {
@@ -2112,15 +2113,15 @@ mod tests {
         })??;
         db.update(|wtx| {
             let mut cdr = wtx
-                .get::<CachedDataRoots>(tx_header.data_root)?
+                .get::<CachedDataRoots>(tx_header.data_tree_root.0)?
                 .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry"))?;
             cdr.expiry_height = Some(expiry_height);
-            wtx.put::<CachedDataRoots>(tx_header.data_root, cdr)?;
+            wtx.put::<CachedDataRoots>(tx_header.data_tree_root.0, cdr)?;
             eyre::Ok(())
         })??;
         if with_chunk {
             let chunk = UnpackedChunk {
-                data_root: tx_header.data_root,
+                data_tree_root: tx_header.data_tree_root,
                 data_size: tx_header.data_size,
                 data_path: Base64(vec![]),
                 bytes: Base64(vec![0_u8; 8]),
@@ -2131,9 +2132,9 @@ mod tests {
                 eyre::Ok(())
             })??;
         }
-        let data_root = tx_header.data_root;
+        let data_root = tx_header.data_tree_root;
         db.view(|rtx| -> eyre::Result<()> {
-            let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
+            let has_root = rtx.get::<CachedDataRoots>(data_root.0)?.is_some();
             eyre::ensure!(has_root, "CachedDataRoots missing before prune");
             Ok(())
         })??;
@@ -2169,7 +2170,7 @@ mod tests {
             txid_prune_running: false,
             txid_prune_queue: VecDeque::new(),
         };
-        Ok((temp_dir, db, data_root, service))
+        Ok((temp_dir, db, data_root.0, service))
     }
 
     /// A mempool-only root (empty `block_set`, future expiry) must survive
@@ -2251,7 +2252,7 @@ mod tests {
             eyre::Ok(())
         })??;
         let chunk = UnpackedChunk {
-            data_root: tx_header.data_root,
+            data_tree_root: tx_header.data_tree_root,
             data_size: tx_header.data_size,
             data_path: Base64(vec![]),
             bytes: Base64(vec![2_u8; 8]),
@@ -2261,13 +2262,13 @@ mod tests {
             database::cache_chunk(wtx, &chunk)?;
             // Mark the cached chunk as very old so it qualifies for age-based pruning
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
-            let mut walk = cur.walk_dup(Some(tx_header.data_root), None)?;
+            let mut walk = cur.walk_dup(Some(tx_header.data_tree_root.0), None)?;
             while let Some((_k, entry)) = walk.next().transpose()? {
                 // Delete the current index entry and reinsert with an old timestamp
-                wtx.delete::<CachedChunksIndex>(tx_header.data_root, Some(entry.clone()))?;
+                wtx.delete::<CachedChunksIndex>(tx_header.data_tree_root.0, Some(entry.clone()))?;
                 let mut updated = entry.clone();
                 updated.meta.updated_at = UnixTimestamp::from_secs(0);
-                wtx.put::<CachedChunksIndex>(tx_header.data_root, updated)?;
+                wtx.put::<CachedChunksIndex>(tx_header.data_tree_root.0, updated)?;
             }
             eyre::Ok(())
         })??;
@@ -2282,7 +2283,7 @@ mod tests {
         if local_proof {
             db.update(|wtx| {
                 let mut ingress_proof = IngressProof::default();
-                ingress_proof.data_root = tx_header.data_root;
+                ingress_proof.data_root = tx_header.data_tree_root.0;
                 irys_database::store_external_ingress_proof_checked(
                     wtx,
                     &ingress_proof,
@@ -2293,7 +2294,7 @@ mod tests {
         }
         if no_root_record {
             db.update(|wtx| {
-                wtx.delete::<CachedDataRoots>(tx_header.data_root, None)?;
+                wtx.delete::<CachedDataRoots>(tx_header.data_tree_root.0, None)?;
                 eyre::Ok(())
             })??;
         }
@@ -2301,7 +2302,7 @@ mod tests {
             db.update(|wtx| {
                 irys_database::store_ingress_data_hash(
                     wtx,
-                    tx_header.data_root,
+                    tx_header.data_tree_root.0,
                     config.irys_signer().address(),
                     TxChunkOffset::from(0_u32),
                     H256::random(),
@@ -2314,7 +2315,7 @@ mod tests {
             let durable_offsets: &[u32] = if durable { &[0] } else { &[] };
             storage_modules_guard_with_durable(
                 _temp_dir.path().join("sm"),
-                tx_header.data_root,
+                tx_header.data_tree_root.0,
                 tx_header.data_size,
                 durable_offsets,
             )?
@@ -2338,11 +2339,11 @@ mod tests {
         let tally = service_task.prune_durably_migrated_chunk_bodies(10)?;
         let survives = db.view(|rtx| -> eyre::Result<bool> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
+            let mut walk = dup_cursor.walk(Some(tx_header.data_tree_root.0))?;
             Ok(walk
                 .next()
                 .transpose()?
-                .is_some_and(|(root, _)| root == tx_header.data_root))
+                .is_some_and(|(root, _)| root == tx_header.data_tree_root.0))
         })??;
         Ok((survives, tally))
     }
@@ -2604,7 +2605,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        let data_root = tx_header.data_root;
+        let data_root = tx_header.data_tree_root;
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             database::insert_tx_header(wtx, &tx_header)?;
@@ -2616,7 +2617,7 @@ mod tests {
             }
             for offset in 0..chunk_count {
                 let chunk = UnpackedChunk {
-                    data_root,
+                    data_tree_root: data_root,
                     data_size,
                     data_path: Base64(vec![offset as u8]),
                     bytes: Base64(vec![2_u8; 8]),
@@ -2626,16 +2627,16 @@ mod tests {
             }
             if chunk_count > 0 {
                 let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
-                let mut walk = cur.walk_dup(Some(data_root), None)?;
+                let mut walk = cur.walk_dup(Some(data_root.0), None)?;
                 while let Some((_k, entry)) = walk.next().transpose()? {
-                    wtx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
+                    wtx.delete::<CachedChunksIndex>(data_root.0, Some(entry.clone()))?;
                     let mut updated = entry.clone();
                     updated.meta.updated_at = UnixTimestamp::from_secs(0);
-                    wtx.put::<CachedChunksIndex>(data_root, updated)?;
+                    wtx.put::<CachedChunksIndex>(data_root.0, updated)?;
                 }
             }
             let mut proof = IngressProof::default();
-            proof.data_root = data_root;
+            proof.data_root = data_root.0;
             proof.anchor = H256::random();
             let address = if local_proof {
                 config.irys_signer().address()
@@ -2650,7 +2651,7 @@ mod tests {
         let storage_modules_guard = match persisted_offsets {
             Some(offsets) => storage_modules_guard_with_durable(
                 sm_dir.path().to_path_buf(),
-                data_root,
+                data_root.0,
                 data_size,
                 offsets,
             )?,
@@ -2679,11 +2680,11 @@ mod tests {
         service_task.prune_cache(10)?;
 
         let proofs = db.view_eyre(|rtx| {
-            Ok(irys_database::ingress_proofs_by_data_root(rtx, data_root)?.len())
+            Ok(irys_database::ingress_proofs_by_data_root(rtx, data_root.0)?.len())
         })?;
         let chunks = db.view_eyre(|rtx| {
             let mut cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let walker = cursor.walk_dup(Some(data_root), None)?;
+            let walker = cursor.walk_dup(Some(data_root.0), None)?;
             let rows = walker.collect::<Result<Vec<_>, _>>()?;
             Ok(rows.len())
         })?;
@@ -2742,7 +2743,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        let data_root = tx_header.data_root;
+        let data_root = tx_header.data_tree_root;
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             insert_tx_header(wtx, &tx_header)?;
@@ -2751,7 +2752,7 @@ mod tests {
             eyre::Ok(())
         })??;
         let chunk = UnpackedChunk {
-            data_root,
+            data_tree_root: data_root,
             data_size: chunk_size,
             data_path: Base64(vec![]),
             bytes: Base64(vec![2_u8; 8]),
@@ -2760,12 +2761,12 @@ mod tests {
         db.update(|wtx| {
             database::cache_chunk(wtx, &chunk)?;
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
-            let mut walk = cur.walk_dup(Some(data_root), None)?;
+            let mut walk = cur.walk_dup(Some(data_root.0), None)?;
             while let Some((_k, entry)) = walk.next().transpose()? {
-                wtx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
+                wtx.delete::<CachedChunksIndex>(data_root.0, Some(entry.clone()))?;
                 let mut updated = entry.clone();
                 updated.meta.updated_at = UnixTimestamp::from_secs(0);
-                wtx.put::<CachedChunksIndex>(data_root, updated)?;
+                wtx.put::<CachedChunksIndex>(data_root.0, updated)?;
             }
             eyre::Ok(())
         })??;
@@ -2795,7 +2796,7 @@ mod tests {
         let storage_modules_guard = if persist_data {
             let guard = storage_modules_guard_with_durable(
                 sm_dir.path().to_path_buf(),
-                data_root,
+                data_root.0,
                 chunk_size,
                 &[0],
             )?;
@@ -2803,7 +2804,7 @@ mod tests {
             sm.clear_data_root_infos_in_range(
                 PartitionChunkOffset::from(0),
                 PartitionChunkOffset::from(0),
-                &[data_root],
+                &[data_root.0],
             )?;
             eyre::ensure!(
                 sm.is_data_chunk_persisted_at(PartitionChunkOffset::from(0)),
@@ -2816,7 +2817,7 @@ mod tests {
         {
             let sm = storage_modules_guard.read()[0].clone();
             let placed = sm.placed_tx_offsets_for_data_root(
-                data_root,
+                data_root.0,
                 &BTreeSet::from([TxChunkOffset::from(0)]),
             )?;
             eyre::ensure!(placed.is_empty(), "fixture still has a placement row");
@@ -2851,11 +2852,11 @@ mod tests {
         service_task.prune_durably_migrated_chunk_bodies(10)?;
         db.view(|rtx| -> eyre::Result<bool> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let mut walk = dup_cursor.walk(Some(data_root))?;
+            let mut walk = dup_cursor.walk(Some(data_root.0))?;
             Ok(walk
                 .next()
                 .transpose()?
-                .is_some_and(|(root, _)| root == data_root))
+                .is_some_and(|(root, _)| root == data_root.0))
         })?
     }
 
@@ -2926,21 +2927,21 @@ mod tests {
         let cached = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: H256::random(),
-                data_root: H256::random(),
+                data_tree_root: DataTreeRoot(H256::random()),
                 data_size: case.tx_chunks * chunk_size,
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
             metadata: DataTransactionMetadata::new(),
         });
-        let data_root = cached.data_root;
+        let data_root = cached.data_tree_root;
         let mut tx_ids = Vec::with_capacity(case.prior_chunks.len() + 1);
         db.update(|wtx| {
             for chunks in case.prior_chunks {
                 let prior = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
                     tx: DataTransactionHeaderV1 {
                         id: H256::random(),
-                        data_root: H256::random(),
+                        data_tree_root: DataTreeRoot(H256::random()),
                         data_size: chunks * chunk_size,
                         ledger_id: DataLedger::Submit as u32,
                         ..Default::default()
@@ -2983,7 +2984,7 @@ mod tests {
         let storage_modules_guard = if case.persisted_own {
             storage_modules_guard_with_durable(
                 sm_dir.path().to_path_buf(),
-                data_root,
+                data_root.0,
                 chunk_size,
                 &[0],
             )?
@@ -3024,7 +3025,7 @@ mod tests {
         let views_before = sm.index_view_count();
         let visits_before = sm.interval_visit_count();
         let keep = task.assigned_unpersisted_offsets(
-            data_root,
+            data_root.0,
             &BTreeSet::from([candidate]),
             &task.storage_modules_guard.read(),
             10,
@@ -3227,7 +3228,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        let data_root = tx_header.data_root;
+        let data_root = tx_header.data_tree_root;
         let local_address = config.irys_signer().address();
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -3237,7 +3238,7 @@ mod tests {
             eyre::Ok(())
         })??;
         let chunk = UnpackedChunk {
-            data_root,
+            data_tree_root: data_root,
             data_size: chunk_size,
             data_path: Base64(vec![]),
             bytes: Base64(vec![2_u8; 8]),
@@ -3246,17 +3247,17 @@ mod tests {
         db.update(|wtx| {
             database::cache_chunk(wtx, &chunk)?;
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
-            let mut walk = cur.walk_dup(Some(data_root), None)?;
+            let mut walk = cur.walk_dup(Some(data_root.0), None)?;
             while let Some((_k, entry)) = walk.next().transpose()? {
-                wtx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
+                wtx.delete::<CachedChunksIndex>(data_root.0, Some(entry.clone()))?;
                 let mut updated = entry.clone();
                 updated.meta.updated_at = UnixTimestamp::from_secs(0);
-                wtx.put::<CachedChunksIndex>(data_root, updated)?;
+                wtx.put::<CachedChunksIndex>(data_root.0, updated)?;
             }
             if matches!(label, SlotLabel::OwnData) {
                 irys_database::store_ingress_data_hash(
                     wtx,
-                    data_root,
+                    data_root.0,
                     local_address,
                     chunk.tx_offset,
                     irys_types::generate_ingress_data_hash(&chunk.bytes.0, local_address),
@@ -3309,7 +3310,7 @@ mod tests {
                     .expect("old tx");
                 let old_tx = signer.sign_transaction(old_tx).expect("sign old tx");
                 eyre::ensure!(
-                    old_tx.header.data_root != data_root,
+                    old_tx.header.data_tree_root != data_root,
                     "fixture old root collided with the cached root"
                 );
                 let (_tx_root, proofs) =
@@ -3327,7 +3328,7 @@ mod tests {
                     .data_root_and_tx_offset_at(partition_zero)?
                     .map(|(root, _)| root);
                 eyre::ensure!(
-                    named == Some(old_tx.header.data_root),
+                    named == Some(old_tx.header.data_tree_root.0),
                     "fixture index does not name the old root at partition offset 0, got {named:?}"
                 );
             }
@@ -3335,7 +3336,7 @@ mod tests {
                 let (_, submodule) = sm.get_submodule_for_offset(partition_zero)?;
                 submodule.db.update(|tx| {
                     tx.add_data_root_info(
-                        data_root,
+                        data_root.0,
                         &DataRootInfo {
                             start_offset: RelativeChunkOffset::from(0_i32),
                             data_size: sm.config.consensus.chunk_size,
@@ -3379,14 +3380,14 @@ mod tests {
             );
         }
         if matches!(label, SlotLabel::ClearedData) {
-            sm.clear_data_root_infos_in_range(partition_zero, partition_zero, &[data_root])?;
+            sm.clear_data_root_infos_in_range(partition_zero, partition_zero, &[data_root.0])?;
             eyre::ensure!(
                 sm.is_data_chunk_persisted_at(partition_zero),
                 "clearing the placement row cleared the Data label"
             );
         }
         let placed = sm.placed_tx_offsets_for_data_root(
-            data_root,
+            data_root.0,
             &BTreeSet::from([TxChunkOffset::from(0)]),
         )?;
         match label {
@@ -3425,11 +3426,11 @@ mod tests {
         let visits = sm.interval_visit_count().saturating_sub(visits_before);
         let survived = db.view(|rtx| -> eyre::Result<bool> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let mut walk = dup_cursor.walk(Some(data_root))?;
+            let mut walk = dup_cursor.walk(Some(data_root.0))?;
             Ok(walk
                 .next()
                 .transpose()?
-                .is_some_and(|(root, _)| root == data_root))
+                .is_some_and(|(root, _)| root == data_root.0))
         })??;
         Ok((survived, views, visits))
     }
@@ -3455,13 +3456,13 @@ mod tests {
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: 32,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ..Default::default()
             },
             metadata: DataTransactionMetadata::new(),
         });
         let chunk = UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 32,
             data_path: Base64(vec![1]),
             bytes: Base64(vec![7_u8; 32]),
@@ -3571,7 +3572,7 @@ mod tests {
         let tx_header_old = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: 64,
-                data_root: DataRoot::random(),
+                data_tree_root: DataTreeRoot(DataRoot::random()),
                 ..Default::default()
             },
             metadata: DataTransactionMetadata::new(),
@@ -3579,7 +3580,7 @@ mod tests {
         let tx_header_new = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: 64,
-                data_root: DataRoot::random(),
+                data_tree_root: DataTreeRoot(DataRoot::random()),
                 ..Default::default()
             },
             metadata: DataTransactionMetadata::new(),
@@ -3592,7 +3593,7 @@ mod tests {
         })??;
 
         let mk_chunk = |data_root: irys_types::H256, offset: u32, byte: u8| UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 64,
             data_path: Base64(vec![]),
             bytes: Base64(vec![byte; 8]),
@@ -3601,7 +3602,7 @@ mod tests {
 
         db.update(|wtx| {
             // Manually insert index and chunk entries with controlled timestamps
-            let chunk_old = mk_chunk(tx_header_old.data_root, 0, 10);
+            let chunk_old = mk_chunk(tx_header_old.data_tree_root.0, 0, 10);
             let hash_old = chunk_old.chunk_path_hash();
             let idx_old = irys_database::db_cache::CachedChunkIndexEntry {
                 index: chunk_old.tx_offset,
@@ -3610,19 +3611,19 @@ mod tests {
                     updated_at: UnixTimestamp::from_secs(0),
                 },
             };
-            wtx.put::<CachedChunksIndex>(tx_header_old.data_root, idx_old)?;
+            wtx.put::<CachedChunksIndex>(tx_header_old.data_tree_root.0, idx_old)?;
             wtx.put::<CachedChunks>(
                 hash_old,
                 irys_database::db_cache::CachedChunk::from(&chunk_old),
             )?;
             irys_database::store_ingress_data_hash(
                 wtx,
-                tx_header_old.data_root,
+                tx_header_old.data_tree_root.0,
                 address,
                 chunk_old.tx_offset,
                 irys_types::generate_ingress_data_hash(&chunk_old.bytes.0, address),
             )?;
-            let chunk_new = mk_chunk(tx_header_new.data_root, 0, 11);
+            let chunk_new = mk_chunk(tx_header_new.data_tree_root.0, 0, 11);
             let hash_new = chunk_new.chunk_path_hash();
             let idx_new = irys_database::db_cache::CachedChunkIndexEntry {
                 index: chunk_new.tx_offset,
@@ -3631,7 +3632,7 @@ mod tests {
                     updated_at: UnixTimestamp::from_secs(10),
                 },
             };
-            wtx.put::<CachedChunksIndex>(tx_header_new.data_root, idx_new)?;
+            wtx.put::<CachedChunksIndex>(tx_header_new.data_tree_root.0, idx_new)?;
             wtx.put::<CachedChunks>(
                 hash_new,
                 irys_database::db_cache::CachedChunk::from(&chunk_new),
@@ -3644,7 +3645,7 @@ mod tests {
         // Use cutoff=5s so 0s is pruned and 10s is retained.
         db.view(|rtx| -> eyre::Result<()> {
             let mut cur_old = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_root), None)?;
+            let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_tree_root.0), None)?;
             let mut eligible = 0;
             while let Some((_k, entry)) = walk_old.next().transpose()? {
                 if entry.meta.updated_at < UnixTimestamp::from_secs(5) {
@@ -3662,7 +3663,7 @@ mod tests {
         db.update(|wtx| {
             let pruned = irys_database::delete_reclaimable_cached_chunks_older_than(
                 wtx,
-                tx_header_old.data_root,
+                tx_header_old.data_tree_root.0,
                 address,
                 &BTreeSet::from([TxChunkOffset::from(0)]),
                 UnixTimestamp::from_secs(5),
@@ -3674,7 +3675,7 @@ mod tests {
         db.view(|rtx| -> eyre::Result<()> {
             // Old root should have no entries
             let mut cur_old = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_root), None)?;
+            let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_tree_root.0), None)?;
             eyre::ensure!(
                 walk_old.next().transpose()?.is_none(),
                 "Old root entries still present"
@@ -3682,7 +3683,7 @@ mod tests {
 
             // New root should still have its entry
             let mut cur_new = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let walk_new = cur_new.walk_dup(Some(tx_header_new.data_root), None)?;
+            let walk_new = cur_new.walk_dup(Some(tx_header_new.data_tree_root.0), None)?;
             let remaining_new: Vec<_> = walk_new.collect::<Result<Vec<_>, _>>()?;
             eyre::ensure!(
                 remaining_new.len() == 1,
@@ -3722,7 +3723,7 @@ mod tests {
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: 64,
-                data_root: DataRoot::random(),
+                data_tree_root: DataTreeRoot(DataRoot::random()),
                 ..Default::default()
             },
             metadata: DataTransactionMetadata::new(),
@@ -3730,14 +3731,14 @@ mod tests {
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             let c0 = UnpackedChunk {
-                data_root: tx_header.data_root,
+                data_tree_root: tx_header.data_tree_root,
                 data_size: tx_header.data_size,
                 data_path: Base64(vec![1]),
                 bytes: Base64(vec![7_u8; 8]),
                 tx_offset: TxChunkOffset::from(0_u32),
             };
             let c1 = UnpackedChunk {
-                data_root: tx_header.data_root,
+                data_tree_root: tx_header.data_tree_root,
                 data_size: tx_header.data_size,
                 data_path: Base64(vec![2]),
                 bytes: Base64(vec![8_u8; 8]),
@@ -3747,14 +3748,14 @@ mod tests {
             database::cache_chunk(wtx, &c1)?;
             database::store_ingress_data_hash(
                 wtx,
-                tx_header.data_root,
+                tx_header.data_tree_root.0,
                 ingress_address,
                 c0.tx_offset,
                 irys_types::generate_ingress_data_hash(&c0.bytes.0, ingress_address),
             )?;
             database::store_ingress_data_hash(
                 wtx,
-                tx_header.data_root,
+                tx_header.data_tree_root.0,
                 ingress_address,
                 c1.tx_offset,
                 irys_types::generate_ingress_data_hash(&c1.bytes.0, ingress_address),
@@ -3762,12 +3763,12 @@ mod tests {
 
             // Mark both chunks as very old
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
-            let mut walk = cur.walk_dup(Some(tx_header.data_root), None)?;
+            let mut walk = cur.walk_dup(Some(tx_header.data_tree_root.0), None)?;
             while let Some((_k, entry)) = walk.next().transpose()? {
-                wtx.delete::<CachedChunksIndex>(tx_header.data_root, Some(entry.clone()))?;
+                wtx.delete::<CachedChunksIndex>(tx_header.data_tree_root.0, Some(entry.clone()))?;
                 let mut updated = entry.clone();
                 updated.meta.updated_at = UnixTimestamp::from_secs(0);
-                wtx.put::<CachedChunksIndex>(tx_header.data_root, updated)?;
+                wtx.put::<CachedChunksIndex>(tx_header.data_tree_root.0, updated)?;
             }
             eyre::Ok(())
         })??;
@@ -3801,12 +3802,12 @@ mod tests {
             // Expect both indices still present
             let m0 = irys_database::cached_chunk_meta_by_offset(
                 rtx,
-                tx_header.data_root,
+                tx_header.data_tree_root.0,
                 TxChunkOffset::from(0_u32),
             )?;
             let m1 = irys_database::cached_chunk_meta_by_offset(
                 rtx,
-                tx_header.data_root,
+                tx_header.data_tree_root.0,
                 TxChunkOffset::from(1_u32),
             )?;
             eyre::ensure!(
@@ -3832,7 +3833,7 @@ mod tests {
             cache_sender: tx,
             storage_modules_guard: storage_modules_guard_with_durable(
                 sm_dir.path().to_path_buf(),
-                tx_header.data_root,
+                tx_header.data_tree_root.0,
                 tx_header.data_size,
                 &[0, 1],
             )?,
@@ -3843,7 +3844,7 @@ mod tests {
 
         db.view(|rtx| -> eyre::Result<()> {
             let mut cur = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let mut walk = cur.walk(Some(tx_header.data_root))?;
+            let mut walk = cur.walk(Some(tx_header.data_tree_root.0))?;
             eyre::ensure!(
                 walk.next().transpose()?.is_none(),
                 "Chunks not pruned above capacity threshold"
@@ -3882,10 +3883,10 @@ mod tests {
         // Set expiry_height to 5 so prune_height > expiry would trigger deletion
         db.update(|wtx| {
             let mut cdr = wtx
-                .get::<CachedDataRoots>(tx_header.data_root)?
+                .get::<CachedDataRoots>(tx_header.data_tree_root.0)?
                 .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry"))?;
             cdr.expiry_height = Some(5);
-            wtx.put::<CachedDataRoots>(tx_header.data_root, cdr)?;
+            wtx.put::<CachedDataRoots>(tx_header.data_tree_root.0, cdr)?;
             eyre::Ok(())
         })??;
 
@@ -3895,7 +3896,7 @@ mod tests {
 
         db.update(|wtx| {
             let mut ingress_proof = IngressProof::default();
-            ingress_proof.data_root = tx_header.data_root;
+            ingress_proof.data_root = tx_header.data_tree_root.0;
             irys_database::store_external_ingress_proof_checked(
                 wtx,
                 &ingress_proof,
@@ -3932,7 +3933,9 @@ mod tests {
 
         // Verify it was NOT pruned
         db.view(|rtx| -> eyre::Result<()> {
-            let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
+            let has_root = rtx
+                .get::<CachedDataRoots>(tx_header.data_tree_root.0)?
+                .is_some();
             eyre::ensure!(
                 has_root,
                 "CachedDataRoots should NOT have been pruned due to local proof"
@@ -4050,11 +4053,11 @@ mod tests {
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             let mut cdr = wtx
-                .get::<CachedDataRoots>(tx_header.data_root)?
+                .get::<CachedDataRoots>(tx_header.data_tree_root.0)?
                 .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry after seed"))?;
             cdr.txid_set.clear();
             cdr.expiry_height = None;
-            wtx.put::<CachedDataRoots>(tx_header.data_root, cdr)?;
+            wtx.put::<CachedDataRoots>(tx_header.data_tree_root.0, cdr)?;
             eyre::Ok(())
         })??;
 
@@ -4063,7 +4066,7 @@ mod tests {
         let local_addr = signer.address();
         db.update(|wtx| {
             let mut ingress_proof = IngressProof::default();
-            ingress_proof.data_root = tx_header.data_root;
+            ingress_proof.data_root = tx_header.data_tree_root.0;
             irys_database::store_external_ingress_proof_checked(wtx, &ingress_proof, local_addr)?;
             eyre::Ok(())
         })??;
@@ -4095,7 +4098,9 @@ mod tests {
         service_task.prune_data_root_cache(1)?;
 
         db.view(|rtx| -> eyre::Result<()> {
-            let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
+            let has_root = rtx
+                .get::<CachedDataRoots>(tx_header.data_tree_root.0)?
+                .is_some();
             eyre::ensure!(
                 has_root,
                 "CachedDataRoots in (None, None) state with local proof should NOT have been pruned"
@@ -4133,7 +4138,7 @@ mod tests {
             DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
                 tx: DataTransactionHeaderV1 {
                     id,
-                    data_root,
+                    data_tree_root: DataTreeRoot(data_root),
                     data_size: 64,
                     ..Default::default()
                 },
@@ -4247,7 +4252,7 @@ mod tests {
             let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
                 tx: DataTransactionHeaderV1 {
                     id: txid,
-                    data_root,
+                    data_tree_root: DataTreeRoot(data_root),
                     data_size: 64,
                     ..Default::default()
                 },
@@ -4371,7 +4376,7 @@ mod tests {
                     &DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
                         tx: DataTransactionHeaderV1 {
                             id: txid,
-                            data_root,
+                            data_tree_root: DataTreeRoot(data_root),
                             data_size: 64,
                             ..Default::default()
                         },
@@ -4480,7 +4485,7 @@ mod tests {
             let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
                 tx: DataTransactionHeaderV1 {
                     id: txid,
-                    data_root,
+                    data_tree_root: DataTreeRoot(data_root),
                     data_size: 64,
                     ..Default::default()
                 },
@@ -4610,7 +4615,7 @@ mod tests {
             let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
                 tx: DataTransactionHeaderV1 {
                     id: txid,
-                    data_root,
+                    data_tree_root: DataTreeRoot(data_root),
                     data_size: 64,
                     ..Default::default()
                 },

@@ -195,10 +195,10 @@ impl PriorityPendingChunks {
     /// If the data_root doesn't exist and the cache is at capacity,
     /// evicts the entry with the fewest chunks first.
     pub fn put(&mut self, chunk: UnpackedChunk) {
-        let data_root = chunk.data_root;
+        let data_root = chunk.data_tree_root;
         let tx_offset = chunk.tx_offset;
 
-        if let Some(chunks) = self.entries.get_mut(&data_root) {
+        if let Some(chunks) = self.entries.get_mut(&data_root.0) {
             chunks.put(tx_offset, chunk);
             return;
         }
@@ -211,7 +211,7 @@ impl PriorityPendingChunks {
             NonZeroUsize::new(self.max_chunks_per_entry).expect("max_chunks_per_entry must be > 0"),
         );
         new_cache.put(tx_offset, chunk);
-        self.entries.insert(data_root, new_cache);
+        self.entries.insert(data_root.0, new_cache);
     }
 
     #[must_use]
@@ -260,12 +260,13 @@ fn lock_drain_flags(flags: &Mutex<DrainFlags>) -> std::sync::MutexGuard<'_, Drai
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_types::DataTreeRoot;
     use irys_types::{DataRoot, TxChunkOffset};
     use proptest::prelude::*;
 
     fn make_chunk(data_root: [u8; 32], offset: u32, data_size: u64) -> UnpackedChunk {
         UnpackedChunk {
-            data_root: DataRoot::from(data_root),
+            data_tree_root: DataTreeRoot(DataRoot::from(data_root)),
             data_size,
             tx_offset: TxChunkOffset::from(offset),
             data_path: Default::default(),

@@ -20,7 +20,7 @@ impl ChunkIngressFacadeImpl {
         chunk: UnpackedChunk,
     ) -> Result<(), ChunkIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let chunk_data_root = chunk.data_root;
+        let chunk_data_root = chunk.data_tree_root;
         let chunk_tx_offset = chunk.tx_offset;
         self.service
             .send_traced(ChunkIngressMessage::IngestChunk(

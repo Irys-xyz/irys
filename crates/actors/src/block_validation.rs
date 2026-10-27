@@ -25,6 +25,7 @@ use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
+use irys_types::DataTreeRoot;
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{Amount, calculate_perm_fee_from_config};
 use irys_types::{BlockHash, EvmBlockHash, H256List, LedgerChunkRange};
@@ -2153,7 +2154,7 @@ pub async fn prevalidate_block(
         let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id)
             .map_err(|_| PreValidationError::IngressProofsMissing)?;
         for proof in tx_proofs.0 {
-            ingress_pairs.push((proof, tx_header.data_root));
+            ingress_pairs.push((proof, tx_header.data_tree_root.0));
         }
     }
     pool.install(|| {
@@ -4852,8 +4853,9 @@ pub fn poa_is_valid(
 
         // data_path validation — against the owning tx's real `data_root` (the root of its
         // data-chunk tree), recovered above.
-        let data_path_result = validate_path(owning_tx.data_root.0, &data_path, tx_chunk_offset)
-            .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
+        let data_path_result =
+            validate_path(owning_tx.data_tree_root.0.0, &data_path, tx_chunk_offset)
+                .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
         // The tx author builds the data tree, and PoA is the only check of its
         // shape for a tx without ingress proofs. Require the leaf to cover
@@ -6572,7 +6574,8 @@ async fn ingress_proof_chunk_bytes_from_local(
                     continue;
                 }
             };
-            if unpacked.data_root != data_root || unpacked.tx_offset != tx_offset {
+            if unpacked.data_tree_root != DataTreeRoot(data_root) || unpacked.tx_offset != tx_offset
+            {
                 continue;
             }
             match crate::chunk_migration_service::validate_chunk_parts_for_migration(
@@ -7111,7 +7114,7 @@ pub async fn data_txs_are_valid(
                             db,
                             storage_modules,
                             config,
-                            tx_header.data_root,
+                            tx_header.data_tree_root.0,
                             tx_header.data_size,
                             tx_chunk_offset,
                         )
@@ -7124,7 +7127,7 @@ pub async fn data_txs_are_valid(
                                 "http://{}/v1/chunk/data-root/{}/{}/{}",
                                 api_addr,
                                 publish_ledger.ledger_id,
-                                tx_header.data_root,
+                                tx_header.data_tree_root,
                                 tx_offset_u32
                             );
 
@@ -7186,7 +7189,7 @@ pub async fn data_txs_are_valid(
                             };
 
                             // Basic sanity checks before ingest
-                            if unpacked.data_root != tx_header.data_root
+                            if unpacked.data_tree_root != tx_header.data_tree_root
                                 || *unpacked.tx_offset != tx_offset_u32
                             {
                                 continue;
@@ -7216,14 +7219,14 @@ pub async fn data_txs_are_valid(
                                 Err(_elapsed) => {
                                     tracing::warn!(
                                         "Timed out waiting for chunk ingest completion for data_root {:?}, tx_offset {}",
-                                        tx_header.data_root,
+                                        tx_header.data_tree_root,
                                         tx_offset_u32
                                     );
                                 }
                                 Ok(Err(recv_err)) => {
                                     tracing::warn!(
                                         "IngestChunk oneshot channel error for data_root {:?}, tx_offset {}: {:?}",
-                                        tx_header.data_root,
+                                        tx_header.data_tree_root,
                                         tx_offset_u32,
                                         recv_err
                                     );
@@ -7232,14 +7235,14 @@ pub async fn data_txs_are_valid(
                                     Ok(()) => {
                                         tracing::debug!(
                                             "Chunk ingested successfully for data_root {:?}, tx_offset {}",
-                                            tx_header.data_root,
+                                            tx_header.data_tree_root,
                                             tx_offset_u32
                                         );
                                     }
                                     Err(e) => {
                                         tracing::warn!(
                                             "IngestChunk returned error for data_root {:?}, tx_offset {}: {:?}",
-                                            tx_header.data_root,
+                                            tx_header.data_tree_root,
                                             tx_offset_u32,
                                             e
                                         );
@@ -7253,7 +7256,7 @@ pub async fn data_txs_are_valid(
                                 db,
                                 storage_modules,
                                 config,
-                                tx_header.data_root,
+                                tx_header.data_tree_root.0,
                                 tx_header.data_size,
                                 tx_chunk_offset,
                             )
@@ -7272,7 +7275,7 @@ pub async fn data_txs_are_valid(
                             return Err(PreValidationError::DatabaseError {
                                 error: format!(
                                     "local storage read failed for data_root {:?} at tx offset {i}",
-                                    tx_header.data_root
+                                    tx_header.data_tree_root
                                 ),
                             });
                         }
@@ -7281,7 +7284,7 @@ pub async fn data_txs_are_valid(
                                 tx_id: tx_header.id,
                                 reason: format!(
                                     "Data unavailable: missing chunk at offset {} for data_root {:?}",
-                                    i, tx_header.data_root
+                                    i, tx_header.data_tree_root
                                 ),
                             });
                         }
@@ -7712,7 +7715,7 @@ pub fn get_assigned_ingress_proofs(
     .map_err(|e| {
         PreValidationError::BlockBoundsLookupError(format!(
             "find_canonical_ledger_range failed for tx {} (data_root {}): {}",
-            tx_header.id, tx_header.data_root, e
+            tx_header.id, tx_header.data_tree_root, e
         ))
     })?;
 
@@ -7728,7 +7731,7 @@ pub fn get_assigned_ingress_proofs(
     for ingress_proof in tx_proofs.iter() {
         // Validate ingress proof signature and data_root match the transaction
         let proof_address = ingress_proof
-            .pre_validate(&tx_header.data_root)
+            .pre_validate(&tx_header.data_tree_root.0)
             .map_err(|e| PreValidationError::InvalidIngressProof {
                 tx_id: tx_header.id,
                 reason: e.to_string(),
@@ -8591,7 +8594,7 @@ mod tests {
         header.id = H256([0xA1; 32]);
         header.ledger_id = DataLedger::Submit as u32;
         header.data_size = data_size;
-        header.data_root = H256(data_root);
+        header.data_tree_root = DataTreeRoot(H256(data_root));
         let (tx_root, tx_paths) =
             DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&header));
         let poas = chunks
@@ -10051,7 +10054,7 @@ mod tests {
         let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
@@ -10177,7 +10180,7 @@ mod tests {
         let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
@@ -10316,7 +10319,7 @@ mod tests {
         let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
@@ -10652,7 +10655,7 @@ mod ingress_proof_local_bytes_tests {
             cache_chunk(
                 wtx,
                 &UnpackedChunk {
-                    data_root: tx.header.data_root,
+                    data_tree_root: tx.header.data_tree_root,
                     data_size: tx.header.data_size,
                     data_path: Base64(tx.proofs[0].proof.clone()),
                     bytes: Base64(data.to_vec()),
@@ -10698,7 +10701,7 @@ mod ingress_proof_local_bytes_tests {
             db,
             modules,
             config,
-            tx.header.data_root,
+            tx.header.data_tree_root.0,
             tx.header.data_size,
             TxChunkOffset::from(0_u32),
         )
@@ -10788,7 +10791,7 @@ mod ingress_proof_local_bytes_tests {
         ));
         sm.sync_pending_chunks().unwrap();
         sm.write_data_chunk(&UnpackedChunk {
-            data_root: tx.header.data_root,
+            data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
             data_path: Base64(tx.proofs[0].proof.clone()),
             bytes: Base64(data.clone()),
@@ -10853,7 +10856,7 @@ mod ingress_proof_local_bytes_tests {
         ));
         sm.sync_pending_chunks().unwrap();
         sm.write_data_chunk(&UnpackedChunk {
-            data_root: tx.header.data_root,
+            data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
             data_path: Base64(tx.proofs[0].proof.clone()),
             bytes: Base64(bytes.to_vec()),
@@ -10929,7 +10932,7 @@ mod ingress_proof_local_bytes_tests {
             &db,
             &modules,
             &config,
-            tx.header.data_root,
+            tx.header.data_tree_root.0,
             tx.header.data_size,
             TxChunkOffset::from(0_u32),
         )
@@ -10994,7 +10997,7 @@ mod ingress_proof_local_bytes_tests {
         let tx = signer.sign_transaction(tx).unwrap();
         let proof = irys_types::ingress::generate_ingress_proof(
             &signer,
-            tx.header.data_root,
+            tx.header.data_tree_root.0,
             std::iter::once(Ok(data.as_slice())),
             config.consensus.chain_id,
             tx.header.anchor,
@@ -11070,7 +11073,7 @@ mod ingress_proof_local_bytes_tests {
         });
 
         let peer_body = serde_json::to_vec(&irys_types::ChunkFormat::Unpacked(UnpackedChunk {
-            data_root: tx.header.data_root,
+            data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
             data_path: Base64(tx.proofs[0].proof.clone()),
             bytes: Base64(data.clone()),

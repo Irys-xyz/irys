@@ -431,16 +431,20 @@ impl BlockDiscoveryServiceInner {
                     })?;
                 // Validate the signatures and data_roots
                 for proof in tx_proofs.iter() {
-                    proof.pre_validate(&tx_header.data_root).map_err(|e| {
-                        BlockDiscoveryError::BlockValidationError(
-                            PreValidationError::IngressProofSignatureInvalid(e.to_string()),
-                        )
-                    })?;
+                    proof
+                        .pre_validate(&tx_header.data_tree_root.0)
+                        .map_err(|e| {
+                            BlockDiscoveryError::BlockValidationError(
+                                PreValidationError::IngressProofSignatureInvalid(e.to_string()),
+                            )
+                        })?;
 
                     // Check to see if we have a confirmed data_size for the data_root
                     let cdr = self
                         .db
-                        .view_eyre(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
+                        .view_eyre(|tx| {
+                            cached_data_root_by_data_root(tx, tx_header.data_tree_root.0)
+                        })
                         .map_err(BlockDiscoveryInternalError::DatabaseError)?;
 
                     // If so, compare it with the data_size in the tx

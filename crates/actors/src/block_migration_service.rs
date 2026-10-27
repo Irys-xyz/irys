@@ -513,7 +513,7 @@ impl BlockMigrationService {
                     for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
                         irys_database::remove_data_root_block_set_entry(
                             tx,
-                            submit_tx.data_root,
+                            submit_tx.data_tree_root.0,
                             orphan_block_hash,
                         )?;
                     }
@@ -543,7 +543,7 @@ impl BlockMigrationService {
                     for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
                         irys_database::update_data_root_block_set(
                             tx,
-                            submit_tx.data_root,
+                            submit_tx.data_tree_root.0,
                             block_hash,
                         )?;
                     }
@@ -704,7 +704,7 @@ impl BlockMigrationService {
             for tx_ids in tx_id_map.values() {
                 for txid in tx_ids {
                     if let Some(tx_header) = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))? {
-                        data_roots.push(tx_header.data_root);
+                        data_roots.push(tx_header.data_tree_root.0);
                     }
                 }
             }
@@ -1278,6 +1278,7 @@ mod tests {
     };
     use irys_domain::{BlockTree, ChunkType, StorageModuleInfo};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_types::DataTreeRoot;
     use irys_types::partition::PartitionAssignment;
     use irys_types::{
         BlockIndexItem, BlockTransactions, ConsensusConfig, DataTransactionHeader,
@@ -1397,7 +1398,7 @@ mod tests {
                 DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
                     tx: DataTransactionHeaderV1 {
                         id: *tx_id,
-                        data_root: *data_root,
+                        data_tree_root: DataTreeRoot(*data_root),
                         ledger_id: DataLedger::Submit as u32,
                         ..Default::default()
                     },
@@ -1426,7 +1427,7 @@ mod tests {
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
@@ -1611,7 +1612,7 @@ mod tests {
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root: H256::random(),
+                data_tree_root: DataTreeRoot(H256::random()),
                 ledger_id: ledger as u32,
                 ..Default::default()
             },
@@ -1639,7 +1640,7 @@ mod tests {
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 // Submit-ledger entries already carry Publish-targeting txs.
                 ledger_id: DataLedger::Publish as u32,
                 ..Default::default()
@@ -2762,7 +2763,7 @@ mod tests {
         let body_job_tx = |data_size: u64| {
             irys_types::DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
                 tx: irys_types::DataTransactionHeaderV1 {
-                    data_root: H256::random(),
+                    data_tree_root: DataTreeRoot(H256::random()),
                     data_size,
                     ..Default::default()
                 },
@@ -2986,7 +2987,7 @@ mod tests {
         let orphan_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: orphan_txid,
-                data_root: shared_data_root,
+                data_tree_root: DataTreeRoot(shared_data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
