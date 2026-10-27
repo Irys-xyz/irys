@@ -1,7 +1,6 @@
 use std::os::raw::c_int;
 
 // CUDA Runtime API bindings (minimal subset)
-#[cfg(feature = "nvidia")]
 #[link(name = "cudart")]
 unsafe extern "C" {
     fn cudaGetDeviceCount(count: *mut c_int) -> c_int;
@@ -12,24 +11,15 @@ unsafe extern "C" {
 // Numeric values of CUDA's `cudaDeviceAttr` enum (driver_types.h). Attributes are queried
 // one by one so this code does not depend on the toolkit's `cudaDeviceProp` struct layout,
 // which grows between toolkit versions.
-#[cfg(feature = "nvidia")]
 const CUDA_DEV_ATTR_MAX_THREADS_PER_BLOCK: c_int = 1;
-#[cfg(feature = "nvidia")]
 const CUDA_DEV_ATTR_WARP_SIZE: c_int = 10;
-#[cfg(feature = "nvidia")]
 const CUDA_DEV_ATTR_MULTIPROCESSOR_COUNT: c_int = 16;
-#[cfg(feature = "nvidia")]
 const CUDA_DEV_ATTR_MAX_THREADS_PER_MULTIPROCESSOR: c_int = 39;
-#[cfg(feature = "nvidia")]
 const CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MAJOR: c_int = 75;
-#[cfg(feature = "nvidia")]
 const CUDA_DEV_ATTR_COMPUTE_CAPABILITY_MINOR: c_int = 76;
-#[cfg(feature = "nvidia")]
 const CUDA_DEV_ATTR_MAX_REGISTERS_PER_MULTIPROCESSOR: c_int = 82;
-#[cfg(feature = "nvidia")]
 const CUDA_DEV_ATTR_MAX_BLOCKS_PER_MULTIPROCESSOR: c_int = 106;
 
-#[cfg(feature = "nvidia")]
 fn get_device_attribute(device_id: i32, attribute: c_int, name: &str) -> Result<i32, String> {
     let mut value: c_int = 0;
     match unsafe { cudaDeviceGetAttribute(&mut value, attribute, device_id) } {
@@ -63,7 +53,6 @@ pub struct NvidiaGpuConfig {
     pub regs_per_multiprocessor: i32,
 }
 
-#[cfg(feature = "nvidia")]
 impl NvidiaGpuConfig {
     /// Query GPU properties for the specified device
     pub fn query_device(device_id: i32) -> Result<Self, String> {
@@ -176,7 +165,7 @@ impl NvidiaGpuConfig {
     }
 }
 
-#[cfg(all(test, feature = "nvidia"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
