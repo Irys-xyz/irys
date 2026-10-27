@@ -167,10 +167,11 @@ pub fn calculate_difficulty(
 
 /// Calculates the next cumulative difficulty by adding the expected hashes needed
 /// (max_diff / (max_diff - new_diff)) to the previous cumulative difficulty.
+/// The sum saturates at `U256::MAX`.
 pub fn next_cumulative_diff(previous_cumulative_diff: U256, new_diff: U256) -> U256 {
     let max_diff = U256::MAX;
     let network_hash_rate = max_diff / (max_diff - new_diff);
-    previous_cumulative_diff + network_hash_rate
+    previous_cumulative_diff.saturating_add(network_hash_rate)
 }
 
 #[cfg(test)]
@@ -627,6 +628,14 @@ mod tests {
             assert!(adjusted < U256::MAX, "offset {offset}");
             let _cumulative = next_cumulative_diff(U256::zero(), adjusted);
         }
+    }
+
+    #[test]
+    fn next_cumulative_diff_saturates_at_max() {
+        assert_eq!(
+            next_cumulative_diff(U256::MAX - U256::from(1_000_u64), U256::MAX - U256::one()),
+            U256::MAX
+        );
     }
 
     /// Adjustments away from the `U256::MAX` edge are unchanged.
