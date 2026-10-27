@@ -55,29 +55,6 @@ pub fn expected_chunk_byte_range(
     Ok((min, max))
 }
 
-/// Verifies that a validated Merkle path identifies exactly the expected chunk
-/// range.
-pub fn validate_path_byte_range(
-    path: &ValidatePathResult,
-    expected: (u64, u64),
-) -> Result<(), Error> {
-    let actual = (
-        u64::try_from(path.min_byte_range)
-            .map_err(|_| eyre!("validated chunk start boundary exceeds u64"))?,
-        u64::try_from(path.max_byte_range)
-            .map_err(|_| eyre!("validated chunk end boundary exceeds u64"))?,
-    );
-    eyre::ensure!(
-        actual == expected,
-        "data path range {}..{} does not match expected range {}..{}",
-        actual.0,
-        actual.1,
-        expected.0,
-        expected.1
-    );
-    Ok(())
-}
-
 /// Concatenated ids and max byte ranges for full set of nodes for an original data chunk, starting with the root.
 #[derive(Debug, PartialEq, Clone)]
 pub struct Proof {
@@ -742,23 +719,6 @@ mod tests {
             (64, 71)
         );
         assert!(expected_chunk_byte_range(TxChunkOffset::from(3), 71, 32).is_err());
-    }
-
-    #[test]
-    fn path_range_must_match_chunk_position_exactly() {
-        let mut path = ValidatePathResult {
-            leaf_hash: [0; HASH_SIZE],
-            min_byte_range: 64,
-            max_byte_range: 71,
-            is_rightmost_chunk: true,
-        };
-        assert!(validate_path_byte_range(&path, (64, 71)).is_ok());
-
-        path.min_byte_range = 63;
-        assert!(validate_path_byte_range(&path, (64, 71)).is_err());
-        path.min_byte_range = 64;
-        path.max_byte_range = 70;
-        assert!(validate_path_byte_range(&path, (64, 71)).is_err());
     }
 
     #[test]

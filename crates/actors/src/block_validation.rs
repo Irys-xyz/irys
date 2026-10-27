@@ -34,11 +34,13 @@ use irys_types::{
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
     SealedBlock, SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
     app_state::DatabaseProvider,
-    calculate_difficulty, ensure_proof_layout, expected_chunk_byte_range,
+    calculate_difficulty,
+    data_tree::verify_data_chunk,
+    ensure_proof_layout,
     hardfork_config::{Cascade, ForEpoch},
     next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    validate_path, validate_path_byte_range,
+    validate_path,
 };
 use irys_types::{CommitmentTypeV2, IrysTransactionCommon, VersionDiscriminant as _};
 use irys_types::{DataCommitment, DataTreeRoot};
@@ -4460,8 +4462,9 @@ fn get_data_poa_bounds_with_block_tree_fallback(
 ) -> Result<(BlockBounds, H256), PreValidationError> {
     // Returns the resolved bounds AND the owning block's hash. The data-ledger
     // PoA branch fetches that block's tx headers with the hash. The caller
-    // rejects a proof buffer that cannot be parsed before that fetch, so an
-    // empty path is `MerkleProofInvalid` and not a missing-header node fault.
+    // rejects a tx_path buffer that cannot be parsed before that fetch, so an
+    // empty tx_path is `MerkleProofInvalid` and not a missing-header node
+    // fault. The data path is checked after the fetch.
     // The full path check still needs the tx: the byte target comes from the
     // chunk layout. The tree-walk path has the owning header in hand; the
     // index paths use the hash carried by `BlockBounds` so the returned hash
@@ -4811,8 +4814,6 @@ pub fn poa_is_valid(
         // path into a node fault.
         ensure_proof_layout(&tx_path.0)
             .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
-        ensure_proof_layout(&data_path.0)
-            .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
         // The block index places each tx on whole chunks, while the tx_root tree
         // sizes each tx by raw `data_size`. Select the tx by the chunk prefix,
@@ -4849,28 +4850,21 @@ pub fn poa_is_valid(
             });
         }
 
-        // data_path validation — against the owning tx's real `data_root` (the root of its
-        // data-chunk tree), recovered above.
-        let data_path_result =
-            validate_path(owning_tx.data_tree_root.0.0, &data_path, tx_chunk_offset)
-                .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
-
         // The tx author builds the data tree, and PoA is the only check of its
-        // shape for a tx without ingress proofs. Require the leaf to cover
-        // exactly this chunk, as chunk ingress does. A wider, shifted, or empty
-        // leaf would let the PoA leave chunk bytes unchecked.
+        // shape for a tx without ingress proofs. The data path must open
+        // exactly this chunk of the owning tx's real `data_root`, recovered
+        // above, as chunk ingress requires. A proof for a wider, shifted, or
+        // empty range would let the PoA leave chunk bytes unchecked.
         fn out_of_chunk<E>(_: E) -> PreValidationError {
             PreValidationError::PoAChunkOffsetOutOfDataChunksBounds
         }
+        let geometry = config
+            .data_tree_geometry()
+            .expect("data tree geometry is validated at load");
         let chunk_index =
             u32::try_from(tx_chunk_offset / u128::from(config.chunk_size)).map_err(out_of_chunk)?;
-        let (chunk_start, chunk_end) = expected_chunk_byte_range(
-            TxChunkOffset(chunk_index),
-            owning_tx.data_size,
-            config.chunk_size,
-        )
-        .map_err(out_of_chunk)?;
-        validate_path_byte_range(&data_path_result, (chunk_start, chunk_end))
+        let chunk_length = geometry
+            .chunk_len(owning_tx.data_size, chunk_index)
             .map_err(out_of_chunk)?;
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -4897,22 +4891,21 @@ pub fn poa_is_valid(
         }
         xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
 
-        let span = usize::try_from(chunk_end - chunk_start).map_err(out_of_chunk)?;
+        let span = usize::try_from(chunk_length).map_err(out_of_chunk)?;
         let (chunk_data, padding) = poa_chunk.split_at(span);
         if padding.iter().any(|byte| *byte != 0) {
             return Err(PreValidationError::PoAChunkPaddingNotZero { span });
         }
 
-        let poa_chunk_hash = sha::sha256(chunk_data);
-
-        if poa_chunk_hash != data_path_result.leaf_hash {
-            return Err(PreValidationError::PoAChunkHashMismatch {
-                expected: data_path_result.leaf_hash.into(),
-                got: poa_chunk_hash.into(),
-                ledger_id: Some(ledger_id),
-                ledger_chunk_offset: Some(ledger_chunk_offset),
-            });
-        }
+        verify_data_chunk(
+            &geometry,
+            owning_tx.data_tree_root,
+            owning_tx.data_size,
+            TxChunkOffset(chunk_index),
+            chunk_data,
+            &data_path.0,
+        )
+        .map_err(|error| PreValidationError::MerkleProofInvalid(error.to_string()))?;
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
@@ -8620,13 +8613,11 @@ mod tests {
         )
     }
 
+    /// The chunk seam rejects a data path that does not open exactly this chunk.
     fn assert_data_leaf_rejected(result: Result<(), PreValidationError>, what: &str) {
         assert!(
-            matches!(
-                result,
-                Err(PreValidationError::PoAChunkOffsetOutOfDataChunksBounds)
-            ),
-            "{what}: expected PoAChunkOffsetOutOfDataChunksBounds, got {result:?}"
+            matches!(result, Err(PreValidationError::MerkleProofInvalid(_))),
+            "{what}: expected MerkleProofInvalid, got {result:?}"
         );
     }
 
@@ -9737,30 +9728,14 @@ mod tests {
         );
 
         match poa_valid {
-            Err(PreValidationError::PoAChunkHashMismatch {
-                ledger_id,
-                ledger_chunk_offset,
-                expected,
-                got,
-            }) => {
-                assert!(ledger_id.is_some(), "expected ledger_id context");
-                assert!(
-                    ledger_chunk_offset.is_some(),
-                    "expected ledger_chunk_offset context"
-                );
-                assert_ne!(expected, got, "expected and got hashes should differ");
-            }
             Err(PreValidationError::MerkleProofInvalid(msg)) => {
                 assert!(
-                    msg.contains("hash mismatch"),
-                    "expected hash mismatch merkle proof error, got: {}",
+                    msg.contains("commitment does not match"),
+                    "expected a data path that does not open the chunk, got: {}",
                     msg
                 );
             }
-            Err(other) => panic!(
-                "expected PoAChunkHashMismatch or MerkleProofInvalid, got {:?}",
-                other
-            ),
+            Err(other) => panic!("expected MerkleProofInvalid, got {:?}", other),
             Ok(_) => panic!("expected invalid PoA, but validation succeeded"),
         }
     }
