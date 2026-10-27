@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793058856321,
+  "lastUpdate": 1793059932587,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -19482,6 +19482,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000111,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bd3f815805d8d53e589b926ad61f29e5dd7218dd",
+          "message": "feat(database): one pinned pass for mdbx-to-rocks --verify (#1665)\n\n* refactor(database): move the submodule index warmup pin into its own module\n\nWarmupPin, env_warmup, and MemlockBudget move to submodule/warmup.rs.\nThe migration still pins before the copy and drops the pin on every return.\n\n* feat(database): pin the MDBX source for convert and verify in one process\n\nmdbx-to-rocks --verify warms and pins the open source, runs the dry-run\nrow scan before the target exists, converts, then verifies that same env.\nWithout --verify the commands stay as they are.\n\n* fix(database): log --verify progress to stderr and drop the duplicate preview scan",
+          "timestamp": "2026-10-26T23:36:16Z",
+          "tree_id": "9fd6bf3fd63afec62faafecc885ac76bc64985a3",
+          "url": "https://github.com/Irys-xyz/irys/commit/bd3f815805d8d53e589b926ad61f29e5dd7218dd"
+        },
+        "date": 1793059929502,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011937,
+            "range": "± 0.000015",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120102,
+            "range": "± 0.000965",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.201642,
+            "range": "± 0.008667",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.930027,
+            "range": "± 0.033657",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077754,
+            "range": "± 0.002121",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 744.852504,
+            "range": "± 1.351417",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 967.988501,
+            "range": "± 0.69144",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117558,
+            "range": "± 0.00039",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1172.655804,
+            "range": "± 0.606398",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1524.57782,
+            "range": "± 4.511908",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034279,
+            "range": "± 0.000395",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.594103,
+            "range": "± 0.17049",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 270.847077,
+            "range": "± 0.084216",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
             "range": "± 0",
             "unit": "ms/iter"
           }
