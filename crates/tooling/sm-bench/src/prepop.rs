@@ -142,6 +142,7 @@ fn write_batch(tx: &mut dyn SubmoduleWrite, from: u64, to: u64) -> eyre::Result<
         let mut chunk = tx_start.max(from);
         while chunk <= tx_end {
             let path_hash_bytes = keyed(b"chunk", chunk);
+            // Two 32-byte hashes: the shape of a v2 chunk proof with one sibling.
             let mut data_path = Vec::with_capacity(64);
             data_path.extend_from_slice(&path_hash_bytes);
             data_path.extend_from_slice(&path_hash_bytes);

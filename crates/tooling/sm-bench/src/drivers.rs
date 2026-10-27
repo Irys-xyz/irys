@@ -5,8 +5,9 @@
 //! `write_data_chunk_queued`. Migration deposits with `deposit_data_chunks`.
 //! Serve uses `read_chunks`.
 //!
-//! The write path does not check chunk merkle proofs. Payloads are synthetic:
-//! a 64-byte data path and a repeated `0x5A` body. `index_transaction_data`
+//! The write path does not check chunk proofs. Payloads are synthetic: a
+//! 64-byte data path (the shape of a two-hash v2 chunk proof) and a repeated
+//! `0x5A` body. `index_transaction_data`
 //! also inserts a body-migration row; the driver that indexed the tx settles
 //! that row after every chunk of the tx is durable.
 //!
@@ -862,10 +863,13 @@ impl Drop for PermitLease {
 }
 
 fn unpacked(root: H256, data_size: u64, tx_offset: u32, chunk_size: u64) -> UnpackedChunk {
-    let mut data_path = Vec::with_capacity(68);
+    // The shape of a v2 chunk proof with one sibling: two 32-byte hashes.
+    // The sibling differs per chunk; the root stands in for the size witness.
+    let mut keyed = root.0.to_vec();
+    keyed.extend_from_slice(&tx_offset.to_be_bytes());
+    let mut data_path = Vec::with_capacity(64);
+    data_path.extend_from_slice(&hash_sha256(&keyed));
     data_path.extend_from_slice(&root.0);
-    data_path.extend_from_slice(&root.0);
-    data_path.extend_from_slice(&tx_offset.to_le_bytes());
     UnpackedChunk {
         data_tree_root: DataTreeRoot(root),
         data_size,

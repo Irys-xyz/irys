@@ -37,7 +37,8 @@ const MAX_DATA_TX_CHUNKS: u64 = 20_971_520;
 /// Mainnet max data transactions in one block. Sizes the tx-path proof.
 const MAX_DATA_TXS_PER_BLOCK: u64 = 100;
 const CHUNK_SIZE: u64 = 256 * 1024;
-/// Same widths as the merkle proof encoder: 32-byte ids, 32-byte notes.
+/// Hash width. Tx proofs (v1 tree) also use 32-byte notes; data proofs
+/// (data tree v2) are hashes only.
 const HASH_SIZE: usize = 32;
 const NOTE_SIZE: usize = 32;
 const BRANCH_SIZE: usize = HASH_SIZE * 2 + NOTE_SIZE;
@@ -72,9 +73,11 @@ const fn proof_bytes(layers: usize) -> usize {
     layers * BRANCH_SIZE + LEAF_SIZE
 }
 
-/// Deepest data proof of a max-size transaction: 25 branches + one leaf.
-const DATA_PROOF_LAYERS: usize = pairing_layers(MAX_DATA_TX_CHUNKS);
-const DATA_PROOF_BYTES: usize = proof_bytes(DATA_PROOF_LAYERS);
+/// Siblings in the deepest data chunk proof of a max-size transaction: 25.
+/// `ceil(log2(chunk_count))` is `depth(0, chunk_count)` (data tree spec §5).
+const DATA_PROOF_SIBLINGS: usize = pairing_layers(MAX_DATA_TX_CHUNKS);
+/// Those siblings, then the size witness (data tree spec §5): 832 bytes.
+const DATA_PROOF_BYTES: usize = (DATA_PROOF_SIBLINGS + 1) * HASH_SIZE;
 /// Deepest tx proof of a full block: 7 branches + one leaf.
 const TX_PROOF_LAYERS: usize = pairing_layers(MAX_DATA_TXS_PER_BLOCK);
 const TX_PROOF_BYTES: usize = proof_bytes(TX_PROOF_LAYERS);
@@ -263,7 +266,7 @@ fn main() -> eyre::Result<()> {
         let raw = u64::from(args.chunks) * DATA_PROOF_BYTES as u64;
         let full = PARTITION_CHUNKS * DATA_PROOF_BYTES as u64;
         println!(
-            "mode=worst-case data_proof_bytes={DATA_PROOF_BYTES} data_proof_branches={DATA_PROOF_LAYERS} tx_proof_bytes={TX_PROOF_BYTES} tx_group_chunks={MAX_DATA_TX_CHUNKS} raw_data_proof_bytes={raw} full_partition_chunks={PARTITION_CHUNKS} full_partition_raw_data_proof_bytes={full}"
+            "mode=worst-case data_proof_bytes={DATA_PROOF_BYTES} data_proof_siblings={DATA_PROOF_SIBLINGS} tx_proof_bytes={TX_PROOF_BYTES} tx_group_chunks={MAX_DATA_TX_CHUNKS} raw_data_proof_bytes={raw} full_partition_chunks={PARTITION_CHUNKS} full_partition_raw_data_proof_bytes={full}"
         );
     } else if args.workload.is_mid() {
         let raw = u64::from(args.chunks) * args.path_bytes as u64;
@@ -1776,20 +1779,12 @@ fn crc_shape_proof(kind: CrcShape, index: u32) -> Vec<u8> {
     match kind {
         CrcShape::MidShared => {
             let leaf = u64::from(index % 4_096);
-            shared_data_proof(&[0x11_u8; 32], 4_096, leaf, CHUNK_SIZE)
+            shared_data_proof(&[0x11_u8; 32], 4_096, leaf)
         }
-        CrcShape::WorstShared => shared_data_proof(
-            &[0x22_u8; 32],
-            MAX_DATA_TX_CHUNKS,
-            u64::from(index),
-            CHUNK_SIZE,
-        ),
-        CrcShape::WorstUniform => {
-            let end = u64::from(index)
-                .saturating_add(1)
-                .saturating_mul(CHUNK_SIZE);
-            shaped_proof(DATA_PROOF_LAYERS, end, u64::from(index))
+        CrcShape::WorstShared => {
+            shared_data_proof(&[0x22_u8; 32], MAX_DATA_TX_CHUNKS, u64::from(index))
         }
+        CrcShape::WorstUniform => fill(DATA_PROOF_BYTES, u64::from(index)),
     }
 }
 
@@ -1959,22 +1954,19 @@ fn rewritten_data_path(args: &Args, offset: u32) -> Vec<u8> {
 }
 
 fn data_path_bytes(args: &Args, offset: u32) -> Vec<u8> {
-    // Shared nodes key on `(data_root, level, index)`. A worst-case prefix
-    // still uses the full transaction leaf count, so the proof stays max depth.
+    // Shared siblings key on `(data_root, subtree)`. A worst-case prefix
+    // still uses the full transaction chunk count, so the proof stays max depth.
     if args.workload.is_many_tx() || (args.workload.is_worst() && !args.uniform_proofs) {
         let place = place_tx(args, offset);
         let root = hash_at(u64::from(place.start).wrapping_add(0x1000_0000));
         let leaf = u64::from(offset.saturating_sub(place.start));
-        return shared_data_proof(&root.0, place.leaves, leaf, CHUNK_SIZE);
+        return shared_data_proof(&root.0, place.leaves, leaf);
     }
     if !args.workload.is_worst() {
         return fill(args.path_bytes, u64::from(offset));
     }
-    let local = u64::from(offset) % MAX_DATA_TX_CHUNKS;
-    let leaf_end = (local + 1) * CHUNK_SIZE;
-    shaped_proof(
-        DATA_PROOF_LAYERS,
-        leaf_end,
+    fill(
+        DATA_PROOF_BYTES,
         u64::from(offset).wrapping_add(0x2000_0000),
     )
 }
@@ -2152,94 +2144,42 @@ fn fill(len: usize, seed: u64) -> Vec<u8> {
     out
 }
 
-/// One node in a synthetic data proof. Level 0 is the leaf.
-struct ProofNode {
-    level: u32,
-    index: u64,
-}
-
-fn layer_widths(mut n: u64) -> Vec<u64> {
-    let mut widths = Vec::new();
-    if n == 0 {
-        return widths;
-    }
-    widths.push(n);
-    while n > 1 {
-        n = n / 2 + n % 2;
-        widths.push(n);
-    }
-    widths
-}
-
-/// Root branch first, leaf last. A promoted odd node is not a proof record.
-fn proof_nodes(widths: &[u64], leaf: u64) -> Vec<ProofNode> {
-    let mut branches = Vec::new();
-    let mut index = leaf;
-    for layer in 0..widths.len().saturating_sub(1) {
-        let parent = index / 2;
-        let real = parent * 2 + 1 < widths[layer];
-        if real {
-            branches.push(ProofNode {
-                level: (layer as u32) + 1,
-                index: parent,
-            });
-        }
-        index = parent;
-    }
-    branches.reverse();
-    branches.push(ProofNode {
-        level: 0,
-        index: leaf,
-    });
-    branches
-}
-
-fn rightmost_leaf(widths: &[u64], level: u32, index: u64) -> u64 {
-    let mut idx = index;
-    for layer in (1..=level).rev() {
-        let below = widths[(layer as usize) - 1];
-        if idx * 2 + 1 < below {
-            idx = idx * 2 + 1;
+/// Chunk ranges `[start, end)` of the sibling subtrees in the proof of
+/// `chunk_index`, leaf to root. The shape is the RFC 9162 split the data tree
+/// uses: the left subtree holds the largest power of two below the count
+/// (data tree spec §4). The count is `depth(chunk_index, chunk_count)`.
+fn sibling_subtrees(chunk_count: u64, chunk_index: u64) -> Vec<(u64, u64)> {
+    let mut siblings = Vec::new();
+    let (mut start, mut end) = (0_u64, chunk_count);
+    while end - start > 1 {
+        let left_size = 1_u64 << (u64::BITS - 1 - (end - start - 1).leading_zeros());
+        if chunk_index < start + left_size {
+            siblings.push((start + left_size, end));
+            end = start + left_size;
         } else {
-            idx *= 2;
+            siblings.push((start, start + left_size));
+            start += left_size;
         }
     }
-    idx
+    siblings.reverse();
+    siblings
 }
 
-/// Node bytes depend only on `(data_root, level, index)`, so two chunks under
-/// one branch store the same 96 bytes. Ids are not hashes. Full path, no tiles.
-fn shared_data_proof(
-    data_root: &[u8; 32],
-    num_leaves: u64,
-    leaf: u64,
-    chunk_bytes: u64,
-) -> Vec<u8> {
-    if num_leaves == 0 || leaf >= num_leaves {
+/// A v2-shaped data chunk proof: one 32-byte id per sibling subtree, leaf
+/// to root, then a 32-byte size witness. A sibling's bytes depend only on
+/// `(data_root, subtree)`, so chunks of one transaction share them the way
+/// real proofs do. The witness is the same for every chunk of a transaction.
+/// Ids are not hashes. Empty when `chunk_index` is not below `chunk_count`.
+fn shared_data_proof(data_root: &[u8; 32], chunk_count: u64, chunk_index: u64) -> Vec<u8> {
+    if chunk_index >= chunk_count {
         return Vec::new();
     }
-    let widths = layer_widths(num_leaves);
-    let nodes = proof_nodes(&widths, leaf);
     let mut out = Vec::new();
-    for node in nodes {
-        if node.level == 0 {
-            let end = leaf
-                .saturating_add(1)
-                .saturating_mul(chunk_bytes)
-                .min(num_leaves.saturating_mul(chunk_bytes));
-            fill_id(&mut out, data_root, 0, leaf, 3, 32);
-            push_note(&mut out, end);
-        } else {
-            let pivot_leaf = rightmost_leaf(&widths, node.level - 1, node.index * 2);
-            let pivot = pivot_leaf
-                .saturating_add(1)
-                .saturating_mul(chunk_bytes)
-                .min(num_leaves.saturating_mul(chunk_bytes));
-            fill_id(&mut out, data_root, node.level, node.index, 1, 32);
-            fill_id(&mut out, data_root, node.level, node.index, 2, 32);
-            push_note(&mut out, pivot);
-        }
+    for (start, end) in sibling_subtrees(chunk_count, chunk_index) {
+        let width = u32::try_from(end - start).unwrap_or(u32::MAX);
+        fill_id(&mut out, data_root, width, start, 1, HASH_SIZE);
     }
+    fill_id(&mut out, data_root, 0, chunk_count, 4, HASH_SIZE);
     out
 }
 
@@ -2262,11 +2202,6 @@ fn fill_id(out: &mut Vec<u8>, root: &[u8; 32], level: u32, index: u64, tag: u8, 
         state = state.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
         out.push((state >> 33) as u8);
     }
-}
-
-fn push_note(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&[0_u8; 24]);
-    out.extend_from_slice(&value.to_be_bytes());
 }
 
 fn has_index_bench(path: &Path) -> bool {
@@ -2597,7 +2532,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         if worst_case {
             DATA_PROOF_BYTES
         } else {
-            shared_data_proof(&[0_u8; 32], tree_leaves, 0, CHUNK_SIZE).len()
+            shared_data_proof(&[0_u8; 32], tree_leaves, 0).len()
         }
     } else {
         path_bytes.unwrap_or(4096)
@@ -2784,7 +2719,7 @@ Presets: {presets}. Each preset other than full-filters, fdatasync-wal-rotate, a
 --list-rocks prints the presets and exits.\n\
 --shuffle-paths RUN writes the data paths as runs of RUN consecutive chunks in a seeded random order, like scattered data sync. Each commit still holds the data-path batch size. RUN=1 is fully random. Transaction rows stay in offset order.\n\
 --txs-per-commit N overrides the transaction rows per durable commit. Production commits one block's transactions together, so --small-txs 1 should use the block's transaction count (100 at the expected cap).\n\
---small-txs N stores one data root every N chunks. Sibling chunks in one transaction share branch bytes. --mid-txs draws each transaction from 257 to 4096 chunks. Neither flag takes --path-bytes or --tx-chunks.\n\
+--small-txs N stores one data root every N chunks. Chunks of one transaction share sibling hashes and the size witness. --mid-txs draws each transaction from 257 to 4096 chunks. Neither flag takes --path-bytes or --tx-chunks.\n\
 --data-fraction F (default 1, and 0 < F <= 1) writes transactions, placements, and data rows for the first F × --chunks offsets. The transaction shape is the shape of that prefix. The header prints data_fraction and data_chunks.\n\
 --with-crc stores the proof plus the checksum trailer from encode_offset_meta. It needs --engine rocks.\n\
 {ENTROPY_FILL_HELP}\n\
@@ -2812,14 +2747,15 @@ mod tests {
     use irys_database::submodule::BLOCK_CACHE_BYTES;
 
     use super::{
-        Args, DATA_PROOF_BYTES, DATA_PROOF_LAYERS, Engines, FILLED_MAP_CEILING, HASH_SIZE,
+        Args, DATA_PROOF_BYTES, DATA_PROOF_SIBLINGS, Engines, FILLED_MAP_CEILING, HASH_SIZE,
         HEAD_SAMPLES, LEAF_SIZE, MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH,
         MID_MDBX_TXS_PER_COMMIT, NOTE_SIZE, PARTITION_CHUNKS, SubmoduleIndex, TX_PROOF_BYTES,
         TX_PROOF_LAYERS, Workload, bloom_bytes, commits_for, data_path_bytes, hash_at, head_tail,
         mdbx_map_bytes, memory_predict, mid_spans, pairing_layers, parse_arg_list, parse_diskstats,
         parse_mount_line, parse_proc_status, percentile, place_tx, proof_bytes, ranks,
-        rewritten_data_path, sample_offset, seq_offset, shaped_proof, shuffled_runs, tx_count,
-        tx_path_bytes, write_data_paths, write_entropy_rows, write_tx_index,
+        rewritten_data_path, sample_offset, seq_offset, shaped_proof, shared_data_proof,
+        shuffled_runs, tx_count, tx_path_bytes, write_data_paths, write_entropy_rows,
+        write_tx_index,
     };
 
     #[test]
@@ -2973,23 +2909,58 @@ mod tests {
     }
 
     #[test]
-    fn max_proofs_match_the_merkle_layout() {
+    fn max_proofs_match_the_tree_layouts() {
         assert_eq!(pairing_layers(1), 0);
         assert_eq!(proof_bytes(0), LEAF_SIZE);
         assert_eq!(pairing_layers(2), 1);
         assert_eq!(proof_bytes(1), 160);
-        assert_eq!(DATA_PROOF_LAYERS, 25);
-        assert_eq!(DATA_PROOF_BYTES, 2464);
+        assert_eq!(DATA_PROOF_SIBLINGS, 25);
+        assert_eq!(DATA_PROOF_BYTES, 832);
+        let max_chunks = u32::try_from(MAX_DATA_TX_CHUNKS).unwrap();
+        assert_eq!(
+            DATA_PROOF_SIBLINGS,
+            irys_data_tree::depth(0, max_chunks).unwrap() as usize
+        );
         assert_eq!(TX_PROOF_LAYERS, 7);
         assert_eq!(TX_PROOF_BYTES, 736);
-        assert!((DATA_PROOF_BYTES - LEAF_SIZE).is_multiple_of(HASH_SIZE * 2 + NOTE_SIZE));
+        assert!((TX_PROOF_BYTES - LEAF_SIZE).is_multiple_of(HASH_SIZE * 2 + NOTE_SIZE));
+    }
+
+    /// Every synthetic data proof has the v2 length `32 × (depth + 1)`, and
+    /// the last hash is the same for every chunk of one transaction.
+    #[test]
+    fn shared_data_proofs_have_the_v2_length() {
+        let root = [0x33_u8; 32];
+        for chunk_count in [1_u32, 2, 3, 5, 17, 4_096] {
+            let first = shared_data_proof(&root, u64::from(chunk_count), 0);
+            for chunk_index in 0..chunk_count {
+                let proof =
+                    shared_data_proof(&root, u64::from(chunk_count), u64::from(chunk_index));
+                let depth = irys_data_tree::depth(chunk_index, chunk_count).unwrap() as usize;
+                assert_eq!(
+                    proof.len(),
+                    (depth + 1) * HASH_SIZE,
+                    "{chunk_index}/{chunk_count}"
+                );
+                assert_eq!(
+                    proof[proof.len() - HASH_SIZE..],
+                    first[first.len() - HASH_SIZE..]
+                );
+            }
+        }
+        // Neighbours share every sibling above the first.
+        let left = shared_data_proof(&root, 4_096, 6);
+        let right = shared_data_proof(&root, 4_096, 7);
+        assert_ne!(left[..HASH_SIZE], right[..HASH_SIZE]);
+        assert_eq!(left[HASH_SIZE..], right[HASH_SIZE..]);
+        assert!(shared_data_proof(&root, 3, 3).is_empty());
     }
 
     #[test]
     fn shaped_proof_keeps_zero_notes_and_changes_per_chunk() {
-        let first = shaped_proof(DATA_PROOF_LAYERS, 262_144, 1);
-        let second = shaped_proof(DATA_PROOF_LAYERS, 524_288, 2);
-        assert_eq!(first.len(), DATA_PROOF_BYTES);
+        let first = shaped_proof(TX_PROOF_LAYERS, 262_144, 1);
+        let second = shaped_proof(TX_PROOF_LAYERS, 524_288, 2);
+        assert_eq!(first.len(), TX_PROOF_BYTES);
         assert_ne!(first, second);
         assert!(first[..HASH_SIZE].iter().any(|byte| *byte != 0));
         let leaf = &first[first.len() - LEAF_SIZE..];
@@ -3421,12 +3392,15 @@ VmHWM:\t   8600000 kB
         }
         assert_eq!(starts, vec![0, 3, 6, 9]);
         assert_eq!(place_tx(&small, 9).leaves, 1);
+        // Leaf to root: chunks 0 and 1 of a 3-chunk tx share the upper
+        // sibling (chunk 2) and the size witness, the last 64 bytes.
         let left = data_path_bytes(&small, 0);
         let right = data_path_bytes(&small, 1);
-        assert_eq!(&left[..96], &right[..96]);
+        assert_eq!(left.len(), 3 * HASH_SIZE);
+        assert_eq!(&left[HASH_SIZE..], &right[HASH_SIZE..]);
         assert_ne!(left, right);
         let other = data_path_bytes(&small, 3);
-        assert_ne!(&left[..96], &other[..96]);
+        assert_ne!(&left[HASH_SIZE..], &other[HASH_SIZE..]);
         assert_ne!(tx_path_bytes(&small, 0), tx_path_bytes(&small, 1));
 
         let spans = mid_spans(10_000);
