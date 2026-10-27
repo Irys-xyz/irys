@@ -2239,10 +2239,12 @@ mod validate_tests {
     )]
     #[case::epoch_seconds_overflow(
         |c: &mut ConsensusConfig| {
-            // A reset window at the cap and 2 x migration_depth (12 in the
-            // testing preset) x block_time <= u64::MAX keep the reset-frequency
-            // guard from tripping first, while block_time x num_blocks_in_epoch
-            // (100 in the testing preset) overflows.
+            // A reset window at the cap keeps the reset-frequency guard from
+            // tripping first: 2 x migration_depth (2 x 6 = 12 in the testing
+            // preset) x block_time <= u64::MAX. This needs a 64-bit host:
+            // `usize::MAX` is only 32 bits wide on a 32-bit host. Meanwhile
+            // block_time x num_blocks_in_epoch (100 in the testing preset)
+            // overflows.
             c.vdf.reset_frequency = usize::MAX;
             c.difficulty_adjustment.block_time = u64::MAX / 16;
         },
@@ -2280,7 +2282,8 @@ mod validate_tests {
     )]
     #[case::partition_chunks_exceed_u32(
         |c: &mut ConsensusConfig| {
-            // Keep the recall-range multiple and VDF step-capacity rules satisfied.
+            // The value stays a multiple of the recall range. The u32 check runs
+            // before the VDF step-capacity check, so that check is not reached.
             c.num_chunks_in_partition =
                 (u64::from(u32::MAX) / c.num_chunks_in_recall_range + 1) * c.num_chunks_in_recall_range;
         },

@@ -21,6 +21,10 @@ pub enum PriceOracleError {
 }
 
 /// Maximum seconds an oracle-reported `last_updated_at` may lead the local wall clock.
+/// A price that is further in the future than this bound is rejected. The startup fetch
+/// then fails, so the node does not start when the local clock or the oracle clock is
+/// skewed by more than this bound. A larger bound accepts more skew but also accepts
+/// prices that are stamped further ahead of real time.
 pub const MAX_ORACLE_CLOCK_SKEW_SECS: u64 = 60;
 
 /// Fails when `reported` is more than `MAX_ORACLE_CLOCK_SKEW_SECS` ahead of the local wall clock.
@@ -43,8 +47,11 @@ fn reject_future_timestamp_at(reported: UnixTimestamp, now_secs: u64) -> eyre::R
     Ok(())
 }
 
-/// Fails when the feed reports a zero price. Validators reject a zero oracle price, so a producer
-/// that adopted it would build blocks no node accepts.
+/// Fails when the feed reports a zero price. Block validation rejects a zero oracle price.
+/// The producer bounds the price to `token_price_safe_range` around the parent price. Only
+/// when that range is 100% or more does the lower bound reach zero. A zero price then passes
+/// the bound and the produced block is invalid. With a smaller range, the bound raises a zero
+/// price to a non-zero minimum.
 pub(crate) fn reject_zero_price(amount: Amount<(IrysPrice, Usd)>) -> eyre::Result<()> {
     eyre::ensure!(!amount.amount.is_zero(), "oracle reported a zero price");
     Ok(())
