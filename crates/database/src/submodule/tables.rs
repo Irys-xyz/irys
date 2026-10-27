@@ -264,6 +264,8 @@ pub struct TxLeafBinding {
 pub struct PendingBodyMigration {
     /// Which data owes bytes at this placement. It keys the chunk cache.
     pub data_commitment: DataCommitment,
+    /// Root of that data's tree. The worker checks each body against it.
+    pub data_tree_root: DataTreeRoot,
     /// `data_size` of the paying tx; gives the worker its chunk count without a
     /// second lookup.
     pub data_size: u64,

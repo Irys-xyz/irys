@@ -7048,6 +7048,7 @@ mod tests {
         store.disable_auto_compaction()?;
         let job = PendingBodyMigration {
             data_commitment: DataCommitment(H256::repeat_byte(1)),
+            data_tree_root: DataTreeRoot(H256::repeat_byte(1)),
             data_size: 32,
             start_offset: RelativeChunkOffset(0),
             block_height: 1,
@@ -8172,6 +8173,7 @@ mod tests {
                 PartitionChunkOffset::from(3),
                 &PendingBodyMigration {
                     data_commitment: DataCommitment(data_root),
+                    data_tree_root: DataTreeRoot(data_root),
                     data_size: 64,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -9062,6 +9064,7 @@ mod tests {
                     PartitionChunkOffset::from(offset),
                     &PendingBodyMigration {
                         data_commitment: DataCommitment(data_root),
+                        data_tree_root: DataTreeRoot(data_root),
                         data_size,
                         start_offset: RelativeChunkOffset(i32::try_from(start).expect("start")),
                         block_height,
@@ -9294,6 +9297,7 @@ mod tests {
                 PartitionChunkOffset::from(0),
                 &PendingBodyMigration {
                     data_commitment: DataCommitment(root),
+                    data_tree_root: DataTreeRoot(root),
                     data_size: 32,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -9332,6 +9336,7 @@ mod tests {
                 PartitionChunkOffset::from(3),
                 &PendingBodyMigration {
                     data_commitment: DataCommitment(H256::repeat_byte(1)),
+                    data_tree_root: DataTreeRoot(H256::repeat_byte(1)),
                     data_size: 32,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -9360,6 +9365,7 @@ mod tests {
                 PartitionChunkOffset::from(3),
                 &PendingBodyMigration {
                     data_commitment: DataCommitment(H256::repeat_byte(1)),
+                    data_tree_root: DataTreeRoot(H256::repeat_byte(1)),
                     data_size: 32,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -9740,6 +9746,7 @@ mod tests {
         let root = H256::repeat_byte(3);
         let job = PendingBodyMigration {
             data_commitment: DataCommitment(root),
+            data_tree_root: DataTreeRoot(root),
             data_size: 32,
             start_offset: RelativeChunkOffset(0),
             block_height: 1,

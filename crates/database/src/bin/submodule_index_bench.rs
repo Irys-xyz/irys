@@ -795,6 +795,7 @@ fn write_tx_index(store: &SubmoduleIndex, args: &Args, txs_per_commit: u32) -> e
                     piece.start,
                     &PendingBodyMigration {
                         data_commitment: DataCommitment(piece.data_root),
+                        data_tree_root: DataTreeRoot(piece.data_root),
                         data_size: piece.data_size,
                         start_offset: piece.start_offset,
                         block_height: 1,

@@ -1054,7 +1054,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     Ok(Some(cached_data_root))
 }
 
-/// Gets a [`CachedDataRoot`] by it's [`DataRoot`] from [`CachedDataRoots`] .
+/// Gets a [`CachedDataRoot`] by its [`DataCommitment`] from [`CachedDataRoots`] .
 pub fn cached_data_root_by_data_root<T: DbTx>(
     tx: &T,
     data_commitment: DataCommitment,
@@ -1225,7 +1225,7 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
     Ok(false)
 }
 
-/// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxChunkOffset`]
+/// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataCommitment`] and [`TxChunkOffset`]
 pub fn cached_chunk_meta_by_offset<T: DbTx>(
     tx: &T,
     data_commitment: DataCommitment,
@@ -1238,7 +1238,7 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
         .filter(|result| result.index == chunk_offset)
         .map(|index_entry| index_entry.meta))
 }
-/// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxChunkOffset`]
+/// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataCommitment`] and [`TxChunkOffset`]
 pub fn cached_chunk_by_chunk_offset<T: DbTx>(
     tx: &T,
     data_commitment: DataCommitment,

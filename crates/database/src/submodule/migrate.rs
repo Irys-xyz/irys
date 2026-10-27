@@ -1473,6 +1473,7 @@ mod tests {
                 0,
                 PendingBodyMigration {
                     data_commitment: DataCommitment(h(40)),
+                    data_tree_root: DataTreeRoot(h(40)),
                     data_size: 64,
                     start_offset: RelativeChunkOffset(3),
                     block_height: 9,

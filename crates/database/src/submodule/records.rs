@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use irys_types::{DataCommitment, H256, PartitionChunkOffset, RelativeChunkOffset};
+use irys_types::{DataCommitment, DataTreeRoot, H256, PartitionChunkOffset, RelativeChunkOffset};
 
 use super::tables::{OffsetMeta, PendingBodyMigration};
 
@@ -104,7 +104,9 @@ pub(super) const DATA_ROOT_KEY_LEN: usize = 36;
 pub(super) const CONTENT_KEY_LEN: usize = 36;
 /// End, tx start and `data_size` (16 bytes), then the data tree root (32 bytes).
 pub(super) const DATA_ROOT_VALUE_LEN: usize = 48;
-pub(super) const PENDING_LEN: usize = 56;
+/// Commitment (32), size (8), tx start (4), height (8), attempts (4), then the
+/// data tree root (32).
+pub(super) const PENDING_LEN: usize = 88;
 /// Stored when the writer did not name a ledger, a height, or a tx index.
 pub(super) const UNSET_U32: u32 = u32::MAX;
 pub(super) const UNSET_U64: u64 = u64::MAX;
@@ -258,6 +260,7 @@ pub(super) fn encode_pending(job: &PendingBodyMigration) -> [u8; PENDING_LEN] {
     out[40..44].copy_from_slice(&job.start_offset.0.to_be_bytes());
     out[44..52].copy_from_slice(&job.block_height.to_be_bytes());
     out[52..56].copy_from_slice(&job.attempts.to_be_bytes());
+    out[56..88].copy_from_slice(&job.data_tree_root.0.0);
     out
 }
 
@@ -276,6 +279,7 @@ pub(super) fn decode_pending(bytes: &[u8]) -> eyre::Result<PendingBodyMigration>
         start_offset: RelativeChunkOffset(i32::from_be_bytes(bytes[40..44].try_into().expect("4"))),
         block_height: u64::from_be_bytes(bytes[44..52].try_into().expect("8")),
         attempts: u32::from_be_bytes(bytes[52..56].try_into().expect("4")),
+        data_tree_root: DataTreeRoot(H256(bytes[56..88].try_into().expect("32"))),
     })
 }
 
@@ -560,6 +564,7 @@ mod tests {
     fn pending_bytes_round_trip() {
         let job = PendingBodyMigration {
             data_commitment: DataCommitment(H256::repeat_byte(3)),
+            data_tree_root: DataTreeRoot(H256::repeat_byte(3)),
             data_size: 64,
             start_offset: RelativeChunkOffset(-2),
             block_height: 8,

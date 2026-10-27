@@ -1201,6 +1201,7 @@ mod tests {
     fn job(data_root: H256, start_offset: i32, block_height: u64) -> PendingBodyMigration {
         PendingBodyMigration {
             data_commitment: DataCommitment(data_root),
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 4_430_000_000,
             start_offset: RelativeChunkOffset(start_offset),
             block_height,
@@ -1217,6 +1218,7 @@ mod tests {
         let a = job(H256::random(), -20, 29_875);
         let b = PendingBodyMigration {
             data_commitment: DataCommitment(H256::random()),
+            data_tree_root: DataTreeRoot(H256::random()),
             data_size: u64::MAX,
             start_offset: RelativeChunkOffset(i32::MIN),
             block_height: u64::MAX,

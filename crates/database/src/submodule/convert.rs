@@ -5429,6 +5429,7 @@ mod tests {
                 PartitionChunkOffset(0),
                 &PendingBodyMigration {
                     data_commitment: DataCommitment(pair.root_a),
+                    data_tree_root: DataTreeRoot(pair.root_a),
                     data_size: 352,
                     start_offset: RelativeChunkOffset(-8),
                     block_height: 1,
@@ -8679,6 +8680,7 @@ mod tests {
                     PartitionChunkOffset::from(0),
                     &PendingBodyMigration {
                         data_commitment: DataCommitment(data_root),
+                        data_tree_root: DataTreeRoot(data_root),
                         data_size: 64,
                         start_offset: RelativeChunkOffset(1),
                         block_height: 1,

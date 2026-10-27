@@ -2669,6 +2669,7 @@ mod tests {
     fn pending_job(data_root: H256) -> PendingBodyMigration {
         PendingBodyMigration {
             data_commitment: DataCommitment(data_root),
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 32,
             start_offset: RelativeChunkOffset(0),
             block_height: 1,
@@ -3550,6 +3551,7 @@ mod tests {
             };
             let pending = PendingBodyMigration {
                 data_commitment: DataCommitment(data_root),
+                data_tree_root: DataTreeRoot(data_root),
                 data_size: 64,
                 start_offset: RelativeChunkOffset(1),
                 block_height: 7,
