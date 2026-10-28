@@ -1081,22 +1081,26 @@ impl BlockTreeServiceInner {
                 // least `block_tree_depth` long diverging inside the window — is
                 // pathological (attack / severe partition); halting is correct.
                 // Returning `Err` drives the controlled-shutdown path.
-                if is_reorg {
-                    let fork_height = split.lca.header().height;
-                    if let Err(e) = validate_reorg_within_cache_window(
+                //
+                // A tip extension that spans the window fails the same way: prune
+                // evicts its oldest new blocks before they are confirmed, and the
+                // epoch snapshot and migration reads that follow fail by hash.
+                let fork_height = split.lca.header().height;
+                if let Err(e) = validate_reorg_within_cache_window(
+                    fork_height,
+                    arc_block.height,
+                    self.config.consensus.block_tree_depth,
+                ) {
+                    error!(
                         fork_height,
-                        arc_block.height,
-                        self.config.consensus.block_tree_depth,
-                    ) {
-                        error!(
-                            fork_height,
-                            new_tip = %block_hash,
-                            new_tip_height = arc_block.height,
-                            block_tree_depth = self.config.consensus.block_tree_depth,
-                            "reorg fork point is older than the block-tree cache window; aborting before prune evicts divergent blocks (and their epoch/commitment snapshots) that downstream reorg consumers re-read, to trigger controlled shutdown",
-                        );
-                        return Err(e);
-                    }
+                        is_reorg,
+                        new_tip = %block_hash,
+                        new_tip_height = arc_block.height,
+                        new_block_count = split.new_divergent.len(),
+                        block_tree_depth = self.config.consensus.block_tree_depth,
+                        "tip change fork point is older than the block-tree cache window; aborting before prune evicts divergent blocks (and their epoch/commitment snapshots) that downstream consumers re-read, to trigger controlled shutdown",
+                    );
+                    return Err(e);
                 }
 
                 // Prune the cache after the LCA is captured.
@@ -1194,25 +1198,6 @@ impl BlockTreeServiceInner {
                     // side of the split holds each block after the old tip up to the new
                     // tip, oldest first. Confirm each one and detect an epoch block among
                     // them, as on a reorg.
-                    // Log a warning instead of running the reorg-path cache-window
-                    // shutdown check: an extension abandons no fork.
-                    let fork_height = split.lca.header().height;
-                    if validate_reorg_within_cache_window(
-                        fork_height,
-                        arc_block.height,
-                        self.config.consensus.block_tree_depth,
-                    )
-                    .is_err()
-                    {
-                        warn!(
-                            fork_height,
-                            new_tip = %block_hash,
-                            new_tip_height = arc_block.height,
-                            block_tree_depth = self.config.consensus.block_tree_depth,
-                            new_block_count = split.new_divergent.len(),
-                            "tip extension spans more blocks than the block-tree cache window",
-                        );
-                    }
                     let blocks_to_confirm: Vec<Arc<SealedBlock>> = split.new_divergent;
                     let new_epoch_block = blocks_to_confirm
                         .iter()
@@ -3818,6 +3803,64 @@ mod tests {
             epoch_heights,
             vec![first_new_block.height],
             "the epoch block among the new canonical blocks is detected"
+        );
+    }
+
+    /// A tip extension whose fork point is below the post-prune cache window aborts
+    /// before prune, as a deep reorg does: prune would evict the oldest new block before
+    /// it is confirmed. With `block_tree_depth = 2`, a two-block extension is one block
+    /// too long.
+    #[tokio::test]
+    async fn tip_extension_past_cache_window_aborts_before_prune() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().block_tree_depth = 2;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (canonical tip) -> first_new_block -> new_tip
+        //         -> pending_fork_start (ties first_new_block, added first)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let _pending_fork_start = h.add_child_block(&genesis, 5_200, true);
+        let first_new_block = h.add_child_block(&old_tip, 5_200, true);
+        h.inner
+            .on_block_validation_finished(first_new_block.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(
+            h.tip(),
+            old_tip.block_hash,
+            "a tie with the max cumulative difficulty block keeps the tip"
+        );
+
+        let new_tip = h.add_child_block(&first_new_block, 5_300, true);
+        let err = h
+            .inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect_err("a tip extension past the cache window must abort");
+        assert!(
+            err.to_string().contains("deeper than cache window"),
+            "error must name the cache-window violation; got: {err}"
+        );
+
+        let cache = h.inner.cache.read().expect("cache lock after abort");
+        assert!(
+            cache.get_block(&first_new_block.block_hash).is_some(),
+            "the abort happens before prune evicts the oldest new block"
+        );
+        drop(cache);
+        while let Ok(message) = h.mempool_rx.try_recv() {
+            let (message, _span) = message.into_parts();
+            assert!(
+                !matches!(message, MempoolServiceMessage::BlockConfirmed(_)),
+                "no block is confirmed when the tip change aborts"
+            );
+        }
+        assert!(
+            h.reorg_rx.try_recv().is_err(),
+            "no ReorgEvent is sent when the tip change aborts"
         );
     }
 
