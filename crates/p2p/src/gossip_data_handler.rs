@@ -162,7 +162,7 @@ where
 
         record_gossip_chunk_received(chunk_size);
 
-        match self.chunk_ingress.handle_chunk_ingress(chunk).await {
+        match self.chunk_ingress.handle_chunk_ingress(chunk, true).await {
             Ok(()) => {
                 // Record processing duration on success
                 record_gossip_chunk_processing_duration(start.elapsed_ms());

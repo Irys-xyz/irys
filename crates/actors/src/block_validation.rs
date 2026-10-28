@@ -7229,6 +7229,7 @@ pub async fn data_txs_are_valid(
                                         unpacked,
                                         Some(ing_tx),
                                         None,
+                                        false,
                                     ),
                                 )
                                 .is_err()
@@ -10916,7 +10917,7 @@ mod ingress_proof_local_bytes_tests {
                 let crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(
                     _chunk,
                     reply,
-                    _,
+                    ..,
                 ) = msg.inner
                 else {
                     continue;

@@ -368,7 +368,7 @@ impl ChunkIngressServiceInner {
         for chunk in chunks {
             let chunk = Arc::new(chunk);
             match self
-                .ingest_chunk(Arc::clone(&chunk), PendingDrainRole::Own)
+                .ingest_chunk(Arc::clone(&chunk), PendingDrainRole::Own, false)
                 .await
             {
                 Ok(()) => saw_ok = true,
@@ -484,19 +484,25 @@ impl ChunkIngressServiceInner {
     pub(crate) async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
+        park_when_placed: bool,
     ) -> Result<(), ChunkIngressError> {
-        self.ingest_chunk(Arc::new(chunk), PendingDrainRole::External)
-            .await
-            .map_err(|failure| failure.error)
+        self.ingest_chunk(
+            Arc::new(chunk),
+            PendingDrainRole::External,
+            park_when_placed,
+        )
+        .await
+        .map_err(|failure| failure.error)
     }
 
+    /// `park_when_placed`: see [`super::ChunkIngressMessage::IngestChunk`].
     async fn ingest_chunk(
         &self,
         chunk: Arc<UnpackedChunk>,
         role: PendingDrainRole,
+        park_when_placed: bool,
     ) -> Result<(), IngressFailure> {
         // TODO: maintain a shared read transaction so we have read isolation
-        let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
         let chunk_size = self.config.consensus.chunk_size;
 
         info!(
@@ -553,7 +559,14 @@ impl ChunkIngressServiceInner {
             match self.placement_data_size_by_commitment(data_commitment) {
                 Ok(Some(data_size)) => {
                     return self
-                        .ingest_placed_chunk(chunk, &geometry, data_commitment, data_size)
+                        .ingest_placed_chunk(
+                            chunk,
+                            &geometry,
+                            data_commitment,
+                            data_size,
+                            role,
+                            park_when_placed,
+                        )
                         .await;
                 }
                 Ok(None) => {}
@@ -566,41 +579,7 @@ impl ChunkIngressServiceInner {
 
             // We don't have a data_root for this chunk but possibly the transaction containing this
             // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
-            let preheader_chunks_per_item = std::cmp::min(
-                max_chunks_per_item,
-                self.config.mempool.max_preheader_chunks_per_item,
-            );
-
-            // The count check and the insert share one write lock so concurrent
-            // ingress cannot exceed the per-item cap.
-            let data_root = chunk.data_tree_root;
-            let tx_offset = chunk.tx_offset;
-            let during_drain = self
-                .park_pending_chunk(
-                    data_commitment,
-                    Arc::clone(&chunk),
-                    preheader_chunks_per_item,
-                    role,
-                    "pre-header",
-                )
-                .await?;
-
-            // A parked chunk is not stored. Log that, so Ok is not read as
-            // a completed ingress.
-            info!(
-                chunk.data_root = %data_root,
-                chunk.tx_offset = %tx_offset,
-                "Parked chunk: no CachedDataRoot yet (awaiting tx header / CDR commit)"
-            );
-
-            // Close the TX/chunk gossip TOCTOU (see maybe_rescue_after_park).
-            // Any CDR is enough: the header that commits it owns this root.
-            // Skip this while a drain is active. That drain schedules one
-            // follow-up; a second pop now would race its restore.
-            if !during_drain {
-                self.maybe_rescue_after_park(data_commitment);
-            }
-            return Ok(());
+            return self.park_until_header(data_commitment, chunk, role).await;
         };
 
         // The commitment binds the size, so the cached size is the size this
@@ -704,6 +683,51 @@ impl ChunkIngressServiceInner {
         Ok(())
     }
 
+    /// Park `chunk` under `data_commitment` until a header for it arrives,
+    /// within the pre-header caps.
+    async fn park_until_header(
+        &self,
+        data_commitment: DataCommitment,
+        chunk: Arc<UnpackedChunk>,
+        role: PendingDrainRole,
+    ) -> Result<(), IngressFailure> {
+        let preheader_chunks_per_item = std::cmp::min(
+            self.config.node_config.mempool().max_chunks_per_item,
+            self.config.mempool.max_preheader_chunks_per_item,
+        );
+
+        // The count check and the insert share one write lock so concurrent
+        // ingress cannot exceed the per-item cap.
+        let data_root = chunk.data_tree_root;
+        let tx_offset = chunk.tx_offset;
+        let during_drain = self
+            .park_pending_chunk(
+                data_commitment,
+                chunk,
+                preheader_chunks_per_item,
+                role,
+                "pre-header",
+            )
+            .await?;
+
+        // A parked chunk is not cached. Log that, so Ok is not read as
+        // a completed ingress.
+        info!(
+            chunk.data_root = %data_root,
+            chunk.tx_offset = %tx_offset,
+            "Parked chunk: no CachedDataRoot yet (awaiting tx header / CDR commit)"
+        );
+
+        // Close the TX/chunk gossip TOCTOU (see maybe_rescue_after_park).
+        // Any CDR is enough: the header that commits it owns this root.
+        // Skip this while a drain is active. That drain schedules one
+        // follow-up; a second pop now would race its restore.
+        if !during_drain {
+            self.maybe_rescue_after_park(data_commitment);
+        }
+        Ok(())
+    }
+
     /// The `data_size` of the first storage placement keyed by
     /// `data_commitment`. `None` when no module holds one. The key binds the
     /// size, so every placement under it has the same `data_size`.
@@ -759,15 +783,24 @@ impl ChunkIngressServiceInner {
     /// The chunk goes only to the modules that hold the placement. It does
     /// not write a cache row, a cached body or an ingress leaf, and it does
     /// not start ingress-proof generation: those belong to the cache row. It
-    /// is not remembered as recently processed, so the same chunk can still
+    /// is not remembered in `recent_valid_chunks`, so the same chunk can still
     /// take the cached path when a header for this commitment arrives. It is
     /// not gossiped: a peer that holds the placement gets it by data sync.
+    ///
+    /// With `park_when_placed` (a chunk that a client or a peer sent), the
+    /// chunk also parks under its commitment after the module write. The
+    /// same data can be uploaded again by a new tx with the same commitment,
+    /// whose header arrives after its chunks. That header then drains the
+    /// parked chunk through the cached path, so the body is cached and the
+    /// ingress leaf is written without a resend.
     async fn ingest_placed_chunk(
         &self,
         chunk: Arc<UnpackedChunk>,
         geometry: &irys_types::data_tree::Geometry,
         data_commitment: DataCommitment,
         data_size: u64,
+        role: PendingDrainRole,
+        park_when_placed: bool,
     ) -> Result<(), IngressFailure> {
         let chunk_len = verify_anchored_chunk(geometry, data_commitment, data_size, &chunk)?;
 
@@ -803,7 +836,10 @@ impl ChunkIngressServiceInner {
                 );
             }
         }
-        Ok(())
+        if !park_when_placed {
+            return Ok(());
+        }
+        self.park_until_header(data_commitment, chunk, role).await
     }
 
     /// Checks whether an ingress proof should be generated for the given `data_commitment`
@@ -1471,7 +1507,7 @@ mod tests {
         // Header A: same root, 64 bytes.
         insert_cached_data_root(&inner.irys_db, data_root, 64);
         inner
-            .handle_chunk_ingress_message(last_chunk.clone())
+            .handle_chunk_ingress_message(last_chunk.clone(), true)
             .await
             .expect("a chunk whose size no header names parks; it is not a fault");
         {
@@ -1540,7 +1576,7 @@ mod tests {
         };
 
         let error = inner
-            .handle_chunk_ingress_message(chunk)
+            .handle_chunk_ingress_message(chunk, true)
             .await
             .expect_err("a chunk of the wrong length must be rejected");
         assert!(
@@ -1595,7 +1631,7 @@ mod tests {
 
         for (data_size, chunk_index) in [(96, 2), (64, 1), (96, 0), (64, 0), (96, 1)] {
             let result = inner
-                .handle_chunk_ingress_message(chunk_of(data_size, chunk_index))
+                .handle_chunk_ingress_message(chunk_of(data_size, chunk_index), true)
                 .await;
             if data_size == 96 {
                 result.unwrap_or_else(|error| {
@@ -1681,7 +1717,7 @@ mod tests {
                 tx_offset: TxChunkOffset::from(u32::try_from(chunk_index)?),
             };
             let error = inner
-                .handle_chunk_ingress_message(chunk)
+                .handle_chunk_ingress_message(chunk, true)
                 .await
                 .expect_err("no honest proof of the larger tree verifies under the prefix header");
             assert!(
@@ -1699,13 +1735,16 @@ mod tests {
                 .as_bytes(),
         );
         inner
-            .handle_chunk_ingress_message(UnpackedChunk {
-                data_tree_root: DataTreeRoot(data_root),
-                data_size: PREFIX_DATA_SIZE,
-                data_path: forged_proof.into(),
-                bytes: data[64..96].to_vec().into(),
-                tx_offset: TxChunkOffset::from(1),
-            })
+            .handle_chunk_ingress_message(
+                UnpackedChunk {
+                    data_tree_root: DataTreeRoot(data_root),
+                    data_size: PREFIX_DATA_SIZE,
+                    data_path: forged_proof.into(),
+                    bytes: data[64..96].to_vec().into(),
+                    tx_offset: TxChunkOffset::from(1),
+                },
+                true,
+            )
             .await
             .expect("the forged proof opens chunk 1 of the prefix size");
 
@@ -1748,7 +1787,7 @@ mod tests {
         };
 
         inner
-            .handle_chunk_ingress_message(unknown_size_chunk)
+            .handle_chunk_ingress_message(unknown_size_chunk, true)
             .await
             .expect("a chunk whose size no header names parks; it is not a fault");
         {
@@ -1769,12 +1808,10 @@ mod tests {
             let other_root = H256([other_upload; 32]);
             for chunk_index in 0..2_u32 {
                 inner
-                    .handle_chunk_ingress_message(chunk_with(
-                        other_root,
-                        chunk_index,
-                        other_upload,
-                        CLAIMED_DATA_SIZE,
-                    ))
+                    .handle_chunk_ingress_message(
+                        chunk_with(other_root, chunk_index, other_upload, CLAIMED_DATA_SIZE),
+                        true,
+                    )
                     .await
                     .expect("a chunk that waits for its header parks");
             }
@@ -1902,12 +1939,14 @@ mod tests {
     }
 
     /// The cache row is gone (pruned, or never written on this node), but a
-    /// storage module holds a placement for the commitment. The chunk is
-    /// verified against the placement's size and lands in that module. The
-    /// cache, the ingress leaves and the ingress proofs stay empty. The chunk
-    /// is not gossiped and not remembered as recently processed.
+    /// storage module holds a placement for the commitment. A chunk that this
+    /// node fetched (data sync) is verified against the placement's size and
+    /// lands in that module. It does not park. The cache, the ingress leaves
+    /// and the ingress proofs stay empty. The chunk is not gossiped and not
+    /// remembered as recently processed.
     #[tokio::test]
-    async fn chunk_with_a_placement_and_no_cache_row_lands_in_the_module() -> eyre::Result<()> {
+    async fn fetched_chunk_with_a_placement_and_no_cache_row_lands_in_the_module_only()
+    -> eyre::Result<()> {
         use irys_types::{PartitionChunkOffset, partition_chunk_offset_ii};
         use nodit::interval::ii;
 
@@ -1925,7 +1964,9 @@ mod tests {
             tx_offset: TxChunkOffset::from(1),
         };
 
-        inner.handle_chunk_ingress_message(chunk.clone()).await?;
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), false)
+            .await?;
 
         assert_eq!(
             storage_module.get_chunk_type(&PartitionChunkOffset::from(1)),
@@ -1953,7 +1994,7 @@ mod tests {
                 .await
                 .get(&data_commitment)
                 .is_none(),
-            "the chunk does not park"
+            "a fetched chunk does not park"
         );
         assert_no_cache_state(&inner, data_commitment);
         assert!(
@@ -2001,11 +2042,15 @@ mod tests {
             tx_offset: TxChunkOffset::from(1),
         };
 
-        inner.handle_chunk_ingress_message(chunk.clone()).await?;
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), true)
+            .await?;
         assert_no_cache_state(&inner, data_commitment);
 
         insert_cached_data_root(&inner.irys_db, data_root, 64);
-        inner.handle_chunk_ingress_message(chunk.clone()).await?;
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), true)
+            .await?;
 
         let address = inner.config.irys_signer().address();
         inner.irys_db.view_eyre(|tx| {
@@ -2017,6 +2062,87 @@ mod tests {
                 ingress_leaf_count(tx, data_commitment, address)?,
                 1,
                 "the chunk's ingress leaf is written"
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// The same data is uploaded again by a second tx with the same
+    /// commitment. The first tx's cache row is pruned, but its placement
+    /// remains. A chunk of the second tx arrives before its header: it is
+    /// stored from the placement and also parks. When the header arrives,
+    /// the drain caches the body and writes the ingress leaf. The client does
+    /// not send the chunk again.
+    #[tokio::test]
+    async fn sent_placed_chunk_parks_and_its_header_drains_it() -> eyre::Result<()> {
+        use irys_database::{cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _};
+        use irys_types::PartitionChunkOffset;
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-placement-park-drain")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            inner.config.data_tree_geometry(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let (storage_module, data, data_root, proofs) = place_upload_without_cache_row(&mut inner)?;
+        let data_commitment = size_key(data_root, 64);
+        let chunk = UnpackedChunk {
+            data_tree_root: DataTreeRoot(data_root),
+            data_size: 64,
+            data_path: proofs[1].clone().into(),
+            bytes: data[32..64].to_vec().into(),
+            tx_offset: TxChunkOffset::from(1),
+        };
+
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), true)
+            .await?;
+
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset::from(1)),
+            Some(irys_domain::ChunkType::Data),
+            "the chunk is written at its placement"
+        );
+        assert!(
+            inner
+                .pending_chunks
+                .read()
+                .await
+                .get(&data_commitment)
+                .is_some_and(|parked| parked.peek(&TxChunkOffset::from(1)).is_some()),
+            "a sent chunk also parks under its commitment"
+        );
+        assert_no_cache_state(&inner, data_commitment);
+
+        // The second tx's header arrives.
+        insert_cached_data_root(&inner.irys_db, data_root, 64);
+        inner.process_pending_chunks_for_root(data_commitment).await;
+
+        assert!(
+            inner
+                .pending_chunks
+                .read()
+                .await
+                .get(&data_commitment)
+                .is_none(),
+            "the drain leaves nothing parked"
+        );
+        let address = inner.config.irys_signer().address();
+        inner.irys_db.view_eyre(|tx| {
+            let (_, cached) =
+                cached_chunk_by_chunk_offset(tx, data_commitment, TxChunkOffset::from(1))?
+                    .expect("the drain caches the body");
+            assert_eq!(cached.chunk, Some(chunk.bytes.clone()));
+            assert_eq!(
+                ingress_leaf_count(tx, data_commitment, address)?,
+                1,
+                "the drain writes the ingress leaf"
             );
             Ok(())
         })?;
@@ -2101,7 +2227,7 @@ mod tests {
         };
 
         PLACEMENT_READ_FAULT_MODULES.with(|faulty| *faulty.borrow_mut() = vec![storage_module.id]);
-        let result = inner.handle_chunk_ingress_message(chunk).await;
+        let result = inner.handle_chunk_ingress_message(chunk, true).await;
         PLACEMENT_READ_FAULT_MODULES.with(|faulty| faulty.borrow_mut().clear());
         result.expect("a failed placement read parks the chunk; it is not a fault");
 
@@ -2141,7 +2267,7 @@ mod tests {
 
         storage_module.pause_data_writes();
         let error = inner
-            .handle_chunk_ingress_message(chunk)
+            .handle_chunk_ingress_message(chunk, true)
             .await
             .expect_err("a chunk that nothing stores is not accepted");
         assert!(
@@ -2185,7 +2311,7 @@ mod tests {
         };
 
         let error = inner
-            .handle_chunk_ingress_message(chunk)
+            .handle_chunk_ingress_message(chunk, true)
             .await
             .expect_err("a chunk that fails against the placement is rejected");
         assert!(
@@ -2245,7 +2371,7 @@ mod tests {
         };
 
         inner
-            .handle_chunk_ingress_message(chunk)
+            .handle_chunk_ingress_message(chunk, true)
             .await
             .expect("a chunk that waits for its header parks; it is not a fault");
 
@@ -2450,7 +2576,7 @@ mod tests {
         let incoming = chunk_with(data_root, cap as u32, 0xAB, CLAIMED_DATA_SIZE);
 
         let err = inner
-            .handle_chunk_ingress_message(incoming.clone())
+            .handle_chunk_ingress_message(incoming.clone(), true)
             .await
             .expect_err("a pre-header chunk must be rejected while the root is draining");
         assert!(
@@ -2497,7 +2623,7 @@ mod tests {
         expect_no_redrain(&mut receivers).await;
 
         let err = inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, true)
             .await
             .expect_err("after the drain, a chunk past the cap still rejects");
         assert!(
@@ -2532,7 +2658,7 @@ mod tests {
         park_offsets(&inner, data_root, [0_u32]).await;
         let (popped, ticket) = pop_for_drain(&inner, data_root).await;
         inner
-            .handle_chunk_ingress_message(chunk_with(data_root, 0, 0xAB, CLAIMED_DATA_SIZE))
+            .handle_chunk_ingress_message(chunk_with(data_root, 0, 0xAB, CLAIMED_DATA_SIZE), true)
             .await
             .expect("the same offset parks while the root is draining");
 
@@ -2576,7 +2702,7 @@ mod tests {
         park_offsets(&inner, data_root, [0_u32]).await;
         let (popped, ticket) = pop_for_drain(&inner, data_root).await;
         inner
-            .handle_chunk_ingress_message(chunk_with(data_root, 1, 1, CLAIMED_DATA_SIZE))
+            .handle_chunk_ingress_message(chunk_with(data_root, 1, 1, CLAIMED_DATA_SIZE), true)
             .await
             .expect("the arrival parks before cancel");
         drop(popped);
@@ -2617,12 +2743,10 @@ mod tests {
 
         for offset in [1_u32, 2] {
             inner
-                .handle_chunk_ingress_message(chunk_with(
-                    data_root,
-                    offset,
-                    offset as u8,
-                    CLAIMED_DATA_SIZE,
-                ))
+                .handle_chunk_ingress_message(
+                    chunk_with(data_root, offset, offset as u8, CLAIMED_DATA_SIZE),
+                    true,
+                )
                 .await
                 .expect("a chunk under the cap must be kept while the root is draining");
         }
@@ -2681,7 +2805,7 @@ mod tests {
         expect_no_redrain(&mut receivers).await;
 
         inner
-            .handle_chunk_ingress_message(chunk_with(data_root, 3, 3, 128))
+            .handle_chunk_ingress_message(chunk_with(data_root, 3, 3, 128), true)
             .await
             .expect("after the drain, a chunk of another size parks");
         {
@@ -3102,7 +3226,7 @@ mod tests {
         let incoming = chunk_with(data_root, 2, 0xAB, CLAIMED_DATA_SIZE);
 
         let err = inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, true)
             .await
             .expect_err("a new pre-header chunk must still reject at the cap");
         assert!(
@@ -3298,7 +3422,7 @@ mod tests {
             tx_offset: TxChunkOffset::from(2),
         };
         inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, true)
             .await
             .expect("a claim with no header parks; it is not a peer fault");
         let pending = inner.pending_chunks.read().await;
@@ -3327,7 +3451,7 @@ mod tests {
         incoming.bytes = vec![1_u8; 33].into();
 
         let err = inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, true)
             .await
             .expect_err("a body over chunk_size must be rejected");
         assert!(
@@ -3362,7 +3486,7 @@ mod tests {
         incoming.data_path = vec![0_u8; max_path + 1].into();
 
         let err = inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, true)
             .await
             .expect_err("a data_path over the pre-header max must be rejected");
         assert!(
@@ -3395,7 +3519,7 @@ mod tests {
         let incoming = chunk_with(data_root, 1, 0xAB, 32);
 
         let err = inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, true)
             .await
             .expect_err("a tx_offset past the claimed size must be rejected");
         assert!(
@@ -3433,7 +3557,7 @@ mod tests {
         incoming.data_path = vec![0_u8; max_path].into();
 
         inner
-            .handle_chunk_ingress_message(incoming)
+            .handle_chunk_ingress_message(incoming, true)
             .await
             .expect("a bounded chunk parks");
         let pending = inner.pending_chunks.read().await;

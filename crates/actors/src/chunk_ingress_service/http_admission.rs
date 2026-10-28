@@ -64,7 +64,12 @@ pub async fn enqueue_http_chunk(
             return Err(HttpChunkEnqueueError::ChannelClosed);
         }
         sender
-            .send_traced(ChunkIngressMessage::IngestChunk(chunk, None, Some(guard)))
+            .send_traced(ChunkIngressMessage::IngestChunk(
+                chunk,
+                None,
+                Some(guard),
+                true,
+            ))
             .map_err(|_| HttpChunkEnqueueError::ChannelClosed)?;
     }
     Ok(())
@@ -107,7 +112,7 @@ mod tests {
         assert_eq!(admission.available_permits(), 0);
         let traced = rx.try_recv().expect("queued");
         match traced.inner {
-            ChunkIngressMessage::IngestChunk(_, None, Some(_)) => {}
+            ChunkIngressMessage::IngestChunk(_, None, Some(_), true) => {}
             other => panic!("expected fire-and-forget with guard, got {other:?}"),
         }
     }

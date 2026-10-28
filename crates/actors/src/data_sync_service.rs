@@ -392,8 +392,9 @@ async fn forward_chunk_to_ingress(
     service_senders: &ServiceSenders,
     unpacked: UnpackedChunk,
 ) -> Result<(), ChunkIngressError> {
+    // A fetched chunk belongs to an old placement: it must not park.
     ChunkIngressFacadeImpl::from(service_senders)
-        .handle_chunk_ingress(unpacked)
+        .handle_chunk_ingress(unpacked, false)
         .await
 }
 
@@ -3190,6 +3191,32 @@ mod peer_chunk_validation_tests {
     };
     use tokio::sync::mpsc::UnboundedReceiver;
 
+    /// Data sync sends a fetched chunk to ingress marked as fetched, so a
+    /// chunk that lands on a storage placement with no cache row does not
+    /// park.
+    #[tokio::test]
+    async fn fetched_chunk_goes_to_ingress_marked_not_to_park() {
+        let (service_senders, receivers) = ServiceSenders::new();
+        let mut ingress_rx = receivers.chunk_ingress;
+        let forward = tokio::spawn(async move {
+            super::forward_chunk_to_ingress(&service_senders, UnpackedChunk::default()).await
+        });
+        let (msg, _span) = ingress_rx
+            .recv()
+            .await
+            .expect("data sync sends the chunk to ingress")
+            .into_parts();
+        let ChunkIngressMessage::IngestChunk(_, Some(reply), None, park_when_placed) = msg else {
+            panic!("expected an IngestChunk with a reply, got {msg:?}");
+        };
+        assert!(!park_when_placed, "a fetched chunk must not park");
+        reply.send(Ok(())).expect("forward waits for the reply");
+        forward
+            .await
+            .expect("forward task")
+            .expect("ingress answered Ok");
+    }
+
     /// Deliver `chunk` as a peer body, then apply the result the spawned
     /// ingress sends back, the way the service loop does.
     async fn deliver(
@@ -3309,7 +3336,7 @@ mod peer_chunk_validation_tests {
         tokio::spawn(async move {
             while let Some(traced) = ingress_rx.recv().await {
                 let (msg, _span) = traced.into_parts();
-                if let ChunkIngressMessage::IngestChunk(_, Some(reply), _) = msg {
+                if let ChunkIngressMessage::IngestChunk(_, Some(reply), ..) = msg {
                     let _ = reply.send(Ok(()));
                 }
             }
@@ -3494,7 +3521,7 @@ mod peer_chunk_validation_tests {
         tokio::spawn(async move {
             while let Some(traced) = ingress_rx.recv().await {
                 let (msg, _span) = traced.into_parts();
-                if let ChunkIngressMessage::IngestChunk(_, Some(reply), _) = msg {
+                if let ChunkIngressMessage::IngestChunk(_, Some(reply), ..) = msg {
                     let _ = reply.send(Ok(()));
                 }
             }
@@ -3636,7 +3663,7 @@ mod peer_chunk_validation_tests {
         tokio::spawn(async move {
             while let Some(traced) = ingress_rx.recv().await {
                 let (msg, _span) = traced.into_parts();
-                if let ChunkIngressMessage::IngestChunk(_, Some(reply), _) = msg {
+                if let ChunkIngressMessage::IngestChunk(_, Some(reply), ..) = msg {
                     let _ = reply.send(Ok(()));
                 }
             }
@@ -3779,7 +3806,7 @@ mod peer_chunk_validation_tests {
         tokio::spawn(async move {
             while let Some(traced) = ingress_rx.recv().await {
                 let (msg, _span) = traced.into_parts();
-                if let ChunkIngressMessage::IngestChunk(_, Some(reply), _) = msg {
+                if let ChunkIngressMessage::IngestChunk(_, Some(reply), ..) = msg {
                     counter.fetch_add(1, Ordering::SeqCst);
                     let _ = reply.send(Ok(()));
                 }
@@ -4968,7 +4995,7 @@ mod assignment_follow_tests {
         tokio::spawn(async move {
             while let Some(traced) = ingress_rx.recv().await {
                 let (msg, _span) = traced.into_parts();
-                if let ChunkIngressMessage::IngestChunk(chunk, Some(reply), _) = msg {
+                if let ChunkIngressMessage::IngestChunk(chunk, Some(reply), ..) = msg {
                     let _ = held_tx.send((chunk, reply));
                 }
             }

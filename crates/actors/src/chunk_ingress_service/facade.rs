@@ -15,9 +15,12 @@ impl ChunkIngressFacadeImpl {
         Self { service }
     }
 
+    /// `park_when_placed`: see [`ChunkIngressMessage::IngestChunk`]. True for
+    /// a chunk a peer sent, false for a chunk this node fetched.
     pub async fn handle_chunk_ingress(
         &self,
         chunk: UnpackedChunk,
+        park_when_placed: bool,
     ) -> Result<(), ChunkIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let chunk_data_root = chunk.data_tree_root;
@@ -27,6 +30,7 @@ impl ChunkIngressFacadeImpl {
                 chunk,
                 Some(oneshot_tx),
                 None,
+                park_when_placed,
             ))
             .map_err(|_| {
                 CriticalChunkIngressError::Other(format!(
