@@ -423,6 +423,13 @@ async fn collect_tx_to_miners_from_range(
     tx_to_miners.extend(middle_miners);
     tx_headers.extend(middle_headers.into_iter().map(|tx| (tx.id, tx)));
 
+    // The fee step pays each header's tx from the miner map, so a tx in the miner
+    // map with no header would get no fee and no error.
+    ensure!(
+        tx_to_miners.keys().eq(tx_headers.keys()),
+        "the expired {ledger_type:?} txs attributed to miners do not match the tx headers read"
+    );
+
     Ok((tx_to_miners, tx_headers))
 }
 
