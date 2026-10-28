@@ -20,6 +20,7 @@ use std::pin::pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use irys_database::{db::IrysDatabaseExt as _, get_cache_size, tables::CachedChunks};
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
@@ -121,6 +122,15 @@ pub struct ChunkIngressState {
     /// When `false`, HTTP enqueue must fail so shutdown drain cannot drop a
     /// chunk after `POST /v1/chunk` has already returned 200.
     pub http_ingress_open: Arc<Mutex<bool>>,
+    cache_watermark: CacheWatermark,
+}
+
+/// HTTP admission's rejection watermark on the chunk cache.
+#[derive(Debug, Clone)]
+struct CacheWatermark {
+    db: DatabaseProvider,
+    chunk_size: u64,
+    max_cache_size_bytes: u64,
 }
 
 impl ChunkIngressState {
@@ -134,6 +144,25 @@ impl ChunkIngressState {
             .await
             .get(&data_root)
             .is_some_and(|chunks| chunks.peek(&tx_offset).is_some())
+    }
+
+    /// True once `CachedChunks` holds `cache.max_cache_size_bytes` or more,
+    /// the cache service's own "at capacity" test. A rejection watermark,
+    /// not a cap: bodies admitted before the mark, and gossip, data-sync and
+    /// pending-drain writes, still land after it. A failed read answers
+    /// `false`, so a transient read error does not close public ingest.
+    pub fn cache_watermark_reached(&self) -> bool {
+        let watermark = &self.cache_watermark;
+        match watermark
+            .db
+            .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, watermark.chunk_size))
+        {
+            Ok((_, cached_bytes)) => cached_bytes >= watermark.max_cache_size_bytes,
+            Err(error) => {
+                warn!(%error, "Failed to read the chunk cache size for HTTP admission");
+                false
+            }
+        }
     }
 }
 
@@ -198,7 +227,11 @@ impl ChunkIngressServiceInner {
         match msg {
             ChunkIngressMessage::IngestChunk(chunk, response, admission) => {
                 let mode = chunks::broadcast_mode_for_admission(admission.is_some());
-                let result = self.handle_chunk_ingress_message(chunk, mode).await;
+                let writes = chunks::module_write_policy_for_admission(
+                    admission.is_some(),
+                    self.config.mempool.http_ingest_waits_for_module_write,
+                );
+                let result = self.handle_chunk_ingress_message(chunk, mode, writes).await;
                 drop(admission);
                 if let Err(e) = &result {
                     metrics::record_chunk_error(e.error_type(), e.is_advisory());
@@ -350,6 +383,11 @@ impl ChunkIngressService {
         let chunk_ingress_state = ChunkIngressState {
             pending_chunks: pending_chunks.clone(),
             http_ingress_open: Arc::clone(&http_ingress_open),
+            cache_watermark: CacheWatermark {
+                db: irys_db.clone(),
+                chunk_size: config.consensus.chunk_size,
+                max_cache_size_bytes: config.node_config.cache.max_cache_size_bytes,
+            },
         };
 
         let handle_for_inner = runtime_handle.clone();
@@ -902,14 +940,76 @@ mod overload_helpers_tests {
         );
     }
 
+    fn test_state(
+        tmp: &impl AsRef<std::path::Path>,
+        pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
+        chunk_size: u64,
+        max_cache_size_bytes: u64,
+    ) -> ChunkIngressState {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        let db_env = open_or_create_db(
+            tmp.as_ref().join("db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().expect("testing database arguments"),
+        )
+        .expect("open test database");
+        ChunkIngressState {
+            pending_chunks,
+            http_ingress_open: Arc::new(Mutex::new(true)),
+            cache_watermark: CacheWatermark {
+                db: DatabaseProvider(Arc::new(db_env)),
+                chunk_size,
+                max_cache_size_bytes,
+            },
+        }
+    }
+
+    #[test]
+    fn cache_watermark_is_reached_at_max_cache_size() {
+        use irys_database::db::IrysDatabaseExt as _;
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-cache-watermark")
+            .build();
+        let state = test_state(
+            &tmp,
+            Arc::new(RwLock::new(PriorityPendingChunks::new(8, 8))),
+            32,
+            64,
+        );
+        let cache_body = |byte: u8| {
+            let chunk = UnpackedChunk {
+                data_root: DataRoot::from([byte; 32]),
+                data_size: 32,
+                tx_offset: 0_u32.into(),
+                data_path: vec![byte].into(),
+                bytes: vec![byte; 32].into(),
+            };
+            state
+                .cache_watermark
+                .db
+                .update_eyre(|tx| irys_database::cache_chunk_verified(tx, &chunk).map(|_| ()))
+                .expect("cache body");
+        };
+
+        assert!(!state.cache_watermark_reached(), "empty cache");
+        cache_body(1);
+        assert!(!state.cache_watermark_reached(), "32 of 64 bytes");
+        cache_body(2);
+        assert!(
+            state.cache_watermark_reached(),
+            "64 of 64 bytes is at the mark"
+        );
+    }
+
     #[tokio::test]
     async fn pending_contains_is_false_when_empty_and_true_after_put() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-pending-contains")
+            .build();
         let pending =
             std::sync::Arc::new(tokio::sync::RwLock::new(PriorityPendingChunks::new(8, 8)));
-        let state = ChunkIngressState {
-            pending_chunks: pending.clone(),
-            http_ingress_open: std::sync::Arc::new(std::sync::Mutex::new(true)),
-        };
+        let state = test_state(&tmp, pending.clone(), 32, u64::MAX);
         let chunk = dummy_chunk();
         assert!(
             !state

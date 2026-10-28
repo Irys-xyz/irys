@@ -1656,6 +1656,11 @@ pub struct MempoolNodeConfig {
     pub max_http_chunk_waiters: usize,
     /// Monotonic wait for an admission permit, in milliseconds.
     pub http_chunk_admission_timeout_millis: u64,
+    /// Rollback switch for public `POST /v1/chunk` ingest. `false` (the
+    /// default) returns once the body is cached and queued on each assigned
+    /// storage module's disk lane. `true` waits for the disk lane to pack
+    /// the body, as before the change.
+    pub http_ingest_waits_for_module_write: bool,
 }
 
 impl Default for MempoolNodeConfig {
@@ -1686,6 +1691,7 @@ impl Default for MempoolNodeConfig {
             max_http_chunk_admission: 256,
             max_http_chunk_waiters: 32,
             http_chunk_admission_timeout_millis: 5000,
+            http_ingest_waits_for_module_write: false,
         }
     }
 }
@@ -1899,6 +1905,7 @@ impl NodeConfig {
                 max_http_chunk_admission: 256,
                 max_http_chunk_waiters: 32,
                 http_chunk_admission_timeout_millis: 5000,
+                http_ingest_waits_for_module_write: false,
             },
             metrics: MetricsConfig::default(),
 
@@ -2116,6 +2123,7 @@ impl NodeConfig {
                 max_http_chunk_admission: 256,
                 max_http_chunk_waiters: 32,
                 http_chunk_admission_timeout_millis: 5000,
+                http_ingest_waits_for_module_write: false,
             },
             metrics: MetricsConfig::default(),
 
