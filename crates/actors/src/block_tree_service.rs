@@ -1152,31 +1152,25 @@ impl BlockTreeServiceInner {
             );
             return Ok(None);
         }
-        let changed = cache.mark_tip(&candidate)?;
-        debug!(
-            block.hash = %candidate,
-            block.height = new_tip.height,
-            old_tip.hash = %old_tip_hash,
-            old_tip.height = old_tip_height,
-            tip_changed = changed,
-            "block_tree.transition: mark_tip"
-        );
-        if !changed {
+
+        // `mark_tip` keeps the tip when the candidate ties the max cumulative difficulty
+        // block and is not that block. Check this first, so the cache-window check below
+        // runs only for a tip that moves.
+        let (max_diff, max_hash) = cache.get_max_cumulative_difficulty_block();
+        if new_tip.cumulative_diff == max_diff && max_hash != candidate {
+            debug!(
+                block.hash = %candidate,
+                block.height = new_tip.height,
+                max_block.hash = %max_hash,
+                "block_tree.transition: ties the max cumulative difficulty block (kept current tip)"
+            );
             return Ok(None);
         }
 
-        let block_index_read = self.block_index_guard.read();
-        let fcu_markers = ForkChoiceMarkers::from_block_tree(
-            cache,
-            block_index_read,
-            &self.db,
-            self.config.consensus.block_migration_depth as usize,
-            self.config.consensus.block_tree_depth as usize,
-        )?;
-
-        // Compute the reorg split BEFORE pruning so the parent-walk
-        // sees both lineages in `cache.blocks`. Independent of
-        // `ChainState` flags by construction.
+        // Compute the reorg split BEFORE `mark_tip` and the prune, so the parent-walk
+        // sees both lineages in `cache.blocks` and the cache-window check below can
+        // abort before the tree changes. Independent of `ChainState` flags by
+        // construction.
         //
         // The tip change is a reorg only when it abandons blocks of the old
         // canonical chain. Classify from the old tip -> new tip transition, not
@@ -1200,8 +1194,8 @@ impl BlockTreeServiceInner {
         // and would fail mid-reorg, after the event was broadcast and
         // metadata persisted.
         //
-        // Abort before prune mutates the cache, so the failure is pre-commit
-        // with an accurate diagnostic. Matches master, whose post-prune
+        // Abort before `mark_tip` and the prune change the tree, so the failure is
+        // pre-commit with an accurate diagnostic and readers never see a moved tip. Matches master, whose post-prune
         // `prune_chains_at_ancestor` errored whenever the LCA had been
         // evicted from the canonical chain. The trigger — a new fork at
         // least `block_tree_depth` long diverging inside the window — is
@@ -1228,6 +1222,28 @@ impl BlockTreeServiceInner {
             );
             return Err(e);
         }
+
+        let changed = cache.mark_tip(&candidate)?;
+        debug!(
+            block.hash = %candidate,
+            block.height = new_tip.height,
+            old_tip.hash = %old_tip_hash,
+            old_tip.height = old_tip_height,
+            tip_changed = changed,
+            "block_tree.transition: mark_tip"
+        );
+        if !changed {
+            return Ok(None);
+        }
+
+        let block_index_read = self.block_index_guard.read();
+        let fcu_markers = ForkChoiceMarkers::from_block_tree(
+            cache,
+            block_index_read,
+            &self.db,
+            self.config.consensus.block_migration_depth as usize,
+            self.config.consensus.block_tree_depth as usize,
+        )?;
 
         // Prune the cache after the LCA is captured.
         //
@@ -3988,6 +4004,10 @@ mod tests {
             cache.get_block(&first_new_block.block_hash).is_some(),
             "the abort happens before prune evicts the oldest new block"
         );
+        assert_eq!(
+            cache.tip, old_tip.block_hash,
+            "the abort happens before the tip moves"
+        );
         drop(cache);
         while let Ok(message) = h.mempool_rx.try_recv() {
             let (message, _span) = message.into_parts();
@@ -4242,6 +4262,10 @@ mod tests {
                     block.height
                 );
             }
+            assert_eq!(
+                cache.tip, old_tip.block_hash,
+                "the abort happens before the tip moves"
+            );
             drop(cache);
             assert!(
                 h.reorg_rx.try_recv().is_err(),
