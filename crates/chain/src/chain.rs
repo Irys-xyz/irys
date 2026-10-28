@@ -1688,6 +1688,11 @@ impl IrysNode {
             service_senders.packing_sender.clone(),
         );
 
+        // create the block reward curve
+        let reward_curve = Arc::new(irys_actors::block_reward::reward_curve_from_config(
+            &config.consensus,
+        ));
+
         // Initialize supply state for tracking cumulative emissions
         let supply_state = Arc::new(SupplyState::new(&config.node_config)?);
         let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
@@ -1705,6 +1710,8 @@ impl IrysNode {
             let supply_state_for_backfill = supply_state.clone();
             let block_index_for_backfill = block_index_guard.clone();
             let db_for_backfill = irys_db.clone();
+            let reward_curve_for_backfill = Arc::clone(&reward_curve);
+            let block_time_secs = config.consensus.difficulty_adjustment.block_time;
             let cancel_for_task = backfill_cancel.clone();
             let backfill_complete_signal = backfill_complete.clone();
             let backfill_handle = runtime_handle.spawn(async move {
@@ -1712,6 +1719,8 @@ impl IrysNode {
                     supply_state_for_backfill,
                     block_index_for_backfill,
                     db_for_backfill,
+                    reward_curve_for_backfill,
+                    block_time_secs,
                     cancel_for_task,
                 )
                 .await
@@ -1828,6 +1837,8 @@ impl IrysNode {
             irys_db.clone(),
             block_index_guard.clone(),
             Some(supply_state.clone()),
+            Arc::clone(&reward_curve),
+            config.consensus.difficulty_adjustment.block_time,
             config.consensus.chunk_size,
             config.consensus.epoch.num_blocks_in_epoch,
             config.consensus.block_tree_depth,
@@ -2053,13 +2064,6 @@ impl IrysNode {
             runtime_handle.clone(),
             sync_state.clone(),
         );
-
-        // create the block reward curve
-        let reward_curve = irys_reward_curve::HalvingCurve {
-            inflation_cap: config.consensus.block_reward_config.inflation_cap,
-            half_life_secs: config.consensus.block_reward_config.half_life_secs.into(),
-        };
-        let reward_curve = Arc::new(reward_curve);
 
         // spawn block discovery
         let block_discovery_handle = Self::init_block_discovery_service(

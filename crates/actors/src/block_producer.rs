@@ -1,5 +1,6 @@
 use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
+    block_reward::{BlockRewardSplit, full_block_reward, split_block_reward},
     block_validation::poa_partition_is_owned_by_miner,
     chunk_ingress_service::ChunkIngressState,
     mempool_guard::MempoolReadGuard,
@@ -707,8 +708,6 @@ pub trait BlockProdStrategy {
             .get_mempool_txs(&prev_block_header, current_timestamp)
             .await?;
 
-        let block_reward = self.block_reward(&prev_block_header)?;
-
         // Registered payout for this miner on the parent epoch snapshot must be
         // what we declare on the Irys header and pay via EVM coinbase.
         let reward_address = parent_epoch_snapshot.resolve_reward_address(solution.mining_address);
@@ -718,9 +717,15 @@ pub trait BlockProdStrategy {
 
         // A failed or late derive must not build a Reth payload. The call
         // inside `produce_block_without_broadcasting` then reads the finished job.
-        if self.create_poa_data(solution, ledger_id).await?.is_none() {
+        let Some((poa, _)) = self.create_poa_data(solution, ledger_id).await? else {
             return Ok(None);
-        }
+        };
+        let block_reward = split_block_reward(
+            self.block_reward(&prev_block_header)?,
+            &self.inner().config.consensus,
+            current_timestamp.to_secs(),
+            !poa.is_data_poa(),
+        )?;
 
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
@@ -741,7 +746,7 @@ pub trait BlockProdStrategy {
                 &prev_block_header,
                 mempool_bundle,
                 current_timestamp,
-                block_reward,
+                block_reward.miner,
                 evm_block,
                 &prev_block_ema_snapshot,
                 final_treasury,
@@ -1033,7 +1038,7 @@ pub trait BlockProdStrategy {
         prev_block_header: &IrysBlockHeader,
         perv_evm_block: &reth_ethereum_primitives::Block,
         mempool: &MempoolTxsBundle,
-        reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+        block_reward: BlockRewardSplit,
         timestamp_ms: UnixTimestampMs,
         solution_hash: H256,
         // Registered / declared payout (must match stake entry and EVM coinbase).
@@ -1049,7 +1054,8 @@ pub trait BlockProdStrategy {
         let mut shadow_tx_generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
-            &reward_amount.amount,
+            &block_reward.miner.amount,
+            block_reward.treasury.amount,
             prev_block_header,
             &solution_hash,
             &self.inner().config.consensus,
@@ -1613,32 +1619,18 @@ pub trait BlockProdStrategy {
         Ok(Some(block.clone()))
     }
 
+    /// Full reward-curve amount of the block on top of `prev_block_header`,
+    /// before the PoA-kind split.
     fn block_reward(
         &self,
         prev_block_header: &IrysBlockHeader,
     ) -> Result<Amount<irys_types::storage_pricing::phantoms::Irys>, eyre::Error> {
-        // Calculate rewards using fixed block intervals, not actual timestamps.
-        // This prevents block producers from manipulating timestamps to maximize rewards
-        // and ensures consistent emissions over time.
-
-        let previous_height = prev_block_header.height();
-
-        let target_block_time_seconds = self
-            .inner()
-            .config
-            .consensus
-            .difficulty_adjustment
-            .block_time;
-
-        // Use height * target_block_time for consistent reward curve positioning
-        let previous_block_seconds = (previous_height * target_block_time_seconds) as u128;
-        let current_block_seconds = previous_block_seconds + target_block_time_seconds as u128;
-
-        let reward_amount = self
-            .inner()
-            .reward_curve
-            .reward_between(previous_block_seconds, current_block_seconds)?;
-        Ok(reward_amount)
+        let inner = self.inner();
+        full_block_reward(
+            &inner.reward_curve,
+            inner.config.consensus.difficulty_adjustment.block_time,
+            prev_block_header.height(),
+        )
     }
 
     async fn get_ema_price(

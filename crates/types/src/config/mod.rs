@@ -192,6 +192,13 @@ impl Config {
         // `filter_transactions_by_chunk_range` bails loud. The `div_ceil` below would
         // also panic on a zero recall range. Reject loudly here. (NC-0042)
         ensure!(self.consensus.chunk_size > 0, "chunk_size must be > 0");
+        if let Some(delta) = &self.consensus.hardforks.delta {
+            ensure!(
+                delta.capacity_chunk_reward_percent.amount
+                    <= crate::storage_pricing::PRECISION_SCALE,
+                "hardforks.delta.capacity_chunk_reward_percent must be <= 1.0 (100%)"
+            );
+        }
         // Entropy packing emits whole SHA-256 hashes, so a chunk size that is
         // not a multiple of the hash size leaves the chunk's tail unpacked.
         ensure!(
@@ -2486,6 +2493,27 @@ mod validate_tests {
         assert!(
             msg.contains(expected_msg),
             "expected error containing {expected_msg:?}, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_capacity_chunk_reward_above_full_reward() {
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.delta = Some(crate::hardfork_config::Delta {
+                activation_timestamp: crate::UnixTimestamp::from_secs(1500),
+                initial_slots_per_new_ledger:
+                    crate::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
+                capacity_chunk_reward_percent: crate::storage_pricing::Amount::percentage(
+                    rust_decimal_macros::dec!(1.01),
+                )
+                .unwrap(),
+            });
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("capacity_chunk_reward_percent must be <= 1.0"),
+            "unexpected validation error: {err}"
         );
     }
 

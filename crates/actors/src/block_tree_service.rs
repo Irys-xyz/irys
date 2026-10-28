@@ -2272,6 +2272,10 @@ mod tests {
                 db.clone(),
                 block_index_guard.clone(),
                 None,
+                Arc::new(crate::block_reward::reward_curve_from_config(
+                    &config.consensus,
+                )),
+                config.consensus.difficulty_adjustment.block_time,
                 config.consensus.chunk_size,
                 config.consensus.epoch.num_blocks_in_epoch,
                 config.consensus.block_tree_depth,

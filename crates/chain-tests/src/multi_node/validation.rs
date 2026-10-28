@@ -1,6 +1,7 @@
 use crate::utils::{
     IrysNodeTest, assert_validation_error, read_block_from_state, solution_context,
 };
+use irys_actors::block_reward::BlockRewardSplit;
 use irys_actors::{
     BlockProdStrategy, BlockProducerInner, MempoolServiceMessage, MempoolTxs, ProductionStrategy,
     async_trait,
@@ -55,20 +56,23 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
             reward_address: irys_types::IrysAddress,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
-            let invalid_reward_amount = Amount::new(reward_amount.amount.pow(2_u64.into()));
+            let invalid_block_reward = BlockRewardSplit {
+                miner: Amount::new(block_reward.miner.amount.pow(2_u64.into())),
+                ..block_reward
+            };
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
                     mempool,
                     // NOTE: Point of error - trying to give yourself extra funds in the evm state
-                    invalid_reward_amount,
+                    invalid_block_reward,
                     timestamp_ms,
                     solution_hash,
                     reward_address,
@@ -233,7 +237,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
             reward_address: irys_types::IrysAddress,
@@ -246,7 +250,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
                     prev_block_header,
                     perv_evm_block,
                     &tampered_mempool,
-                    reward_amount,
+                    block_reward,
                     timestamp_ms,
                     solution_hash,
                     reward_address,
@@ -339,7 +343,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
             reward_address: irys_types::IrysAddress,
@@ -356,7 +360,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
                     prev_block_header,
                     perv_evm_block,
                     &tampered_mempool,
-                    reward_amount,
+                    block_reward,
                     timestamp_ms,
                     solution_hash,
                     reward_address,
