@@ -17,7 +17,7 @@ use crate::geometry::{Geometry, MAX_SUBTREE_HEIGHT};
 use crate::shape::climb;
 use crate::types::{DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash};
 use crate::verify::{verify_chunk, verify_segment};
-use crate::{DataTree, chunk_root, data_commitment, leaf, node, size_witness};
+use crate::{DataTree, chunk_leaf, chunk_root, data_commitment, leaf, node, size_witness};
 
 /// Byte repeated through the garbage hash in the published attack.
 const GARBAGE_BYTE: u8 = 0xAB;
@@ -29,8 +29,9 @@ const PAST_DATA_SIBLING_CASES: u32 = 64;
 const MAX_SUBTREE_HEIGHT_SEGMENTS: u32 = 1 << MAX_SUBTREE_HEIGHT;
 
 /// Test geometry, `n = 40`: chunk 1 holds segment 0 only. The bad chunk root is
-/// `node(node(leaf(seg0), empty(0)), G)` with `G = 0xAB × 32`. The segment proof
-/// is `[empty(0), G, R0, size_witness(G, 40)]`.
+/// `R1 = node(node(leaf(seg0), empty(0)), G)` with `G = 0xAB × 32`. The segment
+/// proof is `[empty(0), G, L0, size_witness(G, 40)]`, `L0 = chunk_leaf(0, R0)`.
+/// The root is `node(L0, chunk_leaf(1, R1))`.
 #[test]
 fn malformed_last_chunk_of_the_published_attack_is_rejected() {
     let geometry = Geometry::TESTING;
@@ -43,13 +44,13 @@ fn malformed_last_chunk_of_the_published_attack_is_rejected() {
     let garbage = NodeHash::from([GARBAGE_BYTE; HASH_SIZE]);
     let left = node(&leaf(segment), &empty_at_height(0));
     let bad_chunk_root = node(&left, &garbage);
-    let chunk_zero = tree.chunk_root(0).unwrap();
+    let chunk_zero = tree.chunk_leaf(0).unwrap();
     let mut proof = Vec::new();
     proof.extend_from_slice(empty_at_height(0).as_bytes());
     proof.extend_from_slice(garbage.as_bytes());
     proof.extend_from_slice(chunk_zero.as_bytes());
     proof.extend_from_slice(size_witness(&geometry, data_size).as_bytes());
-    let root = node(&chunk_zero, &bad_chunk_root);
+    let root = node(&chunk_zero, &chunk_leaf(1, &bad_chunk_root));
     let commitment = data_commitment(&geometry, &DataTreeRoot::from_hash(root), data_size);
     assert_eq!(
         verify_segment(&geometry, &commitment, data_size, 1, 0, segment, &proof),
@@ -417,8 +418,14 @@ fn commitment_from_segment_proof(
         };
         walked_index >>= 1;
     }
-    let climbed = climb(root, chunk_index, chunk_count, chunk_siblings)
-        .expect("the modified proof is one hash per level");
+    // The chunk root takes its index before the chunk level (spec §5).
+    let climbed = climb(
+        chunk_leaf(chunk_index, &root),
+        chunk_index,
+        chunk_count,
+        chunk_siblings,
+    )
+    .expect("the modified proof is one hash per level");
     data_commitment(geometry, &DataTreeRoot::from_hash(climbed), data_size)
 }
 
@@ -550,7 +557,12 @@ fn assert_mixed_empty_leaf(geometry: &Geometry, data_size: u64, segment_verifies
         "the oracle matches chunk_root when no leaf is replaced"
     );
     assert_ne!(bad_root, canonical, "G is not empty(0)");
-    let commitment = data_commitment(geometry, &DataTreeRoot::from_hash(bad_root), data_size);
+    // One chunk: the root is `chunk_leaf(0, R_0)` (spec §4).
+    let commitment = data_commitment(
+        geometry,
+        &DataTreeRoot::from_hash(chunk_leaf(chunk_index, &bad_root)),
+        data_size,
+    );
 
     let rightmost_data_segment = (0..segments_per_chunk)
         .rev()

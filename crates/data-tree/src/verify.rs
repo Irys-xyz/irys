@@ -1,8 +1,9 @@
 //! Proof checks (spec §5).
 //!
 //! The order is fixed: range, byte length, proof length, the size witness, then
-//! the climb. A chunk proof is `32 × (depth(c, C) + 1)` bytes. A segment proof
-//! is `32 × (h + depth(c, C) + 1)` bytes (spec §5). A length that is not a
+//! the climb. The climb starts at the chunk leaf `chunk_leaf(c, R_c)`. A chunk
+//! proof is `32 × (depth(c, C) + 1)` bytes. A segment proof is
+//! `32 × (h + depth(c, C) + 1)` bytes (spec §5). A length that is not a
 //! multiple of 32 fails that check. Length checks run before any hashing
 //! (spec §9). The empty-sibling pin runs in `verify_segment`'s in-chunk loop,
 //! before `climb`: a sibling subtree that lies entirely past the data must be
@@ -11,7 +12,7 @@
 use crate::chunk::chunk_root;
 use crate::error::VerifyError;
 use crate::geometry::{Geometry, SubtreeHeight};
-use crate::hash::{self, empty, leaf, node, size_witness};
+use crate::hash::{self, chunk_leaf, empty, leaf, node, size_witness};
 use crate::shape::{climb, depth};
 use crate::types::{DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash};
 
@@ -50,8 +51,11 @@ pub fn verify_chunk(
     let siblings = require_size_witness(geometry, proof, data_size)?;
     // The length check enforces `1..=chunk_size`, which is `chunk_root`'s precondition.
     let root = chunk_root(geometry, bytes).expect("chunk length is in 1..=chunk_size");
-    let climbed =
-        climb(root, chunk_index, chunk_count, siblings).ok_or(VerifyError::CommitmentMismatch)?;
+    // The climb starts at `chunk_leaf(c, R_c)`: the index is hashed into the
+    // leaf and also picks the left/right steps (spec §5).
+    let leaf_of_chunk = chunk_leaf(chunk_index, &root);
+    let climbed = climb(leaf_of_chunk, chunk_index, chunk_count, siblings)
+        .ok_or(VerifyError::CommitmentMismatch)?;
     commitment_matches(geometry, commitment, climbed, data_size)
 }
 
@@ -145,7 +149,9 @@ pub fn verify_segment(
         };
         node_index >>= 1;
     }
-    let climbed = climb(root, chunk_index, chunk_count, chunk_siblings)
+    // `root` is now the chunk root. It takes its index before the chunk level (spec §5).
+    let leaf_of_chunk = chunk_leaf(chunk_index, &root);
+    let climbed = climb(leaf_of_chunk, chunk_index, chunk_count, chunk_siblings)
         .ok_or(VerifyError::CommitmentMismatch)?;
     commitment_matches(geometry, commitment, climbed, data_size)
 }

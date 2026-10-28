@@ -115,8 +115,9 @@ pub enum ProofError {
         /// Length of the supplied slice.
         actual: u64,
     },
-    /// The bytes hash to a different chunk root than the one stored at `c`.
-    #[error("chunk bytes do not match the stored chunk root")]
+    /// The bytes hash to a chunk root whose chunk leaf at `c` is not the one
+    /// stored at `c`.
+    #[error("chunk bytes do not match the stored chunk leaf")]
     ChunkRootMismatch,
 }
 
