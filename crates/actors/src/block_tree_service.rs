@@ -1091,7 +1091,27 @@ impl BlockTreeServiceInner {
         }; // RwLockWriteGuard is dropped here, before the await
 
         if let Some(tip_move) = tip_move {
+            let (new_tip_hash, new_tip_height) =
+                (tip_move.new_tip.block_hash, tip_move.new_tip.height);
             self.publish_tip_move(tip_move).await?;
+
+            // The discard event went out before the tip moved. Services that wait for a
+            // block they can build on read the tree when an event arrives, so send one
+            // more event now that the new tip is in place.
+            let event = BlockStateUpdated {
+                block_hash: new_tip_hash,
+                height: new_tip_height,
+                state: ChainState::Onchain,
+                discarded: false,
+                validation_result: ValidationResult::Valid,
+            };
+            if let Err(e) = self.service_senders.block_state_events.send(event) {
+                tracing::trace!(
+                    block.hash = ?new_tip_hash,
+                    block.height = new_tip_height,
+                    "Failed to broadcast block state update event: {}", e
+                );
+            }
         }
         Ok(())
     }
@@ -4036,6 +4056,16 @@ mod tests {
             vec![valid_sibling.block_hash],
             "the new tip is confirmed"
         );
+
+        // The discard event goes out before the tip moves, so a last event after the
+        // move wakes the services that wait for a block they can build on.
+        let last_event = h
+            .collect_broadcasts()
+            .pop()
+            .expect("block state events are broadcast");
+        assert_eq!(last_event.block_hash, valid_sibling.block_hash);
+        assert!(!last_event.discarded);
+        assert_eq!(last_event.state, ChainState::Onchain);
     }
 
     /// Same start as `invalid_max_block_after_refused_tie_moves_tip_to_valid_sibling`,
