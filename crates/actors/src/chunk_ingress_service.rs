@@ -60,19 +60,23 @@ impl std::fmt::Debug for HttpAdmissionGuard {
     }
 }
 
-/// Where an ingested chunk came from.
+/// Where an ingested chunk came from. The source matters only for a chunk
+/// with no cache row: on the placed path (a storage placement holds the
+/// commitment) and for the replay skip of a placed chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkIngressSource {
     /// A chunk a client or a peer sent to this node (HTTP upload, gossip).
-    /// With no cache row but a storage placement, it is stored from the
-    /// placement and also parks under its commitment: a later header for the
-    /// same commitment (the same data uploaded again) then drains it into the
-    /// cache.
+    /// On the placed path it is stored from the placement and also parks
+    /// under its commitment: a later header for the same commitment (the same
+    /// data uploaded again) then drains it into the cache. A replay of it
+    /// while the same chunk is still parked is skipped.
     Sent,
-    /// A chunk this node fetched (data sync, block-validation fetch, internal
-    /// re-ingest of a drained chunk). These chunks belong to old placements.
-    /// They do not park: parking them would fill the pending map with
-    /// commitments that no header will drain.
+    /// A chunk this node fetched (data sync, block-validation fetch) or
+    /// re-ingests from the pending map (a drain). On the placed path it is
+    /// stored from the placement and does not park. A fetched chunk is not
+    /// part of a new upload, so parking it would fill the pending map with
+    /// commitments that no header will drain. A drained chunk that must wait
+    /// again is put back by its drain.
     Fetched,
 }
 
