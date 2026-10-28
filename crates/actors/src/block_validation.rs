@@ -8,6 +8,7 @@ use crate::{
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowMetadata, ShadowTxGenerator},
 };
 use alloy_consensus::Transaction as _;
+use alloy_consensus::transaction::SignerRecoverable as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
@@ -5132,11 +5133,7 @@ pub async fn shadow_transactions_are_valid(
     let block_miner_address: Address = block.miner_address.into();
     let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
         let (stx, tx_ref) = res?;
-        // Qualified call: the inherent `Signed::recover_signer` accepts high-s
-        // (non-EIP-2) signatures; the trait method rejects them.
-        let tx_signer = alloy_consensus::transaction::SignerRecoverable::recover_signer(
-            &tx_ref.clone().into_signed(),
-        )?;
+        let tx_signer = tx_ref.recover_signer()?;
         ensure!(
             block_miner_address == tx_signer,
             "Shadow tx signer is not the miner"
@@ -5965,13 +5962,11 @@ mod shadow_tx_priority_fee_match_tests {
         );
     }
 
-    /// A shadow tx signature in high-s form `(r, n - s, !v)` recovers to the same
-    /// signer under the inherent `Signed::recover_signer`, so the validation path
-    /// must use the `SignerRecoverable` trait method, which rejects it.
+    /// Signer recovery on a shadow tx envelope requires the canonical low-s form
+    /// (EIP-2): a high-s signature `(r, n - s, !v)` of the same tx is rejected.
     #[test]
     fn shadow_tx_high_s_signature_is_rejected() -> eyre::Result<()> {
-        use alloy_consensus::transaction::SignerRecoverable;
-        use alloy_consensus::{SignableTransaction as _, TxLegacy};
+        use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844, TxLegacy};
         use alloy_network::TxSignerSync as _;
         use alloy_signer_local::PrivateKeySigner;
         use irys_reth::shadow_tx::{SHADOW_TX_DESTINATION_ADDR, encode_prefixed_input};
@@ -5994,13 +5989,12 @@ mod shadow_tx_priority_fee_match_tests {
             input: encode_prefixed_input(&stake_packet(0)),
         };
         let low_s = miner.sign_transaction_sync(&mut tx)?;
-        let normal = tx.clone().into_signed(low_s);
-        assert_eq!(SignerRecoverable::recover_signer(&normal)?, miner.address());
+        let normal = EthereumTxEnvelope::<TxEip4844>::Legacy(tx.clone().into_signed(low_s));
+        assert_eq!(normal.recover_signer()?, miner.address());
 
         let high_s = Signature::new(low_s.r(), secp256k1n - low_s.s(), !low_s.v());
-        let malleated = tx.into_signed(high_s);
-        assert_eq!(malleated.recover_signer()?, miner.address());
-        assert!(SignerRecoverable::recover_signer(&malleated).is_err());
+        let malleated = EthereumTxEnvelope::<TxEip4844>::Legacy(tx.into_signed(high_s));
+        assert!(malleated.recover_signer().is_err());
         Ok(())
     }
 

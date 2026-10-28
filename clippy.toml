@@ -1,0 +1,4 @@
+disallowed-methods = [
+  { path = "alloy_consensus::Signed::recover_signer", reason = "it does not require the low-s form (EIP-2); recover from the tx envelope with SignerRecoverable::recover_signer" },
+  { path = "alloy_consensus::Signed::try_into_recovered", reason = "it does not require the low-s form (EIP-2); recover from the tx envelope with SignerRecoverable::try_into_recovered" },
+]
