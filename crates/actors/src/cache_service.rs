@@ -2262,7 +2262,9 @@ mod tests {
             // Mark the cached chunk as very old so it qualifies for age-based pruning
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(tx_header.data_root), None)?;
-            // Delete through the walking cursor; re-insert after the walk so it cannot revisit them.
+            // Put the aged entries back after the walk: MDBX aborts when this table gets a
+            // write while the walk deletes through its cursor (see
+            // `put_during_delete_current_walk_aborts` in irys-database).
             let mut aged_entries = Vec::new();
             while let Some((_k, entry)) = walk.next().transpose()? {
                 walk.delete_current()?;
@@ -2631,7 +2633,9 @@ mod tests {
             if chunk_count > 0 {
                 let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
                 let mut walk = cur.walk_dup(Some(data_root), None)?;
-                // Delete through the walking cursor; re-insert after the walk so it cannot revisit them.
+                // Put the aged entries back after the walk: MDBX aborts when this table gets a
+                // write while the walk deletes through its cursor (see
+                // `put_during_delete_current_walk_aborts` in irys-database).
                 let mut aged_entries = Vec::new();
                 while let Some((_k, entry)) = walk.next().transpose()? {
                     walk.delete_current()?;
@@ -2770,7 +2774,9 @@ mod tests {
             database::cache_chunk(wtx, &chunk)?;
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(data_root), None)?;
-            // Delete through the walking cursor; re-insert after the walk so it cannot revisit them.
+            // Put the aged entries back after the walk: MDBX aborts when this table gets a
+            // write while the walk deletes through its cursor (see
+            // `put_during_delete_current_walk_aborts` in irys-database).
             let mut aged_entries = Vec::new();
             while let Some((_k, entry)) = walk.next().transpose()? {
                 walk.delete_current()?;
@@ -3261,7 +3267,9 @@ mod tests {
             database::cache_chunk(wtx, &chunk)?;
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(data_root), None)?;
-            // Delete through the walking cursor; re-insert after the walk so it cannot revisit them.
+            // Put the aged entries back after the walk: MDBX aborts when this table gets a
+            // write while the walk deletes through its cursor (see
+            // `put_during_delete_current_walk_aborts` in irys-database).
             let mut aged_entries = Vec::new();
             while let Some((_k, entry)) = walk.next().transpose()? {
                 walk.delete_current()?;
@@ -3498,7 +3506,9 @@ mod tests {
             )?;
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(data_root), None)?;
-            // Delete through the walking cursor; re-insert after the walk so it cannot revisit them.
+            // Put the aged entries back after the walk: MDBX aborts when this table gets a
+            // write while the walk deletes through its cursor (see
+            // `put_during_delete_current_walk_aborts` in irys-database).
             let mut aged_entries = Vec::new();
             while let Some((_k, entry)) = walk.next().transpose()? {
                 walk.delete_current()?;
@@ -3787,7 +3797,9 @@ mod tests {
             // Mark both chunks as very old
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(tx_header.data_root), None)?;
-            // Delete through the walking cursor; re-insert after the walk so it cannot revisit them.
+            // Put the aged entries back after the walk: MDBX aborts when this table gets a
+            // write while the walk deletes through its cursor (see
+            // `put_during_delete_current_walk_aborts` in irys-database).
             let mut aged_entries = Vec::new();
             while let Some((_k, entry)) = walk.next().transpose()? {
                 walk.delete_current()?;

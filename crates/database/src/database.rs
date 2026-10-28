@@ -3541,6 +3541,34 @@ mod tests {
             (db, path)
         }
 
+        /// MDBX fails an internal assertion (`tree_rebalance: mc->tree->items > 0`) and aborts the
+        /// process when a dupsort walk deletes through its cursor and the same table gets a write
+        /// before the walk ends. Collect the changes and write them after the walk.
+        #[test]
+        #[ignore = "aborts the test process; kept as a reference for the MDBX behaviour"]
+        fn put_during_delete_current_walk_aborts() {
+            let (db, _dir) = open_db();
+            let data_root = H256::random();
+            let rows: Vec<_> = (0..200).map(|index| (index, YOUNG, false)).collect();
+            seed(&db, data_root, IrysAddress::random(), &rows);
+
+            let tx = db.tx_mut().unwrap();
+            let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>().unwrap();
+            let mut walker = cursor.walk_dup(Some(data_root), None).unwrap();
+            while let Some((_, mut entry)) = walker.next().transpose().unwrap() {
+                walker.delete_current().unwrap();
+                entry.meta.updated_at = UnixTimestamp::from_secs(OLD);
+                tx.put::<CachedChunksIndex>(data_root, entry).unwrap();
+            }
+            drop(walker);
+            tx.commit().unwrap();
+
+            assert_eq!(
+                remaining_offsets(&db, data_root),
+                (0..200).collect::<Vec<u32>>()
+            );
+        }
+
         #[test]
         fn reclaim_deletes_interleaved_entries_exactly() {
             let (db, _dir) = open_db();
