@@ -551,6 +551,18 @@ impl ChunkIngressServiceInner {
             // The cheap limits come before any index read.
             self.check_unconfirmed_chunk_bounds(chunk.as_ref(), chunk_size)?;
 
+            // A sent chunk that this node already stored from its placement
+            // and parked. A replay of it changes nothing, so it skips the
+            // index reads and the proof check.
+            if park_when_placed && self.recent_placed_chunks.read().await.contains(&chunk_key) {
+                debug!(
+                    "Chunk {} already stored from its placement recently, skipping",
+                    &chunk_key
+                );
+                record_chunk_duplicate();
+                return Ok(());
+            }
+
             // No cache row: the row was pruned, or this node never cached the
             // header. A storage placement exists only for a tx that a block
             // included, so its commitment is anchored and its `data_size` is
@@ -564,6 +576,7 @@ impl ChunkIngressServiceInner {
                             &geometry,
                             data_commitment,
                             data_size,
+                            chunk_key,
                             role,
                             park_when_placed,
                         )
@@ -792,13 +805,19 @@ impl ChunkIngressServiceInner {
     /// same data can be uploaded again by a new tx with the same commitment,
     /// whose header arrives after its chunks. That header then drains the
     /// parked chunk through the cached path, so the body is cached and the
-    /// ingress leaf is written without a resend.
+    /// ingress leaf is written without a resend. After the park the chunk key
+    /// goes in `recent_placed_chunks`, so a replay is a no-op: the chunk is
+    /// already stored and parked. If the pending map drops the parked chunk
+    /// first (pending LRU eviction), a replay does not park it again; a send
+    /// after the header arrives takes the cached path. A failed park is not
+    /// remembered, so a resend parks again.
     async fn ingest_placed_chunk(
         &self,
         chunk: Arc<UnpackedChunk>,
         geometry: &irys_types::data_tree::Geometry,
         data_commitment: DataCommitment,
         data_size: u64,
+        chunk_key: ChunkKey,
         role: PendingDrainRole,
         park_when_placed: bool,
     ) -> Result<(), IngressFailure> {
@@ -839,7 +858,9 @@ impl ChunkIngressServiceInner {
         if !park_when_placed {
             return Ok(());
         }
-        self.park_until_header(data_commitment, chunk, role).await
+        self.park_until_header(data_commitment, chunk, role).await?;
+        self.recent_placed_chunks.write().await.put(chunk_key, ());
+        Ok(())
     }
 
     /// Checks whether an ingress proof should be generated for the given `data_commitment`
@@ -2012,10 +2033,11 @@ mod tests {
         Ok(())
     }
 
-    /// A chunk first lands in its module from the placement. Later a header
-    /// for the same commitment is cached (the data is uploaded again). The
-    /// same chunk then takes the cached path: its body is cached and its
-    /// ingress leaf is written.
+    /// A chunk first lands in its module from the placement, and its key goes
+    /// in `recent_placed_chunks`. Later a header for the same commitment is
+    /// cached (the data is uploaded again), and the same chunk is sent again.
+    /// `recent_placed_chunks` does not stop it: it takes the cached path, its
+    /// body is cached and its ingress leaf is written.
     #[tokio::test]
     async fn placed_chunk_is_cached_when_its_header_arrives_later() -> eyre::Result<()> {
         use irys_database::{cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _};
@@ -2146,6 +2168,56 @@ mod tests {
             );
             Ok(())
         })?;
+        Ok(())
+    }
+
+    /// A replay of a sent chunk that was stored from its placement and parked
+    /// is a no-op: it does not read the placements again and does not park
+    /// again.
+    #[tokio::test]
+    async fn replayed_placed_chunk_skips_the_placement_read() -> eyre::Result<()> {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-placement-replay")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        let (storage_module, data, data_root, proofs) = place_upload_without_cache_row(&mut inner)?;
+        let data_commitment = size_key(data_root, 64);
+        let chunk = UnpackedChunk {
+            data_tree_root: DataTreeRoot(data_root),
+            data_size: 64,
+            data_path: proofs[1].clone().into(),
+            bytes: data[32..64].to_vec().into(),
+            tx_offset: TxChunkOffset::from(1),
+        };
+
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), true)
+            .await?;
+        assert!(
+            inner
+                .pending_chunks
+                .write()
+                .await
+                .pop(&data_commitment)
+                .is_some(),
+            "the first send parks the chunk"
+        );
+
+        // With a failing placement read, a chunk that reaches the read parks.
+        PLACEMENT_READ_FAULT_MODULES.with(|faulty| *faulty.borrow_mut() = vec![storage_module.id]);
+        let result = inner.handle_chunk_ingress_message(chunk, true).await;
+        PLACEMENT_READ_FAULT_MODULES.with(|faulty| faulty.borrow_mut().clear());
+        result.expect("a replay is not a fault");
+
+        assert!(
+            inner
+                .pending_chunks
+                .read()
+                .await
+                .get(&data_commitment)
+                .is_none(),
+            "the replay does not reach the placement read and does not park"
+        );
         Ok(())
     }
 
@@ -3633,6 +3705,9 @@ mod tests {
                 std::sync::RwLock::new(Vec::new()),
             )),
             recent_valid_chunks: RwLock::new(LruCache::new(NonZeroUsize::new(8).expect("nonzero"))),
+            recent_placed_chunks: RwLock::new(LruCache::new(
+                NonZeroUsize::new(8).expect("nonzero"),
+            )),
             pending_chunks: std::sync::Arc::new(RwLock::new(
                 super::super::PriorityPendingChunks::new(PENDING_ENTRY_CAP, preheader_cap),
             )),

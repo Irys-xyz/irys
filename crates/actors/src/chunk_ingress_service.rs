@@ -36,6 +36,10 @@ use tracing::{Instrument as _, error, info, warn};
 use crate::mempool_service::wait_with_progress;
 use crate::services::ServiceSenders;
 
+/// Entries in `recent_placed_chunks`. 4096 chunk keys are 1 GiB of chunks at
+/// a 256 KiB chunk size: enough for a large upload that is sent again.
+const RECENT_PLACED_CHUNKS_CAPACITY: NonZeroUsize = NonZeroUsize::new(4096).expect("non-zero");
+
 /// Drop-guard holding an HTTP admission permit for a fire-and-forget ingest.
 /// Released when the message is dropped after the worker finishes, or if the
 /// message is dropped unprocessed (backlog drain / shutdown).
@@ -170,6 +174,13 @@ pub(crate) struct ChunkIngressServiceInner {
     /// data tree root share chunk paths, so the path alone does not identify
     /// the chunk.
     pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkKey, ()>>,
+    /// Sent chunks (HTTP upload, gossip) recently stored from a storage
+    /// placement with no cache row, and parked. Only the no-row path of a sent
+    /// chunk reads it: a replay of such a chunk skips the placement reads and
+    /// the proof check. A fetched chunk (data sync) does not read or write it.
+    /// It is separate from `recent_valid_chunks` so that the cached path still
+    /// takes the chunk when its header arrives.
+    pub(crate) recent_placed_chunks: tokio::sync::RwLock<LruCache<ChunkKey, ()>>,
     pub(crate) pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
     pub(crate) pending_ingress_proofs: Mutex<PendingIngressProofs>,
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
@@ -420,6 +431,9 @@ impl ChunkIngressService {
                         service_senders,
                         storage_modules_guard,
                         recent_valid_chunks,
+                        recent_placed_chunks: tokio::sync::RwLock::new(LruCache::new(
+                            RECENT_PLACED_CHUNKS_CAPACITY,
+                        )),
                         pending_chunks,
                         pending_ingress_proofs: Mutex::new(PendingIngressProofs::new(
                             pending_ingress_proofs::MAX_PENDING_INGRESS_PROOFS,
