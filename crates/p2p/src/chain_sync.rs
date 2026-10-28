@@ -59,6 +59,10 @@ pub enum ChainSyncError {
     ServiceCommunication(String),
     #[error("Internal sync error: {0}")]
     Internal(String),
+    /// Each peer that answered the block index request gave entries that do
+    /// not start with our own entry. The cause is most likely our own index.
+    #[error("Local block index does not match the block index of the peers: {0}")]
+    LocalIndexMismatch(String),
 }
 
 /// Type alias for sync service results
@@ -1949,7 +1953,9 @@ async fn get_block_index(
     // Overlap anchor: when our index has the entry just before `start`, ask
     // from that entry and require the answer to start with our hash. Our index
     // holds only migrated blocks, so an answer that does not extend it is not
-    // on our chain. Without that entry, ask from `start` with no anchor.
+    // on our chain. Our own index can be wrong, so such an answer does not
+    // lower the peer score. Without that entry, ask from `start` with no
+    // anchor.
     let anchor_hash = start
         .checked_sub(1)
         .and_then(|anchor_height| local_block_index.read().get_item(anchor_height as u64))
@@ -1968,6 +1974,10 @@ async fn get_block_index(
 
     // A source whose answer breaks a rule is not asked again in this call.
     let mut rejected_sources = HashSet::new();
+    // The rejected answers by kind. They select the error when no answer is
+    // valid.
+    let mut answers_that_do_not_connect = 0_usize;
+    let mut answer_contradicts_claims = false;
 
     for _ in 0..retries {
         // Ask `peer_count` sources at the same time and use the longest valid
@@ -2009,22 +2019,32 @@ async fn get_block_index(
                                 longest_valid_answer = Some(index);
                             }
                         }
-                        Err(broken_rule) => {
+                        Err(rejection) => {
                             warn!(
                                 peer.address = ?peer.address.gossip,
                                 index.start = query.height,
                                 index.limit = query.limit,
                                 "Block index answer from peer {:?} is not valid: {}",
                                 peer_id,
-                                broken_rule
-                            );
-                            // The answer contradicts the peer's own `/info`
-                            // claims or our index.
-                            peer_list.decrease_peer_score_by_peer_id(
-                                peer_id,
-                                ScoreDecreaseReason::BogusData(broken_rule),
+                                rejection
                             );
                             rejected_sources.insert(*peer_id);
+                            match rejection {
+                                // The answer contradicts the peer's own
+                                // `/info` claims.
+                                IndexAnswerRejection::ContradictsClaims(broken_rule) => {
+                                    peer_list.decrease_peer_score_by_peer_id(
+                                        peer_id,
+                                        ScoreDecreaseReason::BogusData(broken_rule),
+                                    );
+                                    answer_contradicts_claims = true;
+                                }
+                                // Our own index can be the cause, so the peer
+                                // score does not change.
+                                IndexAnswerRejection::DoesNotConnect(_) => {
+                                    answers_that_do_not_connect += 1;
+                                }
+                            }
                         }
                     },
                     Err(error) => {
@@ -2047,9 +2067,30 @@ async fn get_block_index(
         sources.retain(|(peer_id, _, _)| !rejected_sources.contains(peer_id));
     }
 
+    // No answer is valid. When each rejected answer broke only the anchor
+    // rule, our own index is the most likely cause. Report a local problem,
+    // not a sync failure.
+    if answers_that_do_not_connect > 0 && !answer_contradicts_claims {
+        return Err(ChainSyncError::LocalIndexMismatch(format!(
+            "the answers of {} peer(s) do not start with our entry at height {}",
+            answers_that_do_not_connect, query.height
+        )));
+    }
+
     Err(ChainSyncError::Network(
         "Failed to fetch block index from peer".to_string(),
     ))
+}
+
+/// The rule that a block index answer breaks.
+#[derive(Debug, thiserror::Error)]
+enum IndexAnswerRejection {
+    /// The answer contradicts the `/info` claims of the peer.
+    #[error("{0}")]
+    ContradictsClaims(String),
+    /// The first entry of the answer is not our anchor entry.
+    #[error("{0}")]
+    DoesNotConnect(String),
 }
 
 /// Checks a block index answer against the `/info` claims of the peer and
@@ -2060,19 +2101,19 @@ fn check_index_answer(
     query: &BlockIndexQuery,
     anchor_hash: Option<BlockHash>,
     claims: &NodeInfo,
-) -> Result<Vec<BlockIndexItem>, String> {
+) -> Result<Vec<BlockIndexItem>, IndexAnswerRejection> {
     if !index_answer_length_matches(
         claims.block_index_height,
         query.height,
         query.limit,
         answer.len(),
     ) {
-        return Err(format!(
+        return Err(IndexAnswerRejection::ContradictsClaims(format!(
             "{} entries from height {} do not match the advertised index height {}",
             answer.len(),
             query.height,
             claims.block_index_height
-        ));
+        )));
     }
 
     // The entry at the advertised index height must have the advertised hash.
@@ -2085,20 +2126,20 @@ fn check_index_answer(
         && let Some(entry) = answer.get(offset)
         && entry.block_hash != claims.block_index_hash
     {
-        return Err(format!(
+        return Err(IndexAnswerRejection::ContradictsClaims(format!(
             "entry at the advertised index height {} has hash {}, not the advertised hash {}",
             claims.block_index_height, entry.block_hash, claims.block_index_hash
-        ));
+        )));
     }
 
     if let Some(anchor_hash) = anchor_hash
         && let Some(first) = answer.first()
     {
         if first.block_hash != anchor_hash {
-            return Err(format!(
+            return Err(IndexAnswerRejection::DoesNotConnect(format!(
                 "first entry at height {} has hash {}, not our hash {}",
                 query.height, first.block_hash, anchor_hash
-            ));
+            )));
         }
         answer.remove(0);
     }
@@ -3554,6 +3595,18 @@ mod tests {
             )
         }
 
+        /// A source with another chain up to `START + 8`, whose answers agree
+        /// with its claims but do not start with our entry.
+        fn source_on_other_chain(peer_byte: u8) -> (PeerListItem, Arc<AtomicUsize>) {
+            index_source(
+                peer_byte,
+                1,
+                START as u64 + 8,
+                entry_hash(OTHER_CHAIN, START as u64 + 8),
+                chain_answer(OTHER_CHAIN, START as u64 + 8),
+            )
+        }
+
         fn trusted_peer_list(peers: Vec<PeerListItem>) -> PeerList {
             let trusted = peers.iter().map(|peer| peer.address).collect();
             peer_list_with_trusted(peers, trusted).1
@@ -3685,17 +3738,10 @@ mod tests {
             assert_eq!(requests, 2);
         }
 
-        /// Each case is a source ranked first whose answer breaks one rule.
-        /// The fetch takes the answer of the next source, and the score of
-        /// the first source goes down.
+        /// Each case is a source ranked first whose answer contradicts its own
+        /// claims. The fetch takes the answer of the next source, and the
+        /// score of the first source goes down.
         #[rstest::rstest]
-        #[case::does_not_start_with_our_entry(index_source(
-            0x11,
-            1,
-            START as u64 + 8,
-            entry_hash(OTHER_CHAIN, START as u64 + 8),
-            chain_answer(OTHER_CHAIN, START as u64 + 8),
-        ))]
         #[case::other_hash_at_the_advertised_height(index_source(
             0x11,
             1,
@@ -3747,6 +3793,75 @@ mod tests {
             assert_eq!(fetched, entries(MAIN_CHAIN, START as u64, START as u64 + 2));
             assert!(score(&peer_list, &first) < 100);
             assert_eq!(score(&peer_list, &second), 100);
+        }
+
+        /// An answer that does not start with our entry is rejected, but our
+        /// own index can be the cause, so the score does not change.
+        #[tokio::test]
+        async fn answer_that_does_not_connect_to_our_index_does_not_lower_the_score() {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
+            let (first, first_requests) = source_on_other_chain(0x11);
+            let (second, _) = consistent_source(0x12, 1, START as u64 + 2);
+            let peer_list = trusted_peer_list(vec![first.clone(), second]);
+
+            let fetched = fetch(&peer_list, &index, 1, true)
+                .await
+                .expect("block index");
+
+            assert_eq!(fetched, entries(MAIN_CHAIN, START as u64, START as u64 + 2));
+            assert_eq!(first_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(score(&peer_list, &first), 100);
+        }
+
+        /// No source is asked again after a rejection, and no score changes.
+        #[tokio::test]
+        async fn every_answer_that_does_not_connect_gives_a_local_index_error() {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
+            let sources = [source_on_other_chain(0x11), source_on_other_chain(0x12)];
+            let peer_list =
+                trusted_peer_list(sources.iter().map(|(peer, _)| peer.clone()).collect());
+
+            let error = fetch(&peer_list, &index, 1, true)
+                .await
+                .expect_err("no valid answer");
+
+            assert!(
+                matches!(error, ChainSyncError::LocalIndexMismatch(_)),
+                "got: {error:?}"
+            );
+            for (peer, requests) in &sources {
+                assert_eq!(requests.load(Ordering::SeqCst), 1);
+                assert_eq!(score(&peer_list, peer), 100);
+            }
+        }
+
+        /// An answer that contradicts its own claims is a fault of that peer,
+        /// so the error is not a local index error.
+        #[tokio::test]
+        async fn answer_that_contradicts_its_claims_gives_a_network_error() {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
+            let (first, _) = source_on_other_chain(0x11);
+            // It advertises entries but answers empty.
+            let (second, _) = index_source(
+                0x12,
+                1,
+                START as u64 + 8,
+                entry_hash(MAIN_CHAIN, START as u64 + 8),
+                |_: &BlockIndexQuery| Vec::new(),
+            );
+            let peer_list = trusted_peer_list(vec![first, second]);
+
+            let error = fetch(&peer_list, &index, 2, true)
+                .await
+                .expect_err("no valid answer");
+
+            assert!(
+                matches!(error, ChainSyncError::Network(_)),
+                "got: {error:?}"
+            );
         }
 
         #[tokio::test]
