@@ -527,12 +527,19 @@ impl ChunkIngressServiceInner {
             // header. A storage placement exists only for a tx that a block
             // included, so its commitment is anchored and its `data_size` is
             // the header's. Store the chunk in the modules that hold it.
-            if let Some((data_size, placed_modules)) =
-                self.storage_placements_by_commitment(data_commitment)?
-            {
-                return self
-                    .ingest_placed_chunk(chunk, data_commitment, data_size, &placed_modules)
-                    .await;
+            // A failed placement read parks the chunk, as before this lookup.
+            match self.storage_placements_by_commitment(data_commitment) {
+                Ok(Some((data_size, placed_modules))) => {
+                    return self
+                        .ingest_placed_chunk(chunk, data_commitment, data_size, &placed_modules)
+                        .await;
+                }
+                Ok(None) => {}
+                Err(error) => warn!(
+                    ?error,
+                    chunk.data_commitment = %data_commitment,
+                    "Failed to read storage placements; parking the chunk"
+                ),
             }
 
             // We don't have a data_root for this chunk but possibly the transaction containing this
@@ -670,7 +677,7 @@ impl ChunkIngressServiceInner {
     fn storage_placements_by_commitment(
         &self,
         data_commitment: DataCommitment,
-    ) -> Result<Option<(u64, Vec<Arc<StorageModule>>)>, CriticalChunkIngressError> {
+    ) -> eyre::Result<Option<(u64, Vec<Arc<StorageModule>>)>> {
         let modules: Vec<_> = {
             let guard = self.storage_modules_guard.read();
             guard.iter().cloned().collect()
@@ -678,17 +685,7 @@ impl ChunkIngressServiceInner {
         let mut data_size = None;
         let mut placed_modules = Vec::new();
         for storage_module in modules {
-            let placements = storage_module
-                .collect_data_root_infos(data_commitment)
-                .map_err(|error| {
-                    error!(
-                        ?error,
-                        storage_module = storage_module.id,
-                        chunk.data_commitment = %data_commitment,
-                        "Failed to read storage placements"
-                    );
-                    CriticalChunkIngressError::DatabaseError
-                })?;
+            let placements = storage_module.collect_data_root_infos(data_commitment)?;
             let Some(placement) = placements.0.first() else {
                 continue;
             };
