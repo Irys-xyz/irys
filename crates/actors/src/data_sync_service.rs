@@ -191,9 +191,13 @@ impl std::fmt::Display for DeliveryError {
 /// How a delivered body reaches the storage-module write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryRoute {
-    /// Through chunk ingress, which commits the body and its compact leaf
-    /// before the storage module may make the offset durable. Submit data
-    /// needs that leaf: this node may sign an ingress proof to promote it.
+    /// Through chunk ingress. When the commitment has a cache row, ingress
+    /// commits the body and its compact leaf before the storage module may
+    /// make the offset durable. Submit data needs that leaf: this node may
+    /// sign an ingress proof to promote it. With no cache row (it was pruned)
+    /// but a storage placement, ingress checks the body against the placement
+    /// and writes it to the modules only. It caches no body and writes no
+    /// leaf: those belong to the cache row.
     Ingress,
     /// Straight to the storage-module write, skipping the ingress lane, the
     /// chunk cache, gossip, and the ingress-proof attempt. No ingress proof
@@ -313,9 +317,12 @@ async fn unpack_off_loop(
 /// On the ingress route it is checked against its own data path, then
 /// handed to ingress. Ingress can accept a body it did not hash, so the path
 /// check runs first and an invalid body never reaches the ingress cache.
-/// The ingress acknowledgement is the durable compact-leaf fence: the
-/// storage module may not make this fetch permanently complete until
-/// ingress has committed the cached body and signer-specific ingress hash.
+/// The ingress acknowledgement means ingress stored the body. With a cache
+/// row it is the durable compact-leaf fence: ingress committed the cached
+/// body and the signer-specific ingress hash before the storage module may
+/// make this fetch permanently complete. With no cache row, ingress
+/// acknowledges after the storage-module write from the placement, and
+/// nothing is cached and no leaf is written.
 /// `Overloaded` means the shared lane is full, not that the body is bad, so
 /// the same body is sent again after a short wait.
 async fn process_delivered_body(
