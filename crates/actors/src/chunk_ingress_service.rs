@@ -181,7 +181,10 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) storage_modules_guard: StorageModulesReadGuard,
     /// Chunks already written, by commitment and path. Two commitments of one
     /// data tree root share chunk paths, so the path alone does not identify
-    /// the chunk.
+    /// the chunk. A cache row prune does not remove keys, so a key can be left
+    /// over from an earlier upload of the same data. A hit skips the chunk
+    /// only when the cache row and this node's ingress leaf for the chunk are
+    /// also present: the prune deletes the leaves with the row.
     pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkKey, ()>>,
     /// Sent chunks (HTTP upload, gossip) recently stored from a storage
     /// placement with no cache row, and parked. Only the no-row path of a sent

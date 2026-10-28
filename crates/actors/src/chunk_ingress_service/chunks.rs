@@ -181,7 +181,12 @@ async fn remember_after_module_writes(
     recent_chunk: ChunkKey,
     write_result: Result<ModuleWriteOutcome, ChunkIngressError>,
 ) -> Result<(), ChunkIngressError> {
-    write_result?;
+    if let Err(error) = write_result {
+        // The ingress leaf is already written, so a key left over from an
+        // earlier upload of the same data would make a retry skip this chunk.
+        recent_valid_chunks.write().await.pop(&recent_chunk);
+        return Err(error);
+    }
     recent_valid_chunks.write().await.put(recent_chunk, ());
     Ok(())
 }
@@ -520,12 +525,38 @@ impl ChunkIngressServiceInner {
 
         let chunk_key = chunk.chunk_key(&geometry);
 
-        // Check to see if we have a cached data_root for this chunk
+        // A row prune does not remove the key from `recent_valid_chunks`, so
+        // a key can be left over from an earlier upload of the same data.
+        // This node's ingress leaf for the chunk is deleted with the row, so
+        // a present leaf proves that the chunk was processed under the
+        // current row. Read the leaf only on a key hit: the address costs a
+        // key derivation.
+        let leaf_address = self
+            .recent_valid_chunks
+            .read()
+            .await
+            .contains(&chunk_key)
+            .then(|| self.config.irys_signer().address());
+
+        // Check to see if we have a cached data_root for this chunk. The leaf
+        // is read in the same transaction, so it belongs to this row.
         let _fetch_size_span = info_span!("chunk.fetch_data_size").entered();
-        let cached_data_root = self
+        let (cached_data_root, processed_under_current_row) = self
             .irys_db
             .view_eyre(|read_tx| {
-                irys_database::cached_data_root_by_commitment(read_tx, data_commitment)
+                let cached_data_root =
+                    irys_database::cached_data_root_by_commitment(read_tx, data_commitment)?;
+                let has_ingress_leaf = match (leaf_address, &cached_data_root) {
+                    (Some(address), Some(_)) => irys_database::cached_ingress_leaf(
+                        read_tx,
+                        data_commitment,
+                        address,
+                        chunk.tx_offset,
+                    )?
+                    .is_some(),
+                    _ => false,
+                };
+                Ok((cached_data_root, has_ingress_leaf))
             })
             .map_err(|e| {
                 error!(
@@ -537,13 +568,12 @@ impl ChunkIngressServiceInner {
 
         drop(_fetch_size_span);
 
-        // Early exit if we've already processed this chunk recently. A sent
-        // chunk with no cache row is not a replay: the row was pruned after
-        // the chunk was cached, and a later upload of the same data (parked
-        // before its header) needs the placed path to park it again.
-        if (cached_data_root.is_some() || source == ChunkIngressSource::Fetched)
-            && self.recent_valid_chunks.read().await.contains(&chunk_key)
-        {
+        // Early exit if we've already processed this chunk under the current
+        // cache row: a recent key, the row and this node's leaf. A stale key
+        // (its row was pruned) does not skip: a later upload of the same data
+        // needs its body cached and its leaf written, whether its header
+        // comes before its chunks or after.
+        if processed_under_current_row {
             debug!(
                 "Chunk {} already processed recently, skipping re-gossip",
                 &chunk_key
@@ -608,9 +638,7 @@ impl ChunkIngressServiceInner {
 
             // We don't have a data_root for this chunk but possibly the transaction containing this
             // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
-            return self
-                .park_until_header(data_commitment, chunk, chunk_key, role)
-                .await;
+            return self.park_until_header(data_commitment, chunk, role).await;
         };
 
         // The commitment binds the size, so the cached size is the size this
@@ -720,7 +748,6 @@ impl ChunkIngressServiceInner {
         &self,
         data_commitment: DataCommitment,
         chunk: Arc<UnpackedChunk>,
-        chunk_key: ChunkKey,
         role: PendingDrainRole,
     ) -> Result<(), IngressFailure> {
         let preheader_chunks_per_item = std::cmp::min(
@@ -741,11 +768,6 @@ impl ChunkIngressServiceInner {
                 "pre-header",
             )
             .await?;
-
-        // A parked chunk has no cache row, so a replay entry for it is stale
-        // (the row was pruned after an earlier cache). Left in place, it
-        // would make the drain that follows the header skip this chunk.
-        self.recent_valid_chunks.write().await.pop(&chunk_key);
 
         // A parked chunk is not cached. Log that, so Ok is not read as
         // a completed ingress.
@@ -887,8 +909,7 @@ impl ChunkIngressServiceInner {
         // park is rejected (per-item cap, or a drain in progress), the sender
         // gets an error although the chunk is stored. A resend verifies the
         // chunk again and repeats the module write, which is idempotent.
-        self.park_until_header(data_commitment, chunk, chunk_key, role)
-            .await?;
+        self.park_until_header(data_commitment, chunk, role).await?;
         self.recent_placed_chunks.write().await.put(chunk_key, ());
         Ok(())
     }
@@ -1501,6 +1522,8 @@ mod tests {
         };
         let chunk_key = chunk.chunk_key(&irys_types::data_tree::Geometry::TESTING);
         let recent = RwLock::new(LruCache::new(NonZeroUsize::new(8).expect("nonzero")));
+        // A key left over from an earlier upload of the same data.
+        recent.write().await.put(chunk_key, ());
 
         storage_module.fail_next_index_commit();
         let first = write_chunk_to_assigned_modules(&[Arc::clone(&storage_module)], &chunk).await;
@@ -1949,6 +1972,29 @@ mod tests {
         Ok(cursor.walk_dup(Some(key), None)?.count())
     }
 
+    /// Delete what `cache_service` deletes when it prunes the cache row of
+    /// `data_commitment`: its ingress proofs, cached chunks, ingress leaves
+    /// and the row. `recent_valid_chunks` is not changed.
+    fn prune_cache_row(
+        inner: &ChunkIngressServiceInner,
+        data_commitment: DataCommitment,
+    ) -> eyre::Result<()> {
+        use irys_database::reth_db::transaction::DbTxMut as _;
+        use irys_database::{
+            db::IrysDatabaseExt as _,
+            delete_cached_chunks_by_data_root, delete_ingress_leaves_by_data_root,
+            tables::{CachedDataRoots, IngressProofs},
+        };
+
+        inner.irys_db.update_eyre(|tx| {
+            tx.delete::<IngressProofs>(data_commitment, None)?;
+            delete_cached_chunks_by_data_root(tx, data_commitment)?;
+            delete_ingress_leaves_by_data_root(tx, data_commitment)?;
+            tx.delete::<CachedDataRoots>(data_commitment, None)?;
+            Ok(())
+        })
+    }
+
     /// Nothing for `data_commitment` is in the chunk cache: no cache row, no
     /// cached body, no ingress leaf and no ingress proof.
     fn assert_no_cache_state(inner: &ChunkIngressServiceInner, data_commitment: DataCommitment) {
@@ -2204,17 +2250,14 @@ mod tests {
         Ok(())
     }
 
-    /// The same data is uploaded twice before any header. The first sent chunk
-    /// parks and its header drains it, then the cache row is pruned. The same
-    /// chunk is sent again: the replay cache holds its key, but nothing is
-    /// parked, so it parks again and a new header drains it.
+    /// The same data is uploaded twice, each time chunks before the header.
+    /// The first sent chunk parks and its header drains it, then the cache
+    /// row is pruned. The same chunk is sent again: both replay caches hold
+    /// its key, but nothing is parked and no ingress leaf is left, so it parks
+    /// again and a new header drains it into the cache with a new leaf.
     #[tokio::test]
     async fn placed_chunk_parks_again_after_its_header_drained_it() -> eyre::Result<()> {
-        use irys_database::reth_db::transaction::DbTxMut as _;
-        use irys_database::{
-            cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _,
-            delete_cached_chunks_by_data_root, tables::CachedDataRoots,
-        };
+        use irys_database::{cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _};
 
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("ingress-placement-repark")
@@ -2257,11 +2300,8 @@ mod tests {
         insert_cached_data_root(&inner.irys_db, data_root, 64);
         inner.process_pending_chunks_for_root(data_commitment).await;
         assert!(!is_parked(&inner).await, "the drain leaves nothing parked");
-        inner.irys_db.update_eyre(|tx| {
-            delete_cached_chunks_by_data_root(tx, data_commitment)?;
-            tx.delete::<CachedDataRoots>(data_commitment, None)?;
-            Ok(())
-        })?;
+        prune_cache_row(&inner, data_commitment)?;
+        assert_no_cache_state(&inner, data_commitment);
 
         // The same data again, before its header: the chunk parks again.
         inner
@@ -2272,9 +2312,145 @@ mod tests {
         insert_cached_data_root(&inner.irys_db, data_root, 64);
         inner.process_pending_chunks_for_root(data_commitment).await;
         assert!(!is_parked(&inner).await, "the new header drains it");
+        let address = inner.config.irys_signer().address();
         inner.irys_db.view_eyre(|tx| {
-            cached_chunk_by_chunk_offset(tx, data_commitment, TxChunkOffset::from(1))?
-                .expect("the drain caches the body");
+            let (_, cached) =
+                cached_chunk_by_chunk_offset(tx, data_commitment, TxChunkOffset::from(1))?
+                    .expect("the drain caches the body");
+            assert_eq!(cached.chunk, Some(chunk.bytes.clone()));
+            assert_eq!(
+                ingress_leaf_count(tx, data_commitment, address)?,
+                1,
+                "the drain writes the ingress leaf again"
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// The cache row is present and the same chunk is sent twice. The second
+    /// send is a duplicate: it returns early and is not gossiped again.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn repeated_chunk_under_its_cache_row_is_a_duplicate() -> eyre::Result<()> {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-row-duplicate")
+            .build();
+        let (mut inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            inner.config.data_tree_geometry(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let data: Vec<u8> = (0..64_u8).collect();
+        let (data_root, proofs) = data_tree_with_proofs(&data)?;
+        let chunk = UnpackedChunk {
+            data_tree_root: DataTreeRoot(data_root),
+            data_size: 64,
+            data_path: proofs[1].clone().into(),
+            bytes: data[32..64].to_vec().into(),
+            tx_offset: TxChunkOffset::from(1),
+        };
+        insert_cached_data_root(&inner.irys_db, data_root, 64);
+
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
+            .await?;
+        assert!(
+            receivers.gossip_broadcast.try_recv().is_ok(),
+            "the first send is gossiped"
+        );
+        assert!(!logs_contain("already processed recently"));
+
+        inner
+            .handle_chunk_ingress_message(chunk, ChunkIngressSource::Sent)
+            .await?;
+        assert!(
+            receivers.gossip_broadcast.try_recv().is_err(),
+            "the duplicate is not gossiped again"
+        );
+        assert!(
+            logs_contain("already processed recently"),
+            "the second send takes the duplicate exit"
+        );
+        Ok(())
+    }
+
+    /// The same data is uploaded twice, each time the header before the
+    /// chunks. The first upload's cache row is pruned: that deletes its body
+    /// and ingress leaf, but leaves the chunk key in `recent_valid_chunks`.
+    /// The second upload's chunk is not a duplicate: its body is cached and
+    /// its ingress leaf is written.
+    #[tokio::test]
+    async fn header_first_reupload_after_a_prune_caches_the_chunk_again() -> eyre::Result<()> {
+        use irys_database::{cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _};
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-header-first-reupload")
+            .build();
+        let (mut inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            inner.config.data_tree_geometry(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let data: Vec<u8> = (0..64_u8).collect();
+        let (data_root, proofs) = data_tree_with_proofs(&data)?;
+        let data_commitment = size_key(data_root, 64);
+        let chunk = UnpackedChunk {
+            data_tree_root: DataTreeRoot(data_root),
+            data_size: 64,
+            data_path: proofs[1].clone().into(),
+            bytes: data[32..64].to_vec().into(),
+            tx_offset: TxChunkOffset::from(1),
+        };
+        let address = inner.config.irys_signer().address();
+
+        // Upload 1: header, then the chunk.
+        insert_cached_data_root(&inner.irys_db, data_root, 64);
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
+            .await?;
+        assert!(receivers.gossip_broadcast.try_recv().is_ok());
+        inner.irys_db.view_eyre(|tx| {
+            assert_eq!(ingress_leaf_count(tx, data_commitment, address)?, 1);
+            Ok(())
+        })?;
+
+        prune_cache_row(&inner, data_commitment)?;
+        assert_no_cache_state(&inner, data_commitment);
+        assert!(
+            inner
+                .recent_valid_chunks
+                .read()
+                .await
+                .contains(&chunk.chunk_key(&irys_types::data_tree::Geometry::TESTING)),
+            "the prune leaves the chunk key"
+        );
+
+        // Upload 2: header, then the same chunk.
+        insert_cached_data_root(&inner.irys_db, data_root, 64);
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
+            .await?;
+        assert!(
+            receivers.gossip_broadcast.try_recv().is_ok(),
+            "the chunk of upload 2 is gossiped"
+        );
+        inner.irys_db.view_eyre(|tx| {
+            let (_, cached) =
+                cached_chunk_by_chunk_offset(tx, data_commitment, TxChunkOffset::from(1))?
+                    .expect("the chunk of upload 2 is cached");
+            assert_eq!(cached.chunk, Some(chunk.bytes.clone()));
+            assert_eq!(
+                ingress_leaf_count(tx, data_commitment, address)?,
+                1,
+                "the chunk of upload 2 writes its ingress leaf"
+            );
             Ok(())
         })?;
         Ok(())
@@ -3273,24 +3449,48 @@ mod tests {
         expect_no_redrain(&mut receivers).await;
     }
 
-    /// One chunk is already in `recent_valid_chunks`, so its re-ingest returns
+    /// One chunk was already processed under the current cache row (a recent
+    /// key, the row and this node's ingress leaf), so its re-ingest returns
     /// Ok. The sibling is a cap restore. That schedules one drain. The next
     /// pass is cap-only and does not schedule again.
+    ///
+    /// A cache row covers every chunk of its commitment. So in one drain, an
+    /// Ok and a cap restore need the row to change between two chunks (a
+    /// header or a prune during the drain). To get the cap restore without
+    /// that race, the sibling claims another size: it has no row, and the
+    /// pre-header entry of its own commitment is full.
     #[tokio::test]
-    async fn ok_chunk_and_cap_restore_schedules_one_drain_then_stops() {
+    async fn ok_chunk_and_cap_restore_schedules_one_drain_then_stops() -> eyre::Result<()> {
+        use irys_database::{db::IrysDatabaseExt as _, store_ingress_data_hash};
+
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("ingress-cap-one-drain")
             .build();
         let cap = 2_usize;
         let (inner, mut receivers) = test_ingress_inner(&tmp, cap, cap);
         let data_root = H256([0x46; 32]);
+        let other_data_size = 128;
         let seen = chunk_with(data_root, 0, 0, CLAIMED_DATA_SIZE);
-        let other = chunk_with(data_root, 1, 1, CLAIMED_DATA_SIZE);
+        let other = chunk_with(data_root, 1, 1, other_data_size);
         {
             let mut pending = inner.pending_chunks.write().await;
             pending.park(seen.clone());
-            pending.park(other);
+            pending.put(claim_key(data_root), other);
+            pending.park(chunk_with(data_root, 0, 0xA0, other_data_size));
+            pending.park(chunk_with(data_root, 2, 0xA2, other_data_size));
         }
+        insert_cached_data_root(&inner.irys_db, data_root, CLAIMED_DATA_SIZE);
+        let address = inner.config.irys_signer().address();
+        inner.irys_db.update_eyre(|tx| {
+            store_ingress_data_hash(
+                tx,
+                claim_key(data_root),
+                address,
+                seen.tx_offset,
+                H256::zero(),
+            )?;
+            Ok(())
+        })?;
         inner.recent_valid_chunks.write().await.put(
             seen.chunk_key(&irys_types::data_tree::Geometry::TESTING),
             (),
@@ -3332,6 +3532,7 @@ mod tests {
         assert!(parked.peek(&TxChunkOffset::from(1)).is_some());
         drop(pending);
         expect_no_redrain(&mut receivers).await;
+        Ok(())
     }
 
     /// Popping a full root restores every chunk. Parks during that re-ingest
