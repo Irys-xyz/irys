@@ -230,6 +230,10 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(storage::get_partition_intervals),
         )
         .route(
+            storage::PERSISTED_ROUTE,
+            web::post().to(storage::post_persisted),
+        )
+        .route(
             "/mempool/status",
             web::get().to(mempool::get_mempool_status),
         )

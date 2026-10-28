@@ -14,7 +14,12 @@ use irys_actors::{
     block_migration_service::BlockMigrationService,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockTreeLifecycleTimestamps, BlockTreeService, BlockTreeServiceMessage},
-    cache_service::ChunkCacheService,
+    cache_service::{
+        ChunkCacheService,
+        replica_custody::{
+            ChainCustodyTopology, CoverageLimits, HttpReplicaCoverage, ReplicaCustody,
+        },
+    },
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
     mempool_guard::MempoolReadGuard,
@@ -1963,22 +1968,6 @@ impl IrysNode {
         let ingress_proof_generation_state =
             irys_actors::chunk_ingress_service::IngressProofGenerationState::default();
 
-        // Spawned after the storage modules: capacity pruning asks them which
-        // cached bodies are already fsynced before reclaiming any.
-        let chunk_cache_handle = ChunkCacheService::spawn_service(
-            block_index_guard.clone(),
-            block_tree_guard.clone(),
-            irys_db.clone(),
-            receivers.chunk_cache,
-            config.clone(),
-            service_senders.gossip_broadcast.clone(),
-            service_senders.chunk_cache.clone(),
-            storage_modules_guard.clone(),
-            ingress_proof_generation_state.clone(),
-            runtime_handle.clone(),
-        );
-        debug!("Chunk cache initialized");
-
         // Provide storage modules guard to block migration service for partition recovery
         service_senders
             .block_tree
@@ -1997,6 +1986,35 @@ impl IrysNode {
             runtime_handle.clone(),
             gossip_circuit_breaker,
         );
+
+        // Spawned after the storage modules: capacity pruning asks them which
+        // cached bodies are already fsynced before reclaiming any. Spawned
+        // after the peer list: a body this node alone holds is released only
+        // once a remote assignee attests a persisted copy.
+        let replica_custody = ReplicaCustody::new(Arc::new(HttpReplicaCoverage::new(
+            Arc::new(ChainCustodyTopology::new(
+                block_tree_guard.clone(),
+                peer_list_guard.clone(),
+            )),
+            config.irys_signer().address(),
+            HttpReplicaCoverage::http_fetchers(config.node_config.max_peer_response_bytes),
+            CoverageLimits::default(),
+            runtime_handle.clone(),
+        )));
+        let chunk_cache_handle = ChunkCacheService::spawn_service(
+            block_index_guard.clone(),
+            block_tree_guard.clone(),
+            irys_db.clone(),
+            receivers.chunk_cache,
+            config.clone(),
+            service_senders.gossip_broadcast.clone(),
+            service_senders.chunk_cache.clone(),
+            storage_modules_guard.clone(),
+            replica_custody,
+            ingress_proof_generation_state.clone(),
+            runtime_handle.clone(),
+        );
+        debug!("Chunk cache initialized");
 
         let execution_payload_cache = ExecutionPayloadCache::new(
             peer_list_guard.clone(),

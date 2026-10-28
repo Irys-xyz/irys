@@ -22,7 +22,7 @@ use irys_domain::{
     EpochSnapshot, StorageModulesReadGuard,
 };
 use irys_types::ingress::CachedIngressProof;
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::v2::{ChunkBroadcastMode, GossipBroadcastMessageV2};
 use irys_types::{
     Config, DataLedger, DataRoot, DataTransactionHeader, DatabaseProvider, GIGABYTE, H256,
     IngressProof, IrysBlockHeader, LedgerChunkOffset, PartitionChunkOffset, SendTraced as _,
@@ -33,17 +33,24 @@ use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
+use rust_decimal::prelude::ToPrimitive as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Condvar;
 #[cfg(test)]
 use std::sync::Mutex;
+use std::time::Instant;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
 use tracing::{Instrument as _, debug, error, info, trace, warn};
+
+pub mod replica_custody;
+use replica_custody::{
+    CoverageCandidate, PassMode, ReplicaCustody, ledger_slot, slot_points, spans_touch_live_slot,
+};
 
 /// Outcome of the CDR pruning-horizon policy for one `CachedDataRoots` entry.
 struct CdrEvictionState {
@@ -159,7 +166,7 @@ pub(crate) struct PruneTally {
     pub candidates: u64,
     /// Deleted: persisted `Data` here with this signer's ingress hash.
     pub deleted_durable: u64,
-    /// Deleted: not stored or proven here, and its root is migrated.
+    /// Deleted: not stored or proven here, with a migrated root and remote custody.
     pub deleted_unplaced: u64,
     /// Kept: younger than migration depth plus the cache clean lag.
     pub too_young: u64,
@@ -184,6 +191,16 @@ pub(crate) struct PruneTally {
     /// Offered to the unplaced path. What it did not delete was placed or
     /// updated since the scan.
     pub unplaced_attempted: u64,
+    /// Kept: not stored, proven or owed here, and no remote assignee has
+    /// attested a persisted copy for every live slot the body occupies.
+    pub kept_unreplicated: u64,
+    /// Kept: a `HoldOnly` pass, below the cache threshold, deletes nothing.
+    /// These are the durable and released bodies a `Reclaim` pass would
+    /// have offered for deletion.
+    pub hold_only: u64,
+    /// Held bodies announced to peers this pass. Not an outcome: each is
+    /// also counted in `kept_unreplicated`.
+    pub reannounced: u64,
 }
 
 impl PruneTally {
@@ -265,6 +282,9 @@ pub struct InnerCacheTask {
     /// Read access to local storage modules, used to answer "is this chunk
     /// body durably stored?" at prune time.
     pub storage_modules_guard: StorageModulesReadGuard,
+    /// Replica attestations, the re-announce schedule and the pass cadence,
+    /// shared by every clone of the task.
+    pub replica_custody: ReplicaCustody,
     /// Shared by a cloned task so a test thread can release the prune thread.
     #[cfg(test)]
     prune_recheck_pause: Arc<PruneRecheckPause>,
@@ -356,7 +376,11 @@ impl InnerCacheTask {
                 first_unexpired_slot_index
             )
         })?;
-        self.prune_data_root_cache(prune_height)
+        // A slot the snapshot does not know counts as live: unknown keeps.
+        let live = |ledger: DataLedger, slot_index: usize| {
+            ledger_slot(&epoch_snapshot, ledger, slot_index).is_none_or(|slot| !slot.is_expired)
+        };
+        self.prune_data_root_cache(prune_height, &live)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(migration_height))]
@@ -382,16 +406,22 @@ impl InnerCacheTask {
             custom.migration_height= ?migration_height,
             "Chunk cache: {} chunks ({:.3} GB),  {} ingress proofs",
             chunk_cache_count,
-            (chunk_cache_size / GIGABYTE as u64),
+            (chunk_cache_size / u64::try_from(GIGABYTE)?),
             ingress_proof_count
         );
         metrics::record_cache_stats(chunk_cache_count, chunk_cache_size);
 
-        // Attempt pruning cache only if we're above `prune_at_capacity_percent`% of max capacity.
+        // Capacity selects reclamation; custody announcements also run below it.
         let max_cache_size_bytes = self.config.node_config.cache.max_cache_size_bytes;
-        let threshold_bytes = max_cache_size_bytes as f64
+        let threshold_bytes = max_cache_size_bytes
+            .to_f64()
+            .ok_or_else(|| eyre::eyre!("cache maximum does not fit f64"))?
             * (self.config.node_config.cache.prune_at_capacity_percent / 100_f64);
-        if chunk_cache_size as f64 > threshold_bytes {
+        let above_threshold = chunk_cache_size
+            .to_f64()
+            .ok_or_else(|| eyre::eyre!("cache size does not fit f64"))?
+            > threshold_bytes;
+        if above_threshold {
             debug!("Cache above target capacity, proceeding with pruning");
             if chunk_cache_size > max_cache_size_bytes {
                 warn!(
@@ -403,9 +433,17 @@ impl InnerCacheTask {
             // not completed the durable write/leaf handoff may temporarily
             // keep the cache above its configured maximum. Normal terminal
             // lifecycle pruning still removes expired or abandoned roots.
-            self.prune_durably_migrated_chunk_bodies(migration_height)?;
         } else {
-            debug!("Cache under target capacity, skipping chunk pruning");
+            debug!("Cache under target capacity, holding chunk bodies");
+        }
+        // Below the threshold the pass still runs, at most every
+        // `HOLD_ONLY_INTERVAL`, so bodies this node alone holds keep being
+        // re-announced to their assignees. It deletes nothing then.
+        if let Some(mode) = self
+            .replica_custody
+            .next_pass_mode(above_threshold, Instant::now())
+        {
+            self.prune_chunk_bodies(migration_height, mode)?;
         }
 
         Ok(())
@@ -508,20 +546,21 @@ impl InnerCacheTask {
     /// file says `Data` for this chunk. A `Data` label whose index names
     /// another chunk is that chunk's bytes.
     ///
-    /// A placed or proven body is deleted only by
-    /// `delete_reclaimable_cached_chunks_older_than`: the offset must be
-    /// persisted `Data` at every local placement, every tx of the root must
-    /// be migrated, and the current signer's compact ingress hash must be
-    /// present. A body with neither a proof, a placement, nor an
-    /// assignment that still owes this chunk is deleted on age once every tx
-    /// of its root is migrated. That path does not require the ingress hash.
-    /// Before migration
-    /// no node has a placement yet, so "unassigned" cannot be told apart from
+    /// A placed or proven body requires persisted `Data` at every local
+    /// placement and the current signer's compact ingress hash before deletion.
+    /// A body this node neither stores, proves nor owes requires a remote
+    /// assignee's attestation for every live slot it occupies instead.
+    /// Both paths require every transaction of the root to be migrated:
+    /// before migration, "unassigned" cannot be distinguished from
     /// "assigned, not migrated".
+    ///
+    /// A `HoldOnly` pass classifies and consults replica coverage, then
+    /// announces held bodies without deleting anything.
     #[tracing::instrument(level = "trace", skip_all)]
-    fn prune_durably_migrated_chunk_bodies(
+    fn prune_chunk_bodies(
         &self,
         migration_height: u64,
+        mode: PassMode,
     ) -> eyre::Result<PruneTally> {
         let local_address = self.config.irys_signer().address();
         let min_chunk_age_in_blocks = self
@@ -661,13 +700,30 @@ impl InnerCacheTask {
                 )?;
                 tally.not_durable += not_durable - unprotected_not_durable;
                 if !unprotected.is_empty() {
-                    tally.unplaced_attempted += u64::try_from(unprotected.len())?;
                     unprotected_by_root.push((root, unprotected));
                 }
             }
             if !durable.is_empty() {
                 durable_by_root.push((root, durable));
             }
+        }
+
+        // No local module stores or owes these bodies, so this node may hold
+        // the only copy. Delete one only once a remote assignee attests a
+        // persisted copy for every live slot it occupies; hold the rest.
+        let (mut unprotected_by_root, held) =
+            self.split_replicated(unprotected_by_root, migration_height, &mut span_cache)?;
+        tally.kept_unreplicated += u64::try_from(held.len())?;
+        tally.reannounced += self.reannounce_held(&held)?;
+        if mode == PassMode::HoldOnly {
+            for (_, offsets) in durable_by_root.iter().chain(&unprotected_by_root) {
+                tally.hold_only += u64::try_from(offsets.len())?;
+            }
+            durable_by_root.clear();
+            unprotected_by_root.clear();
+        }
+        for (_, offsets) in &unprotected_by_root {
+            tally.unplaced_attempted += u64::try_from(offsets.len())?;
         }
 
         // The snapshot above can go stale before this delete. A checksum
@@ -782,6 +838,7 @@ impl InnerCacheTask {
         }
 
         info!(
+            prune.mode = ?mode,
             chunk.pruned_chunks = pruned_chunks,
             prune.candidates = tally.candidates,
             prune.deleted_durable = tally.deleted_durable,
@@ -795,10 +852,22 @@ impl InnerCacheTask {
             prune.root_not_migrated_placed = tally.root_not_migrated_placed,
             prune.kept_unreadable = tally.unreadable,
             prune.kept_unplaced = tally.unplaced_kept(),
+            prune.kept_unreplicated = tally.kept_unreplicated,
+            prune.kept_hold_only = tally.hold_only,
+            prune.reannounced = tally.reannounced,
             "Completed chunk pruning pass"
         );
         metrics::record_cache_prune_pass(&tally);
         Ok(tally)
+    }
+
+    /// One `Reclaim` pass, as `prune_cache` runs above the threshold.
+    #[cfg(test)]
+    fn prune_durably_migrated_chunk_bodies(
+        &self,
+        migration_height: u64,
+    ) -> eyre::Result<PruneTally> {
+        self.prune_chunk_bodies(migration_height, PassMode::Reclaim)
     }
 
     /// Offsets from `batch` that still have no local placement. A placement
@@ -821,6 +890,77 @@ impl InnerCacheTask {
             }
         }
         still
+    }
+
+    /// Splits unprotected bodies into those replicas have released, still
+    /// grouped by root, and those this node must hold. One coverage call
+    /// covers the whole pass.
+    fn split_replicated(
+        &self,
+        unprotected_by_root: Vec<(DataRoot, BTreeSet<TxChunkOffset>)>,
+        migration_height: u64,
+        span_cache: &mut PruneSpanCache,
+    ) -> eyre::Result<(
+        Vec<(DataRoot, BTreeSet<TxChunkOffset>)>,
+        BTreeSet<(DataRoot, TxChunkOffset)>,
+    )> {
+        let chunks_per_partition = self.config.consensus.num_chunks_in_partition;
+        let mut candidates = Vec::new();
+        for (root, offsets) in &unprotected_by_root {
+            let spans = self.ledger_spans_for_root(*root, migration_height, span_cache)?;
+            candidates.extend(offsets.iter().map(|tx_offset| CoverageCandidate {
+                data_root: *root,
+                tx_offset: *tx_offset,
+                points: slot_points(&spans, *tx_offset, chunks_per_partition),
+            }));
+        }
+        let released = self.replica_custody.released(&candidates);
+        let mut held = BTreeSet::new();
+        let mut releasable_by_root = Vec::with_capacity(unprotected_by_root.len());
+        for (root, offsets) in unprotected_by_root {
+            let (releasable, unreleased): (BTreeSet<_>, BTreeSet<_>) = offsets
+                .into_iter()
+                .partition(|offset| released.contains(&(root, *offset)));
+            held.extend(unreleased.into_iter().map(|offset| (root, offset)));
+            if !releasable.is_empty() {
+                releasable_by_root.push((root, releasable));
+            }
+        }
+        Ok((releasable_by_root, held))
+    }
+
+    /// Announces the held bodies that are due, without pushing them: an
+    /// assignee that lacks one pulls it through its fetch path. Returns how
+    /// many were announced.
+    fn reannounce_held(&self, held: &BTreeSet<(DataRoot, TxChunkOffset)>) -> eyre::Result<u64> {
+        let due = self
+            .replica_custody
+            .due_reannouncements(held, Instant::now());
+        if due.is_empty() {
+            return Ok(0);
+        }
+        let chunk_size = self.config.consensus.chunk_size;
+        // Load and send one body at a time: a pass may announce up to
+        // `MAX_REANNOUNCED_PER_PASS` bodies, too many to hold at once.
+        self.db.view_eyre(|tx| {
+            let mut announced = 0_u64;
+            for (root, tx_offset) in due {
+                // Deleted since the scan: nothing left to announce.
+                let Some(chunk) =
+                    irys_database::cached_unpacked_chunk(tx, root, tx_offset, chunk_size)?
+                else {
+                    continue;
+                };
+                let message = GossipBroadcastMessageV2::from(chunk)
+                    .with_chunk_mode(ChunkBroadcastMode::AnnounceOnly);
+                if self.gossip_broadcast.send_traced(message).is_err() {
+                    debug!("Gossip broadcast channel closed, stopping re-announcement");
+                    break;
+                }
+                announced += 1;
+            }
+            Ok(announced)
+        })
     }
 
     fn local_chunk_placement_status(
@@ -1196,8 +1336,23 @@ impl InnerCacheTask {
         }
     }
 
+    /// True when at least one body of `data_root` is cached.
+    fn has_cached_bodies<T: reth_db::transaction::DbTx>(
+        tx: &T,
+        data_root: DataRoot,
+    ) -> eyre::Result<bool> {
+        Ok(tx
+            .cursor_dup_read::<CachedChunksIndex>()?
+            .seek_exact(data_root)?
+            .is_some())
+    }
+
     #[tracing::instrument(level = "trace", skip_all, fields(prune_height))]
-    fn prune_data_root_cache(&self, prune_height: u64) -> eyre::Result<()> {
+    fn prune_data_root_cache(
+        &self,
+        prune_height: u64,
+        live: &dyn Fn(DataLedger, usize) -> bool,
+    ) -> eyre::Result<()> {
         // Per-eviction observability state, buffered inside the write tx and
         // emitted only after `commit()` succeeds — otherwise a failed commit
         // (or a mid-loop delete error that drops the tx) would report
@@ -1266,6 +1421,30 @@ impl InnerCacheTask {
             drop(tx);
         }
 
+        // The prune height comes from Submit slots. A root's bodies may be
+        // the only copy of data still owed to a live term or Publish slot, so
+        // a root with cached bodies on a live slot of its own ledger stays;
+        // the capacity pass releases those bodies and a later epoch evicts it.
+        // Spans at every height: a promotion after the Submit horizon still
+        // places the root on Publish.
+        let chunks_per_partition = self.config.consensus.num_chunks_in_partition;
+        let mut span_cache = PruneSpanCache::default();
+        let mut cleared: HashSet<DataRoot> = HashSet::new();
+        for rec in &candidates {
+            if !self
+                .db
+                .view_eyre(|tx| Self::has_cached_bodies(tx, rec.data_root))?
+            {
+                continue;
+            }
+            let spans = self.ledger_spans_for_root(rec.data_root, u64::MAX, &mut span_cache)?;
+            if spans_touch_live_slot(&spans, chunks_per_partition, live) {
+                debug!(data_root = %rec.data_root, "Deferring eviction of a root with cached bodies on a live slot");
+            } else {
+                cleared.insert(rec.data_root);
+            }
+        }
+
         let mut chunks_pruned: u64 = 0;
         let mut applied: Vec<EvictionRecord> = Vec::new();
         for batch in candidates.chunks(256) {
@@ -1283,6 +1462,13 @@ impl InnerCacheTask {
                         let state = Self::cdr_eviction_state(write_tx, &cached, prune_height)?;
                         if !state.evictable
                             || Self::has_local_ingress_proof(write_tx, rec.data_root, local_addr)?
+                        {
+                            continue;
+                        }
+                        // Bodies arrived since the filter, or sit on a live
+                        // slot: keep the root until a later epoch.
+                        if !cleared.contains(&rec.data_root)
+                            && Self::has_cached_bodies(write_tx, rec.data_root)?
                         {
                             continue;
                         }
@@ -1781,14 +1967,14 @@ impl InnerCacheTask {
     fn spawn_pruning_task(
         &self,
         migration_height: u64,
-        response_sender: Option<oneshot::Sender<eyre::Result<()>>>,
+        response_senders: Vec<oneshot::Sender<eyre::Result<()>>>,
     ) {
         let clone = self.clone();
         std::thread::spawn(move || {
             // Same panic-survival rationale as `spawn_prune_txids_task`:
             // without `catch_unwind`, a panic anywhere in `prune_cache`
             // leaves `pruning_running = true` forever and waiters of
-            // `response_sender` hang.
+            // `response_senders` hang.
             let res: eyre::Result<()> =
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     clone.prune_cache(migration_height)
@@ -1804,11 +1990,7 @@ impl InnerCacheTask {
                 Ok(_) => Ok(()),
                 Err(e) => Err(eyre::eyre!(e.to_string())),
             };
-            if let Some(sender) = response_sender
-                && let Err(error) = sender.send(res)
-            {
-                warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
-            }
+            answer_prune_waiters(response_senders, res);
             // Notify service that pruning finished (drive the queue)
             if let Err(e) = clone
                 .cache_sender
@@ -1875,6 +2057,43 @@ fn panic_payload_string(payload: Box<dyn std::any::Any + Send>) -> String {
 
 pub type CacheServiceSender = UnboundedSender<Traced<CacheServiceAction>>;
 
+/// Every queued prune, merged into one pass at the highest queued height.
+/// A pass reads its height only as "migrated at or below", so the highest
+/// height covers every lower one. `None` when nothing is queued.
+fn coalesce_prunes(
+    queue: &mut VecDeque<(u64, Option<oneshot::Sender<eyre::Result<()>>>)>,
+) -> Option<(u64, Vec<oneshot::Sender<eyre::Result<()>>>)> {
+    let (mut height, first) = queue.pop_front()?;
+    let mut waiters: Vec<_> = first.into_iter().collect();
+    for (queued_height, waiter) in queue.drain(..) {
+        height = height.max(queued_height);
+        waiters.extend(waiter);
+    }
+    Some((height, waiters))
+}
+
+/// Sends one pass's result to every waiter merged into it. The last waiter
+/// receives `res` itself; `eyre::Report` is not `Clone`, so the others
+/// receive its message.
+fn answer_prune_waiters(waiters: Vec<oneshot::Sender<eyre::Result<()>>>, res: eyre::Result<()>) {
+    let mut waiters = waiters.into_iter();
+    let last = waiters.next_back();
+    for waiter in waiters {
+        let copy = match &res {
+            Ok(()) => Ok(()),
+            Err(error) => Err(eyre::eyre!(error.to_string())),
+        };
+        if let Err(error) = waiter.send(copy) {
+            warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
+        }
+    }
+    if let Some(waiter) = last
+        && let Err(error) = waiter.send(res)
+    {
+        warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
+    }
+}
+
 #[derive(Debug)]
 pub struct ChunkCacheService {
     pub msg_rx: UnboundedReceiver<Traced<CacheServiceAction>>,
@@ -1904,6 +2123,7 @@ impl ChunkCacheService {
     /// * `block_index_guard` - Read guard for block index lookups
     /// * `block_tree_guard` - Read guard for canonical chain access
     /// * `db` - Database provider for cache storage
+    /// * `replica_custody` - Remote attestations that release cached bodies this node alone holds
     /// * `rx` - Channel receiver for cache service actions
     /// * `config` - Node configuration including eviction strategy
     /// * `runtime_handle` - Tokio runtime for spawning the service
@@ -1921,6 +2141,7 @@ impl ChunkCacheService {
         gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
         cache_sender: CacheServiceSender,
         storage_modules_guard: StorageModulesReadGuard,
+        replica_custody: ReplicaCustody,
         ingress_proof_generation_state: IngressProofGenerationState,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
@@ -1941,6 +2162,7 @@ impl ChunkCacheService {
                     ingress_proof_generation_state,
                     cache_sender,
                     storage_modules_guard,
+                    replica_custody,
                     #[cfg(test)]
                     prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
                 },
@@ -2017,13 +2239,9 @@ impl ChunkCacheService {
         );
         match msg {
             CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
-                // Enqueue pruning; start if idle
                 self.pruning_queue.push_back((migration_height, sender));
-                if !self.pruning_running
-                    && let Some((h, s)) = self.pruning_queue.pop_front()
-                {
-                    self.pruning_running = true;
-                    self.cache_task.spawn_pruning_task(h, s);
+                if !self.pruning_running {
+                    self.start_queued_prune();
                 }
             }
             CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
@@ -2037,12 +2255,8 @@ impl ChunkCacheService {
                 }
             }
             CacheServiceAction::PruneCompleted(_res) => {
-                // Mark pruning idle and kick next if queued
                 self.pruning_running = false;
-                if let Some((h, s)) = self.pruning_queue.pop_front() {
-                    self.pruning_running = true;
-                    self.cache_task.spawn_pruning_task(h, s);
-                }
+                self.start_queued_prune();
             }
             CacheServiceAction::EpochProcessingCompleted(_res) => {
                 // Mark epoch processing idle and kick next if queued
@@ -2084,6 +2298,17 @@ impl ChunkCacheService {
                     self.cache_task.spawn_prune_txids_task(work);
                 }
             }
+        }
+    }
+
+    /// Starts one pass for everything queued. A pass can wait on replica
+    /// coverage for longer than a block interval, so prunes queued behind it
+    /// merge into one pass instead of running one by one.
+    fn start_queued_prune(&mut self) {
+        if let Some((migration_height, waiters)) = coalesce_prunes(&mut self.pruning_queue) {
+            self.pruning_running = true;
+            self.cache_task
+                .spawn_pruning_task(migration_height, waiters);
         }
     }
 }
@@ -2185,6 +2410,7 @@ mod tests {
     use irys_testing_utils::{
         IrysBlockHeaderTestExt as _, initialize_tracing, new_mock_signed_header,
     };
+    use irys_types::v2::GossipDataV2;
     use irys_types::{
         Base64, Config, DataTransactionHeader, DataTransactionHeaderV1,
         DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256List, IrysAddress,
@@ -2275,6 +2501,7 @@ mod tests {
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
                 storage_modules_guard: test_storage_modules_guard(),
+                replica_custody: ReplicaCustody::all_replicated(),
                 #[cfg(test)]
                 prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
             },
@@ -2293,7 +2520,9 @@ mod tests {
     #[tokio::test]
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
         let (_temp_dir, db, data_root, service) = unconfirmed_cache(100, true)?;
-        service.cache_task.prune_data_root_cache(1)?;
+        service
+            .cache_task
+            .prune_data_root_cache(1, &no_live_slots)?;
         db.view(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
             eyre::ensure!(has_root, "CachedDataRoots was prematurely pruned");
@@ -2307,12 +2536,232 @@ mod tests {
     #[tokio::test]
     async fn prunes_expired_never_confirmed_data_root() -> eyre::Result<()> {
         let (_temp_dir, db, data_root, service) = unconfirmed_cache(5, false)?;
-        service.cache_task.prune_data_root_cache(6)?;
+        service
+            .cache_task
+            .prune_data_root_cache(6, &no_live_slots)?;
         db.view(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
             eyre::ensure!(!has_root, "CachedDataRoots should have been pruned");
             Ok(())
         })??;
+        Ok(())
+    }
+
+    /// Liveness for root-prune tests that predate custody: no slot is live,
+    /// so nothing is deferred.
+    fn no_live_slots(_: DataLedger, _: usize) -> bool {
+        false
+    }
+
+    /// One evictable root, one tx on `ledger` included at height 1, and
+    /// optionally one cached body. Returns the task and the root.
+    fn root_prune_task(
+        ledger: DataLedger,
+        with_body: bool,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        InnerCacheTask,
+        DataRoot,
+    )> {
+        use irys_database::insert_tx_header;
+        use irys_database::tables::{IrysBlockHeaders, MigratedBlockHashes};
+        use irys_types::{DataTransactionLedger, IrysBlockHeader, U256};
+
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let chunk_size = config.consensus.chunk_size;
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                data_root: H256::random(),
+                data_size: chunk_size,
+                ledger_id: u32::from(ledger),
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &header, None)?;
+            insert_tx_header(wtx, &header)?;
+            irys_database::set_data_tx_included_height(wtx, &header.id, 1)
+                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+            if with_body {
+                database::cache_chunk(
+                    wtx,
+                    &UnpackedChunk {
+                        data_root: header.data_root,
+                        data_size: header.data_size,
+                        data_path: Base64(vec![]),
+                        bytes: Base64(vec![3_u8; 8]),
+                        tx_offset: TxChunkOffset::from(0_u32),
+                    },
+                )?;
+            }
+            eyre::Ok(())
+        })??;
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.test_sign();
+        let mut included = IrysBlockHeader::new_mock_header();
+        included.height = 1;
+        included.previous_block_hash = genesis.block_hash;
+        included.cumulative_diff = U256::from(2_u64);
+        match ledger {
+            DataLedger::Submit => {
+                included.data_ledgers[DataLedger::Submit].tx_ids = H256List(vec![header.id]);
+            }
+            term => included.data_ledgers.push(DataTransactionLedger {
+                ledger_id: u32::from(term),
+                tx_ids: H256List(vec![header.id]),
+                ..Default::default()
+            }),
+        }
+        included.test_sign();
+        db.update(|wtx| {
+            wtx.put::<IrysBlockHeaders>(genesis.block_hash, genesis.clone().into())?;
+            wtx.put::<MigratedBlockHashes>(0, genesis.block_hash)?;
+            wtx.put::<IrysBlockHeaders>(included.block_hash, included.clone().into())?;
+            wtx.put::<MigratedBlockHashes>(1, included.block_hash)?;
+            eyre::Ok(())
+        })??;
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        let (cache_sender, _cache_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = InnerCacheTask {
+            db,
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender,
+            storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
+        };
+        Ok((temp_dir, task, header.data_root))
+    }
+
+    /// Past the Submit horizon, a root keeps its row and bodies while one of
+    /// its spans is on a live slot of its own ledger, and only then.
+    #[rstest::rstest]
+    #[case::thirty_day_slot_live(DataLedger::ThirtyDay, true, true)]
+    #[case::thirty_day_slot_expired(DataLedger::ThirtyDay, false, false)]
+    #[case::submit_root(DataLedger::Submit, true, false)]
+    #[tokio::test]
+    async fn root_prune_defers_bodies_on_a_live_slot(
+        #[case] ledger: DataLedger,
+        #[case] thirty_day_live: bool,
+        #[case] survives: bool,
+    ) -> eyre::Result<()> {
+        let (_temp_dir, task, root) = root_prune_task(ledger, true)?;
+        let live = |slot_ledger: DataLedger, _: usize| {
+            thirty_day_live && slot_ledger == DataLedger::ThirtyDay
+        };
+
+        task.prune_data_root_cache(6, &live)?;
+
+        let (row, body) = task.db.view_eyre(|rtx| {
+            Ok((
+                rtx.get::<CachedDataRoots>(root)?.is_some(),
+                irys_database::cached_chunk_meta_by_offset(rtx, root, TxChunkOffset::from(0_u32))?
+                    .is_some(),
+            ))
+        })?;
+        assert_eq!((row, body), (survives, survives));
+        Ok(())
+    }
+
+    /// Deferral protects bodies, not metadata: a root with none left goes.
+    #[tokio::test]
+    async fn root_prune_evicts_a_bodiless_root_on_a_live_slot() -> eyre::Result<()> {
+        let (_temp_dir, task, root) = root_prune_task(DataLedger::ThirtyDay, false)?;
+
+        task.prune_data_root_cache(6, &|_, _| true)?;
+
+        assert!(
+            task.db
+                .view_eyre(|rtx| Ok(rtx.get::<CachedDataRoots>(root)?.is_none()))?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn queued_prunes_merge_at_the_highest_height() {
+        let mut queue = VecDeque::new();
+        assert!(coalesce_prunes(&mut queue).is_none());
+        let (first, _first_rx) = oneshot::channel();
+        let (second, _second_rx) = oneshot::channel();
+        queue.push_back((5, Some(first)));
+        queue.push_back((9, None));
+        queue.push_back((7, Some(second)));
+
+        let (height, waiters) = coalesce_prunes(&mut queue).expect("queued prunes");
+
+        assert_eq!(height, 9);
+        assert_eq!(waiters.len(), 2);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn every_waiter_hears_a_failed_pass() {
+        let (first, mut first_rx) = oneshot::channel();
+        let (second, mut second_rx) = oneshot::channel();
+
+        answer_prune_waiters(vec![first, second], Err(eyre::eyre!("disk gone")));
+
+        for rx in [&mut first_rx, &mut second_rx] {
+            let error = rx
+                .try_recv()
+                .expect("answered")
+                .expect_err("the pass failed");
+            assert_eq!(error.to_string(), "disk gone");
+        }
+    }
+
+    /// Prunes queued behind a running pass start as one pass, and every
+    /// waiter hears its result.
+    #[tokio::test]
+    async fn queued_prunes_run_as_one_pass() -> eyre::Result<()> {
+        let (_temp_dir, _db, _root, mut service) = unconfirmed_cache(100, true)?;
+        service.pruning_running = true;
+        let mut waiters = Vec::new();
+        for height in [4, 9, 6] {
+            let (waiter, answer) = oneshot::channel();
+            service.on_handle_message(CacheServiceAction::OnBlockMigrated(height, Some(waiter)));
+            waiters.push(answer);
+        }
+        assert_eq!(
+            service.pruning_queue.len(),
+            3,
+            "a running pass holds the queue"
+        );
+
+        service.on_handle_message(CacheServiceAction::PruneCompleted(Ok(())));
+
+        assert!(
+            service.pruning_queue.is_empty(),
+            "one pass takes every queued prune"
+        );
+        assert!(service.pruning_running);
+        for answer in waiters {
+            answer.await??;
+        }
         Ok(())
     }
 
@@ -2489,6 +2938,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender,
             storage_modules_guard: StorageModulesReadGuard::new(Arc::new(RwLock::new(modules))),
+            replica_custody: ReplicaCustody::all_replicated(),
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
         let cached_body = || {
@@ -2534,9 +2984,31 @@ mod tests {
         no_root_record: bool,
     }
 
-    /// Runs one capacity prune over an old cached body. Reports whether it is
-    /// still cached, and the pass tally.
-    fn old_body_capacity_prune(body: OldBody) -> eyre::Result<(bool, PruneTally)> {
+    /// One old cached body on a task built from an `OldBody`, ready for any
+    /// number of passes. `broadcasts` receives everything the task gossips.
+    struct OldBodyTask {
+        _temp_dir: irys_testing_utils::utils::tempfile::TempDir,
+        db: DatabaseProvider,
+        data_root: DataRoot,
+        task: InnerCacheTask,
+        broadcasts: tokio::sync::mpsc::UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
+    }
+
+    impl OldBodyTask {
+        /// Whether the cached body is still indexed.
+        fn survives(&self) -> eyre::Result<bool> {
+            self.db.view(|rtx| -> eyre::Result<bool> {
+                let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+                let mut walk = dup_cursor.walk(Some(self.data_root))?;
+                Ok(walk
+                    .next()
+                    .transpose()?
+                    .is_some_and(|(root, _)| root == self.data_root))
+            })?
+        }
+    }
+
+    fn old_body_task(body: OldBody, replica_custody: ReplicaCustody) -> eyre::Result<OldBodyTask> {
         let OldBody {
             local_proof,
             assigned,
@@ -2646,30 +3118,223 @@ mod tests {
         } else {
             test_storage_modules_guard()
         };
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let service_task = InnerCacheTask {
+        let (cache_sender, _cache_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (gossip_broadcast, broadcasts) = tokio::sync::mpsc::unbounded_channel();
+        let task = InnerCacheTask {
             db: db.clone(),
             block_tree_guard,
             block_index_guard,
             config,
-            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            gossip_broadcast,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
-            cache_sender: tx,
+            cache_sender,
             storage_modules_guard,
+            replica_custody,
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
+        Ok(OldBodyTask {
+            _temp_dir,
+            db,
+            data_root: tx_header.data_root,
+            task,
+            broadcasts,
+        })
+    }
 
-        let tally = service_task.prune_durably_migrated_chunk_bodies(10)?;
-        let survives = db.view(|rtx| -> eyre::Result<bool> {
-            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
-            Ok(walk
-                .next()
-                .transpose()?
-                .is_some_and(|(root, _)| root == tx_header.data_root))
-        })??;
-        Ok((survives, tally))
+    /// Runs one capacity prune over an old cached body. Reports whether it is
+    /// still cached, and the pass tally.
+    fn old_body_capacity_prune(body: OldBody) -> eyre::Result<(bool, PruneTally)> {
+        let fixture = old_body_task(body, ReplicaCustody::all_replicated())?;
+        let tally = fixture.task.prune_durably_migrated_chunk_bodies(10)?;
+        Ok((fixture.survives()?, tally))
+    }
+
+    /// A migrated body this node neither stores, proves nor owes stays until
+    /// a replica attests it, and coverage is offered exactly that body.
+    #[tokio::test]
+    async fn an_unattested_unplaced_body_survives_reclaim() -> eyre::Result<()> {
+        let coverage = Arc::new(replica_custody::stubs::ReleasedOnly::default());
+        let fixture = old_body_task(
+            OldBody {
+                migrated: true,
+                ..Default::default()
+            },
+            ReplicaCustody::new(coverage.clone()),
+        )?;
+
+        let tally = fixture.task.prune_durably_migrated_chunk_bodies(10)?;
+
+        assert!(fixture.survives()?);
+        assert_eq!(
+            tally,
+            PruneTally {
+                candidates: 1,
+                kept_unreplicated: 1,
+                reannounced: 1,
+                ..Default::default()
+            }
+        );
+        let calls = coverage.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one coverage call for the whole pass");
+        let offered: Vec<_> = calls[0]
+            .iter()
+            .map(|candidate| (candidate.data_root, candidate.tx_offset))
+            .collect();
+        assert_eq!(
+            offered,
+            vec![(fixture.data_root, TxChunkOffset::from(0_u32))]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_attested_unplaced_body_is_deleted() -> eyre::Result<()> {
+        let coverage = Arc::new(replica_custody::stubs::ReleasedOnly::default());
+        let fixture = old_body_task(
+            OldBody {
+                migrated: true,
+                ..Default::default()
+            },
+            ReplicaCustody::new(coverage.clone()),
+        )?;
+        coverage
+            .keys
+            .lock()
+            .unwrap()
+            .insert((fixture.data_root, TxChunkOffset::from(0_u32)));
+
+        let tally = fixture.task.prune_durably_migrated_chunk_bodies(10)?;
+
+        assert!(!fixture.survives()?);
+        assert_eq!(
+            tally,
+            PruneTally {
+                candidates: 1,
+                deleted_unplaced: 1,
+                unplaced_attempted: 1,
+                ..Default::default()
+            }
+        );
+        Ok(())
+    }
+
+    /// A `HoldOnly` pass keeps bodies a `Reclaim` pass deletes, and counts
+    /// them as held rather than in no outcome.
+    #[rstest::rstest]
+    #[case::durable(
+        OldBody { migrated: true, durable: true, ingress_hash: true, ..Default::default() },
+        PruneTally { candidates: 1, deleted_durable: 1, ..Default::default() },
+    )]
+    #[case::released_unplaced(
+        OldBody { migrated: true, ..Default::default() },
+        PruneTally { candidates: 1, deleted_unplaced: 1, unplaced_attempted: 1, ..Default::default() },
+    )]
+    #[tokio::test]
+    async fn a_hold_only_pass_deletes_nothing(
+        #[case] body: OldBody,
+        #[case] reclaimed: PruneTally,
+    ) -> eyre::Result<()> {
+        let fixture = old_body_task(body, ReplicaCustody::all_replicated())?;
+
+        let held = fixture.task.prune_chunk_bodies(10, PassMode::HoldOnly)?;
+
+        assert!(fixture.survives()?);
+        assert_eq!(
+            held,
+            PruneTally {
+                candidates: 1,
+                hold_only: 1,
+                ..Default::default()
+            }
+        );
+        let tally = fixture.task.prune_chunk_bodies(10, PassMode::Reclaim)?;
+        assert!(!fixture.survives()?, "the same body is reclaimable");
+        assert_eq!(tally, reclaimed);
+        Ok(())
+    }
+
+    /// Below the threshold the pass runs, so held bodies are offered to
+    /// coverage, but at most once per `HOLD_ONLY_INTERVAL`.
+    #[tokio::test]
+    async fn below_the_threshold_the_pass_holds_at_most_every_interval() -> eyre::Result<()> {
+        let coverage = Arc::new(replica_custody::stubs::ReleasedOnly::default());
+        let fixture = old_body_task(
+            OldBody {
+                migrated: true,
+                ..Default::default()
+            },
+            ReplicaCustody::new(coverage.clone()),
+        )?;
+
+        // One cached chunk against the 10 GiB testing maximum.
+        fixture.task.prune_cache(10)?;
+        fixture.task.prune_cache(10)?;
+
+        assert!(fixture.survives()?);
+        assert_eq!(
+            coverage.calls.lock().unwrap().len(),
+            1,
+            "the second pass falls within HOLD_ONLY_INTERVAL"
+        );
+        Ok(())
+    }
+
+    /// The offsets announced through the task's gossip sender since the last
+    /// call, each checked to be announce-only.
+    fn announced(fixture: &mut OldBodyTask) -> Vec<(DataRoot, TxChunkOffset)> {
+        let mut announced = Vec::new();
+        while let Ok(message) = fixture.broadcasts.try_recv() {
+            let (message, _span) = message.into_parts();
+            assert_eq!(message.chunk_mode, ChunkBroadcastMode::AnnounceOnly);
+            let GossipDataV2::Chunk(chunk) = &message.data else {
+                panic!("chunk broadcast");
+            };
+            announced.push((chunk.data_root, chunk.tx_offset));
+        }
+        announced
+    }
+
+    /// A held body is announced by a pass in either mode, and not again
+    /// within the re-announce interval.
+    #[tokio::test]
+    async fn a_held_body_is_announced_once_per_interval() -> eyre::Result<()> {
+        let mut fixture = old_body_task(
+            OldBody {
+                migrated: true,
+                ..Default::default()
+            },
+            ReplicaCustody::new(Arc::new(replica_custody::stubs::ReleasedOnly::default())),
+        )?;
+
+        let first = fixture.task.prune_chunk_bodies(10, PassMode::HoldOnly)?;
+        assert_eq!(first.reannounced, 1);
+        assert_eq!(
+            announced(&mut fixture),
+            vec![(fixture.data_root, TxChunkOffset::from(0_u32))]
+        );
+
+        let second = fixture.task.prune_chunk_bodies(10, PassMode::Reclaim)?;
+        assert_eq!(second.reannounced, 0);
+        assert!(announced(&mut fixture).is_empty());
+        assert!(fixture.survives()?, "a held body is kept");
+        Ok(())
+    }
+
+    /// Bodies replicas have released, and bodies this node stores, are not
+    /// this node's to announce, even when a `HoldOnly` pass keeps them.
+    #[rstest::rstest]
+    #[case::released_unplaced(OldBody { migrated: true, ..Default::default() })]
+    #[case::durable(OldBody { migrated: true, durable: true, ingress_hash: true, ..Default::default() })]
+    #[tokio::test]
+    async fn only_held_bodies_are_announced(#[case] body: OldBody) -> eyre::Result<()> {
+        let mut fixture = old_body_task(body, ReplicaCustody::all_replicated())?;
+
+        let tally = fixture.task.prune_chunk_bodies(10, PassMode::HoldOnly)?;
+
+        assert_eq!(tally.reannounced, 0);
+        assert!(announced(&mut fixture).is_empty());
+        Ok(())
     }
 
     fn old_body_survives_capacity_prune(
@@ -3018,6 +3683,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard,
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -3197,6 +3863,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard,
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -3365,6 +4032,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard,
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -3868,6 +4536,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard,
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -3987,6 +4656,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard,
+            replica_custody: ReplicaCustody::all_replicated(),
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
         task.arm_prune_recheck_pause();
@@ -4295,6 +4965,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx.clone(),
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -4339,6 +5010,7 @@ mod tests {
                 tx_header.data_size,
                 &[0, 1],
             )?,
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -4425,13 +5097,14 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         // Prune with prune_height greater than expiry (6 > 5).
         // Normally this would delete the data root, but because of the local proof, it should stay.
-        service_task.prune_data_root_cache(6)?;
+        service_task.prune_data_root_cache(6, &no_live_slots)?;
 
         // Verify it was NOT pruned
         db.view(|rtx| -> eyre::Result<()> {
@@ -4498,11 +5171,12 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
-        service_task.prune_data_root_cache(1)?;
+        service_task.prune_data_root_cache(1, &no_live_slots)?;
 
         db.view(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
@@ -4589,13 +5263,14 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         // Without the local-proof exemption the (None, None) state would be
         // evicted; with it the entry must survive.
-        service_task.prune_data_root_cache(1)?;
+        service_task.prune_data_root_cache(1, &no_live_slots)?;
 
         db.view(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
@@ -4675,6 +5350,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -4682,7 +5358,7 @@ mod tests {
         // `prune_height = 100` is well past the confirmed tx's `included_height`
         // = 5.  Without the pending-tx guard the CDR would be evicted on
         // inclusion alone.
-        service_task.prune_data_root_cache(100)?;
+        service_task.prune_data_root_cache(100, &no_live_slots)?;
 
         db.view(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
@@ -4808,6 +5484,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -4906,6 +5583,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -5028,6 +5706,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -5172,6 +5851,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -5282,6 +5962,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         }

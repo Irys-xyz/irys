@@ -14,6 +14,11 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 threads-required = 1
 retries = 0
 
+# Custody handover allows 180 seconds of polling plus node startup and shutdown.
+[[profile.default.overrides]]
+filter = 'test(heavy_an_unassigned_uploader_holds_bodies_until_the_assignee_persists_them)'
+slow-timeout = { period = "120s", terminate-after = 3 }
+
 # serial tests
 [[profile.default.overrides]]
 filter = 'test(/.*serial_.*/)'

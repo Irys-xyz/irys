@@ -198,6 +198,11 @@ pub mod v2 {
         Push,
         /// Send a `ChunkAnnouncement`; peers fetch the body if they lack it.
         Announce,
+        /// Send only a `ChunkAnnouncement`, to V2 peers that accept one.
+        /// Never pushes a body: not to V1 peers, not to peers remembered as
+        /// lacking the route, and not after a 404. Used to re-announce
+        /// cached bodies that no replica has confirmed yet.
+        AnnounceOnly,
     }
 
     #[derive(Clone, Debug)]

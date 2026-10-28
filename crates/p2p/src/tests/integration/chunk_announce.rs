@@ -1618,3 +1618,78 @@ async fn in_flight_storage_write_accepts_the_second_push_once() -> eyre::Result<
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn announce_only_reaches_a_new_peer_as_an_announcement() -> eyre::Result<()> {
+    use irys_types::gossip::v2::ChunkBroadcastMode;
+
+    let mut relay = GossipServiceTestFixture::new();
+    let mut receiver = GossipServiceTestFixture::new();
+    relay.add_peer(&receiver);
+    receiver.add_peer(&relay);
+    let chunk = valid_chunk(chunk_size(&relay), 12);
+    cache_body(&relay, &chunk);
+    cache_body(&receiver, &chunk); // held: the announcement is accepted, no fetch
+    let (h1, bus) = relay.run_service();
+    let (h2, _) = receiver.run_service();
+    wait_until_listening(relay.gossip_addr()).await;
+    wait_until_listening(receiver.gossip_addr()).await;
+    let handler = receiver.data_handler().expect("handler");
+
+    bus.send_traced(
+        GossipBroadcastMessageV2::from(chunk).with_chunk_mode(ChunkBroadcastMode::AnnounceOnly),
+    )
+    .expect("send");
+    poll_until(
+        Duration::from_secs(10),
+        "receiver got the announcement",
+        || handler.chunk_announce.stats().announcements_received == 1,
+    )
+    .await?;
+    assert_eq!(handler.chunk_announce.stats().bodies_push, 0);
+    h1.stop().await?;
+    h2.stop().await?;
+    Ok(())
+}
+
+/// An old peer answers the announcement with 404. `AnnounceOnly` remembers
+/// that and pushes nothing, where `Announce` would push the body.
+#[tokio::test]
+async fn announce_only_sends_no_body_to_an_old_peer() -> eyre::Result<()> {
+    use irys_types::gossip::v2::ChunkBroadcastMode;
+
+    let mut relay = GossipServiceTestFixture::new();
+    let chunk = valid_chunk(chunk_size(&relay), 13);
+    let pushes = Arc::new(AtomicUsize::new(0));
+    let fake = FakeGossipServer::new();
+    fake.record_chunk_pushes(Arc::clone(&pushes));
+    let fake_addr = fake.spawn();
+    wait_until_listening(fake_addr).await;
+    let old_peer = add_fake_peer(&relay, 0x32, fake_addr);
+    let (handle, bus) = relay.run_service();
+    wait_until_listening(relay.gossip_addr()).await;
+    // The broadcaster and the data handler share one client, so the
+    // handler's copy sees the 404 the broadcaster records.
+    let client = relay.data_handler().expect("handler").gossip_client.clone();
+
+    bus.send_traced(
+        GossipBroadcastMessageV2::from(chunk).with_chunk_mode(ChunkBroadcastMode::AnnounceOnly),
+    )
+    .expect("send");
+    poll_until(
+        Duration::from_secs(10),
+        "the old peer's 404 was remembered",
+        || client.peer_lacks_announce(&old_peer.peer_id),
+    )
+    .await?;
+    // A fallback push would follow the 404 on the same task within
+    // milliseconds; give one that must not exist time to land.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        pushes.load(Ordering::SeqCst),
+        0,
+        "AnnounceOnly never pushes a body"
+    );
+    handle.stop().await?;
+    Ok(())
+}

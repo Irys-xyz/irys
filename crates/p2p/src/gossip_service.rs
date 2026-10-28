@@ -345,15 +345,31 @@ impl P2PService {
         } = broadcast_message;
         let broadcast_data = Arc::new(data);
 
-        // Pre-serialize once for all V2 peers (O(1) clone per peer instead of N serializations)
-        let preserialized = self.client.pre_serialize_for_broadcast(&broadcast_data);
         let announcement = if self.gossip_cfg.chunk_announce
-            && chunk_mode == ChunkBroadcastMode::Announce
+            && matches!(
+                chunk_mode,
+                ChunkBroadcastMode::Announce | ChunkBroadcastMode::AnnounceOnly
+            )
             && let GossipDataV2::Chunk(chunk) = broadcast_data.as_ref()
         {
             Some(crate::wire_types::ChunkAnnouncement::from(chunk.as_ref()))
         } else {
             None
+        };
+        if chunk_mode == ChunkBroadcastMode::AnnounceOnly && announcement.is_none() {
+            debug!(
+                "Announce-only broadcast with announcements disabled, sending nothing: {}",
+                message_type_and_id
+            );
+            return Ok(());
+        }
+
+        // Pre-serialize once for all V2 peers (O(1) clone per peer instead of N serializations).
+        // An announce-only broadcast never sends the body, so it skips the work.
+        let preserialized = if chunk_mode == ChunkBroadcastMode::AnnounceOnly {
+            None
+        } else {
+            self.client.pre_serialize_for_broadcast(&broadcast_data)
         };
 
         debug!("Broadcasting data to peers: {}", message_type_and_id);
@@ -394,21 +410,38 @@ impl P2PService {
             );
             // Send data to selected peers
             for (peer_miner_address, peer_entry) in selected_peers {
-                if peer_entry.protocol_version == ProtocolVersion::V2
-                    && let (Some(announcement), Some((route, body))) =
-                        (announcement, &preserialized)
-                    && !self.client.peer_lacks_announce(&peer_miner_address)
-                {
-                    self.client.send_chunk_announcement_detached(
-                        (&peer_miner_address, &peer_entry),
-                        announcement,
-                        *route,
-                        body.clone(),
-                        peer_list,
-                        Arc::clone(&self.cache),
-                        key,
-                    );
+                let lacks_announce =
+                    announcement.is_some() && self.client.peer_lacks_announce(&peer_miner_address);
+                let delivery = chunk_delivery(
+                    chunk_mode,
+                    announcement.is_some(),
+                    peer_entry.protocol_version,
+                    lacks_announce,
+                );
+                if delivery == ChunkDelivery::Skip {
                     continue;
+                }
+                if let (ChunkDelivery::Announce { fallback }, Some(announcement)) =
+                    (delivery, announcement)
+                {
+                    let push_fallback = if fallback {
+                        preserialized.clone()
+                    } else {
+                        None
+                    };
+                    // An announcement whose body failed to pre-serialise
+                    // takes the push path below, as it always has.
+                    if !fallback || push_fallback.is_some() {
+                        self.client.send_chunk_announcement_detached(
+                            (&peer_miner_address, &peer_entry),
+                            announcement,
+                            push_fallback,
+                            peer_list,
+                            Arc::clone(&self.cache),
+                            key,
+                        );
+                        continue;
+                    }
                 }
                 if peer_entry.protocol_version == ProtocolVersion::V2
                     && let Some((route, ref body)) = preserialized
@@ -441,6 +474,38 @@ impl P2PService {
 
         debug!("Node {:?}: Broadcast finished", self.client.mining_address);
         Ok(())
+    }
+}
+
+/// How one peer receives a chunk broadcast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkDelivery {
+    /// Send a `ChunkAnnouncement`. On a missing route, push the body only
+    /// when `fallback` is set.
+    Announce { fallback: bool },
+    /// Push the full body: pre-serialised for V2, else the V1 path.
+    Push,
+    /// Send nothing.
+    Skip,
+}
+
+/// Route for one peer. `announces` is whether an announcement was built,
+/// which needs chunk data, `p2p_gossip.chunk_announce`, and an announcing
+/// mode.
+fn chunk_delivery(
+    mode: ChunkBroadcastMode,
+    announces: bool,
+    version: ProtocolVersion,
+    lacks_announce: bool,
+) -> ChunkDelivery {
+    let can_announce = announces && version == ProtocolVersion::V2 && !lacks_announce;
+    match mode {
+        ChunkBroadcastMode::AnnounceOnly if can_announce => {
+            ChunkDelivery::Announce { fallback: false }
+        }
+        ChunkBroadcastMode::AnnounceOnly => ChunkDelivery::Skip,
+        ChunkBroadcastMode::Announce if can_announce => ChunkDelivery::Announce { fallback: true },
+        ChunkBroadcastMode::Announce | ChunkBroadcastMode::Push => ChunkDelivery::Push,
     }
 }
 
@@ -574,4 +639,75 @@ pub fn spawn_p2p_server_watcher_task(
         },
         task_executor,
     )
+}
+
+#[cfg(test)]
+mod chunk_delivery_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::push_mode(
+        ChunkBroadcastMode::Push,
+        false,
+        ProtocolVersion::V2,
+        false,
+        ChunkDelivery::Push
+    )]
+    #[case::announce_new_peer(ChunkBroadcastMode::Announce, true, ProtocolVersion::V2, false, ChunkDelivery::Announce { fallback: true })]
+    #[case::announce_remembered_404(
+        ChunkBroadcastMode::Announce,
+        true,
+        ProtocolVersion::V2,
+        true,
+        ChunkDelivery::Push
+    )]
+    #[case::announce_v1_peer(
+        ChunkBroadcastMode::Announce,
+        true,
+        ProtocolVersion::V1,
+        false,
+        ChunkDelivery::Push
+    )]
+    #[case::announce_disabled(
+        ChunkBroadcastMode::Announce,
+        false,
+        ProtocolVersion::V2,
+        false,
+        ChunkDelivery::Push
+    )]
+    #[case::announce_only_new_peer(ChunkBroadcastMode::AnnounceOnly, true, ProtocolVersion::V2, false, ChunkDelivery::Announce { fallback: false })]
+    #[case::announce_only_remembered_404(
+        ChunkBroadcastMode::AnnounceOnly,
+        true,
+        ProtocolVersion::V2,
+        true,
+        ChunkDelivery::Skip
+    )]
+    #[case::announce_only_v1_peer(
+        ChunkBroadcastMode::AnnounceOnly,
+        true,
+        ProtocolVersion::V1,
+        false,
+        ChunkDelivery::Skip
+    )]
+    #[case::announce_only_disabled(
+        ChunkBroadcastMode::AnnounceOnly,
+        false,
+        ProtocolVersion::V2,
+        false,
+        ChunkDelivery::Skip
+    )]
+    fn chunk_delivery_picks_one_route_per_peer(
+        #[case] mode: ChunkBroadcastMode,
+        #[case] announces: bool,
+        #[case] version: ProtocolVersion,
+        #[case] lacks_announce: bool,
+        #[case] expected: ChunkDelivery,
+    ) {
+        assert_eq!(
+            chunk_delivery(mode, announces, version, lacks_announce),
+            expected
+        );
+    }
 }

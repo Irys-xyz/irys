@@ -126,6 +126,7 @@ fn timing_task(
         ingress_proof_generation_state: IngressProofGenerationState::new(),
         cache_sender: tokio::sync::mpsc::unbounded_channel().0,
         storage_modules_guard: StorageModulesReadGuard::new(Arc::new(RwLock::new(storage_modules))),
+        replica_custody: ReplicaCustody::all_replicated(),
         prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
     }
 }
