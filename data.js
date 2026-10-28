@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793186495576,
+  "lastUpdate": 1793229143405,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -19915,6 +19915,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e755bf618222e3d3a27a894ff298e427e94ad688",
+          "message": "feat(storage): add storage.recall_io_priority to let other IO take priority over mining recall (#1719)\n\n* feat(storage): add storage.recall_io_priority to let other IO take priority over mining recall\n\nThe disk lane holds chunks.dat for a mining recall: no packed write or\nentropy read is submitted and non-lane reads, writes, and durable points\nwait for the recall preads to return. A recall_holds predicate now\ngates every one of those waits on the new storage.recall_io_priority\nflag (default true). With it false a recall shares the disk with\npacking, data sync, and serving instead of holding it; the in-flight\nservice-time budget still bounds both. The flag is read at module\nopen, like recall_direct_io.\n\n* feat(mining): mine queued recall ranges newest-first, keep only the 3 newest\n\nA slow recall read lets newer VDF seeds queue behind it. The oldest\nqueued ranges are the least worth mining (each costs a full recall\nread), so the drain keeps only the 3 newest, evicting the oldest, and\nmines newest to oldest. A solution ends the drain; the block producer\ngets at most one solution per flushed batch.\n\n* fix(mining): per-range lag, drop pre-reanchor seeds, correct budget doc\n\n- Measure each queued recall range's lag against the VDF step at its own\n  mining time, not the batch head: a slow recall read is exactly when the\n  VDF advances several steps behind.\n- Drop seeds collected before a Reanchored event in the flush: they carry\n  the pre-reanchor seed values, which no longer match the healed buffer,\n  so mining them produces solutions other nodes cannot validate.\n- Correct the recall_io_priority doc: the in-flight service-time budget\n  bounds the lane's submitted writes and entropy reads only; recall preads\n  are not counted against it.\n\n* fix(mining): resolve recall ranges in step order before newest-first reads\n\nThe recall-range rotation only moves forward. Resolving a range inside\neach read made newest-first mining ask for steps behind the rotation,\nwhich rebuilds it from the reset step: up to one pick per recall range\nin the partition (~189k on mainnet), twice per backlog.\n\nhandle_seeds now resolves every queued range oldest first, then reads\nnewest first. mine_partition_with_seed takes the resolved range and\nonly reads and hashes.\n\n* docs(storage): name recall_direct_io where testing() clears it",
+          "timestamp": "2026-10-28T22:50:44Z",
+          "tree_id": "4be9fddc4e84b26d0a3966779317083d29448cf5",
+          "url": "https://github.com/Irys-xyz/irys/commit/e755bf618222e3d3a27a894ff298e427e94ad688"
+        },
+        "date": 1793229139696,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012268,
+            "range": "± 0.000316",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.12279,
+            "range": "± 0.003377",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.201309,
+            "range": "± 0.015887",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.227078,
+            "range": "± 0.150685",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075037,
+            "range": "± 0.001027",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 749.549926,
+            "range": "± 4.964184",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 976.574895,
+            "range": "± 8.934509",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.121397,
+            "range": "± 0.002172",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1239.281046,
+            "range": "± 35.649332",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1933.38875,
+            "range": "± 82.671949",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.161048,
+            "range": "± 0.047248",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 268.507516,
+            "range": "± 8.774357",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 345.638617,
+            "range": "± 39.359232",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000124,
+            "range": "± 0.000007",
             "unit": "ms/iter"
           }
         ]
