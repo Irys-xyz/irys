@@ -523,6 +523,18 @@ impl ChunkIngressServiceInner {
         drop(_fetch_size_span);
 
         let Some(cached_data_root) = cached_data_root else {
+            // No cache row: the row was pruned, or this node never cached the
+            // header. A storage placement exists only for a tx that a block
+            // included, so its commitment is anchored and its `data_size` is
+            // the header's. Store the chunk in the modules that hold it.
+            if let Some((data_size, placed_modules)) =
+                self.storage_placements_by_commitment(data_commitment)?
+            {
+                return self
+                    .ingest_placed_chunk(chunk, data_commitment, data_size, &placed_modules)
+                    .await;
+            }
+
             // We don't have a data_root for this chunk but possibly the transaction containing this
             // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
             self.check_unconfirmed_chunk_bounds(chunk.as_ref(), chunk_size)?;
@@ -566,44 +578,12 @@ impl ChunkIngressServiceInner {
 
         // The commitment binds the size, so the cached size is the size this
         // chunk claims.
-        let data_size = cached_data_root.data_size;
-
-        // Validate the data_path/proof for the chunk, linking
-        // data_root->chunk_hash
-        let _proof_span = info_span!("chunk.validate_proof").entered();
-
-        if data_size == 0 {
-            error!(
-                "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
-                CriticalChunkIngressError::InvalidDataSize,
-                chunk.data_tree_root,
-            );
-            return Err(CriticalChunkIngressError::InvalidDataSize.into());
-        }
-
-        let validation_start = Instant::now();
-        let chunk_len = u64::try_from(chunk.bytes.len())
-            .map_err(|_| CriticalChunkIngressError::InvalidChunkSize)?;
-        if let Err(error) = verify_data_chunk(
+        let chunk_len = verify_anchored_chunk(
             &geometry,
             data_commitment,
-            data_size,
-            chunk.tx_offset,
-            &chunk.bytes.0,
-            &chunk.data_path.0,
-        ) {
-            warn!(
-                %error,
-                chunk.tx_offset = %chunk.tx_offset,
-                chunk_len,
-                "Chunk failed verification"
-            );
-            return Err(ingest_error_for_verify_failure(error).into());
-        }
-
-        record_validation_duration(validation_start.elapsed_ms());
-
-        drop(_proof_span);
+            cached_data_root.data_size,
+            chunk.as_ref(),
+        )?;
 
         // The background writer batches concurrent MDBX writes, but returns
         // only after the exact batch containing this chunk commits.
@@ -666,22 +646,7 @@ impl ChunkIngressServiceInner {
             })?;
 
         // Gossip the chunk before moving onto ingress proof checks
-        let chunk_data_root = chunk.data_tree_root;
-        let chunk_tx_offset = chunk.tx_offset;
-        let gossip_broadcast_message = GossipBroadcastMessageV2::chunk(chunk, &geometry);
-
-        if let Err(error) = self
-            .service_senders
-            .gossip_broadcast
-            .send_traced(gossip_broadcast_message)
-        {
-            tracing::error!(
-                "Failed to send gossip data for chunk data_root {:?} tx_offset {}: {:?}",
-                chunk_data_root,
-                chunk_tx_offset,
-                error
-            );
-        }
+        self.gossip_chunk(chunk, &geometry);
 
         // Leaf persistence is assignment-independent: any staked node that
         // validates every chunk can produce the same proof it could before the
@@ -695,6 +660,97 @@ impl ChunkIngressServiceInner {
 
         // Storage-module writes retain their normal batching/striping policy.
         Ok(())
+    }
+
+    /// The `data_size` of the storage placements keyed by `data_commitment`,
+    /// and the storage modules that hold them. `None` when no module holds one.
+    ///
+    /// The key binds the size, so every placement under it has the same
+    /// `data_size`.
+    fn storage_placements_by_commitment(
+        &self,
+        data_commitment: DataCommitment,
+    ) -> Result<Option<(u64, Vec<Arc<StorageModule>>)>, CriticalChunkIngressError> {
+        let modules: Vec<_> = {
+            let guard = self.storage_modules_guard.read();
+            guard.iter().cloned().collect()
+        };
+        let mut data_size = None;
+        let mut placed_modules = Vec::new();
+        for storage_module in modules {
+            let placements = storage_module
+                .collect_data_root_infos(data_commitment)
+                .map_err(|error| {
+                    error!(
+                        ?error,
+                        storage_module = storage_module.id,
+                        chunk.data_commitment = %data_commitment,
+                        "Failed to read storage placements"
+                    );
+                    CriticalChunkIngressError::DatabaseError
+                })?;
+            let Some(placement) = placements.0.first() else {
+                continue;
+            };
+            data_size.get_or_insert(placement.data_size);
+            placed_modules.push(storage_module);
+        }
+        Ok(data_size.map(|data_size| (data_size, placed_modules)))
+    }
+
+    /// Ingest a chunk that has a storage placement and no cache row.
+    ///
+    /// The chunk goes only to the modules that hold the placement. It does
+    /// not write a cache row, a cached body or an ingress leaf, and it does
+    /// not start ingress-proof generation: those belong to the cache row.
+    /// It is gossiped like a chunk on the cached path.
+    async fn ingest_placed_chunk(
+        &self,
+        chunk: Arc<UnpackedChunk>,
+        data_commitment: DataCommitment,
+        data_size: u64,
+        placed_modules: &[Arc<StorageModule>],
+    ) -> Result<(), IngressFailure> {
+        let geometry = self.config.data_tree_geometry();
+        let chunk_len = verify_anchored_chunk(&geometry, data_commitment, data_size, &chunk)?;
+
+        let write_result = write_chunk_to_assigned_modules(placed_modules, chunk.as_ref())
+            .instrument(info_span!("chunk.write_storage_modules"))
+            .await;
+        remember_after_module_writes(
+            &self.recent_valid_chunks,
+            chunk.chunk_key(&geometry),
+            write_result,
+        )
+        .await?;
+        record_chunk_ingested(chunk_len);
+
+        info!(
+            chunk.data_commitment = %data_commitment,
+            chunk.tx_offset = %chunk.tx_offset,
+            "Stored chunk from its storage placement: no CachedDataRoot"
+        );
+        self.gossip_chunk(chunk, &geometry);
+        Ok(())
+    }
+
+    fn gossip_chunk(&self, chunk: Arc<UnpackedChunk>, geometry: &irys_types::data_tree::Geometry) {
+        let chunk_data_root = chunk.data_tree_root;
+        let chunk_tx_offset = chunk.tx_offset;
+        let gossip_broadcast_message = GossipBroadcastMessageV2::chunk(chunk, geometry);
+
+        if let Err(error) = self
+            .service_senders
+            .gossip_broadcast
+            .send_traced(gossip_broadcast_message)
+        {
+            tracing::error!(
+                "Failed to send gossip data for chunk data_root {:?} tx_offset {}: {:?}",
+                chunk_data_root,
+                chunk_tx_offset,
+                error
+            );
+        }
     }
 
     /// Checks whether an ingress proof should be generated for the given `data_commitment`
@@ -935,6 +991,51 @@ impl CriticalChunkIngressError {
             Self::Other(_) => "other",
         }
     }
+}
+
+/// Check `chunk` against an anchored `data_commitment` and the `data_size`
+/// it binds. Returns the chunk length. Every error is the sender's fault.
+fn verify_anchored_chunk(
+    geometry: &irys_types::data_tree::Geometry,
+    data_commitment: DataCommitment,
+    data_size: u64,
+    chunk: &UnpackedChunk,
+) -> Result<u64, CriticalChunkIngressError> {
+    // Validate the data_path/proof for the chunk, linking
+    // data_root->chunk_hash
+    let _proof_span = info_span!("chunk.validate_proof").entered();
+
+    if data_size == 0 {
+        error!(
+            "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
+            CriticalChunkIngressError::InvalidDataSize,
+            chunk.data_tree_root,
+        );
+        return Err(CriticalChunkIngressError::InvalidDataSize);
+    }
+
+    let validation_start = Instant::now();
+    let chunk_len = u64::try_from(chunk.bytes.len())
+        .map_err(|_| CriticalChunkIngressError::InvalidChunkSize)?;
+    if let Err(error) = verify_data_chunk(
+        geometry,
+        data_commitment,
+        data_size,
+        chunk.tx_offset,
+        &chunk.bytes.0,
+        &chunk.data_path.0,
+    ) {
+        warn!(
+            %error,
+            chunk.tx_offset = %chunk.tx_offset,
+            chunk_len,
+            "Chunk failed verification"
+        );
+        return Err(ingest_error_for_verify_failure(error));
+    }
+
+    record_validation_duration(validation_start.elapsed_ms());
+    Ok(chunk_len)
 }
 
 /// Ingest error for a chunk that fails [`verify_data_chunk`]. Each result is
@@ -1627,6 +1728,261 @@ mod tests {
                 .get(&size_key(data_root, 96))
                 .is_none(),
             "the full pending-entry cap evicts the parked chunk"
+        );
+        Ok(())
+    }
+
+    /// One storage module that holds a placement for a two-chunk upload of
+    /// 64 bytes at ledger chunks 0..=1, and no cache row for it. Returns the
+    /// module, the data and the chunk proofs.
+    fn place_upload_without_cache_row(
+        inner: &mut ChunkIngressServiceInner,
+    ) -> eyre::Result<(Arc<StorageModule>, Vec<u8>, H256, Vec<Vec<u8>>)> {
+        use irys_domain::{StorageModuleInfo, StorageModulesReadGuard};
+        use irys_types::{
+            DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+            DataTransactionMetadata, LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset,
+            ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ii,
+        };
+        use nodit::interval::ii;
+
+        let data: Vec<u8> = (0..64_u8).collect();
+        let (data_root, proofs) = data_tree_with_proofs(&data)?;
+        let storage_module = Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(irys_types::DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+            },
+            &inner.config,
+        )?);
+        storage_module.pack_with_zeros();
+        storage_module.force_sync_pending_chunks()?;
+        let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_tree_root: DataTreeRoot(data_root),
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        storage_module.index_transaction_data(
+            &data_tx,
+            &vec![5, 6, 7, 8],
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 1)),
+            0,
+        )?;
+        inner.storage_modules_guard = StorageModulesReadGuard::new(Arc::new(
+            std::sync::RwLock::new(vec![Arc::clone(&storage_module)]),
+        ));
+        Ok((storage_module, data, data_root, proofs))
+    }
+
+    /// Nothing for `data_commitment` is in the chunk cache: no cache row, no
+    /// cached body, no ingress leaf and no ingress proof.
+    fn assert_no_cache_state(inner: &ChunkIngressServiceInner, data_commitment: DataCommitment) {
+        use irys_database::{cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _};
+
+        let address = inner.config.irys_signer().address();
+        inner
+            .irys_db
+            .view_eyre(|tx| {
+                assert!(
+                    irys_database::cached_data_root_by_commitment(tx, data_commitment)?.is_none(),
+                    "no cache row is written"
+                );
+                for chunk_index in 0..2_u32 {
+                    assert!(
+                        cached_chunk_by_chunk_offset(
+                            tx,
+                            data_commitment,
+                            TxChunkOffset::from(chunk_index)
+                        )?
+                        .is_none(),
+                        "no body is cached"
+                    );
+                }
+                assert!(
+                    complete_ingress_leaves(tx, data_commitment, address, 32, 32)?.is_none(),
+                    "no ingress leaf is written"
+                );
+                assert!(
+                    irys_database::ingress_proof_by_commitment_address(
+                        tx,
+                        data_commitment,
+                        address
+                    )?
+                    .is_none(),
+                    "no ingress proof is made"
+                );
+                Ok(())
+            })
+            .expect("read the chunk cache");
+    }
+
+    /// The cache row is gone (pruned, or never written on this node), but a
+    /// storage module holds a placement for the commitment. The chunk is
+    /// verified against the placement's size and lands in that module. The
+    /// cache, the ingress leaves and the ingress proofs stay empty.
+    #[tokio::test]
+    async fn chunk_with_a_placement_and_no_cache_row_lands_in_the_module() -> eyre::Result<()> {
+        use irys_types::{PartitionChunkOffset, partition_chunk_offset_ii};
+        use nodit::interval::ii;
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-placement-no-row")
+            .build();
+        let (mut inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        let (storage_module, data, data_root, proofs) = place_upload_without_cache_row(&mut inner)?;
+        let data_commitment = size_key(data_root, 64);
+        let chunk = UnpackedChunk {
+            data_tree_root: DataTreeRoot(data_root),
+            data_size: 64,
+            data_path: proofs[1].clone().into(),
+            bytes: data[32..64].to_vec().into(),
+            tx_offset: TxChunkOffset::from(1),
+        };
+
+        inner.handle_chunk_ingress_message(chunk.clone()).await?;
+
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset::from(1)),
+            Some(irys_domain::ChunkType::Data),
+            "the chunk is written at its placement"
+        );
+        storage_module.force_sync_pending_chunks()?;
+        let stored = storage_module.read_chunks(partition_chunk_offset_ii!(1, 1))?;
+        let (packed_bytes, chunk_type) = stored
+            .get(&PartitionChunkOffset::from(1))
+            .expect("the chunk is stored at its placement");
+        assert_eq!(*chunk_type, irys_domain::ChunkType::Data);
+        // The module was packed with zero entropy, so the packed bytes are the
+        // chunk bytes.
+        assert_eq!(packed_bytes.as_slice(), chunk.bytes.0.as_slice());
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(irys_domain::ChunkType::Entropy),
+            "the other chunk of the placement is not written"
+        );
+        assert!(
+            inner
+                .pending_chunks
+                .read()
+                .await
+                .get(&data_commitment)
+                .is_none(),
+            "the chunk does not park"
+        );
+        assert_no_cache_state(&inner, data_commitment);
+        assert!(
+            receivers.gossip_broadcast.try_recv().is_ok(),
+            "the stored chunk is gossiped"
+        );
+        Ok(())
+    }
+
+    /// A placement anchors the commitment. A chunk that fails against it is
+    /// the sender's fault, and nothing is written.
+    #[tokio::test]
+    async fn wrong_chunk_under_a_placement_is_a_peer_fault() -> eyre::Result<()> {
+        use irys_types::PartitionChunkOffset;
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-placement-wrong-chunk")
+            .build();
+        let (mut inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        let (storage_module, data, data_root, proofs) = place_upload_without_cache_row(&mut inner)?;
+        let data_commitment = size_key(data_root, 64);
+        let mut wrong_bytes = data[32..64].to_vec();
+        wrong_bytes[0] ^= 1;
+        let chunk = UnpackedChunk {
+            data_tree_root: DataTreeRoot(data_root),
+            data_size: 64,
+            data_path: proofs[1].clone().into(),
+            bytes: wrong_bytes.into(),
+            tx_offset: TxChunkOffset::from(1),
+        };
+
+        let error = inner
+            .handle_chunk_ingress_message(chunk)
+            .await
+            .expect_err("a chunk that fails against the placement is rejected");
+        assert!(
+            matches!(
+                error,
+                ChunkIngressError::Critical(CriticalChunkIngressError::InvalidProof)
+            ),
+            "{error:?}"
+        );
+        assert!(
+            crate::data_sync_service::ingress_error_is_invalid_peer_data(&error),
+            "a wrong chunk under an anchored commitment is the sender's fault"
+        );
+        for offset in 0..2_u32 {
+            assert_eq!(
+                storage_module.get_chunk_type(&PartitionChunkOffset::from(offset)),
+                Some(irys_domain::ChunkType::Entropy),
+                "nothing is written at offset {offset}"
+            );
+        }
+        assert!(
+            inner
+                .pending_chunks
+                .read()
+                .await
+                .get(&data_commitment)
+                .is_none(),
+            "a rejected chunk does not park"
+        );
+        assert_no_cache_state(&inner, data_commitment);
+        assert!(
+            receivers.gossip_broadcast.try_recv().is_err(),
+            "a rejected chunk is not gossiped"
+        );
+        Ok(())
+    }
+
+    /// A placement for one size does not cover a chunk that claims another
+    /// size. With no placement and no cache row for its own commitment, the
+    /// chunk parks.
+    #[tokio::test]
+    async fn chunk_with_no_placement_and_no_cache_row_parks() -> eyre::Result<()> {
+        use irys_types::PartitionChunkOffset;
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-no-placement-no-row")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        let (storage_module, data, data_root, proofs) = place_upload_without_cache_row(&mut inner)?;
+        let other_size_commitment = size_key(data_root, 96);
+        let chunk = UnpackedChunk {
+            data_tree_root: DataTreeRoot(data_root),
+            data_size: 96,
+            data_path: proofs[1].clone().into(),
+            bytes: data[32..64].to_vec().into(),
+            tx_offset: TxChunkOffset::from(1),
+        };
+
+        inner
+            .handle_chunk_ingress_message(chunk)
+            .await
+            .expect("a chunk that waits for its header parks; it is not a fault");
+
+        let pending = inner.pending_chunks.read().await;
+        let parked = pending
+            .get(&other_size_commitment)
+            .expect("the chunk parks under its own commitment");
+        assert!(parked.peek(&TxChunkOffset::from(1)).is_some());
+        drop(pending);
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset::from(1)),
+            Some(irys_domain::ChunkType::Entropy),
+            "a parked chunk is not written to the module"
         );
         Ok(())
     }
