@@ -107,6 +107,24 @@ impl Config {
             &self.consensus.block_migration_depth
         );
 
+        // Zero leaves nothing to confirm a block against: `lookup_via_block_tree`
+        // asserts a positive depth, and it also zeroes the reset-window floor
+        // checked below, which would let `vdf.reset_frequency = 0` through.
+        ensure!(
+            self.consensus.block_migration_depth > 0,
+            "block_migration_depth must be > 0: a block needs at least one confirmation to migrate"
+        );
+        // Divisor of the EMA interval-boundary computation (`height % interval`).
+        ensure!(
+            self.consensus.ema.price_adjustment_interval > 0,
+            "ema.price_adjustment_interval must be > 0: EMA block selection takes the height modulo it"
+        );
+        // Divisor of the VDF reset-boundary computation (`step % reset_frequency`).
+        ensure!(
+            self.consensus.vdf.reset_frequency > 0,
+            "vdf.reset_frequency must be > 0: VDF reset-step selection takes the step number modulo it"
+        );
+
         // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
         ensure!(
             self.consensus.block_migration_depth
@@ -194,6 +212,14 @@ impl Config {
         ensure!(
             self.consensus.num_chunks_in_recall_range > 0,
             "num_chunks_in_recall_range must be > 0"
+        );
+        // Packing ranges index a partition with `u32` chunk offsets; a larger
+        // partition would silently truncate them.
+        ensure!(
+            self.consensus.num_chunks_in_partition <= u64::from(u32::MAX),
+            "num_chunks_in_partition ({}) must be <= {} (u32::MAX): chunk offsets within a partition are u32",
+            self.consensus.num_chunks_in_partition,
+            u32::MAX
         );
         // Zero → genesis capacity math hits log10(0) / NaN during epoch-snapshot build.
         ensure!(
@@ -333,6 +359,18 @@ impl Config {
             );
         }
         ensure!(
+            self.mempool.max_valid_items > 0,
+            "mempool.max_valid_items must be > 0 (used as an LruCache capacity)"
+        );
+        ensure!(
+            self.mempool.max_invalid_items > 0,
+            "mempool.max_invalid_items must be > 0 (used as an LruCache capacity)"
+        );
+        ensure!(
+            self.mempool.max_pending_pledge_items > 0,
+            "mempool.max_pending_pledge_items must be > 0 (used as an LruCache capacity)"
+        );
+        ensure!(
             self.mempool.max_pending_chunk_items > 0,
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
@@ -467,6 +505,20 @@ impl Config {
             ConsensusConfig::SECONDS_PER_YEAR,
             diff.block_time,
             self.consensus.epoch.num_blocks_in_epoch,
+        );
+
+        // Fee math multiplies years by epochs_per_year() as plain u64, which
+        // panics under overflow-checks. Zero divisors are rejected above, so
+        // epochs_per_year() cannot panic here.
+        let epochs_per_year = self.consensus.epochs_per_year();
+        ensure!(
+            self.consensus
+                .safe_minimum_number_of_years
+                .checked_mul(epochs_per_year)
+                .is_some(),
+            "safe_minimum_number_of_years ({}) * epochs_per_year ({}) overflows u64",
+            self.consensus.safe_minimum_number_of_years,
+            epochs_per_year
         );
 
         // NC-0042 / deep-reorg safety: a term-ledger slot's lifetime must exceed
@@ -2187,18 +2239,55 @@ mod validate_tests {
     )]
     #[case::epoch_seconds_overflow(
         |c: &mut ConsensusConfig| {
-            // block_migration_depth = 0 keeps the reset-frequency guard
-            // (2x migration_depth x block_time) from tripping first.
-            c.block_migration_depth = 0;
-            c.difficulty_adjustment.block_time = u64::MAX / 2;
+            // A reset window at the cap keeps the reset-frequency guard from
+            // tripping first: 2 x migration_depth (2 x 6 = 12 in the testing
+            // preset) x block_time <= u64::MAX. This needs a 64-bit host:
+            // `usize::MAX` is only 32 bits wide on a 32-bit host. Meanwhile
+            // block_time x num_blocks_in_epoch (100 in the testing preset)
+            // overflows.
+            c.vdf.reset_frequency = usize::MAX;
+            c.difficulty_adjustment.block_time = u64::MAX / 16;
         },
-        "overflows u64"
+        "block_time (1152921504606846975) * num_blocks_in_epoch (100) overflows u64"
+    )]
+    #[case::perm_storage_years_overflow_epochs(
+        |c: &mut ConsensusConfig| {
+            c.safe_minimum_number_of_years = u64::MAX;
+        },
+        "safe_minimum_number_of_years"
     )]
     #[case::zero_max_data_tx_chunks(
         |c: &mut ConsensusConfig| {
             c.mempool.max_data_tx_chunks = 0;
         },
         "max_data_tx_chunks"
+    )]
+    #[case::zero_block_migration_depth(
+        |c: &mut ConsensusConfig| {
+            c.block_migration_depth = 0;
+        },
+        "block_migration_depth must be > 0"
+    )]
+    #[case::zero_price_adjustment_interval(
+        |c: &mut ConsensusConfig| {
+            c.ema.price_adjustment_interval = 0;
+        },
+        "ema.price_adjustment_interval"
+    )]
+    #[case::zero_reset_frequency(
+        |c: &mut ConsensusConfig| {
+            c.vdf.reset_frequency = 0;
+        },
+        "vdf.reset_frequency must be > 0"
+    )]
+    #[case::partition_chunks_exceed_u32(
+        |c: &mut ConsensusConfig| {
+            // The value stays a multiple of the recall range. The u32 check runs
+            // before the VDF step-capacity check, so that check is not reached.
+            c.num_chunks_in_partition =
+                (u64::from(u32::MAX) / c.num_chunks_in_recall_range + 1) * c.num_chunks_in_recall_range;
+        },
+        "num_chunks_in_partition"
     )]
     fn validate_rejects_runtime_panic_configs(
         #[case] mutate: fn(&mut ConsensusConfig),
@@ -2211,6 +2300,54 @@ mod validate_tests {
             err_str.contains(expected_msg),
             "expected error containing {expected_msg:?}, got: {err_str}"
         );
+    }
+
+    /// Every shipped consensus preset and config template must pass the
+    /// zero/range checks, so a stricter rule cannot brick a real network.
+    /// Presets run in production mode so the real-network-only checks execute;
+    /// templates validate as whole node configs (their own run mode, which
+    /// defaults to production).
+    #[test]
+    fn validate_accepts_shipped_consensus_presets_and_templates() {
+        let templates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("config")
+            .join("templates");
+        let mut node_configs = Vec::new();
+        for (label, consensus) in [
+            ("mainnet preset", ConsensusConfig::mainnet()),
+            ("testnet preset", ConsensusConfig::testnet()),
+            ("testing preset", ConsensusConfig::testing()),
+        ] {
+            let mut node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+            *node_config.consensus.get_mut() = consensus;
+            node_configs.push((label, node_config));
+        }
+        let mainnet_peers = {
+            let toml = std::fs::read_to_string(templates_dir.join("mainnet_config.toml")).unwrap();
+            toml::from_str::<NodeConfig>(&toml).unwrap().trusted_peers
+        };
+        for name in ["mainnet_config.toml", "testnet_config.toml"] {
+            let toml = std::fs::read_to_string(templates_dir.join(name)).unwrap();
+            let mut node_config: NodeConfig = toml::from_str(&toml).unwrap();
+            // The testnet template ships an empty peer list for the operator to
+            // fill in; any peer satisfies that operator-supplied requirement.
+            if node_config.trusted_peers.is_empty() {
+                node_config.trusted_peers = mainnet_peers.clone();
+            }
+            assert!(
+                !node_config.run_mode.is_test(),
+                "{name} must not run in test mode"
+            );
+            node_configs.push((name, node_config));
+        }
+        for (label, node_config) in node_configs {
+            let cfg = Config::new_with_random_peer_id(node_config);
+            if let Err(err) = cfg.validate() {
+                panic!("{label} must validate: {err}");
+            }
+        }
     }
 
     #[test]
@@ -2395,6 +2532,18 @@ mod validate_tests {
     #[case::http_chunk_admission_timeout_millis(
         |nc: &mut NodeConfig| { nc.mempool.http_chunk_admission_timeout_millis = 0; },
         "http_chunk_admission_timeout_millis"
+    )]
+    #[case::max_valid_items(
+        |nc: &mut NodeConfig| { nc.mempool.max_valid_items = 0; },
+        "max_valid_items"
+    )]
+    #[case::max_invalid_items(
+        |nc: &mut NodeConfig| { nc.mempool.max_invalid_items = 0; },
+        "max_invalid_items"
+    )]
+    #[case::max_pending_pledge_items(
+        |nc: &mut NodeConfig| { nc.mempool.max_pending_pledge_items = 0; },
+        "max_pending_pledge_items"
     )]
     fn validate_rejects_zero_mempool_capacities(
         #[case] mutate: fn(&mut NodeConfig),
