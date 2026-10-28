@@ -17,12 +17,15 @@ pub mod store;
 pub mod tables;
 // MDBX-SUBMODULE-INDEX: remove with the migrate CLI. This compares MDBX schema v1 with the migrated schema v2.
 mod verify;
+// MDBX-SUBMODULE-INDEX: remove with the MDBX submodule engine. The consensus database stays MDBX.
+mod warmup;
 
 #[cfg(feature = "rocksdb")]
 // MDBX-SUBMODULE-INDEX: drop convert_mdbx_to_rocks, convert_rocks_to_mdbx, and verify_mdbx_and_rocks from this export. verify_rocks_records can move out.
 pub use convert::{
     ConvertOptions, ConvertStats, EngineEquivalenceReport, convert_mdbx_to_rocks,
-    convert_rocks_to_mdbx, verify_mdbx_and_rocks, verify_rocks_records,
+    convert_mdbx_to_rocks_and_verify, convert_rocks_to_mdbx, verify_mdbx_and_rocks,
+    verify_rocks_records,
 };
 // MDBX-SUBMODULE-INDEX: delete this re-export with db.rs.
 pub use db::*;
@@ -34,8 +37,8 @@ pub use packing::{
 pub use records::{decode_offset_meta, encode_offset_meta};
 #[cfg(feature = "rocksdb")]
 pub use rocks::{
-    BLOB_MIN_BYTES, BLOCK_CACHE_BYTES, ColumnFileUsage, RocksBackground, RocksIngestStats,
-    RocksResourceLimits, RocksResources, RocksSubmoduleStore, RocksTuning,
+    BLOB_MIN_BYTES, BLOCK_CACHE_BYTES, ColumnFileUsage, DELETE_SUBRANGE_OFFSETS, RocksBackground,
+    RocksIngestStats, RocksResourceLimits, RocksResources, RocksSubmoduleStore, RocksTuning,
     install_process_rocks_resources,
 };
 // MDBX-SUBMODULE-INDEX: drop MdbxSubmoduleStore from this export when the MDBX engine is deleted. The other names stay until the trait collapses onto RocksSubmoduleStore.

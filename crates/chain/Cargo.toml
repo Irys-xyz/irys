@@ -55,6 +55,7 @@ alloy-contract.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 
 [dev-dependencies]
+irys-testing-utils.workspace = true
 proptest.workspace = true
 rstest.workspace = true
 test-log.workspace = true

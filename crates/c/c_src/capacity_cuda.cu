@@ -160,6 +160,22 @@ extern "C" int get_registers() {
         return attr.numRegs;
 }
 
+// `cudaDeviceProp` comes from the toolkit header used for this build, so its size always
+// matches the linked runtime. A Rust copy of the struct does not have that property.
+extern "C" int irys_cuda_device_name(int device, char *name, size_t name_len) {
+    if (name == NULL || name_len == 0) {
+        return cudaErrorInvalidValue;
+    }
+    cudaDeviceProp prop;
+    cudaError_t err = cudaGetDeviceProperties(&prop, device);
+    if (err != cudaSuccess) {
+        return (int)err;
+    }
+    strncpy(name, prop.name, name_len - 1);
+    name[name_len - 1] = '\0';
+    return 0;
+}
+
 /**
  * Computes the entropy chunks for the given list of chunks.
  * The entropy chunks are computed in parallel using the GPU.

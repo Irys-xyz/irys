@@ -867,7 +867,8 @@ impl TestSetup {
             consensus_config.chain_id,
         );
 
-        let packed_data = packing_xor_vec_u8(entropy_chunk, &chunk.bytes.0);
+        let packed_data = packing_xor_vec_u8(entropy_chunk, &chunk.bytes.0)
+            .expect("test chunk fits the entropy buffer");
         PackedChunk {
             data_root: chunk.data_root,
             data_size: chunk.data_size,

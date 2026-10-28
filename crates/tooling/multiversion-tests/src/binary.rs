@@ -390,7 +390,9 @@ impl BinaryResolver {
     ) -> Result<PathBuf, BinaryError> {
         let mut args = vec!["build", "--locked"];
         args.extend(profile_args);
-        args.extend(["--bin", "irys", "-p", "irys-chain"]);
+        // No `-p`: the `irys` bin moved from `irys-chain` to `irys-node`, and old
+        // revisions still have it in `irys-chain`. The bin name is unique in both.
+        args.extend(["--bin", "irys"]);
 
         tracing::info!(
             dir = %work_dir.display(),

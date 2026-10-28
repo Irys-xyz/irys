@@ -435,7 +435,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                         peer = %best_peer_address,
                         "Periodic sync check: We're behind the network, starting sync"
                     );
-                    self.spawn_chain_sync_task(None, false);
+                    self.spawn_chain_sync_task(None, false, status.best_trusted_height);
                 } else if status.behind {
                     error!(
                         local_height = status.local_height,
@@ -463,6 +463,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         &self,
         response: Option<oneshot::Sender<ChainSyncResult<()>>>,
         is_initial_sync: bool,
+        chosen_trusted_height: Option<u64>,
     ) {
         let is_already_syncing = !is_initial_sync && self.sync_state.is_syncing();
 
@@ -499,7 +500,8 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         let block_pool = self.block_pool.clone();
         let reth_service = self.reth_service.clone();
         let vdf_controller = self.vdf_controller.clone();
-        let start_sync_from_height = self.block_index.read().latest_height();
+        let block_index = self.block_index.clone();
+        let start_sync_from_height = block_index.read().latest_height();
         let runtime_handle = self.runtime_handle.clone();
 
         self.runtime_handle.spawn(
@@ -510,6 +512,23 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     .gossip_client
                     .hydrate_peers_online_status(&peer_list)
                     .await;
+
+                // Hydration awaits the network. The index can catch up in
+                // that window. Pausing the VDF then starts a sync with
+                // nothing to fetch.
+                if let Some(trusted_height) = chosen_trusted_height {
+                    let live_height = block_index.read().latest_height();
+                    let migration_depth = u64::from(config.consensus.block_migration_depth);
+                    if !is_index_behind_trusted_height(live_height, trusted_height, migration_depth)
+                    {
+                        debug!(
+                            local_height = live_height,
+                            trusted_height,
+                            "Sync task: local index is no longer behind the trusted height; not starting a sync"
+                        );
+                        return;
+                    }
+                }
 
                 // Snapshot the mining flag and disable mining for the duration
                 // of the sync. Restored after sync_chain via `restore()` below.
@@ -736,17 +755,20 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
 
             if !err.is_advisory() {
                 self.block_pool.remove_requested_block(&block_hash).await;
-                // A block another path already stored stays in the cache.
-                if !self.block_pool.is_block_known_locally(&block_hash).await {
-                    self.block_pool
-                        .remove_block_from_cache(
-                            &block_hash,
-                            BlockRemovalReason::FailedToProcess(FailureReason::FailedToPull(
-                                err.clone(),
-                            )),
-                        )
-                        .await;
-                }
+                // Test seam before the removal decision. Production does
+                // not pause. A block stored here is visible to that decision.
+                #[cfg(test)]
+                parent_pull_cleanup_window().await;
+                // One cache lock covers the known-locally check and the
+                // remove, so a block stored in that window stays.
+                self.block_pool
+                    .remove_block_from_cache_unless_known_locally(
+                        &block_hash,
+                        BlockRemovalReason::FailedToProcess(FailureReason::FailedToPull(
+                            err.clone(),
+                        )),
+                    )
+                    .await;
             }
 
             Err(ChainSyncError::Internal(format!(
@@ -757,6 +779,32 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             Ok(())
         }
     }
+}
+
+/// Pauses a test after a failed pull and before the removal decision, so
+/// the test can store a block another path just delivered. No-op unless
+/// that test set the window.
+#[cfg(test)]
+async fn parent_pull_cleanup_window() {
+    let window = PARENT_PULL_CLEANUP_WINDOW
+        .try_with(|slot| slot.lock().expect("cleanup window").take())
+        .ok()
+        .flatten();
+    if let Some(window) = window {
+        let _ = window.reached.send(());
+        let _ = window.resume.await;
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static PARENT_PULL_CLEANUP_WINDOW: std::sync::Mutex<Option<ParentPullCleanupWindow>>;
+}
+
+#[cfg(test)]
+struct ParentPullCleanupWindow {
+    reached: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
 }
 
 impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
@@ -859,7 +907,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
         match msg {
             SyncChainServiceMessage::InitialSync(response_sender) => {
                 self.inner
-                    .spawn_chain_sync_task(Some(response_sender), true);
+                    .spawn_chain_sync_task(Some(response_sender), true, None);
             }
             SyncChainServiceMessage::PeriodicSyncCheck => {
                 self.inner.spawn_periodic_sync_check();
@@ -1961,7 +2009,7 @@ fn warn_if_behind_syncing_trusted_peer(migration_depth: u64, status: &TrustedPee
         return;
     };
     // Same comparison as `behind`: local index + 2 * migration depth.
-    if status.local_height + (migration_depth * 2) < best_syncing_height {
+    if is_index_behind_trusted_height(status.local_height, best_syncing_height, migration_depth) {
         warn!(
             local_height = status.local_height,
             best_syncing_height,
@@ -1978,6 +2026,16 @@ fn warn_if_behind_syncing_trusted_peer(migration_depth: u64, status: &TrustedPee
 /// skips or waits.
 fn should_start_periodic_sync(behind: bool, has_active_not_syncing_trusted_peer: bool) -> bool {
     behind && has_active_not_syncing_trusted_peer
+}
+
+/// True when `trusted_height` is past the gap the local index can close
+/// without a sync: `local + 2 * migration_depth`.
+fn is_index_behind_trusted_height(
+    local_height: u64,
+    trusted_height: u64,
+    migration_depth: u64,
+) -> bool {
+    local_height + (migration_depth * 2) < trusted_height
 }
 
 /// `is_active` is online and reputable. `sync_chain` waits on that set, then
@@ -2035,8 +2093,14 @@ async fn is_local_index_is_behind_trusted_peers(
         }
     });
 
+    let answers = futures::future::join_all(futures).await;
+
+    // Migrated blocks land while `/info` is in flight. `behind` and the
+    // sync-source set use the height after those calls return, so a node
+    // that caught up during the wait is not reported behind.
     let local_height = block_index.read().latest_height();
-    let is_ahead = |height: u64| local_height + (migration_depth * 2) < height;
+    let is_ahead =
+        |height: u64| is_index_behind_trusted_height(local_height, height, migration_depth);
 
     let mut any_answer = false;
     let mut best_trusted_height = None;
@@ -2044,11 +2108,7 @@ async fn is_local_index_is_behind_trusted_peers(
     let mut best_syncing_height = None;
     let mut best_syncing_peer_address = None;
     let mut sync_source_peer_ids = Vec::new();
-    for (peer_id, gossip_address, height, is_syncing) in futures::future::join_all(futures)
-        .await
-        .into_iter()
-        .flatten()
-    {
+    for (peer_id, gossip_address, height, is_syncing) in answers.into_iter().flatten() {
         any_answer = true;
         // The peer's index can be ahead of blocks it is willing to serve.
         // Keep the height for the warn. Do not let it set `behind`:
@@ -3270,6 +3330,19 @@ mod tests {
             BlockIndexReadGuard::new(BlockIndex::new_for_testing(db))
         }
 
+        fn push_index_height(index: &BlockIndexReadGuard, height: u64) {
+            index
+                .read()
+                .push_item(
+                    &BlockIndexItem {
+                        block_hash: irys_types::H256::repeat_byte(height as u8),
+                        ..BlockIndexItem::default()
+                    },
+                    height,
+                )
+                .expect("push index item");
+        }
+
         fn info_at_height(height: u64) -> GossipResponse<NodeInfo> {
             GossipResponse::Accepted(NodeInfo {
                 block_index_height: height,
@@ -3802,6 +3875,171 @@ mod tests {
                 "an active trusted peer does not start a sync when the index is up to date"
             );
         }
+
+        /// Testing migration depth is 6, so the gap is 12. The peer answers
+        /// while the local index moves. `behind` uses the height after `/info`
+        /// returns.
+        async fn status_while_info_advances_index(
+            peer_height: u64,
+            advanced_local_height: u64,
+        ) -> TrustedPeerIndexStatus {
+            let dir = TempDirBuilder::new().with_tracing().build();
+            let index = empty_index(dir.path());
+            let index_during_info = index.clone();
+            let server = FakeGossipServer::new();
+            server.set_on_info_request(move || {
+                push_index_height(&index_during_info, advanced_local_height);
+                info_at_height(peer_height)
+            });
+            let addr = server.spawn();
+            let peer = peer_list_item(0x41, addr, true, PeerScore::MAX);
+            let (config, peer_list) = peer_list_with_trusted(
+                vec![peer],
+                vec![PeerAddress {
+                    gossip: addr,
+                    api: addr,
+                    execution: Default::default(),
+                }],
+            );
+
+            is_local_index_is_behind_trusted_peers(&config, &peer_list, &gossip_client(), &index)
+                .await
+                .expect("the trusted peer answered")
+        }
+
+        /// A trusted `/info` that reports a tip just past the gap must not
+        /// count as `behind` when the local index moves past that gap while
+        /// the call is in flight.
+        #[tokio::test]
+        async fn index_advance_during_info_is_not_behind() {
+            // Empty index is height 0. Peer tip 13 is just past 0 + 12.
+            // Advancing to 1 during the call makes 1 + 12 < 13 false.
+            let status = status_while_info_advances_index(13, 1).await;
+
+            assert_eq!(status.local_height, 1);
+            assert_eq!(status.best_trusted_height, Some(13));
+            assert!(
+                !status.behind,
+                "the height after /info returns is inside the gap"
+            );
+            assert!(
+                status.sync_source_peer_ids.is_empty(),
+                "a peer inside the gap is not a sync source"
+            );
+        }
+
+        /// The same in-flight advance still reports `behind` when the fresh
+        /// height remains past the gap from the trusted tip.
+        #[tokio::test]
+        async fn index_advance_during_info_that_stays_behind_is_behind() {
+            let status = status_while_info_advances_index(100, 1).await;
+
+            assert_eq!(status.local_height, 1);
+            assert_eq!(status.best_trusted_height, Some(100));
+            assert!(status.behind);
+            assert_eq!(status.sync_source_peer_ids.len(), 1);
+        }
+
+        fn service_at_index_height(
+            height: u64,
+        ) -> (
+            irys_testing_utils::tempfile::TempDir,
+            ChainSyncServiceInner<
+                crate::tests::util::BlockDiscoveryStub,
+                crate::tests::util::MempoolStub,
+            >,
+            VdfController,
+        ) {
+            use crate::tests::util::data_handler_stub;
+            use irys_domain::PeerList;
+            use irys_domain::chain_sync_state::ChainSyncState;
+            use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+            use irys_testing_utils::utils::TempDirBuilder;
+            use irys_types::{Config, DatabaseProvider, DbSyncMode, NodeConfig};
+
+            let dir = TempDirBuilder::new().with_tracing().build();
+            let mut node_config = NodeConfig::testing();
+            node_config.base_directory = dir.path().to_path_buf();
+            let config = Config::new_with_random_peer_id(node_config);
+            let db = DatabaseProvider(Arc::new(
+                open_or_create_irys_consensus_data_db(
+                    &config.node_config.base_directory,
+                    DbSyncMode::UtterlyNoSync,
+                )
+                .expect("open test db"),
+            ));
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let handler =
+                data_handler_stub(&config, &peer_list, db, ChainSyncState::new(false, false));
+            push_index_height(&handler.block_index, height);
+            let mining = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let controller = VdfController::new(&mining);
+            let service = ChainSyncServiceInner::new(
+                handler.sync_state.clone(),
+                handler.peer_list.clone(),
+                handler.config.clone(),
+                handler.block_index.clone(),
+                Arc::clone(&handler.block_pool),
+                Arc::clone(&handler),
+                None,
+                controller.clone(),
+                tokio::runtime::Handle::current(),
+            );
+            (dir, service, controller)
+        }
+
+        /// The sync task re-reads the index after peer hydration and before
+        /// the VDF pause. A height that is no longer past the gap does not
+        /// pause mining.
+        #[tokio::test]
+        async fn sync_task_does_not_pause_when_the_live_index_caught_up() {
+            // Migration depth 6. At spawn, local 2 is behind trusted 30:
+            // 2 + 12 < 30.
+            let (_dir, service, controller) = service_at_index_height(2);
+            assert!(is_index_behind_trusted_height(2, 30, 6));
+            service.spawn_chain_sync_task(None, false, Some(30));
+            // This runtime has one thread, so the sync task has not run yet.
+            // The index catches up after the spawn reads its start height and
+            // before the task's re-read. Local 20 is not behind: 20 + 12 < 30
+            // is false. Only the re-read sees 20.
+            push_index_height(&service.block_index, 20);
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                assert!(
+                    controller.is_enabled(),
+                    "a caught-up index must not pause the VDF"
+                );
+                if !service.is_sync_task_spawned.load(Ordering::Acquire) {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "sync task kept the spawn slot"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert!(controller.is_enabled());
+        }
+
+        /// The same re-check still pauses when the live height is behind the
+        /// trusted tip the periodic check selected.
+        #[tokio::test]
+        async fn sync_task_pauses_when_the_live_index_is_still_behind() {
+            // Local 2 is behind trusted 100: 2 + 12 < 100.
+            let (_dir, service, controller) = service_at_index_height(2);
+            service.spawn_chain_sync_task(None, false, Some(100));
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while controller.is_enabled() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "a node that is still behind must pause the VDF"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert!(!controller.is_enabled());
+        }
     }
 
     /// A parent request that fails must not delete a block another path
@@ -3879,6 +4117,106 @@ mod tests {
         assert!(
             handler.block_pool.contains_block(&block_hash).await,
             "a failed parent request must not delete a block another path stored"
+        );
+    }
+
+    /// A block stored after the pull fails and before the cache cleanup
+    /// stays in the cache. The store is injected at the cleanup window,
+    /// not with a sleep.
+    #[tokio::test]
+    async fn failed_parent_request_keeps_a_block_stored_during_cleanup() {
+        use crate::tests::util::data_handler_stub;
+        use irys_domain::PeerList;
+        use irys_domain::chain_sync_state::ChainSyncState;
+        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            BlockBody, Config, DatabaseProvider, DbSyncMode, H256, NodeConfig, SealedBlock,
+        };
+        use irys_vdf::state::VdfController;
+        use std::sync::atomic::AtomicBool;
+
+        let dir = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = dir.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(
+                &config.node_config.base_directory,
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("open test db"),
+        ));
+        let peer_list = PeerList::test_mock().expect("peer list");
+        let handler = data_handler_stub(&config, &peer_list, db, ChainSyncState::new(false, false));
+
+        let mut header = irys_testing_utils::new_mock_signed_header();
+        header.height = 1;
+        header.previous_block_hash = H256::random();
+        header.test_sign();
+        let block_hash = header.block_hash;
+        let sealed = Arc::new(
+            SealedBlock::new(
+                header,
+                BlockBody {
+                    block_hash,
+                    data_transactions: vec![],
+                    commitment_transactions: vec![],
+                },
+            )
+            .expect("sealed block"),
+        );
+
+        let service = ChainSyncServiceInner::new(
+            handler.sync_state.clone(),
+            handler.peer_list.clone(),
+            handler.config.clone(),
+            handler.block_index.clone(),
+            Arc::clone(&handler.block_pool),
+            Arc::clone(&handler),
+            None,
+            VdfController::new(&Arc::new(AtomicBool::new(false))),
+            tokio::runtime::Handle::current(),
+        );
+
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let request = PARENT_PULL_CLEANUP_WINDOW.scope(
+            std::sync::Mutex::new(Some(ParentPullCleanupWindow {
+                reached: reached_tx,
+                resume: resume_rx,
+            })),
+            service.request_block_from_the_network(block_hash),
+        );
+
+        tokio::pin!(request);
+        tokio::select! {
+            biased;
+            reached = reached_rx => {
+                reached.expect("cleanup window opened");
+                handler
+                    .block_pool
+                    .test_insert_block_into_cache(sealed, false)
+                    .await;
+                resume_tx.send(()).expect("resume cleanup");
+            }
+            _ = &mut request => {
+                panic!("parent pull finished before the cleanup window");
+            }
+        }
+
+        let err = request
+            .await
+            .expect_err("a parent pull with no peers fails");
+        let _ = err;
+        assert!(
+            !handler.block_pool.is_block_requested(&block_hash).await,
+            "a failed request clears the requested bit"
+        );
+        assert!(
+            handler.block_pool.contains_block(&block_hash).await,
+            "a block stored before the cache removal stays in the cache"
         );
     }
 }

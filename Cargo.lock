@@ -5100,6 +5100,7 @@ dependencies = [
  "irys-reth-node-bridge",
  "irys-reward-curve",
  "irys-storage",
+ "irys-testing-utils",
  "irys-types",
  "irys-utils",
  "irys-vdf",
@@ -5244,6 +5245,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "irys-data-tree"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "proptest",
+ "rayon",
+ "rstest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "irys-database"
 version = "0.1.0"
 dependencies = [
@@ -5273,7 +5288,9 @@ dependencies = [
  "tempfile",
  "test-fuzz",
  "test-log",
+ "tokio",
  "tracing",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
@@ -5399,7 +5416,6 @@ dependencies = [
  "dotenvy",
  "eyre",
  "irys-chain",
- "irys-testing-utils",
  "irys-types",
  "irys-utils",
  "reth-cli-util",
@@ -5667,11 +5683,9 @@ dependencies = [
 name = "irys-testing-utils"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "color-eyre",
  "irys-types",
  "irys-utils",
- "nix",
  "rand 0.8.5",
  "tempfile",
  "tracing",
@@ -5756,6 +5770,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "strum 0.27.2",
  "test-fuzz",
  "thiserror 1.0.69",
  "tokio",
@@ -5769,10 +5784,13 @@ dependencies = [
 name = "irys-utils"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "color-eyre",
  "dashmap",
  "eyre",
  "irys-types",
  "metrics",
+ "nix",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",

@@ -16,13 +16,16 @@ pub use irys_c::capacity_cuda;
 use serde::{Deserialize, Serialize};
 
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
-/// unpacking & trimming the data, and passing through metadata (size, tx_offset, etc)
+/// unpacking & trimming the data, and passing through metadata (size, tx_offset, etc).
+///
+/// Fails when the packed body is longer than the entropy buffer. The XOR indexes
+/// that buffer by the body length, so a longer body must not be read.
 pub fn unpack(
     packed_chunk: &PackedChunk,
     entropy_packing_iterations: u32,
     chunk_size: usize,
     irys_chain_id: u64,
-) -> UnpackedChunk {
+) -> eyre::Result<UnpackedChunk> {
     let mut entropy: Vec<u8> = Vec::with_capacity(chunk_size);
     capacity_single::compute_entropy_chunk(
         packed_chunk.packing_address,
@@ -34,37 +37,39 @@ pub fn unpack(
         irys_chain_id,
     );
 
-    let unpacked_data = unpack_with_entropy(packed_chunk, entropy, chunk_size);
+    let unpacked_data = unpack_with_entropy(packed_chunk, entropy, chunk_size)?;
 
-    UnpackedChunk {
+    Ok(UnpackedChunk {
         data_root: packed_chunk.data_root,
         data_size: packed_chunk.data_size,
         data_path: packed_chunk.data_path.clone(),
         bytes: Base64(unpacked_data),
         tx_offset: packed_chunk.tx_offset,
-    }
+    })
 }
 
-/// Unpacks a PackedChunk using the supplied entropy, returning *just the unpacked data*
+/// Unpacks a PackedChunk using the supplied entropy, returning *just the unpacked data*.
+///
+/// Fails when the packed body is longer than `entropy`.
 #[inline]
 pub fn unpack_with_entropy(
     packed_chunk: &PackedChunk,
     entropy: Vec<u8>,
     chunk_size: usize,
-) -> Vec<u8> {
+) -> eyre::Result<Vec<u8>> {
     debug_assert_eq!(
         entropy.len(),
         chunk_size,
         "entropy needs to be exactly chunk_size"
     );
     let chunk_size_u64: u64 = chunk_size.try_into().unwrap();
-    let mut unpacked_data = packing_xor_vec_u8(entropy, &(packed_chunk.bytes.0));
+    let mut unpacked_data = packing_xor_vec_u8(entropy, &(packed_chunk.bytes.0))?;
 
     let data_size = packed_chunk.data_size;
     let num_chunks_in_tx = data_size.div_ceil(chunk_size_u64);
     if num_chunks_in_tx == 0 {
         // nothing to trim and avoid underflow when data_size == 0
-        return unpacked_data;
+        return Ok(unpacked_data);
     }
     // trim if this is the last chunk & if data_size isn't aligned to chunk_size
     if u64::from(*packed_chunk.tx_offset) == num_chunks_in_tx - 1 {
@@ -74,7 +79,7 @@ pub fn unpack_with_entropy(
             unpacked_data.truncate(trailing_bytes.try_into().unwrap());
         }
     };
-    unpacked_data
+    Ok(unpacked_data)
 }
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
@@ -283,14 +288,22 @@ pub fn xor_vec_u8_arrays_in_place(a: &mut [u8], b: &[u8]) {
 
 /// Specialized variant, used when we pass in the entropy as argument a (which will always be chunk_size), and unpacked data in b (which can be smaller than chunk_size)
 /// as xor is commutative, this allows us to avoid a clone of the chunk's data when writing, as oftentimes we have mutable access to the required entropy, but only a ref to the unpacked data.
-/// note: this will always produce full chunk_size vecs, as expected by the storage module
+/// note: this will always produce full chunk_size vecs, as expected by the storage module.
+///
+/// Fails when `data` is longer than `entropy`. The loop writes `entropy[i]` for every data byte.
 #[inline]
-pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
-    debug_assert!(data.len() <= entropy.len());
+pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> eyre::Result<Vec<u8>> {
+    if data.len() > entropy.len() {
+        eyre::bail!(
+            "data length {} exceeds entropy length {}",
+            data.len(),
+            entropy.len()
+        );
+    }
     for i in 0..data.len() {
         entropy[i] = entropy[i].bitxor(data[i]);
     }
-    entropy
+    Ok(entropy)
 }
 
 /// Runs entropy packing, starting with the testnet config's step count, calibrating the iterations between runs to get to ~3.5s/chunk - returning the value once `runs` runs are complete
@@ -374,7 +387,8 @@ mod tests {
             ..Default::default()
         };
 
-        let out = unpack_with_entropy(&pc, entropy, chunk_size);
+        let out =
+            unpack_with_entropy(&pc, entropy, chunk_size).expect("data fits the entropy buffer");
         assert_eq!(out, bytes);
     }
 
@@ -393,7 +407,8 @@ mod tests {
             ..Default::default()
         };
 
-        let out = unpack_with_entropy(&pc, entropy, chunk_size);
+        let out =
+            unpack_with_entropy(&pc, entropy, chunk_size).expect("data fits the entropy buffer");
         assert_eq!(out.len(), (data_size % chunk_size as u64) as usize);
     }
 
@@ -412,8 +427,88 @@ mod tests {
             ..Default::default()
         };
 
-        let out = unpack_with_entropy(&pc, entropy, chunk_size);
+        let out =
+            unpack_with_entropy(&pc, entropy, chunk_size).expect("data fits the entropy buffer");
         assert_eq!(out.len(), chunk_size);
+    }
+
+    /// A body one byte past the entropy buffer is an error. A body of the
+    /// entropy length, and a shorter body, keep the XOR bytes.
+    #[test]
+    fn xor_and_unpack_reject_data_longer_than_entropy() {
+        let entropy = vec![1_u8, 2, 3, 4];
+        assert_eq!(
+            packing_xor_vec_u8(entropy.clone(), &[255, 0, 15, 16])
+                .expect("exact data fits entropy"),
+            vec![254, 2, 12, 20]
+        );
+        assert_eq!(
+            packing_xor_vec_u8(entropy.clone(), &[255, 0]).expect("short data fits entropy"),
+            vec![254, 2, 3, 4]
+        );
+        assert!(
+            packing_xor_vec_u8(entropy, &[0x5A; 5]).is_err(),
+            "data one byte past entropy is an error"
+        );
+
+        let exact = PackedChunk {
+            data_size: 4,
+            bytes: irys_types::Base64(vec![255, 0, 15, 16]),
+            tx_offset: TxChunkOffset(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            unpack_with_entropy(&exact, vec![0; 4], 4).expect("exact body fits entropy"),
+            vec![255, 0, 15, 16]
+        );
+        let short = PackedChunk {
+            data_size: 2,
+            bytes: irys_types::Base64(vec![255, 0]),
+            tx_offset: TxChunkOffset(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            unpack_with_entropy(&short, vec![0; 4], 4).expect("short body fits entropy"),
+            vec![255, 0]
+        );
+        let long = PackedChunk {
+            data_size: 4,
+            bytes: irys_types::Base64(vec![1_u8; 5]),
+            tx_offset: TxChunkOffset(0),
+            ..Default::default()
+        };
+        assert!(
+            unpack_with_entropy(&long, vec![0; 4], 4).is_err(),
+            "packed body longer than entropy is an error"
+        );
+
+        let chunk_size = 32_usize;
+        let packed = PackedChunk {
+            data_size: chunk_size as u64,
+            bytes: irys_types::Base64(vec![1_u8; chunk_size + 1]),
+            tx_offset: TxChunkOffset(0),
+            ..Default::default()
+        };
+        assert!(
+            unpack(&packed, 1, chunk_size, 1).is_err(),
+            "unpack rejects a body one byte past chunk_size"
+        );
+        let fitting = PackedChunk {
+            data_size: chunk_size as u64,
+            bytes: irys_types::Base64(vec![0_u8; chunk_size]),
+            tx_offset: TxChunkOffset(0),
+            ..Default::default()
+        };
+        let unpacked = unpack(&fitting, 1, chunk_size, 1).expect("chunk_size body unpacks");
+        assert_eq!(unpacked.bytes.0.len(), chunk_size);
+        let short_body = PackedChunk {
+            data_size: 10,
+            bytes: irys_types::Base64(vec![7_u8; 10]),
+            tx_offset: TxChunkOffset(0),
+            ..Default::default()
+        };
+        let unpacked = unpack(&short_body, 1, chunk_size, 1).expect("short body unpacks");
+        assert_eq!(unpacked.bytes.0.len(), 10);
     }
 
     // Enable with CUDA hardware
@@ -611,18 +706,20 @@ mod tests {
         rng.fill(&mut partition_hash);
 
         let num_chunks: usize = 8000;
-        let mut chunks: Vec<u8> =
-            Vec::with_capacity(num_chunks * ConsensusConfig::CHUNK_SIZE as usize); // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
-        let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
+        let chunk_size = ConsensusConfig::CHUNK_SIZE as usize; // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
+        // The setup and the Rust packer below are single-threaded, so each CPU thread works
+        // on one contiguous range of chunks.
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let chunks_per_thread = num_chunks.div_ceil(threads);
 
-        for _i in 0..num_chunks {
-            let mut chunk = [0_u8; ConsensusConfig::CHUNK_SIZE as usize];
-            rng.fill_bytes(&mut chunk);
-            chunks_rust.push(chunk.to_vec());
-            for j in 0..ConsensusConfig::CHUNK_SIZE as usize {
-                chunks.push(chunk[j]);
+        let mut chunks: Vec<u8> = vec![0; num_chunks * chunk_size];
+        std::thread::scope(|scope| {
+            for range in chunks.chunks_mut(chunks_per_thread * chunk_size) {
+                scope.spawn(move || rand::thread_rng().fill_bytes(range));
             }
-        }
+        });
+        let mut chunks_rust: Vec<ChunkBytes> =
+            chunks.chunks(chunk_size).map(<[u8]>::to_vec).collect();
 
         let now = Instant::now();
 
@@ -640,27 +737,37 @@ mod tests {
         println!("C CUDA implementation: {:.2?}", elapsed);
 
         let now = Instant::now();
-        capacity_pack_range_with_data(
-            &mut chunks_rust,
-            mining_address,
-            chunk_offset,
-            partition_hash.into(),
-            ConsensusConfig::CHUNK_SIZE as usize,
-            testing_config.entropy_packing_iterations,
-            testing_config.chain_id,
-        );
+        std::thread::scope(|scope| {
+            for (range_idx, range) in chunks_rust.chunks_mut(chunks_per_thread).enumerate() {
+                let range_offset =
+                    chunk_offset + (range_idx * chunks_per_thread) as std::ffi::c_ulong;
+                let testing_config = &testing_config;
+                scope.spawn(move || {
+                    capacity_pack_range_with_data(
+                        range,
+                        mining_address,
+                        range_offset,
+                        partition_hash.into(),
+                        chunk_size,
+                        testing_config.entropy_packing_iterations,
+                        testing_config.chain_id,
+                    );
+                });
+            }
+        });
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
-        for i in 0..num_chunks {
-            for j in 0..ConsensusConfig::CHUNK_SIZE as usize {
-                //println!("chunk {} pos {}", i, j);
-                assert_eq!(
-                    chunks_rust[i][j],
-                    chunks[i * ConsensusConfig::CHUNK_SIZE as usize + j]
-                );
-            }
+        for (i, (rust_chunk, cuda_chunk)) in chunks_rust
+            .iter()
+            .zip(chunks.chunks(chunk_size))
+            .enumerate()
+        {
+            assert!(
+                rust_chunk.as_slice() == cuda_chunk,
+                "CUDA and Rust packing differ for chunk {i}"
+            );
         }
     }
 
@@ -695,7 +802,8 @@ mod tests {
         rand::thread_rng().fill(&mut data_bytes[..]);
 
         // pack the data
-        let packed_data = packing_xor_vec_u8(entropy_chunk.clone(), &data_bytes);
+        let packed_data = packing_xor_vec_u8(entropy_chunk.clone(), &data_bytes)
+            .expect("data fits the entropy buffer");
 
         let packed_chunk = PackedChunk {
             data_root: H256::zero(),
@@ -713,7 +821,8 @@ mod tests {
             iterations,
             chunk_size,
             testing_config.chain_id,
-        );
+        )
+        .expect("packed chunk fits the entropy buffer");
 
         assert_eq!(unpacked_chunk.bytes.0, data_bytes);
     }
@@ -748,7 +857,8 @@ mod tests {
             fn packing_xor_is_involution(
                 (data, entropy) in arb_chunk_and_key(512)
             ) {
-                let packed = packing_xor_vec_u8(entropy.clone(), &data); // clone: need entropy for second xor
+                let packed = packing_xor_vec_u8(entropy.clone(), &data) // clone: need entropy for second xor
+                    .expect("data fits the entropy buffer");
                 let mut unpacked = packed;
                 xor_vec_u8_arrays_in_place(&mut unpacked, &entropy);
                 prop_assert_eq!(&unpacked[..data.len()], &data[..]);
@@ -779,7 +889,7 @@ mod tests {
             ) {
                 let mut r1 = a.clone(); // clone: need for second order comparison
                 xor_vec_u8_arrays_in_place(&mut r1, &b);
-                let r2 = packing_xor_vec_u8(b, &a);
+                let r2 = packing_xor_vec_u8(b, &a).expect("data fits the entropy buffer");
                 prop_assert_eq!(&r1[..], &r2[..a.len()]);
             }
         }
@@ -810,7 +920,8 @@ mod tests {
                     chain_id,
                 );
 
-                let packed = packing_xor_vec_u8(entropy.clone(), &chunk_data); // clone: need entropy for unpack
+                let packed = packing_xor_vec_u8(entropy.clone(), &chunk_data) // clone: need entropy for unpack
+                    .expect("data fits the entropy buffer");
                 let packed_chunk = PackedChunk {
                     data_root: H256::zero(),
                     data_size: u64::try_from(chunk_size).unwrap(),
@@ -822,7 +933,8 @@ mod tests {
                     partition_hash: H256::from(partition_hash),
                 };
 
-                let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id);
+                let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id)
+                    .expect("packed chunk fits the entropy buffer");
                 prop_assert_eq!(unpacked.bytes.0, chunk_data);
             }
 
@@ -856,7 +968,8 @@ mod tests {
                     chain_id,
                 );
 
-                let packed = packing_xor_vec_u8(entropy.clone(), &chunk_data); // clone: need entropy for unpack
+                let packed = packing_xor_vec_u8(entropy.clone(), &chunk_data) // clone: need entropy for unpack
+                    .expect("data fits the entropy buffer");
                 let packed_chunk = PackedChunk {
                     data_root: H256::zero(),
                     data_size: u64::try_from(data_len).unwrap(),
@@ -868,7 +981,8 @@ mod tests {
                     partition_hash: H256::from(partition_hash),
                 };
 
-                let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id);
+                let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id)
+                    .expect("packed chunk fits the entropy buffer");
                 prop_assert_eq!(unpacked.bytes.0, chunk_data);
             }
         }
@@ -887,7 +1001,8 @@ mod tests {
                     tx_offset: TxChunkOffset(0),
                     ..Default::default()
                 };
-                let out = unpack_with_entropy(&pc, entropy, 32);
+                let out = unpack_with_entropy(&pc, entropy, 32)
+                    .expect("data fits the entropy buffer");
                 prop_assert_eq!(out.len(), 32);
             }
 
@@ -905,7 +1020,8 @@ mod tests {
                     tx_offset: TxChunkOffset(tx_offset),
                     ..Default::default()
                 };
-                let out = unpack_with_entropy(&pc, entropy, 32);
+                let out = unpack_with_entropy(&pc, entropy, 32)
+                    .expect("data fits the entropy buffer");
                 prop_assert_eq!(out.len(), 32);
             }
         }

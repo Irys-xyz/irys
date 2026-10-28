@@ -471,12 +471,19 @@ pub trait SubmoduleStore: Send + Sync {
     ///
     /// Presence is the offset path-hash row and the offset data-path row.
     /// An empty list, or spans that hold no presence row, does not commit.
-    /// One commit covers every span that has a row. One cursor per presence
-    /// family seeks across the gaps, plus the rows removed. RocksDB deletes the offset
-    /// rows with `DeleteRange`. RocksDB v1 reads the data-proof values in each
-    /// span that has rows and point-deletes the matching content-hash keys in
-    /// that same batch. A span with no row does not read values. MDBX walks
-    /// a cursor inside each span.
+    ///
+    /// MDBX commits every span that has a row in one transaction. It walks
+    /// one cursor per presence family inside each span and seeks across the
+    /// gaps.
+    ///
+    /// RocksDB splits each span into pieces of at most
+    /// `DELETE_SUBRANGE_OFFSETS` offsets. Consecutive pieces share one synced
+    /// batch while their offset count stays within that bound, so an error
+    /// can follow a durable prefix. A group with no offset row does not
+    /// commit. A piece with at most `RANGE_TOMBSTONE_KEY_LIMIT` keys uses
+    /// point deletes. A denser piece uses `DeleteRange`. RocksDB v1 also
+    /// reads the data-proof values in a group that has rows and point-deletes
+    /// the matching content-hash keys in the same batch.
     fn drop_presence_in_ranges(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
@@ -606,6 +613,11 @@ impl MdbxSubmoduleStore {
         }
         store.put_schema_bytes(super::tables::SUBMODULE_CONVERT_INCOMPLETE.as_bytes())?;
         Ok(store)
+    }
+
+    #[cfg(feature = "rocksdb")]
+    pub(super) fn env(&self) -> &DatabaseEnv {
+        &self.env
     }
 
     pub(super) fn from_env(env: DatabaseEnv, writable: bool) -> Self {

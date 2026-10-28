@@ -1821,6 +1821,7 @@ impl IrysNode {
             Arc::clone(&block_tree_cache),
             service_senders.chunk_migration.clone(),
             service_senders.packing_sender(),
+            service_senders.storage_modules.clone(),
             // Same gate as `/internal/*` and the durable producer: skip the
             // 10k-entry de-dup seed when the stream is not written.
             config.node_config.http.expose_internal_api,
@@ -1925,7 +1926,7 @@ impl IrysNode {
         }
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
 
-        let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
+        let storage_modules = Self::init_storage_modules(&config, storage_module_infos).await?;
         let logical_chunks = epoch_snapshot.partition_chunks();
         for module in storage_modules.read().unwrap().iter() {
             module.set_partition_chunks(logical_chunks)?;
@@ -2309,8 +2310,10 @@ impl IrysNode {
         );
 
         // Production chunk fetcher is the HTTP chunk fetcher
-        let http_factory: ChunkFetcherFactory =
-            Box::new(|ledger_id| Arc::new(HttpChunkFetcher::new(ledger_id)));
+        let max_peer_response_bytes = config.node_config.max_peer_response_bytes;
+        let http_factory: ChunkFetcherFactory = Box::new(move |ledger_id| {
+            Arc::new(HttpChunkFetcher::new(ledger_id, max_peer_response_bytes))
+        });
 
         let data_sync_handle = DataSyncService::spawn_service(
             receivers.data_sync,
@@ -2768,16 +2771,17 @@ impl IrysNode {
         )
     }
 
-    fn init_storage_modules(
+    async fn init_storage_modules(
         config: &Config,
         storage_module_infos: Vec<StorageModuleInfo>,
     ) -> eyre::Result<Arc<RwLock<Vec<Arc<StorageModule>>>>> {
-        let mut storage_modules = Vec::new();
-        for info in storage_module_infos {
-            let arc_module = Arc::new(StorageModule::new(&info, config)?);
-            storage_modules.push(arc_module.clone());
-        }
-
+        let storage_modules = crate::storage_module_init::open_storage_modules(
+            config,
+            storage_module_infos,
+            #[cfg(test)]
+            Duration::ZERO,
+        )
+        .await?;
         Ok(Arc::new(RwLock::new(storage_modules)))
     }
 

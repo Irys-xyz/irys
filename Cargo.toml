@@ -9,6 +9,7 @@ members = [
   "crates/types",
   "crates/packing",
   "crates/database",
+  "crates/data-tree",
   "crates/storage",
   "crates/config",
   "crates/efficient-sampling",
@@ -44,6 +45,7 @@ authors = []
 [workspace.dependencies]
 # Irys
 irys-database = { path = "./crates/database" }
+irys-data-tree = { path = "./crates/data-tree" }
 irys-domain = { path = "./crates/domain" }
 irys-actors = { path = "./crates/actors" }
 irys-api-server = { path = "./crates/api-server" }
@@ -425,6 +427,9 @@ opt-level = 3
 [profile.test-release.package.sha2]
 opt-level = 3
 
+[profile.test-release.package.irys-data-tree]
+opt-level = 3
+
 [profile.test-release.package.openssl]
 opt-level = 3
 
@@ -463,6 +468,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.irys-data-tree]
 opt-level = 3
 
 [profile.dev.package.openssl]

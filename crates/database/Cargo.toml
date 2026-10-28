@@ -11,7 +11,7 @@ test-utils = []
 # links RocksDB. An `irys-database`-only build leaves it off. The converter
 # and bench bins built from this crate alone need `--features rocksdb`.
 # `cargo xtask check` turns it on via `--all-features`.
-rocksdb = ["dep:rocksdb", "dep:libc"]
+rocksdb = ["dep:rocksdb"]
 
 [dependencies]
 rayon.workspace = true
@@ -25,6 +25,7 @@ eyre.workspace = true
 irys-types.workspace = true
 irys-utils.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 irys-testing-utils.workspace = true
 test-fuzz.workspace = true
 metrics.workspace = true
@@ -34,9 +35,9 @@ reth-codecs.workspace = true
 reth-primitives-traits.workspace = true
 paste.workspace = true
 strum.workspace = true
-# Same 0.24 line reth pins. Default features include lz4 and leave jemalloc off.
+# Only irys-database depends on rocksdb (reth does not). Default features include lz4 and leave jemalloc off.
 rocksdb = { version = "0.24.0", optional = true }
-libc = { version = "0.2", optional = true }
+libc = "0.2"
 
 [[bin]]
 # MDBX-SUBMODULE-INDEX: delete the MDBX engine path of this bench. The RocksDB timings can stay.
@@ -61,6 +62,7 @@ path = "src/bin/tx_path_derive_bench.rs"
 
 [dev-dependencies]
 irys-config = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 test-log.workspace = true
 rand.workspace = true
 proptest.workspace = true

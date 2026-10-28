@@ -16,9 +16,13 @@ to `rocks.retired`) before the node starts.
 
 MDBX schema v1 is the on-disk format of release 4.0.8. The node migrates
 that `db/` to MDBX schema v2 in place the first time this release opens
-it. Release 4.0.x cannot read the result. There is no rollback from
-4.1.0 to 4.0.x. Open blocks on that migration: it copies every data path
-into a per-offset table in batches, then drops the old hash-keyed table,
+it. After that drop commits, 4.0.x starts, but it returns no data-path
+proof for a migrated offset whose proof lived in the dropped table. A
+later 4.1.x start still serves the copied offset rows and does not import
+rows 4.0.x wrote into the dropped table. Data sync does not refetch those
+chunks while the interval is `Data`. Open blocks on that migration: it
+copies every data path into a per-offset table in batches, then drops the
+old hash-keyed table,
 so the module is not served until it finishes and free space must hold
 both copies until the drop. A v1 data-path hash with no stored blob
 refuses open, and each later start retries it, until the file is

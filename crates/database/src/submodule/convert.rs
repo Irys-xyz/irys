@@ -15,7 +15,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eyre::WrapErr as _;
 use irys_types::{
@@ -514,6 +514,113 @@ impl RowSource for RocksSubmoduleStore {
     }
 }
 
+/// One INFO line per this interval while `--verify` copies and compares.
+const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(15);
+
+struct RowPace {
+    path: PathBuf,
+    phase: &'static str,
+    total: u64,
+    done: u64,
+    started: Instant,
+    last_log: Instant,
+}
+
+thread_local! {
+    static ROW_PACE: std::cell::RefCell<Option<RowPace>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Clears the progress pace on drop. The converter does not spawn a thread.
+struct PaceGuard;
+
+impl PaceGuard {
+    fn start(path: &Path, phase: &'static str, total: u64) -> Self {
+        ROW_PACE.with(|cell| {
+            *cell.borrow_mut() = Some(RowPace {
+                path: path.to_path_buf(),
+                phase,
+                total,
+                done: 0,
+                started: Instant::now(),
+                last_log: Instant::now(),
+            });
+        });
+        Self
+    }
+}
+
+impl Drop for PaceGuard {
+    fn drop(&mut self) {
+        ROW_PACE.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
+fn note_rows(rows: u64) {
+    if rows == 0 {
+        return;
+    }
+    ROW_PACE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let Some(pace) = slot.as_mut() else {
+            return;
+        };
+        pace.done = pace.done.saturating_add(rows);
+        if pace.last_log.elapsed() < PROGRESS_LOG_INTERVAL {
+            return;
+        }
+        let elapsed_ms = u64::try_from(pace.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::info!(
+            path = %pace.path.display(),
+            phase = pace.phase,
+            rows_done = pace.done,
+            rows_total = pace.total,
+            percent = migrate::percent_done(pace.done, pace.total),
+            rows_per_sec = migrate::per_sec(pace.done, elapsed_ms),
+            eta_ms = migrate::eta_ms(pace.done, pace.total, elapsed_ms),
+            "submodule index progress"
+        );
+        pace.last_log = Instant::now();
+    });
+}
+
+struct ConvertPrep {
+    mdbx_dir: PathBuf,
+    rocks_dir: PathBuf,
+    started: Instant,
+    map: PlacementMap,
+    db: DatabaseEnv,
+}
+
+fn prepare_convert(
+    mdbx_dir: &Path,
+    rocks_dir: &Path,
+    options: &ConvertOptions,
+) -> eyre::Result<ConvertPrep> {
+    let mdbx_dir = lexical_target(mdbx_dir)?;
+    let rocks_dir = lexical_target(rocks_dir)?;
+    let started = Instant::now();
+    guard_paths(&mdbx_dir, &rocks_dir, options)?;
+    let map = require_map(options)?;
+    let db = open_consensus(options)?;
+    Ok(ConvertPrep {
+        mdbx_dir,
+        rocks_dir,
+        started,
+        map,
+        db,
+    })
+}
+
+fn require_mdbx_dat(mdbx_dir: &Path) -> eyre::Result<()> {
+    if !mdbx_dir.join("mdbx.dat").is_file() {
+        eyre::bail!(
+            "source {} has no mdbx.dat. Pass the submodule db/ directory.",
+            mdbx_dir.display()
+        );
+    }
+    Ok(())
+}
+
 /// Copies a v1 or v2 MDBX submodule index into a new RocksDB v1 directory.
 ///
 /// The source is opened read-only. A v1 index is converted from its own rows.
@@ -526,32 +633,82 @@ pub fn convert_mdbx_to_rocks(
     rocks_dir: &Path,
     options: &ConvertOptions,
 ) -> eyre::Result<ConvertStats> {
-    let mdbx_dir = lexical_target(mdbx_dir)?;
-    let rocks_dir = lexical_target(rocks_dir)?;
-    let mdbx_dir = mdbx_dir.as_path();
-    let rocks_dir = rocks_dir.as_path();
-    let started = Instant::now();
-    guard_paths(mdbx_dir, rocks_dir, options)?;
-    let map = require_map(options)?;
-    let db = open_consensus(options)?;
-    if !mdbx_dir.join("mdbx.dat").is_file() {
-        eyre::bail!(
-            "source {} has no mdbx.dat. Pass the submodule db/ directory.",
-            mdbx_dir.display()
-        );
+    let prep = prepare_convert(mdbx_dir, rocks_dir, options)?;
+    require_mdbx_dat(&prep.mdbx_dir)?;
+    let opened = map_open(open_mdbx_source(&prep.mdbx_dir, exclusive_args(options)))?;
+    convert_opened(
+        &opened,
+        &prep.rocks_dir,
+        options,
+        &prep.db,
+        &prep.map,
+        prep.started,
+    )
+}
+
+/// Convert, then verify, against one open MDBX source.
+///
+/// The source is warmed and pinned for both passes, so verify re-reads it from
+/// memory instead of a cold HDD. The convert's own row checks replace a separate
+/// `--dry-run` pass; a failure leaves the same unsealed target a plain convert
+/// leaves. The pin drops when this returns.
+// MDBX-SUBMODULE-INDEX: delete this function with the mdbx-to-rocks command.
+pub fn convert_mdbx_to_rocks_and_verify(
+    mdbx_dir: &Path,
+    rocks_dir: &Path,
+    options: &ConvertOptions,
+) -> eyre::Result<(ConvertStats, EngineEquivalenceReport)> {
+    if options.dry_run {
+        eyre::bail!("--dry-run is not valid with --verify");
     }
-    let opened = map_open(open_mdbx_source(mdbx_dir, exclusive_args(options)))?;
+    let prep = prepare_convert(mdbx_dir, rocks_dir, options)?;
+    require_mdbx_dat(&prep.mdbx_dir)?;
+    let opened = map_open(open_mdbx_source(&prep.mdbx_dir, exclusive_args(options)))?;
+    let _pin = super::warmup::pre_read_index_file(opened_env(&opened), &prep.mdbx_dir);
+    let total = source_row_total(&opened)?;
+    let stats = {
+        let _pace = PaceGuard::start(&prep.mdbx_dir, "convert", total);
+        convert_opened(
+            &opened,
+            &prep.rocks_dir,
+            options,
+            &prep.db,
+            &prep.map,
+            prep.started,
+        )?
+    };
+    let report = {
+        let _pace = PaceGuard::start(&prep.mdbx_dir, "verify", total);
+        verify_opened(
+            &opened,
+            &prep.rocks_dir,
+            &prep.db,
+            &prep.map,
+            options.rollback,
+        )?
+    };
+    Ok((stats, report))
+}
+
+fn convert_opened(
+    opened: &OpenedMdbx,
+    rocks_dir: &Path,
+    options: &ConvertOptions,
+    db: &DatabaseEnv,
+    map: &PlacementMap,
+    started: Instant,
+) -> eyre::Result<ConvertStats> {
     let source_v1 = matches!(opened, OpenedMdbx::V1(_));
-    if source_reset(&opened)? {
+    if source_reset(opened)? {
         return Ok(finish_stats(
             write_reset_rocks(rocks_dir, options, source_v1)?,
             started,
             source_v1,
         ));
     }
-    let stats = match &opened {
-        OpenedMdbx::V2(src) => copy_v2_rocks(src, rocks_dir, options, &db, &map)?,
-        OpenedMdbx::V1(env) => copy_v1_rocks(env, rocks_dir, options, &db, &map)?,
+    let stats = match opened {
+        OpenedMdbx::V2(src) => copy_v2_rocks(src, rocks_dir, options, db, map)?,
+        OpenedMdbx::V1(env) => copy_v1_rocks(env, rocks_dir, options, db, map)?,
         OpenedMdbx::Empty(_) => write_empty_rocks(rocks_dir, options)?,
     };
     Ok(finish_stats(stats, started, source_v1))
@@ -813,23 +970,45 @@ pub fn verify_mdbx_and_rocks(
     require_rocks_v1(rocks_dir)?;
     let opened = map_open(open_mdbx_source(mdbx_dir, exclusive_args(options)))?;
     let rocks = map_open(RocksSubmoduleStore::open_read_only(rocks_dir))?;
+    verify_opened_store(&opened, &rocks, &db, &map, options.rollback)
+}
+
+fn verify_opened(
+    opened: &OpenedMdbx,
+    rocks_dir: &Path,
+    db: &DatabaseEnv,
+    map: &PlacementMap,
+    rollback: bool,
+) -> eyre::Result<EngineEquivalenceReport> {
+    require_rocks_v1(rocks_dir)?;
+    let rocks = map_open(RocksSubmoduleStore::open_read_only(rocks_dir))?;
+    verify_opened_store(opened, &rocks, db, map, rollback)
+}
+
+fn verify_opened_store(
+    opened: &OpenedMdbx,
+    rocks: &RocksSubmoduleStore,
+    db: &DatabaseEnv,
+    map: &PlacementMap,
+    rollback: bool,
+) -> eyre::Result<EngineEquivalenceReport> {
     match opened {
         OpenedMdbx::V2(mdbx) => {
             if mdbx.reset_in_progress()? {
-                verify_reset_target(true, &rocks)
+                verify_reset_target(true, rocks)
             } else {
                 let schema = mdbx.schema_bytes()?;
-                verify_mdbx_rows_against_rocks(&mdbx, &rocks, schema, &db, &map, options.rollback)
+                verify_mdbx_rows_against_rocks(mdbx, rocks, schema, db, map, rollback)
             }
         }
         OpenedMdbx::V1(env) => {
-            if reset_marker_on(&env)? {
-                verify_reset_target(true, &rocks)
+            if reset_marker_on(env)? {
+                verify_reset_target(true, rocks)
             } else {
-                verify_mdbx_v1_against_rocks(&env, &rocks, &db, &map)
+                verify_mdbx_v1_against_rocks(env, rocks, db, map)
             }
         }
-        OpenedMdbx::Empty(env) => verify_empty_and_rocks(&env, &rocks),
+        OpenedMdbx::Empty(env) => verify_empty_and_rocks(env, rocks),
     }
 }
 
@@ -2197,6 +2376,7 @@ where
         let Some(last) = batch.last().map(|(key, _)| *key) else {
             break;
         };
+        note_rows(u64::try_from(batch.len()).unwrap_or(u64::MAX));
         let n = write(batch)?;
         copied = copied.saturating_add(n);
         if n > 0 {
@@ -2272,11 +2452,13 @@ where
         };
         pending.push(key);
         if pending.len() == merge_batch_limit() {
+            note_rows(u64::try_from(pending.len()).unwrap_or(u64::MAX));
             on_batch(&pending)?;
             pending.clear();
         }
     }
     if !pending.is_empty() {
+        note_rows(u64::try_from(pending.len()).unwrap_or(u64::MAX));
         on_batch(&pending)?;
     }
     Ok(())
@@ -2578,6 +2760,28 @@ enum OpenedMdbx {
     V2(MdbxSubmoduleStore),
     V1(DatabaseEnv),
     Empty(DatabaseEnv),
+}
+
+fn opened_env(opened: &OpenedMdbx) -> &DatabaseEnv {
+    match opened {
+        OpenedMdbx::V2(store) => store.env(),
+        OpenedMdbx::V1(env) | OpenedMdbx::Empty(env) => env,
+    }
+}
+
+fn source_row_total(opened: &OpenedMdbx) -> eyre::Result<u64> {
+    let v2 = matches!(opened, OpenedMdbx::V2(_));
+    opened_env(opened).view_eyre(|tx| {
+        let rows = if v2 {
+            table_entries::<TxPathIntervalByStart>(tx)?
+                .saturating_add(table_entries::<ChunkDataPathByOffset>(tx)?)
+                .saturating_add(table_entries::<PendingBodyMigrationsByOffset>(tx)?)
+        } else {
+            table_entries::<ChunkPathHashesByOffset>(tx)?
+                .saturating_add(table_entries::<PendingBodyMigrationsByOffset>(tx)?)
+        };
+        Ok(u64::try_from(rows).unwrap_or(u64::MAX))
+    })
 }
 
 // MDBX-SUBMODULE-INDEX: delete this helper with the MDBX source reader.
@@ -2939,6 +3143,7 @@ fn copy_mdbx_v1_into_rocks(
                 }
                 break;
             }
+            note_rows(u64::try_from(batch.len()).unwrap_or(u64::MAX));
             for (offset, hashes) in &batch {
                 let mut closed = Vec::new();
                 migrate::absorb(&mut open, offset.0, hashes.tx_path_hash, &mut closed);
@@ -3181,6 +3386,7 @@ fn walk_v1_intervals(
             }
             break;
         }
+        note_rows(u64::try_from(batch.len()).unwrap_or(u64::MAX));
         for (offset, hashes) in &batch {
             let mut closed = Vec::new();
             migrate::absorb(&mut open, offset.0, hashes.tx_path_hash, &mut closed);
@@ -3708,6 +3914,7 @@ fn copy_v1_pending(
         if batch.is_empty() {
             break;
         }
+        note_rows(u64::try_from(batch.len()).unwrap_or(u64::MAX));
         let mut kept = Vec::new();
         for (offset, job) in batch {
             if written.covers(offset.0) {
@@ -4317,6 +4524,7 @@ fn compare_v1_pending(
         if batch.is_empty() {
             break;
         }
+        note_rows(u64::try_from(batch.len()).unwrap_or(u64::MAX));
         for (offset, job) in &batch {
             if frontier.covers(offset.0) {
                 report.skipped_frontier = report.skipped_frontier.saturating_add(1);
@@ -4877,12 +5085,13 @@ mod tests {
     };
     use super::{
         ConvertOptions, ConvertStats, accepted_offset_ranges, convert_mdbx_to_rocks,
-        convert_rocks_to_mdbx, reset_accepted_offset_ranges, reset_v1_copy_path_views,
-        reset_v1_data_path_reads, reset_v1_range_copy_batches, reset_v1_uncompared_hash_views,
-        reset_verify_placement_caches, reset_verify_views, set_merge_batch, set_v1_path_view_group,
-        set_v1_placement_batch, set_v1_uncompared_hash_group, v1_copy_path_views,
-        v1_data_path_reads, v1_placement_views, v1_range_copy_batches, v1_uncompared_hash_views,
-        verify_mdbx_and_rocks, verify_placement_caches, verify_rocks_records, verify_views,
+        convert_mdbx_to_rocks_and_verify, convert_rocks_to_mdbx, reset_accepted_offset_ranges,
+        reset_v1_copy_path_views, reset_v1_data_path_reads, reset_v1_range_copy_batches,
+        reset_v1_uncompared_hash_views, reset_verify_placement_caches, reset_verify_views,
+        set_merge_batch, set_v1_path_view_group, set_v1_placement_batch,
+        set_v1_uncompared_hash_group, v1_copy_path_views, v1_data_path_reads, v1_placement_views,
+        v1_range_copy_batches, v1_uncompared_hash_views, verify_mdbx_and_rocks,
+        verify_placement_caches, verify_rocks_records, verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::RocksSubmoduleStore;
@@ -6907,6 +7116,26 @@ mod tests {
         assert_eq!(preview.pending, written.pending);
         assert_eq!(preview.tx_leaf_bindings, written.tx_leaf_bindings);
         assert!(rocks.join("SCHEMA").is_file());
+        Ok(())
+    }
+
+    /// `--verify` keeps one source open. The RocksDB bytes match a plain convert.
+    #[test]
+    fn mdbx_to_rocks_verify_matches_a_plain_convert() -> eyre::Result<()> {
+        let Populated {
+            root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-verify-same-bytes")?;
+        let plain = root.path().join("rocks-plain");
+        convert_mdbx_to_rocks(&mdbx, &plain, &options)?;
+        let (stats, report) = convert_mdbx_to_rocks_and_verify(&mdbx, &rocks, &options)?;
+        assert_copy_counts(&stats);
+        assert_equivalent(&report);
+        let same = verify_rocks_records(&plain, &rocks)?;
+        assert!(!same.has_mismatch(), "{same}");
         Ok(())
     }
 

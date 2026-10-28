@@ -98,6 +98,9 @@ pub struct BlockMigrationService {
     /// offsets re-marked `Uninitialized` during a deep-reorg rollback (packing
     /// is otherwise only requested at startup / assignment transitions).
     packing_sender: PackingSender,
+    /// A span the packing channel did not accept. The storage-module tick
+    /// resends it while any offset is still `Uninitialized`.
+    storage_module_sender: UnboundedSender<Traced<crate::StorageModuleServiceMessage>>,
     storage_modules_guard: Option<StorageModulesReadGuard>,
 }
 
@@ -202,6 +205,7 @@ impl BlockMigrationService {
         cache: Arc<RwLock<BlockTree>>,
         chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
         packing_sender: PackingSender,
+        storage_module_sender: UnboundedSender<Traced<crate::StorageModuleServiceMessage>>,
         // When false (`http.expose_internal_api` off), skip the 10k-entry log
         // scan: no frames will be appended and de-dup is unused.
         seed_stream_dedup: bool,
@@ -240,6 +244,7 @@ impl BlockMigrationService {
             cache,
             chunk_migration_sender,
             packing_sender,
+            storage_module_sender,
             storage_modules_guard: None,
         }
     }
@@ -319,37 +324,6 @@ impl BlockMigrationService {
             module.set_partition_chunks(chunks)?;
         }
         Ok(())
-    }
-
-    /// Non-blocking packing request from a sync path; warns (does not fail the
-    /// module) when the request cannot be built or the channel is saturated.
-    fn try_enqueue_packing(
-        &self,
-        module: std::sync::Arc<irys_domain::StorageModule>,
-        interval: PartitionChunkRange,
-        context: &str,
-    ) {
-        let module_id = module.id;
-        match PackingRequest::new(module, interval) {
-            Ok(req) => {
-                if let Err(err) = self.packing_sender.try_send(req) {
-                    warn!(
-                        module_id,
-                        ?interval,
-                        %err,
-                        "failed to enqueue repacking request {context}"
-                    );
-                }
-            }
-            Err(err) => {
-                warn!(
-                    module_id,
-                    ?interval,
-                    %err,
-                    "failed to build repacking request {context}"
-                );
-            }
-        }
     }
 
     pub fn set_storage_modules_guard(&mut self, guard: StorageModulesReadGuard) {
@@ -870,8 +844,10 @@ impl BlockMigrationService {
                         // Wait out a durable point that already copied this batch.
                         // That point holds `sync_in_progress` until it has labeled
                         // the run. The clear runs after that label, then publishes
-                        // `Uninitialized`. A missed packing send leaves that label,
-                        // so startup packing still repacks the span.
+                        // `Uninitialized`. A missed packing send leaves that label.
+                        // The span is stored with the other deferred packing ranges.
+                        // The storage-module tick resends it while any offset is
+                        // still `Uninitialized`.
                         module.rollback_unassigned_range(
                             range_start,
                             range_end,
@@ -893,26 +869,55 @@ impl BlockMigrationService {
                         // otherwise only requested at startup / assignment
                         // transitions, so without this the canonical fork's
                         // re-migrated chunks would have no entropy to XOR against and
-                        // silently fail to write. The packing channel is buffered and
-                        // a rollback enqueues only a handful of ranges, so a
-                        // non-blocking `try_send` from this sync path suffices; warn
-                        // (don't fail the module) if it can't be enqueued.
+                        // silently fail to write. The packing channel is buffered. A
+                        // non-blocking `try_send` from this sync path suffices. A
+                        // full channel, a closed channel, or a request `new` refuses
+                        // is kept for the storage-module tick.
                         //
-                        // Known limitation: packing is asynchronous, so canonical
-                        // chunks re-migrated into this range *before* packing
-                        // completes still find no entropy and are silently skipped by
-                        // `write_data_chunk`. This is not permanent — the range stays
-                        // `Uninitialized` and is recovered by the startup repack plus
-                        // data-sync. Closing the window (gating re-migration on
-                        // entropy presence) is left to the packing-reconciler rework.
-                        self.try_enqueue_packing(
-                            module.clone(),
-                            PartitionChunkRange(ii(
-                                PartitionChunkOffset::from(*partition_range.start()),
-                                PartitionChunkOffset::from(*partition_range.end()),
-                            )),
-                            "during partition recovery",
-                        );
+                        // Packing is asynchronous, so canonical chunks re-migrated
+                        // into this range before packing completes still find no
+                        // entropy and are skipped by `write_data_chunk`. Those
+                        // offsets stay `Uninitialized`. Data sync does not read that
+                        // label. The deferred pack is what fills them.
+                        let range = PartitionChunkRange(ii(
+                            PartitionChunkOffset::from(*partition_range.start()),
+                            PartitionChunkOffset::from(*partition_range.end()),
+                        ));
+                        let accepted = match PackingRequest::new(module.clone(), range) {
+                            Ok(req) => match self.packing_sender.try_send(req) {
+                                Ok(()) => true,
+                                Err(err) => {
+                                    warn!(
+                                        module_id = module.id,
+                                        %err,
+                                        "failed to enqueue repacking request during partition recovery"
+                                    );
+                                    false
+                                }
+                            },
+                            Err(err) => {
+                                warn!(
+                                    module_id = module.id,
+                                    %err,
+                                    "failed to build repacking request during partition recovery"
+                                );
+                                false
+                            }
+                        };
+                        if !accepted
+                            && let Err(err) = self.storage_module_sender.send_traced(
+                                crate::StorageModuleServiceMessage::RepackUninitialized {
+                                    module_id: module.id,
+                                    range,
+                                },
+                            )
+                        {
+                            warn!(
+                                module_id = module.id,
+                                %err,
+                                "failed to record an uninitialized repack for a later tick"
+                            );
+                        }
                     }
                 }
             }
@@ -1348,6 +1353,7 @@ mod tests {
         // channel whose receiver is held (not dropped) is sufficient (enqueue
         // failures are warn-and-continue).
         let (packing_sender, _packing_rx) = tokio::sync::mpsc::channel(16);
+        let (storage_module_sender, _storage_module_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Return a dummy tempdir alongside so callers can keep it alive if
         // they want; in practice the test owns its own tempdir for the DB.
@@ -1363,6 +1369,7 @@ mod tests {
             cache,
             chunk_migration_sender,
             packing_sender,
+            storage_module_sender,
             true, // unit tests that exercise stream emission need a seeded de-dup
         );
         (svc, tmp)
@@ -3046,6 +3053,176 @@ mod tests {
              orphaned placement (start_offset 3, inside it) is removed"
         );
 
+        Ok(())
+    }
+
+    struct RepackRecovery {
+        svc: BlockMigrationService,
+        module: Arc<StorageModule>,
+        storage_rx:
+            tokio::sync::mpsc::UnboundedReceiver<Traced<crate::StorageModuleServiceMessage>>,
+        packing_rx: tokio::sync::mpsc::Receiver<PackingRequest>,
+        _db_tmp: irys_testing_utils::utils::tempfile::TempDir,
+        _sm_tmp: irys_testing_utils::utils::tempfile::TempDir,
+    }
+
+    /// Genesis holds Submit chunks [0, 2]. The orphan adds [3, 5]. Slot 0
+    /// owns the whole partition, so the rollback span is partition [3, 5].
+    fn repack_recovery(fill_packing: bool) -> eyre::Result<RepackRecovery> {
+        let (db, db_tmp) = open_db()?;
+        let sm_tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("recover_repack")
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: sm_tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = irys_types::Config::new_with_random_peer_id(node_config);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(0),
+                ..PartitionAssignment::default()
+            }),
+            submodules: vec![(partition_chunk_offset_ii!(0, 9), "submodule-0".into())],
+        };
+        let module = Arc::new(StorageModule::new(&info, &config)?);
+        module.pack_with_zeros();
+
+        let (packing_sender, packing_rx) = tokio::sync::mpsc::channel(1);
+        if fill_packing {
+            let filler = PackingRequest::new(
+                module.clone(),
+                PartitionChunkRange(partition_chunk_offset_ii!(0, 0)),
+            )
+            .expect("assigned module accepts the filler");
+            packing_sender
+                .try_send(filler)
+                .expect("one slot holds the filler");
+        }
+        let (storage_module_sender, storage_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard = BlockIndexReadGuard::new(block_index);
+        let mut genesis_header = IrysBlockHeader::new_mock_header();
+        genesis_header.height = 0;
+        genesis_header.previous_block_hash = H256::zero();
+        genesis_header.cumulative_diff = U256::from(0);
+        genesis_header.test_sign();
+        let tree = BlockTree::new(&genesis_header, ConsensusConfig::testing());
+        let cache = Arc::new(RwLock::new(tree));
+        let (chunk_migration_sender, _chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut svc = BlockMigrationService::new(
+            db.clone(),
+            block_index_guard,
+            None,
+            config.consensus.chunk_size,
+            ConsensusConfig::testing().epoch.num_blocks_in_epoch,
+            ConsensusConfig::testing().block_tree_depth,
+            ConsensusConfig::testing().block_migration_depth as u64,
+            cache,
+            chunk_migration_sender,
+            packing_sender,
+            storage_module_sender,
+            false,
+        );
+        svc.set_storage_modules_guard(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            module.clone(),
+        ]))));
+
+        let genesis = make_block_header(0, H256::zero(), 3, vec![]);
+        let orphan = make_block_header(1, genesis.block_hash, 6, vec![]);
+        db.update_eyre(|tx| {
+            irys_database::insert_block_header(tx, &genesis)?;
+            irys_database::insert_block_header(tx, &orphan)
+        })?;
+        let submit_index_item = |header: &IrysBlockHeader, total_chunks| BlockIndexItem {
+            block_hash: header.block_hash,
+            num_ledgers: 1,
+            ledgers: vec![LedgerIndexItem {
+                total_chunks,
+                tx_root: H256::zero(),
+                ledger: DataLedger::Submit,
+            }],
+        };
+        {
+            let index = svc.block_index_guard.read();
+            index.push_item(&submit_index_item(&genesis, 3), 0)?;
+            index.push_item(&submit_index_item(&orphan, 6), 1)?;
+        }
+
+        Ok(RepackRecovery {
+            svc,
+            module,
+            storage_rx,
+            packing_rx,
+            _db_tmp: db_tmp,
+            _sm_tmp: sm_tmp,
+        })
+    }
+
+    /// The packing channel is full. Recovery still records the uninitialized
+    /// span so a later tick can send it.
+    #[test]
+    fn recover_from_network_partition_records_a_repack_when_the_packing_channel_is_full()
+    -> eyre::Result<()> {
+        let RepackRecovery {
+            svc,
+            module,
+            mut storage_rx,
+            _db_tmp,
+            _sm_tmp,
+            ..
+        } = repack_recovery(true)?;
+        svc.recover_from_network_partition(0)?;
+        assert_eq!(
+            module.get_intervals(ChunkType::Uninitialized),
+            [partition_chunk_offset_ii!(3, 5)]
+        );
+        let (msg, _span) = storage_rx
+            .try_recv()
+            .expect("a full channel records the uninitialized span")
+            .into_parts();
+        match msg {
+            crate::StorageModuleServiceMessage::RepackUninitialized { module_id, range } => {
+                assert_eq!(module_id, 0);
+                assert_eq!(*range.0.start(), 3);
+                assert_eq!(*range.0.end(), 5);
+            }
+            other => panic!("expected a repack record, got {other:?}"),
+        }
+        assert!(storage_rx.try_recv().is_err(), "one span, one record");
+        Ok(())
+    }
+
+    /// An open channel takes the span now. Recovery does not also record it.
+    #[test]
+    fn recover_from_network_partition_does_not_record_a_repack_the_channel_accepted()
+    -> eyre::Result<()> {
+        let RepackRecovery {
+            svc,
+            mut storage_rx,
+            mut packing_rx,
+            _db_tmp,
+            _sm_tmp,
+            ..
+        } = repack_recovery(false)?;
+        svc.recover_from_network_partition(0)?;
+        let request = packing_rx
+            .try_recv()
+            .expect("an open channel accepts the repack");
+        assert_eq!(*request.chunk_range().0.start(), 3);
+        assert_eq!(*request.chunk_range().0.end(), 5);
+        assert!(
+            storage_rx.try_recv().is_err(),
+            "an accepted send is not recorded for a later tick"
+        );
         Ok(())
     }
 }
