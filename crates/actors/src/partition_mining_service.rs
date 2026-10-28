@@ -874,8 +874,6 @@ impl PartitionMiningServiceInner {
             return;
         }
 
-        let current_step = self.steps_guard.current_step();
-
         // `seeds` arrives in step order. Keep only the newest
         // `MAX_PENDING_RECALLS`, evicting the oldest, so a slow recall read
         // drops the ranges least worth mining.
@@ -901,6 +899,9 @@ impl PartitionMiningServiceInner {
         // Newest first. Newer ranges are worth more; each costs a full
         // recall read.
         for msg in pending.iter().rev() {
+            // A recall read can lag the VDF by several steps. Each range's
+            // lag is measured at its own mining time, not at the batch head.
+            let current_step = self.steps_guard.current_step();
             let lag = current_step.saturating_sub(msg.global_step);
             if lag >= 3 {
                 warn!(
@@ -1104,6 +1105,13 @@ impl PartitionMiningService {
                 MiningBroadcastEvent::Seed(_) => {
                     self.state.finish_expiry_reset();
                     batch.push(queued);
+                }
+                // A reanchor rewrites the seed values the queued seeds carry.
+                // Only seeds broadcast after the reanchor match the healed
+                // buffer, so the collected batch is stale.
+                MiningBroadcastEvent::Reanchored => {
+                    batch.clear();
+                    self.apply_broadcast(&queued);
                 }
                 other => self.apply_broadcast(other),
             }
@@ -2777,6 +2785,67 @@ mod tests {
             2,
             "only the newest (step 5) range was hashed before the win"
         );
+    }
+
+    /// Seeds queued before a `Reanchored` event carry the pre-reanchor seed
+    /// values, which no longer match the healed VDF buffer. They are dropped
+    /// at the boundary; only seeds queued after it are mined.
+    #[test]
+    fn reanchored_event_drops_queued_seeds() {
+        let (_tmp, config, storage_module, _partition_hash, vdf_state) = open_recall_miner(2);
+        let chunk_size = 32;
+        for offset in 0..10_u32 {
+            assert!(storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![0x11_u8; chunk_size],
+                ChunkType::Data
+            ));
+        }
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync data chunks");
+        for step in 1..=4_u64 {
+            vdf_state
+                .write()
+                .unwrap()
+                .store_step(Seed(H256::repeat_byte(0x20 + step as u8)), step);
+        }
+
+        let (service_senders, mut receivers) = ServiceSenders::new();
+        let bus = service_senders.mining_bus();
+        let broadcast_rx = service_senders.subscribe_mining_broadcast();
+        let inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            true,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            None,
+            None,
+        );
+        let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let (_cmd_tx, cmd_rx) = unbounded_channel();
+        let mut svc = PartitionMiningService {
+            shutdown: shutdown_rx,
+            state: inner,
+            cmd_rx,
+            broadcast_rx,
+        };
+
+        // The in-flight seed (step 4) queues behind a reanchor, which queues
+        // behind step 5. Only step 5 may be mined.
+        let pre = backlog_seeds(4..=4).into_iter().next().expect("one seed");
+        let post = backlog_seeds(5..=5).into_iter().next().expect("one seed");
+        bus.send_event(Arc::new(MiningBroadcastEvent::Reanchored));
+        bus.send_event(Arc::new(MiningBroadcastEvent::Seed((*post).clone())));
+        svc.drain_and_mine(Arc::new(MiningBroadcastEvent::Seed((*pre).clone())));
+
+        // Only the post-reanchor range was mined: two looked-up data chunks,
+        // no solution, and the rotation rests at step 5.
+        assert_eq!(svc.state.data_path_lookup_count(), 2);
+        assert!(receivers.block_producer.try_recv().is_err());
+        assert_eq!(svc.state.ranges.last_step_num, 5);
     }
 
     fn clear_stored_tx_paths(storage: &StorageModule) {

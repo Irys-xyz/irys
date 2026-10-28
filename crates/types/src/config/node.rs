@@ -747,7 +747,9 @@ pub struct StorageSyncConfig {
     ///
     /// Set false when other IO should take priority: packing, data sync,
     /// and serving then share the disk with the recall read instead of
-    /// waiting for it. The in-flight service-time budget still bounds both.
+    /// waiting for it. The in-flight service-time budget still bounds the
+    /// lane's submitted writes and entropy reads; recall preads are not
+    /// counted against it and may run alongside a full admitted budget.
     /// Read at module open; a change needs a restart.
     #[serde(default = "default_recall_io_priority")]
     pub recall_io_priority: bool,
