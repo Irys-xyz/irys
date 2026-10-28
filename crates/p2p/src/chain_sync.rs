@@ -1091,8 +1091,14 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
         return Ok(());
     }
 
-    let block_queue =
-        fetch_initial_block_index(&sync_state, &params, peer_list, gossip_client).await?;
+    let block_queue = fetch_initial_block_index(
+        &sync_state,
+        &params,
+        peer_list,
+        gossip_client,
+        &gossip_data_handler.block_index,
+    )
+    .await?;
 
     if !block_queue.is_empty() {
         run_sync_loop(
@@ -1275,10 +1281,12 @@ async fn fetch_initial_block_index(
     params: &SyncParams,
     peer_list: &PeerList,
     gossip_client: &GossipClient,
+    local_block_index: &BlockIndexReadGuard,
 ) -> ChainSyncResult<VecDeque<BlockIndexItem>> {
     let block_index = match get_block_index(
         peer_list,
         gossip_client,
+        local_block_index,
         // +1, because the index endpoint is inclusive, and we don't want to fetch the last block again
         sync_state.sync_target_height() + 1,
         params.block_batch_size,
@@ -1364,6 +1372,7 @@ async fn run_sync_loop<B: BlockDiscoveryFacade, M: MempoolFacade>(
                 config,
                 peer_list,
                 gossip_client,
+                &gossip_data_handler.block_index,
                 &mut block_queue,
                 &mut sync_target,
                 start_sync_from_height,
@@ -1464,6 +1473,7 @@ async fn replenish_block_batch(
     config: &Config,
     peer_list: &PeerList,
     gossip_client: &GossipClient,
+    local_block_index: &BlockIndexReadGuard,
     block_queue: &mut VecDeque<BlockIndexItem>,
     sync_target: &mut usize,
     start_sync_from_height: usize,
@@ -1481,6 +1491,7 @@ async fn replenish_block_batch(
     let additional_index = get_block_index(
         peer_list,
         gossip_client,
+        local_block_index,
         *sync_target,
         params.block_batch_size,
         params.block_index_peer_count,
@@ -1563,6 +1574,7 @@ async fn wait_for_queue_slot<B: BlockDiscoveryFacade, M: MempoolFacade>(
     match get_block_index(
         peer_list,
         gossip_client,
+        &gossip_data_handler.block_index,
         retry_height,
         1, // Just get one block
         params.block_index_peer_count,
@@ -1899,6 +1911,7 @@ async fn check_and_update_full_validation_switch_height(
 async fn get_block_index(
     peer_list: &PeerList,
     gossip_client: &GossipClient,
+    local_block_index: &BlockIndexReadGuard,
     start: usize,
     limit: usize,
     peer_count: usize,
@@ -1926,24 +1939,40 @@ async fn get_block_index(
     }
 
     // Sources in the order to ask them: highest advertised index height first.
-    // A source that advertises a higher index has more entries to give. The
-    // shuffle before the stable sort mixes the sources at the same height.
+    // The checks in `check_index_answer` hold each answer to that height and
+    // its hash. Nothing checks a claimed cumulative difficulty. The shuffle
+    // before the stable sort mixes the sources at the same height.
     let mut sources: Vec<_> = peers.into_values().flatten().collect();
     sources.shuffle(&mut rand::thread_rng());
     sources.sort_by(|a, b| b.2.block_index_height.cmp(&a.2.block_index_height));
 
-    let query = BlockIndexQuery {
-        height: start,
-        limit,
+    // Overlap anchor: when our index has the entry just before `start`, ask
+    // from that entry and require the answer to start with our hash. Our index
+    // holds only migrated blocks, so an answer that does not extend it is not
+    // on our chain. Without that entry, ask from `start` with no anchor.
+    let anchor_hash = start
+        .checked_sub(1)
+        .and_then(|anchor_height| local_block_index.read().get_item(anchor_height as u64))
+        .map(|item| item.block_hash);
+    let query = match anchor_hash {
+        // A limit of 0 asks for the default page size of the server.
+        Some(_) => BlockIndexQuery {
+            height: start - 1,
+            limit: if limit == 0 { 0 } else { limit + 1 },
+        },
+        None => BlockIndexQuery {
+            height: start,
+            limit,
+        },
     };
 
     for _ in 0..retries {
-        // Ask `peer_count` sources at the same time and use the longest
+        // Ask `peer_count` sources at the same time and use the longest valid
         // answer. One source can be behind the others, so an empty answer is
         // final only when no other source in the group gives entries.
         for group in sources.chunks(peer_count) {
             debug!("Fetching block index from a group of {} peers", group.len());
-            let answers = futures::future::join_all(group.iter().map(|(peer_id, peer, _)| {
+            let answers = futures::future::join_all(group.iter().map(|(peer_id, peer, claims)| {
                 let query = query.clone();
                 async move {
                     debug!(
@@ -1954,28 +1983,40 @@ async fn get_block_index(
                         peer_id
                     );
                     let answer = gossip_client.get_block_index(peer.address, query).await;
-                    (peer_id, peer, answer)
+                    (peer_id, peer, claims, answer)
                 }
             }))
             .await;
 
-            let mut longest_answer: Option<Vec<BlockIndexItem>> = None;
-            for (peer_id, peer, answer) in answers {
+            let mut longest_valid_answer: Option<Vec<BlockIndexItem>> = None;
+            for (peer_id, peer, claims, answer) in answers {
                 match answer {
-                    Ok(index) => {
-                        debug!(
-                            peer.address = ?peer.address.gossip,
-                            "Fetched {} block index entries from peer {:?}",
-                            index.len(),
-                            peer_id
-                        );
-                        if longest_answer
-                            .as_ref()
-                            .is_none_or(|longest| index.len() > longest.len())
-                        {
-                            longest_answer = Some(index);
+                    Ok(index) => match check_index_answer(index, &query, anchor_hash, claims) {
+                        Ok(index) => {
+                            debug!(
+                                peer.address = ?peer.address.gossip,
+                                "Fetched {} new block index entries from peer {:?}",
+                                index.len(),
+                                peer_id
+                            );
+                            if longest_valid_answer
+                                .as_ref()
+                                .is_none_or(|longest| index.len() > longest.len())
+                            {
+                                longest_valid_answer = Some(index);
+                            }
                         }
-                    }
+                        Err(broken_rule) => {
+                            warn!(
+                                peer.address = ?peer.address.gossip,
+                                index.start = query.height,
+                                index.limit = query.limit,
+                                "Block index answer from peer {:?} is not valid: {}",
+                                peer_id,
+                                broken_rule
+                            );
+                        }
+                    },
                     Err(error) => {
                         warn!(
                             peer.address = ?peer.address.gossip,
@@ -1988,7 +2029,7 @@ async fn get_block_index(
                 }
             }
 
-            if let Some(index) = longest_answer {
+            if let Some(index) = longest_valid_answer {
                 return Ok(index);
             }
         }
@@ -1997,6 +2038,88 @@ async fn get_block_index(
     Err(ChainSyncError::Network(
         "Failed to fetch block index from peer".to_string(),
     ))
+}
+
+/// Checks a block index answer against the `/info` claims of the peer and
+/// against our anchor entry. Returns the entries after the anchor entry, or
+/// the rule that the answer breaks.
+fn check_index_answer(
+    mut answer: Vec<BlockIndexItem>,
+    query: &BlockIndexQuery,
+    anchor_hash: Option<BlockHash>,
+    claims: &NodeInfo,
+) -> Result<Vec<BlockIndexItem>, String> {
+    if !index_answer_length_matches(
+        claims.block_index_height,
+        query.height,
+        query.limit,
+        answer.len(),
+    ) {
+        return Err(format!(
+            "{} entries from height {} do not match the advertised index height {}",
+            answer.len(),
+            query.height,
+            claims.block_index_height
+        ));
+    }
+
+    // The entry at the advertised index height must have the advertised hash.
+    // The peer index can grow after `/info`, so this entry is not always the
+    // last one. Growth does not change the entries at or below that height.
+    if let Some(offset) = claims
+        .block_index_height
+        .checked_sub(query.height as u64)
+        .and_then(|offset| usize::try_from(offset).ok())
+        && let Some(entry) = answer.get(offset)
+        && entry.block_hash != claims.block_index_hash
+    {
+        return Err(format!(
+            "entry at the advertised index height {} has hash {}, not the advertised hash {}",
+            claims.block_index_height, entry.block_hash, claims.block_index_hash
+        ));
+    }
+
+    if let Some(anchor_hash) = anchor_hash
+        && let Some(first) = answer.first()
+    {
+        if first.block_hash != anchor_hash {
+            return Err(format!(
+                "first entry at height {} has hash {}, not our hash {}",
+                query.height, first.block_hash, anchor_hash
+            ));
+        }
+        answer.remove(0);
+    }
+
+    Ok(answer)
+}
+
+/// The answer length must match the peer's advertised index height.
+///
+/// The index endpoint returns the entries at heights `start..start + limit`
+/// that the peer has. A peer at index height `h` has the `h + 1` entries
+/// `0..=h`, so it must return at least `min(limit, h + 1 - start)` entries.
+/// More entries, up to `limit`, are valid: the peer index can grow between
+/// `/info` and the index request. This is no weaker than an exact count,
+/// because the same answer is valid from a peer that advertises a higher
+/// height. The endpoint never returns more than `limit` entries.
+///
+/// A `limit` of 0 asks for the default page size of the server, which this
+/// node does not know, so no length rule applies.
+fn index_answer_length_matches(
+    advertised_index_height: u64,
+    start: usize,
+    limit: usize,
+    answer_length: usize,
+) -> bool {
+    if limit == 0 {
+        return true;
+    }
+    let entries_from_start = advertised_index_height
+        .saturating_add(1)
+        .saturating_sub(start as u64);
+    let minimum_length = entries_from_start.min(limit as u64);
+    answer_length as u64 >= minimum_length && answer_length <= limit
 }
 
 /// Local index compared with trusted peers that answered `/info`.
@@ -3309,14 +3432,19 @@ mod tests {
         use super::*;
         use crate::tests::util::{FakeGossipServer, peer_list_item};
         use crate::types::GossipResponse;
-        use irys_types::{NodeConfig, PeerListItem};
+        use irys_domain::BlockIndex;
+        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{DatabaseProvider, DbSyncMode, NodeConfig, PeerListItem};
         use std::sync::atomic::AtomicUsize;
 
-        /// The first height that the sync needs.
+        /// The first height that the sync needs. Our index has the main chain
+        /// entries `0..START`.
         const START: usize = 5;
         const LIMIT: usize = 10;
         const RETRIES: usize = 5;
         const MAIN_CHAIN: u8 = 0x01;
+        const OTHER_CHAIN: u8 = 0x02;
 
         fn entry_hash(chain: u8, height: u64) -> BlockHash {
             let mut hash = BlockHash::from_low_u64_be(height);
@@ -3332,6 +3460,24 @@ mod tests {
                     ..BlockIndexItem::default()
                 })
                 .collect()
+        }
+
+        fn local_index(dir: &std::path::Path) -> BlockIndexReadGuard {
+            let db = DatabaseProvider(Arc::new(
+                open_or_create_irys_consensus_data_db(dir, DbSyncMode::UtterlyNoSync)
+                    .expect("open test db"),
+            ));
+            let index = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db));
+            for (height, item) in entries(MAIN_CHAIN, 0, START as u64 - 1)
+                .into_iter()
+                .enumerate()
+            {
+                index
+                    .read()
+                    .push_item(&item, height as u64)
+                    .expect("push index item");
+            }
+            index
         }
 
         /// The entries of `chain` that an index with the last entry at
@@ -3403,12 +3549,14 @@ mod tests {
 
         async fn fetch(
             peer_list: &PeerList,
+            index: &BlockIndexReadGuard,
             peer_count: usize,
             trusted_only: bool,
         ) -> ChainSyncResult<Vec<BlockIndexItem>> {
             get_block_index(
                 peer_list,
                 &gossip_client(),
+                index,
                 START,
                 LIMIT,
                 peer_count,
@@ -3419,7 +3567,9 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn sources_in_a_group_are_asked_at_the_same_time_and_the_longest_answer_wins() {
+        async fn sources_in_a_group_are_asked_at_the_same_time_and_the_longest_valid_answer_wins() {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
             // Ranked first: it has entries up to START + 2.
             let (first, first_requests) = consistent_source(0x11, 1, START as u64 + 2);
             // Ranked second: it advertises START + 1, but its index grew to
@@ -3431,11 +3581,14 @@ mod tests {
                 entry_hash(MAIN_CHAIN, START as u64 + 1),
                 chain_answer(MAIN_CHAIN, START as u64 + 6),
             );
-            // Ranked last: it has no entries from START.
+            // Ranked last: it has no entries after our tip and answers only
+            // the anchor entry.
             let (third, third_requests) = consistent_source(0x13, 1, START as u64 - 1);
             let peer_list = trusted_peer_list(vec![first, second, third]);
 
-            let fetched = fetch(&peer_list, 3, true).await.expect("block index");
+            let fetched = fetch(&peer_list, &index, 3, true)
+                .await
+                .expect("block index");
 
             assert_eq!(fetched, entries(MAIN_CHAIN, START as u64, START as u64 + 6));
             for requests in [first_requests, second_requests, third_requests] {
@@ -3444,12 +3597,16 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn empty_answers_from_a_whole_group_give_an_empty_index_with_no_retry() {
+        async fn valid_empty_answers_from_a_whole_group_give_an_empty_index_with_no_retry() {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
             let (first, first_requests) = consistent_source(0x11, 1, START as u64 - 1);
             let (second, second_requests) = consistent_source(0x12, 1, START as u64 - 1);
             let peer_list = trusted_peer_list(vec![first, second]);
 
-            let fetched = fetch(&peer_list, 2, true).await.expect("block index");
+            let fetched = fetch(&peer_list, &index, 2, true)
+                .await
+                .expect("block index");
 
             assert!(fetched.is_empty());
             assert_eq!(first_requests.load(Ordering::SeqCst), 1);
@@ -3461,6 +3618,8 @@ mod tests {
         #[case::full_mode(false)]
         #[tokio::test]
         async fn sources_are_ranked_by_advertised_index_height(#[case] trusted_only: bool) {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
             // The higher cumulative difficulty, but the lower index height.
             let (first, first_requests) = consistent_source(0x11, 100, START as u64 + 1);
             let (second, _) = consistent_source(0x12, 1, START as u64 + 20);
@@ -3471,7 +3630,7 @@ mod tests {
                 peer_list_with_trusted(peers, vec![]).1
             };
 
-            let fetched = fetch(&peer_list, 1, trusted_only)
+            let fetched = fetch(&peer_list, &index, 1, trusted_only)
                 .await
                 .expect("block index");
 
@@ -3487,13 +3646,15 @@ mod tests {
             let mut node_config = NodeConfig::testing();
             node_config.sync.block_index_peer_count = 2;
             let params = SyncParams::from_config(&Config::new_with_random_peer_id(node_config));
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
             let sources: Vec<_> = (0x11..=0x13)
                 .map(|peer_byte| consistent_source(peer_byte, 1, START as u64 + 2))
                 .collect();
             let peer_list =
                 trusted_peer_list(sources.iter().map(|(peer, _)| peer.clone()).collect());
 
-            fetch(&peer_list, params.block_index_peer_count, true)
+            fetch(&peer_list, &index, params.block_index_peer_count, true)
                 .await
                 .expect("block index");
 
@@ -3502,6 +3663,93 @@ mod tests {
                 .map(|(_, requests)| requests.load(Ordering::SeqCst))
                 .sum();
             assert_eq!(requests, 2);
+        }
+
+        /// Each case is a source ranked first whose answer breaks one rule.
+        /// The fetch takes the answer of the next source.
+        #[rstest::rstest]
+        #[case::does_not_start_with_our_entry(index_source(
+            0x11,
+            1,
+            START as u64 + 8,
+            entry_hash(OTHER_CHAIN, START as u64 + 8),
+            chain_answer(OTHER_CHAIN, START as u64 + 8),
+        ))]
+        #[case::other_hash_at_the_advertised_height(index_source(
+            0x11,
+            1,
+            START as u64 + 8,
+            entry_hash(OTHER_CHAIN, START as u64 + 8),
+            chain_answer(MAIN_CHAIN, START as u64 + 8),
+        ))]
+        #[case::empty_while_it_advertises_entries(index_source(
+            0x11,
+            1,
+            START as u64 + 8,
+            entry_hash(MAIN_CHAIN, START as u64 + 8),
+            |_: &BlockIndexQuery| Vec::new(),
+        ))]
+        #[case::shorter_than_the_advertised_height(index_source(
+            0x11,
+            1,
+            START as u64 + 8,
+            entry_hash(MAIN_CHAIN, START as u64 + 8),
+            chain_answer(MAIN_CHAIN, START as u64 + 6),
+        ))]
+        #[case::longer_than_the_limit(index_source(
+            0x11,
+            1,
+            START as u64 + 8,
+            entry_hash(MAIN_CHAIN, START as u64 + 8),
+            |query: &BlockIndexQuery| {
+                entries(
+                    MAIN_CHAIN,
+                    query.height as u64,
+                    (query.height + query.limit) as u64,
+                )
+            },
+        ))]
+        #[tokio::test]
+        async fn answer_that_breaks_a_rule_is_rejected(
+            #[case] first: (PeerListItem, Arc<AtomicUsize>),
+        ) {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
+            let (first, _) = first;
+            let (second, _) = consistent_source(0x12, 1, START as u64 + 2);
+            let peer_list = trusted_peer_list(vec![first, second]);
+
+            let fetched = fetch(&peer_list, &index, 1, true)
+                .await
+                .expect("block index");
+
+            assert_eq!(fetched, entries(MAIN_CHAIN, START as u64, START as u64 + 2));
+        }
+
+        #[rstest::rstest]
+        // The peer has entries START..=20: the full page.
+        #[case(20, LIMIT, true)]
+        #[case(20, LIMIT - 1, false)]
+        #[case(20, LIMIT + 1, false)]
+        // The peer has entries START..=7: three entries.
+        #[case(7, 3, true)]
+        #[case(7, 2, false)]
+        // The index grew after `/info`.
+        #[case(7, 4, true)]
+        #[case(7, LIMIT, true)]
+        // The peer has no entries from START.
+        #[case(START as u64 - 1, 0, true)]
+        #[case(0, 0, true)]
+        #[case(START as u64, 0, false)]
+        fn answer_length_rule(
+            #[case] advertised_index_height: u64,
+            #[case] answer_length: usize,
+            #[case] matches: bool,
+        ) {
+            assert_eq!(
+                index_answer_length_matches(advertised_index_height, START, LIMIT, answer_length),
+                matches
+            );
         }
     }
 
