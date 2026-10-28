@@ -1173,7 +1173,9 @@ impl PeerNetworkService {
                     observed_hash,
                 );
 
-                // Only log mismatch if the version is not V1 - V1 peers have zero hash
+                // The consensus-config hash is advisory: for V2
+                // peers, log a mismatch but keep the accepted handshake. V1 peers
+                // do not carry the hash and use zero as a compatibility value.
                 if protocol_version != ProtocolVersion::V1 {
                     let our_hash = inner.state.lock().await.config.consensus.keccak256_hash();
                     if accepted_peers.consensus_config_hash != our_hash {
