@@ -28,3 +28,13 @@ Fire-and-forget `IngestChunk` must not park the recv loop and must not spawn `ac
 - Worst-case retained HTTP bodies are `(256 + 32) × 1 MiB` at the JSON limit. Operators who cannot afford that lower the two semaphore knobs.
 - Integration helpers that treated HTTP 200 as “chunk is stored” must poll (`ChunkProvider`, cache, or pending membership) after 200.
 - Gossip saturation behaviour is unchanged for oneshot callers. An HTTP flood can still occupy the chunk lane with *running* handlers, but it cannot HOL-block recv or queue Tokio waiters ahead of gossip `try_acquire`.
+
+## Amendment (2026-10-28): HTTP ingest ends at the cache commit
+
+On devnet the admission permit lived for about 62 s under packing load, because the ingress worker awaited the storage-module write, which waits for an entropy read on a busy disk. Every permit was held, and most public POSTs returned 503 while the node still had cache headroom. The full analysis is in `agents/2026-10-28-002-bug-http-admission-decouple-design.md`.
+
+For an ingest that holds an HTTP admission guard, the worker now validates the body, commits it to `CachedChunks`, queues it on each assigned storage module's disk lane with `StorageModule::enqueue_ingress_batch`, pushes it to peers, checks the ingress proof and finishes. It does not wait for the disk lane to pack the body, so the admission permit and the chunk-lane permit are released after the cache commit. A storage module whose pending bytes have reached its pending-memory ceiling is skipped; the body stays in the cache, which keeps a body this node must store until it is durable, and data sync writes it from there. `mempool.http_ingest_waits_for_module_write = true` restores the waiting write. Gossip, data-sync and pending-drain ingests are unchanged.
+
+Admission gains a second 503 cause, `cache_full`: once `CachedChunks` holds `cache.max_cache_size_bytes` or more, new public bodies are refused before an admission permit is taken. This is a rejection watermark rather than a cap. Bodies already admitted or waiting still land, so the HTTP overshoot is at most `(max_http_chunk_admission + max_http_chunk_waiters)` bodies, and gossip, data-sync and pending-drain writes do not pass through the check.
+
+The memory bound in Consequences covers bodies owned by admission and the ingress worker. It does not cover push gossip: the receiving node still pushes full bodies, each push runs as a detached task holding the serialised body until every peer send finishes, and those tasks are fed through an unbounded channel. With admission no longer paced by the disk, that retention is measured on devnet and bounded separately if the measurement warrants it.

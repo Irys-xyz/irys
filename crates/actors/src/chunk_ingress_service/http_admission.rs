@@ -14,8 +14,12 @@ pub enum HttpChunkEnqueueError {
     AdmissionTimeout,
     #[error("chunk ingress channel closed")]
     ChannelClosed,
+    #[error("chunk cache at its size watermark")]
+    CacheFull,
 }
 
+/// `cache_watermark_reached` is `ChunkIngressState::cache_watermark_reached`,
+/// read by the caller before admission.
 pub async fn enqueue_http_chunk(
     chunk: UnpackedChunk,
     sender: &UnboundedSender<Traced<ChunkIngressMessage>>,
@@ -23,6 +27,7 @@ pub async fn enqueue_http_chunk(
     waiters: &Arc<Semaphore>,
     timeout: Duration,
     accepting: &Arc<Mutex<bool>>,
+    cache_watermark_reached: bool,
 ) -> Result<(), HttpChunkEnqueueError> {
     {
         let open = accepting
@@ -31,6 +36,9 @@ pub async fn enqueue_http_chunk(
         if !*open {
             return Err(HttpChunkEnqueueError::ChannelClosed);
         }
+    }
+    if cache_watermark_reached {
+        return Err(HttpChunkEnqueueError::CacheFull);
     }
     let permit = match Arc::clone(admission).try_acquire_owned() {
         Ok(permit) => permit,
@@ -101,6 +109,7 @@ mod tests {
             &waiters,
             Duration::from_secs(1),
             &accepting(),
+            false,
         )
         .await
         .expect("enqueue");
@@ -126,6 +135,7 @@ mod tests {
             &waiters,
             Duration::from_millis(50),
             &accepting(),
+            false,
         )
         .await
         .expect_err("timeout");
@@ -148,6 +158,7 @@ mod tests {
             &waiters,
             Duration::from_secs(5),
             &accepting(),
+            false,
         )
         .await
         .expect_err("saturated");
@@ -168,11 +179,111 @@ mod tests {
             &waiters,
             Duration::from_secs(1),
             &accepting,
+            false,
         )
         .await
         .expect_err("closed");
         assert!(matches!(err, HttpChunkEnqueueError::ChannelClosed));
         assert!(rx.try_recv().is_err());
         assert_eq!(admission.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn enqueue_rejects_at_cache_watermark_without_taking_a_permit() {
+        let admission = Arc::new(Semaphore::new(1));
+        let waiters = Arc::new(Semaphore::new(1));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = enqueue_http_chunk(
+            dummy_chunk(),
+            &tx,
+            &admission,
+            &waiters,
+            Duration::from_secs(1),
+            &accepting(),
+            true,
+        )
+        .await
+        .expect_err("cache full");
+        assert_eq!(err, HttpChunkEnqueueError::CacheFull);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(admission.available_permits(), 1);
+        assert_eq!(waiters.available_permits(), 1);
+    }
+
+    /// Bodies admitted or waiting when the cache reaches its mark still
+    /// land; nothing new is admitted after it. The HTTP overshoot is
+    /// therefore at most the admission permits plus the waiter slots.
+    #[tokio::test]
+    async fn cache_watermark_bounds_http_overshoot_to_admission_and_waiters() {
+        let admission = Arc::new(Semaphore::new(2));
+        let waiters = Arc::new(Semaphore::new(1));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let open = accepting();
+
+        for _ in 0..2 {
+            enqueue_http_chunk(
+                dummy_chunk(),
+                &tx,
+                &admission,
+                &waiters,
+                Duration::from_secs(5),
+                &open,
+                false,
+            )
+            .await
+            .expect("admitted below the mark");
+        }
+        let waiting = {
+            let (tx, admission, waiters, open) = (
+                tx.clone(),
+                Arc::clone(&admission),
+                Arc::clone(&waiters),
+                Arc::clone(&open),
+            );
+            tokio::spawn(async move {
+                enqueue_http_chunk(
+                    dummy_chunk(),
+                    &tx,
+                    &admission,
+                    &waiters,
+                    Duration::from_secs(5),
+                    &open,
+                    false,
+                )
+                .await
+            })
+        };
+        while waiters.available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+
+        for _ in 0..8 {
+            let err = enqueue_http_chunk(
+                dummy_chunk(),
+                &tx,
+                &admission,
+                &waiters,
+                Duration::from_secs(5),
+                &open,
+                true,
+            )
+            .await
+            .expect_err("refused at the mark");
+            assert_eq!(err, HttpChunkEnqueueError::CacheFull);
+        }
+        assert_eq!(admission.available_permits(), 0);
+        assert_eq!(waiters.available_permits(), 0);
+
+        // The service finishes one body, which frees a permit for the waiter.
+        drop(rx.try_recv().expect("first admitted body"));
+        waiting
+            .await
+            .expect("join")
+            .expect("the waiter lands after the mark");
+        let mut admitted = 1;
+        while rx.try_recv().is_ok() {
+            admitted += 1;
+        }
+        assert_eq!(admitted, 3, "admission (2) + waiters (1)");
     }
 }
