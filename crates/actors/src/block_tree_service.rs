@@ -1613,6 +1613,8 @@ impl BlockTreeServiceInner {
         //      never in block_tree at all → cache_write_succeeded = false.
         //   3. Cache-hit but `remove_block` Err: cache invariant
         //      corruption → cache_write_succeeded = false.
+        //   4. Cache-hit on an `Onchain` block: `remove_block` refuses it
+        //      and this helper returns the error (see the match arm).
         //
         // Side effects split on this flag:
         //   - `BlockStateUpdated` broadcast: ALWAYS emitted. Downstream
@@ -1632,6 +1634,23 @@ impl BlockTreeServiceInner {
         let cache_write_succeeded = if maybe_height.is_some() {
             match cache.remove_block(&block_hash, irys_domain::RemovalReason::ValidationInvalid) {
                 Ok(()) => true,
+                // An `Onchain` block is the tip or an ancestor of it. The tip only moves
+                // to a validated block, so this node already accepted this block, and a
+                // result that is not `Valid` contradicts that. Removing the block would
+                // empty the canonical chain; keeping it and continuing would hide a node
+                // fault. Return the error: the service stops on the controlled-shutdown
+                // path, with the tree unchanged and no broadcast.
+                Err(err) if state == ChainState::Onchain => {
+                    error!(
+                        block.hash = %block_hash,
+                        block.height = height,
+                        ?err,
+                        "validation result that is not Valid for an Onchain block; the block stays in the tree and the service stops"
+                    );
+                    return Err(
+                        err.wrap_err(format!("discard of Onchain block {block_hash} refused"))
+                    );
+                }
                 Err(err) => {
                     tracing::error!(block.hash = %block_hash, ?err, "Failed to remove block from cache");
                     false
@@ -3326,6 +3345,34 @@ mod tests {
                 ValidationResult::InternalFailure(_)
             ),
             "broadcast must carry the InternalFailure verdict even on cache-miss"
+        );
+    }
+
+    /// A discard of an `Onchain` block (here the tip) returns an error and leaves the
+    /// tip and the block in the tree: the block tree refuses to remove it, and the
+    /// service must not continue as if the block were gone.
+    #[test]
+    fn discard_of_onchain_block_returns_error() {
+        let mut h = DiscardHarness::new();
+        let tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::ShadowTransactionInvalid("bad".into()).into();
+        let err = h
+            .inner
+            .discard_and_broadcast(tip.block_hash, result, DiscardKind::Invalid)
+            .expect_err("a discard of an Onchain block must return an error");
+        assert!(
+            format!("{err:#}").contains("Onchain"),
+            "error must name the Onchain block; got: {err:#}"
+        );
+
+        assert_eq!(h.tip(), tip.block_hash, "the tip does not change");
+        let cache = h.inner.cache.read().expect("cache lock after discard");
+        assert!(cache.get_block(&tip.block_hash).is_some());
+        assert_eq!(
+            cache.get_latest_canonical_entry().block_hash(),
+            tip.block_hash
         );
     }
 

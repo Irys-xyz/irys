@@ -719,17 +719,30 @@ impl BlockTree {
     /// recorded on its `delete_block` log line). Descendants are removed with
     /// [`RemovalReason::RecursiveDescendantOf`] so post-hoc log reading can
     /// tell the original target from the cascaded children.
+    ///
+    /// Returns an error, and changes nothing, for an `Onchain` block. An `Onchain` block
+    /// is the tip or an ancestor of it, and the canonical chain is the tip's ancestry:
+    /// removing one leaves the canonical chain empty. `mark_tip` sets every ancestor of
+    /// the tip to `Onchain`, so a block that is not `Onchain` has no `Onchain`
+    /// descendant, and the check on the target covers the whole subtree. `prune` removes
+    /// old `Onchain` blocks with `delete_block`, not with this function.
     pub fn remove_block(
         &mut self,
         block_hash: &BlockHash,
         reason: RemovalReason,
     ) -> eyre::Result<()> {
-        // Get children before deleting the block
-        let children = self
+        let entry = self
             .blocks
             .get(block_hash)
-            .map(|entry| entry.children.iter().copied().collect::<Vec<_>>())
             .ok_or_else(|| eyre::eyre!("Block not found"))?;
+        if entry.chain_state == ChainState::Onchain {
+            return Err(eyre::eyre!(
+                "cannot remove block {block_hash}: it is Onchain (the tip or an ancestor of the tip)"
+            ));
+        }
+
+        // Get children before deleting the block
+        let children = entry.children.iter().copied().collect::<Vec<_>>();
 
         // Recursively remove all children first
         for child in children {
@@ -3922,6 +3935,47 @@ mod tests {
         assert_eq!(
             cache.get_max_chain_validated_head(),
             Some(fork_3.block_hash)
+        );
+    }
+
+    /// Removing an `Onchain` block (the tip or an ancestor of it) returns an error and
+    /// leaves the tip, the canonical chain, the max block and the blocks unchanged.
+    #[test]
+    fn remove_block_refuses_onchain_block() {
+        let (mut cache, [genesis, c1, c2]) = canonical_chain_of_three();
+        let mut fork = extend_chain(random_block(U256::from(1)), &genesis);
+        add_block_for_validation(&mut cache, &mut fork);
+
+        let block_hashes_before: HashSet<BlockHash> = cache.blocks.keys().copied().collect();
+        let canonical_before = canonical_hashes(&cache);
+        let max_before = cache.get_max_cumulative_difficulty_block();
+
+        for onchain in [&c1, &c2] {
+            let err = cache
+                .remove_block(&onchain.block_hash, RemovalReason::ValidationInvalid)
+                .expect_err("an Onchain block must not be removed");
+            assert!(
+                err.to_string().contains("Onchain"),
+                "error must name the Onchain state; got: {err}"
+            );
+
+            assert_eq!(cache.tip, c2.block_hash);
+            assert_eq!(canonical_hashes(&cache), canonical_before);
+            assert_eq!(cache.get_max_cumulative_difficulty_block(), max_before);
+            assert_eq!(
+                cache.blocks.keys().copied().collect::<HashSet<_>>(),
+                block_hashes_before
+            );
+            assert_eq!(
+                cache.get_block_and_status(&c1.block_hash).unwrap().1,
+                &ChainState::Onchain
+            );
+        }
+
+        assert_matches!(
+            cache.remove_block(&fork.block_hash, RemovalReason::ValidationInvalid),
+            Ok(()),
+            "a block that is not Onchain can still be removed"
         );
     }
 }
