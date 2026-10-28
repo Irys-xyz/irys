@@ -25,8 +25,8 @@ use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     BlockBody, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, ConsensusConfig,
     DataTransactionHeader, GossipRequest, GossipRequestV2, IngressProof, IrysAddress,
-    IrysBlockHeader, IrysPeerId, NodeInfo, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
-    UnixTimestamp, UnpackedChunk, parse_user_agent,
+    IrysBlockHeader, IrysPeerId, MAX_BLOCK_INDEX_QUERY_LIMIT, NodeInfo, PeerAddress, PeerListItem,
+    PeerScore, ProtocolVersion, UnixTimestamp, UnpackedChunk, parse_user_agent,
 };
 use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
@@ -1502,7 +1502,6 @@ where
         server: &Data<Self>,
         query: &BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>, HttpResponse> {
-        const MAX_BLOCK_INDEX_QUERY_LIMIT: usize = 1_000;
         const DEFAULT_BLOCK_INDEX_QUERY_LIMIT: usize = 100;
 
         let limit = if query.limit == 0 {

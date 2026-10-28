@@ -9,8 +9,9 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList, ScoreDecreaseReason};
 use irys_types::Traced;
 use irys_types::{
-    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysPeerId, NodeInfo,
-    NodeMode, PeerListItem, SyncMode, TokioServiceHandle, U256,
+    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysPeerId,
+    MAX_BLOCK_INDEX_QUERY_LIMIT, NodeInfo, NodeMode, PeerListItem, SyncMode, TokioServiceHandle,
+    U256,
 };
 use irys_vdf::state::VdfController;
 use rand::prelude::SliceRandom as _;
@@ -1961,10 +1962,17 @@ async fn get_block_index(
         .and_then(|anchor_height| local_block_index.read().get_item(anchor_height as u64))
         .map(|item| item.block_hash);
     let query = match anchor_hash {
-        // A limit of 0 asks for the default page size of the server.
+        // `limit + 1` asks for the anchor entry and `limit` new entries. The
+        // server rejects a limit above its maximum, so at the maximum ask for
+        // `limit` entries: one new entry fewer. A limit of 0 asks for the
+        // default page size of the server.
         Some(_) => BlockIndexQuery {
             height: start - 1,
-            limit: if limit == 0 { 0 } else { limit + 1 },
+            limit: if limit == 0 || limit >= MAX_BLOCK_INDEX_QUERY_LIMIT {
+                limit
+            } else {
+                limit + 1
+            },
         },
         None => BlockIndexQuery {
             height: start,
@@ -3861,6 +3869,57 @@ mod tests {
             assert!(
                 matches!(error, ChainSyncError::Network(_)),
                 "got: {error:?}"
+            );
+        }
+
+        /// With a batch at the server maximum, the anchored query asks for
+        /// the anchor entry and one new entry fewer, not more than the
+        /// server accepts.
+        #[tokio::test]
+        async fn anchored_query_does_not_exceed_the_server_maximum() {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
+            let index_height = START as u64 + 2 * MAX_BLOCK_INDEX_QUERY_LIMIT as u64;
+            let server = FakeGossipServer::new();
+            server.set_on_info_request(move || {
+                GossipResponse::Accepted(NodeInfo {
+                    block_index_height: index_height,
+                    block_index_hash: entry_hash(MAIN_CHAIN, index_height),
+                    ..NodeInfo::default()
+                })
+            });
+            // The server rejects a limit above its maximum.
+            let answer = chain_answer(MAIN_CHAIN, index_height);
+            server.set_on_block_index_request(move |query| {
+                if query.limit > MAX_BLOCK_INDEX_QUERY_LIMIT {
+                    GossipResponse::Rejected(crate::types::RejectionReason::InvalidData)
+                } else {
+                    GossipResponse::Accepted(answer(&query))
+                }
+            });
+            let peer_list =
+                trusted_peer_list(vec![peer_list_item(0x11, server.spawn(), true, 100)]);
+
+            let fetched = get_block_index(
+                &peer_list,
+                &gossip_client(),
+                &index,
+                START,
+                MAX_BLOCK_INDEX_QUERY_LIMIT,
+                1,
+                RETRIES,
+                true,
+            )
+            .await
+            .expect("block index");
+
+            assert_eq!(
+                fetched,
+                entries(
+                    MAIN_CHAIN,
+                    START as u64,
+                    (START + MAX_BLOCK_INDEX_QUERY_LIMIT - 2) as u64
+                )
             );
         }
 
