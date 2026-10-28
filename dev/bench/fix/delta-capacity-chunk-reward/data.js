@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793186495576,
+  "lastUpdate": 1793217877443,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -19915,6 +19915,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "2a92da8113932f641b2776173299bf22ba0007b8",
+          "message": "fix: reduce capacity PoA rewards after Delta",
+          "timestamp": "2026-10-28T11:02:03Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1726/commits/2a92da8113932f641b2776173299bf22ba0007b8"
+        },
+        "date": 1793217875942,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015307,
+            "range": "± 0.000768",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.157881,
+            "range": "± 0.007308",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.570657,
+            "range": "± 0.042853",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.620162,
+            "range": "± 0.564978",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083783,
+            "range": "± 0.001418",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 795.068874,
+            "range": "± 27.590688",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1034.894014,
+            "range": "± 29.080443",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.127531,
+            "range": "± 0.004645",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1270.956171,
+            "range": "± 83.740595",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1569.676174,
+            "range": "± 86.136831",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033646,
+            "range": "± 0.001099",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.585481,
+            "range": "± 0.149043",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.263641,
+            "range": "± 0.277047",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
