@@ -23,8 +23,8 @@ use std::time::Duration;
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
-    BlockHash, ChunkKey, Config, DataCommitment, TokioServiceHandle, Traced, TxChunkOffset,
-    app_state::DatabaseProvider, chunk::UnpackedChunk,
+    BlockHash, ChunkKey, Config, DataCommitment, IrysAddress, TokioServiceHandle, Traced,
+    TxChunkOffset, app_state::DatabaseProvider, chunk::UnpackedChunk,
 };
 use lru::LruCache;
 use pending_ingress_proofs::PendingIngressProofs;
@@ -205,6 +205,9 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
     pub(crate) ingress_proof_generation_state: IngressProofGenerationState,
     http_ingress_open: Arc<Mutex<bool>>,
+    /// This node's signer address, derived once at start. The derivation is
+    /// an EC public-key computation, too costly for each duplicate chunk.
+    ingress_address: IrysAddress,
 }
 
 impl ChunkIngressServiceInner {
@@ -458,6 +461,7 @@ impl ChunkIngressService {
                         chunk_data_writer,
                         ingress_proof_generation_state,
                         http_ingress_open,
+                        ingress_address,
                     }),
                 };
                 let retry_inner = Arc::clone(&service.inner);

@@ -529,14 +529,10 @@ impl ChunkIngressServiceInner {
         // a key can be left over from an earlier upload of the same data.
         // This node's ingress leaf for the chunk is deleted with the row, so
         // a present leaf proves that the chunk was processed under the
-        // current row. Read the leaf only on a key hit: the address costs a
-        // key derivation.
-        let leaf_address = self
-            .recent_valid_chunks
-            .read()
-            .await
-            .contains(&chunk_key)
-            .then(|| self.config.irys_signer().address());
+        // current row. Read the leaf only on a key hit. The LRU guard is
+        // released before the database read.
+        let recent_key_hit = self.recent_valid_chunks.read().await.contains(&chunk_key);
+        let leaf_address = recent_key_hit.then_some(self.ingress_address);
 
         // Check to see if we have a cached data_root for this chunk. The leaf
         // is read in the same transaction, so it belongs to this row.
@@ -4066,6 +4062,7 @@ mod tests {
                 &new_mock_signed_header(),
                 config.consensus.clone(),
             ))));
+        let ingress_address = config.irys_signer().address();
         let inner = ChunkIngressServiceInner {
             block_tree_read_guard,
             config,
@@ -4092,6 +4089,7 @@ mod tests {
             chunk_data_writer: super::super::chunk_data_writer::ChunkDataWriter::closed_for_test(),
             ingress_proof_generation_state: super::super::IngressProofGenerationState::new(),
             http_ingress_open: std::sync::Arc::new(std::sync::Mutex::new(true)),
+            ingress_address,
         };
         (inner, receivers)
     }
