@@ -1,9 +1,12 @@
 use crate::ApiState;
 use crate::error::ApiError;
-use actix_web::web::{Data, Json, Path, Query};
+use actix_web::web::{self, Data, Json, Path, Query};
 use awc::http::StatusCode;
+use irys_actors::chunk_fetcher::{
+    MAX_PERSISTED_QUERY_ENTRIES, PersistedOffsetsResponse, PersistedQueryEntry,
+};
 use irys_domain::{ChunkType, StorageModule};
-use irys_types::{DataLedger, H256, PartitionChunkOffset, ii};
+use irys_types::{DataLedger, DataRoot, H256, PartitionChunkOffset, TxChunkOffset, ii};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -16,6 +19,8 @@ pub const INTERVALS_ROUTE: &str = "/storage/intervals/{ledger}/{slot_index}/{chu
 pub const COUNTS_ROUTE: &str = "/storage/counts/{ledger}/{slot_index}";
 pub const PARTITION_INTERVALS_ROUTE: &str =
     "/storage/partition/{partition_hash}/intervals/{chunk_type}";
+
+pub const PERSISTED_ROUTE: &str = "/storage/persisted/{ledger}/{slot_index}";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StorageIntervalsParams {
@@ -207,6 +212,114 @@ pub async fn get_intervals(
     });
     response.assigned = Some(storage_module.is_some());
     Ok(Json(response))
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PersistedParams {
+    ledger: DataLedger,
+    slot_index: usize,
+}
+
+fn check_persisted_query_size(entries: usize) -> Result<(), ApiError> {
+    if entries > MAX_PERSISTED_QUERY_ENTRIES {
+        return Err(ApiError::CustomWithStatus(
+            format!(
+                "persisted query has {entries} entries; the limit is {MAX_PERSISTED_QUERY_ENTRIES}"
+            ),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    Ok(())
+}
+
+/// Offsets of `entries` that hold a crash-safe placement of exactly the
+/// requested chunk, ascending and unique. `persisted` is
+/// `StorageModule::is_data_chunk_persisted_at`; `indexed` is
+/// `StorageModule::data_root_and_tx_offset_at`. A failed index read
+/// attests nothing.
+fn persisted_offsets(
+    entries: &[PersistedQueryEntry],
+    persisted: impl Fn(PartitionChunkOffset) -> bool,
+    indexed: impl Fn(PartitionChunkOffset) -> eyre::Result<Option<(DataRoot, TxChunkOffset)>>,
+) -> Vec<u32> {
+    let mut offsets: Vec<u32> = entries
+        .iter()
+        .filter(|entry| {
+            let offset = PartitionChunkOffset::from(entry.offset);
+            let names_this_chunk = matches!(
+                indexed(offset),
+                Ok(Some((data_root, tx_offset)))
+                    if data_root == entry.data_root && tx_offset == entry.tx_offset
+            );
+            names_this_chunk && persisted(offset)
+        })
+        .map(|entry| entry.offset)
+        .collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
+}
+
+/// This node's storage module for `ledger` slot `slot_index`, if it is
+/// assigned one.
+fn slot_module(
+    storage_modules: &[Arc<StorageModule>],
+    ledger: DataLedger,
+    slot_index: usize,
+) -> Option<Arc<StorageModule>> {
+    storage_modules
+        .iter()
+        .find(|sm| {
+            sm.partition_assignment().is_some_and(|pa| {
+                pa.ledger_id == Some(ledger.into()) && pa.slot_index == Some(slot_index)
+            })
+        })
+        .cloned()
+}
+
+/// Which requested chunks this node holds as crash-safe placements in its
+/// storage module for the ledger slot. A node that accepted an upload asks
+/// this of the slot's assignees before it deletes a body only it holds.
+pub async fn post_persisted(
+    params: Path<PersistedParams>,
+    entries: Json<Vec<PersistedQueryEntry>>,
+    app_state: Data<ApiState>,
+) -> Result<Json<PersistedOffsetsResponse>, ApiError> {
+    check_persisted_query_size(entries.len())?;
+    let module = slot_module(
+        &app_state.chunk_provider.storage_modules_guard.read(),
+        params.ledger,
+        params.slot_index,
+    );
+    let assigned = module.is_some();
+    let persisted = match module {
+        Some(module) => {
+            let entries = entries.into_inner();
+            // Up to one index point read per entry: keep them off the
+            // actix worker.
+            web::block(move || {
+                persisted_offsets(
+                    &entries,
+                    |offset| module.is_data_chunk_persisted_at(offset),
+                    |offset| module.data_root_and_tx_offset_at(offset),
+                )
+            })
+            .await
+            .map_err(|error| {
+                ApiError::CustomWithStatus(
+                    format!("persisted lookup failed: {error}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            })?
+        }
+        None => Vec::new(),
+    };
+    Ok(Json(PersistedOffsetsResponse {
+        ledger: params.ledger,
+        slot_index: params.slot_index,
+        assigned,
+        persisted,
+    }))
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -780,5 +893,181 @@ mod tests {
         assert_eq!(object["dataChunks"], 10);
         assert_eq!(object["packedChunks"], 20);
         assert_eq!(object["ledger"], "Submit");
+    }
+    // === Persisted-placement attestation ===
+
+    fn asked(offset: u32, data_root: H256, tx_offset: u32) -> PersistedQueryEntry {
+        PersistedQueryEntry {
+            offset,
+            data_root,
+            tx_offset: TxChunkOffset::from(tx_offset),
+        }
+    }
+
+    /// Offset 0 is persisted and indexed as asked. Offset 1 is indexed as
+    /// asked but not persisted (live only, or mid-write). Offset 2 is
+    /// persisted but the index names another chunk. Offset 3 has no index
+    /// row. Offset 4's index read fails. Only offset 0 is attested.
+    #[core::prelude::v1::test]
+    fn persisted_offsets_lists_only_persisted_placements_of_the_asked_chunk() {
+        let root = H256::repeat_byte(1);
+        let other = H256::repeat_byte(2);
+        let persisted = |offset: PartitionChunkOffset| *offset != 1;
+        let indexed =
+            |offset: PartitionChunkOffset| -> eyre::Result<Option<(H256, TxChunkOffset)>> {
+                match *offset {
+                    0 | 1 => Ok(Some((root, TxChunkOffset::from(*offset)))),
+                    2 => Ok(Some((other, TxChunkOffset::from(2)))),
+                    3 => Ok(None),
+                    _ => Err(eyre::eyre!("index read failed")),
+                }
+            };
+        let query = [
+            asked(4, root, 4),
+            asked(0, root, 0),
+            asked(1, root, 1),
+            asked(2, root, 2),
+            asked(3, root, 3),
+            asked(0, root, 0),
+        ];
+        assert_eq!(persisted_offsets(&query, persisted, indexed), vec![0]);
+        assert!(
+            persisted_offsets(&[asked(0, root, 5)], persisted, indexed).is_empty(),
+            "the right root at the wrong tx offset is another chunk"
+        );
+    }
+
+    /// Against a real ledger-assigned module: a persisted, indexed chunk is
+    /// attested; the same offset asked as another chunk is not; an indexed
+    /// offset whose body was never written is not.
+    #[actix_web::test]
+    async fn persisted_offsets_reads_a_real_storage_module() -> eyre::Result<()> {
+        use irys_types::{
+            DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange, SubmoduleIndexEngine,
+            irys::IrysSigner, ledger_chunk_offset_ii,
+        };
+
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("persisted_offsets_api")
+            .build();
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: PARTITION_CHUNKS,
+            entropy_packing_iterations: 1,
+            ..node_config.consensus_config()
+        });
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        node_config.database.submodule_index = SubmoduleIndexEngine::Rocksdb;
+        let config = Config::new_with_random_peer_id(node_config);
+        let module = module_with_assignment(
+            0,
+            &config,
+            PartitionAssignment {
+                partition_hash: H256::random(),
+                miner_address: config.node_config.miner_address(),
+                ledger_id: Some(DataLedger::Submit.into()),
+                slot_index: Some(0),
+            },
+        );
+        module.pack_with_zeros();
+
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let tx = signer
+            .sign_transaction(signer.create_transaction(vec![9_u8; 64], H256::repeat_byte(1))?)?;
+        let chunks = tx.data_chunks()?;
+        let (_, paths) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        module.index_transaction_data(
+            &tx.header,
+            &paths[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 1)),
+            1,
+        )?;
+        module.write_data_chunk(&chunks[0])?;
+        module.force_sync_pending_chunks()?;
+        assert!(module.is_data_chunk_persisted_at(PartitionChunkOffset::from(0)));
+        assert!(!module.is_data_chunk_persisted_at(PartitionChunkOffset::from(1)));
+
+        let root = tx.header.data_root;
+        let read = |query: &[PersistedQueryEntry]| {
+            persisted_offsets(
+                query,
+                |offset| module.is_data_chunk_persisted_at(offset),
+                |offset| module.data_root_and_tx_offset_at(offset),
+            )
+        };
+        assert_eq!(read(&[asked(0, root, 0), asked(1, root, 1)]), vec![0]);
+        assert!(read(&[asked(0, H256::repeat_byte(7), 0)]).is_empty());
+        Ok(())
+    }
+
+    #[core::prelude::v1::test]
+    fn a_full_persisted_query_fits_the_json_limit_and_one_more_is_rejected() {
+        let widest = asked(u32::MAX, H256::repeat_byte(0xff), u32::MAX);
+        let full = vec![widest; MAX_PERSISTED_QUERY_ENTRIES];
+        let bytes = serde_json::to_vec(&full).expect("serialise").len();
+        assert!(
+            bytes < 1024 * 1024,
+            "a full query is {bytes} bytes; the API's JSON limit is 1 MiB"
+        );
+        assert!(check_persisted_query_size(MAX_PERSISTED_QUERY_ENTRIES).is_ok());
+        let err = check_persisted_query_size(MAX_PERSISTED_QUERY_ENTRIES + 1)
+            .expect_err("one entry over the limit");
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[actix_web::test]
+    async fn persisted_path_reaches_handler() {
+        async fn echo_persisted(params: Path<PersistedParams>) -> Json<PersistedParams> {
+            Json(params.into_inner())
+        }
+        let app = test::init_service(App::new().service(
+            web::scope(crate::API_VERSION).route(PERSISTED_ROUTE, web::post().to(echo_persisted)),
+        ))
+        .await;
+        let req = test::TestRequest::post()
+            .uri("/v1/storage/persisted/ThirtyDay/4")
+            .set_json(serde_json::json!([]))
+            .to_request();
+        let resp = app.call(req).await.expect("call");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&test::read_body(resp).await).expect("JSON");
+        assert_eq!(
+            parsed,
+            serde_json::json!({"ledger": "ThirtyDay", "slot_index": 4})
+        );
+    }
+
+    /// Only the module assigned to exactly this ledger slot answers. Any other
+    /// slot gets `assigned: false` and no offsets.
+    #[core::prelude::v1::test]
+    fn only_the_module_for_this_ledger_slot_answers() {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("persisted_slot_module")
+            .build();
+        let config = storage_test_config(tmp_dir.path().to_path_buf());
+        let assigned = |id, ledger: DataLedger, slot_index| {
+            module_with_assignment(
+                id,
+                &config,
+                PartitionAssignment {
+                    partition_hash: H256::random(),
+                    miner_address: config.node_config.miner_address(),
+                    ledger_id: Some(ledger.into()),
+                    slot_index: Some(slot_index),
+                },
+            )
+        };
+        let modules = vec![
+            assigned(0, DataLedger::Submit, 0),
+            assigned(1, DataLedger::ThirtyDay, 1),
+            module_with_assignment(2, &config, capacity_assignment_for(&config, H256::random())),
+        ];
+
+        let found = slot_module(&modules, DataLedger::ThirtyDay, 1).expect("assigned slot");
+        assert!(Arc::ptr_eq(&found, &modules[1]));
+        assert!(slot_module(&modules, DataLedger::ThirtyDay, 0).is_none());
+        assert!(slot_module(&modules, DataLedger::Publish, 1).is_none());
     }
 }

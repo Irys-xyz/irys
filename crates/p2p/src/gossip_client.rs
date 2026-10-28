@@ -2001,17 +2001,13 @@ impl GossipClient {
         false
     }
 
-    /// Offer an announcement. On 404, remember the peer and push the body.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "mirrors send_preserialized_detached"
-    )]
+    /// Offer an announcement. On 404, remember the peer, then push the body
+    /// only when `push_fallback` carries one.
     pub(crate) fn send_chunk_announcement_detached(
         &self,
         peer: (&IrysPeerId, &PeerListItem),
         announcement: crate::wire_types::ChunkAnnouncement,
-        push_route: GossipRoutes,
-        push_body: bytes::Bytes,
+        push_fallback: Option<(GossipRoutes, bytes::Bytes)>,
         peer_list: &PeerList,
         cache: Arc<GossipCache>,
         gossip_cache_key: GossipCacheKey,
@@ -2035,6 +2031,13 @@ impl GossipClient {
                                 // The 404 answered the admission above. Settle
                                 // that trial, then push without taking another.
                                 client.circuit_breaker.record_success(&peer_id);
+                                let Some((push_route, push_body)) = push_fallback else {
+                                    debug!(
+                                        ?peer_id,
+                                        "peer lacks the chunk announce route; no body fallback"
+                                    );
+                                    return;
+                                };
                                 let result = client
                                     .push_preserialized_retries(&address, push_route, push_body)
                                     .await;
@@ -4945,8 +4948,7 @@ mod tests {
             client.send_chunk_announcement_detached(
                 (&peer_id, &peer),
                 announcement,
-                GossipRoutes::Chunk,
-                bytes::Bytes::from_static(b"{}"),
+                Some((GossipRoutes::Chunk, bytes::Bytes::from_static(b"{}"))),
                 &peer_list,
                 Arc::clone(&cache),
                 key,
@@ -5013,8 +5015,7 @@ mod tests {
             client.send_chunk_announcement_detached(
                 (&peer_id, &peer),
                 announcement,
-                GossipRoutes::Chunk,
-                bytes::Bytes::from_static(b"{}"),
+                Some((GossipRoutes::Chunk, bytes::Bytes::from_static(b"{}"))),
                 &peer_list,
                 Arc::clone(&cache),
                 key,
@@ -5076,8 +5077,7 @@ mod tests {
             client.send_chunk_announcement_detached(
                 (&peer_id, &peer),
                 announcement,
-                GossipRoutes::Chunk,
-                bytes::Bytes::from_static(b"{}"),
+                Some((GossipRoutes::Chunk, bytes::Bytes::from_static(b"{}"))),
                 &peer_list,
                 Arc::clone(&cache),
                 key,
@@ -5116,6 +5116,59 @@ mod tests {
             assert_eq!(scored.reputation_score.get(), initial_score);
             assert!(!scored.is_online);
             assert_eq!(client.circuit_breaker.metrics().open_count, 0);
+        }
+
+        /// Without a fallback body, a 404 on `/chunk_announce` remembers the
+        /// peer as lacking the route, settles the breaker trial, and pushes
+        /// nothing. Re-announcement relies on this to stay small.
+        #[tokio::test]
+        async fn announce_404_without_a_fallback_pushes_nothing() -> eyre::Result<()> {
+            let announce_hits = Arc::new(AtomicUsize::new(0));
+            let chunk_hits = Arc::new(AtomicUsize::new(0));
+            let server =
+                OldAnnouncePeer::spawn(Arc::clone(&announce_hits), Arc::clone(&chunk_hits));
+            let client = production_client();
+            let (peer_list, peer_id, peer, _) = peer_aimed_at(9, server.addr);
+            let cache = Arc::new(GossipCache::new());
+            let key = GossipCacheKey::Chunk(H256::zero());
+            let announcement = wire_types::ChunkAnnouncement {
+                data_root: H256::zero(),
+                data_size: 32,
+                tx_offset: irys_types::TxChunkOffset::from(0),
+                chunk_path_hash: H256::zero(),
+            };
+
+            client.send_chunk_announcement_detached(
+                (&peer_id, &peer),
+                announcement,
+                None,
+                &peer_list,
+                Arc::clone(&cache),
+                key,
+            );
+            crate::tests::util::poll_until(
+                Duration::from_secs(5),
+                "the 404 marked the peer",
+                || client.peer_lacks_announce(&peer_id),
+            )
+            .await?;
+            crate::tests::util::poll_until(Duration::from_secs(5), "offer completed", || {
+                Arc::strong_count(&cache) == 1
+            })
+            .await?;
+
+            assert_eq!(announce_hits.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                chunk_hits.load(Ordering::SeqCst),
+                0,
+                "no body may follow the 404"
+            );
+            assert!(!cache.peers_that_have_seen(&key)?.contains(&peer_id));
+            assert!(
+                client.circuit_breaker.would_allow(&peer_id),
+                "the 404 settles the admission trial"
+            );
+            Ok(())
         }
 
         /// 404 on `/chunk_announce`, then accept the body push.
