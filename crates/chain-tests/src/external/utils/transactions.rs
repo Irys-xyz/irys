@@ -76,7 +76,10 @@ pub(crate) async fn post_data_transaction(
         })?;
     info!("Successfully posted transaction header!");
 
-    info!("Transaction has {} merkle nodes", signed_tx.chunks.len());
+    info!(
+        "Transaction has {} merkle nodes",
+        signed_tx.data_chunks().unwrap().len()
+    );
     post_transaction_chunks(client, &signed_tx)
         .await
         .map_err(|e| {

@@ -26,6 +26,7 @@ irys-types.workspace = true
 irys-utils.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+toml.workspace = true
 irys-testing-utils.workspace = true
 test-fuzz.workspace = true
 metrics.workspace = true
@@ -62,6 +63,7 @@ path = "src/bin/tx_path_derive_bench.rs"
 
 [dev-dependencies]
 irys-config = { workspace = true, features = ["test-utils"] }
+irys-data-tree.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 test-log.workspace = true
 rand.workspace = true

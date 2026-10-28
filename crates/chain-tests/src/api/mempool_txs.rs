@@ -149,7 +149,7 @@ async fn heavy_test_mempool_txs_empty_and_pending_lifecycle() -> eyre::Result<()
         .expect("entry");
     assert_eq!(entry.byte_size, data_size);
     assert!(entry.chunks >= 1);
-    assert_eq!(entry.data_root, tx.header.data_root);
+    assert_eq!(entry.data_root, tx.header.data_tree_root.0);
 
     // 2b. Cursor paging reaches every data tx past `limit`.
     for i in 0..4_u8 {

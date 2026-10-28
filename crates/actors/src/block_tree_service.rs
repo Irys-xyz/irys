@@ -2272,7 +2272,7 @@ mod tests {
                 db.clone(),
                 block_index_guard.clone(),
                 None,
-                config.consensus.chunk_size,
+                config.data_tree_geometry(),
                 config.consensus.epoch.num_blocks_in_epoch,
                 config.consensus.block_tree_depth,
                 config.consensus.block_migration_depth as u64,

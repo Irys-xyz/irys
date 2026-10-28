@@ -1,5 +1,6 @@
 use crate::chunk_ingress_service::{
-    ChunkIngressError, ChunkIngressMessage, CriticalChunkIngressError, IngressProofError,
+    ChunkIngressError, ChunkIngressMessage, ChunkIngressSource, CriticalChunkIngressError,
+    IngressProofError,
 };
 use crate::services::ServiceSenders;
 use irys_types::{IngressProof, SendTraced as _, Traced, chunk::UnpackedChunk};
@@ -15,18 +16,21 @@ impl ChunkIngressFacadeImpl {
         Self { service }
     }
 
+    /// `source`: see [`ChunkIngressSource`].
     pub async fn handle_chunk_ingress(
         &self,
         chunk: UnpackedChunk,
+        source: ChunkIngressSource,
     ) -> Result<(), ChunkIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let chunk_data_root = chunk.data_root;
+        let chunk_data_root = chunk.data_tree_root;
         let chunk_tx_offset = chunk.tx_offset;
         self.service
             .send_traced(ChunkIngressMessage::IngestChunk(
                 chunk,
                 Some(oneshot_tx),
                 None,
+                source,
             ))
             .map_err(|_| {
                 CriticalChunkIngressError::Other(format!(
@@ -47,7 +51,7 @@ impl ChunkIngressFacadeImpl {
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let data_root = ingress_proof.data_root;
+        let data_commitment = ingress_proof.data_commitment;
         self.service
             .send_traced(ChunkIngressMessage::IngestIngressProof(
                 ingress_proof,
@@ -55,14 +59,14 @@ impl ChunkIngressFacadeImpl {
             ))
             .map_err(|_| {
                 IngressProofError::Other(format!(
-                    "Error sending IngestIngressProof message for data_root {:?}",
-                    data_root
+                    "Error sending IngestIngressProof message for data_commitment {:?}",
+                    data_commitment
                 ))
             })?;
         oneshot_rx.await.map_err(|_| {
             IngressProofError::Other(format!(
-                "ChunkIngressService dropped response channel for ingress proof data_root {:?}",
-                data_root
+                "ChunkIngressService dropped response channel for ingress proof data_commitment {:?}",
+                data_commitment
             ))
         })?
     }

@@ -1,8 +1,9 @@
 use dashmap::DashSet;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{cache_chunk_verified, store_ingress_data_hash};
+use irys_types::data_tree::Geometry;
 use irys_types::{
-    ChunkPathHash, DatabaseProvider, H256, IrysAddress, UnpackedChunk, generate_ingress_data_hash,
+    ChunkKey, DatabaseProvider, H256, IrysAddress, UnpackedChunk, generate_ingress_data_hash,
 };
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -19,12 +20,14 @@ struct PendingChunkWrite {
 ///
 /// Chunks are queued via [`queue_write`] and written in batches on a background
 /// task, reducing per-chunk MDBX transaction overhead on the hot ingress path.
-/// A [`DashSet`] tracks pending chunk hashes so the writer can detect
+/// A [`DashSet`] tracks pending chunk keys so the writer can detect
 /// in-flight duplicates without hitting the database.
 #[derive(Debug)]
 pub(crate) struct ChunkDataWriter {
     tx: mpsc::Sender<PendingChunkWrite>,
-    pending_hashes: Arc<DashSet<ChunkPathHash>>,
+    pending_chunk_keys: Arc<DashSet<ChunkKey>>,
+    /// Derives each chunk's `ChunkKey`.
+    geometry: Geometry,
 }
 
 pub(crate) struct QueuedChunkWrite {
@@ -47,21 +50,27 @@ impl ChunkDataWriter {
     pub(crate) fn spawn(
         db: DatabaseProvider,
         address: IrysAddress,
+        geometry: Geometry,
         buffer_size: usize,
         runtime_handle: &tokio::runtime::Handle,
     ) -> Self {
         let (tx, rx) = mpsc::channel(buffer_size.max(1));
-        let pending_hashes = Arc::new(DashSet::new());
+        let pending_chunk_keys = Arc::new(DashSet::new());
 
         let writer = BackgroundWriter {
             rx,
             db,
             address,
-            pending_hashes: Arc::clone(&pending_hashes),
+            geometry,
+            pending_chunk_keys: Arc::clone(&pending_chunk_keys),
         };
         runtime_handle.spawn(writer.run());
 
-        Self { tx, pending_hashes }
+        Self {
+            tx,
+            pending_chunk_keys,
+            geometry,
+        }
     }
 
     /// A writer whose channel is already closed, so `queue_write` fails before
@@ -72,7 +81,8 @@ impl ChunkDataWriter {
         drop(rx);
         Self {
             tx,
-            pending_hashes: Arc::new(DashSet::new()),
+            pending_chunk_keys: Arc::new(DashSet::new()),
+            geometry: Geometry::TESTING,
         }
     }
 
@@ -80,14 +90,14 @@ impl ChunkDataWriter {
     ///
     /// Concurrent writes are still committed in shared MDBX batches, but each
     /// caller receives an acknowledgement for the batch containing its own
-    /// chunk. The returned handle also records whether the chunk hash was
+    /// chunk. The returned handle also records whether the chunk key was
     /// already pending (duplicate).
     pub(crate) async fn queue_write(
         &self,
         chunk: Arc<UnpackedChunk>,
     ) -> Result<QueuedChunkWrite, QueueError> {
-        let hash = chunk.chunk_path_hash();
-        let is_duplicate = !self.pending_hashes.insert(hash);
+        let chunk_key = chunk.chunk_key(&self.geometry);
+        let is_duplicate = !self.pending_chunk_keys.insert(chunk_key);
         let (done_tx, done_rx) = oneshot::channel();
         if self
             .tx
@@ -98,7 +108,7 @@ impl ChunkDataWriter {
             .await
             .is_err()
         {
-            self.pending_hashes.remove(&hash);
+            self.pending_chunk_keys.remove(&chunk_key);
             return Err(QueueError::ChannelClosed);
         }
         Ok(QueuedChunkWrite {
@@ -120,7 +130,9 @@ struct BackgroundWriter {
     rx: mpsc::Receiver<PendingChunkWrite>,
     db: DatabaseProvider,
     address: IrysAddress,
-    pending_hashes: Arc<DashSet<ChunkPathHash>>,
+    /// Derives each chunk's `data_commitment`, the cache key.
+    geometry: Geometry,
+    pending_chunk_keys: Arc<DashSet<ChunkKey>>,
 }
 
 impl BackgroundWriter {
@@ -176,11 +188,11 @@ impl BackgroundWriter {
             return Ok(());
         }
 
-        let hashes: Vec<(ChunkPathHash, H256)> = batch
+        let chunk_key_ingress_hashes: Vec<(ChunkKey, H256)> = batch
             .iter()
             .map(|pending| {
                 (
-                    pending.chunk.chunk_path_hash(),
+                    pending.chunk.chunk_key(&self.geometry),
                     generate_ingress_data_hash(&pending.chunk.bytes.0, self.address),
                 )
             })
@@ -188,20 +200,22 @@ impl BackgroundWriter {
 
         let result = self.db.update_eyre(|tx| {
             let mut written = 0_usize;
-            for (pending, (chunk_path_hash, ingress_data_hash)) in batch.iter().zip(&hashes) {
-                match cache_chunk_verified(tx, &pending.chunk) {
+            for (pending, (chunk_key, ingress_data_hash)) in
+                batch.iter().zip(&chunk_key_ingress_hashes)
+            {
+                match cache_chunk_verified(tx, &pending.chunk, &self.geometry) {
                     Ok(is_duplicate) => {
                         if is_duplicate {
                             warn!(
                                 "Duplicate chunk {} of {} in write-behind batch",
-                                chunk_path_hash, pending.chunk.data_root
+                                chunk_key, pending.chunk.data_tree_root
                             );
                         } else {
                             written += 1;
                         }
                         store_ingress_data_hash(
                             tx,
-                            pending.chunk.data_root,
+                            pending.chunk.data_commitment(&self.geometry),
                             self.address,
                             pending.chunk.tx_offset,
                             *ingress_data_hash,
@@ -211,7 +225,7 @@ impl BackgroundWriter {
                     Err(e) => {
                         error!(
                             "Failed to cache chunk {} of {}: {:?}",
-                            chunk_path_hash, pending.chunk.data_root, e
+                            chunk_key, pending.chunk.data_tree_root, e
                         );
                         return Err(e);
                     }
@@ -220,8 +234,8 @@ impl BackgroundWriter {
             Ok(written)
         });
 
-        for (chunk_path_hash, _) in &hashes {
-            self.pending_hashes.remove(chunk_path_hash);
+        for (chunk_key, _) in &chunk_key_ingress_hashes {
+            self.pending_chunk_keys.remove(chunk_key);
         }
 
         match result {
@@ -251,8 +265,40 @@ mod tests {
         tables::{CachedDataRoots, IrysTables},
     };
     use irys_testing_utils::TempDirBuilder;
+    use irys_types::DataTreeRoot;
     use irys_types::{Base64, H256, TxChunkOffset};
     use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+
+    /// Two indices of one commitment can carry byte-identical proofs. The queue
+    /// identifies chunks by index, so neither is mistaken for the other.
+    #[tokio::test]
+    async fn two_indices_with_identical_proof_bytes_are_both_queued() {
+        // No consumer: entries stay pending, so the duplicate flag is deterministic.
+        let (tx, _rx) = mpsc::channel(4);
+        let writer = ChunkDataWriter {
+            tx,
+            pending_chunk_keys: Arc::new(DashSet::new()),
+            geometry: Geometry::TESTING,
+        };
+        let chunk_at = |index: u32| {
+            Arc::new(UnpackedChunk {
+                data_tree_root: DataTreeRoot(H256([0x61; 32])),
+                data_size: 16,
+                data_path: Base64(vec![1, 2, 3]),
+                bytes: Base64(vec![9_u8; 8]),
+                tx_offset: TxChunkOffset::from(index),
+            })
+        };
+
+        let first = writer.queue_write(chunk_at(0)).await.unwrap();
+        let second = writer.queue_write(chunk_at(1)).await.unwrap();
+        assert!(!first.is_duplicate());
+        assert!(!second.is_duplicate());
+        assert_eq!(writer.pending_chunk_keys.len(), 2);
+
+        let repeat = writer.queue_write(chunk_at(1)).await.unwrap();
+        assert!(repeat.is_duplicate());
+    }
 
     #[test_log::test(tokio::test)]
     async fn validated_leaf_is_persisted_without_a_storage_assignment() -> eyre::Result<()> {
@@ -269,20 +315,20 @@ mod tests {
         // The stored repeat-byte hash intentionally conflicts with the hash
         // generated from these bytes, forcing the whole auto-drained batch to fail.
         let chunk = Arc::new(UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 8,
             data_path: Base64::default(),
             bytes: Base64(vec![7_u8; 8]),
             tx_offset,
         });
+        let data_key = chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING);
         let ingress_data_hash = generate_ingress_data_hash(&chunk.bytes.0, address);
         let leaf = irys_types::generate_ingress_leaf_from_data_hash(ingress_data_hash, 8)?;
         db.update_eyre(|tx| {
             tx.put::<CachedDataRoots>(
-                data_root,
+                data_key,
                 CachedDataRoot {
                     data_size: 8,
-                    data_size_confirmed: true,
                     block_set: vec![H256::random()],
                     ..Default::default()
                 },
@@ -290,19 +336,24 @@ mod tests {
             Ok(())
         })?;
 
-        let writer =
-            ChunkDataWriter::spawn(db.clone(), address, 8, &tokio::runtime::Handle::current());
+        let writer = ChunkDataWriter::spawn(
+            db.clone(),
+            address,
+            irys_types::data_tree::Geometry::TESTING,
+            8,
+            &tokio::runtime::Handle::current(),
+        );
         let queued = writer.queue_write(chunk).await?;
         assert!(!queued.is_duplicate());
         queued.committed().await?;
 
         db.view_eyre(|tx| {
-            assert!(cached_chunk_by_chunk_offset(tx, data_root, tx_offset)?.is_some());
-            let cached_leaf = cached_ingress_leaf(tx, data_root, address, tx_offset)?
+            assert!(cached_chunk_by_chunk_offset(tx, data_key, tx_offset)?.is_some());
+            let cached_leaf = cached_ingress_leaf(tx, data_key, address, tx_offset)?
                 .expect("validated leaf must be stored without any storage assignment");
             assert_eq!(cached_leaf.ingress_data_hash, ingress_data_hash);
             assert_eq!(
-                complete_ingress_leaves(tx, data_root, address, 8, 8)?.unwrap(),
+                complete_ingress_leaves(tx, data_key, address, 8, 8)?.unwrap(),
                 vec![leaf],
                 "a non-assignee's validated leaves must satisfy proof readiness"
             );
@@ -323,33 +374,34 @@ mod tests {
         let address = IrysAddress::random();
         let tx_offset = TxChunkOffset::from(0_u32);
         let chunk = Arc::new(UnpackedChunk {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: 8,
             data_path: Base64::default(),
             bytes: Base64(vec![7_u8; 8]),
             tx_offset,
         });
+        let data_key = chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING);
         db.update_eyre(|tx| {
             tx.put::<CachedDataRoots>(
-                data_root,
+                data_key,
                 CachedDataRoot {
                     data_size: 8,
-                    data_size_confirmed: true,
                     block_set: vec![H256::random()],
                     ..Default::default()
                 },
             )?;
-            store_ingress_data_hash(tx, data_root, address, tx_offset, H256::repeat_byte(9))?;
+            store_ingress_data_hash(tx, data_key, address, tx_offset, H256::repeat_byte(9))?;
             Ok(())
         })?;
 
         let (command_tx, command_rx) = mpsc::channel(4);
-        let pending_hashes = Arc::new(DashSet::new());
+        let pending_chunk_keys = Arc::new(DashSet::new());
         let background = BackgroundWriter {
             rx: command_rx,
             db: db.clone(),
             address,
-            pending_hashes,
+            geometry: irys_types::data_tree::Geometry::TESTING,
+            pending_chunk_keys,
         };
         let (first_done_tx, first_done_rx) = oneshot::channel();
         let (second_done_tx, second_done_rx) = oneshot::channel();
@@ -367,9 +419,9 @@ mod tests {
         assert_eq!(first_done_rx.await?, Err(QueueError::WriteFailed));
         assert_eq!(second_done_rx.await?, Err(QueueError::WriteFailed));
         db.view_eyre(|tx| {
-            assert!(cached_chunk_by_chunk_offset(tx, data_root, tx_offset)?.is_none());
+            assert!(cached_chunk_by_chunk_offset(tx, data_key, tx_offset)?.is_none());
             assert_eq!(
-                cached_ingress_leaf(tx, data_root, address, tx_offset)?
+                cached_ingress_leaf(tx, data_key, address, tx_offset)?
                     .expect("pre-existing leaf remains after rollback")
                     .ingress_data_hash,
                 H256::repeat_byte(9)

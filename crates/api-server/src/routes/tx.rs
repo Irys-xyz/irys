@@ -250,10 +250,10 @@ pub async fn get_tx_local_start_offset(
         err: String::from("invalid ledger id"),
     })?;
 
-    match state
-        .chunk_provider
-        .get_ledger_offsets_for_data_root(ledger, tx_header.data_root)
-    {
+    match state.chunk_provider.get_ledger_offsets_for_commitment(
+        ledger,
+        tx_header.data_commitment(&state.config.data_tree_geometry()),
+    ) {
         Err(_error) => Err(ApiError::Internal {
             err: String::from("db error"),
         }),

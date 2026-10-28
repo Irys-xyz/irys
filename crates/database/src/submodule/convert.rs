@@ -18,8 +18,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eyre::WrapErr as _;
+use irys_types::data_tree::Geometry;
 use irys_types::{
-    ChunkDataPath, DataLedger, DataTransactionHeader, H256, PartitionChunkOffset,
+    ChunkDataPath, DataLedger, DataTransactionHeader, DataTreeRoot, H256, PartitionChunkOffset,
     RelativeChunkOffset, TxPath, TxPathHash, hash_sha256,
 };
 use reth_db::cursor::DbCursorRO as _;
@@ -33,6 +34,8 @@ use crate::db::IrysDatabaseExt as _;
 use crate::metadata::MetadataKey;
 use crate::submodule::db::read_schema_bytes;
 use crate::tx_header_by_txid;
+use irys_types::DataCommitment;
+
 use crate::tx_path_derive::{
     DerivedTxPath, TxPathBlockCache, consensus_is_behind, derive_tx_path_at_offset_cached,
     ledger_frontier, tx_header_schema, tx_path_hash,
@@ -46,8 +49,9 @@ use super::tables::{
     ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
     DataRootInfosByDataRoot, Metadata, OffsetMeta, PendingBodyMigration,
     PendingBodyMigrationsByOffset, SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA,
-    SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash,
-    TxPathInterval, TxPathIntervalByStart,
+    SUBMODULE_SCHEMA_DATA_ROOT_KEYS, SUBMODULE_SCHEMA_ROCKS_ROW, SUBMODULE_SCHEMA_ROCKS_V1,
+    TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval,
+    TxPathIntervalByStart,
 };
 
 const CONVERTING_FILE: &str = "CONVERTING";
@@ -96,10 +100,6 @@ pub struct EngineEquivalenceReport {
     pub pending_mismatches: u64,
     pub reset_marker_mismatch: u64,
     pub schema_mismatch: u64,
-    /// Parseable proof leaves plus reverse rows examined on the RocksDB v1 side.
-    pub content_offsets_checked: u64,
-    /// A proof leaf with no reverse row, or a reverse row whose proof leaf differs.
-    pub content_offset_mismatches: u64,
     /// Rows with no covering interval. Not a mismatch: the copy omits them, and
     /// `audit_index` rejects a proof or pending job left with no interval.
     pub skipped_orphans: u64,
@@ -138,7 +138,6 @@ impl EngineEquivalenceReport {
             self.pending_mismatches,
             self.reset_marker_mismatch,
             self.schema_mismatch,
-            self.content_offset_mismatches,
             self.mismatch_data_path_hash,
             self.mismatch_tx_path_hash,
             self.skipped_frontier,
@@ -188,8 +187,6 @@ impl std::fmt::Display for EngineEquivalenceReport {
                 ),
                 ("reset_marker_mismatch", &self.reset_marker_mismatch),
                 ("schema_mismatch", &self.schema_mismatch),
-                ("content_offsets_checked", &self.content_offsets_checked),
-                ("content_offset_mismatches", &self.content_offset_mismatches),
                 ("skipped_orphans", &self.skipped_orphans),
                 ("skipped_frontier", &self.skipped_frontier),
                 ("index_audit_findings", &self.index_audit_findings),
@@ -267,8 +264,9 @@ pub struct ConvertOptions {
     pub slot_index: u64,
     /// Consensus `num_chunks_in_partition`.
     pub chunks_per_partition: u64,
-    /// Consensus chunk size in bytes.
-    pub chunk_size: u64,
+    /// Data tree geometry of the chain config. Its chunk size sets the tx path
+    /// derivation, and it derives the data commitment of each tx.
+    pub data_tree_geometry: Geometry,
     /// `Some(n)` returns an error after `n` committed row batches and does
     /// not write the completion marker. `Some(0)` returns before the first
     /// row batch. The target is left incomplete.
@@ -291,7 +289,7 @@ impl ConvertOptions {
     /// Production batch size. `mdbx` should be the submodule arguments.
     /// The converter sets the exclusive lock itself. `consensus` starts as a
     /// clone of `mdbx`; the binary replaces it with the consensus arguments.
-    pub fn new(mdbx: DatabaseArguments) -> Self {
+    pub fn new(mdbx: DatabaseArguments, data_tree_geometry: Geometry) -> Self {
         Self {
             batch_rows: 2048,
             batch_value_bytes: 8 * 1024 * 1024,
@@ -302,7 +300,7 @@ impl ConvertOptions {
             ledger_id: 0,
             slot_index: 0,
             chunks_per_partition: 0,
-            chunk_size: 0,
+            data_tree_geometry,
             fail_after_batches: None,
             dry_run: false,
             rollback: false,
@@ -708,7 +706,10 @@ fn convert_opened(
     }
     let stats = match opened {
         OpenedMdbx::V2(src) => copy_v2_rocks(src, rocks_dir, options, db, map)?,
-        OpenedMdbx::V1(env) => copy_v1_rocks(env, rocks_dir, options, db, map)?,
+        OpenedMdbx::V1(env) => {
+            refuse_v1_data_rows(env)?;
+            copy_v1_rocks(env, rocks_dir, options, db, map)?
+        }
         OpenedMdbx::Empty(_) => write_empty_rocks(rocks_dir, options)?,
     };
     Ok(finish_stats(stats, started, source_v1))
@@ -910,6 +911,7 @@ pub fn convert_rocks_to_mdbx(
     let db = open_consensus(options)?;
     require_rocks_v1(rocks_dir)?;
     let src = map_open(RocksSubmoduleStore::open_read_only(rocks_dir))?;
+    require_commitment_keyed_rocks(&src, rocks_dir)?;
     if src.reset_in_progress()? {
         return Ok(finish_stats(
             write_reset_mdbx(mdbx_dir, options)?,
@@ -1005,6 +1007,7 @@ fn verify_opened_store(
             if reset_marker_on(env)? {
                 verify_reset_target(true, rocks)
             } else {
+                refuse_v1_data_rows(env)?;
                 verify_mdbx_v1_against_rocks(env, rocks, db, map)
             }
         }
@@ -1016,10 +1019,19 @@ struct PlacementMap {
     ledger: DataLedger,
     slot_index: u64,
     chunks_per_partition: u64,
-    chunk_size: u64,
+    data_tree_geometry: Geometry,
 }
 
 impl PlacementMap {
+    /// The only identity of a tx's data: its commitment under the chain geometry.
+    fn data_commitment(&self, data_tree_root: H256, data_size: u64) -> DataCommitment {
+        irys_types::data_tree::data_commitment(
+            &self.data_tree_geometry,
+            DataTreeRoot(data_tree_root),
+            data_size,
+        )
+    }
+
     fn ledger_offset(&self, partition_offset: PartitionChunkOffset) -> eyre::Result<u64> {
         let base = self
             .slot_index
@@ -1045,6 +1057,7 @@ struct PreparedPlacement {
     end: PartitionChunkOffset,
     path_hash: TxPathHash,
     data_root: H256,
+    data_commitment: DataCommitment,
     prefix_hash: H256,
     info: Option<DataRootInfo>,
     ledger_id: u32,
@@ -1059,8 +1072,8 @@ fn require_map(options: &ConvertOptions) -> eyre::Result<PlacementMap> {
             "pass --consensus-db, the node consensus database. The converter derives each tx path from it and refuses a byte mismatch."
         );
     }
-    if options.chunk_size == 0 || options.chunks_per_partition == 0 {
-        eyre::bail!("--chunk-size and --chunks-per-partition must be non-zero");
+    if options.chunks_per_partition == 0 {
+        eyre::bail!("num_chunks_in_partition must be non-zero");
     }
     let ledger = DataLedger::try_from(options.ledger_id).wrap_err_with(|| {
         format!(
@@ -1072,7 +1085,7 @@ fn require_map(options: &ConvertOptions) -> eyre::Result<PlacementMap> {
         ledger,
         slot_index: options.slot_index,
         chunks_per_partition: options.chunks_per_partition,
-        chunk_size: options.chunk_size,
+        data_tree_geometry: options.data_tree_geometry,
     })
 }
 
@@ -1484,21 +1497,22 @@ fn prepare_v2_placement<S: SubmoduleStore>(
     start: PartitionChunkOffset,
     interval: &TxPathInterval,
 ) -> eyre::Result<PreparedRun> {
-    // The binding names the data root the infos belong to. Derive checks that
-    // root before the infos are used, so the three reads share one view.
-    // A missing binding does not know the root until derive, and reads infos then.
+    // The binding names the data commitment the infos belong to. Derive checks
+    // the commitment before the infos are used, so the three reads share one
+    // view. A missing binding does not know the commitment until derive, and
+    // finds the infos then.
     let (stored, binding, mut infos) = src.view(|tx| {
         let stored = tx.get_full_tx_path(interval.tx_path_hash)?;
         let binding = tx.get_tx_leaf_binding(interval.tx_path_hash)?;
         let infos = match &binding {
-            Some(binding) => tx.get_data_root_infos_for_data_root(binding.data_root)?,
+            Some(binding) => tx.get_data_root_infos_for_commitment(binding.data_commitment)?,
             None => None,
         };
         Ok((stored, binding, infos))
     })?;
     let stored =
         stored.ok_or_else(|| eyre::eyre!("partition offset {} has no stored tx path", start.0))?;
-    let bound_root = binding.as_ref().map(|binding| binding.data_root);
+    let bound_commitment = binding.as_ref().map(|binding| binding.data_commitment);
     split_stored_interval(
         db,
         cache,
@@ -1510,16 +1524,28 @@ fn prepare_v2_placement<S: SubmoduleStore>(
             path_hash: interval.tx_path_hash,
             binding,
         },
-        |root| {
-            if bound_root == Some(root) {
+        |_root, data_commitment| {
+            if bound_commitment == Some(data_commitment) {
                 return Ok(infos.take().map(|infos| infos.0).unwrap_or_default());
             }
-            Ok(src
-                .view(|tx| tx.get_data_root_infos_for_data_root(root))?
-                .map(|infos| infos.0)
-                .unwrap_or_default())
+            stored_infos_for(src, data_commitment)
         },
     )
+}
+
+/// The stored infos for `data_commitment`. No row is an error: a placement
+/// must not be written under a commitment that has no stored infos.
+fn stored_infos_for<S: SubmoduleStore>(
+    src: &S,
+    data_commitment: DataCommitment,
+) -> eyre::Result<Vec<DataRootInfo>> {
+    src.view(|tx| tx.get_data_root_infos_for_commitment(data_commitment))?
+        .map(|DataRootInfos(infos)| infos)
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "no tx leaf binding and no data-root info for data commitment {data_commitment}"
+            )
+        })
 }
 
 /// One RocksDB placement per tx inside a stored interval.
@@ -1528,15 +1554,15 @@ fn prepare_v2_placement<S: SubmoduleStore>(
 /// the same bytes then occupy one interval. Cuts are the interval start plus
 /// every info start strictly inside it, the same cuts a placement read uses.
 /// The first segment must equal the stored bytes. Later segments use the
-/// derived proof. A later segment whose data root differs is corruption and
-/// aborts the run. A later segment the consensus database does not cover is
+/// derived proof. A later segment whose data root or data commitment differs
+/// is corruption and aborts the run. A later segment the consensus database does not cover is
 /// a frontier skip, and the resolved prefix is still returned.
 fn split_stored_interval(
     db: &DatabaseEnv,
     cache: &mut TxPathBlockCache,
     map: &PlacementMap,
     input: SplitInput<'_>,
-    mut load_infos: impl FnMut(H256) -> eyre::Result<Vec<DataRootInfo>>,
+    mut load_infos: impl FnMut(H256, DataCommitment) -> eyre::Result<Vec<DataRootInfo>>,
 ) -> eyre::Result<PreparedRun> {
     let SplitInput {
         start,
@@ -1560,6 +1586,7 @@ fn split_stored_interval(
         );
     }
     let first_header = load_header(db, &first, start)?;
+    let data_commitment = map.data_commitment(first.data_root, first_header.data_size);
     if let Some(binding) = &binding
         && (binding.data_root != first.data_root || binding.prefix_hash != first_header.prefix_hash)
     {
@@ -1568,7 +1595,28 @@ fn split_stored_interval(
             start.0
         );
     }
-    let infos = load_infos(first.data_root)?;
+    if let Some(binding) = &binding
+        && binding.data_commitment != data_commitment
+    {
+        eyre::bail!(
+            "tx leaf binding at partition offset {} names data commitment {}, but the derived tx has {data_commitment}. Check that --config has the consensus config of the chain that wrote this index: a config for another chain or preset derives other commitments.",
+            start.0,
+            binding.data_commitment
+        );
+    }
+    let infos = load_infos(first.data_root, data_commitment)?;
+    if let Some(info) = infos.iter().find(|info| {
+        info.data_tree_root.0 != first.data_root || info.data_size != first_header.data_size
+    }) {
+        eyre::bail!(
+            "data-root info at partition offset {} names root {} and size {}, but the derived tx has root {} and size {}",
+            start.0,
+            info.data_tree_root,
+            info.data_size,
+            first.data_root,
+            first_header.data_size
+        );
+    }
     let segments = tx_segments(start, end, &infos);
     let mut placements = Vec::with_capacity(segments.len());
     let mut frontier = Vec::new();
@@ -1594,6 +1642,12 @@ fn split_stored_interval(
             let seg_hash = tx_path_hash(&derived.proof.proof);
             (derived, header, seg_hash, true)
         };
+        if map.data_commitment(derived.data_root, header.data_size) != data_commitment {
+            eyre::bail!(
+                "partition offset {} derives a different data commitment",
+                seg_start.0
+            );
+        }
         if seg_end != seg_start {
             match derive_at(db, cache, map, seg_end)? {
                 None => {
@@ -1619,6 +1673,7 @@ fn split_stored_interval(
             end: seg_end,
             path_hash: seg_hash,
             data_root: derived.data_root,
+            data_commitment,
             prefix_hash: header.prefix_hash,
             info: select_covering_info(&infos, seg_start)?,
             ledger_id: map.ledger.get_id(),
@@ -1655,7 +1710,13 @@ fn derive_at(
     offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<DerivedTxPath>> {
     let ledger_offset = map.ledger_offset(offset)?;
-    match derive_tx_path_at_offset_cached(db, cache, map.ledger, ledger_offset, map.chunk_size) {
+    match derive_tx_path_at_offset_cached(
+        db,
+        cache,
+        map.ledger,
+        ledger_offset,
+        map.data_tree_geometry.chunk_size(),
+    ) {
         Ok(derived) => Ok(Some(derived)),
         Err(err) if consensus_is_behind(&err) => Ok(None),
         Err(err) => {
@@ -1724,11 +1785,12 @@ fn write_rocks_placement(
         &TxLeafBinding {
             data_root: item.data_root,
             prefix_hash: item.prefix_hash,
+            data_commitment: item.data_commitment,
         },
     )?;
     tx.add_tx_path_hash_to_offset_range(item.start, item.end, Some(item.path_hash))?;
     if let Some(info) = &item.info {
-        tx.add_data_root_info_at(item.start, item.data_root, info)?;
+        tx.add_data_root_info_at(item.start, item.data_commitment, info)?;
     }
     Ok(())
 }
@@ -1739,6 +1801,7 @@ struct RebuiltPlacement {
     path_hash: TxPathHash,
     proof: TxPath,
     data_root: H256,
+    data_commitment: DataCommitment,
     prefix_hash: H256,
     info: Option<DataRootInfo>,
 }
@@ -1759,9 +1822,15 @@ fn rebuild_from_placement(
     let Some(derived) = derive_at(db, cache, map, placement.start)? else {
         return Ok(None);
     };
-    if placement.data_root != derived.data_root {
+    if placement.data_tree_root.0 != derived.data_root {
         eyre::bail!(
             "data root at partition offset {} does not match the derived tx",
+            placement.start.0
+        );
+    }
+    if placement.data_commitment != map.data_commitment(derived.data_root, derived.data_size) {
+        eyre::bail!(
+            "data commitment at partition offset {} does not match the derived tx",
             placement.start.0
         );
     }
@@ -1805,9 +1874,16 @@ fn rebuild_from_placement(
     let info = if placement.tx_start_offset.0 == 0 && placement.data_size == 0 {
         None
     } else {
+        if placement.data_size != header.data_size {
+            eyre::bail!(
+                "data size at partition offset {} does not match the derived tx",
+                placement.start.0
+            );
+        }
         Some(DataRootInfo {
             start_offset: placement.tx_start_offset,
             data_size: placement.data_size,
+            data_tree_root: placement.data_tree_root,
         })
     };
     Ok(Some(RebuiltPlacement {
@@ -1816,6 +1892,7 @@ fn rebuild_from_placement(
         path_hash: tx_path_hash(&derived.proof.proof),
         proof: derived.proof.proof,
         data_root: derived.data_root,
+        data_commitment: placement.data_commitment,
         prefix_hash: header.prefix_hash,
         info,
     }))
@@ -1828,11 +1905,12 @@ fn write_v2_placement(tx: &mut dyn SubmoduleWrite, item: &RebuiltPlacement) -> e
         &TxLeafBinding {
             data_root: item.data_root,
             prefix_hash: item.prefix_hash,
+            data_commitment: item.data_commitment,
         },
     )?;
     tx.add_tx_path_hash_to_offset_range(item.start, item.end, Some(item.path_hash))?;
     if let Some(info) = &item.info {
-        tx.add_data_root_info(item.data_root, info)?;
+        tx.add_data_root_info(item.data_commitment, info)?;
     }
     Ok(())
 }
@@ -1853,29 +1931,8 @@ where
     verify_placements(v2, v3, db, map, &mut report)?;
     verify_pending_rows(v2, v3, &mut report)?;
     verify_markers(v2, v3, v2_schema, &mut report)?;
-    verify_content_index(v3, &mut report)?;
     note_index_audit(v3, &mut report)?;
     Ok(report)
-}
-
-fn verify_content_index(
-    v3: &RocksSubmoduleStore,
-    report: &mut EngineEquivalenceReport,
-) -> eyre::Result<()> {
-    let audit = v3.audit_content_index()?;
-    report.content_offsets_checked = audit.proofs_with_leaf.saturating_add(audit.reverse_rows);
-    report.content_offset_mismatches = audit.missing_reverse.saturating_add(audit.dangling_reverse);
-    if report.content_offset_mismatches > 0 {
-        note(
-            report,
-            "content_offset",
-            format!(
-                "missing_reverse={} dangling_reverse={}",
-                audit.missing_reverse, audit.dangling_reverse
-            ),
-        );
-    }
-    Ok(())
 }
 
 fn note_index_audit(
@@ -2095,12 +2152,12 @@ fn compare_one_placement<S: SubmoduleStore>(
         return Ok(());
     };
     let binding = v2.view(|tx| tx.get_tx_leaf_binding(interval.tx_path_hash))?;
-    let info_root = binding
+    let info_key = binding
         .as_ref()
-        .map(|item| item.data_root)
-        .unwrap_or(place.data_root);
+        .map(|item| item.data_commitment)
+        .unwrap_or(place.data_commitment);
     let infos = v2
-        .view(|tx| tx.get_data_root_infos_for_data_root(info_root))?
+        .view(|tx| tx.get_data_root_infos_for_commitment(info_key))?
         .map(|infos| infos.0)
         .unwrap_or_default();
     let segments = tx_segments(interval.start, interval.end, &infos);
@@ -2174,7 +2231,11 @@ fn compare_one_placement<S: SubmoduleStore>(
         return Ok(());
     }
     let tx_index = u32::try_from(derived.tx_index).ok();
-    let same = place.data_root == derived.data_root
+    let same = place.data_tree_root.0 == derived.data_root
+        && place.data_commitment == map.data_commitment(derived.data_root, derived.data_size)
+        && binding
+            .as_ref()
+            .is_none_or(|item| item.data_commitment == place.data_commitment)
         && place.end == segment_end
         && place.block_height == Some(derived.height)
         && place.tx_index == tx_index
@@ -2186,7 +2247,10 @@ fn compare_one_placement<S: SubmoduleStore>(
     report.data_roots_checked = report.data_roots_checked.saturating_add(1);
     if is_first && let Some(binding) = &binding {
         report.tx_leaf_bindings_checked = report.tx_leaf_bindings_checked.saturating_add(1);
-        if binding.data_root != derived.data_root || binding.prefix_hash != header.prefix_hash {
+        if binding.data_root != derived.data_root
+            || binding.prefix_hash != header.prefix_hash
+            || binding.data_commitment != map.data_commitment(derived.data_root, derived.data_size)
+        {
             report.tx_leaf_bindings_mismatches =
                 report.tx_leaf_bindings_mismatches.saturating_add(1);
             note(report, "tx_leaf_binding", format!("offset {}", key.0));
@@ -2320,7 +2384,7 @@ fn verify_markers<S: SubmoduleStore>(
 ) -> eyre::Result<()> {
     note_reset(report, v2.reset_in_progress()? != v3.reset_in_progress()?);
     let schema_ok = v2_schema.as_deref() == Some(SUBMODULE_SCHEMA.as_bytes())
-        && v3.schema_bytes()?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
+        && v3.schema_bytes()?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes());
     note_schema(report, schema_ok);
     Ok(())
 }
@@ -2347,6 +2411,18 @@ fn rocks_schema_text(path: &Path) -> eyre::Result<Option<String>> {
     fs::read_to_string(&marker)
         .wrap_err("read SCHEMA")
         .map(Some)
+}
+
+/// The source row must be the commitment-keyed row. A data-root keyed index
+/// is upgraded or refused by the node's open, never by this tool.
+fn require_commitment_keyed_rocks(src: &RocksSubmoduleStore, path: &Path) -> eyre::Result<()> {
+    if src.schema_bytes()?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes()) {
+        return Ok(());
+    }
+    eyre::bail!(
+        "rocks index {} does not key data by the data commitment. Open it with the node first: the node upgrades an index with no data rows and refuses one that has data rows.",
+        path.display()
+    )
 }
 
 fn require_rocks_v1(path: &Path) -> eyre::Result<()> {
@@ -2805,6 +2881,12 @@ fn open_mdbx_source(path: &Path, args: DatabaseArguments) -> eyre::Result<Opened
                 path.display()
             )
         }
+        Some(schema) if schema == SUBMODULE_SCHEMA_DATA_ROOT_KEYS.as_bytes() => {
+            eyre::bail!(
+                "MDBX index {} keys data by the data root. Open it with the node first: the node upgrades an index with no data rows and refuses one that has data rows. The source was not modified.",
+                path.display()
+            )
+        }
         Some(schema) if schema.starts_with(migrate::PROGRESS_PREFIX.as_bytes()) => {
             eyre::bail!(
                 "MDBX index {} has an in-progress v1 migration. The source was not modified. Finish or restore that directory before converting.",
@@ -2836,6 +2918,34 @@ fn reset_marker_on(env: &DatabaseEnv) -> eyre::Result<bool> {
             Err(err) => Err(eyre::eyre!("read reset marker: {err}")),
         },
     )
+}
+
+/// v1 rows are data keyed by the data root. This build keys data by the
+/// data commitment. A v1 key is a bare root with no size, so it refuses to
+/// copy or compare them. A reset source is still written as an empty index.
+fn refuse_v1_data_rows(env: &DatabaseEnv) -> eyre::Result<()> {
+    if mdbx_has_v1_rows(env)? && !allows_v1_data_rows() {
+        eyre::bail!("{}", super::tables::data_root_keyed_index(&env.path()));
+    }
+    Ok(())
+}
+
+// Tests of the v1 copy mechanics set this to run the copy on their fixtures.
+// Production always refuses v1 data rows.
+#[cfg(test)]
+thread_local! {
+    static ALLOW_V1_DATA_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn allows_v1_data_rows() -> bool {
+    #[cfg(test)]
+    {
+        ALLOW_V1_DATA_ROWS.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
 }
 
 fn mdbx_has_v1_rows(env: &DatabaseEnv) -> eyre::Result<bool> {
@@ -3366,7 +3476,7 @@ fn prepare_v1_placement(
             path_hash: run.tx_hash,
             binding,
         },
-        |root| v1_infos(env, root),
+        |root, _data_commitment| v1_infos(env, v1_key(root)),
     )
 }
 
@@ -3798,10 +3908,20 @@ fn read_v1_binding(env: &DatabaseEnv, hash: H256) -> eyre::Result<Option<TxLeafB
     read_v1_row::<TxLeafBindingByTxPathHash>(env, hash)
 }
 
-fn v1_infos(env: &DatabaseEnv, data_root: H256) -> eyre::Result<Vec<DataRootInfo>> {
-    Ok(read_v1_row::<DataRootInfosByDataRoot>(env, data_root)?
-        .map(|DataRootInfos(infos)| infos)
-        .unwrap_or_default())
+/// v1 rows are keyed by the data root. The v1 copy reads them under that key
+/// and writes the placement under the derived data commitment. Production
+/// refuses v1 data rows before this copy runs (see [`refuse_v1_data_rows`]),
+/// so only the copy tests reach it.
+fn v1_key(data_root: H256) -> DataCommitment {
+    DataCommitment(data_root)
+}
+
+fn v1_infos(env: &DatabaseEnv, data_commitment: DataCommitment) -> eyre::Result<Vec<DataRootInfo>> {
+    Ok(
+        read_v1_row::<DataRootInfosByDataRoot>(env, data_commitment)?
+            .map(|DataRootInfos(infos)| infos)
+            .unwrap_or_default(),
+    )
 }
 
 fn walk_v1_path_range(
@@ -3999,7 +4119,7 @@ fn cached_tx_path_hash(
 fn placement_start_ok_in_tx(
     tx: &impl reth_db::transaction::DbTx,
     start: PartitionChunkOffset,
-    data_root: H256,
+    data_commitment: DataCommitment,
     cached: &mut Option<(PartitionChunkOffset, Option<H256>)>,
 ) -> eyre::Result<bool> {
     let hash = cached_tx_path_hash(tx, start, cached)?;
@@ -4019,7 +4139,7 @@ fn placement_start_ok_in_tx(
     let Ok(at) = i32::try_from(start.0) else {
         return Ok(false);
     };
-    let infos = match tx.get::<DataRootInfosByDataRoot>(data_root) {
+    let infos = match tx.get::<DataRootInfosByDataRoot>(data_commitment) {
         Ok(Some(DataRootInfos(infos))) => infos,
         Ok(None) => return Ok(false),
         Err(err) if table_missing(&err) => return Ok(false),
@@ -4040,7 +4160,7 @@ fn v1_placement_starts_ok(
             out.push(placement_start_ok_in_tx(
                 tx,
                 place.start,
-                place.data_root,
+                place.data_commitment,
                 cached,
             )?);
         }
@@ -4085,7 +4205,7 @@ fn verify_mdbx_v1_against_rocks(
     let mut report = EngineEquivalenceReport::default();
     note_schema(
         &mut report,
-        v3.schema_bytes()?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()),
+        v3.schema_bytes()?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes()),
     );
     note_reset(
         &mut report,
@@ -4118,7 +4238,6 @@ fn verify_mdbx_v1_against_rocks(
     note_rocks_placements_absent_from_v1(env, v3, &mut report)?;
     compare_v1_pending(env, v3, &written, &frontier, &mut report)?;
     note_extra_rocks_offset_rows(env, v3, &written, &frontier, &accepted, &mut report)?;
-    verify_content_index(v3, &mut report)?;
     note_index_audit(v3, &mut report)?;
     note_accepted_offset_ranges(accepted.range_count());
     Ok(report)
@@ -4184,7 +4303,8 @@ fn compare_v1_interval(
         note(report, "tx_path", format!("offset {}", start.0));
         return Ok(());
     }
-    let infos = v1_infos(env, derived.data_root)?;
+    let binding = read_v1_binding(env, run.tx_hash)?;
+    let infos = v1_infos(env, v1_key(derived.data_root))?;
     let segments = tx_segments(start, end, &infos);
     let mut written_end = None;
     let mut stop_paths = false;
@@ -4262,7 +4382,9 @@ fn compare_v1_interval(
         let tx_index = u32::try_from(seg_derived.tx_index).ok();
         let same = place.start == seg_start
             && place.end == seg_end
-            && place.data_root == seg_derived.data_root
+            && place.data_tree_root.0 == seg_derived.data_root
+            && place.data_commitment
+                == map.data_commitment(seg_derived.data_root, seg_derived.data_size)
             && place.block_height == Some(seg_derived.height)
             && place.tx_index == tx_index
             && place.ledger == Some(map.ledger.get_id());
@@ -4272,9 +4394,11 @@ fn compare_v1_interval(
         }
         if index == 0 {
             report.tx_leaf_bindings_checked = report.tx_leaf_bindings_checked.saturating_add(1);
-            if let Some(binding) = read_v1_binding(env, run.tx_hash)?
+            if let Some(binding) = &binding
                 && (binding.data_root != seg_derived.data_root
-                    || binding.prefix_hash != seg_header.prefix_hash)
+                    || binding.prefix_hash != seg_header.prefix_hash
+                    || binding.data_commitment
+                        != map.data_commitment(seg_derived.data_root, seg_derived.data_size))
             {
                 report.tx_leaf_bindings_mismatches =
                     report.tx_leaf_bindings_mismatches.saturating_add(1);
@@ -5034,7 +5158,7 @@ fn verify_reset_target(
     note_reset(&mut report, v3.reset_in_progress()? != source_reset);
     note_schema(
         &mut report,
-        v3.schema_bytes()?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()),
+        v3.schema_bytes()?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes()),
     );
     if !v3.read_placements(None, 1)?.is_empty() {
         report.intervals_mismatches = 1;
@@ -5053,13 +5177,30 @@ fn verify_reset_target(
             "reset or empty source".to_owned(),
         );
     }
-    verify_content_index(v3, &mut report)?;
     note_index_audit(v3, &mut report)?;
     Ok(report)
 }
 
 #[cfg(test)]
 mod tests {
+    use irys_types::DataCommitment;
+
+    /// Lets this thread copy and verify v1 data rows until dropped. The v1
+    /// copy mechanics stay tested; production refuses those rows.
+    struct AllowV1DataRows;
+
+    impl Drop for AllowV1DataRows {
+        fn drop(&mut self) {
+            super::ALLOW_V1_DATA_ROWS.with(|cell| cell.set(false));
+        }
+    }
+
+    fn allow_v1_data_rows() -> AllowV1DataRows {
+        super::ALLOW_V1_DATA_ROWS.with(|cell| cell.set(true));
+        AllowV1DataRows
+    }
+    use irys_types::DataTreeRoot;
+    use irys_types::data_tree::Geometry;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -5107,14 +5248,22 @@ mod tests {
     }
 
     fn options_for(consensus: &Path) -> eyre::Result<ConvertOptions> {
-        let mut options = ConvertOptions::new(testing_args()?);
+        let mut options = ConvertOptions::new(testing_args()?, Geometry::TESTING);
         options.consensus = testing_args()?;
         options.consensus_db = Some(consensus.to_path_buf());
         options.ledger_id = DataLedger::Publish.get_id();
         options.slot_index = 1;
         options.chunks_per_partition = 8;
-        options.chunk_size = 32;
         Ok(options)
+    }
+
+    /// The data commitment of a tx with `data_tree_root` and `data_size` under the test geometry.
+    fn commitment(data_tree_root: H256, data_size: u64) -> DataCommitment {
+        irys_types::data_tree::data_commitment(
+            &Geometry::TESTING,
+            DataTreeRoot(data_tree_root),
+            data_size,
+        )
     }
 
     fn temp(prefix: &str) -> tempfile::TempDir {
@@ -5130,7 +5279,7 @@ mod tests {
     fn tx_at(n: u64, size: u64) -> DataTransactionHeader {
         let mut header = DataTransactionHeader::default();
         header.id = hid(n);
-        header.data_root = hid(n.saturating_add(100));
+        header.data_tree_root = DataTreeRoot(hid(n.saturating_add(100)));
         header.prefix_hash = hid(n.saturating_add(200));
         header.data_size = size;
         header
@@ -5240,6 +5389,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root: pair.root_a,
                     prefix_hash: pair.prefix_a,
+                    data_commitment: commitment(pair.root_a, 352),
                 },
             )?;
             tx.add_tx_leaf_binding(
@@ -5247,6 +5397,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root: pair.root_b,
                     prefix_hash: pair.prefix_b,
+                    data_commitment: commitment(pair.root_b, 32),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -5270,23 +5421,26 @@ mod tests {
                 Some(H256::from(hash_sha256(&data_3))),
             )?;
             tx.add_data_root_info(
-                pair.root_a,
+                commitment(pair.root_a, 352),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(-8),
                     data_size: 352,
+                    data_tree_root: DataTreeRoot(pair.root_a),
                 },
             )?;
             tx.add_data_root_info(
-                pair.root_b,
+                commitment(pair.root_b, 32),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(3),
                     data_size: 32,
+                    data_tree_root: DataTreeRoot(pair.root_b),
                 },
             )?;
             tx.add_pending_body_migration(
                 PartitionChunkOffset(0),
                 &PendingBodyMigration {
-                    data_root: pair.root_a,
+                    data_commitment: commitment(pair.root_a, 352),
+                    data_tree_root: DataTreeRoot(pair.root_a),
                     data_size: 352,
                     start_offset: RelativeChunkOffset(-8),
                     block_height: 1,
@@ -5355,7 +5509,7 @@ mod tests {
             let place = tx
                 .placement_at(PartitionChunkOffset(0))?
                 .expect("placement 0");
-            assert_eq!(place.data_root, pair.root_a);
+            assert_eq!(place.data_tree_root.0, pair.root_a);
             assert_eq!(place.tx_start_offset, RelativeChunkOffset(-8));
             assert_eq!(place.data_size, 352);
             assert_eq!(place.end, PartitionChunkOffset(2));
@@ -5363,13 +5517,13 @@ mod tests {
             let tail = tx
                 .placement_at(PartitionChunkOffset(3))?
                 .expect("placement 3");
-            assert_eq!(tail.data_root, pair.root_b);
+            assert_eq!(tail.data_tree_root.0, pair.root_b);
             assert_eq!(tail.tx_start_offset, RelativeChunkOffset(3));
             assert_eq!(tail.data_size, 32);
             let job = tx
                 .get_pending_body_migration(PartitionChunkOffset(0))?
                 .expect("pending");
-            assert_eq!(job.data_root, pair.root_a);
+            assert_eq!(job.data_commitment, commitment(pair.root_a, 352));
             assert_eq!(job.start_offset, RelativeChunkOffset(-8));
             assert_eq!(job.block_height, 1);
             Ok(())
@@ -5387,7 +5541,7 @@ mod tests {
                 .expect("placement covers 1");
             assert_eq!(place.start, PartitionChunkOffset(0));
             assert_eq!(place.end, PartitionChunkOffset(2));
-            assert_eq!(place.data_root, pair.root_a);
+            assert_eq!(place.data_tree_root.0, pair.root_a);
             assert_eq!(place.tx_start_offset, RelativeChunkOffset(-8));
             assert_eq!(place.data_size, 352);
             assert_eq!(place.ledger, Some(DataLedger::Publish.get_id()));
@@ -5396,7 +5550,7 @@ mod tests {
             let tail = tx
                 .placement_at(PartitionChunkOffset(3))?
                 .expect("placement 3");
-            assert_eq!(tail.data_root, pair.root_b);
+            assert_eq!(tail.data_tree_root.0, pair.root_b);
             assert_eq!(tail.block_height, Some(2));
             assert_eq!(tail.tx_index, Some(0));
             assert_eq!(tail.data_size, 32);
@@ -5408,19 +5562,10 @@ mod tests {
                 tx.get_data_path_by_offset(PartitionChunkOffset(3))?,
                 Some(indexed_data_leaf(3))
             );
-            assert_eq!(
-                tx.offsets_for_content_hash(H256([1_u8; 32]))?,
-                vec![PartitionChunkOffset(0)]
-            );
-            assert_eq!(
-                tx.offsets_for_content_hash(H256([3_u8; 32]))?,
-                vec![PartitionChunkOffset(3)]
-            );
-            assert!(tx.offsets_for_content_hash(H256([9_u8; 32]))?.is_empty());
             let job = tx
                 .get_pending_body_migration(PartitionChunkOffset(0))?
                 .expect("pending");
-            assert_eq!(job.data_root, pair.root_a);
+            assert_eq!(job.data_commitment, commitment(pair.root_a, 352));
             Ok(())
         })?;
         assert!(!store.reset_in_progress()?);
@@ -5568,11 +5713,9 @@ mod tests {
         assert_eq!(report.tx_paths_checked, 2, "{report}");
         assert_eq!(report.data_roots_checked, 2, "{report}");
         assert_eq!(report.pending_checked, 1, "{report}");
-        assert_eq!(report.content_offset_mismatches, 0, "{report}");
-        assert!(report.content_offsets_checked >= 2, "{report}");
     }
 
-    /// 64-byte data-proof leaf. The first 32 bytes are the content hash.
+    /// Two-hash data proof, every byte of the first hash `byte`.
     fn indexed_data_leaf(byte: u8) -> Vec<u8> {
         let mut leaf = vec![0_u8; 64];
         leaf[..32].fill(byte);
@@ -5660,7 +5803,7 @@ mod tests {
         let record = PackingRecord {
             packing_address: [0x22; 20],
             iterations: 1000,
-            chunk_size: options.chunk_size,
+            chunk_size: options.data_tree_geometry.chunk_size(),
             chain_id: 1270,
         };
         options.packing_record = Some(record);
@@ -5850,8 +5993,80 @@ mod tests {
         Ok(())
     }
 
+    /// A binding for the first tx's root under the commitment of another size.
+    fn binding_with_other_size(pair: &DerivedPair) -> TxLeafBinding {
+        TxLeafBinding {
+            data_root: pair.root_a,
+            prefix_hash: pair.prefix_a,
+            data_commitment: commitment(pair.root_a, 353),
+        }
+    }
+
+    #[test]
+    fn mdbx_binding_with_the_commitment_of_another_size_is_refused() -> eyre::Result<()> {
+        let Populated {
+            root: _root,
+            consensus,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-binding-other-size")?;
+        let pair = derived_pair(&consensus)?;
+        {
+            let store = MdbxSubmoduleStore::open(&mdbx, testing_args()?)?;
+            store.update(|tx| {
+                tx.add_tx_leaf_binding(tx_path_hash(&pair.proof_a), &binding_with_other_size(&pair))
+            })?;
+        }
+        let err = convert_mdbx_to_rocks(&mdbx, &rocks, &options).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("data commitment"), "{message}");
+        assert!(!rocks.join("SCHEMA").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn placement_with_the_commitment_of_another_size_is_a_mismatch() -> eyre::Result<()> {
+        let Populated {
+            root: _root,
+            consensus,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-placement-other-size")?;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        let pair = derived_pair(&consensus)?;
+        let other_size = binding_with_other_size(&pair);
+        // Same root and same offsets, other size: only the commitment differs.
+        {
+            let hash = tx_path_hash(&pair.proof_a);
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            opened.update(|tx| {
+                tx.add_tx_leaf_binding(hash, &other_size)?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset(0),
+                    PartitionChunkOffset(2),
+                    Some(hash),
+                )
+            })?;
+        }
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(report.has_mismatch(), "{report}");
+        assert!(report.intervals_mismatches >= 1, "{report}");
+
+        let back = _root.path().join("db-back");
+        let err = convert_rocks_to_mdbx(&rocks, &back, &options).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("data commitment at partition offset"),
+            "{message}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn convert_reads_v1_without_writing_the_source() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         use crate::submodule::tables::v1_fixture::master;
         use reth_db::Database as _;
         use reth_db::transaction::{DbTx as _, DbTxMut as _};
@@ -5882,6 +6097,7 @@ mod tests {
                 DataRootInfos(vec![DataRootInfo {
                     start_offset: RelativeChunkOffset(-8),
                     data_size: 352,
+                    data_tree_root: DataTreeRoot(pair.root_a),
                 }]),
             )?;
             tx.commit()?;
@@ -5927,7 +6143,7 @@ mod tests {
             let place = tx
                 .placement_at(PartitionChunkOffset(0))?
                 .expect("placement");
-            assert_eq!(place.data_root, pair.root_a);
+            assert_eq!(place.data_tree_root.0, pair.root_a);
             assert_eq!(place.block_height, Some(1));
             assert_eq!(place.tx_index, Some(0));
             assert_eq!(place.ledger, Some(DataLedger::Publish.get_id()));
@@ -6784,7 +7000,7 @@ mod tests {
         assert!(!module.join("sub").exists());
         assert!(!db.join("CONVERTING").is_file());
 
-        let options = super::ConvertOptions::new(testing_args()?);
+        let options = super::ConvertOptions::new(testing_args()?, Geometry::TESTING);
         let err = convert_mdbx_to_rocks(&db, &into_source, &options).unwrap_err();
         assert!(format!("{err:#}").contains("same path"), "{err:#}");
         assert!(!module.join("other").exists());
@@ -6820,7 +7036,7 @@ mod tests {
     #[test]
     fn relative_target_inside_the_source_is_refused() -> eyre::Result<()> {
         let source = std::env::current_dir()?;
-        let options = super::ConvertOptions::new(testing_args()?);
+        let options = super::ConvertOptions::new(testing_args()?, Geometry::TESTING);
         let inside = Path::new("sweep16-x4-relative-inside-source");
         assert!(
             !source.join(inside).exists(),
@@ -7342,8 +7558,8 @@ mod tests {
         let mut right = tx_at(2, 32);
         let data_root = hid(50);
         let prefix = hid(60);
-        left.data_root = data_root;
-        right.data_root = data_root;
+        left.data_tree_root = DataTreeRoot(data_root);
+        right.data_tree_root = DataTreeRoot(data_root);
         left.prefix_hash = prefix;
         right.prefix_hash = prefix;
         let blocks = [
@@ -7380,6 +7596,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root,
                     prefix_hash: prefix,
+                    data_commitment: commitment(data_root, 32),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -7388,17 +7605,19 @@ mod tests {
                 Some(stored_hash),
             )?;
             tx.add_data_root_info(
-                data_root,
+                commitment(data_root, 32),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(0),
                     data_size: 32,
+                    data_tree_root: DataTreeRoot(data_root),
                 },
             )?;
             tx.add_data_root_info(
-                data_root,
+                commitment(data_root, 32),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(1),
                     data_size: 32,
+                    data_tree_root: DataTreeRoot(data_root),
                 },
             )?;
             Ok(())
@@ -7424,7 +7643,7 @@ mod tests {
             assert_eq!(head.start, PartitionChunkOffset(0));
             assert_eq!(head.end, PartitionChunkOffset(0));
             assert_eq!(head.tx_index, Some(0));
-            assert_eq!(head.data_root, data_root);
+            assert_eq!(head.data_tree_root.0, data_root);
             assert_eq!(head.data_size, 32);
             assert_eq!(head.tx_start_offset, RelativeChunkOffset(0));
             let tail = tx
@@ -7433,7 +7652,7 @@ mod tests {
             assert_eq!(tail.start, PartitionChunkOffset(1));
             assert_eq!(tail.end, PartitionChunkOffset(1));
             assert_eq!(tail.tx_index, Some(1));
-            assert_eq!(tail.data_root, data_root);
+            assert_eq!(tail.data_tree_root.0, data_root);
             assert_eq!(tail.data_size, 32);
             assert_eq!(tail.tx_start_offset, RelativeChunkOffset(1));
             Ok(())
@@ -7464,6 +7683,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root: pair.root_b,
                     prefix_hash: pair.prefix_b,
+                    data_commitment: commitment(pair.root_b, 32),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -7472,17 +7692,19 @@ mod tests {
                 Some(hash_b),
             )?;
             tx.add_data_root_info(
-                pair.root_b,
+                commitment(pair.root_b, 32),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(3),
                     data_size: 32,
+                    data_tree_root: DataTreeRoot(pair.root_b),
                 },
             )?;
             tx.add_data_root_info(
-                pair.root_b,
+                commitment(pair.root_b, 32),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(4),
                     data_size: 32,
+                    data_tree_root: DataTreeRoot(pair.root_b),
                 },
             )?;
             Ok(())
@@ -7580,6 +7802,7 @@ mod tests {
                 DataRootInfos(vec![DataRootInfo {
                     start_offset: RelativeChunkOffset(0),
                     data_size: n.saturating_mul(32),
+                    data_tree_root: DataTreeRoot(root),
                 }]),
             )?;
             tx.commit()?;
@@ -7656,6 +7879,7 @@ mod tests {
                 DataRootInfos(vec![DataRootInfo {
                     start_offset: RelativeChunkOffset(0),
                     data_size: n.saturating_mul(32),
+                    data_tree_root: DataTreeRoot(root),
                 }]),
             )?;
             tx.commit()?;
@@ -7670,6 +7894,7 @@ mod tests {
     /// that can hold the paths reads each one once.
     #[test]
     fn v1_oversized_path_batch_does_not_reread_the_rest_of_the_run() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 5;
         let root = temp("convert-v1-path-cap");
         let consensus = write_v1_one_tx_partition(root.path(), N)?;
@@ -7788,6 +8013,7 @@ mod tests {
     /// Two paths are 160 bytes, so each range-copy write is one path.
     #[test]
     fn v1_range_copy_splits_when_the_next_path_passes_the_byte_cap() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 4;
         let run = run_v1_path_cap("convert-v1-range-split", N, 80, 100)?;
         assert_eq!(run.stats.intervals, 1, "{:?}", run.stats);
@@ -7806,6 +8032,7 @@ mod tests {
     /// and stay one write. The seventh path is its own write.
     #[test]
     fn v1_range_copy_keeps_a_hash_batch_that_fits() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 7;
         let run = run_v1_path_cap("convert-v1-range-fit", N, 30, 200)?;
         assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
@@ -7821,6 +8048,7 @@ mod tests {
     /// A path longer than the cap is still written. The next path is a new write.
     #[test]
     fn v1_range_copy_writes_a_path_larger_than_the_cap() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 2;
         let run = run_v1_path_cap("convert-v1-range-oversize", N, 120, 100)?;
         assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
@@ -7837,6 +8065,7 @@ mod tests {
     /// The first pass point-reads two paths. The rescan is one view per page.
     #[test]
     fn v1_range_copy_counts_one_view_per_hash_page() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 4;
         let run = run_v1_path_cap("convert-v1-range-page-views", N, 80, 100)?;
         assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
@@ -7859,6 +8088,7 @@ mod tests {
     /// each view, and it must pass the first-pass point reads.
     #[test]
     fn v1_range_copy_counts_each_path_view_when_the_group_is_one() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 4;
         let run = run_v1_path_cap_grouped("convert-v1-range-path-views", N, 80, 100, Some(1))?;
         assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
@@ -7895,6 +8125,7 @@ mod tests {
     /// One v1 interval's data paths and offset metas are two views, not one per chunk.
     #[test]
     fn verify_v1_loads_each_path_batch_in_two_views() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 3;
         let root = temp("convert-verify-v1-views");
         let consensus = write_v1_one_tx_partition(root.path(), N)?;
@@ -7914,6 +8145,7 @@ mod tests {
     /// A view per path row counts once per view.
     #[test]
     fn verify_v1_counts_each_path_batch_view() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 3;
         let root = temp("convert-verify-v1-views-per-row");
         let consensus = write_v1_one_tx_partition(root.path(), N)?;
@@ -7934,6 +8166,7 @@ mod tests {
     /// Offsets whose hash row was already compared do not need another read.
     #[test]
     fn verify_v1_does_not_point_read_accepted_hash_rows() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 3;
         let root = temp("convert-verify-v1-point-reads");
         let consensus = write_v1_one_tx_partition(root.path(), N)?;
@@ -7960,6 +8193,7 @@ mod tests {
     /// one read per offset. A verify before those rows exist does not read them.
     #[test]
     fn verify_v1_reads_uncompared_offsets_in_one_view() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 4;
         let holes = [1_u64, 2];
         let root = temp("convert-v1-uncompared-views");
@@ -8018,6 +8252,7 @@ mod tests {
     /// A view per uncompared offset counts once per view.
     #[test]
     fn verify_v1_counts_each_uncompared_hash_view() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 4;
         let holes = [1_u64, 2];
         let root = temp("convert-v1-uncompared-per-key");
@@ -8060,6 +8295,7 @@ mod tests {
     /// and a dense run is one range.
     #[test]
     fn verify_v1_stores_accepted_offsets_as_merged_ranges() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 4;
         let root = temp("convert-verify-v1-accepted-ranges");
         let consensus = write_v1_one_tx_partition(root.path(), N)?;
@@ -8122,6 +8358,7 @@ mod tests {
     /// still reads the start and the previous offset together.
     #[test]
     fn verify_v1_checks_placement_starts_in_one_view() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 3;
         let root = temp("convert-verify-v1-placement-views");
         let consensus = write_v1_one_chunk_partition(root.path(), N)?;
@@ -8242,6 +8479,7 @@ mod tests {
                             i32::try_from(offset).unwrap_or(i32::MAX),
                         ),
                         data_size: 32,
+                        data_tree_root: DataTreeRoot(derived.data_root),
                     }]),
                 )?;
             }
@@ -8252,8 +8490,27 @@ mod tests {
         Ok(consensus)
     }
 
+    /// v1 data rows are keyed by the data root. The converter refuses them
+    /// and writes no target.
+    #[test]
+    fn v1_data_rows_are_refused() -> eyre::Result<()> {
+        let root = temp("convert-v1-refused");
+        let consensus = write_v1_one_chunk_partition(root.path(), 1)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = 1;
+        let err = convert_mdbx_to_rocks(&mdbx, &rocks, &options).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("network must reset"), "{text}");
+        assert!(!rocks.join("SCHEMA").exists());
+        Ok(())
+    }
+
     #[test]
     fn v1_one_chunk_placements_share_a_batch() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         let root = temp("convert-v1-batch");
         let consensus = write_v1_one_chunk_partition(root.path(), 3)?;
         let mdbx = root.path().join("db");
@@ -8288,6 +8545,7 @@ mod tests {
     /// The sealed directory has no recycled WAL files.
     #[test]
     fn convert_large_paths_leave_no_wal() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 2_500;
         const DATA_LEN: usize = 32 * 1024;
         let root = temp("convert-wal");
@@ -8473,6 +8731,7 @@ mod tests {
                     &TxLeafBinding {
                         data_root,
                         prefix_hash: H256::repeat_byte(1),
+                        data_commitment: DataCommitment(data_root),
                     },
                 )?;
                 tx.add_tx_path_hash_to_offset_range(
@@ -8481,16 +8740,18 @@ mod tests {
                     Some(path_hash),
                 )?;
                 tx.add_data_root_info(
-                    data_root,
+                    DataCommitment(data_root),
                     &DataRootInfo {
                         start_offset: RelativeChunkOffset(1),
                         data_size: 64,
+                        data_tree_root: DataTreeRoot(data_root),
                     },
                 )?;
                 tx.add_pending_body_migration(
                     PartitionChunkOffset::from(0),
                     &PendingBodyMigration {
-                        data_root,
+                        data_commitment: DataCommitment(data_root),
+                        data_tree_root: DataTreeRoot(data_root),
                         data_size: 64,
                         start_offset: RelativeChunkOffset(1),
                         block_height: 1,
@@ -8622,7 +8883,12 @@ mod tests {
                 }
             }
         };
-        for family in INDEX_FAMILIES {
+        // Nothing writes the retired content-hash family, so it has no row to
+        // change. `audit_index` reports a row there.
+        for family in INDEX_FAMILIES
+            .into_iter()
+            .filter(|family| *family != "ChunkOffsetsByContentHash")
+        {
             refresh_from(&left, &right)?;
             flip_one_stored_byte(&right, family, None)?;
             assert_one(family, &verify_rocks_records(&left, &right)?);
@@ -8731,6 +8997,7 @@ mod tests {
     /// checksum inside a placement, so the mismatch has to come from verify.
     #[test]
     fn verify_v1_flags_a_row_inside_a_path_hole() -> eyre::Result<()> {
+        let _allow = allow_v1_data_rows();
         const N: u64 = 3;
         const HOLE: u32 = 1;
         let root = temp("convert-v1-path-hole");

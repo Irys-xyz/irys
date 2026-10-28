@@ -136,10 +136,12 @@ where
         let v1_request: GossipRequest<UnpackedChunk> = unpacked_chunk_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let chunk_hash = v1_request.data.chunk_path_hash();
+            let chunk_key = v1_request
+                .data
+                .chunk_key(&server.data_handler.config.data_tree_geometry());
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring chunk {:?}",
-                node_id, chunk_hash
+                node_id, chunk_key
             );
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::GossipDisabled,
@@ -599,10 +601,10 @@ where
         let v1_request: GossipRequest<IngressProof> = proof_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let data_root = v1_request.data.data_root;
+            let data_commitment = v1_request.data.data_commitment;
             warn!(
-                "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
-                node_id, data_root
+                "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_commitment: {:?}",
+                node_id, data_commitment
             );
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::GossipDisabled,
@@ -646,10 +648,12 @@ where
         let v2_request: GossipRequestV2<UnpackedChunk> = unpacked_chunk_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let chunk_hash = v2_request.data.chunk_path_hash();
+            let chunk_key = v2_request
+                .data
+                .chunk_key(&server.data_handler.config.data_tree_geometry());
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring chunk {:?}",
-                node_id, chunk_hash
+                node_id, chunk_key
             );
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::GossipDisabled,
@@ -1040,10 +1044,10 @@ where
         let v2_request: GossipRequestV2<IngressProof> = proof_json.0.into();
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let data_root = v2_request.data.data_root;
+            let data_commitment = v2_request.data.data_commitment;
             warn!(
-                "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_root: {:?}",
-                node_id, data_root
+                "Node {}: Gossip reception is disabled, ignoring the ingress proof for data_commitment: {:?}",
+                node_id, data_commitment
             );
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::GossipDisabled,
@@ -1771,8 +1775,8 @@ where
                 irys_types::v2::GossipDataRequestV2::ExecutionPayload(hash) => {
                     format!("execution payload for block {:?}", hash)
                 }
-                irys_types::v2::GossipDataRequestV2::Chunk(chunk_path_hash) => {
-                    format!("chunk {:?}", chunk_path_hash)
+                irys_types::v2::GossipDataRequestV2::Chunk(chunk_key) => {
+                    format!("chunk {:?}", chunk_key)
                 }
                 irys_types::v2::GossipDataRequestV2::BlockBody(block_hash) => {
                     format!("block body {:?}", block_hash)

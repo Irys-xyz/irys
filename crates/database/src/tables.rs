@@ -11,7 +11,7 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::{
     Base64, BlockHeight, DataLedger, IrysAddress, IrysPeerId, LedgerIndexItem, PeerListItemInner,
 };
-use irys_types::{ChunkPathHash, DataRoot, H256};
+use irys_types::{ChunkKey, DataCommitment, H256};
 use irys_types::{
     CommitmentTransaction, CommitmentTransactionMetadata, DataTransactionHeader,
     DataTransactionMetadata, IrysBlockHeader,
@@ -206,22 +206,22 @@ table IrysDataTxMetadata {
     type Value = CompactDataTxMetadata;
 }
 
-/// Indexes the DataRoots currently in the cache
+/// Indexes the data currently in the cache. The key is the `data_commitment`.
 table CachedDataRoots {
-    type Key = DataRoot;
+    type Key = DataCommitment;
     type Value = CachedDataRoot;
 }
 
-/// Index mapping a DataRoot to a set of ordered-by-index index entries, which contain the ChunkPathHash ('chunk id')
+/// Index mapping a `data_commitment` to a set of ordered-by-index index entries, which contain the ChunkKey ('chunk id')
 table CachedChunksIndex {
-    type Key = DataRoot;
+    type Key = DataCommitment;
     type Value = CachedChunkIndexEntry;
     type SubKey = u32;
 }
 
-/// Maps a ChunkPathHash to the cached chunk metadata and optionally its data
+/// Maps a ChunkKey (`chunk_key(data_commitment, chunk index)`) to the cached chunk body
 table CachedChunks {
-    type Key = ChunkPathHash;
+    type Key = ChunkKey;
     type Value = CachedChunk;
 }
 
@@ -234,9 +234,9 @@ table CachedIngressLeaves {
     type SubKey = u32;
 }
 
-/// Indexes ingress proofs by DataRoot and Address
+/// Indexes ingress proofs by `data_commitment` and Address
 table IngressProofs {
-    type Key = DataRoot;
+    type Key = DataCommitment;
     type Value = CompactCachedIngressProof;
     type SubKey = IrysAddress;
 }

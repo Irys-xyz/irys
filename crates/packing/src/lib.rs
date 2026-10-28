@@ -40,7 +40,7 @@ pub fn unpack(
     let unpacked_data = unpack_with_entropy(packed_chunk, entropy, chunk_size)?;
 
     Ok(UnpackedChunk {
-        data_root: packed_chunk.data_root,
+        data_tree_root: packed_chunk.data_tree_root,
         data_size: packed_chunk.data_size,
         data_path: packed_chunk.data_path.clone(),
         bytes: Base64(unpacked_data),
@@ -369,6 +369,7 @@ mod tests {
     use crate::capacity_single::SHA_HASH_SIZE;
     use crate::*;
     use irys_c::capacity::DATA_CHUNK_SIZE;
+    use irys_types::DataTreeRoot;
     use irys_types::{ConsensusConfig, H256, PartitionChunkOffset, TxChunkOffset};
     use rand::{Rng as _, RngCore as _};
     use std::time::*;
@@ -794,7 +795,7 @@ mod tests {
             .expect("data fits the entropy buffer");
 
         let packed_chunk = PackedChunk {
-            data_root: H256::zero(),
+            data_tree_root: DataTreeRoot(H256::zero()),
             data_size: data_size as u64,
             data_path: Base64(vec![]),
             bytes: Base64(packed_data),
@@ -817,6 +818,7 @@ mod tests {
 
     mod property_tests {
         use super::*;
+        use irys_types::DataTreeRoot;
         use proptest::prelude::*;
 
         fn arb_chunk_and_key(max_len: usize) -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
@@ -911,7 +913,7 @@ mod tests {
                 let packed = packing_xor_vec_u8(entropy.clone(), &chunk_data) // clone: need entropy for unpack
                     .expect("data fits the entropy buffer");
                 let packed_chunk = PackedChunk {
-                    data_root: H256::zero(),
+                    data_tree_root: DataTreeRoot(H256::zero()),
                     data_size: u64::try_from(chunk_size).unwrap(),
                     data_path: Base64(vec![]),
                     bytes: Base64(packed),
@@ -959,7 +961,7 @@ mod tests {
                 let packed = packing_xor_vec_u8(entropy.clone(), &chunk_data) // clone: need entropy for unpack
                     .expect("data fits the entropy buffer");
                 let packed_chunk = PackedChunk {
-                    data_root: H256::zero(),
+                    data_tree_root: DataTreeRoot(H256::zero()),
                     data_size: u64::try_from(data_len).unwrap(),
                     data_path: Base64(vec![]),
                     bytes: Base64(packed),

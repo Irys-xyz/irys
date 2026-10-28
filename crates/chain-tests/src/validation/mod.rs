@@ -28,6 +28,7 @@ mod unpledge_partition;
 mod unstake_edge_cases;
 mod zero_oracle_price;
 
+use irys_types::DataTreeRoot;
 use std::sync::Arc;
 
 use crate::utils::{
@@ -1117,10 +1118,11 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
     let anchor = genesis_node.get_anchor().await?;
 
     // Generate data root
-    let leaves =
-        irys_types::generate_leaves(vec![data_bytes.clone()].into_iter().map(Ok), chunk_size)?;
-    let root = irys_types::generate_data_root(leaves)?;
-    let data_root = H256(root.id);
+    let data_root = test_signer
+        .create_transaction(data_bytes.clone(), anchor)?
+        .header
+        .data_tree_root
+        .0;
 
     // Create data transaction header and sign it
     let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
@@ -1128,7 +1130,7 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
             id: H256::zero(),
             anchor,
             signer: test_signer.address(),
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size: data_bytes.len() as u64,
             prefix_size: 0,
             prefix_hash: H256::zero(),
@@ -1142,12 +1144,14 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
         metadata: irys_types::DataTransactionMetadata::with_promoted_height(1),
     })
     .sign(&test_signer)?;
+    let geometry = genesis_node.node_ctx.config.data_tree_geometry();
+    let data_commitment = data_tx.data_commitment(&geometry);
 
     // Generate two ingress proofs from the SAME signer (duplicate!)
     let chain_id = 1_u64;
     let proof1 = generate_ingress_proof(
         &test_signer,
-        data_root,
+        data_commitment,
         chunks.clone().into_iter().map(Ok),
         chain_id,
         anchor,
@@ -1158,15 +1162,15 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
     // We'll use the same data but the proof generation creates a different proof hash
     let proof2 = generate_ingress_proof(
         &test_signer,
-        data_root,
+        data_commitment,
         chunks.into_iter().map(Ok),
         chain_id,
         anchor,
     )?;
 
-    // Verify both proofs have the same data_root and can recover the same signer
-    assert_eq!(proof1.data_root, data_root);
-    assert_eq!(proof2.data_root, data_root);
+    // Verify both proofs have the same data commitment and can recover the same signer
+    assert_eq!(proof1.data_commitment, data_commitment);
+    assert_eq!(proof2.data_commitment, data_commitment);
     assert_eq!(proof1.recover_signer()?, test_signer.address());
     assert_eq!(proof2.recover_signer()?, test_signer.address());
 
@@ -1188,7 +1192,7 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
 
         // Store the data transaction
         tx.put::<IrysDataTxHeaders>(data_tx.id, CompactTxHeader(data_tx.clone()))?;
-        irys_database::cache_data_root(tx, &data_tx, None)?;
+        irys_database::cache_data_root(tx, &data_tx, None, &geometry)?;
 
         // Store the ingress proofs (with duplicates from same address)
         for cached_proof in &duplicate_proofs {
@@ -1475,7 +1479,7 @@ async fn publish_tx_rejected_when_db_submit_inclusion_exceeds_parent_height() ->
         metadata: Default::default(),
     });
     fake_tx.data_size = 32;
-    fake_tx.data_root = H256::random();
+    fake_tx.data_tree_root = DataTreeRoot(H256::random());
     fake_tx.anchor = genesis_node.get_anchor().await?;
     let fake_tx = fake_tx.sign(&signer)?;
     let fake_tx_id = fake_tx.id();

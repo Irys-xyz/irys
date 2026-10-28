@@ -11,6 +11,7 @@ mod panic_freedom;
 mod props;
 mod roundtrip;
 mod shape;
+mod size_proof;
 mod strategies;
 mod tags;
 mod vectors;

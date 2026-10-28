@@ -1,7 +1,7 @@
 use crate::IrysAddress;
 use crate::{
-    Base64, H256, LedgerChunkOffset, PartitionChunkOffset, hash_sha256, partition::PartitionHash,
-    string_u64,
+    Base64, ChunkKey, DataCommitment, DataTreeRoot, H256, LedgerChunkOffset, PartitionChunkOffset,
+    hash_sha256, partition::PartitionHash, string_u64,
 };
 use arbitrary::Arbitrary;
 use core::fmt;
@@ -53,14 +53,15 @@ pub struct UnpackedChunk {
     /// The root hash for this chunk which should map to the root_hash in the
     /// transaction header. Having this present makes it easier to do cached
     /// chunk lookups by data_root on the ingress node.
-    pub data_root: DataRoot,
+    #[serde(rename = "dataRoot")]
+    pub data_tree_root: DataTreeRoot,
     /// Total size of the data stored by this data_root in bytes. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
     #[serde(with = "string_u64")]
     pub data_size: u64,
-    /// Raw bytes of the merkle proof that connects the data_root and the
-    /// chunk hash
+    /// The chunk proof: the sibling hashes from the chunk to the data tree
+    /// root, then the size witness (data tree spec §5)
     pub data_path: Base64,
     /// Raw bytes to be stored, should be CHUNK_SIZE in length unless it is the
     /// last chunk in the transaction
@@ -70,10 +71,20 @@ pub struct UnpackedChunk {
 }
 
 impl UnpackedChunk {
-    pub fn chunk_path_hash(&self) -> ChunkPathHash {
-        Self::hash_data_path(&self.data_path.0)
+    /// The commitment this chunk claims: its `data_tree_root` and `data_size`
+    /// under `geometry`. Data caches and parking key the chunk by it.
+    pub fn data_commitment(&self, geometry: &irys_data_tree::Geometry) -> DataCommitment {
+        crate::data_tree::data_commitment(geometry, self.data_tree_root, self.data_size)
     }
 
+    /// Identity of this chunk: its commitment and index. Independent of the
+    /// proof bytes, which two chunks of one commitment can share.
+    pub fn chunk_key(&self, geometry: &irys_data_tree::Geometry) -> ChunkKey {
+        crate::data_tree::chunk_key(self.data_commitment(geometry), self.tx_offset)
+    }
+
+    /// `sha256(proof)`. The submodule index uses it to store identical proof
+    /// bytes once; it is not chunk identity.
     pub fn hash_data_path(data_path: &ChunkDataPath) -> ChunkPathHash {
         hash_sha256(data_path).into()
     }
@@ -146,13 +157,14 @@ pub struct PackedChunk {
     /// The root hash for this chunk which should map to the root_hash in the
     /// transaction header. Having this present makes it easier to do cached
     /// chunk lookups by data_root on the ingress node.
-    pub data_root: DataRoot,
+    #[serde(rename = "dataRoot")]
+    pub data_tree_root: DataTreeRoot,
     /// Total size of the data stored by this data_root. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
     pub data_size: u64,
-    /// Raw bytes of the merkle proof that connects the data_root and the
-    /// chunk hash
+    /// The chunk proof: the sibling hashes from the chunk to the data tree
+    /// root, then the size witness (data tree spec §5)
     pub data_path: Base64,
     /// Raw bytes to be stored, should be CHUNK_SIZE in length unless it is the
     /// last chunk in the transaction
@@ -175,13 +187,14 @@ pub struct PartialChunk {
     /// The root hash for this chunk which should map to the root_hash in the
     /// transaction header. Having this present makes it easier to do cached
     /// chunk lookups by data_root on the ingress node.
-    pub data_root: Option<DataRoot>,
+    #[serde(rename = "data_root")]
+    pub data_tree_root: Option<DataTreeRoot>,
     /// Total size of the data stored by this data_root. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
     pub data_size: Option<u64>,
-    /// Raw bytes of the merkle proof that connects the data_root and the
-    /// chunk hash
+    /// The chunk proof: the sibling hashes from the chunk to the data tree
+    /// root, then the size witness (data tree spec §5)
     pub data_path: Option<Base64>,
     /// Raw bytes to be stored, should be CHUNK_SIZE in length unless it is the
     /// last chunk in the transaction
@@ -200,7 +213,7 @@ pub struct PartialChunk {
 impl PartialChunk {
     /// Check if this partial chunk has enough fields populated to become an unpacked chunk
     pub fn is_full_unpacked_chunk(&self) -> bool {
-        self.data_root.is_some()
+        self.data_tree_root.is_some()
             && self.data_size.is_some()
             && self.data_path.is_some()
             && self.bytes.is_some()
@@ -227,7 +240,7 @@ impl TryInto<UnpackedChunk> for PartialChunk {
         };
 
         Ok(UnpackedChunk {
-            data_root: self.data_root.ok_or(err_fn("data_root"))?,
+            data_tree_root: self.data_tree_root.ok_or(err_fn("data_root"))?,
             data_size: self.data_size.ok_or(err_fn("data_size"))?,
             data_path: self.data_path.ok_or(err_fn("data_path"))?,
             bytes: self.bytes.ok_or(err_fn("bytes"))?,
@@ -248,7 +261,7 @@ impl TryInto<PackedChunk> for PartialChunk {
         };
 
         Ok(PackedChunk {
-            data_root: self.data_root.ok_or(err_fn("data_root"))?,
+            data_tree_root: self.data_tree_root.ok_or(err_fn("data_tree_root"))?,
             data_size: self.data_size.ok_or(err_fn("data_size"))?,
             data_path: self.data_path.ok_or(err_fn("data_path"))?,
             bytes: self.bytes.ok_or(err_fn("bytes"))?,
@@ -275,11 +288,9 @@ impl TryInto<PackedChunk> for PartialChunk {
 /// either for testing or due to it being the last unpadded chunk
 pub type ChunkBytes = Vec<u8>;
 
-/// sha256(chunk_data_path)
+/// sha256(chunk_data_path). Not chunk identity (see `ChunkKey`): the submodule index
+/// uses it only to store identical proof bytes once.
 pub type ChunkPathHash = H256;
-
-// the root node ID for the merkle tree containing all the transaction's chunks
-pub type DataRoot = H256;
 
 /// The offset of the chunk relative to the first (0th) chunk of the data tree
 #[derive(
@@ -302,6 +313,24 @@ pub struct TxChunkOffset(pub u32);
 impl TxChunkOffset {
     pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
         Self(u32::from_be_bytes(bytes))
+    }
+}
+
+/// Fixed four bytes, big-endian, so a struct that derives `Compact` reads it
+/// without a length.
+impl Compact for TxChunkOffset {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        buf.put_u32(self.0);
+        4
+    }
+
+    fn from_compact(mut buf: &[u8], _len: usize) -> (Self, &[u8]) {
+        use bytes::Buf as _;
+        let value = buf.get_u32();
+        (Self(value), buf)
     }
 }
 
@@ -488,5 +517,31 @@ mod tests {
             };
             assert_eq!(chunk.end_byte_offset_checked(CHUNK_SIZE), expected);
         }
+    }
+
+    #[test]
+    fn chunk_json_keeps_the_data_root_key() {
+        let root = DataTreeRoot(H256::from([5_u8; 32]));
+        let unpacked = UnpackedChunk {
+            data_tree_root: root,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&unpacked).unwrap();
+        assert_eq!(json["dataRoot"], serde_json::to_value(root.0).unwrap());
+        assert!(json.get("dataTreeRoot").is_none());
+
+        let packed = PackedChunk {
+            data_tree_root: root,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&packed).unwrap();
+        assert_eq!(json["dataRoot"], serde_json::to_value(root.0).unwrap());
+
+        let partial = PartialChunk {
+            data_tree_root: Some(root),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&partial).unwrap();
+        assert_eq!(json["data_root"], serde_json::to_value(root.0).unwrap());
     }
 }

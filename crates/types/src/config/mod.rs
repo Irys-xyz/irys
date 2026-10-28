@@ -53,12 +53,19 @@ impl Config {
         }))
     }
 
+    /// The data tree geometry. `validate` checks it at load, so it cannot fail here.
+    pub fn data_tree_geometry(&self) -> irys_data_tree::Geometry {
+        self.consensus
+            .data_tree_geometry()
+            .expect("data tree geometry is validated at load")
+    }
+
     pub fn irys_signer(&self) -> IrysSigner {
         // TODO: store the IrysSigner somewhere so we don't have to clone it all the time (& also memoize the address)
         IrysSigner {
             signer: self.node_config.mining_key.clone(),
             chain_id: self.consensus.chain_id,
-            chunk_size: self.consensus.chunk_size,
+            data_tree_geometry: self.data_tree_geometry(),
         }
     }
 
@@ -187,6 +194,9 @@ impl Config {
             self.consensus.mempool.max_data_tx_chunks > 0,
             "mempool.max_data_tx_chunks must be > 0"
         );
+        self.consensus
+            .data_tree_geometry()
+            .map_err(|error| error.wrap_err("invalid data tree geometry"))?;
         ensure!(
             self.consensus.num_chunks_in_partition > 0,
             "num_chunks_in_partition must be > 0"
@@ -1091,6 +1101,7 @@ mod tests {
 
     use super::*;
     use pretty_assertions::assert_eq;
+    use rstest::rstest;
     use toml;
 
     /// The derived default (cores - 2) exceeds this on any wide host.
@@ -1156,6 +1167,7 @@ mod tests {
         annual_cost_per_gb = 0.01
         decay_rate = 0.01
         chunk_size = 32
+        segments_per_chunk = 4
         block_migration_depth = 6
         block_tree_depth = 50
         num_chunks_in_partition = 10
@@ -1760,6 +1772,61 @@ mod tests {
             err.contains("overflows u64"),
             "expected the slot-lifetime overflow guard, got: {err}"
         );
+    }
+
+    #[test]
+    fn mainnet_and_testnet_geometry_match_the_crate() {
+        assert_eq!(
+            ConsensusConfig::mainnet().data_tree_geometry().unwrap(),
+            irys_data_tree::Geometry::MAINNET
+        );
+        assert_eq!(
+            ConsensusConfig::testnet().data_tree_geometry().unwrap(),
+            irys_data_tree::Geometry::MAINNET
+        );
+    }
+
+    #[test]
+    fn testing_geometry_matches_the_crate() {
+        assert_eq!(
+            ConsensusConfig::testing().data_tree_geometry().unwrap(),
+            irys_data_tree::Geometry::TESTING
+        );
+    }
+
+    #[rstest]
+    #[case::not_power_of_two(32, 3)]
+    #[case::above_maximum(1 << 20, 512)]
+    #[case::not_a_divisor(96, 64)]
+    #[case::zero(32, 0)]
+    fn validate_rejects_an_invalid_data_tree_geometry(
+        #[case] chunk_size: u64,
+        #[case] segments_per_chunk: u32,
+    ) {
+        let mut node_config = NodeConfig::testing();
+        {
+            let consensus = node_config.consensus.get_mut();
+            consensus.chunk_size = chunk_size;
+            consensus.segments_per_chunk = segments_per_chunk;
+        }
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("an invalid data tree geometry must fail validation");
+        assert!(
+            err.to_string().contains("invalid data tree geometry"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_max_data_tx_chunks_above_u32() {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().mempool.max_data_tx_chunks = u64::from(u32::MAX) + 1;
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("max_data_tx_chunks must fit in u32")
+            .to_string();
+        assert!(err.contains("invalid data tree geometry"), "got: {err}");
     }
 
     #[test]

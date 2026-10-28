@@ -13,15 +13,15 @@ use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
 use irys_types::{
-    Base64, ChunkDataPath, Config, DataLedger, H256List, PartitionChunkOffset, PartitionChunkRange,
-    ProofDeserialize as _, SendTraced as _, TokioServiceHandle, U256,
+    ChunkDataPath, Config, DataLedger, H256List, PartitionChunkOffset, PartitionChunkRange,
+    SendTraced as _, TokioServiceHandle, U256,
     app_state::DatabaseProvider,
     block_production::{Seed, SolutionContext, TxPathJob, TxPathSource},
-    get_leaf_proof, partition_chunk_offset_ie, u256_from_le_bytes,
+    data_tree::verify_data_chunk,
+    partition_chunk_offset_ie, u256_from_le_bytes,
 };
 use irys_vdf::state::VdfStateReadonly;
 use nodit::Interval;
-use openssl::sha;
 use reth::tasks::shutdown::Shutdown;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -140,7 +140,7 @@ fn check_startup_placement(
     db: DatabaseProvider,
     ledger: DataLedger,
     ledger_offset: u64,
-    chunk_size: u64,
+    geometry: &irys_types::data_tree::Geometry,
     pool: Option<TxPathPool>,
     placement: DerivePlacement,
 ) -> eyre::Result<()> {
@@ -148,7 +148,7 @@ fn check_startup_placement(
         db.0.as_ref(),
         ledger,
         ledger_offset,
-        chunk_size,
+        geometry.chunk_size(),
         pool.as_deref(),
     )?;
     let check = match placement {
@@ -163,14 +163,18 @@ fn check_startup_placement(
     };
     let tx_index =
         u32::try_from(derived.tx_index).map_err(|_| eyre::eyre!("tx index exceeds u32"))?;
-    if check.data_root != derived.data_root
+    let derived_commitment = irys_types::data_tree::data_commitment(
+        geometry,
+        irys_types::DataTreeRoot(derived.data_root),
+        derived.data_size,
+    );
+    if check.data_commitment != derived_commitment
         || check.block_height != Some(derived.height)
         || check.tx_index != Some(tx_index)
         || check.ledger != Some(derived.ledger.get_id())
     {
         return Err(eyre::eyre!(
-            "placement mismatch: derived data_root {} height {} tx_index {tx_index} ledger {}",
-            derived.data_root,
+            "placement mismatch: derived data commitment {derived_commitment} height {} tx_index {tx_index} ledger {}",
             derived.height,
             derived.ledger.get_id()
         ));
@@ -616,19 +620,19 @@ impl PartitionMiningServiceInner {
             );
             return None;
         };
-        if !self.data_path_binds_chunk(offset, chunk_bytes, &data_path) {
+        let Some(chunk_data) = self.data_path_binds_chunk(offset, chunk_bytes, &data_path) else {
             warn!(
                 storage_module.id = self.storage_module.id,
                 chunk_offset = offset.0,
                 "winning data chunk path does not bind the recall bytes"
             );
             return None;
-        }
+        };
         let tx_path = if let Some(stored) = stored_tx_path {
             // MDBX-SUBMODULE-INDEX: delete this arm. Only MDBX returns a stored data-chunk tx path. RocksDB v1 derives it.
             TxPathSource::Stored(Some(stored))
         } else {
-            let job = self.spawn_tx_path_derive(offset, &data_path)?;
+            let job = self.spawn_tx_path_derive(offset, &data_path, chunk_data)?;
             TxPathSource::Derive(job)
         };
         Some((tx_path, data_path))
@@ -639,12 +643,14 @@ impl PartitionMiningServiceInner {
     /// RocksDB v1 has no placement for the offset, or [`TxPathJob::try_spawn`]
     /// has no free derive slot.
     ///
-    /// The job checks the derived root against `data_path` and, on RocksDB v1,
-    /// against the stored placement. A mismatch fails the job.
+    /// The job checks that `data_path` opens `chunk_data` under the derived
+    /// root and, on RocksDB v1, checks the stored placement. A mismatch fails
+    /// the job.
     fn spawn_tx_path_derive(
         &self,
         offset: PartitionChunkOffset,
         data_path: &[u8],
+        chunk_data: Vec<u8>,
     ) -> Option<TxPathJob> {
         let Some((ledger, ledger_offset)) = self.assigned_ledger_offset(offset) else {
             warn!(
@@ -664,6 +670,7 @@ impl PartitionMiningServiceInner {
         };
         let pool = self.tx_path_pool.clone();
         let chunk_size = self.config.consensus.chunk_size;
+        let geometry = self.config.data_tree_geometry();
         let data_path = data_path.to_vec();
         let placement = match self.placement_for_derive(offset) {
             None => {
@@ -698,8 +705,9 @@ impl PartitionMiningServiceInner {
             irys_database::tx_path_derive::cross_check_derived(
                 &derived,
                 ledger_offset,
-                chunk_size,
+                &geometry,
                 &data_path,
+                &chunk_data,
                 placement,
             )?;
             Ok(derived.proof.proof)
@@ -725,7 +733,7 @@ impl PartitionMiningServiceInner {
         Some(match submodule.db.view(|tx| tx.placement_at(offset)) {
             Ok(Some(placement)) => {
                 DerivePlacement::Check(irys_database::tx_path_derive::PlacementCheck {
-                    data_root: placement.data_root,
+                    data_commitment: placement.data_commitment,
                     ledger: placement.ledger,
                     block_height: placement.block_height,
                     tx_index: placement.tx_index,
@@ -768,10 +776,10 @@ impl PartitionMiningServiceInner {
             return;
         };
         let pool = self.tx_path_pool.clone();
-        let chunk_size = self.config.consensus.chunk_size;
+        let geometry = self.config.data_tree_geometry();
         let module_id = self.storage_module.id;
         let joined = tokio::task::spawn_blocking(move || {
-            check_startup_placement(db, ledger, ledger_offset, chunk_size, pool, placement)
+            check_startup_placement(db, ledger, ledger_offset, &geometry, pool, placement)
         })
         .await;
         let failed = match joined {
@@ -809,32 +817,40 @@ impl PartitionMiningServiceInner {
         Some((ledger, ledger_offset))
     }
 
-    /// True when `data_path`'s leaf hash equals the sha256 of the unpacked
-    /// recall prefix. The leaf stores the exclusive end offset. A full chunk
-    /// ends on a chunk boundary, so the span is the chunk size; a short final
-    /// chunk ends inside the chunk, and the span is that remainder.
+    /// The unpacked data of the recall chunk at `offset` (its `chunk_len`
+    /// bytes) when `data_path` opens it. `None` when the offset has no
+    /// placement, the unpacked bytes after the chunk data are not zero, or
+    /// the proof does not open the chunk.
+    ///
+    /// The placement gives the data tree root, `data_size` and chunk index.
+    /// The proof bytes never choose the chunk index.
     fn data_path_binds_chunk(
         &self,
         offset: PartitionChunkOffset,
         chunk_bytes: &[u8],
         data_path: &ChunkDataPath,
-    ) -> bool {
+    ) -> Option<Vec<u8>> {
         let chunk_size = self.config.consensus.chunk_size as usize;
         if chunk_bytes.len() != chunk_size {
-            return false;
+            return None;
         }
-        let Ok(leaf) = get_leaf_proof(&Base64(data_path.clone())) else {
-            return false;
-        };
-        let Some(leaf_hash) = leaf.hash() else {
-            return false;
-        };
-        let end = leaf.offset();
-        let rem = end % chunk_size;
-        let span = if rem == 0 { chunk_size } else { rem };
-        let Some(partition_hash) = self.storage_module.partition_hash() else {
-            return false;
-        };
+        let (data_commitment, _data_tree_root, data_size, chunk_index) =
+            match self.storage_module.data_chunk_location(offset) {
+                Ok(location) => location?,
+                Err(error) => {
+                    warn!(
+                        storage_module.id = self.storage_module.id,
+                        chunk_offset = offset.0,
+                        %error,
+                        "winning data chunk location lookup failed"
+                    );
+                    return None;
+                }
+            };
+        let geometry = self.config.data_tree_geometry();
+        let chunk_length = geometry.chunk_len(data_size, chunk_index.0).ok()?;
+        let chunk_length = usize::try_from(chunk_length).ok()?;
+        let partition_hash = self.storage_module.partition_hash()?;
         let mut entropy = Vec::with_capacity(chunk_size);
         compute_entropy_chunk(
             self.config.node_config.miner_address(),
@@ -846,11 +862,25 @@ impl PartitionMiningServiceInner {
             self.config.consensus.chain_id,
         );
         if entropy.len() != chunk_size {
-            return false;
+            return None;
         }
         let mut unpacked = chunk_bytes.to_vec();
         xor_vec_u8_arrays_in_place(&mut unpacked, &entropy);
-        sha::sha256(&unpacked[..span]) == leaf_hash
+        // `chunk_len` is at most `chunk_size`, the unpacked length.
+        let padding = unpacked.split_off(chunk_length);
+        if padding.iter().any(|byte| *byte != 0) {
+            return None;
+        }
+        verify_data_chunk(
+            &geometry,
+            data_commitment,
+            data_size,
+            chunk_index,
+            &unpacked,
+            data_path,
+        )
+        .ok()?;
+        Some(unpacked)
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -2187,12 +2217,16 @@ mod tests {
             let unpacked = tx.data_chunks().expect("data chunks");
             let (_, proofs) =
                 DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+            // The identity matches the chain `write_submit_chain` writes:
+            // tx 0 of the Submit ledger at height 1.
             storage_module
-                .index_transaction_data(
+                .index_transaction_data_in(
                     &tx.header,
                     &proofs[0].proof,
                     LedgerChunkRange(ledger_chunk_offset_ii!(0, tx_chunks - 1)),
-                    0,
+                    1,
+                    Some(DataLedger::Submit),
+                    Some(0),
                 )
                 .expect("index transaction");
             for chunk in &unpacked {
@@ -2313,8 +2347,10 @@ mod tests {
         let (chunk_bytes, chunk_type) = recalled.get(&first).expect("offset 0");
         assert_eq!(*chunk_type, ChunkType::Data);
         assert!(
-            inner.data_path_binds_chunk(first, chunk_bytes, &data_path),
-            "the unplaced chunk is a real data win"
+            inner
+                .data_path_binds_chunk(first, chunk_bytes, &data_path)
+                .is_none(),
+            "an unplaced chunk has no chunk index, so its proof does not bind"
         );
 
         let chunk_size = storage.config.consensus.chunk_size as usize;
@@ -2435,7 +2471,7 @@ mod tests {
     }
 
     #[test]
-    fn short_final_chunk_binds_its_prefix_only() {
+    fn short_final_chunk_binds_its_data_and_requires_zero_padding() {
         let chunk_size = 32_usize;
         let tail = 10_usize;
         let mut data = Vec::new();
@@ -2457,23 +2493,107 @@ mod tests {
             .expect("path read");
         let data_path = data_path.expect("data path");
 
-        assert!(
+        assert_eq!(
             inner.data_path_binds_chunk(offset, chunk_bytes, &data_path),
-            "the stored short chunk matches its leaf"
+            Some(vec![0x5A; tail]),
+            "the stored short chunk matches its proof"
         );
 
         let mut prefix = chunk_bytes.clone();
         prefix[0] ^= 0x01;
         assert!(
-            !inner.data_path_binds_chunk(offset, &prefix, &data_path),
-            "a byte inside the hashed prefix must not bind"
+            inner
+                .data_path_binds_chunk(offset, &prefix, &data_path)
+                .is_none(),
+            "a byte inside the chunk data must not bind"
         );
 
+        // PoA validation requires zero padding after a short chunk.
         let mut past_span = chunk_bytes.clone();
         past_span[tail] ^= 0x01;
         assert!(
-            inner.data_path_binds_chunk(offset, &past_span, &data_path),
-            "a byte past the short span is not part of the leaf"
+            inner
+                .data_path_binds_chunk(offset, &past_span, &data_path)
+                .is_none(),
+            "a non-zero byte in the padding must not bind"
+        );
+    }
+
+    /// Chunks 0 and 2 hold the same bytes, so the chunk bytes do not tell
+    /// them apart. Chunks 1 and 3 differ, so their proofs differ. (When every
+    /// chunk is the same, the proofs are the same too: data tree spec §7.)
+    /// The placement says offset 2 is chunk 2. A stored proof for chunk 0
+    /// must not bind there.
+    #[test]
+    fn mining_reads_the_chunk_index_from_the_placement() {
+        use irys_database::submodule::SubmoduleStore as _;
+
+        let chunk_size = 32_usize;
+        let data = [7_u8, 8, 7, 9]
+            .iter()
+            .flat_map(|byte| vec![*byte; chunk_size])
+            .collect::<Vec<u8>>();
+        assert_eq!(data.len(), chunk_size * DATA_CHUNKS as usize);
+        let (_tmp, storage, inner, header) =
+            open_data_miner_with_tx_data(U256::zero(), true, Some(data));
+        let header = header.expect("indexed header");
+        let offset = PartitionChunkOffset::from(2);
+        let location = storage
+            .data_chunk_location(offset)
+            .expect("location read")
+            .expect("the offset is placed");
+        assert_eq!(location.1, header.data_tree_root);
+        assert_eq!(location.2, header.data_size);
+        assert_eq!(location.3, irys_types::TxChunkOffset::from(2_u32));
+
+        let read = storage
+            .read_chunks(partition_chunk_offset_ie!(2, 3))
+            .expect("read the chunk");
+        let (chunk_bytes, _) = read.get(&offset).expect("offset 2");
+        let read_path = |at: u32| {
+            storage
+                .read_tx_data_path(LedgerChunkOffset::from(at))
+                .expect("path read")
+                .1
+                .expect("data path")
+        };
+        let own_proof = read_path(2);
+        let chunk_zero_proof = read_path(0);
+        assert_ne!(own_proof, chunk_zero_proof);
+        assert!(
+            inner
+                .data_path_binds_chunk(offset, chunk_bytes, &own_proof)
+                .is_some(),
+            "the honest proof binds"
+        );
+
+        // Store the chunk 0 proof at offset 2.
+        let (_, submodule) = storage.get_submodule_for_offset(offset).expect("submodule");
+        let path_hash = irys_types::UnpackedChunk::hash_data_path(&chunk_zero_proof);
+        submodule
+            .db
+            .update(|tx| {
+                tx.write_data_path_updates(vec![(offset, path_hash, chunk_zero_proof.clone())])
+            })
+            .expect("store the chunk 0 proof at offset 2");
+        assert_eq!(read_path(2), chunk_zero_proof);
+
+        assert_eq!(
+            storage.data_chunk_location(offset).expect("location read"),
+            Some(location),
+            "the stored proof does not move the placement"
+        );
+        assert!(
+            inner
+                .data_path_binds_chunk(offset, chunk_bytes, &chunk_zero_proof)
+                .is_none(),
+            "a proof for chunk 0 must not bind chunk 2"
+        );
+        assert!(
+            inner
+                .paths_for_winning_data_chunk(offset, chunk_bytes)
+                .is_none(),
+            "the win at offset 2 is not submitted"
         );
     }
 
@@ -2504,14 +2624,18 @@ mod tests {
 
     #[test]
     fn missing_stored_tx_path_derives_the_merkle_proof() {
-        let (tmp, storage, _inner, header) = open_data_miner(U256::zero(), true);
+        // RocksDB v1 stores no tx path, so a data win derives it. The chunk
+        // keeps its placement, which gives the chunk index.
+        let (tmp, storage, _inner, header) = open_data_miner_for_index(
+            U256::zero(),
+            true,
+            None,
+            SubmoduleIndexEngine::Rocksdb,
+            false,
+        );
         let header = header.expect("indexed header");
-        let expected = storage
-            .read_tx_data_path(LedgerChunkOffset::from(0))
-            .expect("stored read")
-            .0
-            .expect("stored tx path");
-        clear_stored_tx_paths(&storage);
+        let (_, tx_paths) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&header));
+        let expected = tx_paths[0].proof.clone();
         let db_dir = tmp.path().join("consensus");
         std::fs::create_dir_all(&db_dir).expect("consensus dir");
         let db = write_submit_chain(&db_dir, &header, storage.config.consensus.chunk_size);

@@ -2,12 +2,12 @@ use super::ChunkIngressServiceInner;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::store_ingress_proof;
-use irys_database::{cached_data_root_by_data_root, complete_ingress_leaves};
+use irys_database::{cached_data_root_by_commitment, complete_ingress_leaves};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
+    BlockHash, Config, DataCommitment, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
     SendTraced as _, Traced,
 };
 use reth_db::DatabaseError;
@@ -26,9 +26,9 @@ pub struct IngressProofGenerationState {
 
 #[derive(Debug, Default)]
 struct IngressProofGenerationStateInner {
-    active: HashSet<DataRoot>,
-    retry_attempts: HashMap<DataRoot, u8>,
-    retry_scheduled: HashSet<DataRoot>,
+    active: HashSet<DataCommitment>,
+    retry_attempts: HashMap<DataCommitment, u8>,
+    retry_scheduled: HashSet<DataCommitment>,
 }
 
 impl IngressProofGenerationState {
@@ -36,70 +36,73 @@ impl IngressProofGenerationState {
         Self::default()
     }
 
-    pub fn try_acquire(&self, data_root: DataRoot) -> Option<IngressProofGenerationLease> {
+    pub fn try_acquire(
+        &self,
+        data_commitment: DataCommitment,
+    ) -> Option<IngressProofGenerationLease> {
         let inserted = self
             .inner
             .write()
             .expect("proof generation state lock poisoned")
             .active
-            .insert(data_root);
+            .insert(data_commitment);
         inserted.then(|| IngressProofGenerationLease {
             state: self.clone(),
-            data_root,
+            data_commitment,
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn is_generating(&self, data_root: DataRoot) -> bool {
+    pub(crate) fn is_generating(&self, data_commitment: DataCommitment) -> bool {
         self.inner
             .read()
             .expect("proof generation state lock poisoned")
             .active
-            .contains(&data_root)
+            .contains(&data_commitment)
     }
 
     /// Reserves one bounded, monotonic retry for a failed generation attempt.
     /// Concurrent failures coalesce, and persistent failures stop after the
     /// capped sequence instead of creating an unbounded retry loop.
-    pub(crate) fn reserve_retry(&self, data_root: DataRoot) -> Option<Duration> {
+    pub(crate) fn reserve_retry(&self, data_commitment: DataCommitment) -> Option<Duration> {
         const MAX_RETRIES: u8 = 6;
         let mut inner = self
             .inner
             .write()
             .expect("proof generation state lock poisoned");
-        if inner.retry_scheduled.contains(&data_root) {
+        if inner.retry_scheduled.contains(&data_commitment) {
             return None;
         }
-        let attempt = *inner.retry_attempts.get(&data_root).unwrap_or(&0);
+        let attempt = *inner.retry_attempts.get(&data_commitment).unwrap_or(&0);
         if attempt >= MAX_RETRIES {
             return None;
         }
-        inner.retry_attempts.insert(data_root, attempt + 1);
-        inner.retry_scheduled.insert(data_root);
+        inner.retry_attempts.insert(data_commitment, attempt + 1);
+        inner.retry_scheduled.insert(data_commitment);
         Some(Duration::from_secs(1_u64 << attempt))
     }
 
-    pub(crate) fn mark_retry_dispatched(&self, data_root: DataRoot) {
+    pub(crate) fn mark_retry_dispatched(&self, data_commitment: DataCommitment) {
         self.inner
             .write()
             .expect("proof generation state lock poisoned")
             .retry_scheduled
-            .remove(&data_root);
+            .remove(&data_commitment);
     }
 
-    pub(crate) fn clear_retries(&self, data_root: DataRoot) {
+    pub(crate) fn clear_retries(&self, data_commitment: DataCommitment) {
         let mut inner = self
             .inner
             .write()
             .expect("proof generation state lock poisoned");
-        inner.retry_attempts.remove(&data_root);
-        inner.retry_scheduled.remove(&data_root);
+        inner.retry_attempts.remove(&data_commitment);
+        inner.retry_scheduled.remove(&data_commitment);
     }
 }
 
 pub struct IngressProofGenerationLease {
     state: IngressProofGenerationState,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
 }
 
 impl Drop for IngressProofGenerationLease {
@@ -109,7 +112,7 @@ impl Drop for IngressProofGenerationLease {
             .write()
             .expect("proof generation state lock poisoned")
             .active
-            .remove(&self.data_root);
+            .remove(&self.data_commitment);
     }
 }
 
@@ -180,14 +183,14 @@ impl IngressProofGenerationError {
 }
 
 impl ChunkIngressServiceInner {
-    #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]
+    #[tracing::instrument(level = "trace", skip_all, fields(data_commitment = %ingress_proof.data_commitment))]
     pub(crate) fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
         // Validate the proofs signature and basic details
         let address = ingress_proof
-            .pre_validate(&ingress_proof.data_root)
+            .pre_validate(&ingress_proof.data_commitment)
             .map_err(|_| IngressProofError::InvalidSignature)?;
 
         // Reject proofs from addresses not staked or pending stake (spam protection)
@@ -207,7 +210,7 @@ impl ChunkIngressServiceInner {
             Ok(()) => {}
             Err(IngressProofError::UnknownAnchor(anchor)) => {
                 debug!(
-                    ingress_proof.data_root = ?ingress_proof.data_root,
+                    ingress_proof.data_commitment = ?ingress_proof.data_commitment,
                     ingress_proof.anchor = ?anchor,
                     "parking ingress proof until its anchor block is known"
                 );
@@ -236,7 +239,7 @@ impl ChunkIngressServiceInner {
 
         if let Err(e) = res {
             tracing::error!(
-                ingress_proof.data_root = ?ingress_proof.data_root,
+                ingress_proof.data_commitment = ?ingress_proof.data_commitment,
                 "Failed to store ingress proof data root: {:?}",
                 e
             );
@@ -244,13 +247,13 @@ impl ChunkIngressServiceInner {
         }
 
         let gossip_sender = &self.service_senders.gossip_broadcast;
-        let data_root = ingress_proof.data_root;
+        let data_commitment = ingress_proof.data_commitment;
         let gossip_broadcast_message = GossipBroadcastMessageV2::from(ingress_proof);
 
         if let Err(error) = gossip_sender.send_traced(gossip_broadcast_message) {
             tracing::error!(
-                "Failed to send gossip data for ingress proof data_root {:?}: {:?}",
-                data_root,
+                "Failed to send gossip data for ingress proof data_commitment {:?}: {:?}",
+                data_commitment,
                 error
             );
         }
@@ -347,7 +350,7 @@ impl ChunkIngressServiceInner {
             // Fully valid
             Ok(()) => {
                 debug!(
-                    ingress_proof.data_root = ?ingress_proof.data_root,
+                    ingress_proof.data_commitment = ?ingress_proof.data_commitment,
                     "Ingress proof anchor is valid"
                 );
                 ProofCheckResult {
@@ -360,7 +363,7 @@ impl ChunkIngressServiceInner {
                     IngressProofError::InvalidAnchor(_block_hash)
                     | IngressProofError::UnknownAnchor(_block_hash) => {
                         warn!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.data_commitment = ?ingress_proof.data_commitment,
                             ingress_proof.anchor = ?ingress_proof.anchor,
                             "Ingress proof anchor has an invalid anchor",
                         );
@@ -372,7 +375,7 @@ impl ChunkIngressServiceInner {
                     }
                     IngressProofError::InvalidSignature => {
                         warn!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.data_commitment = ?ingress_proof.data_commitment,
                             ingress_proof.anchor = ?ingress_proof.anchor,
                             "Ingress proof anchor has an invalid signature and is going to be pruned",
                         );
@@ -384,7 +387,7 @@ impl ChunkIngressServiceInner {
                     }
                     IngressProofError::UnstakedAddress => {
                         warn!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.data_commitment = ?ingress_proof.data_commitment,
                             ingress_proof.anchor = ?ingress_proof.anchor,
                             "Ingress proof has been created by an unstaked address and is going to be pruned",
                         );
@@ -397,7 +400,7 @@ impl ChunkIngressServiceInner {
                     IngressProofError::DatabaseError(message) => {
                         // Don't do anything, we don't know the proof status
                         error!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.data_commitment = ?ingress_proof.data_commitment,
                             "Database error during ingress proof expiration validation: {}", message
                         );
                         ProofCheckResult {
@@ -407,7 +410,7 @@ impl ChunkIngressServiceInner {
                     }
                     IngressProofError::Overloaded => {
                         warn!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.data_commitment = ?ingress_proof.data_commitment,
                             "Ingress proof service overloaded during expiration validation"
                         );
                         ProofCheckResult {
@@ -417,7 +420,7 @@ impl ChunkIngressServiceInner {
                     }
                     IngressProofError::Other(reason_message) => {
                         error!(
-                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.data_commitment = ?ingress_proof.data_commitment,
                             "Unexpected error during ingress proof expiration validation: {}", reason_message
                         );
                         ProofCheckResult {
@@ -464,7 +467,7 @@ pub fn generate_and_store_ingress_proof(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     config: &Config,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     anchor_hint: Option<H256>,
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     generation_state: &IngressProofGenerationState,
@@ -474,18 +477,18 @@ pub fn generate_and_store_ingress_proof(
     // leaf writer, causing that writer to drop its only generation wake-up.
     let leaves = load_complete_ingress_leaves(
         db,
-        data_root,
+        data_commitment,
         config.irys_signer().address(),
         config.consensus.chunk_size,
     )?;
     let generation_lease = generation_state
-        .try_acquire(data_root)
+        .try_acquire(data_commitment)
         .ok_or(IngressProofGenerationError::AlreadyGenerating)?;
     generate_and_store_ingress_proof_from_leaves(
         block_tree_guard,
         db,
         config,
-        data_root,
+        data_commitment,
         anchor_hint,
         leaves,
         gossip_sender,
@@ -500,7 +503,7 @@ pub(crate) fn generate_and_store_ingress_proof_from_leaves(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     config: &Config,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     anchor_hint: Option<H256>,
     leaves: Vec<IngressMerkleLeaf>,
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
@@ -526,7 +529,7 @@ pub(crate) fn generate_and_store_ingress_proof_from_leaves(
 
     let proof = super::chunks::generate_ingress_proof(
         db.clone(),
-        data_root,
+        data_commitment,
         leaves,
         signer,
         chain_id,
@@ -555,13 +558,13 @@ pub fn reanchor_and_store_ingress_proof(
 
     load_complete_ingress_leaves(
         db,
-        proof.data_root,
+        proof.data_commitment,
         signer.address(),
         config.consensus.chunk_size,
     )?;
 
     let _generation_lease = generation_state
-        .try_acquire(proof.data_root)
+        .try_acquire(proof.data_commitment)
         .ok_or(IngressProofGenerationError::AlreadyGenerating)?;
 
     let latest_anchor = block_tree_guard
@@ -600,12 +603,12 @@ pub fn gossip_ingress_proof(
         Ok(()) => {
             let msg = GossipBroadcastMessageV2::from(ingress_proof.clone());
             if let Err(e) = gossip_sender.send_traced(msg) {
-                tracing::error!(proof.data_root = ?ingress_proof.data_root, "Failed to gossip regenerated ingress proof: {e}");
+                tracing::error!(proof.data_commitment = ?ingress_proof.data_commitment, "Failed to gossip regenerated ingress proof: {e}");
             }
         }
         Err(e) => {
             // Skip gossip; proof stored for potential later use/regeneration.
-            warn!(proof.data_root = ?ingress_proof.data_root, "Generated ingress proof anchor invalid (not gossiped): {e}");
+            warn!(proof.data_commitment = ?ingress_proof.data_commitment, "Generated ingress proof anchor invalid (not gossiped): {e}");
         }
     }
 }
@@ -614,21 +617,23 @@ pub fn gossip_ingress_proof(
 /// This is the sole database scan used by proof generation.
 pub fn load_complete_ingress_leaves(
     db: &DatabaseProvider,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     address: irys_types::IrysAddress,
     chunk_size: u64,
 ) -> Result<Vec<IngressMerkleLeaf>, IngressProofGenerationError> {
     let cdr = db
-        .view_eyre(|tx| cached_data_root_by_data_root(tx, data_root))
+        .view_eyre(|tx| cached_data_root_by_commitment(tx, data_commitment))
         .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
         .ok_or(IngressProofGenerationError::DataRootUnavailable)?;
 
     data_size_to_chunk_count(cdr.data_size, chunk_size)
         .map_err(|error| IngressProofGenerationError::InvalidDataSize(error.to_string()))?;
 
-    db.view_eyre(|tx| complete_ingress_leaves(tx, data_root, address, cdr.data_size, chunk_size))
-        .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
-        .ok_or(IngressProofGenerationError::IncompleteLeaves)
+    db.view_eyre(|tx| {
+        complete_ingress_leaves(tx, data_commitment, address, cdr.data_size, chunk_size)
+    })
+    .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
+    .ok_or(IngressProofGenerationError::IncompleteLeaves)
 }
 
 #[cfg(test)]
@@ -638,37 +643,53 @@ mod generation_state_tests {
     #[test]
     fn generation_lease_is_atomic_and_released_on_drop() {
         let state = IngressProofGenerationState::new();
-        let data_root = H256::random();
+        let data_commitment = H256::random();
 
-        let lease = state.try_acquire(data_root).expect("first acquisition");
-        assert!(state.is_generating(data_root));
-        assert!(state.try_acquire(data_root).is_none());
+        let lease = state
+            .try_acquire(DataCommitment(data_commitment))
+            .expect("first acquisition");
+        assert!(state.is_generating(DataCommitment(data_commitment)));
+        assert!(state.try_acquire(DataCommitment(data_commitment)).is_none());
 
         drop(lease);
-        assert!(!state.is_generating(data_root));
-        assert!(state.try_acquire(data_root).is_some());
+        assert!(!state.is_generating(DataCommitment(data_commitment)));
+        assert!(state.try_acquire(DataCommitment(data_commitment)).is_some());
     }
 
     #[test]
     fn generation_retries_are_bounded_and_coalesced() {
         let state = IngressProofGenerationState::new();
-        let data_root = H256::random();
+        let data_commitment = H256::random();
 
-        assert_eq!(state.reserve_retry(data_root), Some(Duration::from_secs(1)));
-        assert_eq!(state.reserve_retry(data_root), None, "one retry at a time");
+        assert_eq!(
+            state.reserve_retry(DataCommitment(data_commitment)),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            state.reserve_retry(DataCommitment(data_commitment)),
+            None,
+            "one retry at a time"
+        );
 
         for expected_secs in [2, 4, 8, 16, 32] {
-            state.mark_retry_dispatched(data_root);
+            state.mark_retry_dispatched(DataCommitment(data_commitment));
             assert_eq!(
-                state.reserve_retry(data_root),
+                state.reserve_retry(DataCommitment(data_commitment)),
                 Some(Duration::from_secs(expected_secs))
             );
         }
-        state.mark_retry_dispatched(data_root);
-        assert_eq!(state.reserve_retry(data_root), None, "retry cap");
+        state.mark_retry_dispatched(DataCommitment(data_commitment));
+        assert_eq!(
+            state.reserve_retry(DataCommitment(data_commitment)),
+            None,
+            "retry cap"
+        );
 
-        state.clear_retries(data_root);
-        assert_eq!(state.reserve_retry(data_root), Some(Duration::from_secs(1)));
+        state.clear_retries(DataCommitment(data_commitment));
+        assert_eq!(
+            state.reserve_retry(DataCommitment(data_commitment)),
+            Some(Duration::from_secs(1))
+        );
     }
 }
 
@@ -695,7 +716,7 @@ mod unknown_anchor_tests {
     fn dummy_proof(anchor: H256) -> IngressProof {
         IngressProof::V1(IngressProofV1 {
             signature: IrysSignature::default(),
-            data_root: H256::zero(),
+            data_commitment: DataCommitment(H256::zero()),
             proof: H256::zero(),
             chain_id: 0,
             anchor,

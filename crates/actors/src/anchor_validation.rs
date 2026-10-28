@@ -135,8 +135,8 @@ pub fn validate_ingress_proof_anchor_for_inclusion(
             .unwrap_or_else(|_| "unknown".to_string());
         warn!(
             signer,
-            "ingress proof data_root {} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}",
-            &ingress_proof.data_root,
+            "ingress proof data_commitment {} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}",
+            &ingress_proof.data_commitment,
         );
         Ok(false)
     }

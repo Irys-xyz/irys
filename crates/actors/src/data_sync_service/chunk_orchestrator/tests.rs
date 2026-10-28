@@ -11,10 +11,10 @@ use irys_domain::ChunkType;
 use irys_domain::{BlockTree, StorageModuleInfo};
 use irys_testing_utils::TempDirBuilder;
 use irys_types::{
-    Base64, Config, ConsensusConfig, DataLedger, DataTransaction, DataTransactionLedger, H256,
-    IrysAddress, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PeerAddress, PeerListItem,
-    TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider, irys::IrysSigner,
-    ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
+    Config, ConsensusConfig, DataLedger, DataTransaction, DataTransactionLedger, H256, IrysAddress,
+    LedgerChunkOffset, LedgerChunkRange, NodeConfig, PeerAddress, PeerListItem, TxChunkOffset,
+    app_state::DatabaseProvider, irys::IrysSigner, ledger_chunk_offset_ii,
+    partition::PartitionAssignment, partition_chunk_offset_ie,
 };
 use nodit::interval::ii;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1853,25 +1853,23 @@ fn index_and_settle(sm: &StorageModule, tx: &DataTransaction, last_inclusive: u6
     index_tx(sm, tx, last_inclusive);
     for (key, job) in sm.pending_body_migrations().expect("pending rows") {
         assert!(
-            sm.settle_pending_body_migration(key, job.data_root, job.block_height)
+            sm.settle_pending_body_migration(key, job.data_commitment, job.block_height)
                 .expect("settle")
         );
     }
 }
 
-fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8], offsets: &[usize]) {
+fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, offsets: &[usize]) {
     db.update_eyre(|wtx| {
-        cache_data_root(wtx, &tx.header, None)?;
+        cache_data_root(
+            wtx,
+            &tx.header,
+            None,
+            &irys_types::data_tree::Geometry::TESTING,
+        )?;
+        let chunks = tx.data_chunks()?;
         for &i in offsets {
-            let node = &tx.chunks[i];
-            let chunk = UnpackedChunk {
-                data_root: tx.header.data_root,
-                data_size: tx.header.data_size,
-                data_path: Base64(tx.proofs[i].proof.clone()),
-                bytes: Base64(data[node.min_byte_range..node.max_byte_range].to_vec()),
-                tx_offset: TxChunkOffset::from(u32::try_from(i).expect("tx offset")),
-            };
-            cache_chunk(wtx, &chunk)?;
+            cache_chunk(wtx, &chunks[i], &irys_types::data_tree::Geometry::TESTING)?;
         }
         Ok(())
     })
@@ -1883,16 +1881,20 @@ fn strip_cached_body(db: &DatabaseProvider, tx: &DataTransaction) {
     use irys_database::tables::CachedChunks;
     use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
-    let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
+    let chunk_key = irys_types::data_tree::chunk_key(
+        tx.header
+            .data_commitment(&irys_types::data_tree::Geometry::TESTING),
+        TxChunkOffset::from(0),
+    );
     db.update_eyre(|wtx| {
         let existing = wtx
-            .get::<CachedChunks>(path_hash)?
+            .get::<CachedChunks>(chunk_key)?
             .expect("cached chunk row");
         wtx.put::<CachedChunks>(
-            path_hash,
+            chunk_key,
             CachedChunk {
                 chunk: None,
-                data_path: existing.data_path,
+                ..existing
             },
         )?;
         Ok(())
@@ -1916,9 +1918,9 @@ async fn local_cache_hit_writes_without_a_peer_request() {
     let config = test_config(tmp.path().to_path_buf(), 4);
     let sm = packed_sm(&config, 4);
     let db = open_test_db(&config);
-    let (tx, data) = signed_tx(&config, 1);
+    let (tx, _) = signed_tx(&config, 1);
     index_and_settle(&sm, &tx, 0);
-    cache_bodies_at(&db, &tx, &data, &[0]);
+    cache_bodies_at(&db, &tx, &[0]);
     let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
     add_assigned_peer(&mut orch, &config, 11, 9111);
     let offset = PartitionChunkOffset::from(0);
@@ -1933,7 +1935,7 @@ async fn local_cache_hit_writes_without_a_peer_request() {
         fetcher.request_log.read().unwrap().is_empty(),
         "a cached body must not ask a peer"
     );
-    assert!(fetcher.data_root_request_log.read().unwrap().is_empty());
+    assert!(fetcher.commitment_request_log.read().unwrap().is_empty());
     assert!(sm.is_data_write_pending_at(offset));
     assert!(matches!(
         orch.chunk_requests[&offset].request_state,
@@ -1949,9 +1951,9 @@ async fn local_cache_hit_writes_when_no_peer_is_connected() {
     let config = test_config(tmp.path().to_path_buf(), 4);
     let sm = packed_sm(&config, 4);
     let db = open_test_db(&config);
-    let (tx, data) = signed_tx(&config, 1);
+    let (tx, _) = signed_tx(&config, 1);
     index_and_settle(&sm, &tx, 0);
-    cache_bodies_at(&db, &tx, &data, &[0]);
+    cache_bodies_at(&db, &tx, &[0]);
     let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
     let offset = PartitionChunkOffset::from(0);
     insert_pending(&mut orch, offset);
@@ -1967,9 +1969,9 @@ async fn local_cache_contiguous_run_writes_hits_around_a_hole() {
     let config = test_config(tmp.path().to_path_buf(), 4);
     let sm = packed_sm(&config, 4);
     let db = open_test_db(&config);
-    let (tx, data) = signed_tx(&config, 3);
+    let (tx, _) = signed_tx(&config, 3);
     index_and_settle(&sm, &tx, 2);
-    cache_bodies_at(&db, &tx, &data, &[0, 2]);
+    cache_bodies_at(&db, &tx, &[0, 2]);
     let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
     add_assigned_peer(&mut orch, &config, 12, 9112);
     for value in 0..3_u32 {
@@ -2002,9 +2004,9 @@ async fn local_cache_descending_run_is_one_lookup() {
     let config = test_config(tmp.path().to_path_buf(), 4);
     let sm = packed_sm(&config, 4);
     let db = open_test_db(&config);
-    let (tx, data) = signed_tx(&config, 3);
+    let (tx, _) = signed_tx(&config, 3);
     index_and_settle(&sm, &tx, 2);
-    cache_bodies_at(&db, &tx, &data, &[1, 2]);
+    cache_bodies_at(&db, &tx, &[1, 2]);
     let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
     add_assigned_peer(&mut orch, &config, 13, 9113);
     for value in [2_u32, 1, 0] {
@@ -2035,9 +2037,9 @@ async fn term_ledger_tick_writes_the_frontier_run_in_one_lookup() {
     let config = test_config(tmp.path().to_path_buf(), 4);
     let sm = packed_sm_for_ledger(&config, 4, DataLedger::Submit);
     let db = open_test_db(&config);
-    let (tx, data) = signed_tx(&config, 4);
+    let (tx, _) = signed_tx(&config, 4);
     index_and_settle(&sm, &tx, 3);
-    cache_bodies_at(&db, &tx, &data, &[0, 1, 2, 3]);
+    cache_bodies_at(&db, &tx, &[0, 1, 2, 3]);
     let mut orch =
         make_orchestrator_with_ledger_total_and_db(sm.clone(), &config, DataLedger::Submit, 4, db);
     add_assigned_peer(&mut orch, &config, 14, 9114);
@@ -2078,9 +2080,9 @@ async fn local_cache_descending_run_crosses_a_submodule_boundary() {
     let sm = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
     sm.pack_with_zeros();
     let db = open_test_db(&config);
-    let (tx, data) = signed_tx(&config, 4);
+    let (tx, _) = signed_tx(&config, 4);
     index_and_settle(&sm, &tx, 3);
-    cache_bodies_at(&db, &tx, &data, &[1, 2, 3]);
+    cache_bodies_at(&db, &tx, &[1, 2, 3]);
     let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
     add_assigned_peer(&mut orch, &config, 15, 9115);
     for value in [3_u32, 2, 1, 0] {
@@ -2109,7 +2111,7 @@ async fn local_cache_miss_sticks_for_one_peer_cycle_then_retries_the_cache() {
     let config = test_config(tmp.path().to_path_buf(), 4);
     let sm = packed_sm(&config, 4);
     let db = open_test_db(&config);
-    let (tx, data) = signed_tx(&config, 1);
+    let (tx, _) = signed_tx(&config, 1);
     index_and_settle(&sm, &tx, 0);
     let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db.clone());
     add_assigned_peer(&mut orch, &config, 13, 9113);
@@ -2139,7 +2141,7 @@ async fn local_cache_miss_sticks_for_one_peer_cycle_then_retries_the_cache() {
         ChunkRequestState::Pending
     ));
 
-    cache_bodies_at(&db, &tx, &data, &[0]);
+    cache_bodies_at(&db, &tx, &[0]);
     assert!(orch.dispatch_next());
     wait_for_ledger_requests(&fetcher, 2).await;
     assert!(
@@ -2186,9 +2188,9 @@ async fn local_cache_index_only_row_is_a_miss() {
     let config = test_config(tmp.path().to_path_buf(), 4);
     let sm = packed_sm(&config, 4);
     let db = open_test_db(&config);
-    let (tx, data) = signed_tx(&config, 1);
+    let (tx, _) = signed_tx(&config, 1);
     index_and_settle(&sm, &tx, 0);
-    cache_bodies_at(&db, &tx, &data, &[0]);
+    cache_bodies_at(&db, &tx, &[0]);
     strip_cached_body(&db, &tx);
     let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
     add_assigned_peer(&mut orch, &config, 15, 9115);
@@ -2212,9 +2214,9 @@ async fn retired_holes_clear_the_cache_memo_and_are_written_locally() {
     let config = test_config(tmp.path().to_path_buf(), 4);
     let sm = packed_sm(&config, 4);
     let db = open_test_db(&config);
-    let (tx, data) = signed_tx(&config, 1);
+    let (tx, _) = signed_tx(&config, 1);
     index_and_settle(&sm, &tx, 0);
-    cache_bodies_at(&db, &tx, &data, &[0]);
+    cache_bodies_at(&db, &tx, &[0]);
     let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
     let offset = PartitionChunkOffset::from(0);
     let later = PartitionChunkOffset::from(2);
@@ -2265,9 +2267,9 @@ async fn pending_body_offsets_are_skipped_until_the_job_settles() {
     let config = test_config(tmp.path().to_path_buf(), 4);
     let sm = packed_sm(&config, 4);
     let db = open_test_db(&config);
-    let (tx, data) = signed_tx(&config, 3);
+    let (tx, _) = signed_tx(&config, 3);
     index_tx(&sm, &tx, 2);
-    cache_bodies_at(&db, &tx, &data, &[0, 1, 2]);
+    cache_bodies_at(&db, &tx, &[0, 1, 2]);
     let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
     add_assigned_peer(&mut orch, &config, 16, 9116);
     for value in 0..4_u32 {
@@ -2295,7 +2297,7 @@ async fn pending_body_offsets_are_skipped_until_the_job_settles() {
         assert_eq!(log.len(), 1);
         assert_eq!(*log[0].0, 3, "only the uncovered hole asks a peer");
     }
-    assert!(fetcher.data_root_request_log.read().unwrap().is_empty());
+    assert!(fetcher.commitment_request_log.read().unwrap().is_empty());
 
     assert!(!orch.dispatch_next());
     assert_eq!(orch.holds_started, 3);
@@ -2303,7 +2305,7 @@ async fn pending_body_offsets_are_skipped_until_the_job_settles() {
 
     for (key, job) in sm.pending_body_migrations().expect("pending rows") {
         assert!(
-            sm.settle_pending_body_migration(key, job.data_root, job.block_height)
+            sm.settle_pending_body_migration(key, job.data_commitment, job.block_height)
                 .expect("settle")
         );
     }
@@ -2618,7 +2620,7 @@ async fn release_promotes_held_offsets_only_up_to_the_hot_budget() {
 
     for (key, job) in sm.pending_body_migrations().expect("pending rows") {
         assert!(
-            sm.settle_pending_body_migration(key, job.data_root, job.block_height)
+            sm.settle_pending_body_migration(key, job.data_commitment, job.block_height)
                 .expect("settle")
         );
     }
@@ -2667,9 +2669,9 @@ async fn local_cache_lookups_stop_at_the_per_tick_cap() {
     let config = Config::new_with_random_peer_id(node_config);
     let sm = packed_sm(&config, 4);
     let db = open_test_db(&config);
-    let (tx, data) = signed_tx(&config, 2);
+    let (tx, _) = signed_tx(&config, 2);
     index_and_settle(&sm, &tx, 1);
-    cache_bodies_at(&db, &tx, &data, &[0, 1]);
+    cache_bodies_at(&db, &tx, &[0, 1]);
     let (mut orch, _fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
     let first = PartitionChunkOffset::from(0);
     let second = PartitionChunkOffset::from(1);

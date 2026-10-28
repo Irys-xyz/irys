@@ -44,7 +44,7 @@ pub async fn post_chunk(
 
     let chunk = body.into_inner();
     let chunk_size = u64::try_from(chunk.bytes.0.len()).unwrap_or(u64::MAX);
-    let data_root = chunk.data_root;
+    let data_root = chunk.data_tree_root;
     let number = chunk.tx_offset;
 
     record_chunk_received(chunk_size);

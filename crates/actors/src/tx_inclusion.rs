@@ -273,6 +273,8 @@ mod tests {
     };
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_testing_utils::utils::{TempDirBuilder, tempfile};
+    use irys_types::DataCommitment;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         BlockTransactions, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
         DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
@@ -338,7 +340,7 @@ mod tests {
         let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
@@ -903,13 +905,13 @@ mod tests {
         db.update(|tx| -> eyre::Result<()> {
             let cdr = CachedDataRoot {
                 data_size: u64::MAX,
-                data_size_confirmed: true,
                 txid_set: vec![H256::random(), tx_id, H256::random()],
                 block_set: vec![H256::random(), H256::random(), H256::random()],
                 expiry_height: Some(0),
                 cached_at: UnixTimestamp::from_secs(0),
+                data_tree_root: Default::default(),
             };
-            tx.put::<CachedDataRoots>(data_root, cdr)?;
+            tx.put::<CachedDataRoots>(DataCommitment(data_root), cdr)?;
             Ok(())
         })??;
 

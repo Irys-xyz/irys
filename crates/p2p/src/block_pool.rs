@@ -1746,6 +1746,7 @@ fn check_block_status(
 mod tests {
     use super::*;
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_types::DataTreeRoot;
     use irys_types::{DataTransactionHeader, IrysBlockHeaderV1, SystemLedger};
     use std::sync::Arc;
 
@@ -2142,12 +2143,12 @@ mod tests {
         // Create 3 data transactions (2 for submit, 1 for publish) and sign them
         // Make them unique by setting different data_roots
         let mut submit_tx1 = DataTransactionHeader::new(&consensus);
-        submit_tx1.data_root = H256::repeat_byte(0x01);
+        submit_tx1.data_tree_root = DataTreeRoot(H256::repeat_byte(0x01));
         submit_tx1 = submit_tx1.sign(&signer).expect("Failed to sign");
         let submit_tx_id1 = submit_tx1.id();
 
         let mut submit_tx2 = DataTransactionHeader::new(&consensus);
-        submit_tx2.data_root = H256::repeat_byte(0x02);
+        submit_tx2.data_tree_root = DataTreeRoot(H256::repeat_byte(0x02));
         submit_tx2 = submit_tx2.sign(&signer).expect("Failed to sign");
         let submit_tx_id2 = submit_tx2.id();
 
@@ -2237,12 +2238,12 @@ mod tests {
         let consensus = config.consensus_config();
 
         let mut submit_tx1 = DataTransactionHeader::new(&consensus);
-        submit_tx1.data_root = H256::repeat_byte(0x11);
+        submit_tx1.data_tree_root = DataTreeRoot(H256::repeat_byte(0x11));
         submit_tx1 = submit_tx1.sign(&signer).expect("Failed to sign");
         let submit_tx_id1 = submit_tx1.id();
 
         let mut submit_tx2 = DataTransactionHeader::new(&consensus);
-        submit_tx2.data_root = H256::repeat_byte(0x12);
+        submit_tx2.data_tree_root = DataTreeRoot(H256::repeat_byte(0x12));
         submit_tx2 = submit_tx2.sign(&signer).expect("Failed to sign");
         let submit_tx_id2 = submit_tx2.id();
 
@@ -2314,13 +2315,13 @@ mod tests {
 
         // Create a transaction that we'll claim should be in Submit ledger
         let mut expected_tx = DataTransactionHeader::new(&consensus);
-        expected_tx.data_root = H256::repeat_byte(0x13);
+        expected_tx.data_tree_root = DataTreeRoot(H256::repeat_byte(0x13));
         expected_tx = expected_tx.sign(&signer).expect("Failed to sign");
         let expected_tx_id = expected_tx.id();
 
         // Create a different transaction that we'll actually put in the body
         let mut actual_tx = DataTransactionHeader::new(&consensus);
-        actual_tx.data_root = H256::repeat_byte(0x99);
+        actual_tx.data_tree_root = DataTreeRoot(H256::repeat_byte(0x99));
         actual_tx = actual_tx.sign(&signer).expect("Failed to sign");
 
         // Create block header expecting expected_tx_id in Submit ledger
@@ -2450,7 +2451,7 @@ mod tests {
         let consensus = config.consensus_config();
 
         let mut dual_tx = DataTransactionHeader::new(&consensus);
-        dual_tx.data_root = H256::repeat_byte(0x77);
+        dual_tx.data_tree_root = DataTreeRoot(H256::repeat_byte(0x77));
         dual_tx = dual_tx.sign(&signer).expect("Failed to sign");
         let dual_tx_id = dual_tx.id();
 

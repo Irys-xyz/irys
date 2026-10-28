@@ -57,7 +57,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     let account1 = IrysSigner {
         signer: SigningKey::from_slice(hex::decode(DEV2_PRIVATE_KEY)?.as_slice())?,
         chain_id: node.node_ctx.config.consensus.chain_id,
-        chunk_size: node.node_ctx.config.consensus.chunk_size,
+        data_tree_geometry: node.node_ctx.config.data_tree_geometry(),
     };
     assert_eq!(
         account1.address(),

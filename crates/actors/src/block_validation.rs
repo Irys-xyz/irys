@@ -34,13 +34,16 @@ use irys_types::{
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
     SealedBlock, SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
     app_state::DatabaseProvider,
-    calculate_difficulty, ensure_proof_layout, expected_chunk_byte_range,
+    calculate_difficulty,
+    data_tree::verify_data_chunk,
+    ensure_proof_layout,
     hardfork_config::{Cascade, ForEpoch},
     next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    validate_path, validate_path_byte_range,
+    validate_path,
 };
 use irys_types::{CommitmentTypeV2, IrysTransactionCommon, VersionDiscriminant as _};
+use irys_types::{DataCommitment, DataTreeRoot};
 use irys_types::{IngressProof, LedgerChunkOffset, get_ingress_proofs};
 use irys_types::{IrysTransactionId, u256_from_le_bytes as hash_to_number};
 use irys_vdf::last_step_checkpoints_is_valid;
@@ -145,10 +148,6 @@ pub enum PreValidationError {
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
-    #[error(
-        "Invalid promotion, transaction {txid:?} data size {got:?} does not match confirmed data root size {expected:?}"
-    )]
-    InvalidPromotionDataSizeMismatch { txid: H256, expected: u64, got: u64 },
     #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
     LastDiffTimestampMismatch {
         expected: UnixTimestampMs,
@@ -649,7 +648,6 @@ impl PreValidationError {
             | Self::InvalidLedgerId { .. }
             | Self::InvalidLedgerIdForTx { .. }
             | Self::InvalidPermFeeStructure { .. }
-            | Self::InvalidPromotionDataSizeMismatch { .. }
             | Self::InvalidPromotionPath { .. }
             | Self::InvalidTermFeeStructure { .. }
             | Self::InvalidTransactionSignature(_)
@@ -742,7 +740,6 @@ impl PreValidationError {
             Self::EmaSnapshotError(_) => "ema_snapshot_error",
             Self::IngressProofsMissing => "ingress_proofs_missing",
             Self::IngressProofSignatureInvalid(_) => "ingress_proof_signature_invalid",
-            Self::InvalidPromotionDataSizeMismatch { .. } => "promotion_data_size_mismatch",
             Self::LastDiffTimestampMismatch { .. } => "last_diff_timestamp_mismatch",
             Self::LedgerIdInvalid { .. } => "ledger_id_invalid",
             Self::MerkleProofInvalid(_) => "merkle_proof_invalid",
@@ -2143,26 +2140,30 @@ pub async fn prevalidate_block(
     // The proof list was pinned to `count × N` at the top of this function.
     let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
 
-    // Flatten (proof, data_root) pairs across publish txs so the parallel
+    // Flatten (proof, data_commitment) pairs across publish txs so the parallel
     // verify below fans out across every proof rather than per-tx batches.
     let estimated_proofs = publish_ledger
         .required_proof_count
         .map_or(publish_txs.len(), |c| publish_txs.len() * c as usize);
-    let mut ingress_pairs: Vec<(IngressProof, H256)> = Vec::with_capacity(estimated_proofs);
+    let geometry = config.data_tree_geometry();
+    let mut ingress_pairs: Vec<(IngressProof, DataCommitment)> =
+        Vec::with_capacity(estimated_proofs);
     for tx_header in publish_txs.iter() {
         let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id)
             .map_err(|_| PreValidationError::IngressProofsMissing)?;
         for proof in tx_proofs.0 {
-            ingress_pairs.push((proof, tx_header.data_root));
+            ingress_pairs.push((proof, tx_header.data_commitment(&geometry)));
         }
     }
     pool.install(|| {
-        ingress_pairs.par_iter().try_for_each(|(proof, data_root)| {
-            proof
-                .pre_validate(data_root)
-                .map(|_| ())
-                .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))
-        })
+        ingress_pairs
+            .par_iter()
+            .try_for_each(|(proof, data_commitment)| {
+                proof
+                    .pre_validate(data_commitment)
+                    .map(|_| ())
+                    .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))
+            })
     })?;
     debug!(
         block.hash = ?block.block_hash,
@@ -4461,8 +4462,10 @@ fn get_data_poa_bounds_with_block_tree_fallback(
 ) -> Result<(BlockBounds, H256), PreValidationError> {
     // Returns the resolved bounds AND the owning block's hash. The data-ledger
     // PoA branch fetches that block's tx headers with the hash. The caller
-    // rejects a proof buffer that cannot be parsed before that fetch, so an
-    // empty path is `MerkleProofInvalid` and not a missing-header node fault.
+    // rejects a tx_path or data_path buffer that cannot be a proof before
+    // that fetch, so an empty path is `MerkleProofInvalid` and not a
+    // missing-header node fault. The full data path check runs after the
+    // fetch.
     // The full path check still needs the tx: the byte target comes from the
     // chunk layout. The tree-walk path has the owning header in hand; the
     // index paths use the hash carried by `BlockBounds` so the returned hash
@@ -4710,6 +4713,31 @@ fn poa_chunk_within_configured_len(
     reject_poa_chunk_longer_than(chunk, chunk_size, limit)
 }
 
+/// Rejects a data path that is not a v2 chunk proof for any upload, without
+/// the owning header. A chunk proof is a non-zero multiple of 32 bytes: the
+/// siblings, then the size witness (spec §5). Chunk 0 of the largest upload
+/// the geometry allows has the longest proof: `depth(0, C)` is the greatest
+/// depth for `C` chunks and grows with `C` (spec §5).
+fn reject_malformed_data_path(
+    geometry: &irys_data_tree::Geometry,
+    data_path: &[u8],
+) -> Result<(), PreValidationError> {
+    let max_depth = irys_data_tree::depth(0, geometry.max_data_tx_chunks())
+        .expect("a geometry allows at least one chunk");
+    let max_length = (max_depth as usize + 1) * irys_data_tree::HASH_SIZE;
+    if data_path.is_empty()
+        || !data_path.len().is_multiple_of(irys_data_tree::HASH_SIZE)
+        || data_path.len() > max_length
+    {
+        return Err(PreValidationError::MerkleProofInvalid(format!(
+            "data path is {} bytes, not a non-zero multiple of {} up to {max_length}",
+            data_path.len(),
+            irys_data_tree::HASH_SIZE
+        )));
+    }
+    Ok(())
+}
+
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
 #[tracing::instrument(level = "trace", skip_all, fields(
     block.miner_address = ?miner_address,
@@ -4809,11 +4837,13 @@ pub fn poa_is_valid(
         // The byte target depends on the owning tx, so the full path check
         // follows that lookup. A buffer that cannot be a proof is invalid for
         // every target. Reject it first, or a missing header turns an empty
-        // path into a node fault.
+        // path into a node fault. The same holds for the data path.
         ensure_proof_layout(&tx_path.0)
             .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
-        ensure_proof_layout(&data_path.0)
-            .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
+        let geometry = config
+            .data_tree_geometry()
+            .expect("data tree geometry is validated at load");
+        reject_malformed_data_path(&geometry, &data_path.0)?;
 
         // The block index places each tx on whole chunks, while the tx_root tree
         // sizes each tx by raw `data_size`. Select the tx by the chunk prefix,
@@ -4850,27 +4880,18 @@ pub fn poa_is_valid(
             });
         }
 
-        // data_path validation — against the owning tx's real `data_root` (the root of its
-        // data-chunk tree), recovered above.
-        let data_path_result = validate_path(owning_tx.data_root.0, &data_path, tx_chunk_offset)
-            .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
-
         // The tx author builds the data tree, and PoA is the only check of its
-        // shape for a tx without ingress proofs. Require the leaf to cover
-        // exactly this chunk, as chunk ingress does. A wider, shifted, or empty
-        // leaf would let the PoA leave chunk bytes unchecked.
+        // shape for a tx without ingress proofs. The data path must open
+        // exactly this chunk of the owning tx's real `data_root`, recovered
+        // above, as chunk ingress requires. A proof for a wider, shifted, or
+        // empty range would let the PoA leave chunk bytes unchecked.
         fn out_of_chunk<E>(_: E) -> PreValidationError {
             PreValidationError::PoAChunkOffsetOutOfDataChunksBounds
         }
         let chunk_index =
             u32::try_from(tx_chunk_offset / u128::from(config.chunk_size)).map_err(out_of_chunk)?;
-        let (chunk_start, chunk_end) = expected_chunk_byte_range(
-            TxChunkOffset(chunk_index),
-            owning_tx.data_size,
-            config.chunk_size,
-        )
-        .map_err(out_of_chunk)?;
-        validate_path_byte_range(&data_path_result, (chunk_start, chunk_end))
+        let chunk_length = geometry
+            .chunk_len(owning_tx.data_size, chunk_index)
             .map_err(out_of_chunk)?;
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
@@ -4897,22 +4918,21 @@ pub fn poa_is_valid(
         }
         xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
 
-        let span = usize::try_from(chunk_end - chunk_start).map_err(out_of_chunk)?;
+        let span = usize::try_from(chunk_length).map_err(out_of_chunk)?;
         let (chunk_data, padding) = poa_chunk.split_at(span);
         if padding.iter().any(|byte| *byte != 0) {
             return Err(PreValidationError::PoAChunkPaddingNotZero { span });
         }
 
-        let poa_chunk_hash = sha::sha256(chunk_data);
-
-        if poa_chunk_hash != data_path_result.leaf_hash {
-            return Err(PreValidationError::PoAChunkHashMismatch {
-                expected: data_path_result.leaf_hash.into(),
-                got: poa_chunk_hash.into(),
-                ledger_id: Some(ledger_id),
-                ledger_chunk_offset: Some(ledger_chunk_offset),
-            });
-        }
+        verify_data_chunk(
+            &geometry,
+            owning_tx.data_commitment(&geometry),
+            owning_tx.data_size,
+            TxChunkOffset(chunk_index),
+            chunk_data,
+            &data_path.0,
+        )
+        .map_err(|error| PreValidationError::MerkleProofInvalid(error.to_string()))?;
     } else {
         let mut entropy_chunk = Vec::<u8>::with_capacity(config.chunk_size as usize);
         compute_entropy_chunk(
@@ -6488,8 +6508,9 @@ mod peer_chunk_length_tests {
 /// Bytes for one ingress-proof chunk from the local cache or a storage module.
 ///
 /// A cache row with `chunk: None` is a miss. A storage-module body must name
-/// this data root and tx offset, and it must pass the same content checks as
-/// a body copied out of the cache (path, byte range, length, leaf hash).
+/// this data commitment and tx offset, and it must pass the same content
+/// checks as a body copied out of the cache (the chunk seam: chunk length and
+/// chunk proof against the commitment of this data root and size).
 /// A mismatch is a miss. `Ok(None)` from a module read is a miss too: the
 /// index can name a chunk before its body is stored.
 ///
@@ -6500,12 +6521,14 @@ async fn ingress_proof_chunk_bytes_from_local(
     db: &DatabaseProvider,
     storage_modules: &StorageModulesReadGuard,
     config: &Config,
-    data_root: H256,
+    data_root: DataTreeRoot,
     data_size: u64,
     tx_offset: irys_types::TxChunkOffset,
 ) -> Result<(Option<Vec<u8>>, bool), PreValidationError> {
+    let geometry = config.data_tree_geometry();
+    let data_commitment = irys_types::data_tree::data_commitment(&geometry, data_root, data_size);
     let cached = db
-        .view_eyre(|tx| irys_database::cached_chunk_by_chunk_offset(tx, data_root, tx_offset))
+        .view_eyre(|tx| irys_database::cached_chunk_by_chunk_offset(tx, data_commitment, tx_offset))
         .map_err(|error| PreValidationError::DatabaseError {
             error: error.to_string(),
         })?;
@@ -6521,20 +6544,21 @@ async fn ingress_proof_chunk_bytes_from_local(
     // miss must stay a miss so the caller can try peers.
     let mut read_failed = false;
     for module in &modules {
-        let offsets = match module.partition_offsets_for_data_root_chunk(data_root, tx_offset) {
-            Ok(Some(offsets)) => offsets,
-            Ok(None) => continue,
-            Err(error) => {
-                debug!(
-                    error = %error,
-                    %data_root,
-                    %tx_offset,
-                    "storage module placement lookup failed; trying the next module"
-                );
-                read_failed = true;
-                continue;
-            }
-        };
+        let offsets =
+            match module.partition_offsets_for_commitment_chunk(data_commitment, tx_offset) {
+                Ok(Some(offsets)) => offsets,
+                Ok(None) => continue,
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        %data_root,
+                        %tx_offset,
+                        "storage module placement lookup failed; trying the next module"
+                    );
+                    read_failed = true;
+                    continue;
+                }
+            };
         for offset in offsets {
             let packed = match module.generate_full_chunk(offset) {
                 Ok(Some(packed)) => packed,
@@ -6572,7 +6596,9 @@ async fn ingress_proof_chunk_bytes_from_local(
                     continue;
                 }
             };
-            if unpacked.data_root != data_root || unpacked.tx_offset != tx_offset {
+            if unpacked.data_commitment(&geometry) != data_commitment
+                || unpacked.tx_offset != tx_offset
+            {
                 continue;
             }
             match crate::chunk_migration_service::validate_chunk_parts_for_migration(
@@ -6581,7 +6607,7 @@ async fn ingress_proof_chunk_bytes_from_local(
                 data_root,
                 data_size,
                 tx_offset,
-                config.consensus.chunk_size as usize,
+                &geometry,
             ) {
                 Ok(checked) => return Ok((Some(checked.bytes.0), read_failed)),
                 Err(error) => {
@@ -7111,7 +7137,7 @@ pub async fn data_txs_are_valid(
                             db,
                             storage_modules,
                             config,
-                            tx_header.data_root,
+                            tx_header.data_tree_root,
                             tx_header.data_size,
                             tx_chunk_offset,
                         )
@@ -7119,13 +7145,13 @@ pub async fn data_txs_are_valid(
 
                     if chunk_bytes.is_none() {
                         for api_addr in api_addrs.iter() {
-                            // Build data_root/offset fetch URL using peer API address
+                            // Build data_commitment/offset fetch URL using peer API address.
                             let url = format!(
-                                "http://{}/v1/chunk/data-root/{}/{}/{}",
+                                "http://{}/v1/chunk/data-commitment/{}/{}/{}",
                                 api_addr,
                                 publish_ledger.ledger_id,
-                                tx_header.data_root,
-                                tx_offset_u32
+                                tx_header.data_commitment(&config.data_tree_geometry()),
+                                tx_offset_u32,
                             );
 
                             // Fetch with short timeout
@@ -7186,7 +7212,9 @@ pub async fn data_txs_are_valid(
                             };
 
                             // Basic sanity checks before ingest
-                            if unpacked.data_root != tx_header.data_root
+                            let geometry = config.data_tree_geometry();
+                            if unpacked.data_commitment(&geometry)
+                                != tx_header.data_commitment(&geometry)
                                 || *unpacked.tx_offset != tx_offset_u32
                             {
                                 continue;
@@ -7201,6 +7229,7 @@ pub async fn data_txs_are_valid(
                                         unpacked,
                                         Some(ing_tx),
                                         None,
+                                        crate::chunk_ingress_service::ChunkIngressSource::Fetched,
                                     ),
                                 )
                                 .is_err()
@@ -7216,14 +7245,14 @@ pub async fn data_txs_are_valid(
                                 Err(_elapsed) => {
                                     tracing::warn!(
                                         "Timed out waiting for chunk ingest completion for data_root {:?}, tx_offset {}",
-                                        tx_header.data_root,
+                                        tx_header.data_tree_root,
                                         tx_offset_u32
                                     );
                                 }
                                 Ok(Err(recv_err)) => {
                                     tracing::warn!(
                                         "IngestChunk oneshot channel error for data_root {:?}, tx_offset {}: {:?}",
-                                        tx_header.data_root,
+                                        tx_header.data_tree_root,
                                         tx_offset_u32,
                                         recv_err
                                     );
@@ -7232,14 +7261,14 @@ pub async fn data_txs_are_valid(
                                     Ok(()) => {
                                         tracing::debug!(
                                             "Chunk ingested successfully for data_root {:?}, tx_offset {}",
-                                            tx_header.data_root,
+                                            tx_header.data_tree_root,
                                             tx_offset_u32
                                         );
                                     }
                                     Err(e) => {
                                         tracing::warn!(
                                             "IngestChunk returned error for data_root {:?}, tx_offset {}: {:?}",
-                                            tx_header.data_root,
+                                            tx_header.data_tree_root,
                                             tx_offset_u32,
                                             e
                                         );
@@ -7253,7 +7282,7 @@ pub async fn data_txs_are_valid(
                                 db,
                                 storage_modules,
                                 config,
-                                tx_header.data_root,
+                                tx_header.data_tree_root,
                                 tx_header.data_size,
                                 tx_chunk_offset,
                             )
@@ -7272,7 +7301,7 @@ pub async fn data_txs_are_valid(
                             return Err(PreValidationError::DatabaseError {
                                 error: format!(
                                     "local storage read failed for data_root {:?} at tx offset {i}",
-                                    tx_header.data_root
+                                    tx_header.data_tree_root
                                 ),
                             });
                         }
@@ -7281,7 +7310,7 @@ pub async fn data_txs_are_valid(
                                 tx_id: tx_header.id,
                                 reason: format!(
                                     "Data unavailable: missing chunk at offset {} for data_root {:?}",
-                                    i, tx_header.data_root
+                                    i, tx_header.data_tree_root
                                 ),
                             });
                         }
@@ -7290,11 +7319,15 @@ pub async fn data_txs_are_valid(
                 }
 
                 // Verify each ingress proof against the actual chunks
+                // Every local chunk source here is checked through the chunk seam (cache rows at
+                // write time, module bodies at read time), so an `Err` means the proof's chunks
+                // do not form an upload, not local corruption.
                 for proof in tx_proofs.iter() {
                     let ok = irys_types::ingress::verify_ingress_proof(
                         proof,
                         &chunks,
                         config.consensus.chain_id,
+                        &config.data_tree_geometry(),
                     )
                     .map_err(|e| PreValidationError::InvalidIngressProof {
                         tx_id: tx_header.id,
@@ -7712,7 +7745,7 @@ pub fn get_assigned_ingress_proofs(
     .map_err(|e| {
         PreValidationError::BlockBoundsLookupError(format!(
             "find_canonical_ledger_range failed for tx {} (data_root {}): {}",
-            tx_header.id, tx_header.data_root, e
+            tx_header.id, tx_header.data_tree_root, e
         ))
     })?;
 
@@ -7728,7 +7761,7 @@ pub fn get_assigned_ingress_proofs(
     for ingress_proof in tx_proofs.iter() {
         // Validate ingress proof signature and data_root match the transaction
         let proof_address = ingress_proof
-            .pre_validate(&tx_header.data_root)
+            .pre_validate(&tx_header.data_commitment(&config.data_tree_geometry()))
             .map_err(|e| PreValidationError::InvalidIngressProof {
                 tx_id: tx_header.id,
                 reason: e.to_string(),
@@ -7830,7 +7863,7 @@ mod tests {
     use irys_types::{
         Base64, BlockHash, DataTransaction, DataTransactionHeader, DataTransactionLedger,
         DbSyncMode, H256, H256List, IrysAddress, IrysBlockHeaderV1, NodeConfig, Signature, U256,
-        hash_sha256, irys::IrysSigner, partition::PartitionAssignment,
+        irys::IrysSigner, partition::PartitionAssignment,
     };
     use std::sync::{Arc, RwLock};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -8532,7 +8565,7 @@ mod tests {
             block_offset: 0,
             poa: PoaData {
                 tx_path: Some(Base64(tx_paths[0].proof.clone())),
-                data_path: Some(Base64(tx.proofs[0].proof.clone())),
+                data_path: Some(tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap()),
                 chunk: Some(Base64(packed)),
                 ledger_id: Some(DataLedger::Submit.into()),
                 partition_chunk_offset: 0,
@@ -8566,38 +8599,27 @@ mod tests {
         }
     }
 
-    fn data_leaf_id(data_hash: &[u8; 32], max_byte: usize) -> [u8; 32] {
-        use irys_types::Helpers as _;
-        irys_types::hash_all_sha256(vec![data_hash, &max_byte.to_note_vec()])
-    }
-
-    fn data_leaf_proof(data_hash: &[u8; 32], max_byte: usize) -> Vec<u8> {
-        use irys_types::Helpers as _;
-        let mut proof = data_hash.to_vec();
-        proof.extend(max_byte.to_note_vec());
-        proof
-    }
-
-    /// Index one Submit tx whose author built its own data tree, `data_root`,
-    /// with one PoA per chunk slot. Every PoA carries `data_path`.
+    /// Index one Submit tx whose header names `data_root` and `data_size`,
+    /// with one PoA per chunk slot. PoA `i` carries `data_paths[i]`.
     fn index_authored_data_tree(
         context: &mut TestContext,
         data_size: u64,
         data_root: [u8; 32],
         chunks: &[&[u8]],
-        data_path: &[u8],
+        data_paths: &[Vec<u8>],
     ) -> IndexedSubmit {
         let mut header = DataTransactionHeader::new(&context.consensus_config);
         header.id = H256([0xA1; 32]);
         header.ledger_id = DataLedger::Submit as u32;
         header.data_size = data_size;
-        header.data_root = H256(data_root);
+        header.data_tree_root = DataTreeRoot(H256(data_root));
         let (tx_root, tx_paths) =
             DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&header));
         let poas = chunks
             .iter()
+            .zip(data_paths)
             .enumerate()
-            .map(|(offset, chunk)| {
+            .map(|(offset, (chunk, data_path))| {
                 let mut poa =
                     pack_chunk_poa(context, chunk, &tx_paths[0].proof, data_path, offset as u64);
                 poa.chunk_index = offset;
@@ -8613,89 +8635,88 @@ mod tests {
         )
     }
 
+    /// The chunk seam rejects a data path that does not open exactly this chunk.
     fn assert_data_leaf_rejected(result: Result<(), PreValidationError>, what: &str) {
         assert!(
-            matches!(
-                result,
-                Err(PreValidationError::PoAChunkOffsetOutOfDataChunksBounds)
-            ),
-            "{what}: expected PoAChunkOffsetOutOfDataChunksBounds, got {result:?}"
+            matches!(result, Err(PreValidationError::MerkleProofInvalid(_))),
+            "{what}: expected MerkleProofInvalid, got {result:?}"
         );
     }
 
-    /// One data leaf spans the whole two-chunk tx, hashed over the first chunk.
+    /// The header names the root of a three-chunk tree with the size of its
+    /// first two chunks. Under v2 the root binds the tree shape, so the
+    /// honest proofs of the larger tree do not open the prefix size.
     #[tokio::test]
-    async fn poa_rejects_a_data_leaf_wider_than_its_chunk() {
+    async fn poa_rejects_a_root_built_for_another_size() {
         let (_tmp, mut context) = init().await;
         let chunk_len = context.consensus_config.chunk_size as usize;
-        let first = vec![0xAB_u8; chunk_len];
-        let data_size = chunk_len * 2;
-        let leaf_hash = hash_sha256(&first);
+        let geometry = context.consensus_config.data_tree_geometry().unwrap();
+        let data: Vec<u8> = (0..chunk_len * 3).map(|byte| byte as u8).collect();
+        let tree = irys_data_tree::DataTree::from_bytes(geometry, &data).unwrap();
+        let proofs: Vec<Vec<u8>> = (0..2)
+            .map(|chunk_index| tree.chunk_proof(chunk_index).unwrap())
+            .collect();
         let built = index_authored_data_tree(
             &mut context,
-            data_size as u64,
-            data_leaf_id(&leaf_hash, data_size),
-            &[&first, &first],
-            &data_leaf_proof(&leaf_hash, data_size),
+            (chunk_len * 2) as u64,
+            *tree.data_tree_root().as_bytes(),
+            &[&data[..chunk_len], &data[chunk_len..chunk_len * 2]],
+            &proofs,
         );
         for poa in &built.poas {
             assert_data_leaf_rejected(
                 validate_indexed_poa(&context, &built, poa),
-                &format!("wide leaf at offset {}", poa.block_offset),
+                &format!("prefix-size chunk at offset {}", poa.block_offset),
             );
         }
     }
 
-    /// The branch pivot sits one byte past the left leaf's max, so the second
-    /// chunk's first byte still resolves to the left leaf.
+    /// A 40-byte tx under the testing geometry: the last chunk holds 8 data
+    /// bytes and 24 zero bytes. The chunk proof checks only the 8 data bytes,
+    /// and the padding must unpack to zero.
     #[tokio::test]
-    async fn poa_rejects_a_data_leaf_behind_a_shifted_pivot() {
-        use irys_types::Helpers as _;
+    async fn data_poa_on_a_short_last_chunk() {
+        let (_tmp, context, built, tail) = tail_chunk_poa().await;
+        assert!(validate_indexed_poa(&context, &built, &tail).is_ok());
 
-        let (_tmp, mut context) = init().await;
-        let chunk_len = context.consensus_config.chunk_size as usize;
-        let first = vec![0x11_u8; chunk_len];
-        let left_hash = hash_sha256(&first);
-        let right_hash = hash_sha256(&vec![0x22_u8; chunk_len]);
-        let pivot = chunk_len + 1;
-        let left = data_leaf_id(&left_hash, chunk_len);
-        let right = data_leaf_id(&right_hash, chunk_len * 2);
-        let root = irys_types::hash_all_sha256(vec![&left, &right, &pivot.to_note_vec()]);
-        let mut proof = left.to_vec();
-        proof.extend(right);
-        proof.extend(pivot.to_note_vec());
-        proof.extend(data_leaf_proof(&left_hash, chunk_len));
+        let mut padding_changed = tail.clone();
+        padding_changed.poa.chunk.as_mut().expect("packed chunk").0[31] ^= 1;
+        match validate_indexed_poa(&context, &built, &padding_changed) {
+            Err(PreValidationError::PoAChunkPaddingNotZero { span }) => assert_eq!(span, 8),
+            other => panic!("expected PoAChunkPaddingNotZero, got {other:?}"),
+        }
 
-        let built = index_authored_data_tree(
-            &mut context,
-            (chunk_len * 2) as u64,
-            root,
-            &[&first, &first],
-            &proof,
-        );
+        let mut data_changed = tail;
+        data_changed.poa.chunk.as_mut().expect("packed chunk").0[7] ^= 1;
         assert_data_leaf_rejected(
-            validate_indexed_poa(&context, &built, &built.poas[1]),
-            "first chunk's leaf at the second chunk's offset",
+            validate_indexed_poa(&context, &built, &data_changed),
+            "changed data byte",
         );
     }
 
-    /// A zero-width leaf would check no chunk bytes at all.
+    /// Flip one bit in each hash of an honest v2 data path in turn: each
+    /// sibling and the size witness. Every tampered path is rejected.
     #[tokio::test]
-    async fn poa_rejects_a_zero_width_data_leaf() {
+    async fn tampered_v2_data_path_is_rejected() {
         let (_tmp, mut context) = init().await;
-        let chunk_len = context.consensus_config.chunk_size as usize;
-        let empty_hash = hash_sha256(&[]);
-        let built = index_authored_data_tree(
-            &mut context,
-            chunk_len as u64,
-            data_leaf_id(&empty_hash, 0),
-            &[&vec![0xFF_u8; chunk_len]],
-            &data_leaf_proof(&empty_hash, 0),
-        );
-        assert_data_leaf_rejected(
-            validate_indexed_poa(&context, &built, &built.poas[0]),
-            "zero-width leaf",
-        );
+        let chunk_size = context.consensus_config.chunk_size as usize;
+        // Five chunks: chunk 0 has three siblings and the size witness.
+        let data: Vec<u8> = (0..chunk_size * 5).map(|byte| byte as u8).collect();
+        let built = index_submit_poas(&mut context, &[data]);
+        let honest = &built.poas[0];
+        assert!(validate_indexed_poa(&context, &built, honest).is_ok());
+        let data_path = honest.poa.data_path.clone().expect("data path").0;
+        assert_eq!(data_path.len(), 4 * irys_data_tree::HASH_SIZE);
+
+        for hash_index in 0..data_path.len() / irys_data_tree::HASH_SIZE {
+            let mut tampered = honest.clone();
+            tampered.poa.data_path.as_mut().expect("data path").0
+                [hash_index * irys_data_tree::HASH_SIZE] ^= 1;
+            assert_data_leaf_rejected(
+                validate_indexed_poa(&context, &built, &tampered),
+                &format!("bit flip in hash {hash_index}"),
+            );
+        }
     }
 
     #[test]
@@ -8878,6 +8899,73 @@ mod tests {
         }
     }
 
+    /// A data path that is not a v2 chunk proof for any upload under the
+    /// geometry is rejected before the owning tx headers are read: empty, not
+    /// a multiple of 32 bytes, or longer than the proof of chunk 0 of the
+    /// largest upload. A missing owning header cannot turn it into a node fault.
+    #[tokio::test]
+    async fn poa_rejects_a_malformed_data_path_before_the_header_fetch() {
+        use irys_database::tables::IrysBlockHeaders;
+        use reth_db::transaction::DbTxMut as _;
+
+        let (_tmp, mut context) = init().await;
+        let built = index_submit_poas(&mut context, &[vec![3_u8; 32]]);
+        context
+            .block_index
+            .db()
+            .update_eyre(|tx| {
+                tx.delete::<IrysBlockHeaders>(H256::zero(), None)?;
+                Ok(())
+            })
+            .expect("delete the owning header");
+        let geometry = context.consensus_config.data_tree_geometry().unwrap();
+        let max_depth = irys_data_tree::depth(0, geometry.max_data_tx_chunks()).unwrap() as usize;
+        let hash_size = irys_data_tree::HASH_SIZE;
+
+        for length in [0, hash_size - 1, hash_size + 1, (max_depth + 2) * hash_size] {
+            let mut malformed = built.poas[0].clone();
+            malformed.poa.data_path = Some(Base64(vec![0_u8; length]));
+            match validate_indexed_poa(&context, &built, &malformed) {
+                Err(err @ PreValidationError::MerkleProofInvalid(_)) => {
+                    assert!(err.to_string().contains("data path"), "{length}: {err}");
+                    assert!(!err.is_node_fault(), "{length}");
+                }
+                other => panic!("{length}: expected MerkleProofInvalid, got {other:?}"),
+            }
+        }
+    }
+
+    /// The early bound is exact. A data path of `(max_depth + 1)` hashes
+    /// passes it and fails later, in the chunk seam. One more hash fails the
+    /// early check.
+    #[tokio::test]
+    async fn poa_data_path_length_bound_is_exact() {
+        let (_tmp, mut context) = init().await;
+        let built = index_submit_poas(&mut context, &[vec![3_u8; 32]]);
+        let geometry = context.consensus_config.data_tree_geometry().unwrap();
+        let max_depth = irys_data_tree::depth(0, geometry.max_data_tx_chunks()).unwrap() as usize;
+        let hash_size = irys_data_tree::HASH_SIZE;
+
+        let mut longest = built.poas[0].clone();
+        longest.poa.data_path = Some(Base64(vec![0_u8; (max_depth + 1) * hash_size]));
+        match validate_indexed_poa(&context, &built, &longest) {
+            Err(err @ PreValidationError::MerkleProofInvalid(_)) => {
+                assert!(!err.to_string().contains("data path is"), "{err}");
+                assert!(err.to_string().contains("proof length"), "{err}");
+            }
+            other => panic!("expected a seam MerkleProofInvalid, got {other:?}"),
+        }
+
+        let mut too_long = built.poas[0].clone();
+        too_long.poa.data_path = Some(Base64(vec![0_u8; (max_depth + 2) * hash_size]));
+        match validate_indexed_poa(&context, &built, &too_long) {
+            Err(err @ PreValidationError::MerkleProofInvalid(_)) => {
+                assert!(err.to_string().contains("data path is"), "{err}");
+            }
+            other => panic!("expected the early MerkleProofInvalid, got {other:?}"),
+        }
+    }
+
     /// A zero-size tx contributes no chunks and no bytes. The following tx
     /// keeps the chunk offset and the raw byte offset it would have had
     /// without the empty tx, and its PoA validates.
@@ -8902,14 +8990,14 @@ mod tests {
                 &context,
                 &left_bytes,
                 &tx_paths[0].proof,
-                &left.proofs[0].proof,
+                &left.chunk_proof(TxChunkOffset::from(0_u32)).unwrap().0,
                 0,
             ),
             pack_chunk_poa(
                 &context,
                 &right_bytes,
                 &tx_paths[2].proof,
-                &right.proofs[0].proof,
+                &right.chunk_proof(TxChunkOffset::from(0_u32)).unwrap().0,
                 1,
             ),
         ];
@@ -9020,14 +9108,16 @@ mod tests {
         let mut block_offset = 0_u64;
         for (tx_index, tx) in txs.iter().enumerate() {
             let tx_bytes = &data[tx_index];
-            for chunk_index in 0..tx.proofs.len() {
+            for chunk_index in 0..tx.data_chunks().unwrap().len() {
                 let start = chunk_index * chunk_size;
                 let end = (start + chunk_size).min(tx_bytes.len());
                 let mut built = pack_chunk_poa(
                     context,
                     &tx_bytes[start..end],
                     &tx_paths[tx_index].proof,
-                    &tx.proofs[chunk_index].proof,
+                    &tx.chunk_proof(TxChunkOffset::from(u32::try_from(chunk_index).unwrap()))
+                        .unwrap()
+                        .0,
                     block_offset,
                 );
                 built.tx_index = tx_index;
@@ -9329,7 +9419,11 @@ mod tests {
 
         let poa = PoaData {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
-            data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
+            data_path: Some(
+                txs[poa_tx_num]
+                    .chunk_proof(TxChunkOffset::from(u32::try_from(poa_chunk_num).unwrap()))
+                    .unwrap(),
+            ),
             chunk: Some(Base64(poa_chunk.clone())),
             ledger_id: Some(DataLedger::Submit.into()),
             partition_chunk_offset: poa_offset.try_into().expect("Value exceeds u32::MAX"),
@@ -9453,300 +9547,6 @@ mod tests {
             &context.consensus_config,
             &context.miner_address,
         )
-    }
-
-    #[tokio::test]
-    async fn poa_does_not_allow_modified_leaves() {
-        let (_tmp, mut context) = init().await;
-        // Create a bunch of TX chunks
-        let data_chunks = vec![
-            vec![[0; 32], [1; 32], [2; 32]], // tx0
-            vec![[3; 32], [4; 32], [5; 32]], // tx1
-            vec![[6; 32], [7; 32], [8; 32]], // tx2
-        ];
-
-        // Create a bunch of signed TX from the chunks
-        // Loop though all the data_chunks and create wrapper tx for them
-        let signer = IrysSigner::random_signer(&context.consensus_config);
-        let mut txs: Vec<DataTransaction> = Vec::new();
-
-        for chunks in &data_chunks {
-            let mut data: Vec<u8> = Vec::new();
-            for chunk in chunks {
-                data.extend_from_slice(chunk);
-            }
-            let tx = signer
-                .create_transaction(data, H256::zero())
-                .expect("Expected to create a transaction");
-            let tx = signer
-                .sign_transaction(tx)
-                .expect("Expected to sign the transaction");
-            txs.push(tx);
-        }
-
-        let chunk_size = context.consensus_config.chunk_size as usize;
-        for poa_tx_num in 0..3 {
-            for poa_chunk_num in 0..3 {
-                let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
-                test_poa_with_malicious_merkle_data(
-                    &mut context,
-                    &txs,
-                    &mut poa_chunk,
-                    poa_tx_num,
-                    poa_chunk_num,
-                    9,
-                    chunk_size,
-                );
-            }
-        }
-    }
-
-    fn test_poa_with_malicious_merkle_data(
-        context: &mut TestContext,
-        txs: &[DataTransaction],
-        #[expect(
-            clippy::ptr_arg,
-            reason = "we need to clone this so it needs to be a Vec"
-        )]
-        poa_chunk: &mut Vec<u8>,
-        poa_tx_num: usize,
-        poa_chunk_num: usize,
-        total_chunks_in_tx: usize,
-        chunk_size: usize,
-    ) {
-        // Initialize genesis block at height 0
-        let height = context.block_index.num_blocks();
-
-        let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
-        compute_entropy_chunk(
-            context.miner_address,
-            (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64,
-            context.partition_hash.into(),
-            context.consensus_config.entropy_packing_iterations,
-            chunk_size,
-            &mut entropy_chunk,
-            context.consensus_config.chain_id,
-        );
-
-        xor_vec_u8_arrays_in_place(poa_chunk, &entropy_chunk);
-
-        // Create vectors of tx headers and txids
-        let tx_headers: Vec<DataTransactionHeader> =
-            txs.iter().map(|tx| tx.header.clone()).collect();
-
-        let data_tx_ids = tx_headers.iter().map(|h| h.id).collect::<Vec<H256>>();
-
-        let (tx_root, tx_path) = DataTransactionLedger::merklize_tx_root(&tx_headers);
-
-        // Hacked data: DEADBEEF (but padded to chunk_size for proper entropy packing)
-        let mut hacked_data = vec![0xde, 0xad, 0xbe, 0xef];
-        hacked_data.resize(chunk_size, 0); // Pad to chunk_size like normal chunks
-
-        // Calculate what the hash SHOULD BE after entropy packing
-        let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
-        compute_entropy_chunk(
-            context.miner_address,
-            (poa_tx_num * 3 + poa_chunk_num) as u64,
-            context.partition_hash.into(),
-            context.consensus_config.entropy_packing_iterations,
-            chunk_size,
-            &mut entropy_chunk,
-            context.consensus_config.chain_id,
-        );
-
-        // Apply entropy packing to our hacked data to see what it becomes
-        let mut entropy_packed_hacked = hacked_data.clone();
-        xor_vec_u8_arrays_in_place(&mut entropy_packed_hacked, &entropy_chunk);
-
-        // Trim to actual data size for hash calculation (chunk_size might be larger)
-        let trimmed_hacked = &entropy_packed_hacked[0..hacked_data.len().min(chunk_size)];
-        let entropy_packed_hash = hash_sha256(trimmed_hacked);
-
-        // Calculate the correct offset for this chunk position
-        let chunk_start_offset = poa_tx_num * 3 * 32 + poa_chunk_num * 32; // Each chunk is 32 bytes
-        let chunk_end_offset = chunk_start_offset + hacked_data.len().min(32); // This chunk's end
-
-        // Create fake leaf proof with the entropy-packed hash and correct offset
-        let mut hacked_data_path = txs[poa_tx_num].proofs[poa_chunk_num].proof.clone();
-        let hacked_data_path_len = hacked_data_path.len();
-        if hacked_data_path_len < 64 {
-            hacked_data_path.resize(64, 0);
-        }
-
-        // Overwrite last 64 bytes (LeafProof structure)
-        let start = hacked_data_path.len() - 64;
-
-        // 32 bytes: entropy-packed hash (what PoA validation expects to see)
-        hacked_data_path[start..start + 32].copy_from_slice(&entropy_packed_hash);
-
-        // 24 bytes: notepad (NOTE_SIZE - 8 = 32 - 8 = 24)
-        for i in 0..24 {
-            hacked_data_path[start + 32 + i] = 0;
-        }
-
-        // 8 bytes: offset as big-endian u64
-        let offset_bytes = (chunk_end_offset as u64).to_be_bytes();
-        hacked_data_path[start + 56..start + 64].copy_from_slice(&offset_bytes);
-
-        debug!("Hacked attack:");
-        debug!("  Original data: {:?}", &hacked_data[0..4]);
-        debug!("  Entropy-packed hash: {:?}", &entropy_packed_hash[..4]);
-        debug!("  Chunk offset: {}", chunk_end_offset);
-
-        let poa = PoaData {
-            tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
-            data_path: Some(Base64(hacked_data_path.clone())),
-            chunk: Some(Base64(hacked_data.clone())), // Use RAW data, PoA validation will entropy-pack it
-            ledger_id: Some(DataLedger::Submit.into()),
-            partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
-                .try_into()
-                .expect("Value exceeds u32::MAX"),
-
-            partition_hash: context.partition_hash,
-        };
-
-        // Create a block from the tx
-        let irys_block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
-            height,
-            reward_address: context.miner_address,
-            poa: poa.clone(),
-            block_hash: H256::zero(),
-            previous_block_hash: H256::zero(),
-            previous_cumulative_diff: U256::from(4000),
-            miner_address: context.miner_address,
-            signature: Signature::test_signature().into(),
-            timestamp: UnixTimestampMs::from_millis(1000),
-            data_ledgers: vec![
-                // Permanent Publish Ledger
-                DataTransactionLedger {
-                    ledger_id: DataLedger::Publish.into(),
-                    tx_root: H256::zero(),
-                    tx_ids: H256List(Vec::new()),
-                    total_chunks: 0,
-                    expires: None,
-                    proofs: None,
-                    required_proof_count: Some(1),
-                },
-                // Term Submit Ledger
-                DataTransactionLedger {
-                    ledger_id: DataLedger::Submit.into(),
-                    tx_root,
-                    tx_ids: H256List(data_tx_ids),
-                    total_chunks: 9,
-                    expires: Some(1622543200),
-                    proofs: None,
-                    required_proof_count: None,
-                },
-            ],
-            ..IrysBlockHeaderV1::default()
-        });
-
-        // Migrate block into the block index
-        let block_txs = BlockTransactions {
-            data_txs: HashMap::from([(DataLedger::Submit, tx_headers)]),
-            ..Default::default()
-        };
-        let sealed = SealedBlock::new_unchecked(Arc::new(irys_block.clone()), block_txs);
-        context
-            .block_index
-            .db()
-            .update_eyre(|tx| {
-                BlockIndex::push_block(tx, &sealed, context.consensus_config.chunk_size)
-            })
-            .expect("Failed to index second block");
-
-        // The data-ledger PoA branch recovers the recall chunk's owning tx (and its
-        // data_root) by fetching the owning block header + tx headers from the DB.
-        // `push_block` only writes the block index, so persist the header and tx
-        // headers here too.
-        context
-            .block_index
-            .db()
-            .update_eyre(|tx| {
-                irys_database::insert_block_header(tx, &irys_block)?;
-                for th in txs.iter().map(|t| &t.header) {
-                    irys_database::insert_tx_header(tx, th)?;
-                }
-                Ok(())
-            })
-            .expect("Failed to persist owning block header + tx headers for PoA lookup");
-
-        let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());
-
-        let ledger_chunk_offset = context
-            .partition_assignment
-            .slot_index
-            .expect("Expected to get slot index") as u64
-            * context.consensus_config.num_chunks_in_partition
-            + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
-
-        assert_eq!(
-            ledger_chunk_offset,
-            (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64,
-            "ledger_chunk_offset mismatch"
-        );
-
-        // ledger data -> block
-        let bb = block_index_guard
-            .read()
-            .get_block_bounds(
-                DataLedger::Submit,
-                LedgerChunkOffset::from(ledger_chunk_offset),
-            )
-            .expect("expected valid block bounds");
-        info!("block bounds: {:?}", bb);
-
-        assert_eq!(bb.start_chunk_offset, 0, "start_chunk_offset should be 0");
-        assert_eq!(
-            bb.end_chunk_offset, total_chunks_in_tx as u64,
-            "end_chunk_offset should be 9, tx has 9 chunks"
-        );
-
-        // See parent-anchor comment in `poa_test`: use the just-pushed
-        // block's height so the pre-check sees the same `total_chunks`
-        // the rest of the assertions exercise. The block_tree fallback in
-        // `poa_is_valid` is unreachable here because `height` is in
-        // `block_index`; the dummy guard exists only to satisfy the signature.
-        let block_tree_guard = dummy_block_tree_guard(&context.consensus_config);
-        let poa_valid = poa_is_valid(
-            &poa,
-            &block_index_guard,
-            &block_tree_guard,
-            context.block_index.db(),
-            H256::zero(),
-            height,
-            &context.epoch_snapshot,
-            &context.consensus_config,
-            &context.miner_address,
-        );
-
-        match poa_valid {
-            Err(PreValidationError::PoAChunkHashMismatch {
-                ledger_id,
-                ledger_chunk_offset,
-                expected,
-                got,
-            }) => {
-                assert!(ledger_id.is_some(), "expected ledger_id context");
-                assert!(
-                    ledger_chunk_offset.is_some(),
-                    "expected ledger_chunk_offset context"
-                );
-                assert_ne!(expected, got, "expected and got hashes should differ");
-            }
-            Err(PreValidationError::MerkleProofInvalid(msg)) => {
-                assert!(
-                    msg.contains("hash mismatch"),
-                    "expected hash mismatch merkle proof error, got: {}",
-                    msg
-                );
-            }
-            Err(other) => panic!(
-                "expected PoAChunkHashMismatch or MerkleProofInvalid, got {:?}",
-                other
-            ),
-            Ok(_) => panic!("expected invalid PoA, but validation succeeded"),
-        }
     }
 
     #[test]
@@ -10051,7 +9851,7 @@ mod tests {
         let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
@@ -10177,7 +9977,7 @@ mod tests {
         let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
@@ -10197,14 +9997,17 @@ mod tests {
         // them, would change the returned range / corrupt the assignment.
         let corrupt_cdr = CachedDataRoot {
             data_size: u64::MAX,
-            data_size_confirmed: true,
             txid_set: vec![H256::random(), tx_id, H256::random()],
             block_set: vec![H256::random(), H256::random(), H256::random()],
             expiry_height: Some(0),
             cached_at: UnixTimestamp::from_secs(0),
+            data_tree_root: Default::default(),
         };
         db.update(|tx| -> eyre::Result<()> {
-            tx.put::<CachedDataRoots>(data_root, corrupt_cdr)?;
+            tx.put::<CachedDataRoots>(
+                header.data_commitment(&config.data_tree_geometry()),
+                corrupt_cdr,
+            )?;
             Ok(())
         })??;
 
@@ -10316,7 +10119,7 @@ mod tests {
         let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
@@ -10368,7 +10171,7 @@ mod tests {
         let chunk_bytes: [u8; 32] = [0; 32];
         let proof = generate_ingress_proof(
             &signer,
-            data_root,
+            header.data_commitment(&config.data_tree_geometry()),
             std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
             consensus.chain_id,
             H256::zero(),
@@ -10648,16 +10451,22 @@ mod ingress_proof_local_bytes_tests {
 
     fn cache_body(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8]) {
         db.update_eyre(|wtx| {
-            cache_data_root(wtx, &tx.header, None)?;
+            cache_data_root(
+                wtx,
+                &tx.header,
+                None,
+                &irys_types::data_tree::Geometry::TESTING,
+            )?;
             cache_chunk(
                 wtx,
                 &UnpackedChunk {
-                    data_root: tx.header.data_root,
+                    data_tree_root: tx.header.data_tree_root,
                     data_size: tx.header.data_size,
-                    data_path: Base64(tx.proofs[0].proof.clone()),
+                    data_path: tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap(),
                     bytes: Base64(data.to_vec()),
                     tx_offset: TxChunkOffset::from(0_u32),
                 },
+                &irys_types::data_tree::Geometry::TESTING,
             )?;
             Ok(())
         })
@@ -10669,14 +10478,18 @@ mod ingress_proof_local_bytes_tests {
         use irys_database::tables::CachedChunks;
         use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
-        let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
+        let chunk_key = irys_types::data_tree::chunk_key(
+            tx.header
+                .data_commitment(&irys_types::data_tree::Geometry::TESTING),
+            TxChunkOffset::from(0),
+        );
         db.update_eyre(|wtx| {
-            let existing = wtx.get::<CachedChunks>(path_hash)?.expect("cached chunk");
+            let existing = wtx.get::<CachedChunks>(chunk_key)?.expect("cached chunk");
             wtx.put::<CachedChunks>(
-                path_hash,
+                chunk_key,
                 CachedChunk {
                     chunk: None,
-                    data_path: existing.data_path,
+                    ..existing
                 },
             )?;
             Ok(())
@@ -10698,7 +10511,7 @@ mod ingress_proof_local_bytes_tests {
             db,
             modules,
             config,
-            tx.header.data_root,
+            DataTreeRoot(tx.header.data_tree_root.0),
             tx.header.data_size,
             TxChunkOffset::from(0_u32),
         )
@@ -10788,9 +10601,9 @@ mod ingress_proof_local_bytes_tests {
         ));
         sm.sync_pending_chunks().unwrap();
         sm.write_data_chunk(&UnpackedChunk {
-            data_root: tx.header.data_root,
+            data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
-            data_path: Base64(tx.proofs[0].proof.clone()),
+            data_path: tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap(),
             bytes: Base64(data.clone()),
             tx_offset: TxChunkOffset::from(0_u32),
         })
@@ -10853,9 +10666,9 @@ mod ingress_proof_local_bytes_tests {
         ));
         sm.sync_pending_chunks().unwrap();
         sm.write_data_chunk(&UnpackedChunk {
-            data_root: tx.header.data_root,
+            data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
-            data_path: Base64(tx.proofs[0].proof.clone()),
+            data_path: tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap(),
             bytes: Base64(bytes.to_vec()),
             tx_offset: TxChunkOffset::from(0_u32),
         })
@@ -10929,7 +10742,7 @@ mod ingress_proof_local_bytes_tests {
             &db,
             &modules,
             &config,
-            tx.header.data_root,
+            DataTreeRoot(tx.header.data_tree_root.0),
             tx.header.data_size,
             TxChunkOffset::from(0_u32),
         )
@@ -10994,7 +10807,7 @@ mod ingress_proof_local_bytes_tests {
         let tx = signer.sign_transaction(tx).unwrap();
         let proof = irys_types::ingress::generate_ingress_proof(
             &signer,
-            tx.header.data_root,
+            tx.header.data_commitment(&config.data_tree_geometry()),
             std::iter::once(Ok(data.as_slice())),
             config.consensus.chain_id,
             tx.header.anchor,
@@ -11070,9 +10883,9 @@ mod ingress_proof_local_bytes_tests {
         });
 
         let peer_body = serde_json::to_vec(&irys_types::ChunkFormat::Unpacked(UnpackedChunk {
-            data_root: tx.header.data_root,
+            data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
-            data_path: Base64(tx.proofs[0].proof.clone()),
+            data_path: tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap(),
             bytes: Base64(data.clone()),
             tx_offset: TxChunkOffset::from(0_u32),
         }))
@@ -11104,7 +10917,7 @@ mod ingress_proof_local_bytes_tests {
                 let crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(
                     _chunk,
                     reply,
-                    _,
+                    ..,
                 ) = msg.inner
                 else {
                     continue;
@@ -11194,14 +11007,18 @@ mod ingress_proof_local_bytes_tests {
         use irys_database::tables::CachedChunks;
         use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
-        let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
+        let chunk_key = irys_types::data_tree::chunk_key(
+            tx.header
+                .data_commitment(&irys_types::data_tree::Geometry::TESTING),
+            TxChunkOffset::from(0),
+        );
         db.update_eyre(|wtx| {
-            let existing = wtx.get::<CachedChunks>(path_hash)?.expect("cached chunk");
+            let existing = wtx.get::<CachedChunks>(chunk_key)?.expect("cached chunk");
             wtx.put::<CachedChunks>(
-                path_hash,
+                chunk_key,
                 CachedChunk {
                     chunk: Some(Base64(data.to_vec())),
-                    data_path: existing.data_path,
+                    ..existing
                 },
             )?;
             Ok(())
@@ -11287,7 +11104,7 @@ mod ingress_proof_local_bytes_tests {
     fn remember_data_path(sm: &StorageModule, tx: &DataTransaction) {
         use irys_database::submodule::SubmoduleStore as _;
 
-        let path = tx.proofs[0].proof.clone();
+        let path = tx.chunk_proof(TxChunkOffset::from(0_u32)).unwrap().0;
         let path_hash = UnpackedChunk::hash_data_path(&path);
         let offset = PartitionChunkOffset::from(0_u32);
         let (_, submodule) = sm.get_submodule_for_offset(offset).unwrap();

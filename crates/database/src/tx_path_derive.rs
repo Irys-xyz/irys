@@ -14,10 +14,12 @@ use std::time::{Duration, Instant};
 
 use eyre::eyre;
 use irys_types::{
-    Base64, ChunkDataPath, DataLedger, DataRootLeaf, DataTransactionHeader, DataTransactionLedger,
-    H256, HASH_SIZE, Helpers as _, Node, PartitionChunkOffset, Proof, ProofDeserialize as _,
-    TxChunkOffset, TxPath, expected_chunk_byte_range, generate_data_root,
-    generate_leaves_from_data_roots, hash_sha256, validate_path, validate_path_byte_range,
+    Base64, ChunkDataPath, DataCommitment, DataLedger, DataRootLeaf, DataTransactionHeader,
+    DataTransactionLedger, DataTreeRoot, H256, HASH_SIZE, Helpers as _, Node, PartitionChunkOffset,
+    Proof, ProofDeserialize as _, TxChunkOffset, TxPath,
+    data_tree::{Geometry, data_commitment, verify_data_chunk},
+    expected_chunk_byte_range, generate_data_root, generate_leaves_from_data_roots, hash_sha256,
+    validate_path,
 };
 use reth_db::DatabaseEnv;
 use reth_db::cursor::DbCursorRO as _;
@@ -96,19 +98,21 @@ pub struct LedgerSpan {
 
 /// Classify a consensus schema stamp without reading a tx header.
 ///
-/// V3 is the only readable layout. Older stamps still use `bundle_format` or an
+/// V3 and V4 are the readable layouts: V4 changes only the data cache tables,
+/// not the tx header bytes. Older stamps still use `bundle_format` or an
 /// inline `promoted_height`. Decoding those bytes with this binary panics.
 pub fn tx_header_schema(version: Option<u32>) -> TxHeaderSchema {
     match version {
-        Some(3) => TxHeaderSchema {
+        Some(version @ (3 | 4)) => TxHeaderSchema {
             readable: true,
-            message: "schema V3: tx headers use metadata_format and decode with this binary"
-                .to_owned(),
+            message: format!(
+                "schema V{version}: tx headers use metadata_format and decode with this binary"
+            ),
         },
-        Some(version) if version > 3 => TxHeaderSchema {
+        Some(version) if version > 4 => TxHeaderSchema {
             readable: false,
             message: format!(
-                "schema {version} is newer than V3. This binary refuses it. A read-only open does not migrate."
+                "schema {version} is newer than V4. This binary refuses it. A read-only open does not migrate."
             ),
         },
         other => {
@@ -238,7 +242,7 @@ fn derive_tx_path_at_offset_timed(
             tx_index,
             tx_id: chosen.id,
             tx_count: headers.len(),
-            data_root: chosen.data_root,
+            data_root: chosen.data_tree_root.0,
             tx_root,
             ledger_start: bounds.start,
             tx_ledger_start,
@@ -304,7 +308,8 @@ pub fn derive_tx_path_at_offset_cached(
     let proof = resolve_proof_at(&block.root, tx_index)?;
     let chosen = &block.headers[tx_index];
     let leaf = proof_leaf_hash(&proof)?;
-    let expected = DataTransactionLedger::fold_tx_root_leaf(chosen.data_root, chosen.prefix_hash);
+    let expected =
+        DataTransactionLedger::fold_tx_root_leaf(chosen.data_tree_root.0, chosen.prefix_hash);
     eyre::ensure!(
         leaf == expected,
         "proof leaf {leaf} != fold of tx {}",
@@ -321,7 +326,7 @@ pub fn derive_tx_path_at_offset_cached(
             tx_index,
             tx_id: chosen.id,
             tx_count: block.headers.len(),
-            data_root: chosen.data_root,
+            data_root: chosen.data_tree_root.0,
             tx_root: block.tx_root,
             ledger_start: block.bounds.start,
             tx_ledger_start,
@@ -487,7 +492,7 @@ pub fn derive_tx_path_synthetic_with(
             tx_index: leaf_index,
             tx_id: chosen.id,
             tx_count: headers.len(),
-            data_root: chosen.data_root,
+            data_root: chosen.data_tree_root.0,
             tx_root,
             ledger_start: 0,
             tx_ledger_start: 0,
@@ -584,7 +589,7 @@ fn proof_for_headers(
     let proof = resolve_proof_at(&root, index)?;
     let leaf = proof_leaf_hash(&proof)?;
     let expected = DataTransactionLedger::fold_tx_root_leaf(
-        headers[index].data_root,
+        headers[index].data_tree_root.0,
         headers[index].prefix_hash,
     );
     eyre::ensure!(
@@ -855,7 +860,7 @@ fn finish(started: Instant, cpu_nanos: u64, built: BuiltPath) -> eyre::Result<De
 /// Identity the miner stored for this offset. Schema v2 leaves the last three empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlacementCheck {
-    pub data_root: H256,
+    pub data_commitment: DataCommitment,
     pub ledger: Option<u32>,
     pub block_height: Option<u64>,
     pub tx_index: Option<u32>,
@@ -863,16 +868,19 @@ pub struct PlacementCheck {
 
 /// The derived path must prove the same chunk the miner holds.
 ///
+/// `chunk_data` is the miner's unpacked chunk data, `chunk_len` bytes.
 /// `placement` is required on RocksDB v1. A mismatch is an error the caller drops.
 pub fn cross_check_derived(
     derived: &DerivedTxPath,
     ledger_offset: u64,
-    chunk_size: u64,
+    geometry: &Geometry,
     data_path: &[u8],
+    chunk_data: &[u8],
     placement: Option<PlacementCheck>,
 ) -> eyre::Result<()> {
     // The same checks as `poa_is_valid`: the tx leaf covers the tx's raw byte
-    // range, and the data leaf covers exactly the chunk at this offset.
+    // range, and the data path opens exactly the chunk at this offset.
+    let chunk_size = geometry.chunk_size();
     let chunk_index = ledger_offset
         .checked_sub(derived.tx_ledger_start)
         .and_then(|index| u32::try_from(index).ok())
@@ -895,34 +903,36 @@ pub fn cross_check_derived(
     if (tx_path.min_byte_range, tx_path.max_byte_range) != (derived.tx_byte_start, tx_end) {
         eyre::bail!("derived tx path range does not match offset {ledger_offset}");
     }
-    let data = validate_path(
-        derived.data_root.0,
-        &Base64(data_path.to_vec()),
-        u128::from(chunk_range.0),
+    let derived_commitment =
+        data_commitment(geometry, DataTreeRoot(derived.data_root), derived.data_size);
+    verify_data_chunk(
+        geometry,
+        derived_commitment,
+        derived.data_size,
+        TxChunkOffset(chunk_index),
+        chunk_data,
+        data_path,
     )
     .map_err(|error| {
         eyre!(
-            "data_root mismatch: data path is not under derived data root {}: {error}",
-            derived.data_root
+            "data_root mismatch: data path does not open chunk {chunk_index} under derived data commitment {derived_commitment}: {error}"
         )
     })?;
-    validate_path_byte_range(&data, chunk_range)
-        .map_err(|error| eyre!("data path range does not match offset {ledger_offset}: {error}"))?;
     let Some(placement) = placement else {
         return Ok(());
     };
     let tx_index = u32::try_from(derived.tx_index).map_err(|_| eyre!("tx index exceeds u32"))?;
-    if placement.data_root != derived.data_root
+    if placement.data_commitment != derived_commitment
         || placement.block_height != Some(derived.height)
         || placement.tx_index != Some(tx_index)
         || placement.ledger != Some(derived.ledger.get_id())
     {
         eyre::bail!(
-            "placement mismatch: derived data_root {} height {} tx_index {tx_index} ledger {}, placement data_root {} height {:?} tx_index {:?} ledger {:?}",
-            derived.data_root,
+            "placement mismatch: derived data commitment {} height {} tx_index {tx_index} ledger {}, placement data commitment {} height {:?} tx_index {:?} ledger {:?}",
+            derived_commitment,
             derived.height,
             derived.ledger.get_id(),
-            placement.data_root,
+            placement.data_commitment,
             placement.block_height,
             placement.tx_index,
             placement.ledger
@@ -968,6 +978,8 @@ mod tests {
         insert_tx_header, open_or_create_db,
     };
     use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::DataTreeRoot;
+    use irys_types::data_tree::Geometry;
     use irys_types::{
         Base64, DataLedger, DataTransactionHeader, DataTransactionLedger, H256, H256List,
         IrysBlockHeader, PartitionChunkOffset, Proof, TxChunkOffset, expected_chunk_byte_range,
@@ -984,7 +996,7 @@ mod tests {
     fn tx_at(n: u64, size: u64) -> DataTransactionHeader {
         let mut header = DataTransactionHeader::default();
         header.id = hid(n);
-        header.data_root = hid(n.saturating_add(100));
+        header.data_tree_root = DataTreeRoot(hid(n.saturating_add(100)));
         header.prefix_hash = hid(n.saturating_add(200));
         header.data_size = size;
         header
@@ -1107,19 +1119,15 @@ mod tests {
     #[test]
     fn cross_check_accepts_the_miners_data_path_and_rejects_a_mismatch() {
         let chunk_size = 32_u64;
-        let bytes = vec![7_u8; chunk_size as usize];
-        let root = generate_data_root(
-            irys_types::generate_leaves(std::iter::once(Ok(bytes)), chunk_size as usize)
-                .expect("leaves"),
+        let tree = irys_data_tree::DataTree::from_bytes(
+            Geometry::TESTING,
+            &vec![7_u8; chunk_size as usize],
         )
-        .expect("data root");
-        let data_root = H256(root.id);
-        let data_path = irys_types::resolve_proofs(root, None)
-            .expect("proofs")
-            .remove(0)
-            .proof;
+        .expect("data tree");
+        let data_root = H256(*tree.data_tree_root().as_bytes());
+        let data_path = tree.chunk_proof(0).expect("chunk proof");
         let mut header = tx_at(1, chunk_size);
-        header.data_root = data_root;
+        header.data_tree_root = DataTreeRoot(data_root);
         let (tx_root, proof) =
             proof_for_headers(std::slice::from_ref(&header), 0).expect("tx path");
         let derived = super::DerivedTxPath {
@@ -1140,25 +1148,95 @@ mod tests {
             cpu_nanos: 0,
         };
         let placement = super::PlacementCheck {
-            data_root,
+            data_commitment: super::data_commitment(
+                &Geometry::TESTING,
+                DataTreeRoot(data_root),
+                chunk_size,
+            ),
             ledger: Some(DataLedger::Publish.get_id()),
             block_height: Some(4),
             tx_index: Some(0),
         };
-        super::cross_check_derived(&derived, 8, chunk_size, &data_path, Some(placement))
-            .expect("matching path");
+        let geometry = Geometry::TESTING;
+        let chunk_data = vec![7_u8; chunk_size as usize];
+        super::cross_check_derived(
+            &derived,
+            8,
+            &geometry,
+            &data_path,
+            &chunk_data,
+            Some(placement),
+        )
+        .expect("matching path");
 
-        let wrong =
-            super::cross_check_derived(&derived, 8, chunk_size, &[1, 2, 3], Some(placement))
-                .expect_err("bad data path");
+        let wrong = super::cross_check_derived(
+            &derived,
+            8,
+            &geometry,
+            &[1, 2, 3],
+            &chunk_data,
+            Some(placement),
+        )
+        .expect_err("bad data path");
         assert!(wrong.to_string().contains("data_root mismatch"), "{wrong}");
+        // The drop counter label matches on this text.
+        assert_eq!(
+            irys_types::block_production::TxPathError::Failed(wrong.to_string()).metric_reason(),
+            "data_root_mismatch"
+        );
+
+        let other_bytes = vec![8_u8; chunk_size as usize];
+        let wrong_bytes = super::cross_check_derived(
+            &derived,
+            8,
+            &geometry,
+            &data_path,
+            &other_bytes,
+            Some(placement),
+        )
+        .expect_err("other chunk bytes");
+        assert!(
+            wrong_bytes.to_string().contains("data_root mismatch"),
+            "{wrong_bytes}"
+        );
 
         let moved = super::PlacementCheck {
             tx_index: Some(1),
             ..placement
         };
-        let mismatch = super::cross_check_derived(&derived, 8, chunk_size, &data_path, Some(moved))
-            .expect_err("placement");
+        let mismatch = super::cross_check_derived(
+            &derived,
+            8,
+            &geometry,
+            &data_path,
+            &chunk_data,
+            Some(moved),
+        )
+        .expect_err("placement");
+        assert!(
+            mismatch.to_string().contains("placement mismatch"),
+            "{mismatch}"
+        );
+
+        // Same root under another data_size is another commitment.
+        let other_size = super::PlacementCheck {
+            data_commitment: super::data_commitment(
+                &geometry,
+                DataTreeRoot(data_root),
+                chunk_size * 2,
+            ),
+            ..placement
+        };
+        assert_ne!(other_size.data_commitment, placement.data_commitment);
+        let mismatch = super::cross_check_derived(
+            &derived,
+            8,
+            &geometry,
+            &data_path,
+            &chunk_data,
+            Some(other_size),
+        )
+        .expect_err("same root, other size");
         assert!(
             mismatch.to_string().contains("placement mismatch"),
             "{mismatch}"
@@ -1237,8 +1315,8 @@ mod tests {
         for (index, &size) in sizes.iter().enumerate() {
             let mut header = tx_at(u64::try_from(index).unwrap_or(0).saturating_add(1), size);
             if size > 0 {
-                let (data_root, _) = data_tree(size, chunk_size);
-                header.data_root = data_root;
+                let (data_root, _) = data_tree(size);
+                header.data_tree_root = DataTreeRoot(data_root);
             }
             chunk_total = chunk_total.saturating_add(size.div_ceil(chunk_size));
             headers.push(header);
@@ -1264,21 +1342,34 @@ mod tests {
             );
             let local = usize::try_from(offset - tx_start).unwrap_or(usize::MAX);
             let size = headers[tx_index].data_size;
-            let (data_root, data_proofs) = data_tree(size, chunk_size);
-            assert_eq!(headers[tx_index].data_root, data_root);
-            let data_path = &data_proofs[local].proof;
+            let (data_root, data_proofs) = data_tree(size);
+            assert_eq!(headers[tx_index].data_tree_root, DataTreeRoot(data_root));
+            let data_path = &data_proofs[local];
             let derived = derived_for(
                 &headers, tx_index, &proof, tx_root, data_root, start, tx_start,
             );
-            let cross = super::cross_check_derived(&derived, offset, chunk_size, data_path, None);
-            // The validator: the tx's raw byte range in the tx_root tree, then
-            // chunk `local` of that tx, each pinned to its exact range.
-            let raw_start = super::tx_byte_start(&headers, tx_index);
-            let raw_end = raw_start + u128::from(size);
-            let data_byte = (offset - tx_start) * chunk_size;
+            let geometry = Geometry::TESTING;
+            assert_eq!(geometry.chunk_size(), chunk_size);
             let chunk_range =
                 expected_chunk_byte_range(TxChunkOffset::from(offset - tx_start), size, chunk_size)
                     .expect("chunk range");
+            // `data_tree` fills every byte with 0x5A.
+            let chunk_data = vec![0x5A_u8; (chunk_range.1 - chunk_range.0) as usize];
+            let cross = super::cross_check_derived(
+                &derived,
+                offset,
+                &geometry,
+                data_path,
+                &chunk_data,
+                None,
+            );
+            // The validator: the tx's raw byte range in the tx_root tree, then
+            // chunk `local` of that tx against the commitment of the derived
+            // data root and size. The data half calls the tree crate, not the
+            // node's chunk seam that `cross_check_derived` uses.
+            let raw_start = super::tx_byte_start(&headers, tx_index);
+            let raw_end = raw_start + u128::from(size);
+            let data_byte = (offset - tx_start) * chunk_size;
             let validator = validate_path(
                 tx_root.0,
                 &Base64(proof.proof.clone()),
@@ -1289,23 +1380,31 @@ mod tests {
                     (tx_path.min_byte_range, tx_path.max_byte_range) == (raw_start, raw_end),
                     "tx leaf range"
                 );
-                let data = validate_path(
-                    data_root.0,
-                    &Base64(data_path.clone()),
-                    u128::from(data_byte),
+                let derived_commitment = irys_data_tree::data_commitment(
+                    &geometry,
+                    &irys_data_tree::DataTreeRoot::from(derived.data_root.0),
+                    derived.data_size,
+                );
+                irys_data_tree::verify_chunk(
+                    &geometry,
+                    &derived_commitment,
+                    derived.data_size,
+                    u32::try_from(local)?,
+                    &chunk_data,
+                    data_path,
                 )?;
-                irys_types::validate_path_byte_range(&data, chunk_range)?;
-                Ok(data)
+                Ok(())
             });
             match (cross, validator) {
-                (Ok(()), Ok(data)) => {
-                    let end = usize::try_from(data.max_byte_range).unwrap_or(usize::MAX);
-                    let rem = end % (chunk_size as usize);
-                    let miner_span = if rem == 0 { chunk_size as usize } else { rem };
+                (Ok(()), Ok(())) => {
+                    // The miner unpacks `chunk_len` bytes for this chunk.
+                    let miner_length = geometry
+                        .chunk_len(size, u32::try_from(local).expect("chunk index"))
+                        .expect("chunk length");
                     assert_eq!(
-                        miner_span as u64,
+                        miner_length,
                         chunk_range.1 - chunk_range.0,
-                        "{name} offset {offset} miner span"
+                        "{name} offset {offset} miner chunk length"
                     );
                     accepted.push(true);
                 }
@@ -1332,19 +1431,16 @@ mod tests {
         }
     }
 
-    fn data_tree(size: u64, chunk_size: u64) -> (H256, Vec<Proof>) {
+    /// The v2 data tree of `size` bytes of 0x5A under the testing geometry:
+    /// its root and every chunk proof.
+    fn data_tree(size: u64) -> (H256, Vec<Vec<u8>>) {
         let bytes = vec![0x5A_u8; usize::try_from(size).unwrap_or(0)];
-        let root = generate_data_root(
-            irys_types::generate_leaves(
-                std::iter::once(Ok(bytes)),
-                usize::try_from(chunk_size).unwrap_or(1),
-            )
-            .expect("leaves"),
-        )
-        .expect("data root");
-        let data_root = H256(root.id);
-        let proofs = irys_types::resolve_proofs(root, None).expect("data proofs");
-        (data_root, proofs)
+        let tree =
+            irys_data_tree::DataTree::from_bytes(Geometry::TESTING, &bytes).expect("data tree");
+        let proofs = (0..tree.chunk_count())
+            .map(|chunk_index| tree.chunk_proof(chunk_index).expect("chunk proof"))
+            .collect();
+        (H256(*tree.data_tree_root().as_bytes()), proofs)
     }
 
     fn derived_for(
@@ -1603,9 +1699,10 @@ mod tests {
                 schema.message
             );
         }
-        let current = tx_header_schema(Some(3));
+        assert!(tx_header_schema(Some(3)).readable);
+        let current = tx_header_schema(Some(4));
         assert!(current.readable);
-        let newer = tx_header_schema(Some(4));
+        let newer = tx_header_schema(Some(5));
         assert!(!newer.readable);
         assert!(newer.message.contains("newer"));
     }

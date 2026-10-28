@@ -137,6 +137,7 @@ expected_genesis_hash = "11111111111111111111111111111111"
 annual_cost_per_gb = 0.01                   # $0.01 USD/GB/year
 decay_rate = 0.01                           # 1% annual decay per year
 chunk_size = 262144
+segments_per_chunk = 64
 block_migration_depth = 6
 block_tree_depth = 50
 num_chunks_in_partition = 51872000

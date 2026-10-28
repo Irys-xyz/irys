@@ -125,13 +125,13 @@ async fn heavy_ledger_offset_tx_endpoint() -> eyre::Result<()> {
             resp.tx_end_offset
         );
         let expected_data_root = if resp.tx_id == tx_a.header.id {
-            tx_a.header.data_root
+            tx_a.header.data_tree_root
         } else if resp.tx_id == tx_b.header.id {
-            tx_b.header.data_root
+            tx_b.header.data_tree_root
         } else {
             panic!("offset {offset} attributed to unknown tx {}", resp.tx_id);
         };
-        assert_eq!(resp.data_root, expected_data_root);
+        assert_eq!(resp.data_root, expected_data_root.0);
         offsets_by_tx.entry(resp.tx_id).or_default().push(offset);
     }
     // Each tx owns a contiguous 3-chunk range, meeting at the boundary
@@ -331,7 +331,7 @@ async fn heavy_ledger_offset_tx_endpoint() -> eyre::Result<()> {
     assert_eq!(resp.ledger, DataLedger::Publish);
     assert_eq!(resp.ledger_id, 0);
     assert_eq!(resp.tx_id, tx_a.header.id);
-    assert_eq!(resp.data_root, tx_a.header.data_root);
+    assert_eq!(resp.data_root, tx_a.header.data_tree_root.0);
     assert_eq!(resp.tx_start_offset, publish_offset);
     assert_eq!(resp.chunks_in_tx, 3);
 
@@ -411,7 +411,7 @@ async fn heavy_ledger_offset_tx_endpoint_cascade_term_ledgers() -> eyre::Result<
             assert_eq!(resp.ledger_offset, offset);
             assert_eq!(resp.block_height, inclusion_block.height);
             assert_eq!(resp.tx_id, tx.header.id);
-            assert_eq!(resp.data_root, tx.header.data_root);
+            assert_eq!(resp.data_root, tx.header.data_tree_root.0);
             assert_eq!(resp.tx_index, 0);
             assert_eq!(resp.tx_start_offset, 0);
             assert_eq!(resp.tx_end_offset, 3);

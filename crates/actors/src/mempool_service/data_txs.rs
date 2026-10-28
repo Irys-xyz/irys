@@ -25,7 +25,7 @@ impl Inner {
     // Performs duplicate detection, signature validation, anchor validation, expiry computation,
     // and ledger parsing. Returns the resolved ledger and the computed expiry height.
     #[inline]
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_tree_root))]
     async fn precheck_data_ingress_common(
         &self,
         tx: &DataTransactionHeader,
@@ -131,7 +131,7 @@ impl Inner {
     // Shared post-processing: insert into mempool, cache data_root with expiry,
     // process any pending chunks, and gossip the transaction.
     #[inline]
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root, expiry_height = expiry_height))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_tree_root, expiry_height = expiry_height))]
     async fn postprocess_data_ingress(
         &self,
         tx: &DataTransactionHeader,
@@ -140,14 +140,16 @@ impl Inner {
         self.mempool_state.insert_tx_and_mark_valid(tx).await?;
         self.cache_data_root_with_expiry(tx, expiry_height);
         // Notify the ChunkIngressService to process any pending chunks for this data root
+        // Drain only the chunks parked under this header's own commitment.
+        let data_commitment = tx.data_commitment(&self.config.data_tree_geometry());
         if let Err(e) = self
             .service_senders
             .chunk_ingress
-            .send_traced(ChunkIngressMessage::ProcessPendingChunks(tx.data_root))
+            .send_traced(ChunkIngressMessage::ProcessPendingChunks(data_commitment))
         {
             tracing::warn!(
-                "Failed to send ProcessPendingChunks for data_root {:?}: {:?}",
-                tx.data_root,
+                "Failed to send ProcessPendingChunks for data_commitment {:?}: {:?}",
+                data_commitment,
                 e
             );
         }
@@ -155,14 +157,14 @@ impl Inner {
         metrics::record_data_tx_ingested();
         Ok(())
     }
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_tree_root))]
     pub async fn handle_data_tx_ingress_message_gossip(
         &self,
         tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!(
             tx.id = ?tx.id,
-            tx.data_root = ?tx.data_root,
+            tx.data_root = ?tx.data_tree_root,
             "Received data tx from Gossip"
         );
 
@@ -218,14 +220,14 @@ impl Inner {
         self.postprocess_data_ingress(&tx, expiry_height).await
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_tree_root))]
     pub async fn handle_data_tx_ingress_message_api(
         &self,
         mut tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!(
             tx.id = ?tx.id,
-            tx.data_root = ?tx.data_root,
+            tx.data_root = ?tx.data_tree_root,
             "Received data tx from API"
         );
 
@@ -486,18 +488,19 @@ impl Inner {
     }
 
     /// Caches data_root with expiry, logging success/failure.
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root, expiry_height = expiry_height))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_tree_root, expiry_height = expiry_height))]
     fn cache_data_root_with_expiry(&self, tx: &DataTransactionHeader, expiry_height: u64) {
+        let geometry = self.config.data_tree_geometry();
         match self.irys_db.update_eyre(|db_tx| {
-            let mut cdr = irys_database::cache_data_root(db_tx, tx, None)?
+            let mut cdr = irys_database::cache_data_root(db_tx, tx, None, &geometry)?
                 .ok_or_else(|| eyre!("failed to cache data_root"))?;
             cdr.expiry_height = Some(expiry_height);
-            db_tx.put::<CachedDataRoots>(tx.data_root, cdr)?;
+            db_tx.put::<CachedDataRoots>(tx.data_commitment(&geometry), cdr)?;
             Ok(())
         }) {
             Ok(()) => {
                 info!(
-                    data_root = %tx.data_root,
+                    data_root = %tx.data_tree_root,
                     tx.id = %tx.id,
                     source = "tx_ingress",
                     expiry_height,
@@ -506,7 +509,7 @@ impl Inner {
             }
             Err(db_error) => {
                 error!(
-                    data_root = %tx.data_root,
+                    data_root = %tx.data_tree_root,
                     tx.id = %tx.id,
                     source = "tx_ingress",
                     expiry_height,

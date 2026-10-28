@@ -221,7 +221,7 @@ impl BlockEvent {
                     tx_id: tx.id,
                     anchor: tx.anchor,
                     signer: OwnerId::ethereum(&tx.signer),
-                    data_root: tx.data_root,
+                    data_root: tx.data_tree_root.0,
                     data_size: tx.data_size,
                     prefix_size: tx.prefix_size,
                     prefix_hash: tx.prefix_hash,

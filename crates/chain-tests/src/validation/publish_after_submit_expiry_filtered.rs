@@ -129,7 +129,8 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
         ];
         let proof = generate_ingress_proof(
             &genesis_signer,
-            tx.header.data_root,
+            tx.header
+                .data_commitment(&genesis_config.consensus_config().data_tree_geometry()?),
             chunks.iter().map(|c| Ok(c.as_slice())),
             chain_id,
             proof_anchor,

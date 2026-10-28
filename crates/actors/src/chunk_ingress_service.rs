@@ -23,8 +23,8 @@ use std::time::Duration;
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
-    BlockHash, ChunkPathHash, Config, DataRoot, TokioServiceHandle, Traced, TxChunkOffset,
-    app_state::DatabaseProvider, chunk::UnpackedChunk,
+    BlockHash, ChunkKey, Config, DataCommitment, IrysAddress, TokioServiceHandle, Traced,
+    TxChunkOffset, app_state::DatabaseProvider, chunk::UnpackedChunk,
 };
 use lru::LruCache;
 use pending_ingress_proofs::PendingIngressProofs;
@@ -35,6 +35,10 @@ use tracing::{Instrument as _, error, info, warn};
 
 use crate::mempool_service::wait_with_progress;
 use crate::services::ServiceSenders;
+
+/// Entries in `recent_placed_chunks`. 4096 chunk keys are 1 GiB of chunks at
+/// a 256 KiB chunk size: enough for a large upload that is sent again.
+const RECENT_PLACED_CHUNKS_CAPACITY: NonZeroUsize = NonZeroUsize::new(4096).expect("non-zero");
 
 /// Drop-guard holding an HTTP admission permit for a fire-and-forget ingest.
 /// Released when the message is dropped after the worker finishes, or if the
@@ -56,23 +60,46 @@ impl std::fmt::Debug for HttpAdmissionGuard {
     }
 }
 
+/// Where an ingested chunk came from. The source matters only for a chunk
+/// with no cache row: on the placed path (a storage placement holds the
+/// commitment) and for the replay skip of a placed chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkIngressSource {
+    /// A chunk a client or a peer sent to this node (HTTP upload, gossip).
+    /// On the placed path it is stored from the placement and also parks
+    /// under its commitment: a later header for the same commitment (the same
+    /// data uploaded again) then drains it into the cache. A replay of it
+    /// while the same chunk is still parked is skipped.
+    Sent,
+    /// A chunk this node fetched (data sync, block-validation fetch) or
+    /// re-ingests from the pending map (a drain). On the placed path it is
+    /// stored from the placement and does not park. A fetched chunk is not
+    /// part of a new upload, so parking it would fill the pending map with
+    /// commitments that no header will drain. A drained chunk that must wait
+    /// again is put back by its drain.
+    Fetched,
+}
+
 /// Messages handled by the ChunkIngressService
 #[derive(Debug)]
 pub enum ChunkIngressMessage {
-    /// Ingest a chunk, optionally with a response channel for the result
+    /// Ingest a chunk, optionally with a response channel for the result.
+    ///
+    /// The last field says where the chunk came from: see [`ChunkIngressSource`].
     IngestChunk(
         UnpackedChunk,
         Option<oneshot::Sender<Result<(), ChunkIngressError>>>,
         Option<HttpAdmissionGuard>,
+        ChunkIngressSource,
     ),
     /// Ingest an ingress proof received from a peer
     IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
     /// Process pending chunks for a data root after its TX header was ingested.
     /// Sent by the mempool when a data TX is successfully validated.
-    ProcessPendingChunks(DataRoot),
+    ProcessPendingChunks(DataCommitment),
     /// Try to generate ingress proofs for data roots just confirmed in a block's
     /// submit ledger. Sent by the mempool service after block confirmation.
-    TryGenerateProofsForConfirmedRoots(Vec<DataRoot>),
+    TryGenerateProofsForConfirmedRoots(Vec<DataCommitment>),
     /// Retry ingress proofs parked because their anchor block was unknown.
     /// Sent when that block is added to the tree (prevalidation) or confirmed.
     ProcessPendingIngressProofs(BlockHash),
@@ -82,7 +109,7 @@ impl ChunkIngressMessage {
     /// Returns the variant name as a static string for tracing/logging purposes
     pub fn variant_name(&self) -> &'static str {
         match self {
-            Self::IngestChunk(_, _, _) => "IngestChunk",
+            Self::IngestChunk(..) => "IngestChunk",
             Self::IngestIngressProof(_, _) => "IngestIngressProof",
             Self::ProcessPendingChunks(_) => "ProcessPendingChunks",
             Self::TryGenerateProofsForConfirmedRoots(_) => "TryGenerateProofsForConfirmedRoots",
@@ -104,7 +131,7 @@ impl ChunkIngressMessage {
     /// requeues the offset, and gossip reports rate limiting to the peer.
     pub fn has_reply_channel(&self) -> bool {
         match self {
-            Self::IngestChunk(_, reply, _) => reply.is_some(),
+            Self::IngestChunk(_, reply, ..) => reply.is_some(),
             Self::IngestIngressProof(_, _) => true,
             Self::ProcessPendingChunks(_)
             | Self::TryGenerateProofsForConfirmedRoots(_)
@@ -128,11 +155,15 @@ impl ChunkIngressState {
         self.pending_chunks.read().await.len()
     }
 
-    pub async fn pending_contains(&self, data_root: DataRoot, tx_offset: TxChunkOffset) -> bool {
+    pub async fn pending_contains(
+        &self,
+        data_commitment: DataCommitment,
+        tx_offset: TxChunkOffset,
+    ) -> bool {
         self.pending_chunks
             .read()
             .await
-            .get(&data_root)
+            .get(&data_commitment)
             .is_some_and(|chunks| chunks.peek(&tx_offset).is_some())
     }
 }
@@ -152,16 +183,31 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) max_control_plane_tasks: u32,
     pub(crate) service_senders: ServiceSenders,
     pub(crate) storage_modules_guard: StorageModulesReadGuard,
-    pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkPathHash, ()>>,
+    /// Chunks already written, by commitment and path. Two commitments of one
+    /// data tree root share chunk paths, so the path alone does not identify
+    /// the chunk. A cache row prune does not remove keys, so a key can be left
+    /// over from an earlier upload of the same data. A hit skips the chunk
+    /// only when the cache row and this node's ingress leaf for the chunk are
+    /// also present: the prune deletes the leaves with the row.
+    pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkKey, ()>>,
+    /// Sent chunks (HTTP upload, gossip) recently stored from a storage
+    /// placement with no cache row, and parked. Only the no-row path of a sent
+    /// chunk reads it: a replay of such a chunk skips the placement reads and
+    /// the proof check, but only while the pending map still holds the same
+    /// chunk at its offset. A key outlives the parked chunk (a header drains
+    /// it, the pending map evicts it, or another chunk replaces it). A fetched
+    /// chunk (data sync) does not read or write it. It is separate from
+    /// `recent_valid_chunks` so that the cached path still takes the chunk
+    /// when its header arrives.
+    pub(crate) recent_placed_chunks: tokio::sync::RwLock<LruCache<ChunkKey, ()>>,
     pub(crate) pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
     pub(crate) pending_ingress_proofs: Mutex<PendingIngressProofs>,
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
     pub(crate) ingress_proof_generation_state: IngressProofGenerationState,
     http_ingress_open: Arc<Mutex<bool>>,
-    /// Runs after a storage-module scan finds no data size, before the second
-    /// cached-data-root read. Tests commit the header in that window.
-    #[cfg(test)]
-    pub(crate) after_missing_data_size_scan: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// This node's signer address, derived once at start. The derivation is
+    /// an EC public-key computation, too costly for each duplicate chunk.
+    ingress_address: IrysAddress,
 }
 
 impl ChunkIngressServiceInner {
@@ -196,8 +242,8 @@ enum NoPermitAction {
 impl ChunkIngressServiceInner {
     async fn handle_message(&self, msg: ChunkIngressMessage) {
         match msg {
-            ChunkIngressMessage::IngestChunk(chunk, response, _admission) => {
-                let result = self.handle_chunk_ingress_message(chunk).await;
+            ChunkIngressMessage::IngestChunk(chunk, response, _admission, source) => {
+                let result = self.handle_chunk_ingress_message(chunk, source).await;
                 if let Err(e) = &result {
                     metrics::record_chunk_error(e.error_type(), e.is_advisory());
                     if response.is_none() {
@@ -216,16 +262,17 @@ impl ChunkIngressServiceInner {
                     warn!("IngestIngressProof response channel closed (caller dropped)");
                 }
             }
-            ChunkIngressMessage::ProcessPendingChunks(data_root) => {
-                self.process_pending_chunks_for_root(data_root).await;
+            ChunkIngressMessage::ProcessPendingChunks(data_commitment) => {
+                self.process_pending_chunks_for_root(data_commitment).await;
             }
-            ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(data_roots) => {
+            ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(data_commitments) => {
                 let chunk_size = self.config.consensus.chunk_size;
-                for data_root in data_roots {
-                    if let Err(e) = self.try_generate_ingress_proof_for_root(data_root, chunk_size)
+                for data_commitment in data_commitments {
+                    if let Err(e) =
+                        self.try_generate_ingress_proof_for_root(data_commitment, chunk_size)
                     {
                         warn!(
-                            ?data_root,
+                            ?data_commitment,
                             "Failed to generate ingress proof after block confirmation: {:?}", e
                         );
                     }
@@ -237,7 +284,7 @@ impl ChunkIngressServiceInner {
         }
     }
 
-    /// Pop and re-ingress any chunks parked for `data_root`.
+    /// Pop and re-ingress any chunks parked for `data_commitment`.
     ///
     /// Invoked by the `ProcessPendingChunks` control-plane message (from TX
     /// postprocess, and from post-park CDR re-check rescue).
@@ -248,21 +295,21 @@ impl ChunkIngressServiceInner {
     /// during the drain when it still fits under the cap. The ticket clears the
     /// flag if this task is cancelled, and schedules one follow-up when that
     /// cancel drops a drain that accepted a new chunk.
-    async fn process_pending_chunks_for_root(&self, data_root: DataRoot) {
+    async fn process_pending_chunks_for_root(&self, data_commitment: DataCommitment) {
         let (chunks, _drain_ticket) = {
             let mut pending = self.pending_chunks.write().await;
-            let Some(chunks_map) = pending.pop(&data_root) else {
+            let Some(chunks_map) = pending.pop(&data_commitment) else {
                 return;
             };
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
-            let mut drain_ticket = pending.begin_drain(data_root, chunks.len());
+            let mut drain_ticket = pending.begin_drain(data_commitment, chunks.len());
             let senders = self.service_senders.clone();
             drain_ticket.set_gained_follow_up(move || {
-                chunks::schedule_pending_drain_retry(senders, data_root);
+                chunks::schedule_pending_drain_retry(senders, data_commitment);
             });
             (chunks, drain_ticket)
         };
-        self.finish_pending_drain(data_root, chunks).await;
+        self.finish_pending_drain(data_commitment, chunks).await;
     }
 }
 
@@ -270,7 +317,7 @@ impl ChunkIngressService {
     fn no_permit_action(msg: &ChunkIngressMessage) -> NoPermitAction {
         if msg.has_reply_channel() {
             NoPermitAction::Overloaded
-        } else if matches!(msg, ChunkIngressMessage::IngestChunk(_, None, _)) {
+        } else if matches!(msg, ChunkIngressMessage::IngestChunk(_, None, ..)) {
             NoPermitAction::Backlog
         } else {
             NoPermitAction::Park
@@ -357,14 +404,14 @@ impl ChunkIngressService {
                     NonZeroUsize::new(max_valid_chunks).unwrap(),
                 ));
                 let ingress_address = config.irys_signer().address();
-                let ingress_chunk_size = config.consensus.chunk_size;
+                let ingress_geometry = config.data_tree_geometry();
                 let backfill_db = irys_db.clone();
                 let retry_roots = match handle_for_inner
                     .spawn_blocking(move || {
                         irys_database::backfill_cached_ingress_data_hashes(
                             &backfill_db,
                             ingress_address,
-                            ingress_chunk_size,
+                            &ingress_geometry,
                         )
                     })
                     .await
@@ -382,6 +429,7 @@ impl ChunkIngressService {
                 let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
                     irys_db.clone(),
                     ingress_address,
+                    config.data_tree_geometry(),
                     chunk_writer_buffer_size,
                     &handle_for_inner,
                 );
@@ -403,6 +451,9 @@ impl ChunkIngressService {
                         service_senders,
                         storage_modules_guard,
                         recent_valid_chunks,
+                        recent_placed_chunks: tokio::sync::RwLock::new(LruCache::new(
+                            RECENT_PLACED_CHUNKS_CAPACITY,
+                        )),
                         pending_chunks,
                         pending_ingress_proofs: Mutex::new(PendingIngressProofs::new(
                             pending_ingress_proofs::MAX_PENDING_INGRESS_PROOFS,
@@ -410,20 +461,19 @@ impl ChunkIngressService {
                         chunk_data_writer,
                         ingress_proof_generation_state,
                         http_ingress_open,
-                        #[cfg(test)]
-                        after_missing_data_size_scan: None,
+                        ingress_address,
                     }),
                 };
                 let retry_inner = Arc::clone(&service.inner);
                 if let Err(error) = handle_for_inner
                     .spawn_blocking(move || {
                         let chunk_size = retry_inner.config.consensus.chunk_size;
-                        for data_root in retry_roots {
+                        for data_commitment in retry_roots {
                             if let Err(error) = retry_inner
-                                .try_generate_ingress_proof_for_root(data_root, chunk_size)
+                                .try_generate_ingress_proof_for_root(data_commitment, chunk_size)
                             {
                                 warn!(
-                                    %data_root,
+                                    %data_commitment,
                                     ?error,
                                     "Failed startup ingress-proof retry after compact-hash backfill"
                                 );
@@ -700,7 +750,7 @@ impl ChunkIngressService {
     /// generic `RecvError` from a silently dropped sender.
     fn send_timeout_errors(msg: ChunkIngressMessage) {
         match msg {
-            ChunkIngressMessage::IngestChunk(_, Some(reply), _) => {
+            ChunkIngressMessage::IngestChunk(_, Some(reply), ..) => {
                 let _ = reply.send(Err(ChunkIngressError::Critical(
                     CriticalChunkIngressError::Other(
                         "service overloaded: timed out waiting for handler permit".into(),
@@ -713,7 +763,7 @@ impl ChunkIngressService {
                 )));
             }
             // No response channel — nothing to notify.
-            ChunkIngressMessage::IngestChunk(_, None, _)
+            ChunkIngressMessage::IngestChunk(_, None, ..)
             | ChunkIngressMessage::ProcessPendingChunks(_)
             | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_)
             | ChunkIngressMessage::ProcessPendingIngressProofs(_) => {}
@@ -726,7 +776,7 @@ impl ChunkIngressService {
     /// so peers are not penalised for hitting our backpressure.
     fn send_overloaded_errors(msg: ChunkIngressMessage) {
         match msg {
-            ChunkIngressMessage::IngestChunk(_, reply, _) => {
+            ChunkIngressMessage::IngestChunk(_, reply, ..) => {
                 // Record the saturation signal even when there is no reply
                 // channel; otherwise dashboards miss fast-failed chunks.
                 metrics::record_chunk_error(
@@ -755,11 +805,12 @@ impl ChunkIngressService {
 #[cfg(test)]
 mod overload_helpers_tests {
     use super::*;
-    use irys_types::{DataRoot, H256, IrysSignature, ingress::IngressProof};
+    use irys_types::DataTreeRoot;
+    use irys_types::{DataCommitment, H256, IrysSignature, ingress::IngressProof};
 
     fn dummy_chunk() -> UnpackedChunk {
         UnpackedChunk {
-            data_root: DataRoot::from([0_u8; 32]),
+            data_tree_root: DataTreeRoot(H256::from([0_u8; 32])),
             data_size: 0,
             tx_offset: 0_u32.into(),
             data_path: Default::default(),
@@ -770,7 +821,7 @@ mod overload_helpers_tests {
     fn dummy_ingress_proof() -> IngressProof {
         IngressProof::V1(irys_types::ingress::IngressProofV1 {
             signature: IrysSignature::default(),
-            data_root: H256::zero(),
+            data_commitment: DataCommitment(H256::zero()),
             proof: H256::zero(),
             chain_id: 0,
             anchor: H256::zero(),
@@ -783,7 +834,12 @@ mod overload_helpers_tests {
     #[tokio::test]
     async fn ingest_chunk_overloaded_returns_advisory_overloaded() {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let msg = ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx), None);
+        let msg = ChunkIngressMessage::IngestChunk(
+            dummy_chunk(),
+            Some(reply_tx),
+            None,
+            ChunkIngressSource::Sent,
+        );
 
         ChunkIngressService::send_overloaded_errors(msg);
 
@@ -798,7 +854,8 @@ mod overload_helpers_tests {
     /// channel — there is simply no caller to notify.
     #[tokio::test]
     async fn ingest_chunk_overloaded_no_reply_is_noop() {
-        let msg = ChunkIngressMessage::IngestChunk(dummy_chunk(), None, None);
+        let msg =
+            ChunkIngressMessage::IngestChunk(dummy_chunk(), None, None, ChunkIngressSource::Sent);
         ChunkIngressService::send_overloaded_errors(msg);
     }
 
@@ -822,7 +879,7 @@ mod overload_helpers_tests {
     /// processed on a future trigger. Must not panic.
     #[tokio::test]
     async fn process_pending_chunks_overloaded_is_noop() {
-        let msg = ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]));
+        let msg = ChunkIngressMessage::ProcessPendingChunks(DataCommitment(H256::from([1_u8; 32])));
         ChunkIngressService::send_overloaded_errors(msg);
     }
 
@@ -833,10 +890,18 @@ mod overload_helpers_tests {
     fn has_reply_channel_distinguishes_fire_and_forget_from_reply_bearing() {
         let (reply_tx, _reply_rx) = oneshot::channel();
         assert!(
-            ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx), None)
+            ChunkIngressMessage::IngestChunk(
+                dummy_chunk(),
+                Some(reply_tx),
+                None,
+                ChunkIngressSource::Sent
+            )
+            .has_reply_channel()
+        );
+        assert!(
+            !ChunkIngressMessage::IngestChunk(dummy_chunk(), None, None, ChunkIngressSource::Sent)
                 .has_reply_channel()
         );
-        assert!(!ChunkIngressMessage::IngestChunk(dummy_chunk(), None, None).has_reply_channel());
 
         let (reply_tx, _reply_rx) = oneshot::channel();
         assert!(
@@ -845,13 +910,13 @@ mod overload_helpers_tests {
         );
 
         assert!(
-            !ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]))
+            !ChunkIngressMessage::ProcessPendingChunks(DataCommitment(H256::from([1_u8; 32])))
                 .has_reply_channel()
         );
 
         assert!(
-            !ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(vec![DataRoot::from(
-                [2_u8; 32]
+            !ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(vec![DataCommitment(
+                H256::from([2_u8; 32])
             )])
             .has_reply_channel()
         );
@@ -882,19 +947,23 @@ mod overload_helpers_tests {
             ChunkIngressService::no_permit_action(&ChunkIngressMessage::IngestChunk(
                 chunk.clone(),
                 Some(reply_tx),
-                None
+                None,
+                ChunkIngressSource::Sent
             )),
             NoPermitAction::Overloaded
         );
         assert_eq!(
             ChunkIngressService::no_permit_action(&ChunkIngressMessage::IngestChunk(
-                chunk, None, None
+                chunk,
+                None,
+                None,
+                ChunkIngressSource::Sent
             )),
             NoPermitAction::Backlog
         );
         assert_eq!(
             ChunkIngressService::no_permit_action(&ChunkIngressMessage::ProcessPendingChunks(
-                DataRoot::from([1_u8; 32])
+                DataCommitment(H256::from([1_u8; 32]))
             )),
             NoPermitAction::Park
         );
@@ -911,15 +980,31 @@ mod overload_helpers_tests {
         let chunk = dummy_chunk();
         assert!(
             !state
-                .pending_contains(chunk.data_root, chunk.tx_offset)
+                .pending_contains(
+                    chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING),
+                    chunk.tx_offset
+                )
                 .await
         );
-        pending.write().await.put(chunk.clone());
+        pending.write().await.put(
+            chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING),
+            chunk.clone(),
+        );
         assert!(
             state
-                .pending_contains(chunk.data_root, chunk.tx_offset)
+                .pending_contains(
+                    chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING),
+                    chunk.tx_offset
+                )
                 .await
         );
-        assert!(!state.pending_contains(chunk.data_root, 1_u32.into()).await);
+        assert!(
+            !state
+                .pending_contains(
+                    chunk.data_commitment(&irys_types::data_tree::Geometry::TESTING),
+                    1_u32.into()
+                )
+                .await
+        );
     }
 }

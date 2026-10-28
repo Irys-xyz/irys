@@ -1,8 +1,8 @@
 pub use crate::{
     Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, CommitmentTypeV2, Compact,
-    ConsensusConfig, DataTransactionMetadata, H256, IrysAddress, IrysSignature, Node, Proof,
-    Signature, TxChunkOffset, U256, UnpackedChunk, address_base58_stringify, decode_rlp_version,
-    encode_rlp_version,
+    ConsensusConfig, DataCommitment, DataTransactionMetadata, DataTreeRoot, H256, IrysAddress,
+    IrysSignature, Node, Proof, Signature, TxChunkOffset, U256, UnpackedChunk,
+    address_base58_stringify, decode_rlp_version, encode_rlp_version,
     ingress::IngressProof,
     optional_string_u64, string_u64,
     versioning::{
@@ -13,6 +13,7 @@ pub use crate::{
 
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
+use irys_data_tree::DataTree;
 use irys_macros_integer_tagged::IntegerTagged;
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
@@ -291,7 +292,8 @@ pub struct DataTransactionHeaderV1 {
 
     /// The merkle root of the transactions data chunks
     // #[serde(default, with = "address_base58_stringify")]
-    pub data_root: H256,
+    #[serde(rename = "dataRoot")]
+    pub data_tree_root: DataTreeRoot,
 
     /// Size of the transaction data in bytes
     #[serde(with = "string_u64")]
@@ -390,10 +392,13 @@ pub struct DataTransaction {
     pub header: DataTransactionHeader,
     // TODO: make this compatible with stream/iterator data sources
     pub data: Option<Base64>,
+    /// The data tree `data` was built into. `None` after deserialization.
     #[serde(skip)]
-    pub chunks: Vec<Node>,
+    pub(crate) tree: Option<DataTree>,
+    /// The geometry chunk size the tree was built with. `data_chunks` slices
+    /// `data` by it.
     #[serde(skip)]
-    pub proofs: Vec<Proof>,
+    pub(crate) chunk_size: u64,
 }
 
 impl DataTransaction {
@@ -401,24 +406,41 @@ impl DataTransaction {
         self.header.signature_hash()
     }
 
+    /// Every chunk of `data` with its chunk proof. Chunk `chunk_index` is the
+    /// `chunk_len` bytes from `chunk_index × chunk_size`.
     pub fn data_chunks(&self) -> eyre::Result<Vec<UnpackedChunk>> {
-        // TODO: find a better version
         let data = match &self.data {
             Some(d) => d,
             None => eyre::bail!("missing required tx data"),
         };
-        let mut chunks = Vec::with_capacity(self.chunks.len());
-        for (idx, chunk) in self.chunks.iter().enumerate() {
-            let unpacked_chunk = UnpackedChunk {
-                data_root: self.header.data_root,
-                data_size: self.header.data_size,
-                data_path: Base64(self.proofs[idx].proof.clone()),
-                bytes: Base64(data.0[chunk.min_byte_range..chunk.max_byte_range].to_vec()),
-                tx_offset: TxChunkOffset::from(idx as u32),
-            };
-            chunks.push(unpacked_chunk);
-        }
-        Ok(chunks)
+        // A deserialized or default transaction has no tree and no chunk size.
+        let tree = self.tree()?;
+        let chunk_size = usize::try_from(self.chunk_size)?;
+        data.0
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_index, bytes)| {
+                let chunk_index = TxChunkOffset::from(u32::try_from(chunk_index)?);
+                Ok(UnpackedChunk {
+                    data_tree_root: self.header.data_tree_root,
+                    data_size: self.header.data_size,
+                    data_path: Base64(tree.chunk_proof(chunk_index.0)?),
+                    bytes: Base64(bytes.to_vec()),
+                    tx_offset: chunk_index,
+                })
+            })
+            .collect()
+    }
+
+    /// The data path of chunk `chunk_index`.
+    pub fn chunk_proof(&self, chunk_index: TxChunkOffset) -> eyre::Result<Base64> {
+        Ok(Base64(self.tree()?.chunk_proof(chunk_index.0)?))
+    }
+
+    fn tree(&self) -> eyre::Result<&DataTree> {
+        self.tree
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("transaction has no data tree"))
     }
 }
 
@@ -428,7 +450,7 @@ impl DataTransactionHeaderV1 {
             id: H256::zero(),
             anchor: H256::zero(),
             signer: IrysAddress::default(),
-            data_root: H256::zero(),
+            data_tree_root: DataTreeRoot(H256::zero()),
             data_size: 0,
             prefix_size: 0,
             prefix_hash: H256::zero(),
@@ -464,6 +486,12 @@ impl DataTransactionHeaderV1 {
 
     pub fn total_cost(&self) -> BoundedFee {
         self.perm_fee.unwrap_or_default() + self.term_fee
+    }
+
+    /// The commitment this header's chunks verify against: it binds the signed
+    /// `data_tree_root` and `data_size` under `geometry`.
+    pub fn data_commitment(&self, geometry: &irys_data_tree::Geometry) -> DataCommitment {
+        crate::data_tree::data_commitment(geometry, self.data_tree_root, self.data_size)
     }
 }
 
@@ -928,7 +956,7 @@ mod tests {
             id: H256::zero(),
             anchor: H256::from([1_u8; 32]),
             signer: IrysAddress::default(),
-            data_root: H256::from([3_u8; 32]),
+            data_tree_root: DataTreeRoot(H256::from([3_u8; 32])),
             data_size: 1024,
             prefix_size: 0,
             prefix_hash: H256::zero(),
@@ -1129,7 +1157,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config.data_tree_geometry().unwrap(),
         };
 
         // Test signing the header directly using the outer versioned type
@@ -1153,7 +1181,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config.data_tree_geometry().unwrap(),
         };
 
         // Test signing the outer versioned type directly
@@ -1175,7 +1203,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config.data_tree_geometry().unwrap(),
         };
 
         let tx = DataTransaction {
@@ -1204,7 +1232,7 @@ mod tests {
         let signer = IrysSigner {
             signer: SigningKey::random(&mut rand::thread_rng()),
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config.data_tree_geometry().unwrap(),
         };
 
         let tx = mock_commitment_tx(&config);
@@ -1229,7 +1257,7 @@ mod tests {
                 id: H256::from([255_u8; 32]),
                 anchor: H256::from([1_u8; 32]),
                 signer: IrysAddress::default(),
-                data_root: H256::from([3_u8; 32]),
+                data_tree_root: DataTreeRoot(H256::from([3_u8; 32])),
                 data_size: 1024,
                 prefix_size: 0,
                 prefix_hash: H256::zero(),
@@ -1242,6 +1270,62 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         })
+    }
+
+    #[test]
+    fn header_bytes_do_not_change_with_the_rename() {
+        let config = ConsensusConfig::testing();
+        let header = mock_header(&config);
+        let root_hash = H256::from([3_u8; 32]);
+
+        // JSON keeps the `dataRoot` key and the same base58 string as a raw H256.
+        let json = serde_json::to_value(&header).unwrap();
+        assert_eq!(json["dataRoot"], serde_json::to_value(root_hash).unwrap());
+        assert!(json.get("dataTreeRoot").is_none());
+        let from_json: DataTransactionHeader = serde_json::from_value(json).unwrap();
+        assert_eq!(from_json.data_tree_root, DataTreeRoot(root_hash));
+
+        // RLP signing bytes and Compact bytes encode the root exactly like an H256.
+        let mut root_rlp = Vec::new();
+        alloy_rlp::Encodable::encode(&root_hash, &mut root_rlp);
+        let mut header_rlp = Vec::new();
+        alloy_rlp::Encodable::encode(&header, &mut header_rlp);
+        assert!(
+            header_rlp
+                .windows(root_rlp.len())
+                .any(|window| window == root_rlp.as_slice())
+        );
+        let mut compact = Vec::new();
+        header.to_compact(&mut compact);
+        let (decoded, _) = DataTransactionHeader::from_compact(&compact, compact.len());
+        assert_eq!(decoded.data_tree_root, DataTreeRoot(root_hash));
+    }
+
+    /// A transaction with data but no tree (deserialized or default) has no
+    /// chunk size. `data_chunks` returns an error; it does not panic.
+    #[test]
+    fn data_chunks_without_a_tree_is_an_error() {
+        let tx = DataTransaction {
+            data: Some(Base64(vec![1_u8; 40])),
+            ..Default::default()
+        };
+        assert!(tx.data_chunks().is_err());
+        assert!(tx.chunk_proof(TxChunkOffset(0)).is_err());
+    }
+
+    #[test]
+    fn data_commitment_uses_the_header_size() {
+        use irys_data_tree::Geometry;
+        let config = ConsensusConfig::testing();
+        let mut header = mock_header(&config);
+        let root = DataTreeRoot(H256::from([7_u8; 32]));
+        let DataTransactionHeader::V1(inner) = &mut header;
+        inner.tx.data_tree_root = root;
+        inner.tx.data_size = 96;
+        assert_eq!(
+            header.data_commitment(&Geometry::TESTING),
+            crate::data_tree::data_commitment(&Geometry::TESTING, root, 96)
+        );
     }
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {

@@ -37,7 +37,7 @@ async fn peer_discovery() -> eyre::Result<()> {
     let signer = IrysSigner {
         signer: signing_key,
         chain_id: config.consensus_config().chain_id,
-        chunk_size: config.consensus_config().chunk_size,
+        data_tree_geometry: config.consensus_config().data_tree_geometry()?,
     };
     config.consensus.extend_genesis_accounts(vec![(
         signer.address(),

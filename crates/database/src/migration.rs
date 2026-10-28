@@ -499,6 +499,7 @@ mod v1_to_v2 {
 
 mod v2_to_v3 {
     use super::*;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
         DataTransactionMetadata,
@@ -533,7 +534,7 @@ mod v2_to_v3 {
                 id: v2_header.id,
                 anchor: v2_header.anchor,
                 signer: v2_header.signer,
-                data_root: v2_header.data_root,
+                data_tree_root: DataTreeRoot(v2_header.data_root),
                 data_size: v2_header.data_size,
                 // Historical on-disk field `header_size` is the new `prefix_size`.
                 prefix_size: v2_header.header_size,
@@ -599,14 +600,43 @@ mod v2_to_v3 {
     }
 }
 
+mod v3_to_v4 {
+    use super::*;
+    use crate::tables::{
+        CachedChunks, CachedChunksIndex, CachedDataRoots, CachedIngressLeaves, IngressProofs,
+    };
+
+    /// Clears the data cache tables, whose rows are keyed by the data root.
+    /// From V4 those tables are keyed by the `data_commitment`, so an old row
+    /// is unreachable or wrong. The V4 `CachedDataRoot` row also has no size
+    /// confirmation flag, and the V4 `CachedChunk` row adds the commitment
+    /// and the chunk index; the clear covers those layout changes too. Headers,
+    /// commitment txs, metadata and the block index are not touched. `clear`
+    /// drops rows without decoding them.
+    pub(crate) fn migrate<TX>(tx: &TX) -> eyre::Result<()>
+    where
+        TX: DbTxMut + DbTx + Debug,
+    {
+        debug!("Migrating from v3 to v4: clearing the data cache tables keyed by data root");
+        tx.clear::<CachedDataRoots>()?;
+        tx.clear::<CachedChunksIndex>()?;
+        tx.clear::<CachedChunks>()?;
+        tx.clear::<CachedIngressLeaves>()?;
+        tx.clear::<IngressProofs>()?;
+        crate::set_database_schema_version(tx, DatabaseVersion::V4)?;
+        Ok(())
+    }
+}
+
 /// Checks the database schema version on startup and either:
-/// - Migrates forward from V0/V1/V2 through to CURRENT
+/// - Migrates forward from V0/V1/V2/V3 through to CURRENT
 /// - Returns an error if the DB version is newer than the binary (rollback not supported)
 /// - No-ops if versions match
 ///
 /// A database without a version stamp is treated as V0 (the versioning system
 /// didn't exist yet). The V0→V1 transition is purely "add the stamp" — no data
-/// format change — so we unconditionally stamp V1 and then run V1→V2 and V2→V3.
+/// format change — so we unconditionally stamp V1 and then run V1→V2, V2→V3
+/// and V3→V4.
 /// On a truly fresh (empty) database the per-step migrations are no-ops.
 pub fn ensure_db_version_compatible(db: &DatabaseEnv) -> eyre::Result<()> {
     use reth_db::Database as _;
@@ -670,6 +700,14 @@ pub fn ensure_db_version_compatible(db: &DatabaseEnv) -> eyre::Result<()> {
                     Ok(())
                 })?;
                 version = DatabaseVersion::V3;
+            }
+            DatabaseVersion::V3 => {
+                debug!("Applying migration from V3 to V4");
+                db.update_eyre(|tx| {
+                    v3_to_v4::migrate(tx)?;
+                    Ok(())
+                })?;
+                version = DatabaseVersion::V4;
             }
             DatabaseVersion::CURRENT => {
                 debug!(
@@ -1131,6 +1169,216 @@ mod tests {
             "v2_to_v3 must reject bundle_format that overflows u8"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn v3_to_v4_clears_only_the_data_cache_tables() -> eyre::Result<()> {
+        use crate::db_cache::{
+            CachedChunk, CachedChunkIndexEntry, CachedDataRoot, CachedIngressLeaf,
+            CachedIngressLeafKey,
+        };
+        use crate::tables::{
+            CachedChunks, CachedChunksIndex, CachedDataRoots, CachedIngressLeaves,
+            CompactCachedIngressProof, IngressProofs, IrysBlockIndexItems, IrysCommitments,
+            MigratedBlockHashes,
+        };
+        use irys_types::ingress::CachedIngressProof;
+        use irys_types::{
+            BlockIndexItem, CommitmentTransaction, ConsensusConfig, DataCommitment, DataLedger,
+            DataTransactionHeader, IrysAddress, LedgerIndexItem, TxChunkOffset,
+        };
+
+        let db_path = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            db_path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+
+        let config = ConsensusConfig::testing();
+        let header = DataTransactionHeader::new(&config);
+        let commitment_tx = CommitmentTransaction::new_stake(&config, H256::from([3_u8; 32]));
+        let block_index_item = BlockIndexItem {
+            block_hash: H256::from([4_u8; 32]),
+            num_ledgers: 1,
+            ledgers: vec![LedgerIndexItem {
+                total_chunks: 0,
+                tx_root: H256::zero(),
+                ledger: DataLedger::Publish,
+            }],
+        };
+        let cache_key = DataCommitment(H256::from([5_u8; 32]));
+        let chunk_key = irys_types::ChunkKey(H256::from([6_u8; 32]));
+        let address = IrysAddress::from_slice(&[7_u8; 20]);
+
+        {
+            let write_tx = db.tx_mut()?;
+            crate::set_database_schema_version(&write_tx, DatabaseVersion::V3)?;
+            crate::insert_tx_header(&write_tx, &header)?;
+            crate::insert_commitment_tx(&write_tx, &commitment_tx)?;
+            crate::insert_block_index_item(&write_tx, 0, &block_index_item)?;
+            write_tx.put::<CachedDataRoots>(cache_key, CachedDataRoot::default())?;
+            write_tx.put::<CachedChunksIndex>(cache_key, CachedChunkIndexEntry::default())?;
+            write_tx.put::<CachedChunks>(chunk_key, CachedChunk::default())?;
+            write_tx.put::<CachedIngressLeaves>(
+                CachedIngressLeafKey {
+                    data_commitment: cache_key,
+                    address,
+                },
+                CachedIngressLeaf {
+                    tx_offset: TxChunkOffset(0),
+                    ingress_data_hash: H256::from([8_u8; 32]),
+                },
+            )?;
+            write_tx.put::<IngressProofs>(
+                cache_key,
+                CompactCachedIngressProof(CachedIngressProof {
+                    address,
+                    ..Default::default()
+                }),
+            )?;
+            write_tx.commit()?;
+        }
+
+        crate::migration::ensure_db_version_compatible(&db)?;
+
+        let read_tx = db.tx()?;
+        assert_eq!(
+            crate::database_schema_version(&mut db.tx()?)?,
+            Some(DatabaseVersion::V4 as u32)
+        );
+        assert_eq!(read_tx.entries::<CachedDataRoots>()?, 0);
+        assert_eq!(read_tx.entries::<CachedChunksIndex>()?, 0);
+        assert_eq!(read_tx.entries::<CachedChunks>()?, 0);
+        assert_eq!(read_tx.entries::<CachedIngressLeaves>()?, 0);
+        assert_eq!(read_tx.entries::<IngressProofs>()?, 0);
+
+        assert!(
+            crate::tx_header_by_txid(&read_tx, &header.id)?
+                .is_some_and(|stored| stored.eq(&header))
+        );
+        assert_eq!(
+            read_tx
+                .get::<IrysCommitments>(commitment_tx.id())?
+                .map(|stored| stored.0),
+            Some(commitment_tx)
+        );
+        assert_eq!(
+            read_tx.get::<MigratedBlockHashes>(0)?,
+            Some(block_index_item.block_hash)
+        );
+        assert_eq!(
+            read_tx
+                .get::<IrysBlockIndexItems>(0)?
+                .map(|stored| stored.0),
+            Some(block_index_item.ledgers[0].clone())
+        );
+        Ok(())
+    }
+
+    /// A V3 node holds data-cache rows in the old layout. No V4 type decodes
+    /// those bytes, so the V3→V4 step must drop them without decoding. The
+    /// rows are written raw, in each table's own key width, and the other
+    /// tables stay as they were.
+    #[test]
+    fn v3_to_v4_clears_undecodable_data_cache_rows() -> eyre::Result<()> {
+        use crate::db_cache::{
+            CachedChunk, CachedChunkIndexEntry, CachedDataRoot, CachedIngressLeaf,
+        };
+        use crate::tables::{
+            CachedChunks, CachedChunksIndex, CachedDataRoots, CachedIngressLeaves,
+            CompactCachedIngressProof, IngressProofs, IrysCommitments,
+        };
+        use irys_types::{CommitmentTransaction, ConsensusConfig, DataTransactionHeader};
+        use reth_db_api::table::Decompress;
+        use reth_db_api::tables::{RawDupSort, RawKey, RawTable, RawValue};
+
+        /// True when the V4 value type reads `bytes` without an error or a panic.
+        fn decodes<V: Decompress>(bytes: &[u8]) -> bool {
+            matches!(std::panic::catch_unwind(|| V::decompress(bytes)), Ok(Ok(_)))
+        }
+
+        // A value that no V4 type decodes stands in for an old-layout row:
+        // a flags byte and no fields.
+        let old_value = vec![0xFF_u8];
+        assert!(!decodes::<CachedDataRoot>(&old_value));
+        assert!(!decodes::<CachedChunkIndexEntry>(&old_value));
+        assert!(!decodes::<CachedChunk>(&old_value));
+        assert!(!decodes::<CachedIngressLeaf>(&old_value));
+        assert!(!decodes::<CompactCachedIngressProof>(&old_value));
+        // A V3 row is keyed by the data root: 32 bytes. The leaf key adds the
+        // 20-byte address.
+        let data_root_key = vec![5_u8; 32];
+        let leaf_key = vec![5_u8; 32 + 20];
+
+        let db_path = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            db_path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let config = ConsensusConfig::testing();
+        let header = DataTransactionHeader::new(&config);
+        let commitment_tx = CommitmentTransaction::new_stake(&config, H256::from([3_u8; 32]));
+        {
+            let write_tx = db.tx_mut()?;
+            crate::set_database_schema_version(&write_tx, DatabaseVersion::V3)?;
+            crate::insert_tx_header(&write_tx, &header)?;
+            crate::insert_commitment_tx(&write_tx, &commitment_tx)?;
+            write_tx.put::<RawTable<CachedDataRoots>>(
+                RawKey::from_vec(data_root_key.clone()),
+                RawValue::from_vec(old_value.clone()),
+            )?;
+            write_tx.put::<RawDupSort<CachedChunksIndex>>(
+                RawKey::from_vec(data_root_key.clone()),
+                RawValue::from_vec(old_value.clone()),
+            )?;
+            write_tx.put::<RawTable<CachedChunks>>(
+                RawKey::from_vec(data_root_key.clone()),
+                RawValue::from_vec(old_value.clone()),
+            )?;
+            write_tx.put::<RawDupSort<CachedIngressLeaves>>(
+                RawKey::from_vec(leaf_key),
+                RawValue::from_vec(old_value.clone()),
+            )?;
+            write_tx.put::<RawDupSort<IngressProofs>>(
+                RawKey::from_vec(data_root_key),
+                RawValue::from_vec(old_value),
+            )?;
+            write_tx.commit()?;
+        }
+        {
+            let read_tx = db.tx()?;
+            assert_eq!(read_tx.entries::<CachedDataRoots>()?, 1);
+            assert_eq!(read_tx.entries::<CachedChunksIndex>()?, 1);
+            assert_eq!(read_tx.entries::<CachedChunks>()?, 1);
+            assert_eq!(read_tx.entries::<CachedIngressLeaves>()?, 1);
+            assert_eq!(read_tx.entries::<IngressProofs>()?, 1);
+        }
+
+        crate::migration::ensure_db_version_compatible(&db)?;
+
+        let read_tx = db.tx()?;
+        assert_eq!(
+            crate::database_schema_version(&mut db.tx()?)?,
+            Some(DatabaseVersion::V4 as u32)
+        );
+        assert_eq!(read_tx.entries::<CachedDataRoots>()?, 0);
+        assert_eq!(read_tx.entries::<CachedChunksIndex>()?, 0);
+        assert_eq!(read_tx.entries::<CachedChunks>()?, 0);
+        assert_eq!(read_tx.entries::<CachedIngressLeaves>()?, 0);
+        assert_eq!(read_tx.entries::<IngressProofs>()?, 0);
+        assert!(
+            crate::tx_header_by_txid(&read_tx, &header.id)?
+                .is_some_and(|stored| stored.eq(&header))
+        );
+        assert_eq!(
+            read_tx
+                .get::<IrysCommitments>(commitment_tx.id())?
+                .map(|stored| stored.0),
+            Some(commitment_tx)
+        );
         Ok(())
     }
 

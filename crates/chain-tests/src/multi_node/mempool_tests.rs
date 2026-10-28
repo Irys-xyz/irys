@@ -116,6 +116,120 @@ async fn heavy3_pending_chunks_test() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Chunks park before their header. The header arrives through mempool
+/// ingress, which drains the chunks parked under its own commitment: they
+/// verify and land in the chunk cache. A chunk of the same root that claims
+/// another size stays parked and is not cached.
+#[tokio::test]
+async fn heavy_header_ingress_drains_only_its_own_parked_chunks() -> eyre::Result<()> {
+    use actix_web::{http::StatusCode, test};
+    use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
+
+    initialize_tracing();
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+    let app = genesis_node.start_public_api().await;
+    let geometry = genesis_node.node_ctx.config.data_tree_geometry();
+
+    let chunks = vec![[10; 32], [20; 32], [30; 32]];
+    let data: Vec<u8> = chunks.concat();
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, data.len() as u64)
+        .await?;
+    let tx = signer.create_publish_transaction(
+        data,
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
+    )?;
+    let tx = signer.sign_transaction(tx)?;
+    let own_commitment = tx.header.data_commitment(&geometry);
+
+    // A chunk of the same root that claims a size no header names.
+    let other_size = tx.header.data_size - 32;
+    let other_size_chunk = UnpackedChunk {
+        data_tree_root: tx.header.data_tree_root,
+        data_size: other_size,
+        data_path: tx.chunk_proof(TxChunkOffset::from(0))?,
+        bytes: Base64(chunks[0].to_vec()),
+        tx_offset: TxChunkOffset::from(0),
+    };
+    let other_commitment = other_size_chunk.data_commitment(&geometry);
+    assert_ne!(other_commitment, own_commitment);
+
+    for chunk_index in 0..chunks.len() {
+        post_chunk(&app, &tx, chunk_index, &chunks).await;
+    }
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/chunk")
+            .set_json(&other_size_chunk)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    genesis_node.wait_for_http_chunk_idle(10).await?;
+
+    let ingress_state = &genesis_node.node_ctx.chunk_ingress_state;
+    for chunk_index in 0..chunks.len() {
+        let tx_offset = TxChunkOffset::from(u32::try_from(chunk_index)?);
+        assert!(
+            ingress_state
+                .pending_contains(own_commitment, tx_offset)
+                .await,
+            "chunk {chunk_index} parks before its header"
+        );
+    }
+    assert!(
+        ingress_state
+            .pending_contains(other_commitment, TxChunkOffset::from(0))
+            .await
+    );
+
+    // The header arrives through mempool ingress.
+    post_data_tx(&app, &tx).await;
+    genesis_node
+        .wait_for_chunk_cache_count(chunks.len() as u64, 10)
+        .await?;
+
+    for (chunk_index, chunk) in chunks.iter().enumerate() {
+        let tx_offset = TxChunkOffset::from(u32::try_from(chunk_index)?);
+        let cached = genesis_node.node_ctx.db.view_eyre(|db_tx| {
+            irys_database::cached_chunk_by_chunk_offset(db_tx, own_commitment, tx_offset)
+        })?;
+        let (_, cached) = cached.ok_or_else(|| eyre::eyre!("chunk {chunk_index} is not cached"))?;
+        assert_eq!(cached.chunk, Some(Base64(chunk.to_vec())));
+        assert!(
+            !ingress_state
+                .pending_contains(own_commitment, tx_offset)
+                .await,
+            "chunk {chunk_index} leaves the pending map"
+        );
+    }
+    let other_cached = genesis_node.node_ctx.db.view_eyre(|db_tx| {
+        irys_database::cached_chunk_by_chunk_offset(db_tx, other_commitment, TxChunkOffset::from(0))
+    })?;
+    assert!(
+        other_cached.is_none(),
+        "the header does not drain another commitment"
+    );
+    assert!(
+        ingress_state
+            .pending_contains(other_commitment, TxChunkOffset::from(0))
+            .await,
+        "the other-size chunk stays parked"
+    );
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
 #[test_log::test(tokio::test)]
 async fn promoted_tx_is_not_reselected_for_submit_after_confirmation() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
@@ -281,7 +395,7 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
     // Build a pre-header chunk with an oversized data_path (> 64 KiB)
     let oversized_path = vec![0_u8; 70_000];
     let chunk = UnpackedChunk {
-        data_root: tx.header.data_root,
+        data_tree_root: tx.header.data_tree_root,
         data_size: tx.header.data_size,
         data_path: Base64(oversized_path),
         bytes: Base64(data),
@@ -348,7 +462,7 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
 
     // Build a pre-header chunk with oversized bytes
     let chunk = UnpackedChunk {
-        data_root: tx.header.data_root,
+        data_tree_root: tx.header.data_tree_root,
         data_size: tx.header.data_size,
         data_path: Base64(vec![]),
         bytes: Base64(data),
@@ -418,7 +532,7 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
     // Fill the pre-header cache to capacity (64 chunks)
     for offset in 0..preheader_cap {
         let chunk = UnpackedChunk {
-            data_root: tx.header.data_root,
+            data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
             data_path: Base64(vec![]),
             bytes: Base64(chunk_bytes.clone()),
@@ -438,7 +552,8 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
 
     genesis_node
         .wait_until_chunk_accepted(
-            tx.header.data_root,
+            tx.header.data_tree_root,
+            tx.header.data_size,
             TxChunkOffset::from(preheader_cap.saturating_sub(1)),
             10,
         )
@@ -446,7 +561,7 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
 
     // Now try to add one more chunk - HTTP admits it; the worker rejects the park.
     let overflow_chunk = UnpackedChunk {
-        data_root: tx.header.data_root,
+        data_tree_root: tx.header.data_tree_root,
         data_size: tx.header.data_size,
         data_path: Base64(vec![]),
         bytes: Base64(chunk_bytes),
@@ -468,14 +583,19 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
         !genesis_node
             .node_ctx
             .chunk_ingress_state
-            .pending_contains(tx.header.data_root, TxChunkOffset::from(preheader_cap))
+            .pending_contains(
+                tx.header
+                    .data_commitment(&genesis_node.node_ctx.config.data_tree_geometry()),
+                TxChunkOffset::from(preheader_cap)
+            )
             .await,
         "overflow pre-header chunk must not remain parked"
     );
     let overflow_cached = genesis_node.node_ctx.db.view_eyre(|db_tx| {
         irys_database::cached_chunk_by_chunk_offset(
             db_tx,
-            tx.header.data_root,
+            tx.header
+                .data_commitment(&genesis_node.node_ctx.config.data_tree_geometry()),
             TxChunkOffset::from(preheader_cap),
         )
     })?;
@@ -1349,8 +1469,12 @@ async fn heavy3_mempool_publish_fork_recovery_test(
     let a_blk1_tx1_proof1 = {
         let tx = a_node.node_ctx.db.tx()?;
         // Get the ingress proof from the database
-        tx.get::<IngressProofs>(a_blk1_tx1.header.data_root)?
-            .expect("Able to get a_blk1_tx1’s ingress proof from DB")
+        tx.get::<IngressProofs>(
+            a_blk1_tx1
+                .header
+                .data_commitment(&a_node.node_ctx.config.data_tree_geometry()),
+        )?
+        .expect("Able to get a_blk1_tx1’s ingress proof from DB")
     };
 
     let a_blk1_tx1_mempool = {

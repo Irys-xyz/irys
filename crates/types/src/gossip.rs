@@ -1,5 +1,5 @@
 use crate::{
-    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, H256, IngressProof,
+    BlockHash, ChunkKey, CommitmentTransaction, DataTransactionHeader, H256, IngressProof,
     IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, UnpackedChunk,
 };
 use alloy_primitives::B256;
@@ -10,8 +10,8 @@ use std::fmt::Debug;
 
 pub mod v1 {
     use crate::{
-        BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, GossipCacheKey,
-        H256, IngressProof, IrysBlockHeader, UnpackedChunk,
+        BlockHash, ChunkKey, CommitmentTransaction, DataTransactionHeader, GossipCacheKey, H256,
+        IngressProof, IrysBlockHeader, UnpackedChunk,
     };
     use alloy_primitives::B256;
     use reth_ethereum_primitives::Block;
@@ -40,14 +40,6 @@ pub mod v1 {
         fn from(sealed_block: SealedBlock<Block>) -> Self {
             let key = GossipCacheKey::sealed_evm_block(&sealed_block);
             let value = GossipDataV1::from(sealed_block);
-            Self::new(key, value)
-        }
-    }
-
-    impl From<UnpackedChunk> for GossipBroadcastMessageV1 {
-        fn from(chunk: UnpackedChunk) -> Self {
-            let key = GossipCacheKey::chunk(&chunk);
-            let value = GossipDataV1::Chunk(chunk);
             Self::new(key, value)
         }
     }
@@ -124,7 +116,7 @@ pub mod v1 {
         pub fn data_type_and_id(&self) -> String {
             match self {
                 Self::Chunk(chunk) => {
-                    format!("chunk data root {}", chunk.data_root)
+                    format!("chunk data root {}", chunk.data_tree_root)
                 }
                 Self::Transaction(tx) => {
                     format!("transaction {}", tx.id)
@@ -143,8 +135,8 @@ pub mod v1 {
                 }
                 Self::IngressProof(ingress_proof) => {
                     format!(
-                        "ingress proof for data_root: {:?} from {:?}",
-                        ingress_proof.data_root,
+                        "ingress proof for data_commitment: {:?} from {:?}",
+                        ingress_proof.data_commitment,
                         ingress_proof.recover_signer()
                     )
                 }
@@ -156,7 +148,7 @@ pub mod v1 {
     pub enum GossipDataRequestV1 {
         ExecutionPayload(B256),
         Block(BlockHash),
-        Chunk(ChunkPathHash),
+        Chunk(ChunkKey),
         Transaction(H256),
     }
 
@@ -167,8 +159,8 @@ pub mod v1 {
                 Self::ExecutionPayload(block_hash) => {
                     write!(f, "execution payload for block {block_hash:?}")
                 }
-                Self::Chunk(chunk_path_hash) => {
-                    write!(f, "chunk {chunk_path_hash:?}")
+                Self::Chunk(chunk_key) => {
+                    write!(f, "chunk {chunk_key:?}")
                 }
                 Self::Transaction(tx_id) => {
                     write!(f, "transaction {tx_id:?}")
@@ -180,7 +172,7 @@ pub mod v1 {
 
 pub mod v2 {
     use crate::{
-        BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader,
+        BlockBody, BlockHash, ChunkKey, CommitmentTransaction, DataTransactionHeader,
         GossipCacheKey, H256, IngressProof, IrysBlockHeader, UnpackedChunk,
     };
     use alloy_primitives::B256;
@@ -214,17 +206,10 @@ pub mod v2 {
         }
     }
 
-    impl From<UnpackedChunk> for GossipBroadcastMessageV2 {
-        fn from(chunk: UnpackedChunk) -> Self {
-            Self::from(Arc::new(chunk))
-        }
-    }
-
-    impl From<Arc<UnpackedChunk>> for GossipBroadcastMessageV2 {
-        fn from(chunk: Arc<UnpackedChunk>) -> Self {
-            let key = GossipCacheKey::chunk(&chunk);
-            let value = GossipDataV2::Chunk(chunk);
-            Self::new(key, value)
+    impl GossipBroadcastMessageV2 {
+        pub fn chunk(chunk: Arc<UnpackedChunk>, geometry: &irys_data_tree::Geometry) -> Self {
+            let key = GossipCacheKey::chunk(&chunk, geometry);
+            Self::new(key, GossipDataV2::Chunk(chunk))
         }
     }
 
@@ -339,7 +324,7 @@ pub mod v2 {
         pub fn data_type_and_id(&self) -> String {
             match self {
                 Self::Chunk(chunk) => {
-                    format!("chunk data root {}", chunk.data_root)
+                    format!("chunk data root {}", chunk.data_tree_root)
                 }
                 Self::Transaction(tx) => {
                     format!("transaction {}", tx.id)
@@ -361,8 +346,8 @@ pub mod v2 {
                 }
                 Self::IngressProof(ingress_proof) => {
                     format!(
-                        "ingress proof for data_root: {:?} from {:?}",
-                        ingress_proof.data_root,
+                        "ingress proof for data_commitment: {:?} from {:?}",
+                        ingress_proof.data_commitment,
                         ingress_proof.recover_signer()
                     )
                 }
@@ -375,7 +360,7 @@ pub mod v2 {
         ExecutionPayload(B256),
         BlockHeader(BlockHash),
         BlockBody(BlockHash),
-        Chunk(ChunkPathHash),
+        Chunk(ChunkKey),
         Transaction(H256),
     }
 
@@ -388,9 +373,7 @@ pub mod v2 {
                 Self::BlockHeader(block_hash) => {
                     Some(super::v1::GossipDataRequestV1::Block(*block_hash))
                 }
-                Self::Chunk(chunk_path_hash) => {
-                    Some(super::v1::GossipDataRequestV1::Chunk(*chunk_path_hash))
-                }
+                Self::Chunk(chunk_key) => Some(super::v1::GossipDataRequestV1::Chunk(*chunk_key)),
                 Self::Transaction(tx_id) => {
                     Some(super::v1::GossipDataRequestV1::Transaction(*tx_id))
                 }
@@ -406,9 +389,7 @@ pub mod v2 {
                     Self::ExecutionPayload(b256)
                 }
                 super::v1::GossipDataRequestV1::Block(block_hash) => Self::BlockHeader(block_hash),
-                super::v1::GossipDataRequestV1::Chunk(chunk_path_hash) => {
-                    Self::Chunk(chunk_path_hash)
-                }
+                super::v1::GossipDataRequestV1::Chunk(chunk_key) => Self::Chunk(chunk_key),
                 super::v1::GossipDataRequestV1::Transaction(tx_id) => Self::Transaction(tx_id),
             }
         }
@@ -422,8 +403,8 @@ pub mod v2 {
                 Self::ExecutionPayload(block_hash) => {
                     write!(f, "execution payload for block {block_hash:?}")
                 }
-                Self::Chunk(chunk_path_hash) => {
-                    write!(f, "chunk {chunk_path_hash:?}")
+                Self::Chunk(chunk_key) => {
+                    write!(f, "chunk {chunk_key:?}")
                 }
                 Self::Transaction(tx_id) => {
                     write!(f, "transaction {tx_id:?}")
@@ -435,7 +416,7 @@ pub mod v2 {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum GossipCacheKey {
-    Chunk(ChunkPathHash),
+    Chunk(ChunkKey),
     Transaction(IrysTransactionId),
     Block(BlockHash),
     ExecutionPayload(B256),
@@ -443,8 +424,8 @@ pub enum GossipCacheKey {
 }
 
 impl GossipCacheKey {
-    pub fn chunk(chunk: &UnpackedChunk) -> Self {
-        Self::Chunk(chunk.chunk_path_hash())
+    pub fn chunk(chunk: &UnpackedChunk, geometry: &irys_data_tree::Geometry) -> Self {
+        Self::Chunk(chunk.chunk_key(geometry))
     }
 
     pub fn transaction(transaction: &DataTransactionHeader) -> Self {

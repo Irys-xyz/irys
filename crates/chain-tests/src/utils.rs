@@ -1773,15 +1773,17 @@ impl IrysNodeTest<IrysNodeCtx> {
                     continue;
                 };
                 last_header_found = true;
+                let data_commitment =
+                    tx_header.data_commitment(&self.node_ctx.config.data_tree_geometry());
                 let n = ingress_proofs_by_root
-                    .get(&tx_header.data_root)
+                    .get(&data_commitment)
                     .map(Vec::len)
                     .unwrap_or(0);
                 last_have = n;
                 if n >= num_proofs {
-                    if let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root) {
+                    if let Some(tx_proofs) = ingress_proofs_by_root.get(&data_commitment) {
                         for ingress_proof in tx_proofs.iter() {
-                            assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                            assert_eq!(ingress_proof.proof.data_commitment, data_commitment);
                             tracing::info!(
                                 "proof {} signer: {}",
                                 ingress_proof.proof.id(),
@@ -3015,19 +3017,21 @@ impl IrysNodeTest<IrysNodeCtx> {
                         if let Ok(Some((_meta, cached_chunk))) = self.node_ctx.db.view_eyre(|tx| {
                             irys_database::cached_chunk_by_chunk_offset(
                                 tx,
-                                tx_header.data_root,
+                                tx_header
+                                    .data_commitment(&self.node_ctx.config.data_tree_geometry()),
                                 tx_chunk_offset,
                             )
                         }) && let Some(bytes) = cached_chunk.chunk
                         {
                             let unpacked = irys_types::UnpackedChunk {
-                                data_root: tx_header.data_root,
+                                data_tree_root: tx_header.data_tree_root,
                                 data_size: tx_header.data_size,
                                 data_path: irys_types::Base64(cached_chunk.data_path.0.clone()),
                                 bytes,
                                 tx_offset: tx_chunk_offset,
                             };
-                            let verify_data_root = unpacked.data_root;
+                            let verify_data_commitment = unpacked
+                                .data_commitment(&peer.node_ctx.config.data_tree_geometry());
                             let verify_tx_offset = unpacked.tx_offset;
 
                             let (ctx, crx) = tokio::sync::oneshot::channel();
@@ -3038,6 +3042,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                                     unpacked,
                                     Some(ctx),
                                     None,
+                                    irys_actors::ChunkIngressSource::Sent,
                                 ))
                                 .expect("failed to send chunk to chunk_ingress");
                             crx.await
@@ -3054,7 +3059,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                                         .view_eyre(|tx| {
                                             irys_database::cached_chunk_by_chunk_offset(
                                                 tx,
-                                                verify_data_root,
+                                                verify_data_commitment,
                                                 verify_tx_offset,
                                             )
                                         })
@@ -3222,9 +3227,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         chunks: &[[u8; 32]],
     ) -> (reqwest::StatusCode, String) {
         let chunk = UnpackedChunk {
-            data_root: tx.header.data_root,
+            data_tree_root: tx.header.data_tree_root,
             data_size: tx.header.data_size,
-            data_path: Base64(tx.proofs[chunk_index].proof.clone()),
+            data_path: tx
+                .chunk_proof(TxChunkOffset::from(u32::try_from(chunk_index).unwrap()))
+                .unwrap(),
             bytes: Base64(chunks[chunk_index].to_vec()),
             tx_offset: TxChunkOffset::from(chunk_index as u32),
         };
@@ -3255,17 +3262,23 @@ impl IrysNodeTest<IrysNodeCtx> {
         debug!("chunk_index: {:?}", chunk_index);
         assert_eq!(status, reqwest::StatusCode::OK);
         let offset = TxChunkOffset::from(u32::try_from(chunk_index).expect("chunk index fits u32"));
-        self.wait_until_chunk_accepted(tx.header.data_root, offset, 10)
+        self.wait_until_chunk_accepted(tx.header.data_tree_root, tx.header.data_size, offset, 10)
             .await
             .expect("chunk accepted after POST /v1/chunk 200");
     }
 
     pub async fn wait_until_chunk_accepted(
         &self,
-        data_root: irys_types::DataRoot,
+        data_root: irys_types::DataTreeRoot,
+        data_size: u64,
         tx_offset: TxChunkOffset,
         timeout_secs: usize,
     ) -> eyre::Result<()> {
+        let data_commitment = irys_types::data_tree::data_commitment(
+            &self.node_ctx.config.data_tree_geometry(),
+            data_root,
+            data_size,
+        );
         let timeout_secs = coverage_adjusted_timeout(timeout_secs);
         let delay = Duration::from_millis(50);
         let max_attempts = timeout_secs.saturating_mul(20);
@@ -3273,7 +3286,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             if self
                 .node_ctx
                 .chunk_ingress_state
-                .pending_contains(data_root, tx_offset)
+                .pending_contains(data_commitment, tx_offset)
                 .await
             {
                 return Ok(());
@@ -3281,7 +3294,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             let cached = self
                 .node_ctx
                 .db
-                .view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, tx_offset))?;
+                .view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_commitment, tx_offset))?;
             if cached.is_some() {
                 return Ok(());
             }
@@ -3289,7 +3302,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 if self
                     .node_ctx
                     .chunk_provider
-                    .get_chunk_by_data_root(ledger, data_root, tx_offset)?
+                    .get_chunk_by_commitment(ledger, data_commitment, tx_offset)?
                     .is_some()
                 {
                     return Ok(());
@@ -4481,9 +4494,11 @@ pub async fn post_chunk<T, B>(
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
 {
     let chunk = UnpackedChunk {
-        data_root: tx.header.data_root,
+        data_tree_root: tx.header.data_tree_root,
         data_size: tx.header.data_size,
-        data_path: Base64(tx.proofs[chunk_index].proof.clone()),
+        data_path: tx
+            .chunk_proof(TxChunkOffset::from(u32::try_from(chunk_index).unwrap()))
+            .unwrap(),
         bytes: Base64(chunks[chunk_index].to_vec()),
         tx_offset: TxChunkOffset::from(chunk_index as u32),
     };

@@ -1,4 +1,5 @@
 use crate::utils::IrysNodeTest;
+use irys_types::DataTreeRoot;
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{
     DataTransactionHeader, DataTransactionHeaderV1, H256, IrysTransactionCommon as _, NodeConfig,
@@ -72,16 +73,18 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
 
     let data_bytes_1 = vec![0_u8; chunk_size * 2];
     let chunks_1: Vec<Vec<u8>> = data_bytes_1.chunks(chunk_size).map(Vec::from).collect();
-    let leaves_1 =
-        irys_types::generate_leaves(vec![data_bytes_1.clone()].into_iter().map(Ok), chunk_size)?;
-    let data_root_1 = H256(irys_types::generate_data_root(leaves_1)?.id);
+    let data_root_1 = signer_a
+        .create_transaction(data_bytes_1.clone(), anchor)?
+        .header
+        .data_tree_root
+        .0;
 
     let data_tx_1 = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
         tx: DataTransactionHeaderV1 {
             id: H256::zero(),
             anchor,
             signer: signer_a.address(),
-            data_root: data_root_1,
+            data_tree_root: DataTreeRoot(data_root_1),
             data_size: data_bytes_1.len() as u64,
             prefix_size: 0,
             prefix_hash: H256::zero(),
@@ -95,24 +98,26 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
         metadata: irys_types::DataTransactionMetadata::new(),
     })
     .sign(&signer_a)?;
+    let geometry = genesis_node.node_ctx.config.data_tree_geometry();
+    let data_commitment_1 = data_tx_1.data_commitment(&geometry);
 
     let proof_1a1 = generate_ingress_proof(
         &signer_a,
-        data_root_1,
+        data_commitment_1,
         mk_chunks(chunks_1.clone()),
         chain_id,
         anchor,
     )?;
     let proof_1a2 = generate_ingress_proof(
         &signer_a,
-        data_root_1,
+        data_commitment_1,
         mk_chunks(chunks_1.clone()),
         chain_id,
         anchor2,
     )?;
     let proof_1b = generate_ingress_proof(
         &signer_b,
-        data_root_1,
+        data_commitment_1,
         mk_chunks(chunks_1),
         chain_id,
         anchor,
@@ -120,9 +125,11 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
 
     let data_bytes_2 = vec![1_u8; chunk_size * 2];
     let chunks_2: Vec<Vec<u8>> = data_bytes_2.chunks(chunk_size).map(Vec::from).collect();
-    let leaves_2 =
-        irys_types::generate_leaves(vec![data_bytes_2.clone()].into_iter().map(Ok), chunk_size)?;
-    let data_root_2 = H256(irys_types::generate_data_root(leaves_2)?.id);
+    let data_root_2 = signer_a
+        .create_transaction(data_bytes_2.clone(), anchor)?
+        .header
+        .data_tree_root
+        .0;
     assert_ne!(data_root_1, data_root_2);
 
     let data_tx_2 = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
@@ -130,7 +137,7 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
             id: H256::zero(),
             anchor,
             signer: signer_a.address(),
-            data_root: data_root_2,
+            data_tree_root: DataTreeRoot(data_root_2),
             data_size: data_bytes_2.len() as u64,
             prefix_size: 0,
             prefix_hash: H256::zero(),
@@ -144,17 +151,18 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
         metadata: irys_types::DataTransactionMetadata::new(),
     })
     .sign(&signer_a)?;
+    let data_commitment_2 = data_tx_2.data_commitment(&geometry);
 
     let proof_2a = generate_ingress_proof(
         &signer_a,
-        data_root_2,
+        data_commitment_2,
         mk_chunks(chunks_2.clone()),
         chain_id,
         anchor,
     )?;
     let proof_2b = generate_ingress_proof(
         &signer_b,
-        data_root_2,
+        data_commitment_2,
         mk_chunks(chunks_2),
         chain_id,
         anchor,
@@ -183,7 +191,7 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
 
         // Insert data_root_1 proofs directly to bypass store_external_ingress_proof_checked dedup
         tx.put::<IrysDataTxHeaders>(data_tx_1.id, CompactTxHeader(data_tx_1.clone()))?;
-        irys_database::cache_data_root(tx, &data_tx_1, None)?;
+        irys_database::cache_data_root(tx, &data_tx_1, None, &geometry)?;
         irys_database::db_index::set_data_tx_included_height(tx, &data_tx_1.id, 0)?;
         for (proof, address) in [
             (&proof_1a1, signer_a.address()),
@@ -191,14 +199,14 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
             (&proof_1b, signer_b.address()),
         ] {
             tx.put::<IngressProofs>(
-                proof.data_root,
+                proof.data_commitment,
                 CompactCachedIngressProof(CachedIngressProof {
                     address,
                     proof: proof.clone(),
                 }),
             )?;
         }
-        let stored_1 = irys_database::ingress_proofs_by_data_root(tx, data_root_1)?;
+        let stored_1 = irys_database::ingress_proofs_by_commitment(tx, data_commitment_1)?;
         assert_eq!(
             stored_1.len(),
             3,
@@ -206,7 +214,7 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
         );
 
         tx.put::<IrysDataTxHeaders>(data_tx_2.id, CompactTxHeader(data_tx_2.clone()))?;
-        irys_database::cache_data_root(tx, &data_tx_2, None)?;
+        irys_database::cache_data_root(tx, &data_tx_2, None, &geometry)?;
         irys_database::db_index::set_data_tx_included_height(tx, &data_tx_2.id, 0)?;
         for (proof, address) in [
             (&proof_2a, signer_a.address()),
@@ -214,7 +222,7 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
         ] {
             irys_database::store_external_ingress_proof_checked(tx, proof, address)?;
         }
-        let stored_2 = irys_database::ingress_proofs_by_data_root(tx, data_root_2)?;
+        let stored_2 = irys_database::ingress_proofs_by_commitment(tx, data_commitment_2)?;
         assert_eq!(
             stored_2.len(),
             2,

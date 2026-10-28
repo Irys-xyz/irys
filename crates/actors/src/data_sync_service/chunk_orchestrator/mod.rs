@@ -83,12 +83,12 @@ enum DispatchStart {
 
 /// How to request a missing body from a selected peer.
 ///
-/// Assignees use ledger-offset; ingress-proof signers (often no SM) use data_root.
+/// Assignees use ledger-offset; ingress-proof signers (often no SM) use the data commitment.
 #[derive(Debug, Clone, Copy)]
 enum FetchMode {
     LedgerOffset(LedgerChunkOffset),
-    DataRoot {
-        data_root: irys_types::DataRoot,
+    DataCommitment {
+        data_commitment: irys_types::DataCommitment,
         tx_offset: irys_types::TxChunkOffset,
     },
 }
@@ -1641,8 +1641,8 @@ impl ChunkOrchestrator {
             let mut rows = Vec::with_capacity(placements.len());
             for placement in &placements {
                 let row = match placement {
-                    Some((data_root, tx_offset, _)) => {
-                        cached_chunk_by_chunk_offset(tx, *data_root, *tx_offset)?
+                    Some((data_commitment, _, tx_offset, _)) => {
+                        cached_chunk_by_chunk_offset(tx, *data_commitment, *tx_offset)?
                             .map(|(_, chunk)| chunk)
                     }
                     None => None,
@@ -1669,8 +1669,8 @@ impl ChunkOrchestrator {
             }
         };
 
-        let Ok(chunk_size) = usize::try_from(self.config.consensus_config().chunk_size) else {
-            warn!(chunk.offset = %start, "configured chunk size does not fit usize");
+        let Ok(geometry) = self.config.consensus_config().data_tree_geometry() else {
+            warn!(chunk.offset = %start, "configured data tree geometry is invalid");
             self.note_local_cache_error(start, &run[1..]);
             return LocalCacheStep::Miss;
         };
@@ -1679,7 +1679,7 @@ impl ChunkOrchestrator {
         let mut tail_misses = Vec::new();
         for (index, offset) in run.iter().copied().enumerate() {
             let miss = match (&placements[index], &looked_up[index]) {
-                (Some((data_root, tx_offset, data_size)), Some(cached))
+                (Some((_, data_root, tx_offset, data_size)), Some(cached))
                     if cached.chunk.is_some() =>
                 {
                     match validate_chunk_for_migration(
@@ -1687,7 +1687,7 @@ impl ChunkOrchestrator {
                         *data_root,
                         *data_size,
                         *tx_offset,
-                        chunk_size,
+                        &geometry,
                     ) {
                         Ok(unpacked) => {
                             hits.push((offset, unpacked));
@@ -2139,11 +2139,15 @@ impl ChunkOrchestrator {
                 LedgerChunkOffset::from(start_ledger_offset + u64::from(chunk_offset));
             FetchMode::LedgerOffset(ledger_chunk_offset)
         } else {
+            // The placement's commitment names the request, so the peer serves
+            // the chunk of this commitment and not another size of the root.
             match irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
-                self.storage_module.data_root_and_tx_offset_at(chunk_offset)
+                self.storage_module
+                    .data_root_and_tx_offset_span(chunk_offset, chunk_offset)
+                    .map(|span| span.into_iter().next().flatten())
             }) {
-                Ok(Some((data_root, tx_offset))) => FetchMode::DataRoot {
-                    data_root,
+                Ok(Some((data_commitment, _, tx_offset, _))) => FetchMode::DataCommitment {
+                    data_commitment,
                     tx_offset,
                 },
                 Ok(None) => {
@@ -2214,12 +2218,12 @@ impl ChunkOrchestrator {
                             .fetch_chunk_by_ledger_offset(ledger_chunk_offset, api_addr, timeout)
                             .await
                     }
-                    FetchMode::DataRoot {
-                        data_root,
+                    FetchMode::DataCommitment {
+                        data_commitment,
                         tx_offset,
                     } => {
                         chunk_fetcher
-                            .fetch_chunk_by_data_root(data_root, tx_offset, api_addr, timeout)
+                            .fetch_chunk_by_commitment(data_commitment, tx_offset, api_addr, timeout)
                             .await
                     }
                 };

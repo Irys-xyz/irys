@@ -4,8 +4,8 @@ use crate::mempool_service::{Inner, MempoolError, TxIngressError};
 use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
-    CommitmentTransaction, DataLedger, H256, IrysTransactionCommon, IrysTransactionId, SealedBlock,
-    SendTraced as _, SystemLedger, get_ingress_proofs,
+    CommitmentTransaction, DataCommitment, DataLedger, H256, IrysTransactionCommon,
+    IrysTransactionId, SealedBlock, SendTraced as _, SystemLedger, get_ingress_proofs,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -88,13 +88,14 @@ impl Inner {
         // which data_roots had a CDR row so the proof-generation
         // notification below targets them.
         let mut confirmed_data_roots = Vec::new();
+        let geometry = self.config.data_tree_geometry();
         for submit_tx in sealed_block
             .transactions()
             .get_ledger_txs(DataLedger::Submit)
         {
-            let data_root = submit_tx.data_root;
+            let data_root = submit_tx.data_tree_root;
             match self.irys_db.update_eyre(|db_tx| {
-                irys_database::cache_data_root(db_tx, submit_tx, Some(block.as_ref()))?;
+                irys_database::cache_data_root(db_tx, submit_tx, Some(block.as_ref()), &geometry)?;
                 Ok(())
             }) {
                 Ok(()) => {
@@ -106,7 +107,7 @@ impl Inner {
                         incoming_block.height = block.height,
                         "cached_data_root.write"
                     );
-                    confirmed_data_roots.push(data_root);
+                    confirmed_data_roots.push(submit_tx.data_commitment(&geometry));
                 }
                 Err(db_error) => {
                     error!(
@@ -212,8 +213,10 @@ impl Inner {
             };
 
             // Revalidate data txs — collect pruned txids grouped by data_root for cleanup
-            let expired_by_data_root =
-                state.revalidate_data_txs(|tx| self.should_prune_tx(current_height, tx));
+            let expired_by_data_root = state
+                .revalidate_data_txs(&self.config.data_tree_geometry(), |tx| {
+                    self.should_prune_tx(current_height, tx)
+                });
 
             // Revalidate commitment txs — uses same prune + cache methods as ingress
             state.revalidate_commitment_txs(
@@ -371,12 +374,13 @@ impl Inner {
 
         // Phase 2: Evaluate expiry
         let mut expired_data: Vec<(H256, H256)> = Vec::new();
-        let mut expired_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
+        let mut expired_by_data_root: HashMap<DataCommitment, Vec<H256>> = HashMap::new();
+        let geometry = self.config.data_tree_geometry();
         for tx in data_txs.values() {
             if self.should_prune_tx(current_height, tx) {
                 expired_data.push((tx.id, tx.anchor));
                 expired_by_data_root
-                    .entry(tx.data_root)
+                    .entry(tx.data_commitment(&geometry))
                     .or_default()
                     .push(tx.id);
             }
@@ -783,10 +787,11 @@ impl Inner {
         // the CDR + cached chunks + ingress proofs would be pinned indefinitely.
         // Scrubbing the txid here closes that leak.  If the tx later becomes valid,
         // fresh gossip naturally recreates the CDR entry.
-        let mut dropped_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
+        let mut dropped_by_data_root: HashMap<DataCommitment, Vec<H256>> = HashMap::new();
+        let geometry = self.config.data_tree_geometry();
         for tx_id in orphaned_term_txs.iter() {
             if let Some(tx) = orphaned_term_tx_map.remove(tx_id) {
-                let data_root = tx.data_root;
+                let data_commitment = tx.data_commitment(&geometry);
                 match self.handle_data_tx_ingress_message_gossip(tx).await {
                     Ok(_) => {}
                     Err(TxIngressError::Skipped) => {
@@ -795,7 +800,7 @@ impl Inner {
                     Err(e) => {
                         error!("Failed to re-submit orphaned tx {} {:?}", tx_id, &e);
                         dropped_by_data_root
-                            .entry(data_root)
+                            .entry(data_commitment)
                             .or_default()
                             .push(*tx_id);
                     }

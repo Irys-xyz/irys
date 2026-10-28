@@ -19,7 +19,7 @@
 //! the process Env pools. There is no separate blob cache for new values.
 //! A bench preset can keep a private cache.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
@@ -32,8 +32,8 @@ use std::time::{Duration, Instant};
 
 use eyre::WrapErr as _;
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, DatabaseConfig, H256, PartitionChunkOffset, TxPath,
-    TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataCommitment, DataTreeRoot, DatabaseConfig, H256,
+    PartitionChunkOffset, TxPath, TxPathHash,
 };
 use reth_db::table::{Decode, Decompress, Encode, Table};
 use rocksdb::{
@@ -48,8 +48,8 @@ use super::records::{self, IndexLayout};
 use super::store::PresenceReconcile;
 use super::tables::{
     CHUNK_META_BY_OFFSET_CF, ChunkPathHashes, DataRootInfo, DataRootInfos, OffsetMeta,
-    PackedOffsetRow, PendingBodyMigration, Placement, SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding,
-    unrecognised_rocks_layout,
+    PackedOffsetRow, PendingBodyMigration, Placement, SUBMODULE_SCHEMA_ROCKS_ROW,
+    SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding, unrecognised_rocks_layout,
 };
 use super::{
     SubmoduleRead, SubmoduleStore as _, SubmoduleWrite, tables::Metadata as MetadataTable,
@@ -610,7 +610,11 @@ enum Cf {
     Pending,
     Interval,
     Metadata,
-    /// content_hash (32 bytes) ‖ partition offset (u32 big-endian). Empty value.
+    /// Retired content-hash index: content_hash (32 bytes) ‖ partition
+    /// offset (u32 big-endian), empty value. A data chunk proof holds no
+    /// content hash, so nothing writes or reads this family. It is still
+    /// opened with its prefix options, so an existing directory keeps its
+    /// layout and opens.
     Content,
 }
 
@@ -1349,7 +1353,7 @@ impl RocksSubmoduleStore {
         )?;
         if stamp_schema {
             ensure_feature_flags(&db, &path, true, false)?;
-            ensure_schema_row(&db)?;
+            ensure_schema_row(&db, &path)?;
             let marker = path.join(SCHEMA_FILE);
             if !marker.exists() {
                 write_schema_marker_file(&path, SUBMODULE_SCHEMA_ROCKS_V1)?;
@@ -2051,7 +2055,8 @@ impl RocksSubmoduleStore {
             }
             let decoded = records::decode_placement(value.as_ref())?;
             out.push(Placement {
-                data_root: H256(decoded.data_root),
+                data_tree_root: DataTreeRoot(H256(decoded.data_root)),
+                data_commitment: DataCommitment(H256(decoded.data_commitment)),
                 tx_start_offset: irys_types::RelativeChunkOffset(decoded.tx_start),
                 data_size: decoded.data_size,
                 ledger: records::optional_u32(decoded.ledger),
@@ -2551,8 +2556,7 @@ impl RocksSubmoduleStore {
     /// Delete presence rows in each inclusive span.
     ///
     /// Consecutive pieces share one synced batch while their offset count stays
-    /// within [`DELETE_SUBRANGE_OFFSETS`]. The batch holds the content keys for
-    /// that group only.
+    /// within [`DELETE_SUBRANGE_OFFSETS`].
     pub(super) fn delete_presence_ranges(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
@@ -2568,11 +2572,9 @@ impl RocksSubmoduleStore {
 
     /// Delete presence rows in each inclusive span.
     ///
-    /// Counts keys only, then `DeleteRange` removes them. RocksDB v1 also
-    /// reads each data-proof value in a span that has rows and point-deletes
-    /// its content-hash key in the same batch. A span with no presence key
-    /// does not enter the batch and does not read values. An empty result
-    /// does not write, so the sequence stays put.
+    /// Counts keys only, then `DeleteRange` removes them. A span with no
+    /// presence key does not enter the batch. An empty result does not write,
+    /// so the sequence stays put.
     fn delete_presence_ranges_one(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
@@ -2589,10 +2591,9 @@ impl RocksSubmoduleStore {
         let path_hash_rows = 0_u64;
         let mut counts = vec![0_u64; spans.len()];
         let mut sparse_keys = vec![Vec::<Vec<u8>>::new(); spans.len()];
-        let mut content_deletes = Vec::new();
         // One iterator for every span. A fresh iterator per span rebuilds the
         // range-tombstone map, which dominates when the family is fragmented.
-        scan_offset_spans(&self.db, &snap, Cf::OffsetMeta, &spans, |key, value| {
+        scan_offset_spans(&self.db, &snap, Cf::OffsetMeta, &spans, |key, _value| {
             let offset = PartitionChunkOffset::decode(key)?;
             let Some(index) = span_of(&spans, offset.0) else {
                 return Ok(false);
@@ -2600,10 +2601,6 @@ impl RocksSubmoduleStore {
             counts[index] = counts[index].saturating_add(1);
             if (counts[index] as usize) <= RANGE_TOMBSTONE_KEY_LIMIT {
                 sparse_keys[index].push(key.to_vec());
-            }
-            let meta = stored_offset_meta(value)?;
-            if let Some(hash) = meta.proof.as_deref().and_then(content_hash_of) {
-                content_deletes.push(records::content_key(&hash, offset).to_vec());
             }
             Ok(false)
         })?;
@@ -2634,12 +2631,6 @@ impl RocksSubmoduleStore {
                     encode_key(PartitionChunkOffset(start)),
                     exclusive_end_key(PartitionChunkOffset(end)),
                 );
-            }
-        }
-        if !content_deletes.is_empty() {
-            let handle = cf_handle(&self.db, Cf::Content)?;
-            for key in &content_deletes {
-                batch.delete_cf(&handle, key);
             }
         }
         self.write_synced_batch(batch, "reconcile presence rows")?;
@@ -2685,16 +2676,10 @@ impl RocksSubmoduleStore {
         let _guard = self.lock_write();
         let snap = self.db.snapshot();
         let mut deletes = Vec::new();
-        let mut content_deletes = Vec::new();
         scan_offset_spans(&self.db, &snap, Cf::OffsetMeta, &spans, |key, value| {
             let meta = stored_offset_meta(value)?;
             if meta.proof.is_some() {
                 deletes.push(key.to_vec());
-                if let Ok(offset) = PartitionChunkOffset::decode(key)
-                    && let Some(hash) = meta.proof.as_deref().and_then(content_hash_of)
-                {
-                    content_deletes.push(records::content_key(&hash, offset).to_vec());
-                }
             }
             Ok(false)
         })?;
@@ -2707,12 +2692,6 @@ impl RocksSubmoduleStore {
         let data = cf_handle(&self.db, Cf::OffsetMeta)?;
         for key in &deletes {
             batch.delete_cf(&data, key);
-        }
-        if !content_deletes.is_empty() {
-            let content = cf_handle(&self.db, Cf::Content)?;
-            for key in &content_deletes {
-                batch.delete_cf(&content, key);
-            }
         }
         self.write_synced_batch(batch, "drop entropy proof rows")?;
         Ok(PresenceReconcile {
@@ -2783,9 +2762,9 @@ impl RocksSubmoduleStore {
     /// An interval that is not awaiting info has a data-root row with the
     /// same end, tx start, and data size, and that row names the interval.
     /// A pending value names the data root of the interval that covers its
-    /// key. A data-path key lies inside an interval. The content-hash index
-    /// is the set of proof leaves, compared by a key-order scan. An interval
-    /// that still awaits its info is a finding: a finished write fills it.
+    /// key. A data-path key lies inside an interval. The retired content-hash
+    /// family is empty. An interval that still awaits its info is a finding:
+    /// a finished write fills it.
     pub fn audit_index(&self) -> eyre::Result<Vec<String>> {
         let snap = self.db.snapshot();
         let mut intervals = std::collections::BTreeMap::<u32, records::PlacementRecord>::new();
@@ -2805,7 +2784,7 @@ impl RocksSubmoduleStore {
         };
         let mut findings = Vec::new();
         let mut points =
-            std::collections::BTreeMap::<(H256, u32), records::DataRootPlacement>::new();
+            std::collections::BTreeMap::<(DataCommitment, u32), records::DataRootPlacement>::new();
         {
             let handle = cf_handle(&self.db, Cf::DataRoots)?;
             for item in snap.iterator_cf(&handle, IteratorMode::Start) {
@@ -2819,15 +2798,23 @@ impl RocksSubmoduleStore {
                 findings.push(format!("interval at {start} still awaits a data-root info"));
                 continue;
             }
-            let root = H256(record.data_root);
+            let root = DataCommitment(H256(record.data_commitment));
             match points.get(&(root, *start)) {
                 None => findings.push(format!(
                     "interval at {start} for {root} has no data-root row"
                 )),
                 Some(point)
-                    if point.end != record.end
-                        || point.tx_start != record.tx_start
-                        || point.data_size != record.data_size =>
+                    if (
+                        point.end,
+                        point.tx_start,
+                        point.data_size,
+                        point.data_tree_root,
+                    ) != (
+                        record.end,
+                        record.tx_start,
+                        record.data_size,
+                        record.data_root,
+                    ) =>
                 {
                     findings.push(format!(
                         "data-root row {root} at {start} does not match its interval"
@@ -2839,10 +2826,11 @@ impl RocksSubmoduleStore {
         for ((root, start), point) in &points {
             match intervals.get(start) {
                 Some(record)
-                    if H256(record.data_root) == *root
+                    if DataCommitment(H256(record.data_commitment)) == *root
                         && record.end == point.end
                         && record.tx_start == point.tx_start
-                        && record.data_size == point.data_size => {}
+                        && record.data_size == point.data_size
+                        && record.data_root == point.data_tree_root => {}
                 Some(_) => findings.push(format!(
                     "data-root placement {root} at {start} does not match its interval"
                 )),
@@ -2878,10 +2866,10 @@ impl RocksSubmoduleStore {
                     continue;
                 };
                 let job = records::decode_pending(&value)?;
-                if job.data_root != H256(record.data_root) {
+                if job.data_commitment != DataCommitment(H256(record.data_commitment)) {
                     findings.push(format!(
-                        "pending job {offset} data root {} does not match interval {start}",
-                        job.data_root
+                        "pending job {offset} data commitment {} does not match interval {start}",
+                        job.data_commitment
                     ));
                 }
                 if record.data_size != 0 && job.data_size != record.data_size {
@@ -2892,93 +2880,10 @@ impl RocksSubmoduleStore {
                 }
             }
         }
-        {
-            let handle = cf_handle(&self.db, Cf::Content)?;
-            let mut iter = snap.raw_iterator_cf_opt(&handle, full_scan_options());
-            iter.seek_to_first();
-            while let Some(key) = iter.key() {
-                let key_owned = key.to_vec();
-                let value = iter.value().unwrap_or(&[]).to_vec();
-                if !value.is_empty() {
-                    findings.push("content-hash row value is not empty".to_string());
-                }
-                match records::decode_content_key(&key_owned) {
-                    Some((_, offset)) if covers(offset.0) => {}
-                    Some((_, offset)) => findings.push(format!(
-                        "content-hash row at {} is outside every interval",
-                        offset.0
-                    )),
-                    None => findings.push("content-hash key does not decode".to_string()),
-                }
-                iter.next();
-            }
-            iter.status().wrap_err("scan content-hash offset index")?;
-        }
-        let content = self.audit_content_index()?;
-        if content.missing_reverse != 0 {
-            findings.push(format!(
-                "content-hash index is missing {} reverse row(s)",
-                content.missing_reverse
-            ));
-        }
-        if content.dangling_reverse != 0 {
-            findings.push(format!(
-                "content-hash index has {} dangling reverse row(s)",
-                content.dangling_reverse
-            ));
+        if cf_has_key(&self.db, &snap, Cf::Content)? {
+            findings.push("retired content-hash family holds a row".to_string());
         }
         Ok(findings)
-    }
-
-    /// Every parseable proof has its reverse row, and every reverse row names
-    /// that proof's leaf. A proof shorter than a leaf is not counted.
-    ///
-    /// Both families are scanned in key order. The sets match when the counts
-    /// match and a key-order checksum of `hash‖offset` matches. This does not
-    /// point-get the other family.
-    pub(super) fn audit_content_index(&self) -> eyre::Result<ContentIndexAudit> {
-        let snap = self.db.snapshot();
-        let data = cf_handle(&self.db, Cf::OffsetMeta)?;
-        let content = cf_handle(&self.db, Cf::Content)?;
-        let mut audit = ContentIndexAudit::default();
-        let mut from_proofs = (0_u64, 0_u64);
-        {
-            let mut iter = snap.raw_iterator_cf_opt(&data, full_scan_options());
-            iter.seek_to_first();
-            while let Some(key) = iter.key() {
-                let key_owned = key.to_vec();
-                let value = iter.value().unwrap_or(&[]).to_vec();
-                let meta = stored_offset_meta(&value)?;
-                if let Ok(offset) = PartitionChunkOffset::decode(&key_owned)
-                    && let Some(hash) = meta.proof.as_deref().and_then(content_hash_of)
-                {
-                    audit.proofs_with_leaf = audit.proofs_with_leaf.saturating_add(1);
-                    mix_key(&mut from_proofs, &records::content_key(&hash, offset));
-                }
-                iter.next();
-            }
-            iter.status().wrap_err("scan data proofs")?;
-        }
-        let mut from_rows = (0_u64, 0_u64);
-        {
-            let mut iter = snap.raw_iterator_cf_opt(&content, full_scan_options());
-            iter.seek_to_first();
-            while let Some(key) = iter.key() {
-                audit.reverse_rows = audit.reverse_rows.saturating_add(1);
-                mix_key(&mut from_rows, key);
-                iter.next();
-            }
-            iter.status().wrap_err("scan content-hash offset index")?;
-        }
-        if audit.proofs_with_leaf > audit.reverse_rows {
-            audit.missing_reverse = audit.proofs_with_leaf - audit.reverse_rows;
-        } else if audit.reverse_rows > audit.proofs_with_leaf {
-            audit.dangling_reverse = audit.reverse_rows - audit.proofs_with_leaf;
-        } else if from_proofs != from_rows {
-            audit.missing_reverse = 1;
-            audit.dangling_reverse = 1;
-        }
-        Ok(audit)
     }
 
     /// Visible keys. Does not read values. A range tombstone hides its span.
@@ -4043,7 +3948,21 @@ fn refuse_unwritable_recovery(path: &Path) -> eyre::Result<()> {
     if let Some(flags) = read_feature_flags(&db)? {
         refuse_unknown_feature_bits(path, &flags, true)?;
     }
-    refuse_present_schema_row(&db)
+    refuse_present_schema_row(&db)?;
+    // Refuse data rows keyed by the data root before the writable open
+    // flushes recovery, so the refused directory keeps its files.
+    if read_schema_row(&db)?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes())
+        && rocks_has_data_rows(&db)?
+    {
+        eyre::bail!("{}", super::tables::data_root_keyed_index(path));
+    }
+    Ok(())
+}
+
+fn read_schema_row(db: &DB) -> eyre::Result<Option<Vec<u8>>> {
+    let handle = cf_handle(db, Cf::Metadata)?;
+    let key = encode_key(MetadataKey::DBSchemaVersion);
+    db.get_cf(&handle, &key).wrap_err("read schema row")
 }
 
 fn read_feature_flags(db: &DB) -> eyre::Result<Option<FeatureBits>> {
@@ -4055,11 +3974,18 @@ fn read_feature_flags(db: &DB) -> eyre::Result<Option<FeatureBits>> {
     }
 }
 
+/// The current row and the data-root keyed row are read. A writable open
+/// upgrades or refuses the data-root keyed row after recovery.
 fn refuse_present_schema_row(db: &DB) -> eyre::Result<()> {
     let handle = cf_handle(db, Cf::Metadata)?;
     let key = encode_key(MetadataKey::DBSchemaVersion);
     match db.get_cf(&handle, &key).wrap_err("read schema row")? {
-        Some(found) if found.as_slice() == SUBMODULE_SCHEMA_ROCKS_V1.as_bytes() => Ok(()),
+        Some(found)
+            if found.as_slice() == SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes()
+                || found.as_slice() == SUBMODULE_SCHEMA_ROCKS_V1.as_bytes() =>
+        {
+            Ok(())
+        }
         Some(found) => eyre::bail!(
             "{}",
             unrecognised_rocks_layout(&String::from_utf8_lossy(&found))
@@ -4091,14 +4017,67 @@ fn ensure_feature_flags(
     }
 }
 
-fn ensure_schema_row(db: &DB) -> eyre::Result<()> {
+fn ensure_schema_row(db: &DB, path: &Path) -> eyre::Result<()> {
+    upgrade_data_root_keyed_row(db, path)?;
     write_schema_row(db, false)
+}
+
+/// A [`SUBMODULE_SCHEMA_ROCKS_V1`] row keys placements by the data root.
+///
+/// With no data rows the index holds only entropy checksums and metadata,
+/// which do not depend on the key, so the row becomes
+/// [`SUBMODULE_SCHEMA_ROCKS_ROW`] and every row stays. With data rows the
+/// open is refused: they cannot be re-keyed here, so the network must reset.
+/// The SCHEMA file keeps its text.
+fn upgrade_data_root_keyed_row(db: &DB, path: &Path) -> eyre::Result<()> {
+    if read_schema_row(db)?.as_deref() != Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()) {
+        return Ok(());
+    }
+    if rocks_has_data_rows(db)? {
+        eyre::bail!("{}", super::tables::data_root_keyed_index(path));
+    }
+    let handle = cf_handle(db, Cf::Metadata)?;
+    let key = encode_key(MetadataKey::DBSchemaVersion);
+    let mut batch = WriteBatch::new();
+    batch.put_cf(&handle, key, SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes());
+    db.write_opt(batch, &write_opts(true, false))
+        .wrap_err("write schema row")?;
+    tracing::info!(
+        path = %path.display(),
+        "submodule index had no data rows; schema row upgraded to data commitment keys"
+    );
+    Ok(())
+}
+
+/// `true` when any family holds a placement, a data-root row, a pending
+/// body job, a row of the retired content-hash family, or an offset row with
+/// a data proof.
+///
+/// Checksum-only offset rows are packed entropy. They do not count.
+fn rocks_has_data_rows(db: &DB) -> eyre::Result<bool> {
+    for cf in [Cf::Interval, Cf::DataRoots, Cf::Pending, Cf::Content] {
+        let handle = cf_handle(db, cf)?;
+        let mut iter = db.raw_iterator_cf_opt(&handle, full_scan_options());
+        iter.seek_to_first();
+        if iter.valid() {
+            return Ok(true);
+        }
+        iter.status().wrap_err("scan for data rows")?;
+    }
+    let handle = cf_handle(db, Cf::OffsetMeta)?;
+    for item in db.iterator_cf_opt(&handle, full_scan_options(), IteratorMode::Start) {
+        let (_key, value) = item.wrap_err("scan offset rows for data proofs")?;
+        if stored_offset_meta(&value)?.proof.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn write_schema_row(db: &DB, disable_wal: bool) -> eyre::Result<()> {
     let handle = cf_handle(db, Cf::Metadata)?;
     let key = encode_key(MetadataKey::DBSchemaVersion);
-    let expected = SUBMODULE_SCHEMA_ROCKS_V1.as_bytes();
+    let expected = SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes();
     match db.get_cf(&handle, &key).wrap_err("read schema row")? {
         Some(found) if found == expected => Ok(()),
         Some(found) => eyre::bail!(
@@ -4328,15 +4307,6 @@ fn full_cf_end(cf: Cf) -> Vec<u8> {
     }
 }
 
-/// Counts from [`RocksSubmoduleStore::audit_content_index`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct ContentIndexAudit {
-    pub proofs_with_leaf: u64,
-    pub reverse_rows: u64,
-    pub missing_reverse: u64,
-    pub dangling_reverse: u64,
-}
-
 /// Scan every key. A prefix extractor would otherwise stop `Next` at the
 /// first prefix, and a full clear would skip its `DeleteRange`.
 fn full_scan_options() -> ReadOptions {
@@ -4346,34 +4316,9 @@ fn full_scan_options() -> ReadOptions {
     opts
 }
 
-/// Order-independent mix of one key. Equal counts plus both accumulators
-/// means the two scans saw the same set.
-fn mix_key(state: &mut (u64, u64), bytes: &[u8]) {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    state.0 ^= hash;
-    state.1 = state.1.wrapping_add(hash);
-}
-
 /// Offset value is the versioned record from `encode_offset_meta`.
 fn stored_offset_meta(bytes: &[u8]) -> eyre::Result<OffsetMeta> {
     records::decode_offset_meta(bytes)
-}
-
-/// Leaf `data_hash` of a data proof. A value shorter than a leaf is not a
-/// content-addressed proof and has no reverse row. The hash is the leaf
-/// already stored in the proof. Chunk bytes are not hashed again.
-fn content_hash_of(proof: &[u8]) -> Option<H256> {
-    const LEAF_LEN: usize = 64;
-    if proof.len() < LEAF_LEN {
-        return None;
-    }
-    let tail = proof[proof.len() - LEAF_LEN..].to_vec();
-    let leaf = irys_types::get_leaf_proof(&irys_types::Base64(tail)).ok()?;
-    irys_types::ProofDeserialize::hash(&leaf).map(H256)
 }
 
 /// `true` when the family has a key. Does not read the value.
@@ -4386,10 +4331,10 @@ fn cf_has_key(db: &DB, snap: &rocksdb::Snapshot<'_>, cf: Cf) -> eyre::Result<boo
     Ok(present)
 }
 
-/// One synced delete covers at most this many offsets: one 36-byte content
-/// key per offset. Callers publish the non-`Data` interval image before the
-/// delete. Open drops rows that remain under a non-`Data` interval, so a
-/// crash between these commits leaves a cleared prefix.
+/// One synced delete covers at most this many offsets. Callers publish the
+/// non-`Data` interval image before the delete. Open drops rows that remain
+/// under a non-`Data` interval, so a crash between these commits leaves a
+/// cleared prefix.
 pub const DELETE_SUBRANGE_OFFSETS: u32 = 65_536;
 
 /// Inclusive sub-spans of at most [`DELETE_SUBRANGE_OFFSETS`] offsets.
@@ -4414,8 +4359,7 @@ fn presence_subspans(
 }
 
 /// Consecutive pieces share one batch while the summed offset count stays
-/// within [`DELETE_SUBRANGE_OFFSETS`]. A group is never wider than that, so
-/// one commit cannot hold more content keys than the bound allows.
+/// within [`DELETE_SUBRANGE_OFFSETS`]. A group is never wider than that.
 fn group_presence_pieces(
     pieces: Vec<(PartitionChunkOffset, PartitionChunkOffset)>,
 ) -> Vec<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> {
@@ -4485,86 +4429,6 @@ fn offset_subspans(
     pieces
 }
 
-/// Content-hash keys held from one pass of a clear scan.
-///
-/// The scan then drops that batch into the commit overlay and resumes at the
-/// first key strictly after the batch-filling key. A seek to the next 4-byte
-/// offset would skip a longer key that sorts between the two encodings, and
-/// the following `DeleteRange` would remove it. Checksum rows are not keys.
-/// The commit is still one batch: a failed sync does not publish a prefix of
-/// the deletes.
-const CLEAR_CONTENT_KEY_BATCH: usize = 1024;
-
-#[cfg(test)]
-thread_local! {
-    static CLEAR_OFFSET_VALUE_PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static CLEAR_CONTENT_SCAN_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static CLEAR_CONTENT_KEY_BATCH_OVERRIDE: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-}
-
-fn clear_content_key_batch() -> usize {
-    #[cfg(test)]
-    if let Some(batch) = CLEAR_CONTENT_KEY_BATCH_OVERRIDE.with(std::cell::Cell::get) {
-        return batch.max(1);
-    }
-    CLEAR_CONTENT_KEY_BATCH
-}
-
-/// Highest number of offset values `delete_content_rows_for_paths` held at once.
-#[cfg(test)]
-fn reset_clear_offset_value_peak() {
-    CLEAR_OFFSET_VALUE_PEAK.with(|cell| cell.set(0));
-}
-
-#[cfg(test)]
-fn clear_offset_value_peak() -> usize {
-    CLEAR_OFFSET_VALUE_PEAK.with(std::cell::Cell::get)
-}
-
-/// `retained` is how many offset values the clear is holding.
-#[cfg_attr(not(test), expect(unused_variables))]
-fn note_clear_offset_values(retained: usize) {
-    #[cfg(test)]
-    CLEAR_OFFSET_VALUE_PEAK.with(|cell| {
-        if retained > cell.get() {
-            cell.set(retained);
-        }
-    });
-}
-
-fn note_clear_content_pass() {
-    #[cfg(test)]
-    CLEAR_CONTENT_SCAN_PASSES.with(|cell| cell.set(cell.get().saturating_add(1)));
-}
-
-#[cfg(test)]
-fn reset_clear_content_scan_passes() {
-    CLEAR_CONTENT_SCAN_PASSES.with(|cell| cell.set(0));
-}
-
-#[cfg(test)]
-fn clear_content_scan_passes() -> usize {
-    CLEAR_CONTENT_SCAN_PASSES.with(std::cell::Cell::get)
-}
-
-/// Restores the production batch size when dropped.
-#[cfg(test)]
-struct ClearContentKeyBatchGuard;
-
-#[cfg(test)]
-impl Drop for ClearContentKeyBatchGuard {
-    fn drop(&mut self) {
-        CLEAR_CONTENT_KEY_BATCH_OVERRIDE.with(|cell| cell.set(None));
-    }
-}
-
-#[cfg(test)]
-fn set_clear_content_key_batch(batch: usize) -> ClearContentKeyBatchGuard {
-    CLEAR_CONTENT_KEY_BATCH_OVERRIDE.with(|cell| cell.set(Some(batch.max(1))));
-    ClearContentKeyBatchGuard
-}
-
 /// Point-delete a span that holds at most this many keys.
 ///
 /// A `DeleteRange` is a range tombstone. The next iterator rebuilds the
@@ -4587,7 +4451,7 @@ fn note_span_key(hit: &mut SpanKeys, key: &[u8]) {
 /// `true` when `key` is an offset inside one of `ranges`.
 ///
 /// `ranges` is sorted and disjoint (see [`insert_deleted_range`]). A key that
-/// is not a 4-byte offset is not hidden. Content and data-root keys are 36 bytes.
+/// is not a 4-byte offset is not hidden. Data-root keys are 36 bytes.
 fn offset_key_in_ranges(ranges: &[(u32, u32)], key: &[u8]) -> bool {
     let Ok(offset) = PartitionChunkOffset::decode(key) else {
         return false;
@@ -4824,7 +4688,7 @@ struct Batch<'a> {
     /// Leaf bindings seen in this batch. RocksDB v1 does not store them.
     bindings: HashMap<H256, TxLeafBinding>,
     /// Interval starts in this batch that still need a data-root info.
-    unfilled: Vec<(u32, H256)>,
+    unfilled: Vec<(u32, DataCommitment)>,
     origin: Option<records::PlacementOrigin>,
 }
 
@@ -4842,35 +4706,13 @@ impl<'a> Batch<'a> {
         self.overlay.maps[cf.index()].insert(key.to_vec(), Some(value));
     }
 
-    /// Replace the offset record and swap the content-hash key from the proof.
-    ///
-    /// Both fields empty deletes the row. The checksum is not part of the
-    /// content hash. A checksum-only row has no content-hash key.
+    /// Replace the offset record. Both fields empty deletes the row.
     fn put_offset_record(
         &mut self,
         offset: PartitionChunkOffset,
         meta: OffsetMeta,
     ) -> eyre::Result<()> {
         let key = encode_key(offset);
-        let old = self.rows().get_raw(Cf::OffsetMeta, &key)?;
-        let old_meta = match &old {
-            Some(bytes) => stored_offset_meta(bytes)?,
-            None => OffsetMeta::default(),
-        };
-        let old_hash = old_meta.proof.as_deref().and_then(content_hash_of);
-        let new_hash = meta.proof.as_deref().and_then(content_hash_of);
-        if old_hash != new_hash
-            && let Some(old_hash) = old_hash
-        {
-            self.delete(Cf::Content, &records::content_key(&old_hash, offset));
-        }
-        if let Some(new_hash) = new_hash {
-            self.put_bytes(
-                Cf::Content,
-                &records::content_key(&new_hash, offset),
-                Vec::new(),
-            );
-        }
         if meta.crc.is_none() && meta.proof.is_none() {
             self.delete(Cf::OffsetMeta, &key);
             return Ok(());
@@ -4896,12 +4738,17 @@ impl<'a> Batch<'a> {
         let existing = self.rows().placement_intervals_touching(start, end)?;
         let next = match tx_path_hash {
             Some(hash) => {
-                let data_root = self.bindings.get(&hash).map(|binding| binding.data_root).ok_or_else(|| {
+                let binding = self.bindings.get(&hash).ok_or_else(|| {
                     eyre::eyre!(
                         "RocksDB v1 interval requires a tx leaf binding in this batch before the interval is written"
                     )
                 })?;
-                Some(records::fresh_placement(end.0, data_root, self.origin))
+                Some(records::fresh_placement(
+                    end.0,
+                    binding.data_root,
+                    binding.data_commitment,
+                    self.origin,
+                ))
             }
             None => None,
         };
@@ -4925,15 +4772,21 @@ impl<'a> Batch<'a> {
         self.unfilled.retain(|(start, _)| !touched.contains(start));
         for start_at in delete {
             if let Some(old) = by_start.get(start_at) {
-                self.delete_data_root_point(&H256(old.value.data_root), *start_at);
+                self.delete_data_root_point(
+                    &DataCommitment(H256(old.value.data_commitment)),
+                    *start_at,
+                );
             }
             self.delete(Cf::Interval, &encode_key(PartitionChunkOffset(*start_at)));
         }
         for row in put {
             if let Some(old) = by_start.get(&row.start)
-                && old.value.data_root != row.value.data_root
+                && old.value.data_commitment != row.value.data_commitment
             {
-                self.delete_data_root_point(&H256(old.value.data_root), row.start);
+                self.delete_data_root_point(
+                    &DataCommitment(H256(old.value.data_commitment)),
+                    row.start,
+                );
             }
             self.put_bytes(
                 Cf::Interval,
@@ -4941,7 +4794,8 @@ impl<'a> Batch<'a> {
                 records::encode_placement(&row.value).to_vec(),
             );
             if records::awaits_info(&row.value) {
-                self.unfilled.push((row.start, H256(row.value.data_root)));
+                self.unfilled
+                    .push((row.start, DataCommitment(H256(row.value.data_commitment))));
             } else {
                 self.put_data_root_point(row);
             }
@@ -4963,8 +4817,11 @@ impl<'a> Batch<'a> {
         self.apply_placement_edit(&existing, &delete, &put)
     }
 
-    fn delete_data_root_point(&mut self, data_root: &H256, start: u32) {
-        self.delete(Cf::DataRoots, &records::data_root_key(data_root, start));
+    fn delete_data_root_point(&mut self, data_commitment: &DataCommitment, start: u32) {
+        self.delete(
+            Cf::DataRoots,
+            &records::data_root_key(data_commitment, start),
+        );
     }
 
     fn put_data_root_point(&mut self, row: &records::PlacementSpan) {
@@ -4972,10 +4829,11 @@ impl<'a> Batch<'a> {
             end: row.value.end,
             tx_start: row.value.tx_start,
             data_size: row.value.data_size,
+            data_tree_root: row.value.data_root,
         };
         self.put_bytes(
             Cf::DataRoots,
-            &records::data_root_key(&H256(row.value.data_root), row.start),
+            &records::data_root_key(&DataCommitment(H256(row.value.data_commitment)), row.start),
             records::encode_data_root(&value).to_vec(),
         );
     }
@@ -4997,6 +4855,13 @@ impl<'a> Batch<'a> {
             eyre::bail!("RocksDB v1 data-root info at {start} has no interval");
         };
         let mut value = records::decode_placement(&bytes)?;
+        if value.data_root != info.data_tree_root.0.0 {
+            eyre::bail!(
+                "RocksDB v1 data-root info at {start} names data tree root {}, but the interval holds {}",
+                info.data_tree_root,
+                H256(value.data_root)
+            );
+        }
         value.tx_start = info.start_offset.0;
         value.data_size = info.data_size;
         self.put_bytes(
@@ -5009,31 +4874,39 @@ impl<'a> Batch<'a> {
         Ok(())
     }
 
-    fn fill_info(&mut self, data_root: H256, info: &DataRootInfo) -> eyre::Result<()> {
+    fn fill_info(
+        &mut self,
+        data_commitment: DataCommitment,
+        info: &DataRootInfo,
+    ) -> eyre::Result<()> {
         Self::reject_empty_info(info)?;
         let starts: Vec<u32> = self
             .unfilled
             .iter()
-            .filter(|(_, root)| *root == data_root)
+            .filter(|(_, commitment)| *commitment == data_commitment)
             .map(|(start, _)| *start)
             .collect();
         let start = match starts.as_slice() {
             [start] => *start,
             [] => eyre::bail!(
-                "RocksDB v1 has no unfilled placement for data root {data_root} in this batch"
+                "RocksDB v1 has no unfilled placement for data commitment {data_commitment} in this batch"
             ),
             _ => eyre::bail!(
-                "RocksDB v1 has more than one unfilled placement for data root {data_root}; name the interval start"
+                "RocksDB v1 has more than one unfilled placement for data commitment {data_commitment}; name the interval start"
             ),
         };
         self.fill_info_at(start, info)
     }
 
-    fn replace_infos(&mut self, data_root: DataRoot, infos: &DataRootInfos) -> eyre::Result<()> {
+    fn replace_infos(
+        &mut self,
+        data_commitment: DataCommitment,
+        infos: &DataRootInfos,
+    ) -> eyre::Result<()> {
         // A data-root row's key is the interval start. Deleting it while that
         // interval remains leaves a placement with no secondary row. Adding a
         // row at `max(tx_start, 0)` invents a key no interval owns.
-        let existing = self.rows().data_root_rows(&data_root)?;
+        let existing = self.rows().data_root_rows(&data_commitment)?;
         for (start, point) in &existing {
             let kept = infos.0.iter().any(|info| {
                 info.start_offset.0 == point.tx_start && info.data_size == point.data_size
@@ -5045,7 +4918,9 @@ impl<'a> Batch<'a> {
                 .rows()
                 .get_raw(Cf::Interval, &encode_key(PartitionChunkOffset(*start)))?
             {
-                Some(bytes) => records::decode_placement(&bytes)?.data_root == data_root.0,
+                Some(bytes) => {
+                    records::decode_placement(&bytes)?.data_commitment == data_commitment.0.0
+                }
                 None => false,
             };
             if still_owned {
@@ -5053,7 +4928,7 @@ impl<'a> Batch<'a> {
                     "RocksDB v1 keeps the data-root row while its interval at {start} exists"
                 );
             }
-            self.delete_data_root_point(&data_root, *start);
+            self.delete_data_root_point(&data_commitment, *start);
         }
         for info in &infos.0 {
             let present = existing.iter().any(|(_, point)| {
@@ -5136,62 +5011,6 @@ impl<'a> Batch<'a> {
             }
         }
         Ok(removed)
-    }
-
-    /// Point-delete reverse rows for proofs currently visible in `[start, end]`.
-    ///
-    /// One content hash can name many offsets. This deletes `hash‖offset`
-    /// only. It does not delete the prefix. The scan drops each offset value
-    /// before the next key. A checksum-only row has no content key and is
-    /// left for the following `DeleteRange`. Content deletes stay in this
-    /// batch until commit, so a failed sync leaves the offset rows in place.
-    fn delete_content_rows_for_paths(
-        &mut self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<()> {
-        let mut next = Some(encode_key(start));
-        while let Some(start_key) = next.take() {
-            // The cursor borrows the snapshot. One pass keeps a bounded set of
-            // content keys, then this loop deletes them and resumes.
-            let (content_keys, resume) = {
-                let rows = self.rows();
-                let mut cursor = rows.cursor(Cf::OffsetMeta, Some(&start_key))?;
-                let mut content_keys = Vec::new();
-                let mut resume = None;
-                note_clear_content_pass();
-                while let Some((key, value)) = cursor.next_kv()? {
-                    if offset_key_ends_span(&key, end)? {
-                        break;
-                    }
-                    let offset = PartitionChunkOffset::decode(&key)
-                        .expect("a key inside the span is a 4-byte offset");
-                    // The value dies with this iteration. The cursor holds one
-                    // lookahead key, not the rest of the span.
-                    note_clear_offset_values(1);
-                    let meta = stored_offset_meta(&value)?;
-                    drop(value);
-                    if let Some(hash) = meta.proof.as_deref().and_then(content_hash_of) {
-                        content_keys.push(records::content_key(&hash, offset));
-                    }
-                    if content_keys.len() == clear_content_key_batch() {
-                        // `encode(n + 1)` is the next 4-byte offset. A longer
-                        // key sorts after `encode(n)` and before that offset.
-                        // The trailing 0 is the first key strictly after `n`.
-                        let mut resume_key = key;
-                        resume_key.push(0);
-                        resume = Some(resume_key);
-                        break;
-                    }
-                }
-                (content_keys, resume)
-            };
-            for key in &content_keys {
-                self.delete(Cf::Content, key);
-            }
-            next = resume;
-        }
-        Ok(())
     }
 
     fn commit(
@@ -5872,16 +5691,16 @@ impl Rows<'_> {
 
     fn data_root_rows(
         &self,
-        data_root: &H256,
+        data_commitment: &DataCommitment,
     ) -> eyre::Result<Vec<(u32, records::DataRootPlacement)>> {
-        let prefix = data_root.0;
+        let prefix = data_commitment.0.0;
         let raw = self.collect_raw(Cf::DataRoots, Some(&prefix), |key| {
             Ok(key.len() < 32 || key[..32] != prefix)
         })?;
         let mut rows = Vec::new();
         for (key, value) in raw {
-            let (root, start) = records::decode_data_root_key(&key)?;
-            if root != *data_root {
+            let (commitment, start) = records::decode_data_root_key(&key)?;
+            if commitment != *data_commitment {
                 break;
             }
             rows.push((start, records::decode_data_root(&value)?));
@@ -5909,7 +5728,8 @@ impl Rows<'_> {
     fn placement_row(&self, start: u32, value: &records::PlacementRecord) -> Placement {
         use super::tables::Placement;
         Placement {
-            data_root: H256(value.data_root),
+            data_tree_root: DataTreeRoot(H256(value.data_root)),
+            data_commitment: DataCommitment(H256(value.data_commitment)),
             tx_start_offset: irys_types::RelativeChunkOffset(value.tx_start),
             data_size: value.data_size,
             ledger: records::optional_u32(value.ledger),
@@ -5952,14 +5772,14 @@ impl Rows<'_> {
 
     fn placements_for_root(
         &self,
-        data_root: DataRoot,
+        data_commitment: DataCommitment,
     ) -> eyre::Result<Vec<super::tables::Placement>> {
         let mut out = Vec::new();
-        for (start, _) in self.data_root_rows(&data_root)? {
+        for (start, _) in self.data_root_rows(&data_commitment)? {
             if let Some(bytes) =
                 self.get_raw(Cf::Interval, &encode_key(PartitionChunkOffset(start)))?
                 && let Ok(value) = records::decode_placement(&bytes)
-                && value.data_root == data_root.0
+                && value.data_commitment == data_commitment.0.0
             {
                 out.push(self.placement_row(start, &value));
             }
@@ -5968,8 +5788,11 @@ impl Rows<'_> {
         Ok(out)
     }
 
-    fn data_root_info_rows(&self, data_root: DataRoot) -> eyre::Result<Option<DataRootInfos>> {
-        let rows = self.data_root_rows(&data_root)?;
+    fn data_root_info_rows(
+        &self,
+        data_commitment: DataCommitment,
+    ) -> eyre::Result<Option<DataRootInfos>> {
+        let rows = self.data_root_rows(&data_commitment)?;
         if rows.is_empty() {
             return Ok(None);
         }
@@ -5978,6 +5801,7 @@ impl Rows<'_> {
             .map(|(_, point)| DataRootInfo {
                 start_offset: irys_types::RelativeChunkOffset(point.tx_start),
                 data_size: point.data_size,
+                data_tree_root: DataTreeRoot(H256(point.data_tree_root)),
             })
             .collect();
         infos.sort_unstable();
@@ -6073,15 +5897,16 @@ impl Rows<'_> {
         Ok(rows)
     }
 
-    fn all_data_root_rows(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
+    fn all_data_root_rows(&self) -> eyre::Result<Vec<(DataCommitment, DataRootInfos)>> {
         let raw = self.collect_raw(Cf::DataRoots, None, |_| Ok(false))?;
-        let mut grouped: BTreeMap<H256, Vec<DataRootInfo>> = BTreeMap::new();
+        let mut grouped: BTreeMap<DataCommitment, Vec<DataRootInfo>> = BTreeMap::new();
         for (key, value) in raw {
-            let (root, _) = records::decode_data_root_key(&key)?;
+            let (commitment, _) = records::decode_data_root_key(&key)?;
             let point = records::decode_data_root(&value)?;
-            grouped.entry(root).or_default().push(DataRootInfo {
+            grouped.entry(commitment).or_default().push(DataRootInfo {
                 start_offset: irys_types::RelativeChunkOffset(point.tx_start),
                 data_size: point.data_size,
+                data_tree_root: DataTreeRoot(H256(point.data_tree_root)),
             });
         }
         Ok(grouped
@@ -6348,11 +6173,11 @@ impl SubmoduleRead for Rows<'_> {
         Ok(None)
     }
 
-    fn get_data_root_infos_for_data_root(
+    fn get_data_root_infos_for_commitment(
         &self,
-        data_root: DataRoot,
+        data_commitment: DataCommitment,
     ) -> eyre::Result<Option<DataRootInfos>> {
-        self.data_root_info_rows(data_root)
+        self.data_root_info_rows(data_commitment)
     }
 
     fn get_pending_body_migration(
@@ -6433,75 +6258,14 @@ impl SubmoduleRead for Rows<'_> {
         self.placement_rows_in_range(start, end)
     }
 
-    fn placements_for_data_root(&self, data_root: DataRoot) -> eyre::Result<Vec<Placement>> {
-        self.placements_for_root(data_root)
-    }
-
-    fn offsets_for_content_hash(
+    fn placements_for_data_root(
         &self,
-        content_hash: H256,
-    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
-        let prefix = content_hash.0;
-        let mut found = BTreeSet::new();
-        let cleared = self
-            .overlay
-            .is_some_and(|overlay| overlay.cleared[Cf::Content.index()]);
-        if !cleared {
-            let handle = cf_handle(self.db, Cf::Content)?;
-            let mut opts = ReadOptions::default();
-            // Prefix mode consults the prefix bloom. `total_order_seek` stays
-            // off. `prefix_same_as_start` stops the iterator at the next hash.
-            opts.set_prefix_same_as_start(true);
-            opts.fill_cache(true);
-            let mut iter = self.snap.raw_iterator_cf_opt(&handle, opts);
-            iter.seek(prefix.as_slice());
-            while let Some(key) = iter.key() {
-                if !key.starts_with(&prefix) {
-                    break;
-                }
-                let key_owned = key.to_vec();
-                let hidden = self.overlay.is_some_and(|overlay| {
-                    matches!(
-                        overlay.maps[Cf::Content.index()].get(key_owned.as_slice()),
-                        Some(None)
-                    )
-                });
-                if !hidden
-                    && let Some((hash, offset)) = records::decode_content_key(&key_owned)
-                    && hash == content_hash
-                {
-                    found.insert(offset);
-                }
-                iter.next();
-            }
-            iter.status().wrap_err("seek content-hash offset index")?;
-        }
-        if let Some(overlay) = self.overlay {
-            let start = prefix.to_vec();
-            for (key, value) in overlay.maps[Cf::Content.index()].range(start..) {
-                if !key.starts_with(&prefix) {
-                    break;
-                }
-                let Some((hash, offset)) = records::decode_content_key(key) else {
-                    continue;
-                };
-                if hash != content_hash {
-                    continue;
-                }
-                match value {
-                    Some(_) => {
-                        found.insert(offset);
-                    }
-                    None => {
-                        found.remove(&offset);
-                    }
-                }
-            }
-        }
-        Ok(found.into_iter().collect())
+        data_commitment: DataCommitment,
+    ) -> eyre::Result<Vec<Placement>> {
+        self.placements_for_root(data_commitment)
     }
 
-    fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
+    fn data_root_entries(&self) -> eyre::Result<Vec<(DataCommitment, DataRootInfos)>> {
         self.all_data_root_rows()
     }
 }
@@ -6548,18 +6312,17 @@ impl_batch_read! {
     missing_path_hash_ranges(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>>;
     get_full_tx_path(path_hash: TxPathHash) -> eyre::Result<Option<TxPath>>;
     get_tx_leaf_binding(path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>>;
-    get_data_root_infos_for_data_root(data_root: DataRoot) -> eyre::Result<Option<DataRootInfos>>;
+    get_data_root_infos_for_commitment(data_commitment: DataCommitment) -> eyre::Result<Option<DataRootInfos>>;
     get_pending_body_migration(offset: PartitionChunkOffset) -> eyre::Result<Option<PendingBodyMigration>>;
     pending_body_migrations_from(start: Option<PartitionChunkOffset>, limit: Option<usize>) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>>;
     has_pending_in_inclusive_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
     tx_interval_overlaps(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
     has_pending_in_ranges(ranges: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> eyre::Result<bool>;
     tx_intervals_overlap_ranges(ranges: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> eyre::Result<bool>;
-    data_root_entries() -> eyre::Result<Vec<(DataRoot, DataRootInfos)>>;
+    data_root_entries() -> eyre::Result<Vec<(DataCommitment, DataRootInfos)>>;
     placement_at(offset: PartitionChunkOffset) -> eyre::Result<Option<Placement>>;
     placements_in_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<Placement>>;
-    placements_for_data_root(data_root: DataRoot) -> eyre::Result<Vec<Placement>>;
-    offsets_for_content_hash(content_hash: H256) -> eyre::Result<Vec<PartitionChunkOffset>>;
+    placements_for_data_root(data_commitment: DataCommitment) -> eyre::Result<Vec<Placement>>;
 }
 
 fn warn_uncovered_proof(offset: PartitionChunkOffset) {
@@ -6714,24 +6477,22 @@ impl SubmoduleWrite for Batch<'_> {
 
         // `delete_offset_range` hides these keys from a later read.
         // Pending stays. The caller purges it in its own commit.
-        self.delete_content_rows_for_paths(start, end)?;
-
         self.delete_offset_range(Cf::OffsetMeta, start, end)?;
         Ok(())
     }
 
     fn set_data_root_infos_for_data_root(
         &mut self,
-        data_root: DataRoot,
+        data_commitment: DataCommitment,
         infos: DataRootInfos,
     ) -> eyre::Result<()> {
-        self.replace_infos(data_root, &infos)
+        self.replace_infos(data_commitment, &infos)
     }
 
     fn add_data_root_info_at(
         &mut self,
         start: PartitionChunkOffset,
-        data_root: DataRoot,
+        data_commitment: DataCommitment,
         info: &DataRootInfo,
     ) -> eyre::Result<()> {
         let key = encode_key(start);
@@ -6739,9 +6500,9 @@ impl SubmoduleWrite for Batch<'_> {
             eyre::bail!("RocksDB v1 data-root info at {} has no interval", start.0);
         };
         let value = records::decode_placement(&bytes)?;
-        if value.data_root != data_root.0 {
+        if value.data_commitment != data_commitment.0.0 {
             eyre::bail!(
-                "RocksDB v1 interval at {} belongs to a different data root",
+                "RocksDB v1 interval at {} belongs to a different data commitment",
                 start.0
             );
         }
@@ -6752,8 +6513,12 @@ impl SubmoduleWrite for Batch<'_> {
         self.layout == IndexLayout::RocksV1
     }
 
-    fn add_data_root_info(&mut self, data_root: DataRoot, info: &DataRootInfo) -> eyre::Result<()> {
-        self.fill_info(data_root, info)
+    fn add_data_root_info(
+        &mut self,
+        data_commitment: DataCommitment,
+        info: &DataRootInfo,
+    ) -> eyre::Result<()> {
+        self.fill_info(data_commitment, info)
     }
 
     fn add_pending_body_migration(
@@ -6842,6 +6607,7 @@ mod tests {
     use super::*;
     use crate::submodule::SubmoduleIndex;
     use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{DataCommitment, DataTreeRoot};
     use irys_types::{H256, RelativeChunkOffset};
 
     fn temp_dir(prefix: &str) -> irys_testing_utils::utils::tempfile::TempDir {
@@ -6924,7 +6690,8 @@ mod tests {
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         store.disable_auto_compaction()?;
         let job = PendingBodyMigration {
-            data_root: H256::repeat_byte(1),
+            data_commitment: DataCommitment(H256::repeat_byte(1)),
+            data_tree_root: DataTreeRoot(H256::repeat_byte(1)),
             data_size: 32,
             start_offset: RelativeChunkOffset(0),
             block_height: 1,
@@ -7011,7 +6778,7 @@ mod tests {
             let store = RocksSubmoduleStore::open(&path)?;
             store.update(|tx| tx.clear())?;
             let payload = store.schema_bytes()?.expect("schema row");
-            assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
+            assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes());
             assert!(
                 store
                     .view(|tx| tx.get_path_hashes_by_offset(offset))?
@@ -7054,7 +6821,7 @@ mod tests {
         drop(second);
         let reader = RocksSubmoduleStore::open_read_only(&path)?;
         let payload = reader.schema_bytes()?.expect("schema row");
-        assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
+        assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes());
         drop(reader);
         let reopened = RocksSubmoduleStore::open(&path)?;
         drop(reopened);
@@ -7975,14 +7742,16 @@ mod tests {
                 &TxLeafBinding {
                     data_root: root,
                     prefix_hash: H256::zero(),
+                    data_commitment: DataCommitment(root),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(covered, covered, Some(root))?;
             tx.add_data_root_info(
-                root,
+                DataCommitment(root),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(1),
                     data_size: 32,
+                    data_tree_root: DataTreeRoot(root),
                 },
             )
         })?;
@@ -8027,6 +7796,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root,
                     prefix_hash: H256::repeat_byte(1),
+                    data_commitment: DataCommitment(data_root),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -8035,16 +7805,18 @@ mod tests {
                 Some(tx_hash),
             )?;
             tx.add_data_root_info(
-                data_root,
+                DataCommitment(data_root),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(0),
                     data_size: 64,
+                    data_tree_root: DataTreeRoot(data_root),
                 },
             )?;
             tx.add_pending_body_migration(
                 PartitionChunkOffset::from(3),
                 &PendingBodyMigration {
-                    data_root,
+                    data_commitment: DataCommitment(data_root),
+                    data_tree_root: DataTreeRoot(data_root),
                     data_size: 64,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -8091,7 +7863,7 @@ mod tests {
         }
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 2);
         let payload = store.schema_bytes()?.expect("schema row");
-        assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
+        assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes());
         assert!(
             store
                 .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(50_000)))?
@@ -8105,7 +7877,7 @@ mod tests {
         assert!(store.view(|tx| tx.get_full_tx_path(tx_hash))?.is_none());
         assert!(
             store
-                .view(|tx| tx.get_data_root_infos_for_data_root(data_root))?
+                .view(|tx| tx.get_data_root_infos_for_commitment(DataCommitment(data_root)))?
                 .is_none()
         );
         assert!(
@@ -8121,104 +7893,72 @@ mod tests {
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 2);
         assert_eq!(
             store.schema_bytes()?.expect("schema row"),
-            SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()
+            SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes()
         );
         Ok(())
     }
 
+    /// Proof writes, rewrites, clears, presence drops, and a full clear
+    /// never write the retired content-hash family.
     #[test]
-    fn content_hash_index_tracks_writes_rewrites_and_deletes() -> eyre::Result<()> {
-        let dir = temp_dir("submodule_rocks_content_index");
+    fn data_proofs_leave_the_retired_content_family_empty() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_retired_content");
         let path = dir.path().join("index");
         let store = RocksSubmoduleStore::open(&path)?;
         // A data path needs a covering interval. Offsets 4 and 9 sit inside it.
         place_span(&store, 0, 20, H256::repeat_byte(9), 0, 1, 0, &[], None)?;
-        let hash_a = H256::repeat_byte(1);
-        let hash_b = H256::repeat_byte(2);
-        let hash_c = H256::repeat_byte(3);
         let at4 = PartitionChunkOffset::from(4);
         let at9 = PartitionChunkOffset::from(9);
         store.update(|tx| {
-            tx.add_full_data_path(at4, content_leaf(1))?;
-            let seen = tx.offsets_for_content_hash(hash_a)?;
-            assert_eq!(seen, vec![at4]);
-            tx.add_full_data_path(at4, content_leaf(3))?;
-            tx.add_full_data_path(at4, content_leaf(2))?;
-            assert!(tx.offsets_for_content_hash(hash_a)?.is_empty());
-            assert!(tx.offsets_for_content_hash(hash_c)?.is_empty());
-            assert_eq!(tx.offsets_for_content_hash(hash_b)?, vec![at4]);
+            tx.add_full_data_path(at4, stored_proof(1))?;
+            tx.add_full_data_path(at4, stored_proof(2))?;
+            tx.add_full_data_path(at9, stored_proof(1))?;
             Ok(())
         })?;
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(hash_b))?,
-            vec![at4]
-        );
-        assert!(
-            store
-                .view(|tx| tx.offsets_for_content_hash(hash_a))?
-                .is_empty()
-        );
-        store.update(|tx| tx.add_full_data_path(at9, content_leaf(1)))?;
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(hash_a))?,
-            vec![at9]
-        );
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(hash_b))?,
-            vec![at4]
-        );
-        store.update(|tx| tx.add_full_data_path(at4, content_leaf(1)))?;
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(hash_a))?,
-            vec![at4, at9]
-        );
-        assert!(
-            store
-                .view(|tx| tx.offsets_for_content_hash(hash_b))?
-                .is_empty()
-        );
+        assert_retired_content_family_is_empty(&store)?;
         drop(store);
         let store = RocksSubmoduleStore::open(&path)?;
         assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(hash_a))?,
-            vec![at4, at9]
+            store.view(|tx| tx.get_data_path_by_offset(at4))?,
+            Some(stored_proof(2))
         );
-        assert_content_index(&store)?;
         store.update(|tx| tx.clear_paths_in_inclusive_range(at9, at9))?;
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(hash_a))?,
-            vec![at4]
-        );
         store.drop_presence_in_ranges(&[(at4, at4)])?;
-        assert!(
-            store
-                .view(|tx| tx.offsets_for_content_hash(hash_a))?
-                .is_empty()
-        );
+        assert_retired_content_family_is_empty(&store)?;
         store.update(|tx| {
-            tx.add_full_data_path(at4, content_leaf(1))?;
-            tx.add_full_data_path(at9, vec![7_u8])?;
+            tx.add_full_data_path(at4, stored_proof(1))?;
+            tx.add_full_data_path(at9, vec![7_u8; 32])?;
             Ok(())
         })?;
-        assert_content_index(&store)?;
-        assert_eq!(store.cf_key_count(Cf::Content)?, 1);
         store.update(|tx| tx.clear())?;
-        assert_eq!(store.cf_key_count(Cf::Content)?, 0);
-        assert_content_index(&store)?;
+        assert_retired_content_family_is_empty(&store)?;
         Ok(())
     }
 
-    /// A rollback clear must not copy every offset value in the span.
-    ///
-    /// Checksum rows have no content key. Proof rows still lose `hash‖offset`.
-    /// A neighbor outside the span stays. A failed synced write leaves both
-    /// families as they were: the content deletes share that commit.
+    /// `audit_index` reports a row left in the retired content-hash family.
     #[test]
-    fn clear_streams_offset_values_and_keeps_the_commit_atomic() -> eyre::Result<()> {
+    fn audit_reports_a_row_in_the_retired_content_family() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_retired_content_row");
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        place_span(&store, 0, 7, H256::repeat_byte(4), 0, 1, 0, &[1], None)?;
+        assert!(store.audit_index()?.is_empty());
+        let handle = cf_handle(&store.db, Cf::Content)?;
+        store.db.put_cf(&handle, [1_u8; 36], [])?;
+        let findings = store.audit_index()?;
+        assert!(
+            findings
+                .iter()
+                .any(|line| line.contains("retired content-hash family")),
+            "{findings:?}"
+        );
+        Ok(())
+    }
+
+    /// A clear drops the proof and checksum rows in its span. A neighbor
+    /// outside the span stays. A failed synced write leaves every row.
+    #[test]
+    fn clear_drops_the_span_and_keeps_the_commit_atomic() -> eyre::Result<()> {
         let dir = temp_dir("submodule_rocks_clear_stream");
-        // Three proofs and a batch of two: the third key is deleted only if
-        // the scan resumes after it drops the first batch.
-        let _batch = set_clear_content_key_batch(2);
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         let kept = 50_u32;
         place_span(
@@ -8247,10 +7987,6 @@ mod tests {
                 .collect();
             tx.write_packed_offset_rows(rows)
         })?;
-        let span_rows = checksums.len() + 3;
-        assert!(span_rows > 1);
-
-        reset_clear_offset_value_peak();
         store.fail_next_synced_write();
         let err = store
             .update(|tx| {
@@ -8261,9 +7997,11 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.to_string().contains("injected"), "{err}");
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(1)))?,
-            vec![PartitionChunkOffset::from(1)]
+        assert!(
+            store
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(1)))?
+                .is_some(),
+            "a rejected clear leaves the proof row"
         );
         assert!(
             store
@@ -8275,31 +8013,13 @@ mod tests {
         drop(store);
 
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
-        reset_clear_offset_value_peak();
-        reset_clear_content_scan_passes();
         store.update(|tx| {
             tx.clear_paths_in_inclusive_range(
                 PartitionChunkOffset::from(0),
                 PartitionChunkOffset::from(39),
             )
         })?;
-        let peak = clear_offset_value_peak();
-        assert_eq!(
-            peak, 1,
-            "clear held {peak} offset values, span has {span_rows}"
-        );
-        assert_eq!(
-            clear_content_scan_passes(),
-            2,
-            "batch of 2 must resume to delete the third proof"
-        );
         for offset in [1_u32, 20, 39] {
-            assert!(
-                store
-                    .view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(offset as u8)))?
-                    .is_empty(),
-                "offset {offset} content key remains"
-            );
             assert!(
                 store
                     .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(offset)))?
@@ -8315,159 +8035,22 @@ mod tests {
                 "checksum {offset} remains"
             );
         }
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(kept as u8)))?,
-            vec![PartitionChunkOffset::from(kept)]
-        );
         assert!(
             store
                 .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(kept)))?
                 .is_some()
         );
-        assert_content_index(&store)?;
-        Ok(())
-    }
-
-    /// A resume that seeks the next 4-byte offset skips a longer key that sorts
-    /// between those encodings. `DeleteRange` would then remove it. The clear
-    /// must fail and leave the span. A later clear that starts after the key
-    /// still drops the proofs and checksums in its own span.
-    #[test]
-    fn clear_resume_keeps_a_key_that_sorts_between_offsets() -> eyre::Result<()> {
-        let dir = temp_dir("submodule_rocks_clear_resume_gap");
-        let _batch = set_clear_content_key_batch(1);
-        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
-        let kept = 50_u32;
-        place_span(
-            &store,
-            0,
-            kept,
-            H256::repeat_byte(4),
-            0,
-            1,
-            0,
-            &[1, 10, 14, kept],
-            None,
-        )?;
-        let checksums = [3_u32, 8, 12];
-        store.update(|tx| {
-            let rows = checksums
-                .into_iter()
-                .map(|offset| PackedOffsetRow {
-                    offset: PartitionChunkOffset::from(offset),
-                    crc: Some(offset),
-                    proof: None,
-                })
-                .collect();
-            tx.write_packed_offset_rows(rows)
-        })?;
-        // Sorts after offset 1 and before offset 2. Batch size 1 fills on the
-        // proof at 1, so the next seek is the one that can skip this key.
-        let gap_key = [0_u8, 0, 0, 1, 0];
-        let handle = cf_handle(&store.db, Cf::OffsetMeta)?;
-        store.db.put_cf(&handle, gap_key, [])?;
-        store.db.flush_cf(&handle)?;
-
-        let wide = store.update(|tx| {
-            tx.clear_paths_in_inclusive_range(
-                PartitionChunkOffset::from(0),
-                PartitionChunkOffset::from(20),
-            )
-        });
-        let gap_still = store.db.get_cf(&handle, gap_key)?.is_some();
-        let content_10 = store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(10)))?;
-        let path_1 = store
-            .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(1)))?
-            .is_some();
-        let path_10 = store
-            .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(10)))?
-            .is_some();
-        let Err(wide_err) = wide else {
-            panic!(
-                "clear succeeded; gap_still={gap_still} content_10={content_10:?} path_1={path_1} path_10={path_10}"
-            );
-        };
-        assert!(wide_err.to_string().contains("not an offset"), "{wide_err}");
-        assert!(
-            gap_still && path_1 && path_10 && content_10 == vec![PartitionChunkOffset::from(10)],
-            "gap_still={gap_still} content_10={content_10:?} path_1={path_1} path_10={path_10}"
-        );
-        assert!(
-            store
-                .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(3)))?
-                .is_some(),
-            "a rejected clear leaves the checksum row"
-        );
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(1)))?,
-            vec![PartitionChunkOffset::from(1)]
-        );
-
-        store.update(|tx| {
-            tx.clear_paths_in_inclusive_range(
-                PartitionChunkOffset::from(6),
-                PartitionChunkOffset::from(20),
-            )
-        })?;
-        assert!(
-            store.db.get_cf(&handle, gap_key)?.is_some(),
-            "the gap key is outside the cleared span"
-        );
-        for offset in [10_u32, 14] {
-            assert!(
-                store
-                    .view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(offset as u8)))?
-                    .is_empty(),
-                "offset {offset} content key remains"
-            );
-            assert!(
-                store
-                    .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(offset)))?
-                    .is_none(),
-                "offset {offset} proof remains"
-            );
-        }
-        for offset in [8_u32, 12] {
-            assert!(
-                store
-                    .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(offset)))?
-                    .is_none(),
-                "checksum {offset} remains"
-            );
-        }
-        assert!(
-            store
-                .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(3)))?
-                .is_some()
-        );
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(1)))?,
-            vec![PartitionChunkOffset::from(1)]
-        );
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(kept as u8)))?,
-            vec![PartitionChunkOffset::from(kept)]
-        );
-        assert!(
-            store
-                .view(|tx| tx.placement_at(PartitionChunkOffset::from(1)))?
-                .is_some()
-        );
-        assert!(
-            store
-                .view(|tx| tx.placement_at(PartitionChunkOffset::from(10)))?
-                .is_none()
-        );
+        assert_retired_content_family_is_empty(&store)?;
         Ok(())
     }
 
     /// A key that is not a 4-byte offset is inside the span, not its end.
     ///
-    /// The clear must fail before `DeleteRange` removes later offset rows
-    /// whose content keys were not visited. A span that ends before that key,
-    /// or starts after it, still clears.
+    /// A read of a span that holds it fails. A read that ends before it, or
+    /// starts after it, still reads. A clear of the span drops it with the
+    /// span's rows.
     #[test]
-    fn short_offset_key_fails_the_clear_and_the_span_reads() -> eyre::Result<()> {
+    fn short_offset_key_fails_the_span_reads_and_a_clear_drops_it() -> eyre::Result<()> {
         let dir = temp_dir("submodule_rocks_short_offset_key");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         place_span(&store, 0, 20, H256::repeat_byte(4), 0, 1, 0, &[2, 10], None)?;
@@ -8484,39 +8067,6 @@ mod tests {
         let handle = cf_handle(&store.db, Cf::OffsetMeta)?;
         store.db.put_cf(&handle, short_key, [])?;
         store.db.flush_cf(&handle)?;
-
-        let clear_wide = store.update(|tx| {
-            tx.clear_paths_in_inclusive_range(
-                PartitionChunkOffset::from(0),
-                PartitionChunkOffset::from(20),
-            )
-        });
-        let content_10 = store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(10)))?;
-        let path_10 = store
-            .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(10)))?
-            .is_some();
-        let placed_10 = store
-            .view(|tx| tx.placement_at(PartitionChunkOffset::from(10)))?
-            .is_some();
-        let checksum_kept = store.view(|tx| tx.get_offset_meta(checksum))?.is_some();
-        let Err(clear_err) = clear_wide else {
-            panic!(
-                "clear={clear_wide:?} content {content_10:?} path {path_10} placed {placed_10} checksum {checksum_kept}"
-            );
-        };
-        assert!(
-            clear_err.to_string().contains("not an offset"),
-            "{clear_err}"
-        );
-        assert!(
-            path_10
-                && placed_10
-                && checksum_kept
-                && content_10 == vec![PartitionChunkOffset::from(10)],
-            "content {content_10:?} path {path_10} placed {placed_10} checksum {checksum_kept}"
-        );
-        let content_2 = store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(2)))?;
-        assert_eq!(content_2, vec![PartitionChunkOffset::from(2)]);
 
         let hashes_wide = store.view(|tx| {
             tx.path_hashes_in_inclusive_range(
@@ -8573,63 +8123,34 @@ mod tests {
         store.update(|tx| {
             tx.clear_paths_in_inclusive_range(
                 PartitionChunkOffset::from(0),
-                PartitionChunkOffset::from(4),
-            )
-        })?;
-        assert!(
-            store
-                .view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(2)))?
-                .is_empty()
-        );
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(10)))?,
-            vec![PartitionChunkOffset::from(10)]
-        );
-        assert!(
-            store
-                .view(|tx| tx.placement_at(PartitionChunkOffset::from(2)))?
-                .is_none()
-        );
-        assert!(
-            store
-                .view(|tx| tx.placement_at(PartitionChunkOffset::from(10)))?
-                .is_some()
-        );
-        let still_hashes = store.view(|tx| {
-            tx.path_hashes_in_inclusive_range(
-                PartitionChunkOffset::from(0),
-                PartitionChunkOffset::from(20),
-            )
-        });
-        assert!(still_hashes.is_err(), "{still_hashes:?}");
-
-        store.update(|tx| {
-            tx.clear_paths_in_inclusive_range(
-                PartitionChunkOffset::from(6),
                 PartitionChunkOffset::from(20),
             )
         })?;
         assert!(
-            store
-                .view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(10)))?
-                .is_empty()
+            store.db.get_cf(&handle, short_key)?.is_none(),
+            "the clear drops the short key"
         );
+        for offset in [2_u32, 10] {
+            assert!(
+                store
+                    .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(offset)))?
+                    .is_none(),
+                "offset {offset} proof remains"
+            );
+            assert!(
+                store
+                    .view(|tx| tx.placement_at(PartitionChunkOffset::from(offset)))?
+                    .is_none()
+            );
+        }
         assert!(store.view(|tx| tx.get_offset_meta(checksum))?.is_none());
-        assert!(
-            store
-                .view(|tx| tx.placement_at(PartitionChunkOffset::from(10)))?
-                .is_none()
-        );
-        let still_short = store.view(|tx| {
+        let metas = store.view(|tx| {
             tx.offset_metas_in_range(
                 PartitionChunkOffset::from(0),
                 PartitionChunkOffset::from(20),
             )
-        });
-        assert!(
-            still_short.is_err(),
-            "the short key stays after clears that do not cover it: {still_short:?}"
-        );
+        })?;
+        assert!(metas.is_empty(), "{metas:?}");
         Ok(())
     }
 
@@ -8647,6 +8168,94 @@ mod tests {
             tx.write_packed_offset_rows(rows)?;
             Ok(())
         })
+    }
+
+    fn put_raw_metadata(
+        store: &RocksSubmoduleStore,
+        key: MetadataKey,
+        value: &[u8],
+    ) -> eyre::Result<()> {
+        let handle = cf_handle(&store.db, Cf::Metadata)?;
+        store.db.put_cf(&handle, encode_key(key), value)?;
+        store.db.flush_cf(&handle)?;
+        Ok(())
+    }
+
+    /// An index from before commitment keys that holds only packed entropy:
+    /// the row is upgraded, the SCHEMA file and every row stay.
+    #[test]
+    fn submodule_index_without_data_rows_upgrades_in_place() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_upgrade_entropy");
+        let path = dir.path().join("index");
+        let partition_hash = [7_u8; 32];
+        let before = {
+            let store = RocksSubmoduleStore::open(&path)?;
+            put_checksums(&store, &[0, 1, 2])?;
+            put_raw_metadata(&store, MetadataKey::PartitionHash, &partition_hash)?;
+            put_raw_metadata(
+                &store,
+                MetadataKey::DBSchemaVersion,
+                SUBMODULE_SCHEMA_ROCKS_V1.as_bytes(),
+            )?;
+            store.view(|tx| {
+                tx.offset_metas_in_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(2),
+                )
+            })?
+        };
+        assert_eq!(before.len(), 3);
+
+        let store = RocksSubmoduleStore::open(&path)?;
+        assert_eq!(
+            store.schema_bytes()?.as_deref(),
+            Some(SUBMODULE_SCHEMA_ROCKS_ROW.as_bytes())
+        );
+        assert_eq!(
+            fs::read_to_string(path.join(SCHEMA_FILE))?,
+            SUBMODULE_SCHEMA_ROCKS_V1
+        );
+        let after = store.view(|tx| {
+            tx.offset_metas_in_range(PartitionChunkOffset::from(0), PartitionChunkOffset::from(2))
+        })?;
+        assert_eq!(after, before, "entropy checksum rows must stay");
+        let handle = cf_handle(&store.db, Cf::Metadata)?;
+        assert_eq!(
+            store
+                .db
+                .get_cf(&handle, encode_key(MetadataKey::PartitionHash))?
+                .as_deref(),
+            Some(partition_hash.as_slice())
+        );
+        Ok(())
+    }
+
+    /// An index from before commitment keys that holds data is refused, and
+    /// its row and data rows stay for the reset.
+    #[test]
+    fn submodule_index_with_data_rows_refuses_to_open() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_refuse_data");
+        let path = dir.path().join("index");
+        {
+            let store = RocksSubmoduleStore::open(&path)?;
+            place_span(&store, 0, 7, H256::repeat_byte(2), 0, 1, 0, &[3], None)?;
+            put_raw_metadata(
+                &store,
+                MetadataKey::DBSchemaVersion,
+                SUBMODULE_SCHEMA_ROCKS_V1.as_bytes(),
+            )?;
+        }
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("network must reset"), "{text}");
+
+        let reader = RocksSubmoduleStore::open_read_only(&path)?;
+        assert_eq!(
+            reader.schema_bytes()?.as_deref(),
+            Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes())
+        );
+        assert_eq!(reader.cf_key_count(Cf::Interval)?, 1);
+        Ok(())
     }
 
     fn put_raw_offset_key(store: &RocksSubmoduleStore, key: &[u8]) -> eyre::Result<()> {
@@ -8722,7 +8331,6 @@ mod tests {
         let entropy = PartitionChunkOffset::from(2);
         let data = PartitionChunkOffset::from(4);
         place_span(&store, 0, 7, H256::repeat_byte(3), 0, 1, 0, &[4], None)?;
-        assert_eq!(store.cf_key_count(Cf::Content)?, 1);
         store.update(|tx| {
             tx.write_packed_offset_rows(vec![
                 PackedOffsetRow {
@@ -8737,11 +8345,6 @@ mod tests {
                 },
             ])
         })?;
-        assert_eq!(
-            store.cf_key_count(Cf::Content)?,
-            0,
-            "replacing a proof with a checksum drops the content key"
-        );
         assert!(store.view(|tx| tx.get_data_path_by_offset(data))?.is_none());
         assert!(
             store
@@ -8764,7 +8367,7 @@ mod tests {
             "{findings:?}"
         );
 
-        store.update(|tx| tx.add_full_data_path(data, content_leaf(4)))?;
+        store.update(|tx| tx.add_full_data_path(data, stored_proof(4)))?;
         let kept = store
             .view(|tx| tx.get_offset_meta(data))?
             .expect("proof keeps the checksum");
@@ -8783,21 +8386,19 @@ mod tests {
     fn assert_no_orphans(store: &RocksSubmoduleStore) -> eyre::Result<()> {
         let orphans = store.audit_index()?;
         assert!(orphans.is_empty(), "{orphans:?}");
-        assert_content_index(store)
+        assert_retired_content_family_is_empty(store)
     }
 
-    fn assert_content_index(store: &RocksSubmoduleStore) -> eyre::Result<()> {
-        let audit = store.audit_content_index()?;
-        assert_eq!(audit.missing_reverse, 0, "{audit:?}");
-        assert_eq!(audit.dangling_reverse, 0, "{audit:?}");
+    fn assert_retired_content_family_is_empty(store: &RocksSubmoduleStore) -> eyre::Result<()> {
+        assert_eq!(store.cf_key_count(Cf::Content)?, 0);
         Ok(())
     }
 
-    /// 64-byte data-proof leaf. The first 32 bytes are the content hash.
-    fn content_leaf(byte: u8) -> Vec<u8> {
-        let mut leaf = vec![0_u8; 64];
-        leaf[..32].fill(byte);
-        leaf
+    /// A two-hash data chunk proof. The first hash is all `byte`.
+    fn stored_proof(byte: u8) -> Vec<u8> {
+        let mut proof = vec![0_u8; 64];
+        proof[..32].fill(byte);
+        proof
     }
 
     fn place_span(
@@ -8819,6 +8420,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root,
                     prefix_hash: H256::repeat_byte(1),
+                    data_commitment: DataCommitment(data_root),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -8828,23 +8430,25 @@ mod tests {
             )?;
             let data_size = u64::from(end - start + 1) * 32;
             tx.add_data_root_info(
-                data_root,
+                DataCommitment(data_root),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(i32::try_from(start).expect("start")),
                     data_size,
+                    data_tree_root: DataTreeRoot(data_root),
                 },
             )?;
             for offset in data_at {
                 tx.add_full_data_path(
                     PartitionChunkOffset::from(*offset),
-                    content_leaf(*offset as u8),
+                    stored_proof(*offset as u8),
                 )?;
             }
             if let Some(offset) = pending_at {
                 tx.add_pending_body_migration(
                     PartitionChunkOffset::from(offset),
                     &PendingBodyMigration {
-                        data_root,
+                        data_commitment: DataCommitment(data_root),
+                        data_tree_root: DataTreeRoot(data_root),
                         data_size,
                         start_offset: RelativeChunkOffset(i32::try_from(start).expect("start")),
                         block_height,
@@ -8854,61 +8458,6 @@ mod tests {
             }
             Ok(())
         })
-    }
-
-    /// A full scan of `ChunkOffsetsByContentHash` has to cross prefixes.
-    ///
-    /// The family uses a 32-byte prefix extractor. An iterator that leaves
-    /// `total_order_seek` off is not required to return the next hash.
-    /// `audit_index` and `Rows::cursor` both walk every key.
-    #[test]
-    fn content_prefix_scans_see_every_hash() -> eyre::Result<()> {
-        let dir = temp_dir("submodule_rocks_content_order");
-        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
-        place_span(&store, 0, 7, H256::repeat_byte(4), 0, 1, 0, &[], None)?;
-        let inside = content_index_key(H256::repeat_byte(1), 1);
-        let outside = content_index_key(H256::repeat_byte(0xFE), 100);
-        let handle = cf_handle(&store.db, Cf::Content)?;
-        store.db.put_cf(&handle, inside, [])?;
-        store.db.put_cf(&handle, outside, [])?;
-        store.db.flush_cf(&handle)?;
-
-        let findings = store.audit_index()?;
-        assert!(
-            findings
-                .iter()
-                .any(|line| { line.contains("content-hash row at 100 is outside every interval") }),
-            "{findings:?}"
-        );
-        assert!(
-            findings
-                .iter()
-                .all(|line| { !line.contains("content-hash row at 1 is outside every interval") }),
-            "{findings:?}"
-        );
-
-        let snap = store.db.snapshot();
-        let rows = Rows {
-            db: store.db.as_ref(),
-            snap: &snap,
-            overlay: None,
-            layout: store.layout,
-        };
-        let mut cursor = rows.cursor(Cf::Content, None)?;
-        let mut seen = Vec::new();
-        while let Some((key, value)) = cursor.next_kv()? {
-            assert!(value.is_empty(), "content value is empty");
-            seen.push(key);
-        }
-        assert_eq!(seen, vec![inside.to_vec(), outside.to_vec()], "{seen:?}");
-        Ok(())
-    }
-
-    fn content_index_key(hash: H256, offset: u32) -> [u8; 36] {
-        let mut key = [0_u8; 36];
-        key[..32].copy_from_slice(&hash.0);
-        key[32..].copy_from_slice(&offset.to_be_bytes());
-        key
     }
 
     /// Overwrite, uninitialized rollback, expiry, and reset leave no row
@@ -8921,14 +8470,15 @@ mod tests {
         let root_b = H256::repeat_byte(5);
         place_span(&store, 0, 19, root_a, 1, 42, 3, &[0, 8, 19], Some(2))?;
         assert_no_orphans(&store)?;
-        assert_eq!(
-            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(8)))?,
-            vec![PartitionChunkOffset::from(8)]
+        assert!(
+            store
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(8)))?
+                .is_some()
         );
         let at_zero = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
             .expect("placement");
-        assert_eq!(at_zero.data_root, root_a);
+        assert_eq!(at_zero.data_tree_root.0, root_a);
         assert_eq!(at_zero.ledger, Some(1));
         assert_eq!(at_zero.block_height, Some(42));
         assert_eq!(at_zero.tx_index, Some(3));
@@ -8939,13 +8489,13 @@ mod tests {
         let left = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
             .expect("left remnant");
-        assert_eq!(left.data_root, root_a);
+        assert_eq!(left.data_tree_root.0, root_a);
         assert_eq!(left.end, PartitionChunkOffset::from(7));
         assert_eq!(left.block_height, Some(42));
         let middle = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(9)))?
             .expect("overwrite");
-        assert_eq!(middle.data_root, root_b);
+        assert_eq!(middle.data_tree_root.0, root_b);
         assert_eq!(middle.ledger, Some(0));
         assert_eq!(middle.tx_index, Some(1));
         assert_eq!(middle.start, PartitionChunkOffset::from(8));
@@ -8953,7 +8503,7 @@ mod tests {
         let right = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(15)))?
             .expect("right remnant");
-        assert_eq!(right.data_root, root_a);
+        assert_eq!(right.data_tree_root.0, root_a);
         assert_eq!(right.start, PartitionChunkOffset::from(12));
         assert_eq!(right.tx_index, Some(3));
 
@@ -8976,7 +8526,7 @@ mod tests {
                 .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(2)))?
                 .is_some()
         );
-        let for_b = store.view(|tx| tx.placements_for_data_root(root_b))?;
+        let for_b = store.view(|tx| tx.placements_for_data_root(DataCommitment(root_b)))?;
         assert_eq!(for_b.len(), 1);
         assert_eq!(for_b[0].start, PartitionChunkOffset::from(8));
 
@@ -9023,6 +8573,7 @@ mod tests {
         let info = DataRootInfo {
             start_offset: RelativeChunkOffset(0),
             data_size: 32,
+            data_tree_root: DataTreeRoot(root),
         };
         let err = store
             .update(|tx| {
@@ -9035,7 +8586,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("leaf binding"), "{err}");
         let err = store
-            .update(|tx| tx.add_data_root_info(root, &info))
+            .update(|tx| tx.add_data_root_info(DataCommitment(root), &info))
             .unwrap_err();
         assert!(err.to_string().contains("no unfilled placement"), "{err}");
         store.update(|tx| {
@@ -9044,6 +8595,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root: root,
                     prefix_hash: H256::repeat_byte(1),
+                    data_commitment: DataCommitment(root),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -9054,24 +8606,28 @@ mod tests {
             let zero = DataRootInfo {
                 start_offset: RelativeChunkOffset(0),
                 data_size: 0,
+                data_tree_root: DataTreeRoot(root),
             };
-            let err = tx.add_data_root_info(root, &zero).unwrap_err();
+            let err = tx
+                .add_data_root_info(DataCommitment(root), &zero)
+                .unwrap_err();
             assert!(err.to_string().contains("data_size of 0"), "{err}");
-            tx.add_data_root_info(root, &info)?;
+            tx.add_data_root_info(DataCommitment(root), &info)?;
             Ok(())
         })?;
-        store.update(|tx| tx.add_full_data_path(PartitionChunkOffset::from(5), content_leaf(5)))?;
+        store.update(|tx| tx.add_full_data_path(PartitionChunkOffset::from(5), stored_proof(5)))?;
         assert!(
             store
                 .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(5)))?
                 .is_none()
         );
         store.update(|tx| {
-            tx.add_full_data_path(PartitionChunkOffset::from(0), content_leaf(1))?;
+            tx.add_full_data_path(PartitionChunkOffset::from(0), stored_proof(1))?;
             tx.add_pending_body_migration(
                 PartitionChunkOffset::from(0),
                 &PendingBodyMigration {
-                    data_root: root,
+                    data_commitment: DataCommitment(root),
+                    data_tree_root: DataTreeRoot(root),
                     data_size: 32,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -9109,7 +8665,8 @@ mod tests {
             tx.add_pending_body_migration(
                 PartitionChunkOffset::from(3),
                 &PendingBodyMigration {
-                    data_root: H256::repeat_byte(1),
+                    data_commitment: DataCommitment(H256::repeat_byte(1)),
+                    data_tree_root: DataTreeRoot(H256::repeat_byte(1)),
                     data_size: 32,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -9137,7 +8694,8 @@ mod tests {
             tx.add_pending_body_migration(
                 PartitionChunkOffset::from(3),
                 &PendingBodyMigration {
-                    data_root: H256::repeat_byte(1),
+                    data_commitment: DataCommitment(H256::repeat_byte(1)),
+                    data_tree_root: DataTreeRoot(H256::repeat_byte(1)),
                     data_size: 32,
                     start_offset: RelativeChunkOffset(0),
                     block_height: 1,
@@ -9517,7 +9075,8 @@ mod tests {
         let path_bytes = b"data-path".to_vec();
         let root = H256::repeat_byte(3);
         let job = PendingBodyMigration {
-            data_root: root,
+            data_commitment: DataCommitment(root),
+            data_tree_root: DataTreeRoot(root),
             data_size: 32,
             start_offset: RelativeChunkOffset(0),
             block_height: 1,
@@ -10207,6 +9766,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root: root,
                     prefix_hash: H256::zero(),
+                    data_commitment: DataCommitment(root),
                 },
             )?;
             tx.set_path_hashes_by_offset(PartitionChunkOffset::from(offset), hashes)
@@ -10782,9 +10342,19 @@ mod tests {
         Ok((span_end, neighbor))
     }
 
-    fn content_offsets(store: &RocksSubmoduleStore) -> eyre::Result<Vec<u32>> {
-        let offsets = store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(0)))?;
-        Ok(offsets.into_iter().map(|offset| offset.0).collect())
+    /// The offsets `seed_three_subspans` gave a proof that still hold one.
+    fn proof_offsets(store: &RocksSubmoduleStore) -> eyre::Result<Vec<u32>> {
+        let limit = DELETE_SUBRANGE_OFFSETS;
+        let mut held = Vec::new();
+        for offset in [0, limit, 2 * limit, 3 * limit] {
+            if store
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(offset)))?
+                .is_some()
+            {
+                held.push(offset);
+            }
+        }
+        Ok(held)
     }
 
     /// A span wider than one sub-span deletes the same rows as one shot of
@@ -10806,10 +10376,10 @@ mod tests {
         let once_stats = once.delete_presence_ranges_one(&[span])?;
         assert_eq!(chunked_stats, once_stats);
         assert_eq!(chunked_stats.data_path_rows, 3);
-        assert_eq!(content_offsets(&chunked)?, content_offsets(&once)?);
-        assert_eq!(content_offsets(&chunked)?, vec![neighbor]);
-        assert_content_index(&chunked)?;
-        assert_content_index(&once)?;
+        assert_eq!(proof_offsets(&chunked)?, proof_offsets(&once)?);
+        assert_eq!(proof_offsets(&chunked)?, vec![neighbor]);
+        assert_retired_content_family_is_empty(&chunked)?;
+        assert_retired_content_family_is_empty(&once)?;
 
         let retained_chunked = temp_dir("submodule_rocks_subspan_retain_chunked");
         let retained_once = temp_dir("submodule_rocks_subspan_retain_once");
@@ -10823,8 +10393,8 @@ mod tests {
         let once_stats = once.retain_entropy_crc_rows_one(&[span])?;
         assert_eq!(chunked_stats, once_stats);
         assert_eq!(chunked_stats.data_path_rows, 3);
-        assert_eq!(content_offsets(&chunked)?, vec![neighbor]);
-        assert_eq!(content_offsets(&chunked)?, content_offsets(&once)?);
+        assert_eq!(proof_offsets(&chunked)?, vec![neighbor]);
+        assert_eq!(proof_offsets(&chunked)?, proof_offsets(&once)?);
         for offset in [1_u32, limit + 1] {
             let meta = chunked
                 .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(offset)))?
@@ -10836,8 +10406,8 @@ mod tests {
             assert_eq!(meta.crc, other.crc);
             assert!(other.proof.is_none());
         }
-        assert_content_index(&chunked)?;
-        assert_content_index(&once)?;
+        assert_retired_content_family_is_empty(&chunked)?;
+        assert_retired_content_family_is_empty(&once)?;
         Ok(())
     }
 
@@ -10993,25 +10563,25 @@ mod tests {
             seeded
         };
         let store = RocksSubmoduleStore::open(&path)?;
-        assert_eq!(content_offsets(&store)?, vec![limit, 2 * limit, neighbor]);
+        assert_eq!(proof_offsets(&store)?, vec![limit, 2 * limit, neighbor]);
         assert!(
             store
                 .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(0)))?
                 .is_none()
         );
-        assert_content_index(&store)?;
+        assert_retired_content_family_is_empty(&store)?;
         let span = (
             PartitionChunkOffset::from(0),
             PartitionChunkOffset::from(span_end),
         );
         store.drop_presence_in_ranges(&[span])?;
-        assert_eq!(content_offsets(&store)?, vec![neighbor]);
+        assert_eq!(proof_offsets(&store)?, vec![neighbor]);
         assert!(
             store
                 .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(limit)))?
                 .is_none()
         );
-        assert_content_index(&store)?;
+        assert_retired_content_family_is_empty(&store)?;
 
         let retained = temp_dir("submodule_rocks_subspan_crash_retain");
         let path = retained.path().join("index");
@@ -11022,19 +10592,19 @@ mod tests {
             store.retain_entropy_crc_rows_one(&[first])?;
         }
         let store = RocksSubmoduleStore::open(&path)?;
-        assert_eq!(content_offsets(&store)?, vec![limit, 2 * limit, neighbor]);
+        assert_eq!(proof_offsets(&store)?, vec![limit, 2 * limit, neighbor]);
         let checksum = store
             .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(1)))?
             .expect("checksum in the cleared prefix");
         assert!(checksum.proof.is_none() && checksum.crc.is_some());
-        assert_content_index(&store)?;
+        assert_retired_content_family_is_empty(&store)?;
         store.retain_entropy_crc_rows(&[span])?;
-        assert_eq!(content_offsets(&store)?, vec![neighbor]);
+        assert_eq!(proof_offsets(&store)?, vec![neighbor]);
         let checksum = store
             .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(1)))?
             .expect("checksum survives entropy retain");
         assert!(checksum.proof.is_none() && checksum.crc.is_some());
-        assert_content_index(&store)?;
+        assert_retired_content_family_is_empty(&store)?;
         Ok(())
     }
 }

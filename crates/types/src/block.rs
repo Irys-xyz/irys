@@ -725,7 +725,7 @@ impl DataTransactionLedger {
     /// The value a transaction folds to in the ledger `tx_root` tree.
     /// Thin wrapper over [`Self::fold_tx_root_leaf`].
     pub fn tx_root_leaf_value(tx: &DataTransactionHeader) -> H256 {
-        Self::fold_tx_root_leaf(tx.data_root, tx.prefix_hash)
+        Self::fold_tx_root_leaf(tx.data_tree_root.0, tx.prefix_hash)
     }
 
     /// The canonical `(data_root, prefix_hash)` fold — `hash_all_sha256([data_root,
@@ -1633,6 +1633,7 @@ impl SealedBlock {
     reason = "Tests need Vec to exercise Index<DataLedger> for Vec<T> impls"
 )]
 mod tests {
+    use crate::DataTreeRoot;
     use crate::ingress::{IngressProof, IngressProofV1};
     use crate::{Config, DataTransactionHeaderV1, NodeConfig, validate_path};
 
@@ -1723,7 +1724,7 @@ mod tests {
             proofs: Some(IngressProofsList(vec![IngressProof::V1(IngressProofV1 {
                 proof: H256::random(),
                 signature: Default::default(), // signature is ignored by RLP & substituted with the default value
-                data_root: H256::random(),
+                data_commitment: crate::DataCommitment(H256::random()),
                 chain_id: 1,
                 anchor: H256::from([10_u8; 32]),
             })])),
@@ -1875,7 +1876,7 @@ mod tests {
     fn test_validate_tx_path() {
         let mut txs: Vec<DataTransactionHeader> = vec![DataTransactionHeader::default(); 10];
         for tx in txs.iter_mut() {
-            tx.data_root = H256::from([3_u8; 32]);
+            tx.data_tree_root = DataTreeRoot(H256::from([3_u8; 32]));
             tx.data_size = 64
         }
 
@@ -1984,7 +1985,7 @@ mod tests {
     /// reads: `data_root`, `prefix_hash`, `data_size`.
     fn folded_data_tx(data_root: H256, prefix_hash: H256, data_size: u64) -> DataTransactionHeader {
         let tx = DataTransactionHeaderV1 {
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             prefix_hash,
             data_size,
             ..Default::default()
@@ -2087,7 +2088,7 @@ mod tests {
         // Indexer reconstructs from only (data_root, prefix_hash, data_size) pairs.
         let reconstructed: Vec<_> = signed_txs
             .iter()
-            .map(|t| folded_data_tx(t.data_root, t.prefix_hash, t.data_size))
+            .map(|t| folded_data_tx(t.data_tree_root.0, t.prefix_hash, t.data_size))
             .collect();
         assert_eq!(
             DataTransactionLedger::compute_tx_root(&reconstructed),
