@@ -1405,28 +1405,35 @@ impl DataSyncServiceInner {
 
         // The body matches its own data path. It still has to be the chunk
         // indexed at the offset we asked for. A self-consistent chunk for
-        // another data_root would otherwise be written at that root's
+        // another data commitment (another root, or the same root under
+        // another data_size) would otherwise be written at that commitment's
         // placement, and the requested offset would be blocked or re-queued
         // with the peer still eligible. A missing local index is not a
         // mismatch: the enqueue path still classifies that write.
         let mismatched_placement =
             storage_module_by_id(&self.storage_modules.read().unwrap(), storage_module_id)
                 .and_then(|sm| {
+                    let delivered_commitment =
+                        unpacked_chunk.data_commitment(&sm.config.data_tree_geometry());
                     irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
                         sm.data_root_and_tx_offset_at(chunk_offset)
                     })
                     .ok()
                     .flatten()
-                    .filter(|(_, root, tx_offset)| {
-                        *root != unpacked_chunk.data_tree_root
+                    .filter(|(placed_commitment, _, tx_offset)| {
+                        *placed_commitment != delivered_commitment
                             || *tx_offset != unpacked_chunk.tx_offset
                     })
+                    .map(|(placed_commitment, _, tx_offset)| {
+                        (delivered_commitment, placed_commitment, tx_offset)
+                    })
                 });
-        if let Some((_, local_root, local_tx_offset)) = mismatched_placement {
+        if let Some((delivered_commitment, placed_commitment, local_tx_offset)) =
+            mismatched_placement
+        {
             self.reject_delivered_body(storage_module_id, chunk_offset, peer_addr)?;
             return Err(eyre::eyre!(
-                "data sync rejected peer chunk at offset {chunk_offset}: fetched data_root {} tx_offset {} does not match the local data_root {local_root} tx_offset {local_tx_offset}",
-                unpacked_chunk.data_tree_root,
+                "data sync rejected peer chunk at offset {chunk_offset}: fetched data commitment {delivered_commitment:?} tx_offset {} does not match the local data commitment {placed_commitment:?} tx_offset {local_tx_offset}",
                 unpacked_chunk.tx_offset,
             ));
         }
@@ -3533,7 +3540,7 @@ mod peer_chunk_validation_tests {
         .await
         .expect_err("a chunk for another data_root must not be stored");
         assert!(
-            err.to_string().contains("data_root") || err.to_string().contains("tx_offset"),
+            err.to_string().contains("data commitment") || err.to_string().contains("tx_offset"),
             "{err}"
         );
         assert_eq!(sm.get_chunk_type(&requested), Some(ChunkType::Entropy));
@@ -3548,6 +3555,143 @@ mod peer_chunk_validation_tests {
         assert!(
             !matches!(request.request_state, ChunkRequestState::Blocked(_)),
             "a foreign chunk is not a local index miss: {:?}",
+            request.request_state
+        );
+    }
+
+    /// A body that matches its own data path and the data_root and tx_offset
+    /// indexed at the requested offset, but was built for another data_size,
+    /// has another data commitment. The Submit ledger takes the ingress route,
+    /// where only the post-ingress placement check can reject it.
+    #[tokio::test]
+    async fn same_root_chunk_of_another_size_does_not_fill_the_requested_offset() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let chunk_size = 32_u64;
+        let config = Config::new_with_random_peer_id(super::sync_test_node_config(tmp.path(), 4));
+        let sm = Arc::new(
+            StorageModule::new(
+                &StorageModuleInfo {
+                    id: 0,
+                    partition_assignment: Some(PartitionAssignment {
+                        ledger_id: Some(DataLedger::Submit.into()),
+                        slot_index: Some(0),
+                        miner_address: IrysAddress::from([1_u8; 20]),
+                        partition_hash: H256::random(),
+                    }),
+                    submodules: vec![(partition_chunk_offset_ie!(0, 4), "chunks".into())],
+                },
+                &config,
+            )
+            .expect("storage module"),
+        );
+        sm.pack_with_zeros();
+
+        // `delivered_tx` holds two chunks. The placement names the same
+        // data_root under a data_size of three chunks: another commitment.
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let delivered_tx = signer
+            .create_transaction(vec![1_u8; 2 * chunk_size as usize], H256::zero())
+            .expect("delivered tx");
+        let delivered_tx = signer
+            .sign_transaction(delivered_tx)
+            .expect("sign delivered");
+        let mut placed_header = delivered_tx.header.clone();
+        placed_header.data_size = 3 * chunk_size;
+        let (_root, placed_proofs) = irys_types::DataTransactionLedger::merklize_tx_root(
+            std::slice::from_ref(&placed_header),
+        );
+        sm.index_transaction_data(
+            &placed_header,
+            &placed_proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 2)),
+            0,
+        )
+        .expect("index the placed tx at offsets 0 to 2");
+
+        let requested = PartitionChunkOffset::from(0_u32);
+        let (placed_commitment, placed_root, placed_tx_offset) = sm
+            .data_root_and_tx_offset_at(requested)
+            .expect("local index read")
+            .expect("offset 0 is indexed");
+        let delivered = delivered_tx
+            .data_chunks()
+            .expect("delivered chunks")
+            .remove(0);
+        let geometry = config.data_tree_geometry();
+        assert_eq!(delivered.data_tree_root, placed_root);
+        assert_eq!(delivered.tx_offset, placed_tx_offset);
+        assert_ne!(delivered.data_commitment(&geometry), placed_commitment);
+        assert_eq!(sm.get_chunk_type(&requested), Some(ChunkType::Entropy));
+
+        let env = open_or_create_db(
+            tmp.path().join("db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        )
+        .expect("db");
+        let db = DatabaseProvider(Arc::new(env));
+        let (service_senders, receivers) = ServiceSenders::new();
+        let mut ingress_rx = receivers.chunk_ingress;
+        let mut data_sync_rx = receivers.data_sync;
+        tokio::spawn(async move {
+            while let Some(traced) = ingress_rx.recv().await {
+                let (msg, _span) = traced.into_parts();
+                if let ChunkIngressMessage::IngestChunk(_, Some(reply), _) = msg {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        });
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        {
+            use irys_testing_utils::IrysBlockHeaderTestExt as _;
+            genesis.test_sign();
+        }
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let peer_list = PeerList::from_peers(
+            Vec::new(),
+            service_senders.peer_network.clone(),
+            &config,
+            tokio::sync::broadcast::channel(8).0,
+        )
+        .expect("peer list");
+        let factory: crate::chunk_fetcher::ChunkFetcherFactory =
+            Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize)));
+        let mut inner = DataSyncServiceInner::new(
+            block_tree_guard,
+            Arc::new(RwLock::new(vec![sm.clone()])),
+            peer_list,
+            db,
+            factory,
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        );
+
+        let peer = IrysAddress::from([9_u8; 20]);
+        mark_requested(&mut inner, sm.id, requested, peer);
+        let err = deliver(
+            &mut inner,
+            &mut data_sync_rx,
+            sm.id,
+            requested,
+            peer,
+            ChunkFormat::Unpacked(delivered),
+        )
+        .await
+        .expect_err("a chunk for another data commitment must not be stored");
+        assert!(err.to_string().contains("data commitment"), "{err}");
+        assert_eq!(sm.get_chunk_type(&requested), Some(ChunkType::Entropy));
+        assert!(!sm.is_data_write_pending_at(requested));
+        let request = &inner.chunk_orchestrators[&sm.id].chunk_requests[&requested];
+        assert!(
+            request.excluded.contains(&peer),
+            "the peer that returned the other-size chunk must be excluded"
+        );
+        assert!(
+            !matches!(request.request_state, ChunkRequestState::Blocked(_)),
+            "an other-size chunk is not a local index miss: {:?}",
             request.request_state
         );
     }
