@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793142623533,
+  "lastUpdate": 1793186495576,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -19806,6 +19806,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000145,
+            "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "065c5e4d4f1c728ed30d5091f985b71e1f661a2a",
+          "message": "fix(config): validate config, bound the price oracle, fix storage edge cases (#1714)\n\n* fix(config): reject zero and out-of-range values that fail at runtime\n\nConfig::validate now rejects block_migration_depth, ema.price_adjustment_interval\nand vdf.reset_frequency of zero (modulo/divisor or zeroed liveness floor), zero\nmempool LRU capacities (max_valid_items, max_invalid_items, max_pending_pledge_items),\nand num_chunks_in_partition above u32::MAX (u32 chunk offsets would truncate).\n\n* fix(config): reject a perm storage term that overflows epoch math\n\n* fix(price-oracle): reject oracle timestamps ahead of the local clock\n\nReal oracle clients fail a fetch whose last_updated_at leads the local\nwall clock by more than MAX_ORACLE_CLOCK_SKEW_SECS, so a future-dated\nsource cannot win the freshest-price selection. choose_oracle_price\ncomputes the freshness window with saturating arithmetic.\n\n* fix(price-oracle): reject a zero feed price\n\nA zero price fails oracle validation on every node, so a producer that\nadopted it would build blocks no node accepts. Treat it as a failed fetch\nand keep the previous cached value.\n\n* fix(price-oracle): bound oracle HTTP request time and response size\n\nOracle clients now use a request timeout, and read the body in chunks\nwith a size cap (reusing accumulate_response_bytes) before parsing, so a\nslow or oversized response cannot stall the poller or use unbounded\nmemory.\n\n* fix(chain): retry the initial oracle fetch and report a startup error\n\nA transient feed error at boot no longer panics the node. The initial\nfetch retries with doubling backoff, then init_price_oracle returns an\nerror naming the failing oracle. A node is never started without the\nprice of a configured oracle.\n\n* fix(database): skip a cached chunk whose data root is gone\n\n* fix(database): delete reclaimed cache entries through the walking cursor\n\nDelete the current CachedChunksIndex entry with the walker's own cursor\ninstead of a second cursor, so the walk never depends on cursor state\nafter a foreign delete. Adds interleaved and large-duplicate-set tests.\n\n* refactor(database): remove the unused RowSource impl for RocksSubmoduleStore\n\n* fix(database): order DataRootInfo by data_size after start_offset\n\n* fix(database): size the tx-path ledger totals from DataLedger::ALL\n\n* refactor(types): remove the unused UnpackedChunk::end_byte_offset\n\n* fix(types): return an error for undecodable PdArgsEncWrapper input\n\n* fix(types): return an error for a malformed branch region in validate_chunk\n\n* fix(database): fail placement scans on a malformed interval key\n\nA non-4-byte key in the interval family was skipped, so a corrupt\nplacement went undetected by conversion and verification. Decode the\nkey and return an error, in read_placements and highest_placement_end.\n\n* fix(block-discovery): read data tx headers on a blocking thread\n\nThe per-txid database reads ran on the async worker and stalled the\nconcurrent mempool lookup. Run them in spawn_blocking, as the commitment\nlookup does.\n\n* fix(types): reject a pre-1970 activation timestamp\n\nA negative timestamp was cast to u64 and wrapped to a far-future value.\nReturn a deserialization error instead.\n\n* test(database): keep test doc comments on their tests\n\n* docs: correct oracle and config validation comments\n\n* refactor(price-oracle): narrow oracle limit constants to crate visibility\n\n* test(database): rename malformed interval key test\n\n* test(actors): delete cached chunk index entries through the walking cursor\n\n* fix(chain): fetch initial oracle prices before starting reth and services\n\nA failed initial fetch now returns before any service exists, so no\nordered shutdown is needed. Poller spawn stays in service init.\n\n* test(database): keep a reference test for writes during a deleting dupsort walk\n\nMDBX aborts the process when a dupsort walk deletes through its cursor\nand the same table gets a write before the walk ends. The ignored test\nreproduces this. The cache service test helpers collect the aged\nentries and write them after the walk; their comments now give that\nreason.",
+          "timestamp": "2026-10-28T11:01:56Z",
+          "tree_id": "3b87c2a4cac47af3e0951b7ac72555eba8da2e45",
+          "url": "https://github.com/Irys-xyz/irys/commit/065c5e4d4f1c728ed30d5091f985b71e1f661a2a"
+        },
+        "date": 1793186493701,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012002,
+            "range": "± 0.000297",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119532,
+            "range": "± 0.001851",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.204512,
+            "range": "± 0.036621",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.954231,
+            "range": "± 0.167576",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074865,
+            "range": "± 0.001407",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 752.682108,
+            "range": "± 8.428785",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 984.221563,
+            "range": "± 5.111407",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120475,
+            "range": "± 0.001779",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1222.316657,
+            "range": "± 11.607248",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1596.993681,
+            "range": "± 103.415163",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.124036,
+            "range": "± 0.018062",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 237.211223,
+            "range": "± 20.782448",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.782875,
+            "range": "± 3.192895",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
             "range": "± 0.000003",
             "unit": "ms/iter"
           }
