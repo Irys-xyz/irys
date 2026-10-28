@@ -1276,6 +1276,111 @@ mod tests {
         Ok(())
     }
 
+    /// A V3 node holds data-cache rows in the old layout. No V4 type decodes
+    /// those bytes, so the V3→V4 step must drop them without decoding. The
+    /// rows are written raw, in each table's own key width, and the other
+    /// tables stay as they were.
+    #[test]
+    fn v3_to_v4_clears_undecodable_data_cache_rows() -> eyre::Result<()> {
+        use crate::db_cache::{
+            CachedChunk, CachedChunkIndexEntry, CachedDataRoot, CachedIngressLeaf,
+        };
+        use crate::tables::{
+            CachedChunks, CachedChunksIndex, CachedDataRoots, CachedIngressLeaves,
+            CompactCachedIngressProof, IngressProofs, IrysCommitments,
+        };
+        use irys_types::{CommitmentTransaction, ConsensusConfig, DataTransactionHeader};
+        use reth_db_api::table::Decompress;
+        use reth_db_api::tables::{RawDupSort, RawKey, RawTable, RawValue};
+
+        /// True when the V4 value type reads `bytes` without an error or a panic.
+        fn decodes<V: Decompress>(bytes: &[u8]) -> bool {
+            matches!(std::panic::catch_unwind(|| V::decompress(bytes)), Ok(Ok(_)))
+        }
+
+        // A value that no V4 type decodes stands in for an old-layout row:
+        // a flags byte and no fields.
+        let old_value = vec![0xFF_u8];
+        assert!(!decodes::<CachedDataRoot>(&old_value));
+        assert!(!decodes::<CachedChunkIndexEntry>(&old_value));
+        assert!(!decodes::<CachedChunk>(&old_value));
+        assert!(!decodes::<CachedIngressLeaf>(&old_value));
+        assert!(!decodes::<CompactCachedIngressProof>(&old_value));
+        // A V3 row is keyed by the data root: 32 bytes. The leaf key adds the
+        // 20-byte address.
+        let data_root_key = vec![5_u8; 32];
+        let leaf_key = vec![5_u8; 32 + 20];
+
+        let db_path = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            db_path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let config = ConsensusConfig::testing();
+        let header = DataTransactionHeader::new(&config);
+        let commitment_tx = CommitmentTransaction::new_stake(&config, H256::from([3_u8; 32]));
+        {
+            let write_tx = db.tx_mut()?;
+            crate::set_database_schema_version(&write_tx, DatabaseVersion::V3)?;
+            crate::insert_tx_header(&write_tx, &header)?;
+            crate::insert_commitment_tx(&write_tx, &commitment_tx)?;
+            write_tx.put::<RawTable<CachedDataRoots>>(
+                RawKey::from_vec(data_root_key.clone()),
+                RawValue::from_vec(old_value.clone()),
+            )?;
+            write_tx.put::<RawDupSort<CachedChunksIndex>>(
+                RawKey::from_vec(data_root_key.clone()),
+                RawValue::from_vec(old_value.clone()),
+            )?;
+            write_tx.put::<RawTable<CachedChunks>>(
+                RawKey::from_vec(data_root_key.clone()),
+                RawValue::from_vec(old_value.clone()),
+            )?;
+            write_tx.put::<RawDupSort<CachedIngressLeaves>>(
+                RawKey::from_vec(leaf_key),
+                RawValue::from_vec(old_value.clone()),
+            )?;
+            write_tx.put::<RawDupSort<IngressProofs>>(
+                RawKey::from_vec(data_root_key),
+                RawValue::from_vec(old_value),
+            )?;
+            write_tx.commit()?;
+        }
+        {
+            let read_tx = db.tx()?;
+            assert_eq!(read_tx.entries::<CachedDataRoots>()?, 1);
+            assert_eq!(read_tx.entries::<CachedChunksIndex>()?, 1);
+            assert_eq!(read_tx.entries::<CachedChunks>()?, 1);
+            assert_eq!(read_tx.entries::<CachedIngressLeaves>()?, 1);
+            assert_eq!(read_tx.entries::<IngressProofs>()?, 1);
+        }
+
+        crate::migration::ensure_db_version_compatible(&db)?;
+
+        let read_tx = db.tx()?;
+        assert_eq!(
+            crate::database_schema_version(&mut db.tx()?)?,
+            Some(DatabaseVersion::V4 as u32)
+        );
+        assert_eq!(read_tx.entries::<CachedDataRoots>()?, 0);
+        assert_eq!(read_tx.entries::<CachedChunksIndex>()?, 0);
+        assert_eq!(read_tx.entries::<CachedChunks>()?, 0);
+        assert_eq!(read_tx.entries::<CachedIngressLeaves>()?, 0);
+        assert_eq!(read_tx.entries::<IngressProofs>()?, 0);
+        assert!(
+            crate::tx_header_by_txid(&read_tx, &header.id)?
+                .is_some_and(|stored| stored.eq(&header))
+        );
+        assert_eq!(
+            read_tx
+                .get::<IrysCommitments>(commitment_tx.id())?
+                .map(|stored| stored.0),
+            Some(commitment_tx)
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_fresh_db_gets_current_version_stamped() {
         use crate::migration::ensure_db_version_compatible;
