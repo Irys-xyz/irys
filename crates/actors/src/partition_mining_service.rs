@@ -140,7 +140,7 @@ fn check_startup_placement(
     db: DatabaseProvider,
     ledger: DataLedger,
     ledger_offset: u64,
-    chunk_size: u64,
+    geometry: &irys_types::data_tree::Geometry,
     pool: Option<TxPathPool>,
     placement: DerivePlacement,
 ) -> eyre::Result<()> {
@@ -148,7 +148,7 @@ fn check_startup_placement(
         db.0.as_ref(),
         ledger,
         ledger_offset,
-        chunk_size,
+        geometry.chunk_size(),
         pool.as_deref(),
     )?;
     let check = match placement {
@@ -163,14 +163,18 @@ fn check_startup_placement(
     };
     let tx_index =
         u32::try_from(derived.tx_index).map_err(|_| eyre::eyre!("tx index exceeds u32"))?;
-    if check.data_root != derived.data_root
+    let derived_commitment = irys_types::data_tree::data_commitment(
+        geometry,
+        irys_types::DataTreeRoot(derived.data_root),
+        derived.data_size,
+    );
+    if check.data_commitment != derived_commitment
         || check.block_height != Some(derived.height)
         || check.tx_index != Some(tx_index)
         || check.ledger != Some(derived.ledger.get_id())
     {
         return Err(eyre::eyre!(
-            "placement mismatch: derived data_root {} height {} tx_index {tx_index} ledger {}",
-            derived.data_root,
+            "placement mismatch: derived data commitment {derived_commitment:?} height {} tx_index {tx_index} ledger {}",
             derived.height,
             derived.ledger.get_id()
         ));
@@ -729,7 +733,7 @@ impl PartitionMiningServiceInner {
         Some(match submodule.db.view(|tx| tx.placement_at(offset)) {
             Ok(Some(placement)) => {
                 DerivePlacement::Check(irys_database::tx_path_derive::PlacementCheck {
-                    data_root: placement.data_tree_root.0,
+                    data_commitment: placement.data_commitment,
                     ledger: placement.ledger,
                     block_height: placement.block_height,
                     tx_index: placement.tx_index,
@@ -772,10 +776,10 @@ impl PartitionMiningServiceInner {
             return;
         };
         let pool = self.tx_path_pool.clone();
-        let chunk_size = self.config.consensus.chunk_size;
+        let geometry = self.config.data_tree_geometry();
         let module_id = self.storage_module.id;
         let joined = tokio::task::spawn_blocking(move || {
-            check_startup_placement(db, ledger, ledger_offset, chunk_size, pool, placement)
+            check_startup_placement(db, ledger, ledger_offset, &geometry, pool, placement)
         })
         .await;
         let failed = match joined {

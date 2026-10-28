@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use eyre::eyre;
 use irys_types::{
-    Base64, ChunkDataPath, DataLedger, DataRootLeaf, DataTransactionHeader, DataTransactionLedger,
-    DataTreeRoot, H256, HASH_SIZE, Helpers as _, Node, PartitionChunkOffset, Proof,
-    ProofDeserialize as _, TxChunkOffset, TxPath,
+    Base64, ChunkDataPath, DataCommitment, DataLedger, DataRootLeaf, DataTransactionHeader,
+    DataTransactionLedger, DataTreeRoot, H256, HASH_SIZE, Helpers as _, Node, PartitionChunkOffset,
+    Proof, ProofDeserialize as _, TxChunkOffset, TxPath,
     data_tree::{Geometry, data_commitment, verify_data_chunk},
     expected_chunk_byte_range, generate_data_root, generate_leaves_from_data_roots, hash_sha256,
     validate_path,
@@ -860,7 +860,7 @@ fn finish(started: Instant, cpu_nanos: u64, built: BuiltPath) -> eyre::Result<De
 /// Identity the miner stored for this offset. Schema v2 leaves the last three empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlacementCheck {
-    pub data_root: H256,
+    pub data_commitment: DataCommitment,
     pub ledger: Option<u32>,
     pub block_height: Option<u64>,
     pub tx_index: Option<u32>,
@@ -903,9 +903,11 @@ pub fn cross_check_derived(
     if (tx_path.min_byte_range, tx_path.max_byte_range) != (derived.tx_byte_start, tx_end) {
         eyre::bail!("derived tx path range does not match offset {ledger_offset}");
     }
+    let derived_commitment =
+        data_commitment(geometry, DataTreeRoot(derived.data_root), derived.data_size);
     verify_data_chunk(
         geometry,
-        data_commitment(geometry, DataTreeRoot(derived.data_root), derived.data_size),
+        derived_commitment,
         derived.data_size,
         TxChunkOffset(chunk_index),
         chunk_data,
@@ -921,17 +923,17 @@ pub fn cross_check_derived(
         return Ok(());
     };
     let tx_index = u32::try_from(derived.tx_index).map_err(|_| eyre!("tx index exceeds u32"))?;
-    if placement.data_root != derived.data_root
+    if placement.data_commitment != derived_commitment
         || placement.block_height != Some(derived.height)
         || placement.tx_index != Some(tx_index)
         || placement.ledger != Some(derived.ledger.get_id())
     {
         eyre::bail!(
-            "placement mismatch: derived data_root {} height {} tx_index {tx_index} ledger {}, placement data_root {} height {:?} tx_index {:?} ledger {:?}",
-            derived.data_root,
+            "placement mismatch: derived data commitment {:?} height {} tx_index {tx_index} ledger {}, placement data commitment {:?} height {:?} tx_index {:?} ledger {:?}",
+            derived_commitment,
             derived.height,
             derived.ledger.get_id(),
-            placement.data_root,
+            placement.data_commitment,
             placement.block_height,
             placement.tx_index,
             placement.ledger
@@ -1147,7 +1149,11 @@ mod tests {
             cpu_nanos: 0,
         };
         let placement = super::PlacementCheck {
-            data_root,
+            data_commitment: super::data_commitment(
+                &Geometry::TESTING,
+                DataTreeRoot(data_root),
+                chunk_size,
+            ),
             ledger: Some(DataLedger::Publish.get_id()),
             block_height: Some(4),
             tx_index: Some(0),
@@ -1203,6 +1209,30 @@ mod tests {
             Some(moved),
         )
         .expect_err("placement");
+        assert!(
+            mismatch.to_string().contains("placement mismatch"),
+            "{mismatch}"
+        );
+
+        // Same root under another data_size is another commitment.
+        let other_size = super::PlacementCheck {
+            data_commitment: super::data_commitment(
+                &geometry,
+                DataTreeRoot(data_root),
+                chunk_size * 2,
+            ),
+            ..placement
+        };
+        assert_ne!(other_size.data_commitment, placement.data_commitment);
+        let mismatch = super::cross_check_derived(
+            &derived,
+            8,
+            &geometry,
+            &data_path,
+            &chunk_data,
+            Some(other_size),
+        )
+        .expect_err("same root, other size");
         assert!(
             mismatch.to_string().contains("placement mismatch"),
             "{mismatch}"
