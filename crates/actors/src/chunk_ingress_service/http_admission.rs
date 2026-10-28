@@ -4,7 +4,7 @@ use std::time::Duration;
 use irys_types::{SendTraced as _, Traced, chunk::UnpackedChunk};
 use tokio::sync::{Semaphore, mpsc::UnboundedSender};
 
-use super::{ChunkIngressMessage, HttpAdmissionGuard};
+use super::{ChunkIngressMessage, ChunkIngressSource, HttpAdmissionGuard};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum HttpChunkEnqueueError {
@@ -68,7 +68,7 @@ pub async fn enqueue_http_chunk(
                 chunk,
                 None,
                 Some(guard),
-                true,
+                ChunkIngressSource::Sent,
             ))
             .map_err(|_| HttpChunkEnqueueError::ChannelClosed)?;
     }
@@ -112,7 +112,7 @@ mod tests {
         assert_eq!(admission.available_permits(), 0);
         let traced = rx.try_recv().expect("queued");
         match traced.inner {
-            ChunkIngressMessage::IngestChunk(_, None, Some(_), true) => {}
+            ChunkIngressMessage::IngestChunk(_, None, Some(_), ChunkIngressSource::Sent) => {}
             other => panic!("expected fire-and-forget with guard, got {other:?}"),
         }
     }

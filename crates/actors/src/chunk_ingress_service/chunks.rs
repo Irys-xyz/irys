@@ -1,10 +1,10 @@
-use super::ChunkIngressMessage;
 use super::ChunkIngressServiceInner;
 use super::ingress_proofs::generate_and_store_ingress_proof_from_leaves;
 use super::metrics::{
     record_chunk_duplicate, record_chunk_error, record_chunk_ingested, record_enqueue_duration,
     record_flush_failure, record_validation_duration,
 };
+use super::{ChunkIngressMessage, ChunkIngressSource};
 
 use irys_data_tree::{SizeError, VerifyError};
 use irys_database::{complete_ingress_leaves, db::IrysDatabaseExt as _};
@@ -368,7 +368,11 @@ impl ChunkIngressServiceInner {
         for chunk in chunks {
             let chunk = Arc::new(chunk);
             match self
-                .ingest_chunk(Arc::clone(&chunk), PendingDrainRole::Own, false)
+                .ingest_chunk(
+                    Arc::clone(&chunk),
+                    PendingDrainRole::Own,
+                    ChunkIngressSource::Fetched,
+                )
                 .await
             {
                 Ok(()) => saw_ok = true,
@@ -484,23 +488,19 @@ impl ChunkIngressServiceInner {
     pub(crate) async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
-        park_when_placed: bool,
+        source: ChunkIngressSource,
     ) -> Result<(), ChunkIngressError> {
-        self.ingest_chunk(
-            Arc::new(chunk),
-            PendingDrainRole::External,
-            park_when_placed,
-        )
-        .await
-        .map_err(|failure| failure.error)
+        self.ingest_chunk(Arc::new(chunk), PendingDrainRole::External, source)
+            .await
+            .map_err(|failure| failure.error)
     }
 
-    /// `park_when_placed`: see [`super::ChunkIngressMessage::IngestChunk`].
+    /// `source`: see [`ChunkIngressSource`].
     async fn ingest_chunk(
         &self,
         chunk: Arc<UnpackedChunk>,
         role: PendingDrainRole,
-        park_when_placed: bool,
+        source: ChunkIngressSource,
     ) -> Result<(), IngressFailure> {
         // TODO: maintain a shared read transaction so we have read isolation
         let chunk_size = self.config.consensus.chunk_size;
@@ -518,17 +518,7 @@ impl ChunkIngressServiceInner {
         let geometry = self.config.data_tree_geometry();
         let data_commitment = chunk.data_commitment(&geometry);
 
-        // Early exit if we've already processed this chunk recently
         let chunk_key = chunk.chunk_key(&geometry);
-
-        if self.recent_valid_chunks.read().await.contains(&chunk_key) {
-            debug!(
-                "Chunk {} already processed recently, skipping re-gossip",
-                &chunk_key
-            );
-            record_chunk_duplicate();
-            return Ok(());
-        }
 
         // Check to see if we have a cached data_root for this chunk
         let _fetch_size_span = info_span!("chunk.fetch_data_size").entered();
@@ -547,14 +537,40 @@ impl ChunkIngressServiceInner {
 
         drop(_fetch_size_span);
 
+        // Early exit if we've already processed this chunk recently. A sent
+        // chunk with no cache row is not a replay: the row was pruned after
+        // the chunk was cached, and a later upload of the same data (parked
+        // before its header) needs the placed path to park it again.
+        if (cached_data_root.is_some() || source == ChunkIngressSource::Fetched)
+            && self.recent_valid_chunks.read().await.contains(&chunk_key)
+        {
+            debug!(
+                "Chunk {} already processed recently, skipping re-gossip",
+                &chunk_key
+            );
+            record_chunk_duplicate();
+            return Ok(());
+        }
+
         let Some(cached_data_root) = cached_data_root else {
             // The cheap limits come before any index read.
             self.check_unconfirmed_chunk_bounds(chunk.as_ref(), chunk_size)?;
 
             // A sent chunk that this node already stored from its placement
             // and parked. A replay of it changes nothing, so it skips the
-            // index reads and the proof check.
-            if park_when_placed && self.recent_placed_chunks.read().await.contains(&chunk_key) {
+            // index reads and the proof check. The replay cache outlives the
+            // parked chunk (a header drains it, or the pending map evicts it).
+            // Only a chunk that is still parked is a replay: otherwise this is
+            // new work for a later upload of the same data, which must park.
+            if source == ChunkIngressSource::Sent
+                && self.recent_placed_chunks.read().await.contains(&chunk_key)
+                && self
+                    .pending_chunks
+                    .read()
+                    .await
+                    .get(&data_commitment)
+                    .is_some_and(|parked| parked.peek(&chunk.tx_offset).is_some())
+            {
                 debug!(
                     "Chunk {} already stored from its placement recently, skipping",
                     &chunk_key
@@ -578,7 +594,7 @@ impl ChunkIngressServiceInner {
                             data_size,
                             chunk_key,
                             role,
-                            park_when_placed,
+                            source,
                         )
                         .await;
                 }
@@ -592,7 +608,9 @@ impl ChunkIngressServiceInner {
 
             // We don't have a data_root for this chunk but possibly the transaction containing this
             // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
-            return self.park_until_header(data_commitment, chunk, role).await;
+            return self
+                .park_until_header(data_commitment, chunk, chunk_key, role)
+                .await;
         };
 
         // The commitment binds the size, so the cached size is the size this
@@ -702,6 +720,7 @@ impl ChunkIngressServiceInner {
         &self,
         data_commitment: DataCommitment,
         chunk: Arc<UnpackedChunk>,
+        chunk_key: ChunkKey,
         role: PendingDrainRole,
     ) -> Result<(), IngressFailure> {
         let preheader_chunks_per_item = std::cmp::min(
@@ -722,6 +741,11 @@ impl ChunkIngressServiceInner {
                 "pre-header",
             )
             .await?;
+
+        // A parked chunk has no cache row, so a replay entry for it is stale
+        // (the row was pruned after an earlier cache). Left in place, it
+        // would make the drain that follows the header skip this chunk.
+        self.recent_valid_chunks.write().await.pop(&chunk_key);
 
         // A parked chunk is not cached. Log that, so Ok is not read as
         // a completed ingress.
@@ -800,17 +824,18 @@ impl ChunkIngressServiceInner {
     /// take the cached path when a header for this commitment arrives. It is
     /// not gossiped: a peer that holds the placement gets it by data sync.
     ///
-    /// With `park_when_placed` (a chunk that a client or a peer sent), the
+    /// With [`ChunkIngressSource::Sent`] (a chunk that a client or a peer sent), the
     /// chunk also parks under its commitment after the module write. The
     /// same data can be uploaded again by a new tx with the same commitment,
     /// whose header arrives after its chunks. That header then drains the
     /// parked chunk through the cached path, so the body is cached and the
     /// ingress leaf is written without a resend. After the park the chunk key
     /// goes in `recent_placed_chunks`, so a replay is a no-op: the chunk is
-    /// already stored and parked. If the pending map drops the parked chunk
-    /// first (pending LRU eviction), a replay does not park it again; a send
-    /// after the header arrives takes the cached path. A failed park is not
-    /// remembered, so a resend parks again.
+    /// already stored and parked. The key is a replay only while the pending
+    /// map still holds the chunk. Once a header drains it, or the pending map
+    /// evicts it, a send of the same chunk takes the placed path again and
+    /// parks again (a later upload of the same data needs its body and leaf).
+    /// A failed park is not remembered, so a resend parks again.
     async fn ingest_placed_chunk(
         &self,
         chunk: Arc<UnpackedChunk>,
@@ -819,7 +844,7 @@ impl ChunkIngressServiceInner {
         data_size: u64,
         chunk_key: ChunkKey,
         role: PendingDrainRole,
-        park_when_placed: bool,
+        source: ChunkIngressSource,
     ) -> Result<(), IngressFailure> {
         let chunk_len = verify_anchored_chunk(geometry, data_commitment, data_size, &chunk)?;
 
@@ -855,10 +880,15 @@ impl ChunkIngressServiceInner {
                 );
             }
         }
-        if !park_when_placed {
+        if source == ChunkIngressSource::Fetched {
             return Ok(());
         }
-        self.park_until_header(data_commitment, chunk, role).await?;
+        // The module write above is already done when the park runs. If the
+        // park is rejected (per-item cap, or a drain in progress), the sender
+        // gets an error although the chunk is stored. A resend verifies the
+        // chunk again and repeats the module write, which is idempotent.
+        self.park_until_header(data_commitment, chunk, chunk_key, role)
+            .await?;
         self.recent_placed_chunks.write().await.put(chunk_key, ());
         Ok(())
     }
@@ -1528,7 +1558,7 @@ mod tests {
         // Header A: same root, 64 bytes.
         insert_cached_data_root(&inner.irys_db, data_root, 64);
         inner
-            .handle_chunk_ingress_message(last_chunk.clone(), true)
+            .handle_chunk_ingress_message(last_chunk.clone(), ChunkIngressSource::Sent)
             .await
             .expect("a chunk whose size no header names parks; it is not a fault");
         {
@@ -1597,7 +1627,7 @@ mod tests {
         };
 
         let error = inner
-            .handle_chunk_ingress_message(chunk, true)
+            .handle_chunk_ingress_message(chunk, ChunkIngressSource::Sent)
             .await
             .expect_err("a chunk of the wrong length must be rejected");
         assert!(
@@ -1652,7 +1682,10 @@ mod tests {
 
         for (data_size, chunk_index) in [(96, 2), (64, 1), (96, 0), (64, 0), (96, 1)] {
             let result = inner
-                .handle_chunk_ingress_message(chunk_of(data_size, chunk_index), true)
+                .handle_chunk_ingress_message(
+                    chunk_of(data_size, chunk_index),
+                    ChunkIngressSource::Sent,
+                )
                 .await;
             if data_size == 96 {
                 result.unwrap_or_else(|error| {
@@ -1738,7 +1771,7 @@ mod tests {
                 tx_offset: TxChunkOffset::from(u32::try_from(chunk_index)?),
             };
             let error = inner
-                .handle_chunk_ingress_message(chunk, true)
+                .handle_chunk_ingress_message(chunk, ChunkIngressSource::Sent)
                 .await
                 .expect_err("no honest proof of the larger tree verifies under the prefix header");
             assert!(
@@ -1764,7 +1797,7 @@ mod tests {
                     bytes: data[64..96].to_vec().into(),
                     tx_offset: TxChunkOffset::from(1),
                 },
-                true,
+                ChunkIngressSource::Sent,
             )
             .await
             .expect("the forged proof opens chunk 1 of the prefix size");
@@ -1808,7 +1841,7 @@ mod tests {
         };
 
         inner
-            .handle_chunk_ingress_message(unknown_size_chunk, true)
+            .handle_chunk_ingress_message(unknown_size_chunk, ChunkIngressSource::Sent)
             .await
             .expect("a chunk whose size no header names parks; it is not a fault");
         {
@@ -1831,7 +1864,7 @@ mod tests {
                 inner
                     .handle_chunk_ingress_message(
                         chunk_with(other_root, chunk_index, other_upload, CLAIMED_DATA_SIZE),
-                        true,
+                        ChunkIngressSource::Sent,
                     )
                     .await
                     .expect("a chunk that waits for its header parks");
@@ -1986,7 +2019,7 @@ mod tests {
         };
 
         inner
-            .handle_chunk_ingress_message(chunk.clone(), false)
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Fetched)
             .await?;
 
         assert_eq!(
@@ -2065,13 +2098,13 @@ mod tests {
         };
 
         inner
-            .handle_chunk_ingress_message(chunk.clone(), true)
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
             .await?;
         assert_no_cache_state(&inner, data_commitment);
 
         insert_cached_data_root(&inner.irys_db, data_root, 64);
         inner
-            .handle_chunk_ingress_message(chunk.clone(), true)
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
             .await?;
 
         let address = inner.config.irys_signer().address();
@@ -2123,7 +2156,7 @@ mod tests {
         };
 
         inner
-            .handle_chunk_ingress_message(chunk.clone(), true)
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
             .await?;
 
         assert_eq!(
@@ -2171,6 +2204,82 @@ mod tests {
         Ok(())
     }
 
+    /// The same data is uploaded twice before any header. The first sent chunk
+    /// parks and its header drains it, then the cache row is pruned. The same
+    /// chunk is sent again: the replay cache holds its key, but nothing is
+    /// parked, so it parks again and a new header drains it.
+    #[tokio::test]
+    async fn placed_chunk_parks_again_after_its_header_drained_it() -> eyre::Result<()> {
+        use irys_database::reth_db::transaction::DbTxMut as _;
+        use irys_database::{
+            cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _,
+            delete_cached_chunks_by_data_root, tables::CachedDataRoots,
+        };
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-placement-repark")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        inner.chunk_data_writer = super::super::chunk_data_writer::ChunkDataWriter::spawn(
+            inner.irys_db.clone(),
+            inner.config.irys_signer().address(),
+            inner.config.data_tree_geometry(),
+            8,
+            &tokio::runtime::Handle::current(),
+        );
+        let (_storage_module, data, data_root, proofs) =
+            place_upload_without_cache_row(&mut inner)?;
+        let data_commitment = size_key(data_root, 64);
+        let chunk = UnpackedChunk {
+            data_tree_root: DataTreeRoot(data_root),
+            data_size: 64,
+            data_path: proofs[1].clone().into(),
+            bytes: data[32..64].to_vec().into(),
+            tx_offset: TxChunkOffset::from(1),
+        };
+        let is_parked = |inner: &ChunkIngressServiceInner| {
+            let pending = inner.pending_chunks.clone();
+            async move {
+                pending
+                    .read()
+                    .await
+                    .get(&data_commitment)
+                    .is_some_and(|parked| parked.peek(&TxChunkOffset::from(1)).is_some())
+            }
+        };
+
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
+            .await?;
+        assert!(is_parked(&inner).await, "the first send parks");
+
+        // First header: the drain caches the chunk. Then the row is pruned.
+        insert_cached_data_root(&inner.irys_db, data_root, 64);
+        inner.process_pending_chunks_for_root(data_commitment).await;
+        assert!(!is_parked(&inner).await, "the drain leaves nothing parked");
+        inner.irys_db.update_eyre(|tx| {
+            delete_cached_chunks_by_data_root(tx, data_commitment)?;
+            tx.delete::<CachedDataRoots>(data_commitment, None)?;
+            Ok(())
+        })?;
+
+        // The same data again, before its header: the chunk parks again.
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
+            .await?;
+        assert!(is_parked(&inner).await, "the repeat send parks again");
+
+        insert_cached_data_root(&inner.irys_db, data_root, 64);
+        inner.process_pending_chunks_for_root(data_commitment).await;
+        assert!(!is_parked(&inner).await, "the new header drains it");
+        inner.irys_db.view_eyre(|tx| {
+            cached_chunk_by_chunk_offset(tx, data_commitment, TxChunkOffset::from(1))?
+                .expect("the drain caches the body");
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// A replay of a sent chunk that was stored from its placement and parked
     /// is a no-op: it does not read the placements again and does not park
     /// again.
@@ -2191,31 +2300,43 @@ mod tests {
         };
 
         inner
-            .handle_chunk_ingress_message(chunk.clone(), true)
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
             .await?;
-        assert!(
-            inner
-                .pending_chunks
-                .write()
-                .await
-                .pop(&data_commitment)
-                .is_some(),
-            "the first send parks the chunk"
-        );
+        // Swap the parked chunk for a marker at the same offset. A replay
+        // that parks again would overwrite the marker.
+        let marker = UnpackedChunk {
+            bytes: vec![0xEE].into(),
+            ..chunk.clone()
+        };
+        {
+            let mut pending = inner.pending_chunks.write().await;
+            assert!(
+                pending
+                    .get(&data_commitment)
+                    .is_some_and(|parked| parked.peek(&chunk.tx_offset).is_some()),
+                "the first send parks the chunk"
+            );
+            pending.park(marker);
+        }
 
         // With a failing placement read, a chunk that reaches the read parks.
         PLACEMENT_READ_FAULT_MODULES.with(|faulty| *faulty.borrow_mut() = vec![storage_module.id]);
-        let result = inner.handle_chunk_ingress_message(chunk, true).await;
+        let result = inner
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
+            .await;
         PLACEMENT_READ_FAULT_MODULES.with(|faulty| faulty.borrow_mut().clear());
         result.expect("a replay is not a fault");
 
-        assert!(
+        assert_eq!(
             inner
                 .pending_chunks
                 .read()
                 .await
                 .get(&data_commitment)
-                .is_none(),
+                .and_then(|parked| parked
+                    .peek(&chunk.tx_offset)
+                    .map(|held| held.bytes.0.clone())),
+            Some(vec![0xEE]),
             "the replay does not reach the placement read and does not park"
         );
         Ok(())
@@ -2299,7 +2420,9 @@ mod tests {
         };
 
         PLACEMENT_READ_FAULT_MODULES.with(|faulty| *faulty.borrow_mut() = vec![storage_module.id]);
-        let result = inner.handle_chunk_ingress_message(chunk, true).await;
+        let result = inner
+            .handle_chunk_ingress_message(chunk, ChunkIngressSource::Sent)
+            .await;
         PLACEMENT_READ_FAULT_MODULES.with(|faulty| faulty.borrow_mut().clear());
         result.expect("a failed placement read parks the chunk; it is not a fault");
 
@@ -2339,7 +2462,7 @@ mod tests {
 
         storage_module.pause_data_writes();
         let error = inner
-            .handle_chunk_ingress_message(chunk, true)
+            .handle_chunk_ingress_message(chunk, ChunkIngressSource::Sent)
             .await
             .expect_err("a chunk that nothing stores is not accepted");
         assert!(
@@ -2383,7 +2506,7 @@ mod tests {
         };
 
         let error = inner
-            .handle_chunk_ingress_message(chunk, true)
+            .handle_chunk_ingress_message(chunk, ChunkIngressSource::Sent)
             .await
             .expect_err("a chunk that fails against the placement is rejected");
         assert!(
@@ -2443,7 +2566,7 @@ mod tests {
         };
 
         inner
-            .handle_chunk_ingress_message(chunk, true)
+            .handle_chunk_ingress_message(chunk, ChunkIngressSource::Sent)
             .await
             .expect("a chunk that waits for its header parks; it is not a fault");
 
@@ -2648,7 +2771,7 @@ mod tests {
         let incoming = chunk_with(data_root, cap as u32, 0xAB, CLAIMED_DATA_SIZE);
 
         let err = inner
-            .handle_chunk_ingress_message(incoming.clone(), true)
+            .handle_chunk_ingress_message(incoming.clone(), ChunkIngressSource::Sent)
             .await
             .expect_err("a pre-header chunk must be rejected while the root is draining");
         assert!(
@@ -2695,7 +2818,7 @@ mod tests {
         expect_no_redrain(&mut receivers).await;
 
         let err = inner
-            .handle_chunk_ingress_message(incoming, true)
+            .handle_chunk_ingress_message(incoming, ChunkIngressSource::Sent)
             .await
             .expect_err("after the drain, a chunk past the cap still rejects");
         assert!(
@@ -2730,7 +2853,10 @@ mod tests {
         park_offsets(&inner, data_root, [0_u32]).await;
         let (popped, ticket) = pop_for_drain(&inner, data_root).await;
         inner
-            .handle_chunk_ingress_message(chunk_with(data_root, 0, 0xAB, CLAIMED_DATA_SIZE), true)
+            .handle_chunk_ingress_message(
+                chunk_with(data_root, 0, 0xAB, CLAIMED_DATA_SIZE),
+                ChunkIngressSource::Sent,
+            )
             .await
             .expect("the same offset parks while the root is draining");
 
@@ -2774,7 +2900,10 @@ mod tests {
         park_offsets(&inner, data_root, [0_u32]).await;
         let (popped, ticket) = pop_for_drain(&inner, data_root).await;
         inner
-            .handle_chunk_ingress_message(chunk_with(data_root, 1, 1, CLAIMED_DATA_SIZE), true)
+            .handle_chunk_ingress_message(
+                chunk_with(data_root, 1, 1, CLAIMED_DATA_SIZE),
+                ChunkIngressSource::Sent,
+            )
             .await
             .expect("the arrival parks before cancel");
         drop(popped);
@@ -2817,7 +2946,7 @@ mod tests {
             inner
                 .handle_chunk_ingress_message(
                     chunk_with(data_root, offset, offset as u8, CLAIMED_DATA_SIZE),
-                    true,
+                    ChunkIngressSource::Sent,
                 )
                 .await
                 .expect("a chunk under the cap must be kept while the root is draining");
@@ -2877,7 +3006,10 @@ mod tests {
         expect_no_redrain(&mut receivers).await;
 
         inner
-            .handle_chunk_ingress_message(chunk_with(data_root, 3, 3, 128), true)
+            .handle_chunk_ingress_message(
+                chunk_with(data_root, 3, 3, 128),
+                ChunkIngressSource::Sent,
+            )
             .await
             .expect("after the drain, a chunk of another size parks");
         {
@@ -3298,7 +3430,7 @@ mod tests {
         let incoming = chunk_with(data_root, 2, 0xAB, CLAIMED_DATA_SIZE);
 
         let err = inner
-            .handle_chunk_ingress_message(incoming, true)
+            .handle_chunk_ingress_message(incoming, ChunkIngressSource::Sent)
             .await
             .expect_err("a new pre-header chunk must still reject at the cap");
         assert!(
@@ -3494,7 +3626,7 @@ mod tests {
             tx_offset: TxChunkOffset::from(2),
         };
         inner
-            .handle_chunk_ingress_message(incoming, true)
+            .handle_chunk_ingress_message(incoming, ChunkIngressSource::Sent)
             .await
             .expect("a claim with no header parks; it is not a peer fault");
         let pending = inner.pending_chunks.read().await;
@@ -3523,7 +3655,7 @@ mod tests {
         incoming.bytes = vec![1_u8; 33].into();
 
         let err = inner
-            .handle_chunk_ingress_message(incoming, true)
+            .handle_chunk_ingress_message(incoming, ChunkIngressSource::Sent)
             .await
             .expect_err("a body over chunk_size must be rejected");
         assert!(
@@ -3558,7 +3690,7 @@ mod tests {
         incoming.data_path = vec![0_u8; max_path + 1].into();
 
         let err = inner
-            .handle_chunk_ingress_message(incoming, true)
+            .handle_chunk_ingress_message(incoming, ChunkIngressSource::Sent)
             .await
             .expect_err("a data_path over the pre-header max must be rejected");
         assert!(
@@ -3591,7 +3723,7 @@ mod tests {
         let incoming = chunk_with(data_root, 1, 0xAB, 32);
 
         let err = inner
-            .handle_chunk_ingress_message(incoming, true)
+            .handle_chunk_ingress_message(incoming, ChunkIngressSource::Sent)
             .await
             .expect_err("a tx_offset past the claimed size must be rejected");
         assert!(
@@ -3629,7 +3761,7 @@ mod tests {
         incoming.data_path = vec![0_u8; max_path].into();
 
         inner
-            .handle_chunk_ingress_message(incoming, true)
+            .handle_chunk_ingress_message(incoming, ChunkIngressSource::Sent)
             .await
             .expect("a bounded chunk parks");
         let pending = inner.pending_chunks.read().await;

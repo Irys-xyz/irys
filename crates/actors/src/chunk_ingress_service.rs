@@ -60,24 +60,33 @@ impl std::fmt::Debug for HttpAdmissionGuard {
     }
 }
 
+/// Where an ingested chunk came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkIngressSource {
+    /// A chunk a client or a peer sent to this node (HTTP upload, gossip).
+    /// With no cache row but a storage placement, it is stored from the
+    /// placement and also parks under its commitment: a later header for the
+    /// same commitment (the same data uploaded again) then drains it into the
+    /// cache.
+    Sent,
+    /// A chunk this node fetched (data sync, block-validation fetch, internal
+    /// re-ingest of a drained chunk). These chunks belong to old placements.
+    /// They do not park: parking them would fill the pending map with
+    /// commitments that no header will drain.
+    Fetched,
+}
+
 /// Messages handled by the ChunkIngressService
 #[derive(Debug)]
 pub enum ChunkIngressMessage {
     /// Ingest a chunk, optionally with a response channel for the result.
     ///
-    /// The last field is true for a chunk that a client or a peer sent to this
-    /// node (HTTP upload, gossip). When such a chunk has no cache row but a
-    /// storage placement, it is stored from the placement and also parked
-    /// under its commitment: a later header for the same commitment (the same
-    /// data uploaded again) then drains it into the cache. It is false for a
-    /// chunk that this node fetched (data sync, block validation). Those
-    /// chunks belong to old placements, and parking them would fill the
-    /// pending map with commitments that no header will drain.
+    /// The last field says where the chunk came from: see [`ChunkIngressSource`].
     IngestChunk(
         UnpackedChunk,
         Option<oneshot::Sender<Result<(), ChunkIngressError>>>,
         Option<HttpAdmissionGuard>,
-        bool,
+        ChunkIngressSource,
     ),
     /// Ingest an ingress proof received from a peer
     IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
@@ -220,10 +229,8 @@ enum NoPermitAction {
 impl ChunkIngressServiceInner {
     async fn handle_message(&self, msg: ChunkIngressMessage) {
         match msg {
-            ChunkIngressMessage::IngestChunk(chunk, response, _admission, park_when_placed) => {
-                let result = self
-                    .handle_chunk_ingress_message(chunk, park_when_placed)
-                    .await;
+            ChunkIngressMessage::IngestChunk(chunk, response, _admission, source) => {
+                let result = self.handle_chunk_ingress_message(chunk, source).await;
                 if let Err(e) = &result {
                     metrics::record_chunk_error(e.error_type(), e.is_advisory());
                     if response.is_none() {
@@ -813,7 +820,12 @@ mod overload_helpers_tests {
     #[tokio::test]
     async fn ingest_chunk_overloaded_returns_advisory_overloaded() {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let msg = ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx), None, true);
+        let msg = ChunkIngressMessage::IngestChunk(
+            dummy_chunk(),
+            Some(reply_tx),
+            None,
+            ChunkIngressSource::Sent,
+        );
 
         ChunkIngressService::send_overloaded_errors(msg);
 
@@ -828,7 +840,8 @@ mod overload_helpers_tests {
     /// channel — there is simply no caller to notify.
     #[tokio::test]
     async fn ingest_chunk_overloaded_no_reply_is_noop() {
-        let msg = ChunkIngressMessage::IngestChunk(dummy_chunk(), None, None, true);
+        let msg =
+            ChunkIngressMessage::IngestChunk(dummy_chunk(), None, None, ChunkIngressSource::Sent);
         ChunkIngressService::send_overloaded_errors(msg);
     }
 
@@ -863,11 +876,17 @@ mod overload_helpers_tests {
     fn has_reply_channel_distinguishes_fire_and_forget_from_reply_bearing() {
         let (reply_tx, _reply_rx) = oneshot::channel();
         assert!(
-            ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx), None, true)
-                .has_reply_channel()
+            ChunkIngressMessage::IngestChunk(
+                dummy_chunk(),
+                Some(reply_tx),
+                None,
+                ChunkIngressSource::Sent
+            )
+            .has_reply_channel()
         );
         assert!(
-            !ChunkIngressMessage::IngestChunk(dummy_chunk(), None, None, true).has_reply_channel()
+            !ChunkIngressMessage::IngestChunk(dummy_chunk(), None, None, ChunkIngressSource::Sent)
+                .has_reply_channel()
         );
 
         let (reply_tx, _reply_rx) = oneshot::channel();
@@ -915,13 +934,16 @@ mod overload_helpers_tests {
                 chunk.clone(),
                 Some(reply_tx),
                 None,
-                true
+                ChunkIngressSource::Sent
             )),
             NoPermitAction::Overloaded
         );
         assert_eq!(
             ChunkIngressService::no_permit_action(&ChunkIngressMessage::IngestChunk(
-                chunk, None, None, true
+                chunk,
+                None,
+                None,
+                ChunkIngressSource::Sent
             )),
             NoPermitAction::Backlog
         );

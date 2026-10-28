@@ -15,7 +15,7 @@ use irys_actors::block_discovery::{
     get_data_tx_in_parallel,
 };
 use irys_actors::{
-    MempoolFacade, block_discovery::BlockDiscoveryFacade,
+    ChunkIngressSource, MempoolFacade, block_discovery::BlockDiscoveryFacade,
     chunk_ingress_service::facade::ChunkIngressFacadeImpl,
 };
 use irys_database::{
@@ -162,7 +162,11 @@ where
 
         record_gossip_chunk_received(chunk_size);
 
-        match self.chunk_ingress.handle_chunk_ingress(chunk, true).await {
+        match self
+            .chunk_ingress
+            .handle_chunk_ingress(chunk, ChunkIngressSource::Sent)
+            .await
+        {
             Ok(()) => {
                 // Record processing duration on success
                 record_gossip_chunk_processing_duration(start.elapsed_ms());

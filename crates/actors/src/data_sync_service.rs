@@ -7,8 +7,8 @@ pub mod peer_stats;
 use crate::{
     chunk_fetcher::ChunkFetcherFactory,
     chunk_ingress_service::{
-        AdvisoryChunkIngressError, ChunkIngressError, CriticalChunkIngressError,
-        facade::ChunkIngressFacadeImpl,
+        AdvisoryChunkIngressError, ChunkIngressError, ChunkIngressSource,
+        CriticalChunkIngressError, facade::ChunkIngressFacadeImpl,
     },
     metrics,
     services::ServiceSenders,
@@ -401,7 +401,7 @@ async fn forward_chunk_to_ingress(
 ) -> Result<(), ChunkIngressError> {
     // A fetched chunk belongs to an old placement: it must not park.
     ChunkIngressFacadeImpl::from(service_senders)
-        .handle_chunk_ingress(unpacked, false)
+        .handle_chunk_ingress(unpacked, ChunkIngressSource::Fetched)
         .await
 }
 
@@ -3178,7 +3178,7 @@ mod peer_chunk_validation_tests {
     use super::chunk_orchestrator::{ChunkRequest, ChunkRequestState};
     use super::{DataSyncServiceInner, DataSyncServiceMessage};
     use crate::chunk_fetcher::MockChunkFetcher;
-    use crate::chunk_ingress_service::ChunkIngressMessage;
+    use crate::chunk_ingress_service::{ChunkIngressMessage, ChunkIngressSource};
     use crate::services::ServiceSenders;
     use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
     use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
@@ -3213,10 +3213,14 @@ mod peer_chunk_validation_tests {
             .await
             .expect("data sync sends the chunk to ingress")
             .into_parts();
-        let ChunkIngressMessage::IngestChunk(_, Some(reply), None, park_when_placed) = msg else {
+        let ChunkIngressMessage::IngestChunk(_, Some(reply), None, source) = msg else {
             panic!("expected an IngestChunk with a reply, got {msg:?}");
         };
-        assert!(!park_when_placed, "a fetched chunk must not park");
+        assert_eq!(
+            source,
+            ChunkIngressSource::Fetched,
+            "a fetched chunk must not park"
+        );
         reply.send(Ok(())).expect("forward waits for the reply");
         forward
             .await

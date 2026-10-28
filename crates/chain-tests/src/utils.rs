@@ -3042,7 +3042,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                                     unpacked,
                                     Some(ctx),
                                     None,
-                                    true,
+                                    irys_actors::ChunkIngressSource::Sent,
                                 ))
                                 .expect("failed to send chunk to chunk_ingress");
                             crx.await

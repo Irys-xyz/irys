@@ -7229,7 +7229,7 @@ pub async fn data_txs_are_valid(
                                         unpacked,
                                         Some(ing_tx),
                                         None,
-                                        false,
+                                        crate::chunk_ingress_service::ChunkIngressSource::Fetched,
                                     ),
                                 )
                                 .is_err()
