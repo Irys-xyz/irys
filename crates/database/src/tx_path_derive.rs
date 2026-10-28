@@ -915,8 +915,7 @@ pub fn cross_check_derived(
     )
     .map_err(|error| {
         eyre!(
-            "data_root mismatch: data path does not open chunk {chunk_index} under derived data root {}: {error}",
-            derived.data_root
+            "data_root mismatch: data path does not open chunk {chunk_index} under derived data commitment {derived_commitment:?}: {error}"
         )
     })?;
     let Some(placement) = placement else {

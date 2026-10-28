@@ -6508,9 +6508,9 @@ mod peer_chunk_length_tests {
 /// Bytes for one ingress-proof chunk from the local cache or a storage module.
 ///
 /// A cache row with `chunk: None` is a miss. A storage-module body must name
-/// this data commitment and tx offset, and it must pass the same content checks as
-/// a body copied out of the cache (the chunk seam: chunk length and chunk
-/// proof against the commitment of this data root and size).
+/// this data commitment and tx offset, and it must pass the same content
+/// checks as a body copied out of the cache (the chunk seam: chunk length and
+/// chunk proof against the commitment of this data root and size).
 /// A mismatch is a miss. `Ok(None)` from a module read is a miss too: the
 /// index can name a chunk before its body is stored.
 ///
@@ -6525,8 +6525,8 @@ async fn ingress_proof_chunk_bytes_from_local(
     data_size: u64,
     tx_offset: irys_types::TxChunkOffset,
 ) -> Result<(Option<Vec<u8>>, bool), PreValidationError> {
-    let data_commitment =
-        irys_types::data_tree::data_commitment(&config.data_tree_geometry(), data_root, data_size);
+    let geometry = config.data_tree_geometry();
+    let data_commitment = irys_types::data_tree::data_commitment(&geometry, data_root, data_size);
     let cached = db
         .view_eyre(|tx| irys_database::cached_chunk_by_chunk_offset(tx, data_commitment, tx_offset))
         .map_err(|error| PreValidationError::DatabaseError {
@@ -6596,7 +6596,7 @@ async fn ingress_proof_chunk_bytes_from_local(
                     continue;
                 }
             };
-            if unpacked.data_commitment(&config.data_tree_geometry()) != data_commitment
+            if unpacked.data_commitment(&geometry) != data_commitment
                 || unpacked.tx_offset != tx_offset
             {
                 continue;
@@ -6607,7 +6607,7 @@ async fn ingress_proof_chunk_bytes_from_local(
                 data_root,
                 data_size,
                 tx_offset,
-                &config.data_tree_geometry(),
+                &geometry,
             ) {
                 Ok(checked) => return Ok((Some(checked.bytes.0), read_failed)),
                 Err(error) => {
