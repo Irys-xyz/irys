@@ -470,11 +470,15 @@ impl PartitionMiningServiceInner {
             .wrap_err("recall range larger than u64")
     }
 
+    /// Read and hash one recall range. The caller resolves
+    /// `recall_range_index` with `get_recall_range` in step order, so the
+    /// reads can run in any order.
     #[tracing::instrument(level = "trace", skip_all, err)]
     fn mine_partition_with_seed(
         &mut self,
         mining_seed: irys_types::H256,
         vdf_step: u64,
+        recall_range_index: u64,
         checkpoints: &H256List,
     ) -> eyre::Result<Option<SolutionContext>> {
         let partition_hash = match self.storage_module.partition_hash() {
@@ -484,9 +488,6 @@ impl PartitionMiningServiceInner {
                 return Ok(None);
             }
         };
-
-        // Pick a random recall range in the partition using efficient sampling
-        let recall_range_index = self.get_recall_range(vdf_step, &mining_seed, &partition_hash)?;
 
         // Starting chunk index within partition
         let start_chunk_offset = (recall_range_index as u32)
@@ -866,13 +867,13 @@ impl PartitionMiningServiceInner {
             return;
         }
 
-        if self.storage_module.partition_assignment().is_none() {
+        let Some(partition_hash) = self.storage_module.partition_hash() else {
             debug!(
                 "No partition assigned - skipping {} queued seed(s)",
                 seeds.len()
             );
             return;
-        }
+        };
 
         // `seeds` arrives in step order. Keep only the newest
         // `MAX_PENDING_RECALLS`, evicting the oldest, so a slow recall read
@@ -896,9 +897,22 @@ impl PartitionMiningServiceInner {
             pending.push_back(msg);
         }
 
-        // Newest first. Newer ranges are worth more; each costs a full
+        // Resolve every range oldest first. The rotation only moves forward:
+        // resolving a step behind it rebuilds it from the reset step.
+        let mut resolved = Vec::with_capacity(pending.len());
+        for msg in &pending {
+            match self.get_recall_range(msg.global_step, &msg.seed.0, &partition_hash) {
+                Ok(recall_range_index) => resolved.push((*msg, recall_range_index)),
+                Err(err) => error!(
+                    "Error resolving recall range for storage_module {} partition_hash {} step {}: {:?}",
+                    self.storage_module.id, partition_hash, msg.global_step, err
+                ),
+            }
+        }
+
+        // Read newest first. Newer ranges are worth more; each costs a full
         // recall read.
-        for msg in pending.iter().rev() {
+        for (msg, recall_range_index) in resolved.into_iter().rev() {
             // A recall read can lag the VDF by several steps. Each range's
             // lag is measured at its own mining time, not at the batch head.
             let current_step = self.steps_guard.current_step();
@@ -913,21 +927,18 @@ impl PartitionMiningServiceInner {
 
             debug!(
                 "Mining partition {} with seed {:?} step number {} current step {}",
-                self.storage_module.partition_hash().unwrap(),
-                msg.seed,
-                msg.global_step,
-                current_step
+                partition_hash, msg.seed, msg.global_step, current_step
             );
 
             debug!(
                 "Partition {} -- looking for solution with difficulty >= {}",
-                self.storage_module.partition_hash().unwrap(),
-                self.difficulty
+                partition_hash, self.difficulty
             );
 
             match self.mine_partition_with_seed(
                 msg.seed.clone().into_inner(),
                 msg.global_step,
+                recall_range_index,
                 &msg.checkpoints,
             ) {
                 Ok(Some(s)) => {
@@ -986,7 +997,12 @@ impl PartitionMiningServiceInner {
         vdf_step: u64,
         checkpoints: &H256List,
     ) -> Option<SolutionContext> {
-        self.mine_partition_with_seed(mining_seed, vdf_step, checkpoints)
+        let partition_hash = self
+            .storage_module
+            .partition_hash()
+            .expect("test module has a partition");
+        let recall_range_index = self.test_get_recall_range(vdf_step, mining_seed, partition_hash);
+        self.mine_partition_with_seed(mining_seed, vdf_step, recall_range_index, checkpoints)
             .expect("test_mine_partition_with_seed failed")
     }
 
@@ -2709,11 +2725,10 @@ mod tests {
             receivers.block_producer.try_recv().is_err(),
             "data chunks without stored paths are not submitted"
         );
-        // The drain mined steps 5, 4, 3. Mining step N rewinds the rotation
-        // to a rebuild of 1..=N-1, and the cached pick for N does not advance
-        // it: after step 3 the rotation rests at 2. Mining all five newest
-        // first would rest at 1; mining 1, 2, 3 would rest at 3.
-        assert_eq!(inner.ranges.last_step_num, 2);
+        // The ranges resolve oldest first, so the rotation only moves
+        // forward and rests at the newest step. Resolving in read order
+        // (5, 4, 3) would rewind it and leave it at 2.
+        assert_eq!(inner.ranges.last_step_num, 5);
     }
 
     /// A solution ends the drain. The newest range is hashed first; an older
