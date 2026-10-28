@@ -609,7 +609,8 @@ mod v3_to_v4 {
     /// Clears the data cache tables, whose rows are keyed by the data root.
     /// From V4 those tables are keyed by the `data_commitment`, so an old row
     /// is unreachable or wrong. The V4 `CachedDataRoot` row also has no size
-    /// confirmation flag; the clear covers that layout change too. Headers,
+    /// confirmation flag, and the V4 `CachedChunk` row adds the commitment
+    /// and the chunk index; the clear covers those layout changes too. Headers,
     /// commitment txs, metadata and the block index are not touched. `clear`
     /// drops rows without decoding them.
     pub(crate) fn migrate<TX>(tx: &TX) -> eyre::Result<()>

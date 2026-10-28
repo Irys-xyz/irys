@@ -93,6 +93,7 @@ fn main() -> eyre::Result<()> {
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::default(),
+            ..Default::default()
         },
     };
     let key = B256::random();
@@ -105,6 +106,7 @@ fn main() -> eyre::Result<()> {
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::default(),
+            ..Default::default()
         },
     };
     write_tx.put::<CachedChunks2>(key, chunk2.clone())?;
@@ -115,6 +117,7 @@ fn main() -> eyre::Result<()> {
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::from_utf8_str("hello, world!")?,
+            ..Default::default()
         },
     };
     write_tx.put::<CachedChunks2>(key, chunk3.clone())?;
@@ -177,6 +180,7 @@ fn main() -> eyre::Result<()> {
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::from_utf8_str("version1")?,
+            ..Default::default()
         },
     };
     let chunk_v2 = CachedChunk2 {
@@ -184,6 +188,7 @@ fn main() -> eyre::Result<()> {
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::from_utf8_str("version2")?,
+            ..Default::default()
         },
     };
     let chunk_v3 = CachedChunk2 {
@@ -191,6 +196,7 @@ fn main() -> eyre::Result<()> {
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::from_utf8_str("version3")?,
+            ..Default::default()
         },
     };
 

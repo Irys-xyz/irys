@@ -3715,7 +3715,13 @@ mod tests {
             )?;
             wtx.put::<CachedChunks>(
                 hash_old,
-                irys_database::db_cache::CachedChunk::from(&chunk_old),
+                irys_database::db_cache::CachedChunk {
+                    chunk: Some(chunk_old.bytes.clone()),
+                    data_path: chunk_old.data_path.clone(),
+                    data_commitment: tx_header_old
+                        .data_commitment(&irys_types::data_tree::Geometry::TESTING),
+                    tx_offset: chunk_old.tx_offset,
+                },
             )?;
             irys_database::store_ingress_data_hash(
                 wtx,
@@ -3742,7 +3748,13 @@ mod tests {
             )?;
             wtx.put::<CachedChunks>(
                 hash_new,
-                irys_database::db_cache::CachedChunk::from(&chunk_new),
+                irys_database::db_cache::CachedChunk {
+                    chunk: Some(chunk_new.bytes.clone()),
+                    data_path: chunk_new.data_path.clone(),
+                    data_commitment: tx_header_new
+                        .data_commitment(&irys_types::data_tree::Geometry::TESTING),
+                    tx_offset: chunk_new.tx_offset,
+                },
             )?;
 
             eyre::Ok(())

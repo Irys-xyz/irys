@@ -10485,7 +10485,7 @@ mod ingress_proof_local_bytes_tests {
                 chunk_key,
                 CachedChunk {
                     chunk: None,
-                    data_path: existing.data_path,
+                    ..existing
                 },
             )?;
             Ok(())
@@ -11014,7 +11014,7 @@ mod ingress_proof_local_bytes_tests {
                 chunk_key,
                 CachedChunk {
                     chunk: Some(Base64(data.to_vec())),
-                    data_path: existing.data_path,
+                    ..existing
                 },
             )?;
             Ok(())

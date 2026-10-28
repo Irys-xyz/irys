@@ -3,7 +3,7 @@ use arbitrary::Arbitrary;
 use bytes::Buf as _;
 use irys_types::{
     Base64, ChunkKey, Compact, DataCommitment, DataTreeRoot, H256, IrysAddress, TxChunkOffset,
-    UnixTimestamp, UnpackedChunk, partition::PartitionHash,
+    UnixTimestamp, partition::PartitionHash,
 };
 use reth_db::DatabaseError;
 use reth_db::table::{Decode, Encode};
@@ -82,6 +82,28 @@ mod global_chunk_offset_tests {
     }
 }
 
+#[cfg(test)]
+mod cached_chunk_tests {
+    use super::*;
+    use reth_db::table::{Compress as _, Decompress as _};
+
+    /// The commitment and the chunk index come back from the row exactly:
+    /// a lookup by chunk key depends on them.
+    #[test]
+    fn cached_chunk_row_keeps_its_commitment_and_index() {
+        for chunk in [None, Some(Base64(vec![7_u8; 32]))] {
+            let row = CachedChunk {
+                chunk,
+                data_path: Base64(vec![9_u8; 65]),
+                data_commitment: DataCommitment(H256::from([3_u8; 32])),
+                tx_offset: TxChunkOffset(0x0102_0304),
+            };
+            let encoded: Vec<u8> = row.clone().compress();
+            assert_eq!(CachedChunk::decompress(&encoded).expect("decode row"), row);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
 pub struct CachedDataRoot {
     /// Total size (in bytes) of the data represented by the `data_root`
@@ -155,29 +177,16 @@ pub struct CachedDataRoot {
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]
 pub struct CachedChunk {
+    /// Commitment of the upload this chunk belongs to. The row key is
+    /// `chunk_key(data_commitment, tx_offset)`, which cannot be reversed, so
+    /// a lookup by key reads the commitment and the chunk index here.
+    pub data_commitment: DataCommitment,
+    /// Index of the chunk in its upload.
+    pub tx_offset: TxChunkOffset,
     // optional as the chunk's data can be in a partition
     pub chunk: Option<Base64>,
+    // `Compact` reads this unsized field to the end of the row, so it stays last.
     pub data_path: Base64,
-}
-
-impl From<UnpackedChunk> for CachedChunk {
-    fn from(value: UnpackedChunk) -> Self {
-        Self {
-            chunk: Some(value.bytes),
-            data_path: value.data_path,
-        }
-    }
-}
-
-// TODO: figure out if/how to use lifetimes to reduce the data cloning
-// (the write to DB copies the bytes anyway so it should just need a ref)
-impl From<&UnpackedChunk> for CachedChunk {
-    fn from(value: &UnpackedChunk) -> Self {
-        Self {
-            chunk: Some(value.bytes.clone()),
-            data_path: value.data_path.clone(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary)]

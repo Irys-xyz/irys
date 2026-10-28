@@ -1172,7 +1172,15 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
     );
 
     tx.put::<CachedChunksIndex>(data_commitment, value)?;
-    tx.put::<CachedChunks>(chunk_key, chunk.into())?;
+    tx.put::<CachedChunks>(
+        chunk_key,
+        CachedChunk {
+            chunk: Some(chunk.bytes.clone()),
+            data_path: chunk.data_path.clone(),
+            data_commitment,
+            tx_offset: chunk.tx_offset,
+        },
+    )?;
     Ok(false)
 }
 

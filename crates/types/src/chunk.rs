@@ -316,6 +316,24 @@ impl TxChunkOffset {
     }
 }
 
+/// Fixed four bytes, big-endian, so a struct that derives `Compact` reads it
+/// without a length.
+impl Compact for TxChunkOffset {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        buf.put_u32(self.0);
+        4
+    }
+
+    fn from_compact(mut buf: &[u8], _len: usize) -> (Self, &[u8]) {
+        use bytes::Buf as _;
+        let value = buf.get_u32();
+        (Self(value), buf)
+    }
+}
+
 impl Hash for TxChunkOffset {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.hash(state);

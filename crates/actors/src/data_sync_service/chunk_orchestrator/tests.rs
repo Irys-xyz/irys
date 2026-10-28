@@ -1894,7 +1894,7 @@ fn strip_cached_body(db: &DatabaseProvider, tx: &DataTransaction) {
             chunk_key,
             CachedChunk {
                 chunk: None,
-                data_path: existing.data_path,
+                ..existing
             },
         )?;
         Ok(())
