@@ -1604,10 +1604,11 @@ impl ValidationError {
 ///
 /// The block signature covers the RLP encoding of the header, and an absent
 /// `Option` field can share its encoding with a zero value. A header therefore
-/// has one canonical form, which honest producers always emit:
+/// has one canonical form:
 /// - a PoA with `tx_path` or `data_path` has `ledger_id = Some(_)`
 ///   (a data PoA has all three; the producer takes `ledger_id` from the partition
-///   assignment);
+///   assignment in the parent epoch snapshot, and drops a solution whose partition
+///   has no data ledger there);
 /// - the Publish ledger has `expires = None` (see `validate_term_ledger_expiry`).
 ///
 /// Cheap and independent of chain state, so it runs before any signature work.
