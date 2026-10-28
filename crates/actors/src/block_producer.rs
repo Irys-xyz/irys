@@ -2131,7 +2131,10 @@ fn choose_oracle_price(
     const ORACLE_MAX_AGE_SECS: u64 = 3 * 60;
 
     // Prefer oracle if it was updated within the grace period
-    let oracle_is_fresh = parent_ts.as_secs() <= oracle_updated_at.as_secs() + ORACLE_MAX_AGE_SECS;
+    let oracle_is_fresh = parent_ts.as_secs()
+        <= oracle_updated_at
+            .as_secs()
+            .saturating_add(ORACLE_MAX_AGE_SECS);
 
     let (chosen, source) = if oracle_is_fresh {
         (oracle_price, "oracle_fresh")
@@ -2319,6 +2322,8 @@ mod oracle_choice_tests {
     #[case::fresher_oracle(100, 200, false)]
     // Both at same second - prefer oracle (authoritative source)
     #[case::equal_timestamps(500, 500, false)]
+    // Timestamp near u64::MAX must not overflow - use oracle
+    #[case::max_oracle_timestamp(1000, u64::MAX, false)]
     fn choose_oracle_price_scenarios(
         #[case] parent_ts_secs: u64,
         #[case] oracle_ts_secs: u64,

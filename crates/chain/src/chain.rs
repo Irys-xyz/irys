@@ -1415,6 +1415,18 @@ impl IrysNode {
         runtime_handle: Handle,
         shutdown_token: CancellationToken,
     ) -> ShutdownReason {
+        // Phase 0: Fetch initial oracle prices. A failure here must return
+        // before reth or any service starts, so nothing needs shutdown.
+        let price_oracle_instances = match Self::fetch_initial_oracle_prices(&config).await {
+            Ok(instances) => instances,
+            Err(err) => {
+                let reason = format!("{err:?}");
+                error!(error = ?err, "Failed to fetch initial oracle prices");
+                let _ = irys_node_ctx_tx.send(Err(err));
+                return ShutdownReason::FatalError(reason);
+            }
+        };
+
         // Phase 1: Start reth (sequential)
         let exec = reth_runtime.clone();
         let (node_handle, reth_node) =
@@ -1447,6 +1459,7 @@ impl IrysNode {
                 http_listener,
                 irys_db,
                 gossip_listener,
+                price_oracle_instances,
                 runtime_handle.clone(),
                 shutdown_token.clone(),
             )
@@ -1648,6 +1661,7 @@ impl IrysNode {
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
         gossip_listener: TcpListener,
+        price_oracle_instances: Vec<Arc<SingleOracle>>,
         runtime_handle: tokio::runtime::Handle,
         shutdown_token: CancellationToken,
     ) -> eyre::Result<(
@@ -2131,9 +2145,9 @@ impl IrysNode {
             shutdown_token.clone(),
         )?;
 
-        // set up the price oracles (initial price(s) fetched during construction)
+        // set up the price oracles (initial price(s) fetched before startup)
         let (price_oracle, price_oracle_handles) =
-            Self::init_price_oracle(&config, &runtime_handle).await;
+            Self::init_price_oracle(price_oracle_instances, &runtime_handle);
 
         // set up the block producer
         let (block_producer_inner, block_producer_handle) = Self::init_block_producer(
@@ -2678,10 +2692,9 @@ impl IrysNode {
         (block_producer_inner, tokio_service_handle)
     }
 
-    async fn init_price_oracle(
-        config: &Config,
-        runtime_handle: &tokio::runtime::Handle,
-    ) -> (Arc<IrysPriceOracle>, Vec<irys_types::TokioServiceHandle>) {
+    /// Builds every configured oracle and fetches its initial price.
+    /// This is the part that can fail, so it runs before any service starts.
+    async fn fetch_initial_oracle_prices(config: &Config) -> eyre::Result<Vec<Arc<SingleOracle>>> {
         let oracle_cfgs: Vec<OracleConfig> = if config.node_config.oracles.is_empty() {
             tracing::info!(
                 "No oracles configured — block production will reuse the \
@@ -2693,7 +2706,6 @@ impl IrysNode {
         };
 
         let mut instances: Vec<Arc<SingleOracle>> = Vec::new();
-        let mut handles: Vec<irys_types::TokioServiceHandle> = Vec::new();
 
         for oc in oracle_cfgs {
             let oracle = match oc {
@@ -2716,7 +2728,7 @@ impl IrysNode {
                     poll_interval_ms,
                 } => SingleOracle::new_coinmarketcap(api_key, id, poll_interval_ms)
                     .await
-                    .expect("coinmarketcap initial price"),
+                    .wrap_err("coinmarketcap initial price")?,
                 OracleConfig::CoinGecko {
                     api_key,
                     coin_id,
@@ -2724,12 +2736,22 @@ impl IrysNode {
                     poll_interval_ms,
                 } => SingleOracle::new_coingecko(api_key, coin_id, demo_api_key, poll_interval_ms)
                     .await
-                    .expect("coingecko initial price"),
+                    .wrap_err("coingecko initial price")?,
             };
-            let handle = Arc::clone(&oracle).spawn_poller(runtime_handle);
-            handles.push(handle);
             instances.push(oracle);
         }
+
+        Ok(instances)
+    }
+
+    fn init_price_oracle(
+        instances: Vec<Arc<SingleOracle>>,
+        runtime_handle: &tokio::runtime::Handle,
+    ) -> (Arc<IrysPriceOracle>, Vec<irys_types::TokioServiceHandle>) {
+        let handles = instances
+            .iter()
+            .map(|oracle| Arc::clone(oracle).spawn_poller(runtime_handle))
+            .collect();
 
         (IrysPriceOracle::new(instances), handles)
     }
