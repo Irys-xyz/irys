@@ -1306,14 +1306,14 @@ mod tests {
         };
 
         // Verify initial fork block priorities
-        // All fork blocks will be CanonicalExtension because they form a chain
-        // that extends from the canonical chain (at height 2) and creates a longer chain
+        // The fork blocks branch from height 2, below the canonical tip at height 3,
+        // so they do not extend the canonical tip: they are a Fork.
         for block in &fork_blocks {
             let priority = coordinator.calculate_priority(block);
             assert_eq!(
                 priority.state,
-                BlockPriority::CanonicalExtension,
-                "Fork block at height {} is initially CanonicalExtension (extends from canonical chain)",
+                BlockPriority::Fork,
+                "Fork block at height {} is initially Fork (branches below the canonical tip)",
                 block.height
             );
         }

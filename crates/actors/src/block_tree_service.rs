@@ -868,10 +868,8 @@ impl BlockTreeServiceInner {
                 eyre::eyre!("block tree cache write lock poisoned in on_block_validation_finished")
             })?;
 
-            // Get the current tip before any changes
-            // Note: We can't rely on canonical chain here, because the canonical chain was already updated when this
-            //       block arrived and was added after pre-validation. While the canonical head advances immediately, the
-            //       `cache.tip` only moves after full validation.
+            // Get the current tip before any changes. The canonical chain follows
+            // `cache.tip`, which only moves after full validation (in `mark_tip` below).
             let old_tip = cache.tip;
             let old_tip_block = cache
                 .get_block(&old_tip)
@@ -1969,6 +1967,7 @@ mod tests {
     use crate::block_validation::PreValidationError;
     use irys_types::BlockTransactions;
     use rstest::rstest;
+    use std::sync::Mutex;
 
     /// A consensus-rejection error must convert to `ValidationResult::Invalid`.
     #[test]
@@ -2380,20 +2379,58 @@ mod tests {
         }
 
         /// Answer every fork-choice update the service sends, as the Reth service does,
-        /// so a tip change runs to completion.
-        fn answer_fork_choice_updates(&mut self) {
+        /// so a tip change runs to completion. Returns the recorded updates, in order.
+        fn answer_fork_choice_updates(&mut self) -> Arc<Mutex<Vec<ForkChoiceUpdateMessage>>> {
             let mut reth_service_rx = self
                 .reth_service_rx
                 .take()
                 .expect("Reth service receiver not yet taken");
+            let recorded = Arc::new(Mutex::new(Vec::new()));
+            let recorder = Arc::clone(&recorded);
             tokio::spawn(async move {
                 while let Some(message) = reth_service_rx.recv().await {
                     let (message, _span) = message.into_parts();
-                    if let RethServiceMessage::ForkChoice { response, .. } = message {
+                    if let RethServiceMessage::ForkChoice { update, response } = message {
+                        recorder.lock().expect("fork-choice recorder").push(update);
                         let _ = response.send(());
                     }
                 }
             });
+            recorded
+        }
+
+        /// The last fork-choice update names the tip as head, and its confirmed and
+        /// finalized blocks are ancestors of the tip.
+        fn assert_last_fork_choice_follows_tip(
+            &self,
+            updates: &Arc<Mutex<Vec<ForkChoiceUpdateMessage>>>,
+        ) {
+            let updates = updates.lock().expect("fork-choice recorder");
+            let last = updates.last().expect("at least one fork-choice update");
+            let cache = self
+                .inner
+                .cache
+                .read()
+                .expect("cache lock for tip ancestry");
+            let tip = cache.tip;
+            assert_eq!(last.head_hash, tip, "the fork-choice head is the tip");
+
+            let mut tip_ancestry = vec![tip];
+            let mut current = tip;
+            while let Some(block) = cache.get_block(&current)
+                && block.height > 0
+            {
+                current = block.previous_block_hash;
+                tip_ancestry.push(current);
+            }
+            assert!(
+                tip_ancestry.contains(&last.confirmed_hash),
+                "the confirmed block is an ancestor of the tip"
+            );
+            assert!(
+                tip_ancestry.contains(&last.finalized_hash),
+                "the finalized block is an ancestor of the tip"
+            );
         }
 
         /// Add a child of `parent` with `cumulative_diff` to the cache. With
@@ -3645,7 +3682,7 @@ mod tests {
     #[tokio::test]
     async fn tip_extension_with_pending_heavier_fork_is_not_a_reorg() {
         let mut h = DiscardHarness::new();
-        h.answer_fork_choice_updates();
+        let fork_choice_updates = h.answer_fork_choice_updates();
         h.index_genesis();
         let genesis = h.genesis();
 
@@ -3673,6 +3710,7 @@ mod tests {
             "a tip extension abandons no block and must not broadcast a ReorgEvent, got {:?}",
             event.map(|event| block_hashes(&event.old_fork))
         );
+        h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
     }
 
     /// The validated block is on a sibling fork of the tip, lighter than a pending fork
@@ -3681,7 +3719,7 @@ mod tests {
     #[tokio::test]
     async fn tip_move_to_sibling_fork_below_pending_max_is_a_reorg() {
         let mut h = DiscardHarness::new();
-        h.answer_fork_choice_updates();
+        let fork_choice_updates = h.answer_fork_choice_updates();
         h.index_genesis();
         let genesis = h.genesis();
 
@@ -3710,6 +3748,7 @@ mod tests {
         assert_eq!(block_hashes(&event.new_fork), vec![new_tip.block_hash]);
         assert_eq!(event.fork_parent.block_hash, genesis.block_hash);
         assert_eq!(event.new_tip, new_tip.block_hash);
+        h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
     }
 
     /// The tip moves two blocks at once: an exact cumulative difficulty tie with a
@@ -3722,7 +3761,7 @@ mod tests {
         let mut h = DiscardHarness::new_with_config(|c| {
             c.consensus.get_mut().epoch.num_blocks_in_epoch = 2;
         });
-        h.answer_fork_choice_updates();
+        let fork_choice_updates = h.answer_fork_choice_updates();
         h.index_genesis();
         let genesis = h.genesis();
 
@@ -3804,6 +3843,7 @@ mod tests {
             vec![first_new_block.height],
             "the epoch block among the new canonical blocks is detected"
         );
+        h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
     }
 
     /// A tip extension whose fork point is below the post-prune cache window aborts
