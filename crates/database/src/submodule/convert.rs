@@ -1543,7 +1543,7 @@ fn stored_infos_for<S: SubmoduleStore>(
         .map(|DataRootInfos(infos)| infos)
         .ok_or_else(|| {
             eyre::eyre!(
-                "no tx leaf binding and no data-root info for data commitment {data_commitment:?}"
+                "no tx leaf binding and no data-root info for data commitment {data_commitment}"
             )
         })
 }
@@ -1599,7 +1599,7 @@ fn split_stored_interval(
         && binding.data_commitment != data_commitment
     {
         eyre::bail!(
-            "tx leaf binding at partition offset {} names data commitment {:?}, but the derived tx has {data_commitment:?}. Check that --config is the config of the node that wrote this index: another data tree geometry derives other commitments.",
+            "tx leaf binding at partition offset {} names data commitment {}, but the derived tx has {data_commitment}. Check that --config is the config of the node that wrote this index: another data tree geometry derives other commitments.",
             start.0,
             binding.data_commitment
         );

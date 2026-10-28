@@ -174,7 +174,7 @@ fn check_startup_placement(
         || check.ledger != Some(derived.ledger.get_id())
     {
         return Err(eyre::eyre!(
-            "placement mismatch: derived data commitment {derived_commitment:?} height {} tx_index {tx_index} ledger {}",
+            "placement mismatch: derived data commitment {derived_commitment} height {} tx_index {tx_index} ledger {}",
             derived.height,
             derived.ledger.get_id()
         ));

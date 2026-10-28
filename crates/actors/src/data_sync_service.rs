@@ -1441,7 +1441,7 @@ impl DataSyncServiceInner {
         {
             self.reject_delivered_body(storage_module_id, chunk_offset, peer_addr)?;
             return Err(eyre::eyre!(
-                "data sync rejected peer chunk at offset {chunk_offset}: fetched data commitment {delivered_commitment:?} tx_offset {} does not match the local data commitment {placed_commitment:?} tx_offset {local_tx_offset}",
+                "data sync rejected peer chunk at offset {chunk_offset}: fetched data commitment {delivered_commitment} tx_offset {} does not match the local data commitment {placed_commitment} tx_offset {local_tx_offset}",
                 unpacked_chunk.tx_offset,
             ));
         }

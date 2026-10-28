@@ -915,7 +915,7 @@ pub fn cross_check_derived(
     )
     .map_err(|error| {
         eyre!(
-            "data_root mismatch: data path does not open chunk {chunk_index} under derived data commitment {derived_commitment:?}: {error}"
+            "data_root mismatch: data path does not open chunk {chunk_index} under derived data commitment {derived_commitment}: {error}"
         )
     })?;
     let Some(placement) = placement else {
@@ -928,7 +928,7 @@ pub fn cross_check_derived(
         || placement.ledger != Some(derived.ledger.get_id())
     {
         eyre::bail!(
-            "placement mismatch: derived data commitment {:?} height {} tx_index {tx_index} ledger {}, placement data commitment {:?} height {:?} tx_index {:?} ledger {:?}",
+            "placement mismatch: derived data commitment {} height {} tx_index {tx_index} ledger {}, placement data commitment {} height {:?} tx_index {:?} ledger {:?}",
             derived_commitment,
             derived.height,
             derived.ledger.get_id(),
