@@ -575,9 +575,12 @@ impl ConsensusConfig {
     ///   `crates/p2p/src/peer_network_service.rs`
     /// - inbound: the V2 handshake handler in `crates/p2p/src/server.rs`
     ///
-    /// Every consensus field is always serialized, so the hash shows every
-    /// config difference. Do not add `skip_serializing_if` to a consensus field
-    /// to keep the hash stable.
+    /// Every set value is serialized, so the hash shows every config
+    /// difference. An unset optional field (`skip_serializing_if =
+    /// "Option::is_none"`) is left out, and setting it changes the hash. Do not
+    /// skip a set value (e.g. skip-if-default) to keep the hash stable. A
+    /// change to what is serialized changes the hash snapshots in the tests
+    /// below.
     pub fn keccak256_hash(&self) -> H256 {
         // Serialize to canonical JSON value (camelCase keys, u64/i64 as strings)
         let json_value = crate::canonical::to_canonical(self)
