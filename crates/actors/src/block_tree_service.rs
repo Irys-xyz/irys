@@ -1834,30 +1834,6 @@ impl BlockTreeServiceInner {
     }
 }
 
-/// Reject reorgs that would un-migrate already-finalised blocks.
-///
-/// `old_fork_len` is the number of blocks on the old fork excluding the common
-/// ancestor. The previous tick's migration has already moved the block at
-/// `old_tip - migration_depth` and below into the block index, so a fork
-/// strictly deeper than `migration_depth` would require reverting a
-/// migrated block — which the FCU + downstream migration path cannot do
-/// safely. The caller treats `Err` as a controlled-shutdown trigger.
-pub fn validate_reorg_within_migration_depth(
-    old_fork_len: usize,
-    migration_depth: u32,
-    fork_height: u64,
-) -> eyre::Result<()> {
-    if u32::try_from(old_fork_len).unwrap_or(u32::MAX) > migration_depth {
-        return Err(eyre::eyre!(
-            "reorg depth ({}) exceeds migration depth ({}); already-migrated block at fork height {} would be reverted",
-            old_fork_len,
-            migration_depth,
-            fork_height,
-        ));
-    }
-    Ok(())
-}
-
 /// Reject reorgs whose fork point would be evicted by the cache prune that runs
 /// immediately after split computation.
 ///
@@ -3495,64 +3471,6 @@ mod tests {
             panic!("expected InternalFailure for ParentBlockMissing");
         };
         assert!(!inner.is_node_fault());
-    }
-
-    /// Reorgs at or within `migration_depth` are reversible: nothing on the
-    /// old fork has been migrated to the block index yet, so the FCU path can
-    /// switch chains cleanly.
-    #[rstest]
-    #[case::depth_zero_no_orphans(0, 5)]
-    #[case::depth_strictly_below_migration(3, 5)]
-    #[case::depth_equals_migration_boundary(5, 5)]
-    fn validate_reorg_within_migration_depth_passes_for_safe_depths(
-        #[case] old_fork_len: usize,
-        #[case] migration_depth: u32,
-    ) {
-        validate_reorg_within_migration_depth(old_fork_len, migration_depth, 100)
-            .expect("reorg at or within migration depth must be permitted");
-    }
-
-    /// Reorgs strictly deeper than `migration_depth` would un-migrate a block
-    /// that the previous tick committed to the block index. The gate must
-    /// surface a typed error so the caller can trigger controlled shutdown
-    /// rather than silently corrupting the on-disk index.
-    #[rstest]
-    #[case::just_over_boundary(6, 5)]
-    #[case::well_over_boundary(20, 5)]
-    #[case::large_reorg_small_window(100, 10)]
-    fn validate_reorg_within_migration_depth_returns_err_when_exceeds(
-        #[case] old_fork_len: usize,
-        #[case] migration_depth: u32,
-    ) {
-        let fork_height = 12345_u64;
-        let err = validate_reorg_within_migration_depth(old_fork_len, migration_depth, fork_height)
-            .expect_err("reorg deeper than migration depth must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("reorg depth"),
-            "error must mention reorg depth; got: {msg}"
-        );
-        assert!(
-            msg.contains(&format!("({old_fork_len})")),
-            "error must include the offending depth value; got: {msg}"
-        );
-        assert!(
-            msg.contains(&format!("({migration_depth})")),
-            "error must include the migration depth value; got: {msg}"
-        );
-        assert!(
-            msg.contains(&fork_height.to_string()),
-            "error must include the fork height; got: {msg}"
-        );
-    }
-
-    /// `usize::MAX` reorg lengths must clamp to `u32::MAX` rather than wrap;
-    /// the gate should still fire and the error message must surface.
-    #[test]
-    fn validate_reorg_within_migration_depth_clamps_oversized_lengths() {
-        let err = validate_reorg_within_migration_depth(usize::MAX, 5, 0)
-            .expect_err("usize::MAX must be treated as exceeding migration depth");
-        assert!(err.to_string().contains("reorg depth"));
     }
 
     /// A reorg whose fork point stays within the post-prune cache window

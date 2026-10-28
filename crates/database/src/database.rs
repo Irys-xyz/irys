@@ -659,9 +659,8 @@ pub fn tx_header_by_txid<T: DbTx>(
 /// at each migrated height.  It is *branch-invariant* — attests the same hash
 /// from every chain's perspective — ONLY for heights below the reorg floor.
 ///
-/// **Reorg ceiling moved.**  Network-partition / deep-reorg recovery
-/// removed the old `validate_reorg_within_migration_depth` gate (now dead): a
-/// reorg can rewind and rewrite already-migrated MBH rows up to
+/// **Reorg ceiling.**  Network-partition / deep-reorg recovery lets a
+/// reorg rewind and rewrite already-migrated MBH rows up to
 /// `block_tree_depth` deep (`recover_from_network_partition` →
 /// `truncate_to_height` → `delete_block_index_range`).  So within
 /// `(tip - block_tree_depth, tip - block_migration_depth]`, MBH is a
