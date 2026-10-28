@@ -1950,6 +1950,13 @@ async fn get_block_index(
     let mut sources: Vec<_> = peers.into_values().flatten().collect();
     sources.shuffle(&mut rand::thread_rng());
     sources.sort_by(|a, b| b.2.block_index_height.cmp(&a.2.block_index_height));
+    // Ask only the sources that advertise entries from `start`. The other
+    // sources have no entries to give, and their empty answers must not end
+    // the fetch while a source with entries can still answer.
+    sources.retain(|(_, _, claims)| claims.block_index_height >= start as u64);
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
 
     // Overlap anchor: when our index has the entry just before `start`, ask
     // from that entry and require the answer to start with our hash. Our index
@@ -1989,8 +1996,9 @@ async fn get_block_index(
 
     for _ in 0..retries {
         // Ask `peer_count` sources at the same time and use the longest valid
-        // answer. One source can be behind the others, so an empty answer is
-        // final only when no other source in the group gives entries.
+        // answer. With a `limit` above 0, the length rule makes each valid
+        // answer from these sources non-empty. With a `limit` of 0, an empty
+        // answer is not used.
         for group in sources.chunks(peer_count) {
             debug!("Fetching block index from a group of {} peers", group.len());
             let answers = futures::future::join_all(group.iter().map(|(peer_id, peer, claims)| {
@@ -2020,9 +2028,10 @@ async fn get_block_index(
                                 index.len(),
                                 peer_id
                             );
-                            if longest_valid_answer
-                                .as_ref()
-                                .is_none_or(|longest| index.len() > longest.len())
+                            if !index.is_empty()
+                                && longest_valid_answer
+                                    .as_ref()
+                                    .is_none_or(|longest| index.len() > longest.len())
                             {
                                 longest_valid_answer = Some(index);
                             }
@@ -2083,6 +2092,12 @@ async fn get_block_index(
             "the answers of {} peer(s) do not start with our entry at height {}",
             answers_that_do_not_connect, query.height
         )));
+    }
+
+    // Each source that advertised entries broke its own claims. The other
+    // sources advertise no entries from `start`, so there is nothing to fetch.
+    if sources.is_empty() && answers_that_do_not_connect == 0 {
+        return Ok(Vec::new());
     }
 
     Err(ChainSyncError::Network(
@@ -2822,6 +2837,17 @@ mod tests {
 
             let calls = Arc::new(Mutex::new(vec![]));
             let block_index_requests = calls.clone();
+            // The peer advertises the entry at height 11 that its next index
+            // answer gives.
+            let calls_for_info = calls.clone();
+            fake_gossip_server.set_on_info_request(move || {
+                let calls_len = calls_for_info.lock().unwrap().len();
+                GossipResponse::Accepted(NodeInfo {
+                    block_index_height: 11,
+                    block_index_hash: BlockHash::repeat_byte(if calls_len == 0 { 1 } else { 2 }),
+                    ..NodeInfo::default()
+                })
+            });
             fake_gossip_server.set_on_block_index_request(move |query| {
                 let mut calls_ref = calls.lock().unwrap();
                 let calls_len = calls_ref.len();
@@ -2906,17 +2932,16 @@ mod tests {
             .await
             .expect("to finish catching up");
 
-            // There should be three calls total: two that got items and one that didn't
+            // Two calls that got items. The peer advertises no entries above
+            // height 11, so the sync ends with no third call.
             {
                 let data_requests = block_index_requests.lock().unwrap();
-                assert_eq!(data_requests.len(), 3);
+                assert_eq!(data_requests.len(), 2);
                 debug!("Data requests: {:?}", data_requests);
                 assert_eq!(data_requests[0].height, 11);
                 assert_eq!(data_requests[1].height, 11);
                 assert_eq!(data_requests[0].limit, 50);
                 assert_eq!(data_requests[1].limit, 50);
-                assert_eq!(data_requests[2].height, 12);
-                assert_eq!(data_requests[2].limit, 50);
             }
 
             // Check that the sync status has changed to synced
@@ -3662,8 +3687,7 @@ mod tests {
                 entry_hash(MAIN_CHAIN, START as u64 + 1),
                 chain_answer(MAIN_CHAIN, START as u64 + 6),
             );
-            // Ranked last: it has no entries after our tip and answers only
-            // the anchor entry.
+            // It advertises no entries after our tip, so it is not asked.
             let (third, third_requests) = consistent_source(0x13, 1, START as u64 - 1);
             let peer_list = trusted_peer_list(vec![first, second, third]);
 
@@ -3672,13 +3696,14 @@ mod tests {
                 .expect("block index");
 
             assert_eq!(fetched, entries(MAIN_CHAIN, START as u64, START as u64 + 6));
-            for requests in [first_requests, second_requests, third_requests] {
+            for requests in [first_requests, second_requests] {
                 assert_eq!(requests.load(Ordering::SeqCst), 1);
             }
+            assert_eq!(third_requests.load(Ordering::SeqCst), 0);
         }
 
         #[tokio::test]
-        async fn valid_empty_answers_from_a_whole_group_give_an_empty_index_with_no_retry() {
+        async fn no_source_advertises_entries_gives_an_empty_index_with_no_request() {
             let dir = TempDirBuilder::new().build();
             let index = local_index(dir.path());
             let (first, first_requests) = consistent_source(0x11, 1, START as u64 - 1);
@@ -3690,8 +3715,101 @@ mod tests {
                 .expect("block index");
 
             assert!(fetched.is_empty());
+            assert_eq!(first_requests.load(Ordering::SeqCst), 0);
+            assert_eq!(second_requests.load(Ordering::SeqCst), 0);
+        }
+
+        /// A source that advertises the main chain up to `START + 2` and
+        /// fails its first `failures` index requests. The counter records the
+        /// index requests that the source gets.
+        fn source_that_fails_first(
+            peer_byte: u8,
+            failures: usize,
+        ) -> (PeerListItem, Arc<AtomicUsize>) {
+            let index_height = START as u64 + 2;
+            let server = FakeGossipServer::new();
+            server.set_on_info_request(move || {
+                GossipResponse::Accepted(NodeInfo {
+                    block_index_height: index_height,
+                    block_index_hash: entry_hash(MAIN_CHAIN, index_height),
+                    ..NodeInfo::default()
+                })
+            });
+            let index_requests = Arc::new(AtomicUsize::new(0));
+            let index_requests_in_server = index_requests.clone();
+            let answer = chain_answer(MAIN_CHAIN, index_height);
+            server.set_on_block_index_request(move |query| {
+                if index_requests_in_server.fetch_add(1, Ordering::SeqCst) < failures {
+                    GossipResponse::Rejected(crate::types::RejectionReason::GossipDisabled)
+                } else {
+                    GossipResponse::Accepted(answer(&query))
+                }
+            });
+            let peer = peer_list_item(peer_byte, server.spawn(), true, 100);
+            (peer, index_requests)
+        }
+
+        #[tokio::test]
+        async fn failed_source_with_entries_is_asked_again_and_a_source_behind_is_not_asked() {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
+            let (first, first_requests) = source_that_fails_first(0x11, 1);
+            let (second, second_requests) = consistent_source(0x12, 1, START as u64 - 1);
+            let peer_list = trusted_peer_list(vec![first, second]);
+
+            let fetched = fetch(&peer_list, &index, 1, true)
+                .await
+                .expect("block index");
+
+            assert_eq!(fetched, entries(MAIN_CHAIN, START as u64, START as u64 + 2));
+            assert_eq!(first_requests.load(Ordering::SeqCst), 2);
+            assert_eq!(second_requests.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn failed_source_with_entries_gives_a_network_error_not_an_empty_index() {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
+            let (first, first_requests) = source_that_fails_first(0x11, usize::MAX);
+            let (second, second_requests) = consistent_source(0x12, 1, START as u64 - 1);
+            let peer_list = trusted_peer_list(vec![first, second]);
+
+            let error = fetch(&peer_list, &index, 1, true)
+                .await
+                .expect_err("no valid answer");
+
+            assert!(
+                matches!(error, ChainSyncError::Network(_)),
+                "got: {error:?}"
+            );
+            assert_eq!(first_requests.load(Ordering::SeqCst), RETRIES);
+            assert_eq!(second_requests.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn sources_that_contradict_their_claims_give_an_empty_index_when_no_other_source_has_entries()
+         {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
+            // It advertises entries but answers empty.
+            let (first, first_requests) = index_source(
+                0x11,
+                1,
+                START as u64 + 8,
+                entry_hash(MAIN_CHAIN, START as u64 + 8),
+                |_: &BlockIndexQuery| Vec::new(),
+            );
+            let (second, second_requests) = consistent_source(0x12, 1, START as u64 - 1);
+            let peer_list = trusted_peer_list(vec![first.clone(), second]);
+
+            let fetched = fetch(&peer_list, &index, 1, true)
+                .await
+                .expect("block index");
+
+            assert!(fetched.is_empty());
             assert_eq!(first_requests.load(Ordering::SeqCst), 1);
-            assert_eq!(second_requests.load(Ordering::SeqCst), 1);
+            assert!(score(&peer_list, &first) < 100);
+            assert_eq!(second_requests.load(Ordering::SeqCst), 0);
         }
 
         #[rstest::rstest]
