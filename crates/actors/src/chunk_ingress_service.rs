@@ -189,9 +189,12 @@ pub(crate) struct ChunkIngressServiceInner {
     /// Sent chunks (HTTP upload, gossip) recently stored from a storage
     /// placement with no cache row, and parked. Only the no-row path of a sent
     /// chunk reads it: a replay of such a chunk skips the placement reads and
-    /// the proof check. A fetched chunk (data sync) does not read or write it.
-    /// It is separate from `recent_valid_chunks` so that the cached path still
-    /// takes the chunk when its header arrives.
+    /// the proof check, but only while the pending map still holds the same
+    /// chunk at its offset. A key outlives the parked chunk (a header drains
+    /// it, the pending map evicts it, or another chunk replaces it). A fetched
+    /// chunk (data sync) does not read or write it. It is separate from
+    /// `recent_valid_chunks` so that the cached path still takes the chunk
+    /// when its header arrives.
     pub(crate) recent_placed_chunks: tokio::sync::RwLock<LruCache<ChunkKey, ()>>,
     pub(crate) pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
     pub(crate) pending_ingress_proofs: Mutex<PendingIngressProofs>,

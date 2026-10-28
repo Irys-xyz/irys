@@ -590,8 +590,10 @@ impl ChunkIngressServiceInner {
             // and parked. A replay of it changes nothing, so it skips the
             // index reads and the proof check. The replay cache outlives the
             // parked chunk (a header drains it, or the pending map evicts it).
-            // Only a chunk that is still parked is a replay: otherwise this is
-            // new work for a later upload of the same data, which must park.
+            // Only a replay of the chunk that is still parked skips: otherwise
+            // this is new work for a later upload of the same data, which must
+            // park. A different chunk parked at the same offset (a pre-header
+            // park is not checked) does not make the incoming chunk a replay.
             if source == ChunkIngressSource::Sent
                 && self.recent_placed_chunks.read().await.contains(&chunk_key)
                 && self
@@ -599,7 +601,8 @@ impl ChunkIngressServiceInner {
                     .read()
                     .await
                     .get(&data_commitment)
-                    .is_some_and(|parked| parked.peek(&chunk.tx_offset).is_some())
+                    .and_then(|parked| parked.peek(&chunk.tx_offset))
+                    .is_some_and(|parked_chunk| parked_chunk == chunk.as_ref())
             {
                 debug!(
                     "Chunk {} already stored from its placement recently, skipping",
@@ -854,9 +857,10 @@ impl ChunkIngressServiceInner {
     /// ingress leaf is written without a resend. After the park the chunk key
     /// goes in `recent_placed_chunks`, so a replay is a no-op: the chunk is
     /// already stored and parked. The key is a replay only while the pending
-    /// map still holds the chunk. Once a header drains it, or the pending map
-    /// evicts it, a send of the same chunk takes the placed path again and
-    /// parks again (a later upload of the same data needs its body and leaf).
+    /// map still holds this same chunk at its offset. Once a header drains it,
+    /// another chunk replaces it, or the pending map evicts it, a send of the
+    /// same chunk takes the placed path again and parks again (a later upload
+    /// of the same data needs its body and leaf).
     /// A failed park is not remembered, so a resend parks again.
     async fn ingest_placed_chunk(
         &self,
@@ -2478,22 +2482,22 @@ mod tests {
         inner
             .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
             .await?;
-        // Swap the parked chunk for a marker at the same offset. A replay
-        // that parks again would overwrite the marker.
-        let marker = UnpackedChunk {
-            bytes: vec![0xEE].into(),
-            ..chunk.clone()
-        };
-        {
-            let mut pending = inner.pending_chunks.write().await;
-            assert!(
-                pending
-                    .get(&data_commitment)
-                    .is_some_and(|parked| parked.peek(&chunk.tx_offset).is_some()),
-                "the first send parks the chunk"
-            );
-            pending.park(marker);
-        }
+        assert!(
+            inner
+                .pending_chunks
+                .read()
+                .await
+                .get(&data_commitment)
+                .is_some_and(|parked| parked.peek(&chunk.tx_offset).is_some()),
+            "the first send parks the chunk"
+        );
+        // A drain that holds the whole per-item cap: a send that reaches the
+        // park is now rejected.
+        let _drain = inner
+            .pending_chunks
+            .read()
+            .await
+            .begin_drain(data_commitment, 8);
 
         // With a failing placement read, a chunk that reaches the read parks.
         PLACEMENT_READ_FAULT_MODULES.with(|faulty| *faulty.borrow_mut() = vec![storage_module.id]);
@@ -2501,19 +2505,57 @@ mod tests {
             .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
             .await;
         PLACEMENT_READ_FAULT_MODULES.with(|faulty| faulty.borrow_mut().clear());
-        result.expect("a replay is not a fault");
+        result.expect("the replay does not reach the placement read and does not park");
+        Ok(())
+    }
 
+    /// A different chunk is parked at the offset of a sent placed chunk (a
+    /// pre-header park is not checked). A send of the placed chunk is not a
+    /// replay: it parks and replaces the other chunk.
+    #[tokio::test]
+    async fn placed_chunk_is_not_a_replay_of_a_different_parked_chunk() -> eyre::Result<()> {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-placement-replace")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        let (_storage_module, data, data_root, proofs) =
+            place_upload_without_cache_row(&mut inner)?;
+        let data_commitment = size_key(data_root, 64);
+        let chunk = UnpackedChunk {
+            data_tree_root: DataTreeRoot(data_root),
+            data_size: 64,
+            data_path: proofs[1].clone().into(),
+            bytes: data[32..64].to_vec().into(),
+            tx_offset: TxChunkOffset::from(1),
+        };
+        let parked_bytes = |inner: &ChunkIngressServiceInner| {
+            let pending = inner.pending_chunks.clone();
+            async move {
+                pending
+                    .read()
+                    .await
+                    .get(&data_commitment)
+                    .and_then(|parked| parked.peek(&TxChunkOffset::from(1)))
+                    .map(|parked_chunk| parked_chunk.bytes.0.clone())
+            }
+        };
+
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
+            .await?;
+        inner.pending_chunks.write().await.park(UnpackedChunk {
+            bytes: vec![0xEE].into(),
+            ..chunk.clone()
+        });
+        assert_eq!(parked_bytes(&inner).await, Some(vec![0xEE]));
+
+        inner
+            .handle_chunk_ingress_message(chunk.clone(), ChunkIngressSource::Sent)
+            .await?;
         assert_eq!(
-            inner
-                .pending_chunks
-                .read()
-                .await
-                .get(&data_commitment)
-                .and_then(|parked| parked
-                    .peek(&chunk.tx_offset)
-                    .map(|held| held.bytes.0.clone())),
-            Some(vec![0xEE]),
-            "the replay does not reach the placement read and does not park"
+            parked_bytes(&inner).await,
+            Some(chunk.bytes.0.clone()),
+            "the placed chunk replaces the other parked chunk"
         );
         Ok(())
     }
