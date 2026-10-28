@@ -6,7 +6,7 @@ use irys_actors::MempoolFacade;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::reth_service::RethServiceMessage;
 use irys_domain::chain_sync_state::ChainSyncState;
-use irys_domain::{BlockIndexReadGuard, PeerList};
+use irys_domain::{BlockIndexReadGuard, PeerList, ScoreDecreaseReason};
 use irys_types::Traced;
 use irys_types::{
     BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysPeerId, NodeInfo,
@@ -15,7 +15,7 @@ use irys_types::{
 use irys_vdf::state::VdfController;
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1966,6 +1966,9 @@ async fn get_block_index(
         },
     };
 
+    // A source whose answer breaks a rule is not asked again in this call.
+    let mut rejected_sources = HashSet::new();
+
     for _ in 0..retries {
         // Ask `peer_count` sources at the same time and use the longest valid
         // answer. One source can be behind the others, so an empty answer is
@@ -2015,6 +2018,13 @@ async fn get_block_index(
                                 peer_id,
                                 broken_rule
                             );
+                            // The answer contradicts the peer's own `/info`
+                            // claims or our index.
+                            peer_list.decrease_peer_score_by_peer_id(
+                                peer_id,
+                                ScoreDecreaseReason::BogusData(broken_rule),
+                            );
+                            rejected_sources.insert(*peer_id);
                         }
                     },
                     Err(error) => {
@@ -2033,6 +2043,8 @@ async fn get_block_index(
                 return Ok(index);
             }
         }
+
+        sources.retain(|(peer_id, _, _)| !rejected_sources.contains(peer_id));
     }
 
     Err(ChainSyncError::Network(
@@ -3547,6 +3559,14 @@ mod tests {
             peer_list_with_trusted(peers, trusted).1
         }
 
+        fn score(peer_list: &PeerList, peer: &PeerListItem) -> u16 {
+            peer_list
+                .peer_by_id(&peer.peer_id)
+                .expect("peer in the list")
+                .reputation_score
+                .get()
+        }
+
         async fn fetch(
             peer_list: &PeerList,
             index: &BlockIndexReadGuard,
@@ -3666,7 +3686,8 @@ mod tests {
         }
 
         /// Each case is a source ranked first whose answer breaks one rule.
-        /// The fetch takes the answer of the next source.
+        /// The fetch takes the answer of the next source, and the score of
+        /// the first source goes down.
         #[rstest::rstest]
         #[case::does_not_start_with_our_entry(index_source(
             0x11,
@@ -3710,20 +3731,56 @@ mod tests {
             },
         ))]
         #[tokio::test]
-        async fn answer_that_breaks_a_rule_is_rejected(
+        async fn answer_that_breaks_a_rule_is_rejected_and_lowers_the_score(
             #[case] first: (PeerListItem, Arc<AtomicUsize>),
         ) {
             let dir = TempDirBuilder::new().build();
             let index = local_index(dir.path());
             let (first, _) = first;
             let (second, _) = consistent_source(0x12, 1, START as u64 + 2);
-            let peer_list = trusted_peer_list(vec![first, second]);
+            let peer_list = trusted_peer_list(vec![first.clone(), second.clone()]);
 
             let fetched = fetch(&peer_list, &index, 1, true)
                 .await
                 .expect("block index");
 
             assert_eq!(fetched, entries(MAIN_CHAIN, START as u64, START as u64 + 2));
+            assert!(score(&peer_list, &first) < 100);
+            assert_eq!(score(&peer_list, &second), 100);
+        }
+
+        #[tokio::test]
+        async fn rejected_source_is_not_asked_again_in_the_same_fetch() {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
+            // It advertises entries but answers empty.
+            let (first, first_requests) = index_source(
+                0x11,
+                1,
+                START as u64 + 8,
+                entry_hash(MAIN_CHAIN, START as u64 + 8),
+                |_: &BlockIndexQuery| Vec::new(),
+            );
+            // It fails each index request, so the fetch uses all its retries.
+            let failing_server = FakeGossipServer::new();
+            failing_server.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    block_index_height: START as u64 + 8,
+                    ..NodeInfo::default()
+                })
+            });
+            failing_server.set_on_block_index_request(|_| {
+                GossipResponse::Rejected(crate::types::RejectionReason::GossipDisabled)
+            });
+            let second = peer_list_item(0x12, failing_server.spawn(), true, 100);
+            let peer_list = trusted_peer_list(vec![first.clone(), second]);
+
+            fetch(&peer_list, &index, 2, true)
+                .await
+                .expect_err("no valid answer");
+
+            assert_eq!(first_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(score(&peer_list, &first), 95);
         }
 
         #[rstest::rstest]
