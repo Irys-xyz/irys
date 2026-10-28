@@ -291,8 +291,10 @@ are the fields in `<submodule>/packing_params.toml`.
 That file also records `entropy_packing_iterations` and `chunk_size`.
 A file that omits them is filled from the current consensus when the
 node opens the module, then written back.
-`chunks-per-partition` and `chunk-size` come from the chain config.
-Mainnet chunk size is 262144. The tool derives the tx path at that ledger
+`--config` is the node's `config.toml`. The tool takes
+`num_chunks_in_partition`, the chunk size and the data tree geometry from
+its consensus config. The geometry derives each tx's data commitment, and
+a stored placement with another commitment is a mismatch. The tool derives the tx path at that ledger
 offset and requires the stored bytes to be identical. A mismatch aborts
 and names the partition offset.
 
@@ -326,12 +328,12 @@ Stop the node. Do this for each submodule directory.
 submodule-index-convert mdbx-to-rocks \
   --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
-  --chunks-per-partition <n> --chunk-size <bytes> \
+  --config <node>/config.toml \
   <submodule>/db <submodule>/rocks
 submodule-index-convert verify \
   --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
-  --chunks-per-partition <n> --chunk-size <bytes> \
+  --config <node>/config.toml \
   <submodule>/db <submodule>/rocks
 ```
 
@@ -347,12 +349,12 @@ output is MDBX schema v2, which release 4.0.x cannot read. Stop the node.
 submodule-index-convert rocks-to-mdbx \
   --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
-  --chunks-per-partition <n> --chunk-size <bytes> \
+  --config <node>/config.toml \
   <submodule>/rocks <new-db-dir>
 submodule-index-convert verify --rollback \
   --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
-  --chunks-per-partition <n> --chunk-size <bytes> \
+  --config <node>/config.toml \
   <new-db-dir> <submodule>/rocks
 ```
 

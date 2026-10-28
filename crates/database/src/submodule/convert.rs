@@ -18,8 +18,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eyre::WrapErr as _;
+use irys_types::data_tree::Geometry;
 use irys_types::{
-    ChunkDataPath, DataLedger, DataTransactionHeader, H256, PartitionChunkOffset,
+    ChunkDataPath, DataLedger, DataTransactionHeader, DataTreeRoot, H256, PartitionChunkOffset,
     RelativeChunkOffset, TxPath, TxPathHash, hash_sha256,
 };
 use reth_db::cursor::DbCursorRO as _;
@@ -263,8 +264,9 @@ pub struct ConvertOptions {
     pub slot_index: u64,
     /// Consensus `num_chunks_in_partition`.
     pub chunks_per_partition: u64,
-    /// Consensus chunk size in bytes.
-    pub chunk_size: u64,
+    /// Data tree geometry of the chain config. Its chunk size sets the tx path
+    /// derivation, and it derives the data commitment of each tx.
+    pub data_tree_geometry: Geometry,
     /// `Some(n)` returns an error after `n` committed row batches and does
     /// not write the completion marker. `Some(0)` returns before the first
     /// row batch. The target is left incomplete.
@@ -287,7 +289,7 @@ impl ConvertOptions {
     /// Production batch size. `mdbx` should be the submodule arguments.
     /// The converter sets the exclusive lock itself. `consensus` starts as a
     /// clone of `mdbx`; the binary replaces it with the consensus arguments.
-    pub fn new(mdbx: DatabaseArguments) -> Self {
+    pub fn new(mdbx: DatabaseArguments, data_tree_geometry: Geometry) -> Self {
         Self {
             batch_rows: 2048,
             batch_value_bytes: 8 * 1024 * 1024,
@@ -298,7 +300,7 @@ impl ConvertOptions {
             ledger_id: 0,
             slot_index: 0,
             chunks_per_partition: 0,
-            chunk_size: 0,
+            data_tree_geometry,
             fail_after_batches: None,
             dry_run: false,
             rollback: false,
@@ -1017,10 +1019,19 @@ struct PlacementMap {
     ledger: DataLedger,
     slot_index: u64,
     chunks_per_partition: u64,
-    chunk_size: u64,
+    data_tree_geometry: Geometry,
 }
 
 impl PlacementMap {
+    /// The only identity of a tx's data: its commitment under the chain geometry.
+    fn data_commitment(&self, data_tree_root: H256, data_size: u64) -> DataCommitment {
+        irys_types::data_tree::data_commitment(
+            &self.data_tree_geometry,
+            DataTreeRoot(data_tree_root),
+            data_size,
+        )
+    }
+
     fn ledger_offset(&self, partition_offset: PartitionChunkOffset) -> eyre::Result<u64> {
         let base = self
             .slot_index
@@ -1061,8 +1072,8 @@ fn require_map(options: &ConvertOptions) -> eyre::Result<PlacementMap> {
             "pass --consensus-db, the node consensus database. The converter derives each tx path from it and refuses a byte mismatch."
         );
     }
-    if options.chunk_size == 0 || options.chunks_per_partition == 0 {
-        eyre::bail!("--chunk-size and --chunks-per-partition must be non-zero");
+    if options.chunks_per_partition == 0 {
+        eyre::bail!("num_chunks_in_partition must be non-zero");
     }
     let ledger = DataLedger::try_from(options.ledger_id).wrap_err_with(|| {
         format!(
@@ -1074,7 +1085,7 @@ fn require_map(options: &ConvertOptions) -> eyre::Result<PlacementMap> {
         ledger,
         slot_index: options.slot_index,
         chunks_per_partition: options.chunks_per_partition,
-        chunk_size: options.chunk_size,
+        data_tree_geometry: options.data_tree_geometry,
     })
 }
 
@@ -1487,9 +1498,9 @@ fn prepare_v2_placement<S: SubmoduleStore>(
     interval: &TxPathInterval,
 ) -> eyre::Result<PreparedRun> {
     // The binding names the data commitment the infos belong to. Derive checks
-    // the root before the infos are used, so the three reads share one view.
-    // A missing binding does not know the commitment until derive, and finds
-    // the infos then.
+    // the commitment before the infos are used, so the three reads share one
+    // view. A missing binding does not know the commitment until derive, and
+    // finds the infos then.
     let (stored, binding, mut infos) = src.view(|tx| {
         let stored = tx.get_full_tx_path(interval.tx_path_hash)?;
         let binding = tx.get_tx_leaf_binding(interval.tx_path_hash)?;
@@ -1501,9 +1512,7 @@ fn prepare_v2_placement<S: SubmoduleStore>(
     })?;
     let stored =
         stored.ok_or_else(|| eyre::eyre!("partition offset {} has no stored tx path", start.0))?;
-    let bound = binding
-        .as_ref()
-        .map(|binding| (binding.data_root, binding.data_commitment));
+    let bound_commitment = binding.as_ref().map(|binding| binding.data_commitment);
     split_stored_interval(
         db,
         cache,
@@ -1515,42 +1524,28 @@ fn prepare_v2_placement<S: SubmoduleStore>(
             path_hash: interval.tx_path_hash,
             binding,
         },
-        |root, data_size| {
-            if let Some((bound_root, data_commitment)) = bound
-                && bound_root == root
-            {
-                let infos = infos.take().map(|infos| infos.0).unwrap_or_default();
-                return Ok((data_commitment, infos));
+        |_root, data_commitment| {
+            if bound_commitment == Some(data_commitment) {
+                return Ok(infos.take().map(|infos| infos.0).unwrap_or_default());
             }
-            stored_commitment_for(src, root, data_size)
+            stored_infos_for(src, data_commitment)
         },
     )
 }
 
-/// The stored infos for `data_tree_root` and `data_size`, with their key.
-///
-/// The converter has no geometry, so it cannot derive a commitment. It
-/// finds the row whose infos name this root and size instead. No row is an
-/// error: a placement must not be written under a commitment that nothing
-/// derived.
-fn stored_commitment_for<S: SubmoduleStore>(
+/// The stored infos for `data_commitment`. No row is an error: a placement
+/// must not be written under a commitment that has no stored infos.
+fn stored_infos_for<S: SubmoduleStore>(
     src: &S,
-    data_tree_root: H256,
-    data_size: u64,
-) -> eyre::Result<(DataCommitment, Vec<DataRootInfo>)> {
-    let entries = src.view(|tx| tx.data_root_entries())?;
-    for (data_commitment, DataRootInfos(infos)) in entries {
-        if infos
-            .iter()
-            .any(|info| info.data_tree_root.0 == data_tree_root && info.data_size == data_size)
-        {
-            return Ok((data_commitment, infos));
-        }
-    }
-    eyre::bail!(
-        "no tx leaf binding and no data-root info for root {data_tree_root} and size {data_size}; \
-         the converter has no geometry to derive the data commitment"
-    )
+    data_commitment: DataCommitment,
+) -> eyre::Result<Vec<DataRootInfo>> {
+    src.view(|tx| tx.get_data_root_infos_for_commitment(data_commitment))?
+        .map(|DataRootInfos(infos)| infos)
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "no tx leaf binding and no data-root info for data commitment {data_commitment:?}"
+            )
+        })
 }
 
 /// One RocksDB placement per tx inside a stored interval.
@@ -1559,15 +1554,15 @@ fn stored_commitment_for<S: SubmoduleStore>(
 /// the same bytes then occupy one interval. Cuts are the interval start plus
 /// every info start strictly inside it, the same cuts a placement read uses.
 /// The first segment must equal the stored bytes. Later segments use the
-/// derived proof. A later segment whose data root differs is corruption and
-/// aborts the run. A later segment the consensus database does not cover is
+/// derived proof. A later segment whose data root or data commitment differs
+/// is corruption and aborts the run. A later segment the consensus database does not cover is
 /// a frontier skip, and the resolved prefix is still returned.
 fn split_stored_interval(
     db: &DatabaseEnv,
     cache: &mut TxPathBlockCache,
     map: &PlacementMap,
     input: SplitInput<'_>,
-    mut load_infos: impl FnMut(H256, u64) -> eyre::Result<(DataCommitment, Vec<DataRootInfo>)>,
+    mut load_infos: impl FnMut(H256, DataCommitment) -> eyre::Result<Vec<DataRootInfo>>,
 ) -> eyre::Result<PreparedRun> {
     let SplitInput {
         start,
@@ -1591,6 +1586,7 @@ fn split_stored_interval(
         );
     }
     let first_header = load_header(db, &first, start)?;
+    let data_commitment = map.data_commitment(first.data_root, first_header.data_size);
     if let Some(binding) = &binding
         && (binding.data_root != first.data_root || binding.prefix_hash != first_header.prefix_hash)
     {
@@ -1599,7 +1595,16 @@ fn split_stored_interval(
             start.0
         );
     }
-    let (data_commitment, infos) = load_infos(first.data_root, first_header.data_size)?;
+    if let Some(binding) = &binding
+        && binding.data_commitment != data_commitment
+    {
+        eyre::bail!(
+            "tx leaf binding at partition offset {} names data commitment {:?}, but the derived tx has {data_commitment:?}",
+            start.0,
+            binding.data_commitment
+        );
+    }
+    let infos = load_infos(first.data_root, data_commitment)?;
     if let Some(info) = infos.iter().find(|info| {
         info.data_tree_root.0 != first.data_root || info.data_size != first_header.data_size
     }) {
@@ -1637,6 +1642,12 @@ fn split_stored_interval(
             let seg_hash = tx_path_hash(&derived.proof.proof);
             (derived, header, seg_hash, true)
         };
+        if map.data_commitment(derived.data_root, header.data_size) != data_commitment {
+            eyre::bail!(
+                "partition offset {} derives a different data commitment",
+                seg_start.0
+            );
+        }
         if seg_end != seg_start {
             match derive_at(db, cache, map, seg_end)? {
                 None => {
@@ -1699,7 +1710,13 @@ fn derive_at(
     offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<DerivedTxPath>> {
     let ledger_offset = map.ledger_offset(offset)?;
-    match derive_tx_path_at_offset_cached(db, cache, map.ledger, ledger_offset, map.chunk_size) {
+    match derive_tx_path_at_offset_cached(
+        db,
+        cache,
+        map.ledger,
+        ledger_offset,
+        map.data_tree_geometry.chunk_size(),
+    ) {
         Ok(derived) => Ok(Some(derived)),
         Err(err) if consensus_is_behind(&err) => Ok(None),
         Err(err) => {
@@ -1808,6 +1825,12 @@ fn rebuild_from_placement(
     if placement.data_tree_root.0 != derived.data_root {
         eyre::bail!(
             "data root at partition offset {} does not match the derived tx",
+            placement.start.0
+        );
+    }
+    if placement.data_commitment != map.data_commitment(derived.data_root, derived.data_size) {
+        eyre::bail!(
+            "data commitment at partition offset {} does not match the derived tx",
             placement.start.0
         );
     }
@@ -2209,6 +2232,7 @@ fn compare_one_placement<S: SubmoduleStore>(
     }
     let tx_index = u32::try_from(derived.tx_index).ok();
     let same = place.data_tree_root.0 == derived.data_root
+        && place.data_commitment == map.data_commitment(derived.data_root, derived.data_size)
         && binding
             .as_ref()
             .is_none_or(|item| item.data_commitment == place.data_commitment)
@@ -2894,7 +2918,7 @@ fn reset_marker_on(env: &DatabaseEnv) -> eyre::Result<bool> {
 }
 
 /// v1 rows are data keyed by the data root. This build keys data by the
-/// data commitment and has no geometry here to derive it, so it refuses to
+/// data commitment. A v1 key is a bare root with no size, so it refuses to
 /// copy or compare them. A reset source is still written as an empty index.
 fn refuse_v1_data_rows(env: &DatabaseEnv) -> eyre::Result<()> {
     if mdbx_has_v1_rows(env)? && !allows_v1_data_rows() {
@@ -3449,10 +3473,7 @@ fn prepare_v1_placement(
             path_hash: run.tx_hash,
             binding,
         },
-        |root, _data_size| {
-            let key = v1_key(root);
-            Ok((key, v1_infos(env, key)?))
-        },
+        |root, _data_commitment| v1_infos(env, v1_key(root)),
     )
 }
 
@@ -3884,9 +3905,10 @@ fn read_v1_binding(env: &DatabaseEnv, hash: H256) -> eyre::Result<Option<TxLeafB
     read_v1_row::<TxLeafBindingByTxPathHash>(env, hash)
 }
 
-/// v1 rows are keyed by the data root. The v1 copy keeps that key as the
-/// placement's key. Production refuses v1 data rows before this copy runs
-/// (see [`refuse_v1_data_rows`]), so only the copy tests reach it.
+/// v1 rows are keyed by the data root. The v1 copy reads them under that key
+/// and writes the placement under the derived data commitment. Production
+/// refuses v1 data rows before this copy runs (see [`refuse_v1_data_rows`]),
+/// so only the copy tests reach it.
 fn v1_key(data_root: H256) -> DataCommitment {
     DataCommitment(data_root)
 }
@@ -4358,6 +4380,8 @@ fn compare_v1_interval(
         let same = place.start == seg_start
             && place.end == seg_end
             && place.data_tree_root.0 == seg_derived.data_root
+            && place.data_commitment
+                == map.data_commitment(seg_derived.data_root, seg_derived.data_size)
             && place.block_height == Some(seg_derived.height)
             && place.tx_index == tx_index
             && place.ledger == Some(map.ledger.get_id());
@@ -5171,6 +5195,7 @@ mod tests {
         AllowV1DataRows
     }
     use irys_types::DataTreeRoot;
+    use irys_types::data_tree::Geometry;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -5218,14 +5243,22 @@ mod tests {
     }
 
     fn options_for(consensus: &Path) -> eyre::Result<ConvertOptions> {
-        let mut options = ConvertOptions::new(testing_args()?);
+        let mut options = ConvertOptions::new(testing_args()?, Geometry::TESTING);
         options.consensus = testing_args()?;
         options.consensus_db = Some(consensus.to_path_buf());
         options.ledger_id = DataLedger::Publish.get_id();
         options.slot_index = 1;
         options.chunks_per_partition = 8;
-        options.chunk_size = 32;
         Ok(options)
+    }
+
+    /// The data commitment of a tx with `data_tree_root` and `data_size` under the test geometry.
+    fn commitment(data_tree_root: H256, data_size: u64) -> DataCommitment {
+        irys_types::data_tree::data_commitment(
+            &Geometry::TESTING,
+            DataTreeRoot(data_tree_root),
+            data_size,
+        )
     }
 
     fn temp(prefix: &str) -> tempfile::TempDir {
@@ -5351,7 +5384,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root: pair.root_a,
                     prefix_hash: pair.prefix_a,
-                    data_commitment: DataCommitment(pair.root_a),
+                    data_commitment: commitment(pair.root_a, 352),
                 },
             )?;
             tx.add_tx_leaf_binding(
@@ -5359,7 +5392,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root: pair.root_b,
                     prefix_hash: pair.prefix_b,
-                    data_commitment: DataCommitment(pair.root_b),
+                    data_commitment: commitment(pair.root_b, 32),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -5383,7 +5416,7 @@ mod tests {
                 Some(H256::from(hash_sha256(&data_3))),
             )?;
             tx.add_data_root_info(
-                DataCommitment(pair.root_a),
+                commitment(pair.root_a, 352),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(-8),
                     data_size: 352,
@@ -5391,7 +5424,7 @@ mod tests {
                 },
             )?;
             tx.add_data_root_info(
-                DataCommitment(pair.root_b),
+                commitment(pair.root_b, 32),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(3),
                     data_size: 32,
@@ -5401,7 +5434,7 @@ mod tests {
             tx.add_pending_body_migration(
                 PartitionChunkOffset(0),
                 &PendingBodyMigration {
-                    data_commitment: DataCommitment(pair.root_a),
+                    data_commitment: commitment(pair.root_a, 352),
                     data_tree_root: DataTreeRoot(pair.root_a),
                     data_size: 352,
                     start_offset: RelativeChunkOffset(-8),
@@ -5485,7 +5518,7 @@ mod tests {
             let job = tx
                 .get_pending_body_migration(PartitionChunkOffset(0))?
                 .expect("pending");
-            assert_eq!(job.data_commitment, DataCommitment(pair.root_a));
+            assert_eq!(job.data_commitment, commitment(pair.root_a, 352));
             assert_eq!(job.start_offset, RelativeChunkOffset(-8));
             assert_eq!(job.block_height, 1);
             Ok(())
@@ -5527,7 +5560,7 @@ mod tests {
             let job = tx
                 .get_pending_body_migration(PartitionChunkOffset(0))?
                 .expect("pending");
-            assert_eq!(job.data_commitment, DataCommitment(pair.root_a));
+            assert_eq!(job.data_commitment, commitment(pair.root_a, 352));
             Ok(())
         })?;
         assert!(!store.reset_in_progress()?);
@@ -5765,7 +5798,7 @@ mod tests {
         let record = PackingRecord {
             packing_address: [0x22; 20],
             iterations: 1000,
-            chunk_size: options.chunk_size,
+            chunk_size: options.data_tree_geometry.chunk_size(),
             chain_id: 1270,
         };
         options.packing_record = Some(record);
@@ -5952,6 +5985,77 @@ mod tests {
         let message = format!("{err:#}");
         assert!(message.contains("partition offset"), "{message}");
         assert!(!rocks.join("SCHEMA").exists());
+        Ok(())
+    }
+
+    /// A binding for the first tx's root under the commitment of another size.
+    fn binding_with_other_size(pair: &DerivedPair) -> TxLeafBinding {
+        TxLeafBinding {
+            data_root: pair.root_a,
+            prefix_hash: pair.prefix_a,
+            data_commitment: commitment(pair.root_a, 353),
+        }
+    }
+
+    #[test]
+    fn mdbx_binding_with_the_commitment_of_another_size_is_refused() -> eyre::Result<()> {
+        let Populated {
+            root: _root,
+            consensus,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-binding-other-size")?;
+        let pair = derived_pair(&consensus)?;
+        {
+            let store = MdbxSubmoduleStore::open(&mdbx, testing_args()?)?;
+            store.update(|tx| {
+                tx.add_tx_leaf_binding(tx_path_hash(&pair.proof_a), &binding_with_other_size(&pair))
+            })?;
+        }
+        let err = convert_mdbx_to_rocks(&mdbx, &rocks, &options).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("data commitment"), "{message}");
+        assert!(!rocks.join("SCHEMA").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn placement_with_the_commitment_of_another_size_is_a_mismatch() -> eyre::Result<()> {
+        let Populated {
+            root: _root,
+            consensus,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-placement-other-size")?;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        let pair = derived_pair(&consensus)?;
+        let other_size = binding_with_other_size(&pair);
+        // Same root and same offsets, other size: only the commitment differs.
+        {
+            let hash = tx_path_hash(&pair.proof_a);
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            opened.update(|tx| {
+                tx.add_tx_leaf_binding(hash, &other_size)?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset(0),
+                    PartitionChunkOffset(2),
+                    Some(hash),
+                )
+            })?;
+        }
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(report.has_mismatch(), "{report}");
+        assert!(report.intervals_mismatches >= 1, "{report}");
+
+        let back = _root.path().join("db-back");
+        let err = convert_rocks_to_mdbx(&rocks, &back, &options).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("data commitment at partition offset"),
+            "{message}"
+        );
         Ok(())
     }
 
@@ -6891,7 +6995,7 @@ mod tests {
         assert!(!module.join("sub").exists());
         assert!(!db.join("CONVERTING").is_file());
 
-        let options = super::ConvertOptions::new(testing_args()?);
+        let options = super::ConvertOptions::new(testing_args()?, Geometry::TESTING);
         let err = convert_mdbx_to_rocks(&db, &into_source, &options).unwrap_err();
         assert!(format!("{err:#}").contains("same path"), "{err:#}");
         assert!(!module.join("other").exists());
@@ -6927,7 +7031,7 @@ mod tests {
     #[test]
     fn relative_target_inside_the_source_is_refused() -> eyre::Result<()> {
         let source = std::env::current_dir()?;
-        let options = super::ConvertOptions::new(testing_args()?);
+        let options = super::ConvertOptions::new(testing_args()?, Geometry::TESTING);
         let inside = Path::new("sweep16-x4-relative-inside-source");
         assert!(
             !source.join(inside).exists(),
@@ -7487,7 +7591,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root,
                     prefix_hash: prefix,
-                    data_commitment: DataCommitment(data_root),
+                    data_commitment: commitment(data_root, 32),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -7496,7 +7600,7 @@ mod tests {
                 Some(stored_hash),
             )?;
             tx.add_data_root_info(
-                DataCommitment(data_root),
+                commitment(data_root, 32),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(0),
                     data_size: 32,
@@ -7504,7 +7608,7 @@ mod tests {
                 },
             )?;
             tx.add_data_root_info(
-                DataCommitment(data_root),
+                commitment(data_root, 32),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(1),
                     data_size: 32,
@@ -7574,7 +7678,7 @@ mod tests {
                 &TxLeafBinding {
                     data_root: pair.root_b,
                     prefix_hash: pair.prefix_b,
-                    data_commitment: DataCommitment(pair.root_b),
+                    data_commitment: commitment(pair.root_b, 32),
                 },
             )?;
             tx.add_tx_path_hash_to_offset_range(
@@ -7583,7 +7687,7 @@ mod tests {
                 Some(hash_b),
             )?;
             tx.add_data_root_info(
-                DataCommitment(pair.root_b),
+                commitment(pair.root_b, 32),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(3),
                     data_size: 32,
@@ -7591,7 +7695,7 @@ mod tests {
                 },
             )?;
             tx.add_data_root_info(
-                DataCommitment(pair.root_b),
+                commitment(pair.root_b, 32),
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(4),
                     data_size: 32,
