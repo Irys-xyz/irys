@@ -6508,7 +6508,7 @@ mod peer_chunk_length_tests {
 /// Bytes for one ingress-proof chunk from the local cache or a storage module.
 ///
 /// A cache row with `chunk: None` is a miss. A storage-module body must name
-/// this data root and tx offset, and it must pass the same content checks as
+/// this data commitment and tx offset, and it must pass the same content checks as
 /// a body copied out of the cache (the chunk seam: chunk length and chunk
 /// proof against the commitment of this data root and size).
 /// A mismatch is a miss. `Ok(None)` from a module read is a miss too: the
@@ -6596,7 +6596,9 @@ async fn ingress_proof_chunk_bytes_from_local(
                     continue;
                 }
             };
-            if unpacked.data_tree_root != data_root || unpacked.tx_offset != tx_offset {
+            if unpacked.data_commitment(&config.data_tree_geometry()) != data_commitment
+                || unpacked.tx_offset != tx_offset
+            {
                 continue;
             }
             match crate::chunk_migration_service::validate_chunk_parts_for_migration(
@@ -7210,8 +7212,9 @@ pub async fn data_txs_are_valid(
                             };
 
                             // Basic sanity checks before ingest
-                            if unpacked.data_tree_root != tx_header.data_tree_root
-                                || unpacked.data_size != tx_header.data_size
+                            let geometry = config.data_tree_geometry();
+                            if unpacked.data_commitment(&geometry)
+                                != tx_header.data_commitment(&geometry)
                                 || *unpacked.tx_offset != tx_offset_u32
                             {
                                 continue;

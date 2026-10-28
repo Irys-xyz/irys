@@ -630,7 +630,8 @@ fn fill_submit_misses(
                 let Some(body) = read.into_iter().next().flatten() else {
                     continue;
                 };
-                if body.data_tree_root != data_tree_root || body.tx_offset != tx_offset {
+                if body.data_commitment(geometry) != data_commitment || body.tx_offset != tx_offset
+                {
                     tracing::warn!(
                         data_commitment = %data_commitment,
                         %tx_offset,
