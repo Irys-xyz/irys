@@ -18,12 +18,15 @@ use irys_actors::{
     MempoolFacade, block_discovery::BlockDiscoveryFacade,
     chunk_ingress_service::facade::ChunkIngressFacadeImpl,
 };
+use irys_database::{
+    cached_data_root_by_commitment, db::IrysDatabaseExt as _, tables::CachedChunks,
+};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
-use irys_types::{BlockBody, Config, H256, IrysAddress, IrysPeerId, PeerNetworkError};
+use irys_types::{BlockBody, ChunkKey, Config, H256, IrysAddress, IrysPeerId, PeerNetworkError};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, SealedBlock, UnpackedChunk,
@@ -1021,8 +1024,47 @@ where
 
                 Ok(None)
             }
-            GossipDataRequestV2::Chunk(_chunk_key) => Ok(None),
+            GossipDataRequestV2::Chunk(chunk_key) => Ok(self
+                .cached_chunk_by_chunk_key(*chunk_key)?
+                .map(|chunk| GossipDataV2::Chunk(Arc::new(chunk)))),
         }
+    }
+
+    /// The chunk cached under `chunk_key`, rebuilt for a pull. The cached
+    /// row keeps the commitment and the chunk index, and the commitment's
+    /// cache row keeps `data_tree_root` and `data_size`. `None` when the
+    /// body or that row is gone. Storage modules are not read here.
+    fn cached_chunk_by_chunk_key(
+        &self,
+        chunk_key: ChunkKey,
+    ) -> GossipResult<Option<UnpackedChunk>> {
+        use irys_database::reth_db::transaction::DbTx as _;
+
+        self.block_pool
+            .db
+            .view_eyre(|tx| {
+                let Some(cached_chunk) = tx.get::<CachedChunks>(chunk_key)? else {
+                    return Ok(None);
+                };
+                let Some(bytes) = cached_chunk.chunk else {
+                    return Ok(None);
+                };
+                let Some(cached_data_root) =
+                    cached_data_root_by_commitment(tx, cached_chunk.data_commitment)?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(UnpackedChunk {
+                    data_tree_root: cached_data_root.data_tree_root,
+                    data_size: cached_data_root.data_size,
+                    data_path: cached_chunk.data_path,
+                    bytes,
+                    tx_offset: cached_chunk.tx_offset,
+                }))
+            })
+            .map_err(|error| {
+                GossipError::Internal(InternalGossipError::Database(error.to_string()))
+            })
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -2380,5 +2422,196 @@ mod body_fetch_recovery_tests {
             0,
             "a recently processed block must not be pulled again"
         );
+    }
+}
+
+#[cfg(test)]
+mod chunk_pull_tests {
+    use super::*;
+    use crate::tests::util::data_handler_stub;
+    use irys_database::reth_db::transaction::{DbTx as _, DbTxMut as _};
+    use irys_database::tables::CachedDataRoots;
+    use irys_domain::PeerList;
+    use irys_domain::chain_sync_state::ChainSyncState;
+    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::data_tree::{chunk_key, verify_data_chunk};
+    use irys_types::{
+        DataCommitment, DataTransaction, DatabaseProvider, DbSyncMode, NodeConfig, TxChunkOffset,
+    };
+
+    const WINDOW: Duration = Duration::from_secs(10);
+
+    struct Fixture {
+        _dir: irys_testing_utils::tempfile::TempDir,
+        db: DatabaseProvider,
+        config: Config,
+        handler: Arc<
+            GossipDataHandler<
+                crate::tests::util::MempoolStub,
+                crate::tests::util::BlockDiscoveryStub,
+            >,
+        >,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = dir.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(
+                &config.node_config.base_directory,
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("open test db"),
+        ));
+        let peer_list = PeerList::test_mock().expect("peer list");
+        let handler = data_handler_stub(
+            &config,
+            &peer_list,
+            db.clone(),
+            ChainSyncState::new(false, false),
+        );
+        Fixture {
+            _dir: dir,
+            db,
+            config,
+            handler,
+        }
+    }
+
+    /// Chunk `chunk_index` of `transaction`, as an uploader sends it.
+    fn unpacked_chunk(
+        fixture: &Fixture,
+        transaction: &DataTransaction,
+        data: &[u8],
+        chunk_index: u32,
+    ) -> UnpackedChunk {
+        let chunk_size = usize::try_from(fixture.config.consensus.chunk_size).expect("chunk size");
+        let start = chunk_index as usize * chunk_size;
+        let end = (start + chunk_size).min(data.len());
+        UnpackedChunk {
+            data_tree_root: transaction.header.data_tree_root,
+            data_size: transaction.header.data_size,
+            data_path: transaction
+                .chunk_proof(TxChunkOffset::from(chunk_index))
+                .expect("chunk proof"),
+            bytes: data[start..end].to_vec().into(),
+            tx_offset: TxChunkOffset::from(chunk_index),
+        }
+    }
+
+    /// Caches a three-chunk upload with a short last chunk: the header's row
+    /// and every chunk. Returns the transaction, its data and its commitment.
+    fn cache_upload(fixture: &Fixture) -> (DataTransaction, Vec<u8>, DataCommitment) {
+        let chunk_size = usize::try_from(fixture.config.consensus.chunk_size).expect("chunk size");
+        let data: Vec<u8> = (0..(2 * chunk_size + 5)).map(|i| i as u8).collect();
+        let transaction = fixture
+            .config
+            .irys_signer()
+            .create_transaction(data.clone(), H256::zero())
+            .expect("data transaction");
+        let geometry = fixture.config.data_tree_geometry();
+        fixture
+            .db
+            .update_eyre(|tx| {
+                irys_database::cache_data_root(tx, &transaction.header, None, &geometry)?;
+                for chunk_index in 0..3 {
+                    let chunk = unpacked_chunk(fixture, &transaction, &data, chunk_index);
+                    irys_database::cache_chunk(tx, &chunk, &geometry)?;
+                }
+                Ok(())
+            })
+            .expect("cache the upload");
+        let data_commitment = transaction.header.data_commitment(&geometry);
+        (transaction, data, data_commitment)
+    }
+
+    fn chunk_request(peer_byte: u8, key: ChunkKey) -> GossipRequestV2<GossipDataRequestV2> {
+        let miner = IrysAddress::repeat_byte(peer_byte);
+        GossipRequestV2 {
+            peer_id: IrysPeerId::from(miner),
+            miner_address: miner,
+            data: GossipDataRequestV2::Chunk(key),
+        }
+    }
+
+    async fn pull(fixture: &Fixture, peer_byte: u8, key: ChunkKey) -> Option<GossipDataV2> {
+        fixture
+            .handler
+            .handle_get_data_sync(chunk_request(peer_byte, key), WINDOW)
+            .await
+            .expect("chunk pull")
+    }
+
+    /// A pull for a cached chunk answers that chunk, and the chunk verifies
+    /// against the commitment of its header.
+    #[tokio::test]
+    async fn pull_for_a_cached_chunk_returns_a_chunk_that_verifies() {
+        let fixture = fixture();
+        let (transaction, data, data_commitment) = cache_upload(&fixture);
+        let geometry = fixture.config.data_tree_geometry();
+
+        for chunk_index in 0..3_u32 {
+            let key = chunk_key(data_commitment, TxChunkOffset::from(chunk_index));
+            let Some(GossipDataV2::Chunk(served)) =
+                pull(&fixture, 10 + chunk_index as u8, key).await
+            else {
+                panic!("chunk {chunk_index} is served");
+            };
+            assert_eq!(
+                *served,
+                unpacked_chunk(&fixture, &transaction, &data, chunk_index),
+                "chunk {chunk_index}"
+            );
+            verify_data_chunk(
+                &geometry,
+                data_commitment,
+                transaction.header.data_size,
+                served.tx_offset,
+                &served.bytes.0,
+                &served.data_path.0,
+            )
+            .unwrap_or_else(|error| panic!("chunk {chunk_index} verifies: {error}"));
+        }
+    }
+
+    /// A key that no cached chunk has answers None.
+    #[tokio::test]
+    async fn pull_for_an_unknown_key_returns_none() {
+        let fixture = fixture();
+        let (_, _, data_commitment) = cache_upload(&fixture);
+
+        let unknown = chunk_key(data_commitment, TxChunkOffset::from(3));
+        assert!(pull(&fixture, 20, unknown).await.is_none());
+        assert!(
+            pull(&fixture, 21, ChunkKey(H256::repeat_byte(0x5A)))
+                .await
+                .is_none()
+        );
+    }
+
+    /// The body is still cached, but the header's row was pruned. Without
+    /// that row the chunk cannot be rebuilt, so the pull answers None.
+    #[tokio::test]
+    async fn pull_after_the_data_root_row_is_pruned_returns_none() {
+        let fixture = fixture();
+        let (_, _, data_commitment) = cache_upload(&fixture);
+        fixture
+            .db
+            .update_eyre(|tx| {
+                tx.delete::<CachedDataRoots>(data_commitment, None)?;
+                Ok(())
+            })
+            .expect("prune the data root row");
+
+        let key = chunk_key(data_commitment, TxChunkOffset::from(0));
+        let body = fixture
+            .db
+            .view_eyre(|tx| Ok(tx.get::<CachedChunks>(key)?))
+            .expect("read the body");
+        assert!(body.is_some(), "the body is still cached");
+        assert!(pull(&fixture, 30, key).await.is_none());
     }
 }
