@@ -71,7 +71,11 @@ impl super::PackingStrategy for CudaPackingStrategy {
                 break;
             }
             let start: u32 = *(*chunk_range_split).start();
-            let end: u32 = *(*chunk_range_split).end();
+            let partition_chunks = storage_module.partition_chunks();
+            if u64::from(start) >= partition_chunks {
+                break;
+            }
+            let end: u32 = (*(*chunk_range_split).end()).min(partition_chunks as u32 - 1);
             let num_chunks = end - start + 1;
 
             debug!(

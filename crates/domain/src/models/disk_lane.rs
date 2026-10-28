@@ -1547,7 +1547,7 @@ impl StorageModule {
                 .collect()
         };
         let chunk_size = self.config.consensus.chunk_size;
-        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
+        let num_chunks_in_partition = self.partition_chunks();
 
         let mut selected: Vec<SelectedOffset> = Vec::new();
         {
@@ -2483,13 +2483,8 @@ impl StorageModule {
         let last_tx = u32::try_from(chunks - 1).ok()?;
         let start = offset.0.checked_sub(u32::from(tx_offset))?;
         let tx_last = start.checked_add(last_tx)?;
-        let partition_last = u32::try_from(
-            self.config
-                .consensus
-                .num_chunks_in_partition
-                .saturating_sub(1),
-        )
-        .unwrap_or(u32::MAX);
+        let partition_last =
+            u32::try_from(self.partition_chunks().saturating_sub(1)).unwrap_or(u32::MAX);
         Some(tx_last.min(partition_last))
     }
 
@@ -2912,6 +2907,7 @@ impl StorageModule {
         pread: Option<&[u8]>,
     ) -> Result<(), WriteDataChunkError> {
         if self.data_writes_paused()
+            || !self.offset_in_partition(slot.offset)
             || self.index_write_generation.load(Ordering::SeqCst) != slot.generation
         {
             return Err(WriteDataChunkError::WritesPaused);
@@ -3121,6 +3117,7 @@ impl StorageModule {
             }
             pending.occupancy.remove(&offset);
             if self.data_writes_paused()
+                || !self.offset_in_partition(offset)
                 || self.index_write_generation.load(Ordering::SeqCst) != generation
             {
                 return Err(WriteDataChunkError::WritesPaused);

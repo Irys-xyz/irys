@@ -303,6 +303,29 @@ impl BlockMigrationService {
         Ok(())
     }
 
+    /// Update logical ledger geometry on canonical adoption, including reorgs.
+    /// Destructive truncation is separately gated on finality by the storage service.
+    ///
+    /// Hot path: runs on every tip change for every module; the no-growth
+    /// case is an atomic load and swap.
+    pub fn update_partition_geometry(
+        &self,
+        epoch: &irys_domain::EpochSnapshot,
+    ) -> eyre::Result<()> {
+        let Some(modules) = &self.storage_modules_guard else {
+            return Ok(());
+        };
+        let chunks = epoch.partition_chunks();
+        for module in modules.read().iter() {
+            // A growing bound (a branch without the activation became
+            // canonical) re-exposes a suffix that was never packed. The module
+            // records it and the storage-module service packs it on its next
+            // tick, keeping it across a full packing channel.
+            module.set_partition_chunks(chunks)?;
+        }
+        Ok(())
+    }
+
     pub fn set_storage_modules_guard(&mut self, guard: StorageModulesReadGuard) {
         self.storage_modules_guard = Some(guard);
     }

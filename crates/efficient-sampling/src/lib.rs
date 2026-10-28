@@ -147,12 +147,6 @@ impl Ranges {
             Ok(())
         })
     }
-
-    pub fn reset_step(&mut self, step_num: u64) -> u64 {
-        let num_ranges = u64::try_from(self.num_recall_ranges_in_partition)
-            .expect("num_recall_ranges_in_partition fits in u64 on all supported platforms");
-        reset_step(step_num, num_ranges)
-    }
 }
 
 /// Validates recall range index for a given step number, seed and partition hash
@@ -205,6 +199,15 @@ pub fn reset_step(step_num: u64, num_recall_ranges_in_partition: u64) -> u64 {
         return 0;
     }
     ((step_num - 1) / num_recall_ranges_in_partition) * num_recall_ranges_in_partition + 1
+}
+
+/// Fork-local pass origin; rejects stale steps from before the transition.
+pub fn reset_step_from_origin(step: u64, num_ranges: u64, origin: u64) -> Result<u64> {
+    eyre::ensure!(
+        num_ranges > 0 && origin > 0 && step >= origin,
+        "step precedes sampling origin"
+    );
+    Ok(origin + ((step - origin) / num_ranges) * num_ranges)
 }
 
 pub fn num_recall_ranges_in_partition(config: &ConsensusConfig) -> u64 {
@@ -583,5 +586,32 @@ mod tests {
                 valid_range
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod partition_resize_tests {
+    use super::*;
+
+    #[test]
+    fn partition_resize_sampling_origin_and_pass_boundary() -> Result<()> {
+        assert_eq!(reset_step_from_origin(32, 20, 32)?, 32);
+        assert_eq!(reset_step_from_origin(51, 20, 32)?, 32);
+        assert_eq!(reset_step_from_origin(52, 20, 32)?, 52);
+        assert!(reset_step_from_origin(31, 20, 32).is_err());
+        for step in 1..100 {
+            assert_eq!(reset_step_from_origin(step, 20, 1)?, reset_step(step, 20));
+        }
+        let partition = H256::repeat_byte(4);
+        let seeds = H256List((0..20).map(H256::repeat_byte).collect());
+        let mut miner = Ranges::new(20)?;
+        miner.last_step_num = 31;
+        miner.reconstruct(&seeds, &partition)?;
+        assert_eq!(miner.last_step_num, 51);
+        assert_eq!(
+            miner.get_recall_range(51, &seeds[19], &partition)?,
+            get_recall_range(20, &seeds, &partition)?
+        );
+        Ok(())
     }
 }
