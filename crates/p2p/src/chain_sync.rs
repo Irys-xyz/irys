@@ -9,8 +9,8 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::Traced;
 use irys_types::{
-    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysPeerId, NodeMode,
-    PeerListItem, SyncMode, TokioServiceHandle, U256,
+    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysPeerId, NodeInfo,
+    NodeMode, PeerListItem, SyncMode, TokioServiceHandle, U256,
 };
 use irys_vdf::state::VdfController;
 use rand::prelude::SliceRandom as _;
@@ -1022,6 +1022,7 @@ struct SyncParams {
     is_trusted_mode: bool,
     is_a_genesis_node: bool,
     block_batch_size: usize,
+    block_index_peer_count: usize,
     retry_block_request_timeout_secs: u64,
     wait_queue_slot_timeout_secs: u64,
     wait_queue_slot_max_attempts: usize,
@@ -1039,6 +1040,7 @@ impl SyncParams {
             is_trusted_mode: matches!(sync_mode, SyncMode::Trusted),
             is_a_genesis_node: matches!(config.node_config.node_mode, NodeMode::Genesis),
             block_batch_size: config.node_config.sync.block_batch_size,
+            block_index_peer_count: config.node_config.sync.block_index_peer_count,
             retry_block_request_timeout_secs: config
                 .node_config
                 .sync
@@ -1280,6 +1282,7 @@ async fn fetch_initial_block_index(
         // +1, because the index endpoint is inclusive, and we don't want to fetch the last block again
         sync_state.sync_target_height() + 1,
         params.block_batch_size,
+        params.block_index_peer_count,
         BLOCK_INDEX_RETRIES,
         params.is_trusted_mode,
     )
@@ -1480,6 +1483,7 @@ async fn replenish_block_batch(
         gossip_client,
         *sync_target,
         params.block_batch_size,
+        params.block_index_peer_count,
         BLOCK_INDEX_RETRIES,
         params.is_trusted_mode,
     )
@@ -1561,6 +1565,7 @@ async fn wait_for_queue_slot<B: BlockDiscoveryFacade, M: MempoolFacade>(
         gossip_client,
         retry_height,
         1, // Just get one block
+        params.block_index_peer_count,
         QUEUE_SLOT_RETRY_BLOCK_INDEX_RETRIES,
         params.is_trusted_mode,
     )
@@ -1887,6 +1892,7 @@ async fn check_and_update_full_validation_switch_height(
 #[instrument(skip_all, fields(
     index_request.start = start,
     index_request.limit = limit,
+    index_request.peer_count = peer_count,
     index_request.retries = retries,
     index_request.fetch_from_trusted_peers_only = fetch_from_trusted_peers_only
 ), err)]
@@ -1895,6 +1901,7 @@ async fn get_block_index(
     gossip_client: &GossipClient,
     start: usize,
     limit: usize,
+    peer_count: usize,
     retries: usize,
     fetch_from_trusted_peers_only: bool,
 ) -> ChainSyncResult<Vec<BlockIndexItem>> {
@@ -1918,52 +1925,71 @@ async fn get_block_index(
         return Err(ChainSyncError::Network("No peers available".to_string()));
     }
 
+    // Sources in the order to ask them: highest advertised index height first.
+    // A source that advertises a higher index has more entries to give. The
+    // shuffle before the stable sort mixes the sources at the same height.
+    let mut sources: Vec<_> = peers.into_values().flatten().collect();
+    sources.shuffle(&mut rand::thread_rng());
+    sources.sort_by(|a, b| b.2.block_index_height.cmp(&a.2.block_index_height));
+
+    let query = BlockIndexQuery {
+        height: start,
+        limit,
+    };
+
     for _ in 0..retries {
-        let mut peers = peers.clone();
+        // Ask `peer_count` sources at the same time and use the longest
+        // answer. One source can be behind the others, so an empty answer is
+        // final only when no other source in the group gives entries.
+        for group in sources.chunks(peer_count) {
+            debug!("Fetching block index from a group of {} peers", group.len());
+            let answers = futures::future::join_all(group.iter().map(|(peer_id, peer, _)| {
+                let query = query.clone();
+                async move {
+                    debug!(
+                        peer.address = ?peer.address.gossip,
+                        index.start = query.height,
+                        index.limit = query.limit,
+                        "Fetching block index from peer {:?}",
+                        peer_id
+                    );
+                    let answer = gossip_client.get_block_index(peer.address, query).await;
+                    (peer_id, peer, answer)
+                }
+            }))
+            .await;
 
-        while let Some((diff, mut peers_to_fetch_index_from)) = peers.pop_last() {
-            debug!("Peers with cumulative diff {:?}: {:?}", diff, peers.len());
-            peers_to_fetch_index_from.shuffle(&mut rand::thread_rng());
-
-            for (mining_addr, peer) in &peers_to_fetch_index_from {
-                debug!(
-                    peer.address = ?peer.address.gossip,
-                    index.start = start,
-                    index.limit = limit,
-                    "Fetching block index from peer {:?}",
-                    mining_addr
-                );
-
-                match gossip_client
-                    .get_block_index(
-                        peer.address,
-                        BlockIndexQuery {
-                            height: start,
-                            limit,
-                        },
-                    )
-                    .await
-                {
+            let mut longest_answer: Option<Vec<BlockIndexItem>> = None;
+            for (peer_id, peer, answer) in answers {
+                match answer {
                     Ok(index) => {
                         debug!(
                             peer.address = ?peer.address.gossip,
-                            index.start = start,
-                            index.limit = limit,
-                            "Fetched block index from peer {:?}: {:?}",
-                            mining_addr, index
+                            "Fetched {} block index entries from peer {:?}",
+                            index.len(),
+                            peer_id
                         );
-                        return Ok(index);
+                        if longest_answer
+                            .as_ref()
+                            .is_none_or(|longest| index.len() > longest.len())
+                        {
+                            longest_answer = Some(index);
+                        }
                     }
                     Err(error) => {
                         warn!(
                             peer.address = ?peer.address.gossip,
-                            index.start = start,
-                            index.limit = limit,
+                            index.start = query.height,
+                            index.limit = query.limit,
                             "Failed to fetch a block index from peer {:?}: {:?}",
-                            mining_addr, error
+                            peer_id, error
                         );
                     }
                 }
+            }
+
+            if let Some(index) = longest_answer {
+                return Ok(index);
             }
         }
     }
@@ -2198,11 +2224,13 @@ async fn estimate_canonical_height(
     highest_trusted_peer_height
 }
 
+/// Peers grouped by advertised cumulative difficulty. Each peer comes with the
+/// `/info` that it answered.
 async fn synced_peers_sorted_by_cumulative_diff(
     peer_list: &PeerList,
     gossip_client: &GossipClient,
     trusted_peers_only: bool,
-) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysPeerId, PeerListItem)>>> {
+) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysPeerId, PeerListItem, NodeInfo)>>> {
     let deadline = tokio::time::Instant::now() + SYNCED_PEER_DISCOVERY_TIMEOUT;
     let mut seen_candidate = false;
 
@@ -2248,7 +2276,7 @@ async fn synced_peers_sorted_by_cumulative_diff(
                 match gossip_client.get_info(peer.address).await {
                     Ok(info) => {
                         if !info.is_syncing {
-                            Ok((addr, peer, info.cumulative_difficulty))
+                            Ok((addr, peer, info))
                         } else {
                             Err(ChainSyncError::PeerSyncing(addr))
                         }
@@ -2264,11 +2292,11 @@ async fn synced_peers_sorted_by_cumulative_diff(
         let mut peers_and_diffs = BTreeMap::new();
         for res in futures::future::join_all(peers_and_diffs_futures).await {
             match res {
-                Ok((addr, peer, diff)) => {
+                Ok((addr, peer, info)) => {
                     peers_and_diffs
-                        .entry(diff)
+                        .entry(info.cumulative_difficulty)
                         .or_insert_with(Vec::new)
-                        .push((addr, peer));
+                        .push((addr, peer, info));
                 }
                 Err(ref err) => {
                     if matches!(err, ChainSyncError::PeerSyncing(_)) {
@@ -3276,6 +3304,207 @@ mod tests {
         }
     }
 
+    mod get_block_index_tests {
+        use super::behind_trusted_peers_tests::{gossip_client, peer_list_with_trusted};
+        use super::*;
+        use crate::tests::util::{FakeGossipServer, peer_list_item};
+        use crate::types::GossipResponse;
+        use irys_types::{NodeConfig, PeerListItem};
+        use std::sync::atomic::AtomicUsize;
+
+        /// The first height that the sync needs.
+        const START: usize = 5;
+        const LIMIT: usize = 10;
+        const RETRIES: usize = 5;
+        const MAIN_CHAIN: u8 = 0x01;
+
+        fn entry_hash(chain: u8, height: u64) -> BlockHash {
+            let mut hash = BlockHash::from_low_u64_be(height);
+            hash.0[0] = chain;
+            hash
+        }
+
+        /// The entries `first..=last` of `chain`.
+        fn entries(chain: u8, first: u64, last: u64) -> Vec<BlockIndexItem> {
+            (first..=last)
+                .map(|height| BlockIndexItem {
+                    block_hash: entry_hash(chain, height),
+                    ..BlockIndexItem::default()
+                })
+                .collect()
+        }
+
+        /// The entries of `chain` that an index with the last entry at
+        /// `last_height` returns for `query`.
+        fn chain_answer(
+            chain: u8,
+            last_height: u64,
+        ) -> impl Fn(&BlockIndexQuery) -> Vec<BlockIndexItem> + Send + Sync + 'static {
+            move |query| {
+                let first = query.height as u64;
+                let last = last_height.min(first + query.limit as u64 - 1);
+                if first > last {
+                    Vec::new()
+                } else {
+                    entries(chain, first, last)
+                }
+            }
+        }
+
+        /// A source that advertises `cumulative_difficulty`, `index_height` and
+        /// `index_hash`, and answers each index request with `answer`. The
+        /// counter records the index requests that the source gets.
+        fn index_source(
+            peer_byte: u8,
+            cumulative_difficulty: u64,
+            index_height: u64,
+            index_hash: BlockHash,
+            answer: impl Fn(&BlockIndexQuery) -> Vec<BlockIndexItem> + Send + Sync + 'static,
+        ) -> (PeerListItem, Arc<AtomicUsize>) {
+            let server = FakeGossipServer::new();
+            server.set_on_info_request(move || {
+                GossipResponse::Accepted(NodeInfo {
+                    cumulative_difficulty: U256::from(cumulative_difficulty),
+                    block_index_height: index_height,
+                    block_index_hash: index_hash,
+                    ..NodeInfo::default()
+                })
+            });
+            let index_requests = Arc::new(AtomicUsize::new(0));
+            let index_requests_in_server = index_requests.clone();
+            server.set_on_block_index_request(move |query| {
+                index_requests_in_server.fetch_add(1, Ordering::SeqCst);
+                GossipResponse::Accepted(answer(&query))
+            });
+            let peer = peer_list_item(peer_byte, server.spawn(), true, 100);
+            (peer, index_requests)
+        }
+
+        /// A source with the main chain up to `index_height`, whose answers
+        /// agree with its claims.
+        fn consistent_source(
+            peer_byte: u8,
+            cumulative_difficulty: u64,
+            index_height: u64,
+        ) -> (PeerListItem, Arc<AtomicUsize>) {
+            index_source(
+                peer_byte,
+                cumulative_difficulty,
+                index_height,
+                entry_hash(MAIN_CHAIN, index_height),
+                chain_answer(MAIN_CHAIN, index_height),
+            )
+        }
+
+        fn trusted_peer_list(peers: Vec<PeerListItem>) -> PeerList {
+            let trusted = peers.iter().map(|peer| peer.address).collect();
+            peer_list_with_trusted(peers, trusted).1
+        }
+
+        async fn fetch(
+            peer_list: &PeerList,
+            peer_count: usize,
+            trusted_only: bool,
+        ) -> ChainSyncResult<Vec<BlockIndexItem>> {
+            get_block_index(
+                peer_list,
+                &gossip_client(),
+                START,
+                LIMIT,
+                peer_count,
+                RETRIES,
+                trusted_only,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn sources_in_a_group_are_asked_at_the_same_time_and_the_longest_answer_wins() {
+            // Ranked first: it has entries up to START + 2.
+            let (first, first_requests) = consistent_source(0x11, 1, START as u64 + 2);
+            // Ranked second: it advertises START + 1, but its index grew to
+            // START + 6 before the index request.
+            let (second, second_requests) = index_source(
+                0x12,
+                1,
+                START as u64 + 1,
+                entry_hash(MAIN_CHAIN, START as u64 + 1),
+                chain_answer(MAIN_CHAIN, START as u64 + 6),
+            );
+            // Ranked last: it has no entries from START.
+            let (third, third_requests) = consistent_source(0x13, 1, START as u64 - 1);
+            let peer_list = trusted_peer_list(vec![first, second, third]);
+
+            let fetched = fetch(&peer_list, 3, true).await.expect("block index");
+
+            assert_eq!(fetched, entries(MAIN_CHAIN, START as u64, START as u64 + 6));
+            for requests in [first_requests, second_requests, third_requests] {
+                assert_eq!(requests.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[tokio::test]
+        async fn empty_answers_from_a_whole_group_give_an_empty_index_with_no_retry() {
+            let (first, first_requests) = consistent_source(0x11, 1, START as u64 - 1);
+            let (second, second_requests) = consistent_source(0x12, 1, START as u64 - 1);
+            let peer_list = trusted_peer_list(vec![first, second]);
+
+            let fetched = fetch(&peer_list, 2, true).await.expect("block index");
+
+            assert!(fetched.is_empty());
+            assert_eq!(first_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(second_requests.load(Ordering::SeqCst), 1);
+        }
+
+        #[rstest::rstest]
+        #[case::trusted_mode(true)]
+        #[case::full_mode(false)]
+        #[tokio::test]
+        async fn sources_are_ranked_by_advertised_index_height(#[case] trusted_only: bool) {
+            // The higher cumulative difficulty, but the lower index height.
+            let (first, first_requests) = consistent_source(0x11, 100, START as u64 + 1);
+            let (second, _) = consistent_source(0x12, 1, START as u64 + 20);
+            let peers = vec![first, second];
+            let peer_list = if trusted_only {
+                trusted_peer_list(peers)
+            } else {
+                peer_list_with_trusted(peers, vec![]).1
+            };
+
+            let fetched = fetch(&peer_list, 1, trusted_only)
+                .await
+                .expect("block index");
+
+            assert_eq!(
+                fetched,
+                entries(MAIN_CHAIN, START as u64, START as u64 + LIMIT as u64 - 1)
+            );
+            assert_eq!(first_requests.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn block_index_peer_count_from_the_config_sets_the_group_size() {
+            let mut node_config = NodeConfig::testing();
+            node_config.sync.block_index_peer_count = 2;
+            let params = SyncParams::from_config(&Config::new_with_random_peer_id(node_config));
+            let sources: Vec<_> = (0x11..=0x13)
+                .map(|peer_byte| consistent_source(peer_byte, 1, START as u64 + 2))
+                .collect();
+            let peer_list =
+                trusted_peer_list(sources.iter().map(|(peer, _)| peer.clone()).collect());
+
+            fetch(&peer_list, params.block_index_peer_count, true)
+                .await
+                .expect("block index");
+
+            let requests: usize = sources
+                .iter()
+                .map(|(_, requests)| requests.load(Ordering::SeqCst))
+                .sum();
+            assert_eq!(requests, 2);
+        }
+    }
+
     /// The periodic behind-check asks the configured trusted set. The online
     /// flag is for peer selection, not for "who is trusted".
     mod behind_trusted_peers_tests {
@@ -3293,7 +3522,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        fn gossip_client() -> GossipClient {
+        pub(super) fn gossip_client() -> GossipClient {
             GossipClient::with_circuit_breaker_config(
                 Duration::from_secs(5),
                 IrysAddress::repeat_byte(0xFF),
@@ -3304,7 +3533,7 @@ mod tests {
             )
         }
 
-        fn peer_list_with_trusted(
+        pub(super) fn peer_list_with_trusted(
             peers: Vec<PeerListItem>,
             trusted: Vec<PeerAddress>,
         ) -> (Config, PeerList) {

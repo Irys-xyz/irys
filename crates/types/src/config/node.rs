@@ -1269,6 +1269,9 @@ impl Default for P2PPullConfig {
 pub struct SyncConfig {
     /// How many blocks to fetch in parallel per batch during the sync
     pub block_batch_size: usize,
+    /// How many peers to ask for the block index at the same time during the
+    /// sync. The sync uses the longest valid answer.
+    pub block_index_peer_count: usize,
     /// How often to check if we're behind and need to sync
     pub periodic_sync_check_interval_secs: u64,
     /// Timeout for retry block pull/process
@@ -1303,6 +1306,7 @@ impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             block_batch_size: 50,
+            block_index_peer_count: 3,
             // Check every 30 seconds if we're behind
             periodic_sync_check_interval_secs: 30,
             retry_block_request_timeout_secs: 30,

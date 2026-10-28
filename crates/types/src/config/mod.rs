@@ -356,6 +356,12 @@ impl Config {
             "sync.min_active_peers must be > 0 (zero makes startup skip sync immediately on the empty snapshot)"
         );
 
+        // The sync asks the block index from groups of this many peers.
+        ensure!(
+            self.node_config.sync.block_index_peer_count > 0,
+            "sync.block_index_peer_count must be > 0 (zero asks no peer for the block index)"
+        );
+
         // For nodes joining an existing network the chain_sync `count == 0`
         // skip path is only recovered via the periodic sync check. If the
         // operator disables the periodic check (or sets the interval to 0), a node that boots
@@ -1853,6 +1859,23 @@ mod tests {
         Config::new_with_random_peer_id(node_config)
             .validate()
             .expect("any positive cap is accepted");
+    }
+
+    #[test]
+    fn validate_rejects_zero_block_index_peer_count() {
+        let mut node_config = NodeConfig::testing();
+        node_config.sync.block_index_peer_count = 0;
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("zero peers per block index request")
+            .to_string();
+        assert!(err.contains("block_index_peer_count"), "got: {err}");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.sync.block_index_peer_count = 1;
+        Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect("any positive peer count is accepted");
     }
 
     #[test]
