@@ -707,25 +707,51 @@ impl ChunkIngressServiceInner {
     /// The `data_size` of the first storage placement keyed by
     /// `data_commitment`. `None` when no module holds one. The key binds the
     /// size, so every placement under it has the same `data_size`.
+    ///
+    /// A module whose read fails is logged and skipped. The error is returned
+    /// only when no module answered.
     fn placement_data_size_by_commitment(
         &self,
         data_commitment: DataCommitment,
     ) -> eyre::Result<Option<u64>> {
-        #[cfg(test)]
-        if tests::PLACEMENT_READ_FAULT.with(std::cell::Cell::get) {
-            return Err(eyre::eyre!("injected placement read error"));
-        }
         let modules: Vec<_> = {
             let guard = self.storage_modules_guard.read();
             guard.iter().cloned().collect()
         };
+        let mut any_answered = false;
+        let mut last_error = None;
         for storage_module in modules {
-            let placements = storage_module.collect_data_root_infos(data_commitment)?;
-            if let Some(placement) = placements.0.first() {
-                return Ok(Some(placement.data_size));
+            let read = storage_module.collect_data_root_infos(data_commitment);
+            #[cfg(test)]
+            let read = if tests::PLACEMENT_READ_FAULT_MODULES
+                .with(|faulty| faulty.borrow().contains(&storage_module.id))
+            {
+                Err(eyre::eyre!("injected placement read error"))
+            } else {
+                read
+            };
+            match read {
+                Ok(placements) => {
+                    any_answered = true;
+                    if let Some(placement) = placements.0.first() {
+                        return Ok(Some(placement.data_size));
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        ?error,
+                        storage_module = storage_module.id,
+                        chunk.data_commitment = %data_commitment,
+                        "Failed to read storage placements from a module; trying the next module"
+                    );
+                    last_error = Some(error);
+                }
             }
         }
-        Ok(None)
+        match last_error {
+            Some(error) if !any_answered => Err(error),
+            _ => Ok(None),
+        }
     }
 
     /// Ingest a chunk that has a storage placement and no cache row.
@@ -1168,9 +1194,9 @@ enum PendingDrainRole {
 #[cfg(test)]
 mod tests {
     thread_local! {
-        /// While set, the storage-placement read on the no-row path fails.
-        pub(super) static PLACEMENT_READ_FAULT: std::cell::Cell<bool> =
-            const { std::cell::Cell::new(false) };
+        /// Storage module ids whose placement read on the no-row path fails.
+        pub(super) static PLACEMENT_READ_FAULT_MODULES: std::cell::RefCell<Vec<usize>> =
+            const { std::cell::RefCell::new(Vec::new()) };
     }
 
     /// Parks a chunk under its own commitment, the way ingress does.
@@ -1997,6 +2023,63 @@ mod tests {
         Ok(())
     }
 
+    /// One module's placement read fails. The lookup logs it and asks the
+    /// next module. The error comes back only when no module answers.
+    #[tokio::test]
+    async fn placement_read_skips_a_failing_module() -> eyre::Result<()> {
+        use irys_domain::{StorageModuleInfo, StorageModulesReadGuard};
+        use irys_types::{
+            PartitionChunkOffset, partition::PartitionAssignment, partition_chunk_offset_ii,
+        };
+        use nodit::interval::ii;
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-placement-module-fails")
+            .build();
+        let (mut inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        let (placed_module, _data, data_root, _proofs) =
+            place_upload_without_cache_row(&mut inner)?;
+        let data_commitment = size_key(data_root, 64);
+        let failing_module = Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id: 1,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(irys_types::DataLedger::Submit.into()),
+                    slot_index: Some(1),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd1".into())],
+            },
+            &inner.config,
+        )?);
+        // The failing module comes first.
+        inner.storage_modules_guard =
+            StorageModulesReadGuard::new(Arc::new(std::sync::RwLock::new(vec![
+                Arc::clone(&failing_module),
+                Arc::clone(&placed_module),
+            ])));
+
+        PLACEMENT_READ_FAULT_MODULES.with(|faulty| *faulty.borrow_mut() = vec![failing_module.id]);
+        let one_failing = inner.placement_data_size_by_commitment(data_commitment);
+        PLACEMENT_READ_FAULT_MODULES.with(|faulty| {
+            *faulty.borrow_mut() = vec![failing_module.id, placed_module.id];
+        });
+        let all_failing = inner.placement_data_size_by_commitment(data_commitment);
+        PLACEMENT_READ_FAULT_MODULES.with(|faulty| faulty.borrow_mut().clear());
+
+        assert_eq!(
+            one_failing?,
+            Some(64),
+            "the next module answers with its placement"
+        );
+        assert!(
+            all_failing.is_err(),
+            "with no module answering, the error comes back"
+        );
+        Ok(())
+    }
+
     /// A failed placement read does not reject the chunk: it parks, as it did
     /// before the lookup, and it is not a fault of the sender.
     #[tokio::test]
@@ -2017,9 +2100,9 @@ mod tests {
             tx_offset: TxChunkOffset::from(1),
         };
 
-        PLACEMENT_READ_FAULT.with(|fault| fault.set(true));
+        PLACEMENT_READ_FAULT_MODULES.with(|faulty| *faulty.borrow_mut() = vec![storage_module.id]);
         let result = inner.handle_chunk_ingress_message(chunk).await;
-        PLACEMENT_READ_FAULT.with(|fault| fault.set(false));
+        PLACEMENT_READ_FAULT_MODULES.with(|faulty| faulty.borrow_mut().clear());
         result.expect("a failed placement read parks the chunk; it is not a fault");
 
         let pending = inner.pending_chunks.read().await;
