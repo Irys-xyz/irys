@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793186495576,
+  "lastUpdate": 1793200902327,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -19915,6 +19915,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "c1a44d2a06af1bc24e50fe007b64d5732aaa2656",
+          "message": "feat(storage): add storage.recall_io_priority to let other IO take priority over mining recall",
+          "timestamp": "2026-10-28T11:02:03Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1719/commits/c1a44d2a06af1bc24e50fe007b64d5732aaa2656"
+        },
+        "date": 1793200899591,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012034,
+            "range": "± 0.000144",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.121694,
+            "range": "± 0.001901",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.204414,
+            "range": "± 0.036228",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.020063,
+            "range": "± 0.154454",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074779,
+            "range": "± 0.001136",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 746.31208,
+            "range": "± 4.922951",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 968.89613,
+            "range": "± 3.797091",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119942,
+            "range": "± 0.00036",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1197.954783,
+            "range": "± 0.859057",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1556.350514,
+            "range": "± 7.126924",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.031827,
+            "range": "± 0.000932",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.8139,
+            "range": "± 0.209044",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 285.207731,
+            "range": "± 13.972794",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000146,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
