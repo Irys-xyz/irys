@@ -40,11 +40,13 @@ required flags:
                                  The tool reads num_chunks_in_partition, the chunk
                                  size and the data tree geometry from its consensus
                                  config. The geometry derives each tx's data
-                                 commitment, so another node's config gives false
-                                 mismatches. A relative `consensus` path in the
-                                 file resolves from the current directory: run the
-                                 tool from the node's working directory or use an
-                                 absolute path.
+                                 commitment. Every node of one chain has the same
+                                 consensus config, but a config for another chain
+                                 or preset, or another custom consensus file,
+                                 gives false mismatches. A relative `consensus`
+                                 path in the file resolves from the current
+                                 directory: run the tool from the node's working
+                                 directory or use an absolute path.
 
 optional:
   --rollback                     verify only: the <db-dir> is a rocks-to-mdbx copy.

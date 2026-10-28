@@ -1599,7 +1599,7 @@ fn split_stored_interval(
         && binding.data_commitment != data_commitment
     {
         eyre::bail!(
-            "tx leaf binding at partition offset {} names data commitment {}, but the derived tx has {data_commitment}. Check that --config is the config of the node that wrote this index: another data tree geometry derives other commitments.",
+            "tx leaf binding at partition offset {} names data commitment {}, but the derived tx has {data_commitment}. Check that --config has the consensus config of the chain that wrote this index: a config for another chain or preset derives other commitments.",
             start.0,
             binding.data_commitment
         );

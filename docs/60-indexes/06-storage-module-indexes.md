@@ -294,8 +294,10 @@ node opens the module, then written back.
 `--config` is the `config.toml` of the node that wrote this index. The tool
 takes `num_chunks_in_partition`, the chunk size and the data tree geometry
 from its consensus config. The geometry derives each tx's data commitment,
-and a stored placement with another commitment is a mismatch. Another
-node's config gives false mismatches. When `consensus` in that file is a
+and a stored placement with another commitment is a mismatch. Every node
+of one chain has the same consensus config, so any node's config of that
+chain works. A config for another chain or preset, or another custom
+consensus file, gives false mismatches. When `consensus` in that file is a
 `Path`, a relative path resolves from the current directory: run the tool
 from the node's working directory or use an absolute path.
 The tool derives the tx path at that ledger offset and requires the stored
