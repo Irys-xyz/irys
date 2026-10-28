@@ -291,12 +291,15 @@ are the fields in `<submodule>/packing_params.toml`.
 That file also records `entropy_packing_iterations` and `chunk_size`.
 A file that omits them is filled from the current consensus when the
 node opens the module, then written back.
-`--config` is the node's `config.toml`. The tool takes
-`num_chunks_in_partition`, the chunk size and the data tree geometry from
-its consensus config. The geometry derives each tx's data commitment, and
-a stored placement with another commitment is a mismatch. The tool derives the tx path at that ledger
-offset and requires the stored bytes to be identical. A mismatch aborts
-and names the partition offset.
+`--config` is the `config.toml` of the node that wrote this index. The tool
+takes `num_chunks_in_partition`, the chunk size and the data tree geometry
+from its consensus config. The geometry derives each tx's data commitment,
+and a stored placement with another commitment is a mismatch. Another
+node's config gives false mismatches. When `consensus` in that file is a
+`Path`, a relative path resolves from the current directory: run the tool
+from the node's working directory or use an absolute path.
+The tool derives the tx path at that ledger offset and requires the stored
+bytes to be identical. A mismatch aborts and names the partition offset.
 
 The converter never modifies its source. It reads a schema v1 or v2
 `db/` and writes RocksDB v1 to the target. The completion marker is

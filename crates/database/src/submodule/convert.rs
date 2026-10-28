@@ -1599,7 +1599,7 @@ fn split_stored_interval(
         && binding.data_commitment != data_commitment
     {
         eyre::bail!(
-            "tx leaf binding at partition offset {} names data commitment {:?}, but the derived tx has {data_commitment:?}",
+            "tx leaf binding at partition offset {} names data commitment {:?}, but the derived tx has {data_commitment:?}. Check that --config is the config of the node that wrote this index: another data tree geometry derives other commitments.",
             start.0,
             binding.data_commitment
         );
@@ -2247,7 +2247,10 @@ fn compare_one_placement<S: SubmoduleStore>(
     report.data_roots_checked = report.data_roots_checked.saturating_add(1);
     if is_first && let Some(binding) = &binding {
         report.tx_leaf_bindings_checked = report.tx_leaf_bindings_checked.saturating_add(1);
-        if binding.data_root != derived.data_root || binding.prefix_hash != header.prefix_hash {
+        if binding.data_root != derived.data_root
+            || binding.prefix_hash != header.prefix_hash
+            || binding.data_commitment != map.data_commitment(derived.data_root, derived.data_size)
+        {
             report.tx_leaf_bindings_mismatches =
                 report.tx_leaf_bindings_mismatches.saturating_add(1);
             note(report, "tx_leaf_binding", format!("offset {}", key.0));
@@ -4393,7 +4396,9 @@ fn compare_v1_interval(
             report.tx_leaf_bindings_checked = report.tx_leaf_bindings_checked.saturating_add(1);
             if let Some(binding) = &binding
                 && (binding.data_root != seg_derived.data_root
-                    || binding.prefix_hash != seg_header.prefix_hash)
+                    || binding.prefix_hash != seg_header.prefix_hash
+                    || binding.data_commitment
+                        != map.data_commitment(seg_derived.data_root, seg_derived.data_size))
             {
                 report.tx_leaf_bindings_mismatches =
                     report.tx_leaf_bindings_mismatches.saturating_add(1);

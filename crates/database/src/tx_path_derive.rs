@@ -1179,6 +1179,11 @@ mod tests {
         )
         .expect_err("bad data path");
         assert!(wrong.to_string().contains("data_root mismatch"), "{wrong}");
+        // The drop counter label matches on this text.
+        assert_eq!(
+            irys_types::block_production::TxPathError::Failed(wrong.to_string()).metric_reason(),
+            "data_root_mismatch"
+        );
 
         let other_bytes = vec![8_u8; chunk_size as usize];
         let wrong_bytes = super::cross_check_derived(

@@ -13,7 +13,8 @@ use irys_database::submodule::{
 };
 use irys_database::{consensus_db_args, submodule_db_args};
 use irys_types::IrysAddress;
-use irys_types::config::{DatabaseConfig, NodeConfig};
+use irys_types::config::{ConsensusConfig, ConsensusOptions, DatabaseConfig, NodeConfig};
+use irys_types::data_tree::Geometry;
 
 const USAGE: &str = "\
 usage:
@@ -35,10 +36,15 @@ required flags:
   --ledger <id>                  data ledger id.
                                  Publish is 0, Submit is 1, OneYear is 10, ThirtyDay is 20.
   --slot <n>                     partition slot from packing_params.toml (`slot`)
-  --config <path>                the node's config.toml. The tool reads
-                                 num_chunks_in_partition, the chunk size and the
-                                 data tree geometry from its consensus config.
-                                 The geometry derives each tx's data commitment.
+  --config <path>                config.toml of the node that wrote this index.
+                                 The tool reads num_chunks_in_partition, the chunk
+                                 size and the data tree geometry from its consensus
+                                 config. The geometry derives each tx's data
+                                 commitment, so another node's config gives false
+                                 mismatches. A relative `consensus` path in the
+                                 file resolves from the current directory: run the
+                                 tool from the node's working directory or use an
+                                 absolute path.
 
 optional:
   --rollback                     verify only: the <db-dir> is a rocks-to-mdbx copy.
@@ -194,21 +200,7 @@ fn consensus_options(tool: &ToolArgs) -> eyre::Result<ConvertOptions> {
     let ledger_id = required("--ledger", tool.ledger_id)?;
     let slot_index = required("--slot", tool.slot_index)?;
     let config_path = required("--config", tool.config.clone())?;
-    let contents = std::fs::read_to_string(&config_path)
-        .map_err(|err| eyre::eyre!("--config {}: {err}", config_path.display()))?;
-    let node_config = toml::from_str::<NodeConfig>(&contents).map_err(|err| {
-        eyre::eyre!(
-            "--config {}: invalid node config: {err}",
-            config_path.display()
-        )
-    })?;
-    let consensus = node_config.consensus_config();
-    let data_tree_geometry = consensus.data_tree_geometry().map_err(|err| {
-        eyre::eyre!(
-            "--config {}: invalid data tree geometry: {err}",
-            config_path.display()
-        )
-    })?;
+    let (consensus, data_tree_geometry) = load_consensus(&config_path)?;
     let mut options = ConvertOptions::new(
         submodule_db_args(&DatabaseConfig::default())?,
         data_tree_geometry,
@@ -224,6 +216,49 @@ fn consensus_options(tool: &ToolArgs) -> eyre::Result<ConvertOptions> {
     options.chunks_per_partition = consensus.num_chunks_in_partition;
     options.packing_record = packing_record_from_flags(tool, data_tree_geometry.chunk_size())?;
     Ok(options)
+}
+
+/// The consensus config and data tree geometry of the node config at `config_path`.
+///
+/// `NodeConfig::consensus_config` panics when a `consensus = Path(..)` file is
+/// missing or malformed. The tool reads that file itself so the operator gets an
+/// error that names it. A relative path resolves from the current directory,
+/// the same as in the node.
+fn load_consensus(config_path: &Path) -> eyre::Result<(ConsensusConfig, Geometry)> {
+    let contents = std::fs::read_to_string(config_path)
+        .map_err(|err| eyre::eyre!("--config {}: {err}", config_path.display()))?;
+    let node_config = toml::from_str::<NodeConfig>(&contents).map_err(|err| {
+        eyre::eyre!(
+            "--config {}: invalid node config: {err}",
+            config_path.display()
+        )
+    })?;
+    let consensus = match &node_config.consensus {
+        ConsensusOptions::Path(consensus_path) => {
+            let text = std::fs::read_to_string(consensus_path).map_err(|err| {
+                eyre::eyre!(
+                    "--config {}: consensus file {}: {err}. A relative path resolves from the current directory.",
+                    config_path.display(),
+                    consensus_path.display()
+                )
+            })?;
+            toml::from_str::<ConsensusConfig>(&text).map_err(|err| {
+                eyre::eyre!(
+                    "--config {}: invalid consensus file {}: {err}",
+                    config_path.display(),
+                    consensus_path.display()
+                )
+            })?
+        }
+        _ => node_config.consensus_config(),
+    };
+    let data_tree_geometry = consensus.data_tree_geometry().map_err(|err| {
+        eyre::eyre!(
+            "--config {}: invalid data tree geometry: {err}",
+            config_path.display()
+        )
+    })?;
+    Ok((consensus, data_tree_geometry))
 }
 
 fn packing_record_from_flags(
@@ -460,5 +495,37 @@ fn paths_are_same(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_testing_utils::TempDirBuilder;
+
+    #[test]
+    fn a_missing_consensus_file_is_an_error_not_a_panic() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new().prefix("convert-config").build();
+        let missing = dir.path().join("no-such-consensus.toml");
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus = ConsensusOptions::Path(missing.clone());
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, toml::to_string(&node_config)?)?;
+
+        let err = load_consensus(&config_path).expect_err("missing consensus file");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("--config"), "{message}");
+
+        std::fs::write(&missing, "not = [valid")?;
+        let err = load_consensus(&config_path).expect_err("malformed consensus file");
+        assert!(
+            format!("{err:#}").contains("invalid consensus file"),
+            "{err:#}"
+        );
+        Ok(())
     }
 }
