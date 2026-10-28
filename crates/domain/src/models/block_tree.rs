@@ -1194,6 +1194,34 @@ impl BlockTree {
         self.max_cumulative_difficulty
     }
 
+    /// The head of the validated prefix of the max cumulative difficulty chain: the highest
+    /// block on the ancestry of the max block that is fully validated (`NotOnchain(ValidBlock)`
+    /// or `Validated(ValidBlock)`), with every block between it and its first `Onchain`
+    /// ancestor also fully validated. When no such block exists, it is that first `Onchain`
+    /// ancestor. It is the max block when the whole fork is validated, and the tip when the
+    /// max block is the tip.
+    ///
+    /// Returns `None` when the walk leaves the tree before it gets to an `Onchain` block.
+    #[must_use]
+    pub fn get_max_chain_validated_head(&self) -> Option<BlockHash> {
+        let mut validated_head = None;
+        let mut current = self.max_cumulative_difficulty.1;
+        loop {
+            let entry = self.blocks.get(&current)?;
+            match entry.chain_state {
+                ChainState::Onchain => return Some(validated_head.unwrap_or(current)),
+                ChainState::NotOnchain(BlockState::ValidBlock)
+                | ChainState::Validated(BlockState::ValidBlock) => {
+                    validated_head.get_or_insert(current);
+                }
+                // A block that waits for validation ends the prefix below it, so a
+                // validated block above it is not part of the prefix.
+                ChainState::NotOnchain(_) | ChainState::Validated(_) => validated_head = None,
+            }
+            current = entry.block.header().previous_block_hash;
+        }
+    }
+
     /// Returns max-difficulty block info: (hash, height, can_build_upon)
     ///
     /// # Panics
@@ -3852,6 +3880,48 @@ mod tests {
             cache.get_block_and_status(&old_tip.block_hash).unwrap().1,
             &ChainState::Validated(BlockState::ValidBlock),
             "the old tip is validated but no longer canonical"
+        );
+    }
+
+    /// The validated head of the max chain is the tip while the tip is the max block,
+    /// the fork point while the first fork block waits for validation, the highest
+    /// block of a contiguous validated prefix, and the max block when the whole fork
+    /// is validated.
+    #[test]
+    fn max_chain_validated_head_follows_the_validated_prefix() {
+        let genesis = random_block(U256::from(0));
+        let mut cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+
+        // genesis -> tip
+        //         -> fork_1 -> fork_2 -> fork_3 (max)
+        let mut tip = extend_chain(random_block(U256::from(10)), &genesis);
+        add_block_for_validation(&mut cache, &mut tip);
+        validate_and_mark_tip(&mut cache, &tip);
+        assert_eq!(cache.get_max_chain_validated_head(), Some(tip.block_hash));
+
+        let mut fork_1 = extend_chain(random_block(U256::from(5)), &genesis);
+        add_block_for_validation(&mut cache, &mut fork_1);
+        let mut fork_2 = extend_chain(random_block(U256::from(15)), &fork_1);
+        add_block_for_validation(&mut cache, &mut fork_2);
+        let mut fork_3 = extend_chain(random_block(U256::from(20)), &fork_2);
+        add_block_for_validation(&mut cache, &mut fork_3);
+        cache.mark_block_as_valid(&fork_2.block_hash).unwrap();
+        assert_eq!(
+            cache.get_max_chain_validated_head(),
+            Some(genesis.block_hash),
+            "a validated block above a pending block is not part of the prefix"
+        );
+
+        cache.mark_block_as_valid(&fork_1.block_hash).unwrap();
+        assert_eq!(
+            cache.get_max_chain_validated_head(),
+            Some(fork_2.block_hash)
+        );
+
+        cache.mark_block_as_valid(&fork_3.block_hash).unwrap();
+        assert_eq!(
+            cache.get_max_chain_validated_head(),
+            Some(fork_3.block_hash)
         );
     }
 }
