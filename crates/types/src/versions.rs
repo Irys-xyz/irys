@@ -124,12 +124,12 @@ pub enum ProtocolVersion {
     /// nodes can detect multiple peers mining the same address (often from
     /// copy-pasting a config). Switches to standard RLP encoding for
     /// cross-language compatibility on signed handshake messages. Includes
-    /// `consensus_config_hash` to reject incompatible peers at handshake
-    /// time.
+    /// `consensus_config_hash`. Peers exchange it and log a mismatch. It is
+    /// advisory and does not reject the peer.
     ///
     /// * Added `peer_id` ([`crate::IrysPeerId`]) for independent P2P identity.
-    /// * Added `consensus_config_hash` so peers reject misconfigured nodes
-    ///   at connection time instead of at block validation.
+    /// * Added `consensus_config_hash`. Peers exchange it and log a mismatch.
+    ///   It is advisory and does not reject the peer.
     /// * Switched signing preimage to RLP encoding for consistency with the
     ///   rest of the wire format.
     V2 = 2,

@@ -78,34 +78,6 @@ impl UnpackedChunk {
         hash_sha256(data_path).into()
     }
 
-    /// Returns the transaction-relative byte offset of the last byte in this chunk.
-    ///
-    /// Chunk offsets in the merkle tree are based on end byte offsets:
-    /// - Chunk 0: bytes [0, chunk_size)            → ends at chunk_size - 1
-    /// - Chunk 1: bytes [chunk_size, 2*chunk_size) → ends at 2*chunk_size - 1
-    /// - Last chunk may be partial                 → ends at data_size - 1
-    ///
-    /// Note: Converting from chunk count to chunk offset requires subtracting 1
-    /// (e.g., 3 chunks means the last chunk has offset 2) the same is true
-    /// of the byte offsets in the chunk.
-    pub fn end_byte_offset(&self, chunk_size: u64) -> u64 {
-        if self.data_size == 0 {
-            return 0;
-        }
-
-        // Calculate total number of chunks, then calculate the last chunks offset
-        let num_chunks = self.data_size.div_ceil(chunk_size);
-        let last_chunk_offset = num_chunks - 1;
-
-        if self.tx_offset.0 as u64 == last_chunk_offset {
-            // If it's the last chunk, the end byte offset is just # of bytes - 1
-            self.data_size - 1
-        } else {
-            // Intermediate chunks always end at a chunk boundary byte count minus 1 to make it an offset
-            (self.tx_offset.0 as u64 + 1) * chunk_size - 1
-        }
-    }
-
     /// Returns the maximum valid tx_offset for this chunk's data_size.
     /// Returns None if data_size is 0.
     pub fn max_valid_offset(&self, chunk_size: u64) -> Option<u64> {
@@ -166,6 +138,10 @@ pub struct PackedChunk {
     pub tx_offset: TxChunkOffset,
     /// The hash of the partition containing this chunk
     pub partition_hash: PartitionHash,
+    /// The number of entropy packing iterations used to pack this chunk.
+    /// Receivers do not read it: consensus fixes the iteration count, and
+    /// unpacking takes it from the consensus config.
+    pub packing_iterations: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -195,6 +171,8 @@ pub struct PartialChunk {
     pub tx_offset: Option<TxChunkOffset>,
     /// The hash of the partition containing this chunk
     pub partition_hash: Option<PartitionHash>,
+    /// The number of entropy packing iterations used to pack this chunk
+    pub packing_iterations: Option<u32>,
 }
 
 impl PartialChunk {
@@ -212,6 +190,7 @@ impl PartialChunk {
             && self.packing_address.is_some()
             && self.partition_relative_offset.is_some()
             && self.partition_hash.is_some()
+            && self.packing_iterations.is_some()
     }
 }
 
@@ -258,6 +237,9 @@ impl TryInto<PackedChunk> for PartialChunk {
                 .partition_relative_offset
                 .ok_or(err_fn("partition_relative_offset"))?,
             partition_hash: self.partition_hash.ok_or(err_fn("partition_hash"))?,
+            packing_iterations: self
+                .packing_iterations
+                .ok_or(err_fn("packing_iterations"))?,
         })
     }
 }
@@ -426,6 +408,27 @@ pub type ChunkDataPath = Vec<u8>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_chunk_json_carries_packing_iterations_and_reads_it_as_zero_when_absent() {
+        let chunk = PackedChunk {
+            packing_iterations: 7,
+            ..Default::default()
+        };
+        let mut json = serde_json::to_value(ChunkFormat::Packed(chunk.clone())).unwrap();
+        assert_eq!(json["packingIterations"], 7);
+        assert_eq!(
+            serde_json::from_value::<ChunkFormat>(json.clone()).unwrap(),
+            ChunkFormat::Packed(chunk)
+        );
+
+        // A node that does not send the field.
+        json.as_object_mut().unwrap().remove("packingIterations");
+        let ChunkFormat::Packed(read) = serde_json::from_value(json).unwrap() else {
+            panic!("expected a packed chunk");
+        };
+        assert_eq!(read.packing_iterations, 0);
+    }
 
     mod offset_validation {
         use super::*;

@@ -443,6 +443,7 @@ async fn new_ledger_activation_slots_test(
             delta: delta_active.then(|| Delta {
                 activation_timestamp: UnixTimestamp::from_secs(0),
                 initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+                capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             }),
             ..ConsensusConfig::testing().hardforks
         },

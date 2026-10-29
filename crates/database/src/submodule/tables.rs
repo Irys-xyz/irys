@@ -240,10 +240,13 @@ impl PartialOrd for DataRootInfo {
     }
 }
 
-/// Orders DataRootInfo by start_offset in ascending order
+/// Orders DataRootInfo by start_offset in ascending order, then by data_size.
+/// Includes every field so the order agrees with the derived `Eq`.
 impl Ord for DataRootInfo {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.start_offset.cmp(&other.start_offset)
+        self.start_offset
+            .cmp(&other.start_offset)
+            .then(self.data_size.cmp(&other.data_size))
     }
 }
 
@@ -290,6 +293,19 @@ mod tests {
                 .contains("; this build reads RocksDB v1 only. If this directory came from a pre-release build, move it aside and convert from MDBX or reset the storage module"),
             "the sentence must follow the layout marker"
         );
+    }
+
+    #[test]
+    fn data_root_info_order_breaks_start_offset_ties_by_data_size() {
+        let info = |start_offset: i32, data_size: u64| DataRootInfo {
+            start_offset: RelativeChunkOffset(start_offset),
+            data_size,
+        };
+        let mut infos = vec![info(5, 9), info(5, 3), info(2, 7), info(5, 9)];
+        infos.sort_unstable();
+        infos.dedup();
+        assert_eq!(infos, vec![info(2, 7), info(5, 3), info(5, 9)]);
+        assert_ne!(info(5, 3).cmp(&info(5, 9)), Ordering::Equal);
     }
 
     #[test]

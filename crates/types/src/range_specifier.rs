@@ -141,9 +141,11 @@ impl<T> PdArgsEncWrapper<T> {
     }
 }
 
-impl<T: PdAccessListArgSerde> From<&[u8; 32]> for PdArgsEncWrapper<T> {
-    fn from(bytes: &[u8; 32]) -> Self {
-        Self(T::decode(bytes).expect("Invalid byte encoding"))
+impl<T: PdAccessListArgSerde> TryFrom<&[u8; 32]> for PdArgsEncWrapper<T> {
+    type Error = eyre::Report;
+
+    fn try_from(bytes: &[u8; 32]) -> Result<Self, Self::Error> {
+        T::decode(bytes).map(Self)
     }
 }
 
@@ -159,9 +161,11 @@ impl<T: PdAccessListArgSerde> From<PdArgsEncWrapper<T>> for B256 {
     }
 }
 
-impl<T: PdAccessListArgSerde> From<&B256> for PdArgsEncWrapper<T> {
-    fn from(bytes: &B256) -> Self {
-        Self(T::decode(&bytes.0).expect("Invalid byte encoding"))
+impl<T: PdAccessListArgSerde> TryFrom<&B256> for PdArgsEncWrapper<T> {
+    type Error = eyre::Report;
+
+    fn try_from(bytes: &B256) -> Result<Self, Self::Error> {
+        T::decode(&bytes.0).map(Self)
     }
 }
 
@@ -208,6 +212,27 @@ mod range_specifier_tests {
         let mut bytes = [0_u8; 32];
         bytes[0] = invalid_type_id;
         assert!(PdAccessListArg::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn pd_args_enc_wrapper_try_from_rejects_bad_bytes_and_accepts_good_bytes() {
+        use crate::range_specifier::PdArgsEncWrapper;
+        use alloy_primitives::B256;
+
+        let wrong_type = B256::from([0xFF_u8; 32]);
+        assert!(PdArgsEncWrapper::<ChunkRangeSpecifier>::try_from(&wrong_type).is_err());
+        assert!(PdArgsEncWrapper::<ChunkRangeSpecifier>::try_from(&wrong_type.0).is_err());
+
+        let range_spec = ChunkRangeSpecifier {
+            partition_index: U200::from(42_u16),
+            offset: 12_u32,
+            chunk_count: 11_u16,
+        };
+        let encoded = range_spec.encode();
+        let decoded = PdArgsEncWrapper::<ChunkRangeSpecifier>::try_from(&encoded)
+            .unwrap()
+            .into_inner();
+        assert_eq!(decoded, range_spec);
     }
 }
 

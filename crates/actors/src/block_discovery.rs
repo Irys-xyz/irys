@@ -1181,19 +1181,23 @@ where
         }
     };
 
-    // Set up a function to query the database for commitment transactions
+    // Set up a function to query the database for data transactions
     let db_future = {
         let tx_ids = data_tx_ids.clone();
         let db_ref = db.clone();
         async move {
-            let db_tx = db_ref.tx()?;
-            let mut results = HashMap::new();
-            for tx_id in &tx_ids {
-                if let Some(header) = tx_header_by_txid(&db_tx, tx_id)? {
-                    results.insert(*tx_id, header);
+            tokio::task::spawn_blocking(move || {
+                let db_tx = db_ref.tx()?;
+                let mut results = HashMap::new();
+                for tx_id in &tx_ids {
+                    if let Some(header) = tx_header_by_txid(&db_tx, tx_id)? {
+                        results.insert(*tx_id, header);
+                    }
                 }
-            }
-            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(results)
+                Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(results)
+            })
+            .await
+            .map_err(|e| eyre::eyre!("Database task join error: {}", e))?
         }
     };
 
@@ -1234,4 +1238,45 @@ where
         found: headers,
         missing,
     })
+}
+
+#[cfg(test)]
+mod data_tx_lookup_tests {
+    use super::*;
+    use irys_database::insert_tx_header;
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{ConsensusConfig, H256};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn db_lookup_finds_stored_txs_and_reports_missing() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new().prefix("data_tx_lookup").build();
+        let db = DatabaseProvider(Arc::new(
+            irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+                tmp_dir.path(),
+                irys_types::DbSyncMode::UtterlyNoSync,
+            )?,
+        ));
+        let mut stored = DataTransactionHeader::new(&ConsensusConfig::testing());
+        stored.id = H256::repeat_byte(1);
+        db.update_eyre(|tx| insert_tx_header(tx, &stored))?;
+        let absent = H256::repeat_byte(2);
+
+        let result = get_data_tx_in_parallel_inner(
+            vec![stored.id, absent],
+            |ids| Box::pin(async move { Ok(vec![None; ids.len()]) }),
+            &db,
+        )
+        .await?;
+
+        assert_eq!(
+            result
+                .found
+                .iter()
+                .map(|header| header.id)
+                .collect::<Vec<_>>(),
+            vec![stored.id]
+        );
+        assert_eq!(result.missing, vec![absent]);
+        Ok(())
+    }
 }

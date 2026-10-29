@@ -3,6 +3,7 @@ use alloy_eips::HashOrNumber;
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
+use irys_actors::block_reward::BlockRewardSplit;
 use irys_actors::tx_selector::TxSelectorError;
 use irys_actors::{
     BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
@@ -17,7 +18,6 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::SystemLedger;
 use irys_types::{
     DataTransactionHeader, H256, IrysBlockHeader, NodeConfig, UnixTimestampMs, irys::IrysSigner,
-    storage_pricing::Amount,
 };
 use reth::payload::EthBuiltPayload;
 use reth::rpc::types::BlockNumberOrTag;
@@ -1077,7 +1077,7 @@ async fn block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
             prev_block_header: &IrysBlockHeader,
             prev_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
             reward_address: irys_types::IrysAddress,
@@ -1096,7 +1096,7 @@ async fn block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
                     prev_block_header,
                     prev_evm_block,
                     &tampered_mempool,
-                    reward_amount,
+                    block_reward,
                     timestamp_ms,
                     solution_hash,
                     reward_address,
@@ -1503,7 +1503,7 @@ async fn test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             prev_block_header: &IrysBlockHeader,
             prev_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             timestamp_ms: UnixTimestampMs,
             _solution_hash: H256,
             reward_address: irys_types::IrysAddress,
@@ -1519,7 +1519,7 @@ async fn test_invalid_solution_hash_rejected() -> eyre::Result<()> {
                     prev_block_header,
                     prev_evm_block,
                     mempool,
-                    reward_amount,
+                    block_reward,
                     timestamp_ms,
                     invalid_solution_hash,
                     reward_address,

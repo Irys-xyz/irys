@@ -24,7 +24,6 @@ use irys_types::{
 };
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::mdbx::DatabaseArguments;
-use reth_db::table::Table as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind, DatabaseError};
 
@@ -447,70 +446,6 @@ impl RowSource for MdbxSubmoduleStore {
 
     fn highest_placement_end(&self) -> eyre::Result<Option<PartitionChunkOffset>> {
         self.highest_interval_end()
-    }
-}
-
-impl RowSource for RocksSubmoduleStore {
-    fn read_intervals(
-        &self,
-        after: Option<PartitionChunkOffset>,
-        limits: Limits,
-    ) -> eyre::Result<Vec<(PartitionChunkOffset, TxPathInterval)>> {
-        self.read_cf_batch(
-            TxPathIntervalByStart::NAME,
-            after,
-            limits.rows,
-            limits.value_bytes,
-            |_| 40,
-        )
-    }
-
-    fn read_data_paths(
-        &self,
-        after: Option<PartitionChunkOffset>,
-        limits: Limits,
-    ) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkDataPath)>> {
-        // MDBX stores the raw proof under this name. RocksDB v1 reads
-        // `ChunkMetaByOffset` through `read_offset_row_keys`.
-        self.read_cf_batch(
-            ChunkDataPathByOffset::NAME,
-            after,
-            limits.rows,
-            limits.value_bytes,
-            |path: &ChunkDataPath| path.len(),
-        )
-    }
-
-    fn read_pending(
-        &self,
-        after: Option<PartitionChunkOffset>,
-        limits: Limits,
-    ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
-        self.read_cf_batch(
-            PendingBodyMigrationsByOffset::NAME,
-            after,
-            limits.rows,
-            limits.value_bytes,
-            |_| 80,
-        )
-    }
-
-    fn read_offset_keys(
-        &self,
-        table: OffsetTable,
-        after: Option<PartitionChunkOffset>,
-        limit: usize,
-    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
-        let name = match table {
-            // MDBX. RocksDB v1 offset keys use `read_offset_row_keys`.
-            OffsetTable::DataPaths => ChunkDataPathByOffset::NAME,
-            OffsetTable::Pending => PendingBodyMigrationsByOffset::NAME,
-        };
-        self.read_cf_keys(name, after, limit)
-    }
-
-    fn highest_placement_end(&self) -> eyre::Result<Option<PartitionChunkOffset>> {
-        Self::highest_placement_end(self)
     }
 }
 

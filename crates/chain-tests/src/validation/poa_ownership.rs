@@ -13,6 +13,7 @@ use irys_actors::{
     BlockProdStrategy, BlockProducerInner, BlockProductionError, ProductionStrategy, async_trait,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     block_producer::current_timestamp,
+    block_reward::split_block_reward,
     block_validation::{PreValidationError, prevalidate_block},
 };
 use irys_chain::IrysNodeCtx;
@@ -403,7 +404,6 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let timestamp = current_timestamp(&prev_block_header, irys_types::global_clock()).await;
         let mempool_bundle = self.get_mempool_txs(&prev_block_header, timestamp).await?;
-        let block_reward = self.block_reward(&prev_block_header)?;
         let reward_address = self
             .inner()
             .block_tree_guard
@@ -412,9 +412,15 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
             .expect("parent epoch snapshot")
             .resolve_reward_address(solution.mining_address);
 
-        if self.create_poa_data(solution, None).await?.is_none() {
+        let Some((poa, _)) = self.create_poa_data(solution, None).await? else {
             return Ok(None);
-        }
+        };
+        let block_reward = split_block_reward(
+            self.block_reward(&prev_block_header)?,
+            &self.inner().config.consensus,
+            timestamp.to_secs(),
+            !poa.is_data_poa(),
+        )?;
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
                 &prev_block_header,
@@ -432,7 +438,7 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
                 &prev_block_header,
                 mempool_bundle,
                 timestamp,
-                block_reward,
+                block_reward.miner,
                 eth_built_payload.block(),
                 &prev_block_ema_snapshot,
                 final_treasury,
