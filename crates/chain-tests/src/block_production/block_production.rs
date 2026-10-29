@@ -1748,9 +1748,9 @@ async fn own_block_prevalidation_failure_keeps_producer_running() -> eyre::Resul
     Ok(())
 }
 
-/// Own blocks rejected for the same reason, with no block produced between
-/// them, stop the producer service once the run reaches the threshold. A
-/// local fault that one error does not prove then still stops the node.
+/// Own blocks rejected on the same parent for the same local-cause reason
+/// stop the producer service once the run reaches the threshold. A local
+/// fault that one error does not prove then still stops the node.
 #[test_log::test(tokio::test)]
 async fn own_block_rejections_in_a_row_stop_the_producer() -> eyre::Result<()> {
     use irys_actors::{

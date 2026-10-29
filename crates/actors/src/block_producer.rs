@@ -76,6 +76,8 @@ pub enum BlockProductionError {
     Recoverable {
         /// Low-cardinality label for logs and the dropped-blocks metric.
         reason: &'static str,
+        /// The block the attempt built on, once known.
+        parent: Option<H256>,
         #[source]
         source: eyre::Error,
     },
@@ -93,7 +95,24 @@ impl BlockProductionError {
     pub fn recoverable<E: Into<eyre::Report>>(reason: &'static str) -> impl FnOnce(E) -> Self {
         move |source| Self::Recoverable {
             reason,
+            parent: None,
             source: source.into(),
+        }
+    }
+
+    /// Records the block the failed attempt built on, unless already known.
+    fn on_parent(self, parent_hash: H256) -> Self {
+        match self {
+            Self::Recoverable {
+                reason,
+                parent: None,
+                source,
+            } => Self::Recoverable {
+                reason,
+                parent: Some(parent_hash),
+                source,
+            },
+            other => other,
         }
     }
 
@@ -111,6 +130,14 @@ impl BlockProductionError {
             Self::Retryable { .. } => "retryable",
             Self::Recoverable { reason, .. } => reason,
             Self::Irrecoverable { .. } => "irrecoverable",
+        }
+    }
+
+    /// The block a dropped attempt built on, when known.
+    pub fn parent(&self) -> Option<H256> {
+        match self {
+            Self::Recoverable { parent, .. } => *parent,
+            Self::Retryable { .. } | Self::Irrecoverable { .. } => None,
         }
     }
 
@@ -139,6 +166,7 @@ fn ensure_payload_starts_with_shadow_txs(
     }
     Err(BlockProductionError::Recoverable {
         reason: "payload_missing_shadow_tx",
+        parent: None,
         source: eyre!(
             "built payload does not start with the {} expected shadow txs",
             expected_shadow_tx_hashes.len()
@@ -209,6 +237,7 @@ fn check_new_payload_status(status: &PayloadStatusEnum) -> Result<(), BlockProdu
     }
     Err(BlockProductionError::Recoverable {
         reason: "payload_not_valid",
+        parent: None,
         source: eyre!("engine returned {status:?} for our own payload"),
     })
 }
@@ -229,21 +258,34 @@ fn classify_shadow_tx_error(err: ShadowTxGenError) -> BlockProductionError {
     }
 }
 
+/// Why our own block failed block discovery. It decides what the producer
+/// does with the attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnBlockRejectionCause {
+    /// Proven local fault: stop the node.
+    LocalFault,
+    /// A tx the producer selected, which a peer can supply: drop the attempt.
+    /// It does not count toward the drop-streak stop.
+    SelectedTx,
+    /// Local state that can change between attempts (stored chunk data,
+    /// partition assignments, the VDF state, the clock, the block tree): drop
+    /// the attempt. It counts toward the drop-streak stop.
+    ChangingLocalState,
+}
+
 /// Block-discovery errors for our own block. A node fault stops the node, as
 /// it does for a peer's block, and so does a failed check that our own block
-/// passes by construction (see [`own_block_rejection_is_local_fault`]). A
-/// discovery `InternalError` (local DB or channel failure) is always a node
-/// fault. Any other error rejects only this block: drop it.
+/// passes by construction (see [`own_block_rejection_cause`]). A discovery
+/// `InternalError` (local DB or channel failure) is always a node fault. Any
+/// other error rejects only this block: drop it.
 fn classify_own_block_discovery_error(
     err: BlockDiscoveryError,
     block_header: &IrysBlockHeader,
 ) -> BlockProductionError {
     // SAFETY: no `_` wildcard. A new variant must be classified here.
-    let is_node_fault = match &err {
-        BlockDiscoveryError::BlockValidationError(pre_err) => {
-            own_block_rejection_is_local_fault(pre_err)
-        }
-        BlockDiscoveryError::InternalError(_) => true,
+    let cause = match &err {
+        BlockDiscoveryError::BlockValidationError(pre_err) => own_block_rejection_cause(pre_err),
+        BlockDiscoveryError::InternalError(_) => OwnBlockRejectionCause::LocalFault,
         // The producer sets these from the parent and builds the header and
         // the body from the same tx lists.
         BlockDiscoveryError::MissingTransactions(_)
@@ -251,12 +293,15 @@ fn classify_own_block_discovery_error(
         | BlockDiscoveryError::InvalidDataLedgersLength(_, _)
         | BlockDiscoveryError::InvalidBlockHeight { .. }
         | BlockDiscoveryError::InvalidSignature(_)
-        | BlockDiscoveryError::TransactionIdMismatch { .. } => true,
-        // The block tree or the mempool view can race the chain.
-        BlockDiscoveryError::PreviousBlockNotFound { .. }
-        | BlockDiscoveryError::DuplicateTransaction(_)
+        | BlockDiscoveryError::TransactionIdMismatch { .. } => OwnBlockRejectionCause::LocalFault,
+        // The mempool view can lag the chain, and a peer supplies the tx.
+        BlockDiscoveryError::DuplicateTransaction(_)
         | BlockDiscoveryError::InvalidCommitmentTransaction(_)
-        | BlockDiscoveryError::InvalidAnchor { .. } => false,
+        | BlockDiscoveryError::InvalidAnchor { .. } => OwnBlockRejectionCause::SelectedTx,
+        // The block tree can prune the parent.
+        BlockDiscoveryError::PreviousBlockNotFound { .. } => {
+            OwnBlockRejectionCause::ChangingLocalState
+        }
     };
     let source = eyre!(
         "Newly produced block {} ({}) failed block discovery: {:?}",
@@ -264,21 +309,25 @@ fn classify_own_block_discovery_error(
         &block_header.height,
         err
     );
-    if is_node_fault {
-        BlockProductionError::Irrecoverable { source }
-    } else {
-        BlockProductionError::Recoverable {
-            reason: "own_block_rejected",
-            source,
+    let reason = match cause {
+        OwnBlockRejectionCause::LocalFault => {
+            return BlockProductionError::Irrecoverable { source };
         }
+        OwnBlockRejectionCause::SelectedTx => "own_block_rejected_by_tx",
+        OwnBlockRejectionCause::ChangingLocalState => "own_block_rejected",
+    };
+    BlockProductionError::Recoverable {
+        reason,
+        parent: Some(block_header.previous_block_hash),
+        source,
     }
 }
 
-/// Whether a pre-validation failure of our own block proves a local fault.
-/// `PreValidationError::classify` decides as it does for a peer's block. A
-/// mismatch on a field the producer derives from the same inputs that
-/// pre-validation reads is also a local fault: every attempt fails again.
-fn own_block_rejection_is_local_fault(err: &PreValidationError) -> bool {
+/// Why a pre-validation failure of our own block happened.
+/// `PreValidationError::classify` decides node faults as it does for a peer's
+/// block. A mismatch on a field the producer derives from the same inputs
+/// that pre-validation reads is also a local fault: every attempt fails again.
+fn own_block_rejection_cause(err: &PreValidationError) -> OwnBlockRejectionCause {
     // SAFETY: no `_` wildcard. A new variant must be classified here.
     match err {
         // Derived from the parent header, the parent snapshots, config, the
@@ -310,17 +359,16 @@ fn own_block_rejection_is_local_fault(err: &PreValidationError) -> bool {
         | PreValidationError::TotalChunksMismatch { .. }
         | PreValidationError::TransactionIdMismatch { .. }
         | PreValidationError::TxRootMismatch { .. }
-        | PreValidationError::VDFPreviousOutputMismatch { .. } => true,
+        | PreValidationError::VDFPreviousOutputMismatch { .. } => {
+            OwnBlockRejectionCause::LocalFault
+        }
 
-        // Depend on state that can change between attempts: the mempool view
-        // and tx history (selection can lag the chain), stored chunk data and
-        // partition assignments (an epoch change or a reorg), the VDF state,
-        // or the clock. The drop streak stops the service if one repeats.
+        // A selected tx's content, fees, ingress proofs or history. The
+        // mempool view can lag the chain, and a peer supplies the tx.
         PreValidationError::AssignedProofCountMismatch { .. }
         | PreValidationError::CascadeNotConfigured { .. }
         | PreValidationError::CommitmentChainIdMismatch { .. }
         | PreValidationError::CommitmentVersionInvalid { .. }
-        | PreValidationError::DataLedgerExtractionFailed(_)
         | PreValidationError::DataSizeExceedsMax { .. }
         | PreValidationError::DataTxChainIdMismatch { .. }
         | PreValidationError::DuplicateIngressProofSigner { .. }
@@ -330,13 +378,34 @@ fn own_block_rejection_is_local_fault(err: &PreValidationError) -> bool {
         | PreValidationError::IngressProofsMissing
         | PreValidationError::InsufficientPermFee { .. }
         | PreValidationError::InsufficientTermFee { .. }
-        | PreValidationError::InvalidEpochSnapshot { .. }
         | PreValidationError::InvalidIngressProof { .. }
         | PreValidationError::InvalidLedgerIdForTx { .. }
         | PreValidationError::InvalidPermFeeStructure { .. }
         | PreValidationError::InvalidPromotionDataSizeMismatch { .. }
         | PreValidationError::InvalidPromotionPath { .. }
         | PreValidationError::InvalidTermFeeStructure { .. }
+        | PreValidationError::PrefixSizeExceedsDataSize { .. }
+        | PreValidationError::PublishLedgerProofCountMismatch { .. }
+        | PreValidationError::PublishTxAlreadyIncluded { .. }
+        | PreValidationError::PublishTxMissingPriorSubmit { .. }
+        | PreValidationError::PublishTxProofLengthMismatch
+        | PreValidationError::SubmitTxAlreadyIncluded { .. }
+        | PreValidationError::SubmitTxHasPromotedHeight { .. }
+        | PreValidationError::TermLedgerTxHasPermFee { .. }
+        | PreValidationError::TooManyCommitmentTxs { .. }
+        | PreValidationError::TooManyDataTxs { .. }
+        | PreValidationError::TooManyPublishTxs { .. }
+        | PreValidationError::TxFoundInMultipleBlocks { .. }
+        | PreValidationError::TxInMultipleLedgers { .. }
+        | PreValidationError::UnstakedIngressProofSigner { .. }
+        | PreValidationError::ZeroSizeDataTx { .. } => OwnBlockRejectionCause::SelectedTx,
+
+        // Local state that can change between attempts: stored chunk data
+        // and partition assignments (an epoch change or a reorg), the VDF
+        // state, the clock, or header checks with no matching recomputation
+        // in the producer.
+        PreValidationError::DataLedgerExtractionFailed(_)
+        | PreValidationError::InvalidEpochSnapshot { .. }
         | PreValidationError::LedgerIdInvalid { .. }
         | PreValidationError::MerkleProofInvalid(_)
         | PreValidationError::PartitionAssignmentMissing { .. }
@@ -354,25 +423,12 @@ fn own_block_rejection_is_local_fault(err: &PreValidationError) -> bool {
         | PreValidationError::PoALedgerInactive { .. }
         | PreValidationError::PoAOffCanonicalAncestor { .. }
         | PreValidationError::PoaTxRootLeafMismatch { .. }
-        | PreValidationError::PrefixSizeExceedsDataSize { .. }
-        | PreValidationError::PublishLedgerProofCountMismatch { .. }
-        | PreValidationError::PublishTxAlreadyIncluded { .. }
-        | PreValidationError::PublishTxMissingPriorSubmit { .. }
-        | PreValidationError::PublishTxProofLengthMismatch
         | PreValidationError::SolutionHashLinkInvalid { .. }
-        | PreValidationError::SubmitTxAlreadyIncluded { .. }
-        | PreValidationError::SubmitTxHasPromotedHeight { .. }
-        | PreValidationError::TermLedgerTxHasPermFee { .. }
         | PreValidationError::TimestampTooFarInFuture { .. }
-        | PreValidationError::TooManyCommitmentTxs { .. }
-        | PreValidationError::TooManyDataTxs { .. }
-        | PreValidationError::TooManyPublishTxs { .. }
-        | PreValidationError::TxFoundInMultipleBlocks { .. }
-        | PreValidationError::TxInMultipleLedgers { .. }
         | PreValidationError::UnexpectedCommitmentTransactions
-        | PreValidationError::UnstakedIngressProofSigner { .. }
-        | PreValidationError::VDFCheckpointsInvalid(_)
-        | PreValidationError::ZeroSizeDataTx { .. } => false,
+        | PreValidationError::VDFCheckpointsInvalid(_) => {
+            OwnBlockRejectionCause::ChangingLocalState
+        }
 
         // Node faults and prune races: decided as for a peer's block.
         PreValidationError::AddBlockFailed { .. }
@@ -389,7 +445,13 @@ fn own_block_rejection_is_local_fault(err: &PreValidationError) -> bool {
         | PreValidationError::RewardCurveError(_)
         | PreValidationError::SystemTimeError(_)
         | PreValidationError::UpdateCacheForScheduledValidationError(_)
-        | PreValidationError::ValidationServiceUnreachable => err.is_node_fault(),
+        | PreValidationError::ValidationServiceUnreachable => {
+            if err.is_node_fault() {
+                OwnBlockRejectionCause::LocalFault
+            } else {
+                OwnBlockRejectionCause::ChangingLocalState
+            }
+        }
     }
 }
 
@@ -469,22 +531,47 @@ pub struct BlockProducerService {
     /// new height, so a second block produced at an already-seen height (a
     /// rejected block's same-height replacement) does not consume the budget.
     highest_test_block_height_produced: Option<u64>,
-    /// Consecutive dropped attempts per drop reason since the last produced block.
+    /// Consecutive local-cause drops per drop reason on one parent.
     drop_streaks: DropStreaks,
 }
 
-/// This many dropped attempts with the same reason, and no block produced
-/// between them, stop the producer service. A local fault that is not proven
-/// by one error then still stops the node instead of a silent halt.
+/// This many dropped attempts with the same local-cause reason on the same
+/// parent stop the producer service. A local fault that is not proven by one
+/// error then still stops the node instead of a silent halt.
 pub const DROP_STREAK_STOP_AT: u32 = 8;
 
-/// Consecutive dropped attempts per drop reason. A produced block clears all.
+/// Whether a drop with this reason counts toward the stop. A reason whose
+/// cause can be a tx that a peer supplied does not count, so that a peer
+/// cannot stop the node with a tx. Such drops are still logged and counted
+/// in the dropped-blocks metric.
+fn drop_reason_has_local_cause(reason: &str) -> bool {
+    !matches!(
+        reason,
+        // Tx selection reads the mempool.
+        "tx_selection"
+        // Fee and refund amounts come from the selected txs.
+        | "shadow_tx_generation"
+        // A selected tx's payer can lack the EVM balance for its fee.
+        | "payload_missing_shadow_tx"
+        // Pre-validation rejected our block because of a selected tx.
+        | "own_block_rejected_by_tx"
+    )
+}
+
+/// Consecutive dropped attempts per drop reason. Only local-cause reasons
+/// count (see [`drop_reason_has_local_cause`]). A produced block clears all
+/// counts, and so does a counted drop on a parent other than the one of the
+/// previous counted drop: the stop means repeated failures on one parent.
 #[derive(Debug, Default)]
-struct DropStreaks(std::collections::HashMap<&'static str, u32>);
+struct DropStreaks {
+    by_reason: std::collections::HashMap<&'static str, u32>,
+    /// Parent of the previous counted drop.
+    parent: Option<H256>,
+}
 
 impl DropStreaks {
     fn clear(&mut self) {
-        self.0.clear();
+        self.by_reason.clear();
     }
 
     /// Gives the error back when the service continues. `Err` stops the
@@ -495,12 +582,20 @@ impl DropStreaks {
             return Err(err.into());
         }
         let reason = err.reason();
-        let streak = self.0.entry(reason).or_default();
+        if !drop_reason_has_local_cause(reason) {
+            return Ok(err);
+        }
+        if err.parent() != self.parent {
+            self.by_reason.clear();
+            self.parent = err.parent();
+        }
+        let streak = self.by_reason.entry(reason).or_default();
         *streak = streak.saturating_add(1);
         if *streak >= DROP_STREAK_STOP_AT {
             error!(
                 error.reason = reason,
                 streak = *streak,
+                block.parent = ?self.parent,
                 error.source = %format_args!("{:#}", err.source_report()),
                 "Stopping block producer: block production keeps failing for the same reason"
             );
@@ -1171,6 +1266,7 @@ pub trait BlockProdStrategy {
                         );
                         return Err(BlockProductionError::Recoverable {
                             reason: "retries_exhausted",
+                            parent: Some(block_hash),
                             source: source
                                 .wrap_err(format!("max retries ({}) exceeded", MAX_RETRY_ATTEMPTS)),
                         });
@@ -1200,7 +1296,7 @@ pub trait BlockProdStrategy {
                         error.source = %format_args!("{:#}", e.source_report()),
                         "Block production failed on parent, aborting"
                     );
-                    return Err(e);
+                    return Err(e.on_parent(block_hash));
                 }
             }
         }
@@ -2295,6 +2391,7 @@ pub trait BlockProdStrategy {
         }
         .ok_or_else(|| BlockProductionError::Recoverable {
             reason: "parent_evm_block_unavailable",
+            parent: None,
             source: eyre!(
                 "parent EVM block {} for height {} not found in Reth",
                 prev_block_header.evm_block_hash,
@@ -2791,65 +2888,66 @@ mod error_classification_tests {
         );
     }
 
+    // Expected outcome: `None` stops the node, `Some` is the drop reason.
     #[rstest]
     #[case::cache_poisoned(
         BlockDiscoveryError::BlockValidationError(PreValidationError::CachePoisoned { at: "test" }),
-        true
+        None
     )]
     #[case::add_block_failed(
         BlockDiscoveryError::BlockValidationError(PreValidationError::AddBlockFailed {
             block_hash: H256::zero(),
             reason: "test".into(),
         }),
-        true
+        None
     )]
     #[case::validation_service_unreachable(
         BlockDiscoveryError::BlockValidationError(
             PreValidationError::ValidationServiceUnreachable
         ),
-        true
+        None
     )]
     #[case::discovery_database_error(
         BlockDiscoveryError::InternalError(BlockDiscoveryInternalError::DatabaseError(
             eyre::eyre!("test")
         )),
-        true
+        None
     )]
     #[case::parent_not_in_cache(
         BlockDiscoveryError::BlockValidationError(PreValidationError::ParentNotInCache {
             parent_hash: H256::zero(),
             expected_height: 1,
         }),
-        false
+        Some("own_block_rejected")
     )]
     #[case::block_signature_invalid(
         BlockDiscoveryError::BlockValidationError(PreValidationError::BlockSignatureInvalid),
-        true
+        None
     )]
     #[case::ema_mismatch(
         BlockDiscoveryError::BlockValidationError(PreValidationError::EmaMismatch),
-        true
+        None
     )]
     #[case::reward_mismatch(
         BlockDiscoveryError::BlockValidationError(PreValidationError::RewardMismatch {
             got: U256::one(),
             expected: U256::zero(),
         }),
-        true
+        None
     )]
     #[case::invalid_block_height(
         BlockDiscoveryError::InvalidBlockHeight {
             expected: 2,
             got: 3
         },
-        true
+        None
     )]
     #[case::transaction_id_mismatch(
         BlockDiscoveryError::TransactionIdMismatch {
             expected: H256::zero(),
             actual: H256::repeat_byte(1),
         },
-        true
+        None
     )]
     #[case::poa_chunk_hash_mismatch(
         BlockDiscoveryError::BlockValidationError(PreValidationError::PoAChunkHashMismatch {
@@ -2858,44 +2956,48 @@ mod error_classification_tests {
             ledger_id: None,
             ledger_chunk_offset: None,
         }),
-        false
+        Some("own_block_rejected")
     )]
     #[case::timestamp_too_far_in_future(
         BlockDiscoveryError::BlockValidationError(PreValidationError::TimestampTooFarInFuture {
             current: 2,
             now: 1,
         }),
-        false
+        Some("own_block_rejected")
     )]
-    #[case::duplicate_transaction(BlockDiscoveryError::DuplicateTransaction(H256::zero()), false)]
+    #[case::duplicate_transaction(
+        BlockDiscoveryError::DuplicateTransaction(H256::zero()),
+        Some("own_block_rejected_by_tx")
+    )]
+    #[case::insufficient_perm_fee(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::InsufficientPermFee {
+            tx_id: H256::zero(),
+            expected: U256::one(),
+            actual: U256::zero(),
+        }),
+        Some("own_block_rejected_by_tx")
+    )]
     #[case::previous_block_not_found(
         BlockDiscoveryError::PreviousBlockNotFound {
             previous_block_hash: H256::zero(),
         },
-        false
+        Some("own_block_rejected")
     )]
     fn own_block_discovery_error_is_fatal_only_for_local_faults(
         #[case] err: BlockDiscoveryError,
-        #[case] fatal: bool,
+        #[case] drop_reason: Option<&'static str>,
     ) {
-        let classified =
-            classify_own_block_discovery_error(err, &IrysBlockHeader::new_mock_header());
-        if fatal {
-            assert!(
+        let header = IrysBlockHeader::new_mock_header();
+        let classified = classify_own_block_discovery_error(err, &header);
+        match drop_reason {
+            None => assert!(
                 matches!(classified, BlockProductionError::Irrecoverable { .. }),
                 "{classified:?}"
-            );
-        } else {
-            assert!(
-                matches!(
-                    classified,
-                    BlockProductionError::Recoverable {
-                        reason: "own_block_rejected",
-                        ..
-                    }
-                ),
-                "{classified:?}"
-            );
+            ),
+            Some(expected) => {
+                assert_eq!(classified.reason(), expected, "{classified:?}");
+                assert_eq!(classified.parent(), Some(header.previous_block_hash));
+            }
         }
     }
 
@@ -2965,12 +3067,19 @@ mod error_classification_tests {
 #[cfg(test)]
 mod drop_streak_tests {
     use super::{BlockProductionError, DROP_STREAK_STOP_AT, DropStreaks};
+    use irys_types::H256;
+    use rstest::rstest;
 
-    fn dropped(reason: &'static str) -> BlockProductionError {
+    fn dropped_on(reason: &'static str, parent: H256) -> BlockProductionError {
         BlockProductionError::Recoverable {
             reason,
+            parent: Some(parent),
             source: eyre::eyre!("attempt failed"),
         }
+    }
+
+    fn dropped(reason: &'static str) -> BlockProductionError {
+        dropped_on(reason, H256::zero())
     }
 
     // `handle_command` returns the `Err` of `continue_after` with `?`, which
@@ -2985,17 +3094,34 @@ mod drop_streak_tests {
     }
 
     #[test]
-    fn drop_streak_at_the_threshold_stops_the_service() {
+    fn local_drops_on_one_parent_at_the_threshold_stop_the_service() {
         let mut streaks = DropStreaks::default();
         for _ in 1..DROP_STREAK_STOP_AT {
             streaks
-                .continue_after(dropped("tx_selection"))
+                .continue_after(dropped("own_block_rejected"))
                 .expect("below the threshold the service continues");
         }
         let stop = streaks
-            .continue_after(dropped("tx_selection"))
+            .continue_after(dropped("own_block_rejected"))
             .expect_err("the drop that reaches the threshold stops the service");
-        assert!(format!("{stop:#}").contains("tx_selection"), "{stop:#}");
+        assert!(
+            format!("{stop:#}").contains("own_block_rejected"),
+            "{stop:#}"
+        );
+    }
+
+    #[rstest]
+    #[case::tx_selection("tx_selection")]
+    #[case::shadow_tx_generation("shadow_tx_generation")]
+    #[case::payload_missing_shadow_tx("payload_missing_shadow_tx")]
+    #[case::own_block_rejected_by_tx("own_block_rejected_by_tx")]
+    fn drop_with_a_peer_supplied_cause_never_stops_the_service(#[case] reason: &'static str) {
+        let mut streaks = DropStreaks::default();
+        for _ in 0..DROP_STREAK_STOP_AT * 2 {
+            streaks
+                .continue_after(dropped(reason))
+                .expect("a peer-supplied cause must not stop the service");
+        }
     }
 
     #[test]
@@ -3005,6 +3131,38 @@ mod drop_streak_tests {
             streaks.continue_after(dropped("a")).expect("continues");
             streaks.continue_after(dropped("b")).expect("continues");
         }
+        assert!(streaks.continue_after(dropped("a")).is_err());
+    }
+
+    #[test]
+    fn new_parent_resets_the_streak() {
+        let mut streaks = DropStreaks::default();
+        for _ in 1..DROP_STREAK_STOP_AT {
+            streaks
+                .continue_after(dropped_on("a", H256::zero()))
+                .expect("continues");
+        }
+        for _ in 1..DROP_STREAK_STOP_AT {
+            streaks
+                .continue_after(dropped_on("a", H256::repeat_byte(1)))
+                .expect("a new parent starts a new streak");
+        }
+        assert!(
+            streaks
+                .continue_after(dropped_on("a", H256::repeat_byte(1)))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn excluded_drop_on_a_new_parent_does_not_reset_the_streak() {
+        let mut streaks = DropStreaks::default();
+        for _ in 1..DROP_STREAK_STOP_AT {
+            streaks.continue_after(dropped("a")).expect("continues");
+        }
+        streaks
+            .continue_after(dropped_on("tx_selection", H256::repeat_byte(1)))
+            .expect("continues");
         assert!(streaks.continue_after(dropped("a")).is_err());
     }
 

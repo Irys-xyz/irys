@@ -87,6 +87,7 @@ impl From<TxSelectorError> for crate::block_producer::BlockProductionError {
             TxSelectorError::LedgerExpiry(LedgerExpiryError::Other(source))
             | TxSelectorError::Other(source) => Self::Recoverable {
                 reason: "tx_selection",
+                parent: None,
                 source,
             },
         }
