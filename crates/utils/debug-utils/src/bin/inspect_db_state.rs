@@ -16,20 +16,12 @@ use irys_database::reth_db::{
     transaction::DbTx as _,
 };
 use irys_database::tables::{IrysBlockHeaders, IrysDataTxMetadata, MigratedBlockHashes};
-use irys_types::H256;
+use irys_types::{H256, ToBase58 as _};
 use reth_node_core::version::default_client_version;
 use std::path::PathBuf;
 
 fn parse_hash(s: &str) -> eyre::Result<H256> {
-    let bytes = bs58::decode(s)
-        .into_vec()
-        .with_context(|| format!("decode base58 {s:?}"))?;
-    if bytes.len() != 32 {
-        return Err(eyre!("hash must decode to 32 bytes, got {}", bytes.len()));
-    }
-    let mut arr = [0_u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(H256(arr))
+    H256::from_base58_result(s).with_context(|| format!("decode base58 {s:?}"))
 }
 
 fn open_ro(db_path: &PathBuf) -> eyre::Result<DatabaseEnv> {
@@ -44,7 +36,7 @@ fn open_ro(db_path: &PathBuf) -> eyre::Result<DatabaseEnv> {
 }
 
 fn b58(h: &H256) -> String {
-    bs58::encode(h.as_bytes()).into_string()
+    h.as_bytes().to_base58()
 }
 
 fn dump_block(

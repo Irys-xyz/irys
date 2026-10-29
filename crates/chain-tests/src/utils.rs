@@ -3103,7 +3103,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer.node_ctx
             .block_pool
             .add_execution_payload_to_cache(eth_payload.block().clone())
-            .await;
+            .await
+            .expect("payload body matches its header");
 
         let sealed_block = build_sealed_block(irys_block_header.clone(), &block_transactions)?;
 

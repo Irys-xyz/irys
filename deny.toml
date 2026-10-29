@@ -1,0 +1,14 @@
+# cargo-deny config. Run with `cargo xtask deny`; only the `bans` check is enforced.
+
+[graph]
+# Feature-gated deps are checked too.
+all-features = true
+
+[bans]
+# Only the explicit bans below; duplicate versions are not policed.
+multiple-versions = "allow"
+deny = [
+    # Unmaintained. Base58 goes through `bs58`, decoded only by
+    # `irys_types::decode_base58_exact`.
+    { crate = "base58" },
+]
