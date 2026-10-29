@@ -974,9 +974,9 @@ pub mod serde_utils {
         amount_from_float(deserializer, |dec| Amount::<T>::token(dec))
     }
 
-    /// deserialize the percentage amount from a string.
+    /// deserialize the percentage amount from a number (not a string).
     ///
-    /// The string is expected to be:
+    /// The number is expected to be:
     /// - 0.1 (10%)
     /// - 1.0 (100%)
     pub fn percentage_amount<'de, T: std::fmt::Debug, D>(
