@@ -195,7 +195,16 @@ impl PreemptibleVdfTask {
                 // wait for the parent's last step. Peer-innocent and terminal:
                 // nothing pursues the block any more.
                 } else if let Some(left) = e.downcast_ref::<VdfTaskLeftBlockTree>() {
-                    metrics::record_validation_cancellation("vdf_left_block_tree");
+                    let label = match left.reason {
+                        crate::block_validation::ValidationCancelReason::BlockMissing => {
+                            "vdf_block_missing"
+                        }
+                        crate::block_validation::ValidationCancelReason::ParentMissing => {
+                            "vdf_left_tree_parent_missing"
+                        }
+                        _ => "vdf_left_block_tree",
+                    };
+                    metrics::record_validation_cancellation(label);
                     VdfValidationResult::LeftBlockTree {
                         reason: left.reason,
                     }
