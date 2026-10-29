@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793229143405,
+  "lastUpdate": 1793282806899,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20023,6 +20023,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000124,
             "range": "± 0.000007",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "86b8e8b050f7f03ce8a4c1975f4d51c5591e9e16",
+          "message": "fix: reduce capacity PoA rewards after Delta (#1726)\n\n* feat: cut the capacity-PoA block reward under Delta, send the rest to the treasury\n\nFrom the first block whose timestamp reaches Delta's activation, a PoA that\nis not a data PoA pays the miner `Delta.capacity_chunk_reward_percent`\n(default 0.5) of the reward-curve amount. The remainder goes to the block\nheader's treasury. The kind is a property of the PoA: a data-assigned\npartition can mine an entropy PoA, and PoA validation enforces the kind.\n\nProducer and validator share one full-reward and split helper. The\nvalidator recomputes the treasury share for the shadow-tx check. Supply\nstate counts the full curve reward as emitted at each block, so persisted\nsupply needs no migration. Networks without Delta are unchanged.\n\n* test: cover the Delta capacity reward split end to end\n\nChain tests mine with Delta active and check each block's miner reward, treasury delta and emitted supply by PoA kind, and reject blocks that pay the full reward or leave the treasury share out.\n\n* docs: describe the Delta capacity reward split\n\n* docs: state that the consensus-config hash is advisory\n\nBoth handshake sides only log a mismatch; they do not reject the peer.\n\n* docs: say which consensus-config fields the hash leaves out\n\n* chore: update agents.md\n\n* docs: give the reason each reward-split failure cannot come from a peer\n\nThe RewardCurveError classification comment said the inputs are all local.\nThe Delta split also reads the peer-supplied timestamp and PoA kind. State\nwhy that cannot fail on peer input: the subtraction underflows only for a\npercent above 1.0, which Config::validate rejects, and the multiplication\ncannot overflow because the full reward is bounded by the inflation cap.\n\n* test: wait on the supply height before checking supply in partition recovery\n\nMigration writes the block index before it updates the supply state, so a\nread right after the index reaches a height can see a supply state that\ndoes not yet count that block. Add wait_supply_height and sum the expected\nemission up to the height the supply state reports.\n\n* test: cover Delta mid-chain activation, supply backfill and partition recovery\n\n- Mid-chain activation: blocks before the activation timestamp pay the full\n  reward, capacity PoA blocks after it pay the configured fraction, and the\n  treasury share starts on the first post-activation block. Pinned to the\n  accelerated clock.\n- Backfill: a restarted Delta node rebuilds the supply state from the reward\n  curve, not from the reduced header rewards.\n- Partition recovery: rollback and re-apply on a Delta chain count the full\n  curve emission.\n\n* chore: update agents.md\n\n* chore: update agents.md\n\n* test: require the block index to advance after Delta partition recovery\n\nThe continued-operation check waited for the index height that recovery had\nalready reached, so it passed even if the index did not advance. Wait for\nthe height that the newly mined block brings into the index.\n\n* docs: state that trusted sync trusts the declared PoA kind\n\nThe reward check says poa_is_valid verifies the declared PoA kind. Trusted\nsync skips poa_is_valid, so there the kind is trusted like the rest of the\nPoA.\n\n* docs: percentage amounts deserialize from a number, not a string\n\n* test: make the Delta PoA-kind and supply checks cover what they claim\n\n- The PoA-kind test wrote one chunk, so a data PoA was a matter of chance\n  and the test did not assert one. Write half of each data partition and\n  mine until both a data PoA and an entropy PoA from a data partition occur.\n- The treasury test stopped its supply wait at the first migrated block.\n  Wait until the supply state counts every block that the index holds.\n\n* test: pin the reward split error above 100% and the Delta config hash\n\n- A capacity reward percent above 1.0 makes split_block_reward return an\n  error, not panic.\n- Setting the Delta hardfork with default values changes the consensus\n  config hash.\n\n* docs: note the trusted-sync exception on split_block_reward\n\n* refactor: use the node's reward curve in shadow-tx validation\n\nShadow-tx validation built a new reward curve from config to compute the\ntreasury share. Pass in the node's shared curve, so production,\nprevalidation and shadow-tx validation all use the same instance.\n\n* test: pin the Delta capacity reward default to a literal 50%\n\nThe test compared the deserialized default with the same function that\nserde uses as the default, so a change to the default still passed.\n\n* docs: include xtask test in the shared-target prune guidance",
+          "timestamp": "2026-10-29T13:46:27Z",
+          "tree_id": "e0ff036ea3c4a83ba965ef64705db9355141a924",
+          "url": "https://github.com/Irys-xyz/irys/commit/86b8e8b050f7f03ce8a4c1975f4d51c5591e9e16"
+        },
+        "date": 1793282805337,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012178,
+            "range": "± 0.000104",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.123612,
+            "range": "± 0.004231",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.208234,
+            "range": "± 0.020249",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.947428,
+            "range": "± 0.20313",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.07537,
+            "range": "± 0.001574",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 751.765266,
+            "range": "± 4.902311",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 976.610022,
+            "range": "± 6.788796",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120184,
+            "range": "± 0.002268",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1218.191514,
+            "range": "± 10.618797",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1748.5336,
+            "range": "± 199.636449",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034615,
+            "range": "± 0.000802",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.427315,
+            "range": "± 0.709339",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.492335,
+            "range": "± 0.78337",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
