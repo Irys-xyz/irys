@@ -405,7 +405,7 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
         let mempool_bundle = self.get_mempool_txs(&prev_block_header, timestamp).await?;
         let block_reward = self
             .block_reward(&prev_block_header)
-            .map_err(BlockProductionError::recoverable("block_reward"))?;
+            .map_err(BlockProductionError::irrecoverable)?;
         let reward_address = self
             .inner()
             .block_tree_guard
@@ -445,8 +445,7 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
                 final_treasury,
                 reward_address,
             )
-            .await
-            .map_err(BlockProductionError::recoverable("block_assembly"))?;
+            .await?;
         Ok(block_result.map(|(block, stats)| (block, stats, eth_built_payload)))
     }
 }

@@ -80,6 +80,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
+/// Errors from the ledger-expiry fee calculation.
+#[derive(Debug, thiserror::Error)]
+pub enum LedgerExpiryError {
+    /// The txs attributed to miners and the tx headers come from the same block
+    /// reads, so a difference is a local bug: every attempt computes it again.
+    #[error("the expired {ledger:?} txs attributed to miners do not match the tx headers read")]
+    AttributedTxHeadersMismatch { ledger: DataLedger },
+    /// Any other failure.
+    #[error(transparent)]
+    Other(#[from] eyre::Report),
+}
+
 /// Calculates the aggregated fees owed to miners when data ledgers expire.
 ///
 /// This function processes expired partitions at epoch boundaries, determines which miners
@@ -114,7 +126,7 @@ pub async fn calculate_expired_ledger_fees(
     // unconditional, so for such a slot the settled set differs from pre-Cascade
     // master.
     cascade_for_block: ForBlock<Cascade>,
-) -> eyre::Result<LedgerExpiryBalanceDelta> {
+) -> Result<LedgerExpiryBalanceDelta, LedgerExpiryError> {
     // Fee distribution is only implemented for Submit ledger. Publish expiry
     // simply resets partitions without fee redistribution.
     assert_ne!(
@@ -276,7 +288,7 @@ pub async fn calculate_all_expired_ledger_fees(
     cascade_for_block: ForBlock<Cascade>,
     cascade_for_epoch: ForEpoch<Cascade>,
     new_total_chunks: impl Fn(DataLedger) -> u64,
-) -> eyre::Result<LedgerExpiryBalanceDelta> {
+) -> Result<LedgerExpiryBalanceDelta, LedgerExpiryError> {
     let mut result = calculate_expired_ledger_fees(
         parent_epoch_snapshot,
         parent_block_header,
@@ -335,10 +347,13 @@ async fn collect_tx_to_miners_from_range(
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
-) -> eyre::Result<(
-    BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>,
-    BTreeMap<IrysTransactionId, DataTransactionHeader>,
-)> {
+) -> Result<
+    (
+        BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>,
+        BTreeMap<IrysTransactionId, DataTransactionHeader>,
+    ),
+    LedgerExpiryError,
+> {
     let same_block = block_range.min_block.block_hash == block_range.max_block.block_hash;
     tracing::info!(
         "Processing boundary blocks: min_block height={}, max_block height={}, same_block={}",
@@ -425,10 +440,11 @@ async fn collect_tx_to_miners_from_range(
 
     // The fee step pays each header's tx from the miner map, so a tx in the miner
     // map with no header would get no fee and no error.
-    ensure!(
-        tx_to_miners.keys().eq(tx_headers.keys()),
-        "the expired {ledger_type:?} txs attributed to miners do not match the tx headers read"
-    );
+    if !tx_to_miners.keys().eq(tx_headers.keys()) {
+        return Err(LedgerExpiryError::AttributedTxHeadersMismatch {
+            ledger: ledger_type,
+        });
+    }
 
     Ok((tx_to_miners, tx_headers))
 }
