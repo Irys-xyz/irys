@@ -1068,9 +1068,14 @@ pub struct RethConfig {
     /// mainnet and testnet templates). The Irys API proxies it at
     /// `/v1/execution-rpc`. It has no authentication.
     ///
-    /// Read-only namespaces are safe to add: `debug` (Irys removes every
-    /// `debug_*` method except a fixed set of reads and traces), `trace`,
-    /// `txpool`, `net`, `web3` and `rpc`.
+    /// Read-only namespaces do not change node state: `debug` (Irys removes
+    /// every `debug_*` method except a fixed set of reads and traces),
+    /// `trace`, `txpool`, `net`, `web3` and `rpc`. Some of their methods
+    /// (traces, `debug_stateRootWithUpdates`) can use much CPU, memory or I/O.
+    /// `/v1/execution-rpc` forwards every method. Before you add these
+    /// namespaces, restrict access to and rate-limit both the Reth port and
+    /// `/v1/execution-rpc`.
+    ///
     /// Do not add namespaces that change node state to a reachable port.
     /// Anyone who reaches the port can call them:
     /// - `admin`: controls peers and clears the transaction pool.

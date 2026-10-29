@@ -108,8 +108,12 @@ rpc_args = ["--http.api=eth,debug"]
 ```
 
 Warning: the RPC has no authentication and binds to the Reth network `bind_ip`.
-Do not add `all`, `admin`, `miner` or `testing` on a reachable port.
+Do not add `all`, `admin`, `miner`, `testing`, `flashbots` or `mev` on a reachable port.
 They let any caller change node state.
+
+Read-only namespaces such as `debug` and `trace` do not change node state, but some methods can use much CPU, memory or I/O.
+`/v1/execution-rpc` forwards every method.
+Before you add these namespaces, restrict access to and rate-limit both the Reth port and `/v1/execution-rpc`.
 
 
 
