@@ -2,6 +2,7 @@ use crate::block_pool::{BlockRemovalReason, CriticalBlockPoolError, FailureReaso
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::types::AdvisoryGossipError;
 use crate::{BlockPool, GossipClient, GossipError, GossipResult};
+use futures::StreamExt as _;
 use irys_actors::MempoolFacade;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::reth_service::RethServiceMessage;
@@ -1347,6 +1348,7 @@ async fn run_sync_loop<B: BlockDiscoveryFacade, M: MempoolFacade>(
     runtime_handle: &tokio::runtime::Handle,
 ) -> ChainSyncResult<()> {
     let mut blocks_to_request = block_queue.len();
+    let mut batch_pulls = Vec::with_capacity(blocks_to_request);
     let mut sync_target = sync_state.sync_target_height() + block_queue.len();
     sync_state.set_sync_target_height(sync_target);
 
@@ -1362,15 +1364,26 @@ async fn run_sync_loop<B: BlockDiscoveryFacade, M: MempoolFacade>(
             .await?;
         }
 
-        spawn_block_pull_task(
+        batch_pulls.push(spawn_block_pull_task(
             sync_state,
             gossip_data_handler,
             block.block_hash,
             runtime_handle,
-        );
+        ));
 
         blocks_to_request -= 1;
         if blocks_to_request == 0 {
+            // The next batch is asked from above the heights of this batch.
+            // Our index does not hold those heights, so no anchor checks the
+            // next answer. A batch in which no pull succeeds gives no sign
+            // that its entries are on a real chain: stop the sync here, and
+            // the next sync asks again from our own index.
+            if !any_block_pull_succeeded(std::mem::take(&mut batch_pulls)).await {
+                return Err(ChainSyncError::Network(format!(
+                    "no block pull of the sync batch up to height {} succeeded",
+                    sync_target
+                )));
+            }
             match replenish_block_batch(
                 sync_state,
                 params,
@@ -1432,12 +1445,13 @@ async fn finalize_sync<B: BlockDiscoveryFacade, M: MempoolFacade>(
 }
 
 /// Spawns a tokio task that pulls and processes a single block from the network.
+/// The task gives `true` when the pull succeeds.
 fn spawn_block_pull_task<B: BlockDiscoveryFacade, M: MempoolFacade>(
     sync_state: &ChainSyncState,
     gossip_data_handler: &Arc<GossipDataHandler<M, B>>,
     block_hash: BlockHash,
     runtime_handle: &tokio::runtime::Handle,
-) {
+) -> tokio::task::JoinHandle<bool> {
     let sync_state = sync_state.clone();
     let data_handler = gossip_data_handler.clone();
 
@@ -1455,14 +1469,29 @@ fn spawn_block_pull_task<B: BlockDiscoveryFacade, M: MempoolFacade>(
             {
                 Ok(()) => {
                     debug!("Sync task: Successfully processed block {:?}", block_hash);
+                    true
                 }
                 Err(e) => {
                     error!("Sync task: Failed to process block {:?}: {}", block_hash, e);
+                    false
                 }
             }
         }
         .in_current_span(),
-    );
+    )
+}
+
+/// Waits until one pull succeeds, or until each pull has failed. Does not
+/// wait for the other pulls after the first success, so a slow pull does not
+/// hold the sync. The pull tasks continue after this returns.
+async fn any_block_pull_succeeded(pulls: Vec<tokio::task::JoinHandle<bool>>) -> bool {
+    let mut pulls: futures::stream::FuturesUnordered<_> = pulls.into_iter().collect();
+    while let Some(outcome) = pulls.next().await {
+        if matches!(outcome, Ok(true)) {
+            return true;
+        }
+    }
+    false
 }
 
 enum BatchReplenishResult {
@@ -3051,6 +3080,202 @@ mod tests {
             assert!(!sync_state.is_syncing());
 
             Ok(())
+        }
+
+        /// Runs `sync_chain` from `start_from` against one trusted peer served
+        /// by `fake_gossip_server`.
+        async fn sync_from_fake_peer(
+            fake_gossip_server: FakeGossipServer,
+            sync_state: &ChainSyncState,
+            start_from: usize,
+        ) -> ChainSyncResult<()> {
+            let temp_dir = TempDirBuilder::new().with_tracing().build();
+            let db = DatabaseProvider(Arc::new(
+                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
+                    .expect("can't open temp dir"),
+            ));
+
+            let fake_gossip_address = fake_gossip_server.spawn();
+            let fake_peer_address = PeerAddress {
+                gossip: fake_gossip_address,
+                api: fake_gossip_address,
+                execution: Default::default(),
+            };
+
+            let mut node_config = NodeConfig::testing();
+            node_config.sync_mode = SyncMode::Full;
+            node_config.trusted_peers = vec![fake_peer_address];
+            node_config.genesis_peer_discovery_timeout_millis = 10;
+            let config = Config::new_with_random_peer_id(node_config);
+
+            let (sender, receiver) = PeerNetworkSender::new_with_receiver();
+            let (_peer_network_handle, peer_list) = spawn_peer_network_service_with_client(
+                db.clone(),
+                &config,
+                noop_reth_peer_sender(),
+                receiver,
+                sender,
+                tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+                tokio::runtime::Handle::current(),
+            );
+
+            let fake_mining_addr = IrysAddress::repeat_byte(2);
+            peer_list.add_or_update_peer(
+                PeerListItem {
+                    peer_id: IrysPeerId::from(fake_mining_addr),
+                    mining_address: fake_mining_addr,
+                    reputation_score: PeerScore::new(100),
+                    address: fake_peer_address,
+                    is_online: true,
+                    ..Default::default()
+                },
+                true,
+            );
+
+            let data_handler = data_handler_stub(&config, &peer_list, db, sync_state.clone());
+
+            sync_chain(
+                sync_state.clone(),
+                &peer_list,
+                start_from,
+                &config,
+                data_handler,
+                &tokio::runtime::Handle::current(),
+            )
+            .await
+        }
+
+        fn index_item(block_hash: BlockHash) -> BlockIndexItem {
+            BlockIndexItem {
+                block_hash,
+                num_ledgers: 0,
+                ledgers: vec![],
+            }
+        }
+
+        /// A peer that advertises a far index height and answers each index
+        /// request with a full page of hashes that no peer can serve. The
+        /// sync stops after the first page, and the sync target does not
+        /// move past that page.
+        #[tokio::test]
+        async fn batch_in_which_each_pull_fails_stops_the_sync() {
+            let start_from = 10;
+            let sync_state = ChainSyncState::new(true, false);
+            let fake_gossip_server = FakeGossipServer::new();
+
+            fake_gossip_server.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    block_index_height: 1_000_000,
+                    block_index_hash: BlockHash::repeat_byte(0xEE),
+                    ..NodeInfo::default()
+                })
+            });
+            let index_requests = Arc::new(Mutex::new(vec![]));
+            let index_requests_in_server = index_requests.clone();
+            fake_gossip_server.set_on_block_index_request(move |query| {
+                let mut requests = index_requests_in_server.lock().unwrap();
+                let page = u8::try_from(requests.len()).expect("few pages");
+                requests.push(query.clone());
+                GossipResponse::Accepted(
+                    (0..query.limit)
+                        .map(|entry| {
+                            let mut hash = BlockHash::repeat_byte(0xF0 ^ page);
+                            hash.0[..8].copy_from_slice(&(entry as u64).to_be_bytes());
+                            index_item(hash)
+                        })
+                        .collect(),
+                )
+            });
+            fake_gossip_server.set_on_pull_data_request(|_| GossipResponse::Accepted(None));
+
+            let result = sync_from_fake_peer(fake_gossip_server, &sync_state, start_from).await;
+
+            assert!(
+                matches!(result, Err(ChainSyncError::Network(_))),
+                "expected a network error, got {result:?}"
+            );
+            let index_requests = index_requests.lock().unwrap();
+            assert_eq!(
+                index_requests.len(),
+                1,
+                "no index request may follow a batch in which each pull failed"
+            );
+            let batch_size = index_requests[0].limit;
+            assert_eq!(sync_state.sync_target_height(), start_from + batch_size);
+        }
+
+        /// One pull of the batch fails at once, one fails after its retries
+        /// and one succeeds only after retries. The sync asks for the next
+        /// batch and completes.
+        #[tokio::test]
+        async fn batch_with_one_slow_successful_pull_continues_the_sync() {
+            let start_from = 10;
+            let sync_state = ChainSyncState::new(true, false);
+            let fake_gossip_server = FakeGossipServer::new();
+
+            let rejected_block = BlockHash::repeat_byte(1);
+            let missing_block = BlockHash::repeat_byte(2);
+            let slow_block = BlockHash::repeat_byte(3);
+            let slow_block_height = 13;
+
+            // The peer index ends at the slow block. The first page has
+            // heights 11..=13. The next page starts at 13 and holds only the
+            // slow block. No page starts above 13.
+            fake_gossip_server.set_on_info_request(move || {
+                GossipResponse::Accepted(NodeInfo {
+                    block_index_height: slow_block_height,
+                    block_index_hash: slow_block,
+                    ..NodeInfo::default()
+                })
+            });
+            let index_requests = Arc::new(Mutex::new(vec![]));
+            let index_requests_in_server = index_requests.clone();
+            fake_gossip_server.set_on_block_index_request(move |query| {
+                index_requests_in_server.lock().unwrap().push(query.clone());
+                if query.height == 11 {
+                    GossipResponse::Accepted(vec![
+                        index_item(rejected_block),
+                        index_item(missing_block),
+                        index_item(slow_block),
+                    ])
+                } else {
+                    GossipResponse::Accepted(vec![index_item(slow_block)])
+                }
+            });
+
+            let slow_block_requests = Arc::new(Mutex::new(0_usize));
+            let sync_state_in_server = sync_state.clone();
+            fake_gossip_server.set_on_pull_data_request(move |request| match request {
+                GossipDataRequestV2::BlockHeader(hash) if hash == rejected_block => {
+                    GossipResponse::Rejected(crate::types::RejectionReason::InvalidData)
+                }
+                GossipDataRequestV2::BlockHeader(hash) if hash == slow_block => {
+                    let mut requests = slow_block_requests.lock().unwrap();
+                    *requests += 1;
+                    if *requests <= 2 {
+                        return GossipResponse::Accepted(None);
+                    }
+                    sync_state_in_server.mark_processed(slow_block_height as usize);
+                    GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
+                        irys_testing_utils::new_mock_signed_header(),
+                    ))))
+                }
+                _ => GossipResponse::Accepted(None),
+            });
+
+            sync_from_fake_peer(fake_gossip_server, &sync_state, start_from)
+                .await
+                .expect("to finish catching up");
+
+            let index_requests = index_requests.lock().unwrap();
+            assert_eq!(
+                index_requests
+                    .iter()
+                    .map(|query| query.height)
+                    .collect::<Vec<_>>(),
+                vec![11, 13]
+            );
+            assert!(!sync_state.is_syncing());
         }
     }
 
