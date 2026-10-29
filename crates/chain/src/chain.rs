@@ -2063,6 +2063,7 @@ impl IrysNode {
             receivers.validation_service,
             runtime_handle.clone(),
             sync_state.clone(),
+            Arc::clone(&reward_curve),
         );
 
         // spawn block discovery

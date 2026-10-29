@@ -1,4 +1,4 @@
-use crate::block_reward::{full_block_reward, reward_curve_from_config, split_block_reward};
+use crate::block_reward::{full_block_reward, split_block_reward};
 use crate::block_tree_service::BlockTreeServiceMessage;
 use crate::data_tx_validation::{DataTxStructuralDefect, data_tx_structural_defect};
 use crate::{
@@ -4983,6 +4983,7 @@ pub async fn shadow_transactions_are_valid(
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
+    reward_curve: &HalvingCurve,
 ) -> Result<(), ValidationError> {
     // Helper: payload-structure rejections are always consensus.
     fn reject(msg: impl Into<String>) -> ValidationError {
@@ -5138,6 +5139,7 @@ pub async fn shadow_transactions_are_valid(
         parent_commitment_snapshot,
         block_index,
         transactions,
+        reward_curve,
     )
     .await?;
 
@@ -5399,6 +5401,7 @@ async fn generate_expected_shadow_transactions(
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
+    reward_curve: &HalvingCurve,
 ) -> Result<Vec<ShadowMetadata>, ValidationError> {
     // Helpers: classify common failure shapes.
     let parent_hash = block.previous_block_hash;
@@ -5661,7 +5664,7 @@ async fn generate_expected_shadow_transactions(
     // having checked that field. A curve failure is local arithmetic, the
     // same class as in prevalidation.
     let block_reward = full_block_reward(
-        &reward_curve_from_config(&config.consensus),
+        reward_curve,
         config.consensus.difficulty_adjustment.block_time,
         prev_block.height,
     )
