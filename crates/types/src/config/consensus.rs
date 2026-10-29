@@ -1192,6 +1192,19 @@ mod tests {
     }
 
     #[test]
+    fn setting_delta_changes_consensus_hash() {
+        let without_delta = ConsensusConfig::testing();
+        let mut with_delta = ConsensusConfig::testing();
+        with_delta.hardforks.delta = Some(Delta {
+            activation_timestamp: UnixTimestamp::from_secs(1500),
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        });
+        assert_eq!(without_delta.hardforks.delta, None);
+        assert_ne!(without_delta.keccak256_hash(), with_delta.keccak256_hash());
+    }
+
+    #[test]
     fn test_consensus_hash_independent_instances() {
         let config_a = ConsensusConfig::testing();
         let config_b = ConsensusConfig::testing();

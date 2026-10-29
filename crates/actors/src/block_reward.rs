@@ -183,6 +183,16 @@ mod tests {
         }
     }
 
+    /// `Config::validate` rejects a percent above 1.0 at startup. If one gets
+    /// past it, the split must return an error, not panic or mint.
+    #[test]
+    fn percent_above_full_reward_returns_error() {
+        let config = config_with_delta_percent(100, Decimal::new(15, 1));
+        assert!(
+            split_block_reward(amount(101), &config, UnixTimestamp::from_secs(100), true).is_err()
+        );
+    }
+
     #[rstest::rstest]
     #[case::before_activation_second(99_999, false)]
     #[case::first_activation_ms(100_000, true)]
