@@ -1,8 +1,10 @@
 use crate::models::PeerEvent;
 use alloy_core::primitives::B256;
 use irys_database::reth_db::Database as _;
+use irys_database::reth_db::DatabaseError;
+use irys_database::reth_db::cursor::DbCursorRO as _;
+use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::tables::PeerListItems;
-use irys_database::walk_all;
 use irys_types::{
     Config, DatabaseProvider, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError,
     PeerNetworkSender,
@@ -106,8 +108,25 @@ impl PeerList {
         peer_events: broadcast::Sender<PeerEvent>,
     ) -> Result<Self, PeerNetworkError> {
         let read_tx = db.tx().map_err(PeerNetworkError::from)?;
-        let compact_peers =
-            walk_all::<PeerListItems, _>(&read_tx).map_err(PeerNetworkError::from)?;
+        let mut read_cursor = read_tx
+            .cursor_read::<PeerListItems>()
+            .map_err(PeerNetworkError::from)?;
+        let walker = read_cursor.walk(None).map_err(PeerNetworkError::from)?;
+
+        // The peer table is a local cache that is rediscovered from the network,
+        // so one malformed row must not stop startup.
+        let mut compact_peers = Vec::new();
+        for row in walker {
+            match row {
+                Ok((peer_id, compact_item)) => compact_peers.push((peer_id, compact_item)),
+                Err(DatabaseError::Decode) => {
+                    warn!(
+                        "Skipping a peer list row that does not decode; the peer can be rediscovered"
+                    );
+                }
+                Err(err) => return Err(PeerNetworkError::from(err)),
+            }
+        }
 
         let peers: Vec<PeerListItem> = compact_peers
             .into_iter()
@@ -1672,6 +1691,63 @@ mod tests {
             config,
         };
         PeerList(Arc::new(RwLock::new(peer_list_data)))
+    }
+
+    /// A row that does not decode is a corrupted cache entry, not a startup
+    /// blocker: the peer is rediscovered from the network.
+    #[test]
+    fn new_skips_a_peer_row_that_does_not_decode() {
+        use irys_database::tables::IrysTables;
+        use irys_database::{IrysDatabaseArgs as _, insert_peer_list_item, open_or_create_db};
+        use irys_testing_utils::utils::TempDirBuilder;
+        use reth_db::mdbx::DatabaseArguments;
+        use reth_db::table::Table;
+        use reth_db::transaction::DbTxMut as _;
+
+        /// Same table as `PeerListItems`, but with a raw `Vec<u8>` value so a
+        /// malformed row can be written directly.
+        #[derive(Debug)]
+        struct RawPeerRow {
+            _private: std::marker::PhantomData<()>,
+        }
+
+        impl Table for RawPeerRow {
+            const NAME: &'static str = "PeerListItems";
+            const DUPSORT: bool = false;
+            type Key = IrysPeerId;
+            type Value = Vec<u8>;
+        }
+
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("peer_list_malformed_row")
+            .build();
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_db(
+                tmp_dir.path().join("db"),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap(),
+        ));
+
+        let (_, peer_id, peer) = create_test_peer(1);
+        let bad_peer_id = IrysPeerId::from([0xEE; 20]);
+
+        let write_tx = db.tx_mut().unwrap();
+        insert_peer_list_item(&write_tx, &peer_id, &peer).unwrap();
+        write_tx
+            .put::<RawPeerRow>(bad_peer_id, vec![0_u8, 1_u8])
+            .unwrap();
+        write_tx.commit().unwrap();
+
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let peer_events = broadcast::channel::<PeerEvent>(100).0;
+        let peer_list = PeerList::new(&config, &db, create_mock_sender(), peer_events)
+            .expect("startup must not fail on a malformed peer row");
+
+        assert_eq!(peer_list.peer_count(), 1);
+        assert!(peer_list.get_peer(&peer_id).is_some());
+        assert!(peer_list.get_peer(&bad_peer_id).is_none());
     }
 
     /// Reputation alone stranded this peer: excluded from selection for being
