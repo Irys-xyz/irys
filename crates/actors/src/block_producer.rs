@@ -469,6 +469,48 @@ pub struct BlockProducerService {
     /// new height, so a second block produced at an already-seen height (a
     /// rejected block's same-height replacement) does not consume the budget.
     highest_test_block_height_produced: Option<u64>,
+    /// Consecutive dropped attempts per drop reason since the last produced block.
+    drop_streaks: DropStreaks,
+}
+
+/// This many dropped attempts with the same reason, and no block produced
+/// between them, stop the producer service. A local fault that is not proven
+/// by one error then still stops the node instead of a silent halt.
+pub const DROP_STREAK_STOP_AT: u32 = 8;
+
+/// Consecutive dropped attempts per drop reason. A produced block clears all.
+#[derive(Debug, Default)]
+struct DropStreaks(std::collections::HashMap<&'static str, u32>);
+
+impl DropStreaks {
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Gives the error back when the service continues. `Err` stops the
+    /// service: an irrecoverable error, or the drop that brings its reason's
+    /// streak to [`DROP_STREAK_STOP_AT`].
+    fn continue_after(&mut self, err: BlockProductionError) -> eyre::Result<BlockProductionError> {
+        if matches!(err, BlockProductionError::Irrecoverable { .. }) {
+            return Err(err.into());
+        }
+        let reason = err.reason();
+        let streak = self.0.entry(reason).or_default();
+        *streak = streak.saturating_add(1);
+        if *streak >= DROP_STREAK_STOP_AT {
+            error!(
+                error.reason = reason,
+                streak = *streak,
+                error.source = %format_args!("{:#}", err.source_report()),
+                "Stopping block producer: block production keeps failing for the same reason"
+            );
+            let streak = *streak;
+            return Err(eyre::Report::new(err).wrap_err(format!(
+                "block production dropped {streak} consecutive attempts ({reason})"
+            )));
+        }
+        Ok(err)
+    }
 }
 
 #[derive(Debug)]
@@ -601,6 +643,7 @@ impl BlockProducerService {
                     inner,
                     blocks_remaining_for_test,
                     highest_test_block_height_produced: None,
+                    drop_streaks: DropStreaks::default(),
                 };
                 service
                     .start()
@@ -701,13 +744,12 @@ impl BlockProducerService {
                 };
 
                 // One failed attempt ends this solution, not the service.
-                // Only a proven local inconsistency stops the service (and so the node).
+                // A proven local inconsistency stops the service (and so the
+                // node), and so does a run of drops for one reason.
                 let result = match result {
                     Ok(result) => result,
-                    Err(err @ BlockProductionError::Irrecoverable { .. }) => {
-                        return Err(err.into());
-                    }
                     Err(err) => {
+                        let err = self.drop_streaks.continue_after(err)?;
                         error!(
                             solution.hash = %solution_hash,
                             solution.vdf_step = solution_vdf_step,
@@ -722,6 +764,7 @@ impl BlockProducerService {
                 };
 
                 if let Some((block, eth_built_payload)) = result {
+                    self.drop_streaks.clear();
                     // Final guard: ensure tests haven't exhausted quota
                     if matches!(self.blocks_remaining_for_test, Some(0)) {
                         info!("Test guard exhausted; dropping candidate block before publication");
@@ -2916,6 +2959,67 @@ mod error_classification_tests {
             ),
             "{err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod drop_streak_tests {
+    use super::{BlockProductionError, DROP_STREAK_STOP_AT, DropStreaks};
+
+    fn dropped(reason: &'static str) -> BlockProductionError {
+        BlockProductionError::Recoverable {
+            reason,
+            source: eyre::eyre!("attempt failed"),
+        }
+    }
+
+    // `handle_command` returns the `Err` of `continue_after` with `?`, which
+    // ends the service loop and so the node.
+    #[test]
+    fn irrecoverable_error_stops_the_service() {
+        let mut streaks = DropStreaks::default();
+        let err = BlockProductionError::Irrecoverable {
+            source: eyre::eyre!("local state is inconsistent"),
+        };
+        assert!(streaks.continue_after(err).is_err());
+    }
+
+    #[test]
+    fn drop_streak_at_the_threshold_stops_the_service() {
+        let mut streaks = DropStreaks::default();
+        for _ in 1..DROP_STREAK_STOP_AT {
+            streaks
+                .continue_after(dropped("tx_selection"))
+                .expect("below the threshold the service continues");
+        }
+        let stop = streaks
+            .continue_after(dropped("tx_selection"))
+            .expect_err("the drop that reaches the threshold stops the service");
+        assert!(format!("{stop:#}").contains("tx_selection"), "{stop:#}");
+    }
+
+    #[test]
+    fn streaks_count_each_reason_on_its_own() {
+        let mut streaks = DropStreaks::default();
+        for _ in 1..DROP_STREAK_STOP_AT {
+            streaks.continue_after(dropped("a")).expect("continues");
+            streaks.continue_after(dropped("b")).expect("continues");
+        }
+        assert!(streaks.continue_after(dropped("a")).is_err());
+    }
+
+    #[test]
+    fn produced_block_resets_the_streak() {
+        let mut streaks = DropStreaks::default();
+        for _ in 1..DROP_STREAK_STOP_AT {
+            streaks.continue_after(dropped("a")).expect("continues");
+        }
+        streaks.clear();
+        for _ in 1..DROP_STREAK_STOP_AT {
+            streaks
+                .continue_after(dropped("a"))
+                .expect("a produced block starts a new streak");
+        }
     }
 }
 
