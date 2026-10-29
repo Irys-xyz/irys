@@ -1347,12 +1347,14 @@ async fn block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Peer mines a block on top of common state with genesis
-/// But peer does not broadcast execution payload (effectively, block is stuck in validation on the genesis)
+/// Peer mines a block on top of common state with genesis, with gossip disabled.
+/// The test sends the block directly to the genesis validation service, so the block
+/// never enters the genesis block tree.
 ///
-/// Expectation: genesis mines ahead, and the block validation task for the block that's stuck gets cancelled
+/// Expectation: the VDF task finds the block missing from the block tree, and its
+/// validation is cancelled with `BlockMissing`
 #[test_log::test(tokio::test)]
-async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
+async fn heavy_block_validation_cancels_a_block_missing_from_the_tree() -> eyre::Result<()> {
     let num_blocks_in_epoch = 2;
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -1388,17 +1390,20 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
     send_block_to_block_validation(&genesis_node.node_ctx, sealed_block)?;
 
     genesis_node.mine_blocks_without_gossip(3).await?;
-    genesis_node.gossip_enable();
-    peer_node.gossip_enable();
-    peer_node.gossip_block_to_peers(&header)?;
 
-    // Send block for validation
     let outcome = outcome.await;
 
     assert_validation_error(
         outcome,
-        |e| matches!(e, ValidationError::ValidationCancelled { .. }),
-        "block with versioned_hashes should be rejected",
+        |e| {
+            matches!(
+                e,
+                ValidationError::ValidationCancelled {
+                    reason: irys_actors::block_validation::ValidationCancelReason::BlockMissing
+                }
+            )
+        },
+        "block missing from the tree should be cancelled with BlockMissing",
     );
     genesis_node.stop().await;
     peer_node.stop().await;

@@ -23,7 +23,6 @@ use reth_provider::{
 use reth_rpc_eth_api::EthApiServer as _;
 use reth_rpc_eth_api::helpers::EthTransactions;
 use reth_storage_api::StateProvider as _;
-use tracing::warn;
 
 /// Production handle to a launched Reth node.
 ///
@@ -73,35 +72,30 @@ impl IrysRethNodeAdapter {
         Ok(self.eth_api().balance(address.into(), block_id).await?)
     }
 
-    /// Returns Irys `U256`, or zero if the RPC call fails.
+    /// Returns Irys `U256`. An RPC failure is an error, not a zero balance.
     pub async fn get_balance_irys(
         &self,
         address: IrysAddress,
         block_id: Option<BlockId>,
-    ) -> irys_types::U256 {
-        self.eth_api()
+    ) -> eyre::Result<irys_types::U256> {
+        let balance = self
+            .eth_api()
             .balance(address.into(), block_id)
             .await
-            .map(std::convert::Into::into)
-            .inspect_err(|e| {
-                warn!(
-                    "Error getting balance for {}@{:?} - {:?}",
-                    &address, &block_id, &e
-                )
-            })
-            .unwrap_or(irys_types::U256::zero())
+            .map_err(|e| eyre::eyre!("Error getting balance for {address}@{block_id:?}: {e}"))?;
+        Ok(balance.into())
     }
 
     pub async fn get_balances_irys(
         &self,
         addresses: &[IrysAddress],
         block_id: Option<BlockId>,
-    ) -> HashMap<IrysAddress, irys_types::U256> {
+    ) -> eyre::Result<HashMap<IrysAddress, irys_types::U256>> {
         let mut results = HashMap::new();
         for address in addresses {
-            results.insert(*address, self.get_balance_irys(*address, block_id).await);
+            results.insert(*address, self.get_balance_irys(*address, block_id).await?);
         }
-        results
+        Ok(results)
     }
 
     /// Balance from pending & canonical state. `block_id` of `None` / `Latest`

@@ -46,7 +46,10 @@ impl BlockProdStrategy for TrackingStrategy {
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<irys_types::SealedBlock>, reth::payload::EthBuiltPayload)>> {
+    ) -> Result<
+        Option<(Arc<irys_types::SealedBlock>, reth::payload::EthBuiltPayload)>,
+        irys_actors::BlockProductionError,
+    > {
         // Signal that we're starting and wait for resume
         if let Some(pause_tx) = self.pause_signal.lock().await.take() {
             let _ = pause_tx.send(());

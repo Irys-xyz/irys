@@ -412,15 +412,21 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
             .expect("parent epoch snapshot")
             .resolve_reward_address(solution.mining_address);
 
-        let Some((poa, _)) = self.create_poa_data(solution, None).await? else {
+        let Some((poa, _)) = self
+            .create_poa_data(solution, None)
+            .await
+            .map_err(BlockProductionError::recoverable("poa_data"))?
+        else {
             return Ok(None);
         };
         let block_reward = split_block_reward(
-            self.block_reward(&prev_block_header)?,
+            self.block_reward(&prev_block_header)
+                .map_err(BlockProductionError::irrecoverable)?,
             &self.inner().config.consensus,
             timestamp.to_secs(),
             !poa.is_data_poa(),
-        )?;
+        )
+        .map_err(BlockProductionError::irrecoverable)?;
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
                 &prev_block_header,

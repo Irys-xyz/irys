@@ -150,7 +150,7 @@ async fn heavy_delta_capacity_reward_share_goes_to_treasury() -> eyre::Result<()
     for _ in 0..12 {
         let block = node.mine_block().await?;
         eyre::ensure!(
-            block.get_data_ledger_tx_ids().values().all(Vec::is_empty)
+            block.get_data_ledger_tx_ids()?.values().all(Vec::is_empty)
                 && block.system_ledgers.iter().all(|l| l.tx_ids.is_empty()),
             "height {}: expected a block with no txs",
             block.height
@@ -328,7 +328,10 @@ impl BlockProdStrategy for FullRewardStrategy {
         reward_address: irys_types::IrysAddress,
     ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError> {
         let full = BlockRewardSplit {
-            miner: self.prod.block_reward(prev_block_header)?,
+            miner: self
+                .prod
+                .block_reward(prev_block_header)
+                .map_err(irys_actors::block_producer::BlockProductionError::irrecoverable)?,
             treasury: Amount::new(U256::zero()),
         };
         self.prod
@@ -355,8 +358,14 @@ impl BlockProdStrategy for FullRewardStrategy {
         prev_block_ema_snapshot: &EmaSnapshot,
         treasury: U256,
         reward_address: irys_types::IrysAddress,
-    ) -> eyre::Result<Option<(Arc<SealedBlock>, Option<AdjustmentStats>)>> {
-        let full = self.prod.block_reward(prev_block_header)?;
+    ) -> Result<
+        Option<(Arc<SealedBlock>, Option<AdjustmentStats>)>,
+        irys_actors::block_producer::BlockProductionError,
+    > {
+        let full = self
+            .prod
+            .block_reward(prev_block_header)
+            .map_err(irys_actors::block_producer::BlockProductionError::irrecoverable)?;
         self.prod
             .produce_block_without_broadcasting(
                 solution,

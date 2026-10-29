@@ -1,14 +1,14 @@
 use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     block_reward::{BlockRewardSplit, full_block_reward, split_block_reward},
-    block_validation::poa_partition_is_owned_by_miner,
+    block_validation::{PreValidationError, poa_partition_is_owned_by_miner},
     chunk_ingress_service::ChunkIngressState,
     mempool_guard::MempoolReadGuard,
     mempool_service::MempoolTxs,
     metrics,
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
     services::ServiceSenders,
-    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
+    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenError, ShadowTxGenerator},
 };
 use alloy_consensus::{
     EthereumTxEnvelope, SignableTransaction as _, TxEip4844, transaction::SignerRecoverable as _,
@@ -59,7 +59,9 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{Instrument as _, debug, error, error_span, info, warn};
 
-/// Error type for block production that distinguishes between retryable and irrecoverable errors
+/// Error type for block production. The variant decides what the producer
+/// does with the solution; there is no blanket conversion from `eyre::Report`,
+/// so each fallible step states which class its failure belongs to.
 #[derive(Debug, thiserror::Error)]
 pub enum BlockProductionError {
     /// Retryable errors that should trigger a rebuild attempt with a new parent
@@ -68,7 +70,18 @@ pub enum BlockProductionError {
         #[source]
         source: eyre::Error,
     },
-    /// Irrecoverable errors that should abort block production
+    /// This attempt failed. The service logs it, drops the solution and keeps
+    /// serving the next one. Nothing is published before the attempt succeeds,
+    /// so dropping it is always safe.
+    #[error("block production attempt dropped ({reason})")]
+    Recoverable {
+        /// Low-cardinality label for logs and the dropped-blocks metric.
+        reason: &'static str,
+        #[source]
+        source: eyre::Error,
+    },
+    /// Local state is proven inconsistent, so continuing would be unsafe.
+    /// Stops the producer service, which stops the node.
     #[error("irrecoverable error during block production")]
     Irrecoverable {
         #[source]
@@ -76,9 +89,63 @@ pub enum BlockProductionError {
     },
 }
 
+impl BlockProductionError {
+    /// `map_err` adapter that classifies an error as [`Self::Recoverable`].
+    pub fn recoverable<E: Into<eyre::Report>>(reason: &'static str) -> impl FnOnce(E) -> Self {
+        move |source| Self::Recoverable {
+            reason,
+            source: source.into(),
+        }
+    }
+
+    /// `map_err` adapter for a local failure that every attempt hits again,
+    /// classified as [`Self::Irrecoverable`].
+    pub fn irrecoverable<E: Into<eyre::Report>>(source: E) -> Self {
+        Self::Irrecoverable {
+            source: source.into(),
+        }
+    }
+
+    /// Label for logs and metrics.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Retryable { .. } => "retryable",
+            Self::Recoverable { reason, .. } => reason,
+            Self::Irrecoverable { .. } => "irrecoverable",
+        }
+    }
+
+    pub fn source_report(&self) -> &eyre::Report {
+        match self {
+            Self::Retryable { source }
+            | Self::Recoverable { source, .. }
+            | Self::Irrecoverable { source } => source,
+        }
+    }
+}
+
 /// Cold header reads finish in a few milliseconds. This bound only stops a
 /// stuck read from holding block production after the overlap window.
 const TX_PATH_DERIVE_WAIT: Duration = Duration::from_secs(2);
+
+/// The payload builder drops a shadow tx that fails to execute, and validators
+/// reject a block without it. The cause is deterministic, so a retry cannot
+/// help: drop this attempt instead of publishing a block no node accepts.
+fn ensure_payload_starts_with_shadow_txs(
+    built_tx_hashes: &[B256],
+    expected_shadow_tx_hashes: &[B256],
+) -> Result<(), BlockProductionError> {
+    if built_tx_hashes.starts_with(expected_shadow_tx_hashes) {
+        return Ok(());
+    }
+    Err(BlockProductionError::Recoverable {
+        reason: "payload_missing_shadow_tx",
+        source: eyre!(
+            "built payload does not start with the {} expected shadow txs",
+            expected_shadow_tx_hashes.len()
+        ),
+    })
+}
 
 /// Build PoA fields from a solution. `Ok(None)` means the tx path is not safe
 /// to publish.
@@ -120,13 +187,7 @@ fn assemble_poa(
     Ok(Some((poa, poa_chunk_hash)))
 }
 
-impl From<eyre::Report> for BlockProductionError {
-    fn from(source: eyre::Report) -> Self {
-        Self::Irrecoverable { source }
-    }
-}
-
-/// Classifies PayloadBuilderError into retryable or irrecoverable categories
+/// Classifies PayloadBuilderError into retryable or recoverable categories
 fn classify_payload_error(err: PayloadBuilderError) -> BlockProductionError {
     match err {
         // Retryable errors - parent block/header not yet available
@@ -135,8 +196,229 @@ fn classify_payload_error(err: PayloadBuilderError) -> BlockProductionError {
             BlockProductionError::Retryable { source: e.into() }
         }
 
-        // All other errors are irrecoverable
-        e => BlockProductionError::Irrecoverable { source: e.into() },
+        // The payload is only ours until it is published: drop it.
+        e => BlockProductionError::recoverable("payload_builder")(e),
+    }
+}
+
+/// Our own payload must come back `Valid` from the engine. Any other status
+/// (Syncing/Accepted while the EL catches up or reorgs, Invalid) drops this
+/// attempt: the payload is not published, so nothing is left to undo.
+fn check_new_payload_status(status: &PayloadStatusEnum) -> Result<(), BlockProductionError> {
+    if *status == PayloadStatusEnum::Valid {
+        return Ok(());
+    }
+    Err(BlockProductionError::Recoverable {
+        reason: "payload_not_valid",
+        source: eyre!("engine returned {status:?} for our own payload"),
+    })
+}
+
+/// Shadow-tx generation errors on the producer side. Snapshot invariant
+/// violations prove the local snapshots disagree with canonical state (the
+/// validator treats the same errors as node faults), so they stay fatal. The
+/// rest are fee-calculation faults in this one block: drop it.
+fn classify_shadow_tx_error(err: ShadowTxGenError) -> BlockProductionError {
+    match err {
+        e @ (ShadowTxGenError::SnapshotInvariant(_)
+        | ShadowTxGenError::SnapshotTreasuryUnderflow(_)) => {
+            BlockProductionError::Irrecoverable { source: e.into() }
+        }
+        e @ (ShadowTxGenError::TreasuryArithmetic(_) | ShadowTxGenError::Structural(_)) => {
+            BlockProductionError::recoverable("shadow_tx_generation")(e)
+        }
+    }
+}
+
+/// Why our own block failed block discovery. It decides what the producer
+/// does with the attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnBlockRejectionCause {
+    /// Proven local fault: stop the node.
+    LocalFault,
+    /// A tx the producer selected, which a peer can supply: drop the attempt.
+    SelectedTx,
+    /// Local state that can change between attempts (stored chunk data,
+    /// partition assignments, the VDF state, the clock, the block tree): drop
+    /// the attempt.
+    ChangingLocalState,
+}
+
+/// Block-discovery errors for our own block. A node fault stops the node, as
+/// it does for a peer's block, and so does a failed check that our own block
+/// passes by construction (see [`own_block_rejection_cause`]). A discovery
+/// `InternalError` (local DB or channel failure) is always a node fault. Any
+/// other error rejects only this block: drop it.
+fn classify_own_block_discovery_error(
+    err: BlockDiscoveryError,
+    block_header: &IrysBlockHeader,
+) -> BlockProductionError {
+    // SAFETY: no `_` wildcard. A new variant must be classified here.
+    let cause = match &err {
+        BlockDiscoveryError::BlockValidationError(pre_err) => own_block_rejection_cause(pre_err),
+        BlockDiscoveryError::InternalError(_) => OwnBlockRejectionCause::LocalFault,
+        // The producer sets these from the parent and builds the header and
+        // the body from the same tx lists.
+        BlockDiscoveryError::MissingTransactions(_)
+        | BlockDiscoveryError::InvalidEpochBlock(_)
+        | BlockDiscoveryError::InvalidDataLedgersLength(_, _)
+        | BlockDiscoveryError::InvalidBlockHeight { .. }
+        | BlockDiscoveryError::InvalidSignature(_)
+        | BlockDiscoveryError::TransactionIdMismatch { .. } => OwnBlockRejectionCause::LocalFault,
+        // The mempool view can lag the chain, and a peer supplies the tx.
+        BlockDiscoveryError::DuplicateTransaction(_)
+        | BlockDiscoveryError::InvalidCommitmentTransaction(_)
+        | BlockDiscoveryError::InvalidAnchor { .. } => OwnBlockRejectionCause::SelectedTx,
+        // The block tree can prune the parent.
+        BlockDiscoveryError::PreviousBlockNotFound { .. } => {
+            OwnBlockRejectionCause::ChangingLocalState
+        }
+    };
+    let source = eyre!(
+        "Newly produced block {} ({}) failed block discovery: {:?}",
+        &block_header.block_hash,
+        &block_header.height,
+        err
+    );
+    let reason = match cause {
+        OwnBlockRejectionCause::LocalFault => {
+            return BlockProductionError::Irrecoverable { source };
+        }
+        OwnBlockRejectionCause::SelectedTx => "own_block_rejected_by_tx",
+        OwnBlockRejectionCause::ChangingLocalState => "own_block_rejected",
+    };
+    BlockProductionError::Recoverable { reason, source }
+}
+
+/// Why a pre-validation failure of our own block happened.
+/// `PreValidationError::classify` decides node faults as it does for a peer's
+/// block. A mismatch on a field the producer derives from the same inputs
+/// that pre-validation reads is also a local fault: every attempt fails again.
+fn own_block_rejection_cause(err: &PreValidationError) -> OwnBlockRejectionCause {
+    // SAFETY: no `_` wildcard. A new variant must be classified here.
+    match err {
+        // Derived from the parent header, the parent snapshots, config, the
+        // solution or our own key, and checked against the same inputs. The
+        // tx checks compare the header with the body, which the producer
+        // builds from the same tx lists.
+        PreValidationError::BlockSignatureInvalid
+        | PreValidationError::CumulativeDifficultyMismatch { .. }
+        | PreValidationError::DifficultyMismatch { .. }
+        | PreValidationError::EmaMismatch
+        | PreValidationError::HeightInvalid { .. }
+        | PreValidationError::InvalidDataLedgersLength { .. }
+        | PreValidationError::InvalidLedgerId { .. }
+        | PreValidationError::InvalidTransactionSignature(_)
+        | PreValidationError::LastDiffTimestampMismatch { .. }
+        | PreValidationError::LastEpochHashMismatch { .. }
+        | PreValidationError::MissingTransactions(_)
+        | PreValidationError::OraclePriceInvalid
+        | PreValidationError::PoAChunkMissing
+        | PreValidationError::PoALedgerMismatch { .. }
+        | PreValidationError::PoAPartitionNotOwned { .. }
+        | PreValidationError::PreviousCumulativeDifficultyMismatch { .. }
+        | PreValidationError::PreviousSolutionHashMismatch { .. }
+        | PreValidationError::RewardAddressMismatch { .. }
+        | PreValidationError::RewardMismatch { .. }
+        | PreValidationError::SolutionHashBelowDifficulty { .. }
+        | PreValidationError::TermLedgerExpiryMismatch { .. }
+        | PreValidationError::TimestampOlderThanParent { .. }
+        | PreValidationError::TotalChunksMismatch { .. }
+        | PreValidationError::TransactionIdMismatch { .. }
+        | PreValidationError::TxRootMismatch { .. }
+        | PreValidationError::VDFPreviousOutputMismatch { .. } => {
+            OwnBlockRejectionCause::LocalFault
+        }
+
+        // A selected tx's content, fees, ingress proofs or history. The
+        // mempool view can lag the chain, and a peer supplies the tx.
+        PreValidationError::AssignedProofCountMismatch { .. }
+        | PreValidationError::CascadeNotConfigured { .. }
+        | PreValidationError::CommitmentChainIdMismatch { .. }
+        | PreValidationError::CommitmentVersionInvalid { .. }
+        | PreValidationError::DataSizeExceedsMax { .. }
+        | PreValidationError::DataTxChainIdMismatch { .. }
+        | PreValidationError::DuplicateIngressProofSigner { .. }
+        | PreValidationError::IngressProofCountMismatch { .. }
+        | PreValidationError::IngressProofMismatch { .. }
+        | PreValidationError::IngressProofSignatureInvalid(_)
+        | PreValidationError::IngressProofsMissing
+        | PreValidationError::InsufficientPermFee { .. }
+        | PreValidationError::InsufficientTermFee { .. }
+        | PreValidationError::InvalidIngressProof { .. }
+        | PreValidationError::InvalidLedgerIdForTx { .. }
+        | PreValidationError::InvalidPermFeeStructure { .. }
+        | PreValidationError::InvalidPromotionDataSizeMismatch { .. }
+        | PreValidationError::InvalidPromotionPath { .. }
+        | PreValidationError::InvalidTermFeeStructure { .. }
+        | PreValidationError::PrefixSizeExceedsDataSize { .. }
+        | PreValidationError::PublishLedgerProofCountMismatch { .. }
+        | PreValidationError::PublishTxAlreadyIncluded { .. }
+        | PreValidationError::PublishTxMissingPriorSubmit { .. }
+        | PreValidationError::PublishTxProofLengthMismatch
+        | PreValidationError::SubmitTxAlreadyIncluded { .. }
+        | PreValidationError::SubmitTxHasPromotedHeight { .. }
+        | PreValidationError::TermLedgerTxHasPermFee { .. }
+        | PreValidationError::TooManyCommitmentTxs { .. }
+        | PreValidationError::TooManyDataTxs { .. }
+        | PreValidationError::TooManyPublishTxs { .. }
+        | PreValidationError::TxFoundInMultipleBlocks { .. }
+        | PreValidationError::TxInMultipleLedgers { .. }
+        | PreValidationError::UnstakedIngressProofSigner { .. }
+        | PreValidationError::ZeroSizeDataTx { .. } => OwnBlockRejectionCause::SelectedTx,
+
+        // Local state that can change between attempts: stored chunk data
+        // and partition assignments (an epoch change or a reorg), the VDF
+        // state, the clock, or header checks with no matching recomputation
+        // in the producer.
+        PreValidationError::DataLedgerExtractionFailed(_)
+        | PreValidationError::InvalidEpochSnapshot { .. }
+        | PreValidationError::LedgerIdInvalid { .. }
+        | PreValidationError::MerkleProofInvalid(_)
+        | PreValidationError::PartitionAssignmentMissing { .. }
+        | PreValidationError::PartitionAssignmentSlotIndexMissing { .. }
+        | PreValidationError::PartitionAssignmentSlotIndexTooLarge { .. }
+        | PreValidationError::PoACapacityChunkMismatch { .. }
+        | PreValidationError::PoAChunkHashMismatch { .. }
+        | PreValidationError::PoAChunkOffsetOutOfBlockBounds
+        | PreValidationError::PoAChunkOffsetOutOfDataChunksBounds
+        | PreValidationError::PoAChunkOffsetOutOfTxBounds
+        | PreValidationError::PoAChunkPaddingNotZero { .. }
+        | PreValidationError::PoAChunkTooLong { .. }
+        | PreValidationError::PoAChunkTooShort { .. }
+        | PreValidationError::PoADataPartitionExpired { .. }
+        | PreValidationError::PoALedgerInactive { .. }
+        | PreValidationError::PoAOffCanonicalAncestor { .. }
+        | PreValidationError::PoaTxRootLeafMismatch { .. }
+        | PreValidationError::SolutionHashLinkInvalid { .. }
+        | PreValidationError::TimestampTooFarInFuture { .. }
+        | PreValidationError::UnexpectedCommitmentTransactions
+        | PreValidationError::VDFCheckpointsInvalid(_) => {
+            OwnBlockRejectionCause::ChangingLocalState
+        }
+
+        // Node faults and prune races: decided as for a peer's block.
+        PreValidationError::AddBlockFailed { .. }
+        | PreValidationError::BlockBoundsLookupError(_)
+        | PreValidationError::BlockEmaSnapshotNotFound { .. }
+        | PreValidationError::CachePoisoned { .. }
+        | PreValidationError::DatabaseError { .. }
+        | PreValidationError::EmaSnapshotError(_)
+        | PreValidationError::FeeCalculationFailed(_)
+        | PreValidationError::InternalTaskJoin(_)
+        | PreValidationError::ParentEpochSnapshotNotFound { .. }
+        | PreValidationError::ParentNotInCache { .. }
+        | PreValidationError::PreviousTxInclusionsFailed(_)
+        | PreValidationError::RewardCurveError(_)
+        | PreValidationError::SystemTimeError(_)
+        | PreValidationError::UpdateCacheForScheduledValidationError(_)
+        | PreValidationError::ValidationServiceUnreachable => {
+            if err.is_node_fault() {
+                OwnBlockRejectionCause::LocalFault
+            } else {
+                OwnBlockRejectionCause::ChangingLocalState
+            }
+        }
     }
 }
 
@@ -435,6 +717,7 @@ impl BlockProducerService {
                     inner: self.inner.clone(),
                 };
 
+                let solution_vdf_step = solution.vdf_step;
                 // Race production against shutdown so we don't block graceful shutdown.
                 let result = tokio::select! {
                     biased;
@@ -443,7 +726,28 @@ impl BlockProducerService {
                         let _ = response.send(Ok(None));
                         return Ok(true);
                     }
-                    r = production_strategy.fully_produce_new_block(solution) => r?
+                    r = production_strategy.fully_produce_new_block(solution) => r
+                };
+
+                // One failed attempt ends this solution, not the service.
+                // Only a proven local inconsistency stops the service (and so the node).
+                let result = match result {
+                    Ok(result) => result,
+                    Err(err @ BlockProductionError::Irrecoverable { .. }) => {
+                        return Err(err.into());
+                    }
+                    Err(err) => {
+                        error!(
+                            solution.hash = %solution_hash,
+                            solution.vdf_step = solution_vdf_step,
+                            error.reason = err.reason(),
+                            error.source = %format_args!("{:#}", err.source_report()),
+                            "Dropping solution after block production error"
+                        );
+                        metrics::record_block_producer_dropped(err.reason());
+                        let _ = response.send(Err(err.into()));
+                        return Ok(false);
+                    }
                 };
 
                 if let Some((block, eth_built_payload)) = result {
@@ -658,7 +962,7 @@ pub trait BlockProdStrategy {
         // that target yet fall below the canonical parent's `diff`; the same can happen
         // on a rebuild against a higher-difficulty parent. Without this gate the block is
         // built and only rejected at terminal pre-validation (`SolutionHashBelowDifficulty`),
-        // whose failure panics the producer service. Discard early and re-mine,
+        // after the Reth payload work is already spent. Discard early and re-mine,
         // mirroring `solution_hash_is_valid` exactly: valid iff `solution_diff >= diff`.
         let solution_diff = hash_to_number(&solution.solution_hash.0);
         if solution_diff < prev_block_header.diff {
@@ -682,7 +986,11 @@ pub trait BlockProdStrategy {
                     "parent epoch snapshot missing for {}",
                     prev_block_header.block_hash
                 )
-            })?;
+            })
+            // The block tree can prune the parent after it was selected.
+            .map_err(BlockProductionError::recoverable(
+                "parent_state_unavailable",
+            ))?;
 
         // Validators reject a PoA over a partition the parent epoch snapshot does
         // not assign to this miner. A solution can go stale this way when an epoch
@@ -740,15 +1048,23 @@ pub trait BlockProdStrategy {
 
         // A failed or late derive must not build a Reth payload. The call
         // inside `produce_block_without_broadcasting` then reads the finished job.
-        let Some((poa, _)) = self.create_poa_data(solution, ledger_id).await? else {
+        let Some((poa, _)) = self
+            .create_poa_data(solution, ledger_id)
+            .await
+            .map_err(BlockProductionError::recoverable("poa_data"))?
+        else {
             return Ok(None);
         };
+        // Reward-curve arithmetic and the PoA-kind split read only the parent
+        // height, the block timestamp, the PoA kind and config.
         let block_reward = split_block_reward(
-            self.block_reward(&prev_block_header)?,
+            self.block_reward(&prev_block_header)
+                .map_err(BlockProductionError::irrecoverable)?,
             &self.inner().config.consensus,
             current_timestamp.to_secs(),
             !poa.is_data_poa(),
-        )?;
+        )
+        .map_err(BlockProductionError::irrecoverable)?;
 
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
@@ -827,8 +1143,12 @@ pub trait BlockProdStrategy {
 
         loop {
             // Fetch the current best parent block
-            let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
+            let (prev_block_header, prev_block_ema_snapshot) = self
+                .parent_irys_block()
+                .await
+                .map_err(BlockProductionError::recoverable("parent_selection"))?;
             let block_hash = prev_block_header.block_hash;
+            let block_height = prev_block_header.height + 1;
 
             // Attempt to produce the block
             match self
@@ -854,13 +1174,16 @@ pub trait BlockProdStrategy {
                         error!(
                             solution.hash = %solution.solution_hash,
                             solution.vdf_step = solution.vdf_step,
+                            block.parent = %block_hash,
+                            block.height = block_height,
                             error.type = "retryable",
                             error.source = %source,
                             retry.count = retry_count,
                             retry.max_attempts = MAX_RETRY_ATTEMPTS,
                             "Max retry attempts reached for retryable error, aborting"
                         );
-                        return Err(BlockProductionError::Irrecoverable {
+                        return Err(BlockProductionError::Recoverable {
+                            reason: "retries_exhausted",
                             source: source
                                 .wrap_err(format!("max retries ({}) exceeded", MAX_RETRY_ATTEMPTS)),
                         });
@@ -877,12 +1200,18 @@ pub trait BlockProdStrategy {
                     );
                     // Continue loop to retry with fresh parent
                 }
-                Err(e @ BlockProductionError::Irrecoverable { .. }) => {
+                Err(
+                    e @ (BlockProductionError::Recoverable { .. }
+                    | BlockProductionError::Irrecoverable { .. }),
+                ) => {
                     error!(
                         solution.hash = %solution.solution_hash,
                         solution.vdf_step = solution.vdf_step,
-                        error.type = "irrecoverable",
-                        "Irrecoverable error during block production, aborting"
+                        block.parent = %block_hash,
+                        block.height = block_height,
+                        error.type = e.reason(),
+                        error.source = %format_args!("{:#}", e.source_report()),
+                        "Block production failed on parent, aborting"
                     );
                     return Err(e);
                 }
@@ -1040,7 +1369,7 @@ pub trait BlockProdStrategy {
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysSealedBlock>, EthBuiltPayload)>> {
+    ) -> Result<Option<(Arc<IrysSealedBlock>, EthBuiltPayload)>, BlockProductionError> {
         let Some((block, stats, eth_built_payload)) =
             self.fully_produce_new_block_candidate(solution).await?
         else {
@@ -1093,14 +1422,13 @@ pub trait BlockProdStrategy {
             &mempool.unstake_refund_events,
             &mempool.epoch_snapshot,
         )
-        // The producer treats all shadow-tx generation failures as local
-        // bugs; the validator-side typed routing in `block_validation.rs`
-        // does the consensus/node-fault classification.
-        .map_err(eyre::Report::from)?;
+        // See `classify_shadow_tx_error`; the validator-side typed routing in
+        // `block_validation.rs` does the consensus/node-fault classification.
+        .map_err(classify_shadow_tx_error)?;
 
         let mut shadow_txs = Vec::new();
         for tx_result in shadow_tx_generator.by_ref() {
-            let metadata = tx_result.map_err(eyre::Report::from)?;
+            let metadata = tx_result.map_err(classify_shadow_tx_error)?;
             let mut tx_raw = metadata.shadow_tx.compose(
                 self.inner().config.consensus.chain_id,
                 metadata.transaction_fee,
@@ -1187,10 +1515,17 @@ pub trait BlockProdStrategy {
         // send & await the payload
         info!("Sending new payload to Reth");
 
+        let expected_shadow_tx_hashes = attributes
+            .shadow_txs
+            .iter()
+            .map(|tx| *tx.transaction.hash())
+            .collect::<Vec<_>>();
+
         let payload_id = payload_builder
             .send_new_payload(attributes.clone())
             .await
-            .map_err(|e| eyre!("Failed to send payload to builder: {}", e))?
+            .map_err(|e| eyre!("Failed to send payload to builder: {}", e))
+            .map_err(BlockProductionError::recoverable("payload_builder"))?
             .map_err(classify_payload_error)?;
 
         debug!(
@@ -1203,8 +1538,18 @@ pub trait BlockProdStrategy {
             .await
             .ok_or_else(|| {
                 eyre!("Failed to resolve payload future - payload builder returned None")
-            })?
+            })
+            .map_err(BlockProductionError::recoverable("payload_builder"))?
             .map_err(classify_payload_error)?;
+
+        let built_tx_hashes = built_payload
+            .block()
+            .body()
+            .transactions
+            .iter()
+            .map(|tx| *tx.tx_hash())
+            .collect::<Vec<_>>();
+        ensure_payload_starts_with_shadow_txs(&built_tx_hashes, &expected_shadow_tx_hashes)?;
 
         let evm_block_hash = built_payload.block().hash();
         tracing::debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
@@ -1221,15 +1566,10 @@ pub trait BlockProdStrategy {
                 sidecar,
             })
             .await
-            .map_err(|e| BlockProductionError::Irrecoverable {
-                source: eyre::eyre!("beacon engine error: {}", e),
-            })?;
+            .map_err(|e| eyre!("beacon engine error: {}", e))
+            .map_err(BlockProductionError::recoverable("engine_new_payload"))?;
 
-        if new_payload_result.status != PayloadStatusEnum::Valid {
-            return Err(BlockProductionError::Irrecoverable {
-                source: eyre::eyre!("Reth has gone out of sync: {:?}", new_payload_result.status),
-            });
-        }
+        check_new_payload_status(&new_payload_result.status)?;
 
         info!(
             payload.block_hash = %built_payload.block().hash(),
@@ -1252,7 +1592,7 @@ pub trait BlockProdStrategy {
         perv_block_ema_snapshot: &EmaSnapshot,
         final_treasury: U256,
         reward_address: IrysAddress,
-    ) -> eyre::Result<Option<(Arc<IrysSealedBlock>, Option<AdjustmentStats>)>> {
+    ) -> Result<Option<(Arc<IrysSealedBlock>, Option<AdjustmentStats>)>, BlockProductionError> {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
@@ -1291,7 +1631,11 @@ pub trait BlockProdStrategy {
             .block_tree_guard
             .read()
             .get_epoch_snapshot(&prev_block_hash)
-            .expect("parent epoch snapshot to be retrievable");
+            .ok_or_eyre("parent epoch snapshot to be retrievable")
+            // The block tree can prune the parent after it was selected.
+            .map_err(BlockProductionError::recoverable(
+                "parent_state_unavailable",
+            ))?;
 
         let ledger_id = epoch_snapshot
             .get_data_partition_assignment(solution.partition_hash)
@@ -1299,7 +1643,11 @@ pub trait BlockProdStrategy {
 
         // Create PoA data using the trait method. A failed derive drops the
         // solution instead of sealing a PoA with an unverified tx path.
-        let Some((poa, poa_chunk_hash)) = self.create_poa_data(solution, ledger_id).await? else {
+        let Some((poa, poa_chunk_hash)) = self
+            .create_poa_data(solution, ledger_id)
+            .await
+            .map_err(BlockProductionError::recoverable("poa_data"))?
+        else {
             return Ok(None);
         };
 
@@ -1309,13 +1657,19 @@ pub trait BlockProdStrategy {
             H256List::new()
         } else {
             self.inner().vdf_steps_guard.get_steps(ii(prev_block_header.vdf_limiter_info.global_step_number + 1, solution.vdf_step - 1))
-                .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))?
+                .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))
+                // The VDF state keeps a bounded window of steps and can be
+                // re-anchored, so a missing range is not proof of a local bug.
+                .map_err(BlockProductionError::recoverable("vdf_steps_unavailable"))?
         };
         steps.push(solution.seed.0);
 
+        // From here on each step is a local computation over inputs already in
+        // hand, so a failure repeats on every attempt.
         let ema_calculation = self
             .get_ema_price(prev_block_header, perv_block_ema_snapshot)
-            .await?;
+            .await
+            .map_err(BlockProductionError::irrecoverable)?;
 
         // Update the last_epoch_hash field, which tracks the most recent epoch boundary
         //
@@ -1409,7 +1763,8 @@ pub trait BlockProdStrategy {
                             self.inner()
                                 .config
                                 .number_of_ingress_proofs_total_at(current_timestamp.to_secs())
-                                .try_into()?,
+                                .try_into()
+                                .map_err(BlockProductionError::irrecoverable)?,
                         ),
                     },
                     // Term Submit Ledger
@@ -1512,7 +1867,9 @@ pub trait BlockProdStrategy {
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();
-        block_signer.sign_block_header(&mut irys_block)?;
+        block_signer
+            .sign_block_header(&mut irys_block)
+            .map_err(BlockProductionError::irrecoverable)?;
 
         // Build BlockTransactions from the mempool bundle.
         // Clear internal metadata (promoted_height, included_height) so block
@@ -1533,7 +1890,8 @@ pub trait BlockProdStrategy {
             data_transactions: all_data_txs,
         };
 
-        let sealed_block = IrysSealedBlock::new(irys_block, block_body)?;
+        let sealed_block = IrysSealedBlock::new(irys_block, block_body)
+            .map_err(BlockProductionError::irrecoverable)?;
 
         Ok(Some((Arc::new(sealed_block), stats)))
     }
@@ -1544,7 +1902,7 @@ pub trait BlockProdStrategy {
         block: Arc<IrysSealedBlock>,
         stats: Option<AdjustmentStats>,
         eth_built_payload: &EthBuiltPayload,
-    ) -> eyre::Result<Option<Arc<IrysSealedBlock>>> {
+    ) -> Result<Option<Arc<IrysSealedBlock>>, BlockProductionError> {
         let mut is_difficulty_updated = false;
         let block_header = block.header();
 
@@ -1575,38 +1933,28 @@ pub trait BlockProdStrategy {
             }
         }
 
-        match self
+        // Block discovery gossips the header only after `handle_block`
+        // succeeds, so a block that fails here was never published and
+        // dropping it is safe. Pre-validation rejects a bad block before it
+        // enters the tree. After the block enters the tree, validation
+        // scheduling or the reply to block discovery can still fail; the block
+        // then stays in the tree but is not gossiped.
+        if let Err(e) = self
             .inner()
             .block_discovery
             .handle_block(block.clone(), false)
             .await
         {
-            Ok(()) => Ok(()),
-            e @ Err(BlockDiscoveryError::InternalError(_)) => {
-                error!(
-                    "Internal Block discovery error for block {} ({}) : {:?}",
-                    &block_header.block_hash, &block_header.height, e
-                );
-                Err(eyre!(
-                    "Internal Block discovery error for block {} ({}) : {:?}",
-                    &block_header.block_hash,
-                    &block_header.height,
-                    e
-                ))
-            }
-            Err(e) => {
-                error!(
-                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
-                    &block_header.block_hash.0, &block_header.height, e
-                );
-                Err(eyre!(
-                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
-                    &block_header.block_hash.0,
-                    &block_header.height,
-                    e
-                ))
-            }
-        }?;
+            error!(
+                block.hash = %block_header.block_hash,
+                block.height = block_header.height,
+                block.parent = %block_header.previous_block_hash,
+                block.solution_hash = %block_header.solution_hash,
+                "Newly produced block failed block discovery: {:?}",
+                e
+            );
+            return Err(classify_own_block_discovery_error(e, block_header));
+        }
 
         // Gossip the EVM payload
         let execution_payload_gossip_data =
@@ -1772,16 +2120,15 @@ pub trait BlockProdStrategy {
             .await?;
 
         let commitment_refund_events = self.derive_unpledge_refunds(&parent_commitment_snapshot)?;
-        // Producer treats commitment-refund snapshot invariants as a local
-        // bug — surfaces as `TxSelectorError::Other` and ultimately
-        // `BlockProductionError::Irrecoverable`. The validator-side mapping
-        // in `block_validation.rs` classifies them as node faults instead.
+        // Commitment-refund snapshot invariants prove the local snapshot is
+        // corrupt — surfaces as `TxSelectorError::CommitmentRefund` and
+        // ultimately `BlockProductionError::Irrecoverable`. The validator-side
+        // mapping in `block_validation.rs` classifies them as node faults.
         let unstake_refund_events =
             crate::commitment_refunds::derive_unstake_refunds_from_snapshot(
                 &parent_commitment_snapshot,
                 &self.inner().config.consensus,
-            )
-            .map_err(eyre::Report::from)?;
+            )?;
 
         // note: we do not filter txs by version for epoch blocks
         let commitment_txs = parent_commitment_snapshot.get_epoch_commitments();
@@ -1880,16 +2227,15 @@ pub trait BlockProdStrategy {
     fn derive_unpledge_refunds(
         &self,
         commit_snapshot: &CommitmentSnapshot,
-    ) -> eyre::Result<Vec<UnpledgeRefundEvent>> {
+    ) -> Result<Vec<UnpledgeRefundEvent>, crate::commitment_refunds::CommitmentRefundError> {
         // Producer treats commitment-refund snapshot invariants as local
-        // bugs (see comment on the call site at `get_mempool_txs`); the
-        // validator-side mapping in `block_validation.rs` reclassifies
-        // them as node faults.
+        // corruption (see comment on the call site at `get_mempool_txs`); the
+        // validator-side mapping in `block_validation.rs` classifies them as
+        // node faults.
         crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
             commit_snapshot,
             &self.inner().config.consensus,
         )
-        .map_err(eyre::Report::from)
     }
 
     fn build_non_epoch_bundle(
@@ -1915,7 +2261,7 @@ pub trait BlockProdStrategy {
     async fn get_evm_block(
         &self,
         prev_block_header: &IrysBlockHeader,
-    ) -> eyre::Result<reth_ethereum_primitives::Block> {
+    ) -> Result<reth_ethereum_primitives::Block, BlockProductionError> {
         use reth::providers::BlockReader as _;
 
         let parent = {
@@ -1929,7 +2275,10 @@ pub trait BlockProdStrategy {
                 let result = self
                     .inner()
                     .reth_provider
-                    .block(BlockHashOrNumber::Hash(prev_block_header.evm_block_hash))?;
+                    .block(BlockHashOrNumber::Hash(prev_block_header.evm_block_hash))
+                    .map_err(BlockProductionError::recoverable(
+                        "parent_evm_block_unavailable",
+                    ))?;
                 match result {
                     Some(block) => {
                         info!(
@@ -1945,23 +2294,30 @@ pub trait BlockProdStrategy {
                 }
             }
         }
-        .unwrap_or_else(|| {
-            panic!(
-                "Should be able to get the parent EVM block {} {}",
-                prev_block_header.evm_block_hash, prev_block_header.height
-            )
-        });
+        .ok_or_else(|| BlockProductionError::Recoverable {
+            reason: "parent_evm_block_unavailable",
+            source: eyre!(
+                "parent EVM block {} for height {} not found in Reth",
+                prev_block_header.evm_block_hash,
+                prev_block_header.height
+            ),
+        })?;
         // TODO: fix genesis hash computation when using init-state (persist modified chainspec?)
         // for now we just skip the check for the genesis block
         if prev_block_header.height > 0 {
             let computed_parent_evm_hash = parent.header.hash_slow();
-            eyre::ensure!(
-                computed_parent_evm_hash == prev_block_header.evm_block_hash,
-                "reth parent block hash mismatch for height {} - computed {} got {}",
-                &prev_block_header.height,
-                &computed_parent_evm_hash,
-                &prev_block_header.evm_block_hash
-            );
+            // Reth returned a block under a hash that block does not have: the
+            // local EL store is inconsistent, and validation reads the same store.
+            if computed_parent_evm_hash != prev_block_header.evm_block_hash {
+                return Err(BlockProductionError::Irrecoverable {
+                    source: eyre!(
+                        "reth parent block hash mismatch for height {} - computed {} got {}",
+                        &prev_block_header.height,
+                        &computed_parent_evm_hash,
+                        &prev_block_header.evm_block_hash
+                    ),
+                });
+            }
         }
         Ok(parent)
     }
@@ -1978,7 +2334,7 @@ pub trait BlockProdStrategy {
         block_timestamp: UnixTimestampMs,
         prev_block_header: &IrysBlockHeader,
         mempool_txs: &MempoolTxs,
-    ) -> eyre::Result<LedgerExpiryBalanceDelta> {
+    ) -> Result<LedgerExpiryBalanceDelta, ledger_expiry::LedgerExpiryError> {
         let chunk_size = self.inner().config.consensus.chunk_size;
         // Cascade status of THIS block (its own timestamp — the value
         // `perform_epoch_tasks` reads to gate the `touch_active_ledger_slots` that
@@ -2301,6 +2657,32 @@ mod current_timestamp_tests {
 }
 
 #[cfg(test)]
+mod shadow_tx_presence_tests {
+    use super::{B256, BlockProductionError, ensure_payload_starts_with_shadow_txs};
+
+    #[test]
+    fn payload_missing_a_shadow_tx_is_a_recoverable_error() {
+        let (a, b, pool) = (
+            B256::repeat_byte(1),
+            B256::repeat_byte(2),
+            B256::repeat_byte(3),
+        );
+        ensure_payload_starts_with_shadow_txs(&[a, b, pool], &[a, b]).expect("all present");
+        ensure_payload_starts_with_shadow_txs(&[pool], &[]).expect("none expected");
+        for built in [vec![a, pool], vec![b, a], vec![]] {
+            let err = ensure_payload_starts_with_shadow_txs(&built, &[a, b]).unwrap_err();
+            assert!(matches!(
+                err,
+                BlockProductionError::Recoverable {
+                    reason: "payload_missing_shadow_tx",
+                    ..
+                }
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
 mod tx_path_poa_tests {
     use super::assemble_poa;
     use irys_types::{
@@ -2348,5 +2730,320 @@ mod tx_path_poa_tests {
         };
         let (poa, _) = assemble_poa(&solution, None).expect("ok").expect("poa");
         assert_eq!(poa.tx_path.expect("tx path").0, bytes);
+    }
+}
+
+#[cfg(test)]
+mod error_classification_tests {
+    use super::{
+        BlockProductionError, check_new_payload_status, classify_own_block_discovery_error,
+        classify_payload_error, classify_shadow_tx_error,
+    };
+    use crate::block_discovery::{BlockDiscoveryError, BlockDiscoveryInternalError};
+    use crate::block_producer::ledger_expiry::LedgerExpiryError;
+    use crate::block_validation::PreValidationError;
+    use crate::shadow_tx_generator::ShadowTxGenError;
+    use crate::tx_selector::TxSelectorError;
+    use alloy_rpc_types_engine::PayloadStatusEnum;
+    use irys_types::{DataLedger, H256, IrysBlockHeader, U256};
+    use reth::revm::primitives::B256;
+    use reth_payload_primitives::PayloadBuilderError;
+    use rstest::rstest;
+
+    #[test]
+    fn valid_payload_status_is_accepted() {
+        assert!(check_new_payload_status(&PayloadStatusEnum::Valid).is_ok());
+    }
+
+    #[rstest]
+    #[case::syncing(PayloadStatusEnum::Syncing)]
+    #[case::accepted(PayloadStatusEnum::Accepted)]
+    #[case::invalid(PayloadStatusEnum::Invalid { validation_error: "bad".into() })]
+    fn non_valid_payload_status_drops_the_attempt(#[case] status: PayloadStatusEnum) {
+        let err = check_new_payload_status(&status).expect_err("only Valid is accepted");
+        assert!(
+            matches!(
+                err,
+                BlockProductionError::Recoverable {
+                    reason: "payload_not_valid",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn missing_parent_payload_error_is_retryable() {
+        let err = classify_payload_error(PayloadBuilderError::MissingParentHeader(B256::ZERO));
+        assert!(
+            matches!(err, BlockProductionError::Retryable { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn other_payload_builder_error_drops_the_attempt() {
+        let err = classify_payload_error(PayloadBuilderError::MissingPayload);
+        assert!(
+            matches!(
+                err,
+                BlockProductionError::Recoverable {
+                    reason: "payload_builder",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    // Expected outcome: `None` stops the node, `Some` is the drop reason.
+    #[rstest]
+    #[case::cache_poisoned(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::CachePoisoned { at: "test" }),
+        None
+    )]
+    #[case::add_block_failed(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::AddBlockFailed {
+            block_hash: H256::zero(),
+            reason: "test".into(),
+        }),
+        None
+    )]
+    #[case::validation_service_unreachable(
+        BlockDiscoveryError::BlockValidationError(
+            PreValidationError::ValidationServiceUnreachable
+        ),
+        None
+    )]
+    #[case::discovery_database_error(
+        BlockDiscoveryError::InternalError(BlockDiscoveryInternalError::DatabaseError(
+            eyre::eyre!("test")
+        )),
+        None
+    )]
+    #[case::parent_not_in_cache(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::ParentNotInCache {
+            parent_hash: H256::zero(),
+            expected_height: 1,
+        }),
+        Some("own_block_rejected")
+    )]
+    #[case::block_signature_invalid(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::BlockSignatureInvalid),
+        None
+    )]
+    #[case::ema_mismatch(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::EmaMismatch),
+        None
+    )]
+    #[case::reward_mismatch(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::RewardMismatch {
+            got: U256::one(),
+            expected: U256::zero(),
+        }),
+        None
+    )]
+    #[case::invalid_block_height(
+        BlockDiscoveryError::InvalidBlockHeight {
+            expected: 2,
+            got: 3
+        },
+        None
+    )]
+    #[case::transaction_id_mismatch(
+        BlockDiscoveryError::TransactionIdMismatch {
+            expected: H256::zero(),
+            actual: H256::repeat_byte(1),
+        },
+        None
+    )]
+    #[case::poa_chunk_hash_mismatch(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::PoAChunkHashMismatch {
+            expected: H256::zero(),
+            got: H256::repeat_byte(1),
+            ledger_id: None,
+            ledger_chunk_offset: None,
+        }),
+        Some("own_block_rejected")
+    )]
+    #[case::timestamp_too_far_in_future(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::TimestampTooFarInFuture {
+            current: 2,
+            now: 1,
+        }),
+        Some("own_block_rejected")
+    )]
+    #[case::duplicate_transaction(
+        BlockDiscoveryError::DuplicateTransaction(H256::zero()),
+        Some("own_block_rejected_by_tx")
+    )]
+    #[case::insufficient_perm_fee(
+        BlockDiscoveryError::BlockValidationError(PreValidationError::InsufficientPermFee {
+            tx_id: H256::zero(),
+            expected: U256::one(),
+            actual: U256::zero(),
+        }),
+        Some("own_block_rejected_by_tx")
+    )]
+    #[case::previous_block_not_found(
+        BlockDiscoveryError::PreviousBlockNotFound {
+            previous_block_hash: H256::zero(),
+        },
+        Some("own_block_rejected")
+    )]
+    fn own_block_discovery_error_is_fatal_only_for_local_faults(
+        #[case] err: BlockDiscoveryError,
+        #[case] drop_reason: Option<&'static str>,
+    ) {
+        let header = IrysBlockHeader::new_mock_header();
+        let classified = classify_own_block_discovery_error(err, &header);
+        match drop_reason {
+            None => assert!(
+                matches!(classified, BlockProductionError::Irrecoverable { .. }),
+                "{classified:?}"
+            ),
+            Some(expected) => {
+                assert_eq!(classified.reason(), expected, "{classified:?}");
+            }
+        }
+    }
+
+    #[rstest]
+    #[case::snapshot_invariant(ShadowTxGenError::SnapshotInvariant("x".into()), true)]
+    #[case::snapshot_treasury_underflow(
+        ShadowTxGenError::SnapshotTreasuryUnderflow("x".into()),
+        true
+    )]
+    #[case::treasury_arithmetic(ShadowTxGenError::TreasuryArithmetic("x".into()), false)]
+    #[case::structural(ShadowTxGenError::Structural("x".into()), false)]
+    fn shadow_tx_error_is_fatal_only_for_snapshot_invariants(
+        #[case] err: ShadowTxGenError,
+        #[case] fatal: bool,
+    ) {
+        let classified = classify_shadow_tx_error(err);
+        if fatal {
+            assert!(
+                matches!(classified, BlockProductionError::Irrecoverable { .. }),
+                "{classified:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    classified,
+                    BlockProductionError::Recoverable {
+                        reason: "shadow_tx_generation",
+                        ..
+                    }
+                ),
+                "{classified:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn expired_tx_attribution_mismatch_is_irrecoverable() {
+        let err: BlockProductionError =
+            TxSelectorError::LedgerExpiry(LedgerExpiryError::AttributedTxHeadersMismatch {
+                ledger: DataLedger::Submit,
+            })
+            .into();
+        assert!(
+            matches!(err, BlockProductionError::Irrecoverable { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn other_ledger_expiry_error_drops_the_attempt() {
+        let err: BlockProductionError =
+            TxSelectorError::LedgerExpiry(LedgerExpiryError::Other(eyre::eyre!("block missing")))
+                .into();
+        assert!(
+            matches!(
+                err,
+                BlockProductionError::Recoverable {
+                    reason: "ledger_expiry",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::{BlockProdStrategy, BlockProducerInner, BlockProductionError};
+    use irys_domain::EmaSnapshot;
+    use irys_types::{
+        AdjustmentStats, IrysBlockHeader, SealedBlock as IrysSealedBlock,
+        block_production::SolutionContext,
+    };
+    use reth::payload::EthBuiltPayload;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    /// Every attempt fails with a retryable error.
+    #[derive(Default)]
+    struct AlwaysRetryable {
+        attempts: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for AlwaysRetryable {
+        fn inner(&self) -> &BlockProducerInner {
+            unreachable!("the retry loop reads only the overridden methods")
+        }
+
+        async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
+            Ok((
+                IrysBlockHeader::new_mock_header(),
+                Arc::new(EmaSnapshot::default()),
+            ))
+        }
+
+        async fn produce_block_with_parent(
+            &self,
+            _solution: &SolutionContext,
+            _prev_block_header: IrysBlockHeader,
+            _prev_block_ema_snapshot: Arc<EmaSnapshot>,
+        ) -> Result<
+            Option<(
+                Arc<IrysSealedBlock>,
+                Option<AdjustmentStats>,
+                EthBuiltPayload,
+            )>,
+            BlockProductionError,
+        > {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            Err(BlockProductionError::Retryable {
+                source: eyre::eyre!("parent payload not ready"),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_exhausted_drops_the_attempt() {
+        let strategy = AlwaysRetryable::default();
+        let Err(err) = strategy
+            .fully_produce_new_block_without_gossip(&SolutionContext::default())
+            .await
+        else {
+            panic!("every attempt fails, so the loop must fail");
+        };
+        assert!(
+            matches!(
+                err,
+                BlockProductionError::Recoverable {
+                    reason: "retries_exhausted",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(strategy.attempts.load(Ordering::Relaxed), 5);
     }
 }

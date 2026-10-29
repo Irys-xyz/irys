@@ -1107,7 +1107,7 @@ mod peer_sync_recovery {
                 height
             );
             // Verify all data txs in this block are in the database
-            for tx_ids in block.get_data_ledger_tx_ids().values() {
+            for tx_ids in block.get_data_ledger_tx_ids().unwrap().values() {
                 for tx_id in tx_ids {
                     let tx_header = genesis_node.get_tx_header(tx_id)?;
                     assert_eq!(
@@ -1215,7 +1215,7 @@ mod peer_sync_recovery {
             );
             // Verify all data txs in this block are in the database
             let mut block_tx_count = 0;
-            for tx_ids in block.get_data_ledger_tx_ids().values() {
+            for tx_ids in block.get_data_ledger_tx_ids().unwrap().values() {
                 for tx_id in tx_ids {
                     let tx_header = genesis_node.get_tx_header(tx_id)?;
                     assert_eq!(
@@ -1295,7 +1295,7 @@ mod peer_sync_recovery {
                 height
             );
             // Verify all data txs in this block are in the peer's database (direct DB read, not mempool)
-            for tx_ids in peer_block.get_data_ledger_tx_ids().values() {
+            for tx_ids in peer_block.get_data_ledger_tx_ids().unwrap().values() {
                 for tx_id in tx_ids {
                     let tx_header = peer_node
                         .node_ctx
