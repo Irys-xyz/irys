@@ -2973,6 +2973,19 @@ mod resolve_stage_result_against_parent_tests {
         assert_eq!(result.unwrap_err(), ValidationCancelReason::ParentMissing);
     }
 
+    /// The wait reports the parent ready, but the tree read finds the parent
+    /// still pending (not fully valid): the fault is not confirmed.
+    #[tokio::test]
+    async fn node_fault_with_parent_pending_after_ready_wait_is_cancelled() {
+        let result = resolve(
+            shadow_tx_node_fault().into(),
+            ParentValidationResult::Ready,
+            tree_state(parent_pending(), true),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), ValidationCancelReason::ParentMissing);
+    }
+
     /// The parent is fully valid but this block was removed from the tree.
     #[tokio::test]
     async fn node_fault_with_block_removed_is_cancelled() {
@@ -3027,14 +3040,24 @@ mod resolve_stage_result_against_parent_tests {
         assert_same_node_fault(result, &node_fault);
     }
 
-    /// The wait checks the height difference before the parent state. A
-    /// too-old block whose parent is fully valid keeps its node fault.
+    /// A cancelled wait does not decide the outcome: the tree read after the
+    /// wait does. With the parent fully valid and the block in the tree, the
+    /// node fault is kept for every wait cancel reason. The wait checks the
+    /// height difference before the parent state, so a too-old block can
+    /// reach this; a parent seen missing and then valid again, or a shutdown
+    /// during the wait, must not hide a confirmed fault either.
+    #[rstest]
+    #[case::height_difference(ValidationCancelReason::HeightDifference)]
+    #[case::parent_missing(ValidationCancelReason::ParentMissing)]
+    #[case::channel_closed(ValidationCancelReason::ChannelClosed)]
     #[tokio::test]
-    async fn node_fault_with_valid_parent_survives_height_difference_cancel() {
+    async fn node_fault_with_valid_parent_survives_wait_cancel(
+        #[case] reason: ValidationCancelReason,
+    ) {
         let node_fault = shadow_tx_node_fault();
         let result = resolve(
             node_fault.clone().into(),
-            ParentValidationResult::Cancelled(ValidationCancelReason::HeightDifference),
+            ParentValidationResult::Cancelled(reason),
             tree_state(parent_valid(), true),
         )
         .await;
