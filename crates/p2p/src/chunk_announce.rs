@@ -1,5 +1,6 @@
 //! Receiver-side state for chunk announcements: which pushes are inside
-//! `handle_chunk` now, and which claims a fetch task owns. Whether this node
+//! `handle_chunk` now, which claims a fetch task owns, and the fetch tasks
+//! themselves, so gossip shutdown can abort them. Whether this node
 //! holds a chunk is a `CachedChunks` lookup done by the caller; this module
 //! never asserts possession. The gossip seen-cache records what peers know
 //! and is not used to decide whether to fetch.
@@ -9,10 +10,12 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use irys_types::{ChunkPathHash, H256, IrysPeerId};
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use tracing::error;
 
 /// Caps and timings. `Default` is the production policy from the design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +127,8 @@ pub struct ChunkAnnounceState {
     announcements_received: AtomicU64,
     pub(crate) fetch_permits: Arc<Semaphore>,
     pub(crate) serve_permits: Arc<Semaphore>,
+    /// Fetch tasks for live claims. `None` once `stop_fetches` has run.
+    fetch_tasks: Mutex<Option<JoinSet<()>>>,
 }
 
 impl Default for ChunkAnnounceState {
@@ -149,6 +154,7 @@ impl ChunkAnnounceState {
             announcements_received: AtomicU64::new(0),
             fetch_permits: Arc::new(Semaphore::new(limits.max_concurrent_fetches)),
             serve_permits: Arc::new(Semaphore::new(limits.max_concurrent_serves)),
+            fetch_tasks: Mutex::new(Some(JoinSet::new())),
         }
     }
 
@@ -332,6 +338,53 @@ impl ChunkAnnounceState {
             bodies_fetch: self.bodies_fetch.load(Ordering::Relaxed),
             announcements_received: self.announcements_received.load(Ordering::Relaxed),
         }
+    }
+
+    /// Run a claim's fetch task, owned so gossip shutdown can abort it.
+    /// After `stop_fetches` the task is dropped unpolled, and its
+    /// `ClaimGuard` releases the claim `admit` reserved.
+    pub(crate) fn spawn_fetch<F>(&self, task: F, runtime: &tokio::runtime::Handle)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut guard = self
+            .fetch_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(tasks) = guard.as_mut() else {
+            return;
+        };
+        // A finished task stays in the set until it is joined.
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result
+                && error.is_panic()
+            {
+                error!(%error, "chunk fetch task panicked");
+            }
+        }
+        tasks.spawn_on(task, runtime);
+    }
+
+    /// Refuse new fetch tasks, then abort the running ones and wait for
+    /// each, so every claim they held is released on return.
+    pub(crate) async fn stop_fetches(&self) {
+        let tasks = self
+            .fetch_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(mut tasks) = tasks {
+            tasks.shutdown().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fetch_task_count(&self) -> usize {
+        self.fetch_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map_or(0, JoinSet::len)
     }
 }
 
@@ -623,5 +676,87 @@ mod tests {
                 announcements_received: 1
             }
         );
+    }
+
+    /// Sets its flag when dropped, so a test can tell that a task's future
+    /// was dropped.
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_fetch_reaps_finished_tasks() {
+        let state = ChunkAnnounceState::new();
+        let runtime = tokio::runtime::Handle::current();
+        let finished = Arc::new(AtomicUsize::new(0));
+        for _ in 0..3 {
+            let finished = Arc::clone(&finished);
+            state.spawn_fetch(
+                async move {
+                    finished.fetch_add(1, Ordering::SeqCst);
+                },
+                &runtime,
+            );
+        }
+        while finished.load(Ordering::SeqCst) < 3 {
+            tokio::task::yield_now().await;
+        }
+
+        state.spawn_fetch(std::future::pending(), &runtime);
+
+        assert_eq!(state.fetch_task_count(), 1, "only the live task remains");
+        state.stop_fetches().await;
+    }
+
+    #[tokio::test]
+    async fn stop_fetches_aborts_and_joins_running_tasks() {
+        let state = ChunkAnnounceState::new();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = DropFlag(Arc::clone(&dropped));
+        state.spawn_fetch(
+            async move {
+                let _flag = flag;
+                std::future::pending::<()>().await;
+            },
+            &tokio::runtime::Handle::current(),
+        );
+        tokio::task::yield_now().await;
+
+        state.stop_fetches().await;
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the running task was dropped"
+        );
+        assert_eq!(state.fetch_task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_after_stop_is_dropped_unpolled() {
+        let state = ChunkAnnounceState::new();
+        state.stop_fetches().await;
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = DropFlag(Arc::clone(&dropped));
+        let was_polled = Arc::clone(&polled);
+
+        state.spawn_fetch(
+            async move {
+                let _flag = flag;
+                was_polled.store(true, Ordering::SeqCst);
+            },
+            &tokio::runtime::Handle::current(),
+        );
+        tokio::task::yield_now().await;
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the refused task was dropped"
+        );
+        assert!(!polled.load(Ordering::SeqCst), "the refused task never ran");
     }
 }
