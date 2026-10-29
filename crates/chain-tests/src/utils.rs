@@ -53,6 +53,7 @@ use irys_types::{
     CommitmentV2WithMetadata, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
     DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
     NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
+    compute_solution_hash,
 };
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, DataLedger, EvmBlockHash, H256, H256List, IrysAddress,
@@ -73,7 +74,6 @@ use reth::{
     rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
 use reth_db::{Database as _, cursor::*};
-use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
@@ -292,12 +292,15 @@ pub async fn capacity_chunk_solution(
                 config.consensus.chain_id,
             );
 
-            // solution_hash = sha256(poa_chunk || offset_le || vdf_output)
-            let mut hasher_sol = Sha256::new();
-            hasher_sol.update(&entropy_chunk);
-            hasher_sol.update(partition_chunk_offset.to_le_bytes());
-            hasher_sol.update(steps[1].as_bytes());
-            let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
+            // Same order choice as the miner: Delta at the clock now.
+            let delta = config.consensus.hardforks.delta_for_block(
+                irys_types::global_clock()
+                    .now_ms()
+                    .expect("clock")
+                    .to_secs(),
+            );
+            let solution_hash =
+                compute_solution_hash(&entropy_chunk, partition_chunk_offset, &steps[1], delta);
 
             // Check difficulty: interpret hash as little-endian number
             let solution_val = irys_types::u256_from_le_bytes(&solution_hash.0);
@@ -359,11 +362,14 @@ pub async fn capacity_chunk_solution(
         config.consensus.chain_id,
     );
 
-    let mut hasher_sol = Sha256::new();
-    hasher_sol.update(&entropy_chunk);
-    hasher_sol.update(partition_chunk_offset.to_le_bytes());
-    hasher_sol.update(steps[1].as_bytes());
-    let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
+    let delta = config.consensus.hardforks.delta_for_block(
+        irys_types::global_clock()
+            .now_ms()
+            .expect("clock")
+            .to_secs(),
+    );
+    let solution_hash =
+        compute_solution_hash(&entropy_chunk, partition_chunk_offset, &steps[1], delta);
 
     SolutionContext {
         partition_hash,

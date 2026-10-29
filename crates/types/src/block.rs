@@ -3,6 +3,7 @@
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
 use crate::block_production::SolutionContext;
+use crate::hardfork_config::{Activation, Delta};
 use crate::storage_pricing::{Amount, phantoms::IrysPrice, phantoms::Usd};
 use crate::versioning::{
     Signable, VersionDiscriminant, Versioned, VersioningError, compact_with_discriminant,
@@ -905,28 +906,47 @@ impl fmt::Display for IrysBlockHeaderV1 {
     }
 }
 
-/// Compute the solution hash as sha256(poa_chunk || offset_le || seed)
+/// Compute the solution hash.
+///
+/// - Delta inactive: sha256(poa_chunk || offset_le || seed)
+/// - Delta active: sha256(seed || offset_le || poa_chunk)
+///
+/// `delta` is Delta resolved at the block's own timestamp.
 ///
 /// This is the canonical utility used across the codebase to avoid duplicate
 /// implementations of the hashing logic.
 ///
 /// # Examples
 /// ```
-/// use irys_types::{compute_solution_hash, H256};
+/// use irys_types::{compute_solution_hash, hardfork_config::Activation, H256};
 ///
 /// let poa_chunk = b"example chunk data";
 /// let offset = 42u32;
 /// let seed = H256::from([7u8; 32]);
 ///
 /// // This should compile and produce a 32-byte hash.
-/// let _hash = compute_solution_hash(poa_chunk, offset, &seed);
+/// let _hash = compute_solution_hash(poa_chunk, offset, &seed, Activation::Inactive);
 /// ```
-pub fn compute_solution_hash(poa_chunk: &[u8], offset_le: u32, seed: &H256) -> H256 {
+pub fn compute_solution_hash(
+    poa_chunk: &[u8],
+    offset_le: u32,
+    seed: &H256,
+    delta: Activation<Delta>,
+) -> H256 {
     use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(poa_chunk);
-    hasher.update(offset_le.to_le_bytes());
-    hasher.update(seed.as_bytes());
+    match delta {
+        Activation::Inactive => {
+            hasher.update(poa_chunk);
+            hasher.update(offset_le.to_le_bytes());
+            hasher.update(seed.as_bytes());
+        }
+        Activation::Active(_) => {
+            hasher.update(seed.as_bytes());
+            hasher.update(offset_le.to_le_bytes());
+            hasher.update(poa_chunk);
+        }
+    }
     H256::from(<[u8; 32]>::from(hasher.finalize()))
 }
 
@@ -939,6 +959,7 @@ impl IrysBlockHeaderV1 {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
         // Compute default PoA chunk, chunk_hash, and solution_hash so mock headers satisfy solution_hash_link_is_valid
+        // while Delta is inactive (pre-Delta hash order)
         let default_poa_chunk: Vec<u8> = Vec::new();
         let default_partition_chunk_offset: u32 = 0;
         let default_vdf_output = H256::zero();
@@ -947,6 +968,7 @@ impl IrysBlockHeaderV1 {
             &default_poa_chunk,
             default_partition_chunk_offset,
             &default_vdf_output,
+            Activation::Inactive,
         );
 
         // Create a sample IrysBlockHeader object with mock data

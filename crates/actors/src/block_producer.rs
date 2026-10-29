@@ -39,7 +39,7 @@ use irys_types::{
     IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, SendTraced as _, Signature,
     SystemTransactionLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
     VDFLimiterInfo, app_state::DatabaseProvider, block_production::SolutionContext,
-    calculate_difficulty, next_cumulative_diff, storage_pricing::Amount,
+    calculate_difficulty, compute_solution_hash, next_cumulative_diff, storage_pricing::Amount,
     u256_from_le_bytes as hash_to_number,
 };
 use irys_vdf::state::VdfStateReadonly;
@@ -1011,6 +1011,29 @@ pub trait BlockProdStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp =
             current_timestamp(&prev_block_header, irys_types::global_clock()).await;
+
+        // The miner took the hash order from its clock. Validators take it from
+        // this block's timestamp, which can be on the other side of Delta
+        // activation. A hash in the wrong order fails `solution_hash_link_is_valid`.
+        let block_solution_hash = compute_solution_hash(
+            &solution.chunk,
+            solution.chunk_offset,
+            &solution.seed.0,
+            self.inner()
+                .config
+                .consensus
+                .hardforks
+                .delta_for_block(current_timestamp.to_secs()),
+        );
+        if block_solution_hash != solution.solution_hash {
+            warn!(
+                "Skipping solution {} hashed in the wrong order for block timestamp {} on parent {}",
+                solution.solution_hash,
+                current_timestamp.to_secs(),
+                prev_block_header.block_hash
+            );
+            return Ok(None);
+        }
 
         let mempool_bundle = self
             .get_mempool_txs(&prev_block_header, current_timestamp)
