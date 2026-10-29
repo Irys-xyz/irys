@@ -24,7 +24,6 @@ eyre.workspace = true
 tracing.workspace = true
 openssl.workspace = true
 hex.workspace = true
-base58.workspace = true
 nodit.workspace = true
 thiserror.workspace = true
 

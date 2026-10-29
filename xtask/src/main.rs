@@ -136,6 +136,8 @@ enum Commands {
     },
     Typos,
     UnusedDeps,
+    /// Enforce the crate bans in `deny.toml`.
+    Deny,
     EmissionSimulation,
     LocalChecks {
         #[clap(short, long, default_value_t = false)]
@@ -786,6 +788,11 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             cmd!(sh, "cargo install --locked --version 0.8.0 cargo-machete").remove_and_run()?;
             cmd!(sh, "cargo-machete").run()?;
         }
+        Commands::Deny => {
+            println!("deny bans");
+            cmd!(sh, "cargo install --locked --version 0.20.2 cargo-deny").remove_and_run()?;
+            cmd!(sh, "cargo deny check bans").remove_and_run()?;
+        }
         Commands::EmissionSimulation => {
             println!("block reward emission simulation");
             cmd!(
@@ -813,6 +820,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 run_command(Args::try_parse_from(["xtask", "clippy"])?.command, sh)?;
             }
             run_command(Commands::UnusedDeps, sh)?;
+            run_command(Commands::Deny, sh)?;
             run_command(Commands::Typos, sh)?;
             if with_tests {
                 // Parsed, not built by hand, so the `XTASK_*` env vars apply exactly as they do to

@@ -1,5 +1,6 @@
 use crate::ApiState;
 use crate::error::{ApiError, ApiStatusResponse};
+use crate::routes::tx_ingress::{MEMPOOL_REPLY_TIMEOUT, ingest_via_mempool};
 use actix_web::{
     HttpResponse, Result,
     web::{self, Json},
@@ -12,7 +13,7 @@ use irys_actors::{
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
     CommitmentTransaction, DataLedger, DataTransactionHeader, H256, IrysTransactionResponse,
-    SendTraced as _, option_u64_stringify, u64_stringify,
+    option_u64_stringify, u64_stringify,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
@@ -29,30 +30,15 @@ pub async fn post_tx(
     let tx = body.into_inner();
 
     // Validate transaction is valid. Check balances etc etc.
-    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::IngestDataTxFromApi(tx, oneshot_tx);
-    if let Err(err) = state.mempool_service.send_traced(tx_ingress_msg) {
-        tracing::error!("API: {}", err);
-        return Err((
-            format!("Failed to deliver chunk: {err}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-            .into());
-    }
-    let msg_result = oneshot_rx.await;
-
-    // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
-    if let Err(err) = msg_result {
-        tracing::error!("API: {}", err);
-        return Err((
-            format!("Failed to deliver transaction: {err}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-            .into());
-    }
+    let inner_result = ingest_via_mempool(
+        &state.tx_ingress_admission,
+        &state.mempool_service,
+        MEMPOOL_REPLY_TIMEOUT,
+        |reply| MempoolServiceMessage::IngestDataTxFromApi(tx, reply),
+    )
+    .await?;
 
     // If message delivery succeeded, check for validation errors within the response
-    let inner_result = msg_result.unwrap();
     if let Err(err) = inner_result {
         tracing::warn!("API: {}", err);
         return match err {

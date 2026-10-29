@@ -459,6 +459,23 @@ impl IrysHardforkConfig {
             .map(|aurora| aurora.minimum_commitment_tx_version)
     }
 
+    /// Check if `timestamp` is within `tolerance_millis` of an activation that changes the
+    /// allowed commitment versions. In this window, nodes with different clocks can apply
+    /// different version rules.
+    #[must_use]
+    pub fn is_near_commitment_version_change(
+        &self,
+        timestamp: UnixTimestamp,
+        tolerance_millis: u128,
+    ) -> bool {
+        self.aurora.as_ref().is_some_and(|aurora| {
+            let distance_secs = timestamp
+                .as_secs()
+                .abs_diff(aurora.activation_timestamp.as_secs());
+            u128::from(distance_secs) * 1000 <= tolerance_millis
+        })
+    }
+
     /// Retain only commitment transactions that meet the minimum version requirement.
     /// Removes transactions that don't meet the minimum version requirement at the given timestamp.
     pub fn retain_valid_commitment_versions<T: VersionDiscriminant>(

@@ -73,7 +73,7 @@ ruint = { version = "1.12.3", features = ["alloc", "arbitrary"] }
 actix-web = "4.9.0"
 actix-http = "3.9.0"
 awc = "3.5.1"
-base58 = "0.2.0"
+bs58 = "0.5.1"
 tokio-util = "0.7"
 rand = { version = "0.8", features = ["small_rng"] }
 hex = "0.4"
@@ -190,6 +190,9 @@ alloy-rpc-types-engine = { version = "1.7.3", default-features = false }
 alloy-rpc-types-trace = { version = "1.7.3", default-features = false }
 alloy-signer = { version = "1.7.3", default-features = false }
 alloy-signer-local = { version = "1.7.3", default-features = false }
+
+# Same version as Reth, so tests can build Reth RPC modules
+jsonrpsee = { version = "0.26.0", default-features = false }
 
 # Reth crates
 # These point to a fork of reth with Irys-specific changes (branch: irys-changes)
