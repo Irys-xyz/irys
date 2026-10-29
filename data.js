@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793282806899,
+  "lastUpdate": 1793288067136,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20131,6 +20131,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2f572278f06e324919550f6c13506e33ab86f6a9",
+          "message": "feat(types): carry the packing iterations in a packed chunk (#1746)\n\nA packed chunk now names the entropy packing iterations used to pack it.\nStorage modules fill it from the consensus config. Receivers do not read\nit: consensus fixes the iteration count, and unpacking takes it from the\nconsensus config. A chunk from a node that does not send the field reads\nas zero.",
+          "timestamp": "2026-10-29T15:19:44Z",
+          "tree_id": "8a9fa00b6caae18661e7422bf904d8bc9f85301b",
+          "url": "https://github.com/Irys-xyz/irys/commit/2f572278f06e324919550f6c13506e33ab86f6a9"
+        },
+        "date": 1793288063186,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015365,
+            "range": "± 0.000486",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.155104,
+            "range": "± 0.014724",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.567166,
+            "range": "± 0.078885",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 11.158305,
+            "range": "± 2.869539",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083462,
+            "range": "± 0.003301",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 860.558591,
+            "range": "± 40.313227",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1099.12552,
+            "range": "± 54.258934",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.160552,
+            "range": "± 0.019565",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1585.885777,
+            "range": "± 28.265445",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1990.458931,
+            "range": "± 47.075108",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.194891,
+            "range": "± 0.069251",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 254.371409,
+            "range": "± 38.413862",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 319.673529,
+            "range": "± 7.627226",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000157,
+            "range": "± 0.000023",
             "unit": "ms/iter"
           }
         ]
