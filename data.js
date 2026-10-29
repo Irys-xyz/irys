@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793300353632,
+  "lastUpdate": 1793314037784,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20455,6 +20455,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2086e3a9c4abc7908e850b934fafc6b61dc68b89",
+          "message": "fix(p2p): harden p2p, API and Reth RPC (#1713)\n\n* refactor: move base58 encoding to bs58\n\nbase58 is unmaintained; bs58 is maintained and already in the\ndependency tree. Encoding goes through an irys-types `ToBase58` trait,\nand all decoding goes through `decode_base58_exact::<N>`, which caps\nthe input length at the longest encoding of N bytes and requires an\nexact byte count. clippy.toml disallows calling `bs58::decode`\ndirectly.\n\n* chore(ci): add cargo-deny bans check\n\n`cargo xtask deny` runs `cargo deny check bans` against deny.toml. It\nruns in `cargo xtask local-checks` and as a CI job. The first ban is\nthe base58 crate.\n\n* chore(reth): enable only the eth RPC namespace\n\nThe node only needs eth_* over its local Reth HTTP RPC.\n\n* fix(p2p): check execution payload body against its header before caching\n\nThe payload cache is keyed by the EVM header hash, and sealing hashes\nonly the header. The cache now stores a payload only when its body\nmatches the header's transactions root, ommers hash and withdrawals\nroot.\n\n`ExecutionPayloadCache::add_payload_to_cache` runs reth's\n`validate_body_against_header` and stores nothing on a mismatch, so a\ncached payload's body always matches its header. Every insertion path\n(gossip push, pull responses, sync) goes through it. The gossip handler\nmaps the error to `InvalidData` before the payload is recorded as seen,\nso a matching copy is still accepted.\n\nTests that mutate a payload body now recompute the header roots, so the\npayload reaches validation and is rejected there as before.\n\n* fix(p2p): bound execution payloads that no local request names\n\nThe payload cache now has two tiers. A payload whose hash a local\nwaiter or network request names goes to the requested tier as before.\nAny other payload goes to an unsolicited tier bounded to 64 entries and\n64 MiB of in-memory size. The newest entry always stays, so one large\npayload is still kept. The unsolicited tier cannot evict requested\npayloads.\n\nAn EVM payload often arrives before its Irys block. Such a payload\nstays usable: `wait_for_sealed_block` serves it from the unsolicited\ntier and moves it to the requested tier. If it was evicted before its\nblock arrived, the wait requests it from the network again. A payload\npulled by `pull_and_add_execution_payload_to_cache` is marked as\nrequested first, so it goes to the requested tier and is not skipped\nas already seen.\n\n* fix(p2p): reject a pulled execution payload whose hash is not the requested one\n\n* fix(p2p): return the last error when every payload pull attempt fails\n\nThe pull path returned success after the third attempt even when the\nhandler rejected the served payload, so callers saw an empty cache with\nno error. The last handler error now reaches the caller.\n\n* fix(p2p): do not repeat a failed header fetch within a short window\n\nA pushed block body for an unknown hash fetches the header from peers.\nAfter that fetch fails, the hash is remembered for 5 seconds (bounded\ncache), and a pushed body for it does not start a new fetch in that\nwindow. The entry expires, so a header that peers serve later is still\nfetched and the block is processed.\n\nHeader fetches for pushed bodies also take a permit from a semaphore\n(16 permits). Excess pushes wait instead of fetching at once, and they\ncheck the failed-fetch cache after they get the permit.\n\n* fix(p2p): check block height against parent before the tree-capacity wait\n\nReject a block whose height is not parent height + 1 in process_block, before\nwaiting for block tree capacity. Prevalidation enforces the same rule later.\n\n* fix(api): bound tx ingress admission and time out mempool replies\n\n* fix(chunk-ingress): reject a chunk whose size does not match its proof\n\n* fix(p2p): do not penalise a peer for a commitment version rejected by the local clock\n\nThe version rule reads the local wall clock. Near a hardfork activation a\nclock difference makes an honest peer's tx look invalid. The tx is still\nrejected, but the sender's score is not lowered.\n\n* fix(api): serve /internal routes without CORS headers\n\nCORS stays permissive on the public /v1 scope only. The unauthenticated\n/internal routes no longer answer cross-origin browser requests.\n\n* fix(api): map NotImplemented to 501 Not Implemented\n\nAn unsupported block tag is not an authorization failure.\n\n* feat(reth): forward Reth RPC flags from the node config\n\nreth.rpc_args takes Reth RPC server flags with the same syntax as\n`reth node` (for example --http.api=eth,debug or\n--rpc.max-tracing-requests=4). Irys parses them into Reth's RPC\nserver settings at startup. An invalid flag stops startup.\n\nIrys keeps control of --http, --http.addr and --http.corsdomain. A\nflag in reth.rpc_args that sets one of them stops startup. Without\n--http.api, the HTTP RPC serves only the eth namespace, as before.\n\n* fix(reth): serve only read and trace methods in the debug namespace\n\nWhen reth.rpc_args enables the debug namespace, the Reth RPC serves\nonly an allow-list of read and trace methods on every transport (http,\nws, ipc). All other debug_* methods are removed, including methods\nthat change node state and methods that a later Reth adds.\n\n* fix(p2p): skip the version penalty only near a version-changing hardfork activation\n\nThe version rule reads the local wall clock, so a clock difference near a\nhardfork activation can make an honest peer's commitment tx look invalid.\nBefore, the penalty was skipped at all times, so a peer could push\nwrong-version txs with no score loss. Now the penalty is skipped only when\nthe local time is within max_future_timestamp_drift_millis of an activation\nthat changes the allowed commitment versions.\n\n* chore(lint): route base58 encoding through ToBase58\n\nThe debug bins called bs58::encode directly. They now use\nirys_types::ToBase58, and clippy bans bs58::encode outside its one\nsanctioned call site, as it does for bs58::decode.\n\n* fix(p2p): reject a pulled execution payload whose body does not match its header\n\nThe pull mapper checked only the payload hash. A payload with the\nrequested hash but a body that does not match its header passed the\nmapper, so the pull returned it as a success. The cache rejected it\nlater, but the peer got no bogus-data penalty and the pull did not try\nthe next peer.\n\nThe mapper now checks the body against the header. A mismatched body is\nbogus data from the peer: the pull scores the peer down and tries the\nnext one. The cache check stays, because gossip pushes and other callers\nalso add payloads to the cache.\n\n* fix(p2p): ask several block index sources at once, ranked by index height\n\nget_block_index asked peers sorted by claimed cumulative difficulty, one\nafter another, and returned the first answer, also an empty one. One peer\nthat is behind the others then stopped the sync at the local height, or\nended a batch too early.\n\nThe sources are now ranked by advertised block index height in Trusted and\nFull mode, with a shuffle among equal heights. The fetch asks a group of\nsync.block_index_peer_count sources (default 3) at the same time and uses\nthe longest answer. The result is empty only when no source in the group\ngives entries. When no source in the group answers, the fetch asks the next\ngroup. The retries and the error when every peer fails do not change.\n\nConfig::validate rejects a block_index_peer_count of 0, because a group of\nno sources asks no peer.\n\n* fix(p2p): check each block index answer against our index and the peer's claims\n\nA block index answer was used as it came. Its entries carry no heights, so\nnothing tied them to our chain or to the index that the peer advertised.\n\nEach answer must now pass three rules, or the fetch does not use it:\n\n- Overlap anchor. When our index has the entry just before the first height\n  that we need, the request starts at that entry (limit + 1) and the first\n  entry of the answer must have our hash. The fetch removes that entry\n  before it returns. Our index holds only migrated blocks, so an answer\n  that does not extend it is not on our chain. When our index does not\n  have that entry, the request has no anchor.\n- Length. A peer at index height h has the entries 0..=h, so for a request\n  at start with limit n it must return at least min(n, h + 1 - start) and\n  at most n entries. More than the minimum is valid, because the peer index\n  can grow between /info and the index request. A limit of 0 asks for the\n  default page size of the server, so no length rule applies.\n- Advertised hash. When the answer has the entry at h, that entry must have\n  the block_index_hash that the peer advertised. Growth of the peer index\n  does not change the entries at or below h.\n\n* fix(p2p): lower the score of a peer whose block index answer breaks a rule\n\nAn answer that breaks the overlap anchor, length or advertised hash rule\ncontradicts the peer's own /info claims or our migrated index. Such an\nanswer is not a network failure, so the fetch now lowers the peer score at\nonce with ScoreDecreaseReason::BogusData.\n\nThe fetch does not ask that peer again in the same call. Thus the score\ngoes down once per fetch, not once per retry. A peer that does not answer\n(timeout or network error) keeps the handling that it had.\n\n* fix(p2p): do not lower the score of a peer whose block index answer does not connect\n\nAn answer whose first entry is not our entry at the anchor height does not\nconnect to our index. Our own index can be the cause, so a peer must not\nlose score for it. The fetch now rejects such an answer and does not ask\nthat peer again in the same call, but the peer score does not change.\n\nAn answer that contradicts the peer's own /info claims (the length rule or\nthe advertised hash rule) still lowers the score with\nScoreDecreaseReason::BogusData.\n\nWhen no answer is valid, at least one answer did not connect and no\nanswer contradicted its claims, get_block_index returns the new\nChainSyncError::LocalIndexMismatch. The error shows a problem in our local\nindex, not a generic sync failure.\n\n* fix(p2p): keep the anchored block index query within the server maximum\n\nWith an anchor, get_block_index asks for limit + 1 entries from start - 1.\nThe gossip server rejects a limit above MAX_BLOCK_INDEX_QUERY_LIMIT (1000),\nso a batch size at the maximum made each anchored query fail.\n\nThe anchored query now asks for limit + 1 entries only when that is within\nthe maximum. Otherwise it asks for limit entries from start - 1, which\ngives one new entry fewer. The length rule uses the limit of the query\nthat was sent, so it does not change.\n\nMAX_BLOCK_INDEX_QUERY_LIMIT moves from the gossip server handler to\nirys-types, so the server, the sync and the config check use one value.\n\nConfig::validate rejects a sync.block_batch_size above that maximum. A\nblock_batch_size of 0 stays valid: it asks for the default page size of\nthe server.\n\n* fix(p2p): ask only block index sources that advertise entries\n\nA source that advertises no entries from the requested height gave a\nvalid empty answer, and that answer ended the fetch even when a source\nwith entries had failed and could still answer on a retry.\n\nAsk only the sources that advertise entries from the requested height.\nWith none, the index is empty and no request is sent. When each source\nwith entries breaks its own claims, the index is also empty. When a\nsource with entries only fails, the fetch returns an error.\n\n* docs(reth): warn which rpc_args namespaces are unsafe on a public port\n\n* docs(config): add commented rpc_args example to network templates\n\n* fix(api): keep CORS on the root redirect\n\nCORS moved from the app to the /v1 scope so that the /internal routes get\nnone. The public / redirect to /v1/info lost CORS with that move, so a\ncross-origin browser request to / failed. Wrap the redirect resource in the\nsame permissive CORS as the /v1 scope.\n\n* fix(p2p): reject a block header reply that is not the requested header\n\nA peer could answer a header request with a different, validly signed\nheader and the pull still returned Ok. Block sync then counted it as a\npull of the requested hash. The header pulls now compare the returned\nblock_hash with the requested one and fail with UnexpectedData, as the\nexecution payload pull does.\n\n* docs(reth): warn that read-only RPC namespaces can still load the node\n\nRead-only namespaces do not change node state, but traces and some debug\nreads can use much CPU, memory or I/O, and /v1/execution-rpc forwards every\nJSON-RPC method. Tell operators to restrict and rate-limit both entry points\nbefore they add these namespaces. List flashbots and mev with the other\nunsafe namespaces in SETUP.md and the templates.\n\n* fix(api): hold the tx ingress permit until the mempool handles the message\n\nA reply timeout or a client disconnect freed the admission permit while\nthe message stayed in the unbounded mempool queue. With a stalled\nmempool, sustained submissions grew the queue without limit.\n\nA spawned task now owns the permit and frees it when the mempool replies\nor drops the message, so at most MAX_IN_FLIGHT_TX_INGRESS messages are\nqueued.\n\n* fix(p2p): lower the score of a peer that sends another block header\n\nThe single-peer header pull rejected a header whose hash is not the\nrequested one, but did not score the peer down. The multi-peer pull\nalready gives BogusData for the same fault.\n\n* fix(reth): do not allow debug methods that Reth does not implement\n\ndebug_traceChain, debug_getBlockAccessList and debug_storageRangeAt are\nstubs in the pinned Reth. On the allowlist, a later Reth that implements\nthem (debug_traceChain traces a block range) would serve them without\nreview.\n\nAdds a test that the removal keeps only listed debug methods on every\ntransport.\n\n* fix(p2p): send the default block index page size when the batch size is 0\n\nA query limit of 0 asks for the server default page, which the client\ndid not know, so no length rule applied to the answer. A peer could\nreturn a short answer without penalty.\n\nThe sync now sends DEFAULT_BLOCK_INDEX_QUERY_LIMIT explicitly, so the\nlength rule always applies. The constant moves from the gossip server\nto irys-types. A block_batch_size of 0 stays valid.",
+          "timestamp": "2026-10-29T22:26:35Z",
+          "tree_id": "78f812a20378c4e53950616257be1371b8051fc5",
+          "url": "https://github.com/Irys-xyz/irys/commit/2086e3a9c4abc7908e850b934fafc6b61dc68b89"
+        },
+        "date": 1793314036194,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012315,
+            "range": "± 0.000375",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.124445,
+            "range": "± 0.004032",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.306483,
+            "range": "± 0.058718",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.94824,
+            "range": "± 0.090349",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078884,
+            "range": "± 0.000453",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 767.071775,
+            "range": "± 8.727242",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 995.343013,
+            "range": "± 15.866412",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.128807,
+            "range": "± 0.003905",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1249.020234,
+            "range": "± 40.475371",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1531.095143,
+            "range": "± 14.00541",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.032915,
+            "range": "± 0.001406",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 214.35843,
+            "range": "± 2.252404",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 277.579393,
+            "range": "± 2.088154",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
