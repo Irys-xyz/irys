@@ -126,6 +126,8 @@ const IRYS_OWNED_RPC_ARGS: [&str; 3] = ["http", "http_addr", "http_corsdomain"];
 ///
 /// Fails if a flag is not valid or sets a field in [`IRYS_OWNED_RPC_ARGS`].
 /// Without `--http.api`, the HTTP RPC serves only the `eth` namespace.
+/// An explicit `--http.api` applies as given. See `RethConfig::rpc_args` for
+/// the namespaces that are unsafe on a public port.
 fn parse_rpc_args(rpc_args: &[String]) -> eyre::Result<RpcServerArgs> {
     let command = RethRpcFlags::command();
     let argv = std::iter::once("reth").chain(rpc_args.iter().map(String::as_str));

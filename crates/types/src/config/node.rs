@@ -1044,6 +1044,23 @@ pub struct RethConfig {
     /// Reth RPC server flags, the same syntax as `reth node` RPC flags,
     /// e.g. `["--http.api=eth,debug", "--rpc.max-tracing-requests=4"]`.
     /// Empty by default: the HTTP RPC then serves only the `eth` namespace.
+    ///
+    /// Irys uses `--http.api`, `--ws.api` and `--ipc*` exactly as given.
+    /// The HTTP RPC binds to the Reth network `bind_ip` (`0.0.0.0` in the
+    /// mainnet and testnet templates). The Irys API proxies it at
+    /// `/v1/execution-rpc`. It has no authentication.
+    ///
+    /// Read-only namespaces are safe to add: `debug` (Irys removes every
+    /// `debug_*` method except a fixed set of reads and traces), `trace`,
+    /// `txpool`, `net`, `web3` and `rpc`.
+    /// Do not add namespaces that change node state to a reachable port.
+    /// Anyone who reaches the port can call them:
+    /// - `admin`: controls peers and clears the transaction pool.
+    /// - `miner`: changes block-building settings.
+    /// - `testing`: builds blocks from caller-supplied transactions.
+    /// - `flashbots` and `mev`: bundle submission methods.
+    ///
+    /// `all` includes every namespace above. Do not use it.
     #[serde(default)]
     pub rpc_args: Vec<String>,
 }
