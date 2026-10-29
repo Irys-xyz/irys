@@ -22,6 +22,7 @@ use irys_domain::{
     chain_sync_state::ChainSyncState,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
+use irys_reward_curve::HalvingCurve;
 use irys_types::{
     BlockHash, Config, IrysBlockHeader, SealedBlock, SendTraced as _, TokioServiceHandle, Traced,
     app_state::DatabaseProvider,
@@ -350,6 +351,9 @@ pub(crate) struct ValidationServiceInner {
     /// Local partitions. Full ingress-proof validation reads a body from here
     /// when the cache row has no bytes.
     pub(crate) storage_modules_guard: StorageModulesReadGuard,
+    /// The node's block reward curve, shared with block production and
+    /// prevalidation.
+    pub(crate) reward_curve: Arc<HalvingCurve>,
 }
 
 impl ValidationService {
@@ -369,6 +373,7 @@ impl ValidationService {
         rx: UnboundedReceiver<Traced<ValidationServiceMessage>>,
         runtime_handle: tokio::runtime::Handle,
         chain_sync_state: ChainSyncState,
+        reward_curve: Arc<HalvingCurve>,
     ) -> (TokioServiceHandle, Arc<AtomicBool>) {
         info!("Spawning validation service");
 
@@ -403,6 +408,7 @@ impl ValidationService {
                         storage_modules_guard,
                         validation_enabled: validation_enabled_clone,
                         chain_sync_state,
+                        reward_curve,
                     }),
                 };
 

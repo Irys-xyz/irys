@@ -910,11 +910,13 @@ pub mod unix_timestamp_string_serde {
     {
         let s = String::deserialize(deserializer)?;
 
-        Ok(UnixTimestamp::from_secs(
-            DateTime::parse_from_rfc3339(&s)
-                .map_err(|e| serde::de::Error::custom(format!("invalid timestamp: {}", e)))?
-                .timestamp() as u64,
-        ))
+        let secs = DateTime::parse_from_rfc3339(&s)
+            .map_err(|e| serde::de::Error::custom(format!("invalid timestamp: {}", e)))?
+            .timestamp();
+        let secs = u64::try_from(secs).map_err(|_| {
+            serde::de::Error::custom(format!("invalid timestamp: {s} is before 1970"))
+        })?;
+        Ok(UnixTimestamp::from_secs(secs))
     }
 
     pub fn serialize<S>(timestamp: &UnixTimestamp, serializer: S) -> Result<S::Ok, S::Error>
@@ -1124,6 +1126,15 @@ mod tests {
             let result: Result<TestStruct, _> = serde_json::from_str(json);
 
             assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_deserialize_pre_1970_timestamp_returns_error() {
+            let json = r#"{"timestamp":"1969-12-31T23:59:59+00:00"}"#;
+
+            let err = serde_json::from_str::<TestStruct>(json).unwrap_err();
+
+            assert!(err.to_string().contains("before 1970"), "{err}");
         }
     }
 

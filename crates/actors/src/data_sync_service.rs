@@ -2507,6 +2507,7 @@ mod ingress_handoff_tests {
             packing_address,
             partition_offset,
             partition_hash,
+            packing_iterations: 1_000,
         }
     }
 

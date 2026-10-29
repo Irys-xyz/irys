@@ -878,6 +878,7 @@ impl TestSetup {
             partition_offset,
             tx_offset: chunk.tx_offset,
             partition_hash: pa.partition_hash,
+            packing_iterations: consensus_config.entropy_packing_iterations,
         }
     }
 }

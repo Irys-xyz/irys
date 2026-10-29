@@ -1,99 +1,64 @@
+use std::ffi::CStr;
 use std::os::raw::c_int;
 
 // CUDA Runtime API bindings (minimal subset)
-#[cfg(feature = "nvidia")]
 #[link(name = "cudart")]
 unsafe extern "C" {
     fn cudaGetDeviceCount(count: *mut c_int) -> c_int;
-    fn cudaGetDeviceProperties(prop: *mut CudaDeviceProp, device: c_int) -> c_int;
+    fn cudaDeviceGetAttribute(value: *mut c_int, attr: c_int, device: c_int) -> c_int;
     fn cudaSetDevice(device: c_int) -> c_int;
 }
 
-#[cfg(feature = "nvidia")]
-#[repr(C)]
-#[derive(Debug)]
-struct CudaDeviceProp {
-    name: [u8; 256],
-    uuid: [u8; 16],
-    luid: [u8; 8],
-    luid_device_node_mask: u32,
-    total_global_mem: usize,
-    shared_mem_per_block: usize,
-    regs_per_block: c_int,
-    warp_size: c_int,
-    mem_pitch: usize,
-    max_threads_per_block: c_int,
-    max_threads_dim: [c_int; 3],
-    max_grid_size: [c_int; 3],
-    clock_rate: c_int,
-    total_const_mem: usize,
-    major: c_int,
-    minor: c_int,
-    texture_alignment: usize,
-    texture_pitch_alignment: usize,
-    device_overlap: c_int,
-    multi_processor_count: c_int,
-    kernel_exec_timeout_enabled: c_int,
-    integrated: c_int,
-    can_map_host_memory: c_int,
-    compute_mode: c_int,
-    max_texture_1d: c_int,
-    max_texture_1d_mipmap: c_int,
-    max_texture_1d_linear: c_int,
-    max_texture_2d: [c_int; 2],
-    max_texture_2d_mipmap: [c_int; 2],
-    max_texture_2d_linear: [c_int; 3],
-    max_texture_2d_gather: [c_int; 2],
-    max_texture_3d: [c_int; 3],
-    max_texture_3d_alt: [c_int; 3],
-    max_texture_cubemap: c_int,
-    max_texture_1d_layered: [c_int; 2],
-    max_texture_2d_layered: [c_int; 3],
-    max_texture_cubemap_layered: [c_int; 2],
-    max_surface_1d: c_int,
-    max_surface_2d: [c_int; 2],
-    max_surface_3d: [c_int; 3],
-    max_surface_1d_layered: [c_int; 2],
-    max_surface_2d_layered: [c_int; 3],
-    max_surface_cubemap: c_int,
-    max_surface_cubemap_layered: [c_int; 2],
-    surface_alignment: usize,
-    concurrent_kernels: c_int,
-    ecc_enabled: c_int,
-    pci_bus_id: c_int,
-    pci_device_id: c_int,
-    pci_domain_id: c_int,
-    tcc_driver: c_int,
-    async_engine_count: c_int,
-    unified_addressing: c_int,
-    memory_clock_rate: c_int,
-    memory_bus_width: c_int,
-    l2_cache_size: c_int,
-    persisting_l2_cache_max_size: c_int,
-    max_threads_per_multi_processor: c_int,
-    stream_priorities_supported: c_int,
-    global_l1_cache_supported: c_int,
-    local_l1_cache_supported: c_int,
-    shared_mem_per_multiprocessor: usize,
-    regs_per_multiprocessor: c_int,
-    managed_memory: c_int,
-    is_multi_gpu_board: c_int,
-    multi_gpu_board_group_id: c_int,
-    host_native_atomic_supported: c_int,
-    single_to_double_precision_perf_ratio: c_int,
-    pageable_memory_access: c_int,
-    concurrent_managed_access: c_int,
-    compute_preemption_supported: c_int,
-    can_use_host_pointer_for_registered_mem: c_int,
-    cooperative_launch: c_int,
-    cooperative_multi_device_launch: c_int,
-    // spellchecker:ignore-next-line
-    shared_mem_per_block_optin: usize,
-    pageable_memory_access_uses_host_page_tables: c_int,
-    direct_managed_mem_access_from_host: c_int,
-    max_blocks_per_multi_processor: c_int,
-    access_policy_max_window_size: c_int,
-    reserved_shared_mem_per_block: usize,
+/// The subset of CUDA's `cudaDeviceAttr` enum (driver_types.h) that this crate reads, with the
+/// same numeric values. Attributes are queried one by one so this code does not depend on the
+/// toolkit's `cudaDeviceProp` struct layout, which grows between toolkit versions.
+#[derive(Debug, Clone, Copy)]
+#[repr(i32)]
+enum CudaDeviceAttribute {
+    MaxThreadsPerBlock = 1,
+    MaxBlockDimX = 2,
+    MaxBlockDimY = 3,
+    MaxBlockDimZ = 4,
+    MaxGridDimX = 5,
+    MaxGridDimY = 6,
+    MaxGridDimZ = 7,
+    WarpSize = 10,
+    MultiProcessorCount = 16,
+    MaxThreadsPerMultiProcessor = 39,
+    ComputeCapabilityMajor = 75,
+    ComputeCapabilityMinor = 76,
+    MaxRegistersPerMultiprocessor = 82,
+    MaxBlocksPerMultiprocessor = 106,
+}
+
+fn get_device_attribute(device_id: i32, attribute: CudaDeviceAttribute) -> Result<i32, String> {
+    let mut value: c_int = 0;
+    match unsafe { cudaDeviceGetAttribute(&mut value, attribute as c_int, device_id) } {
+        0 => Ok(value),
+        n => Err(format!(
+            "Failed to get device attribute {:?} for device {}: error code {}",
+            attribute, device_id, n
+        )),
+    }
+}
+
+/// The name of CUDA device `device_id`. CUDA has no device attribute for the name, so a C
+/// helper built with the toolkit's own `cudaDeviceProp` reads it.
+fn get_device_name(device_id: i32) -> Result<String, String> {
+    // `cudaDeviceProp::name` is a 256-byte C string.
+    let mut name = [0_u8; 256];
+    let result = unsafe {
+        crate::capacity_cuda::irys_cuda_device_name(device_id, name.as_mut_ptr().cast(), name.len())
+    };
+    if result != 0 {
+        return Err(format!(
+            "Failed to get the name of device {}: error code {}",
+            device_id, result
+        ));
+    }
+    let name = CStr::from_bytes_until_nul(&name)
+        .map_err(|e| format!("Device {} name is not NUL-terminated: {}", device_id, e))?;
+    Ok(name.to_string_lossy().into_owned())
 }
 
 pub fn set_current_cuda_device_for_thread(device_id: i32) -> Result<(), String> {
@@ -121,47 +86,34 @@ pub struct NvidiaGpuConfig {
     pub regs_per_multiprocessor: i32,
 }
 
-#[cfg(feature = "nvidia")]
 impl NvidiaGpuConfig {
     /// Query GPU properties for the specified device
     pub fn query_device(device_id: i32) -> Result<Self, String> {
-        unsafe {
-            let mut prop: CudaDeviceProp = std::mem::zeroed();
-            let result = cudaGetDeviceProperties(&mut prop, device_id);
-
-            if result != 0 {
-                return Err(format!(
-                    "Failed to get device properties: error code {}",
-                    result
-                ));
-            }
-
-            // Convert device name from C string
-            let name_bytes: Vec<u8> = prop.name.iter().take_while(|&&b| b != 0).copied().collect();
-            let device_name = String::from_utf8_lossy(&name_bytes).to_string();
-
-            Ok(Self {
-                device_id,
-                device_name,
-                compute_capability: (prop.major, prop.minor),
-                max_threads_per_block: prop.max_threads_per_block,
-                max_block_dim: (
-                    prop.max_threads_dim[0],
-                    prop.max_threads_dim[1],
-                    prop.max_threads_dim[2],
-                ),
-                max_grid_size: (
-                    prop.max_grid_size[0],
-                    prop.max_grid_size[1],
-                    prop.max_grid_size[2],
-                ),
-                warp_size: prop.warp_size,
-                multiprocessor_count: prop.multi_processor_count,
-                max_threads_per_multiprocessor: prop.max_threads_per_multi_processor,
-                max_blocks_per_multiprocessor: prop.max_blocks_per_multi_processor,
-                regs_per_multiprocessor: prop.regs_per_multiprocessor,
-            })
-        }
+        let attr = |attribute| get_device_attribute(device_id, attribute);
+        Ok(Self {
+            device_id,
+            device_name: get_device_name(device_id)?,
+            compute_capability: (
+                attr(CudaDeviceAttribute::ComputeCapabilityMajor)?,
+                attr(CudaDeviceAttribute::ComputeCapabilityMinor)?,
+            ),
+            max_threads_per_block: attr(CudaDeviceAttribute::MaxThreadsPerBlock)?,
+            max_block_dim: (
+                attr(CudaDeviceAttribute::MaxBlockDimX)?,
+                attr(CudaDeviceAttribute::MaxBlockDimY)?,
+                attr(CudaDeviceAttribute::MaxBlockDimZ)?,
+            ),
+            max_grid_size: (
+                attr(CudaDeviceAttribute::MaxGridDimX)?,
+                attr(CudaDeviceAttribute::MaxGridDimY)?,
+                attr(CudaDeviceAttribute::MaxGridDimZ)?,
+            ),
+            warp_size: attr(CudaDeviceAttribute::WarpSize)?,
+            multiprocessor_count: attr(CudaDeviceAttribute::MultiProcessorCount)?,
+            max_threads_per_multiprocessor: attr(CudaDeviceAttribute::MaxThreadsPerMultiProcessor)?,
+            max_blocks_per_multiprocessor: attr(CudaDeviceAttribute::MaxBlocksPerMultiprocessor)?,
+            regs_per_multiprocessor: attr(CudaDeviceAttribute::MaxRegistersPerMultiprocessor)?,
+        })
     }
 
     /// Get the number of available CUDA devices
@@ -245,5 +197,29 @@ impl NvidiaGpuConfig {
             self.max_blocks_per_multiprocessor
         );
         println!(" registers per SM: {}", self.regs_per_multiprocessor);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_device_reads_nonzero_attributes() {
+        let config = NvidiaGpuConfig::query_device(0).expect("query device 0");
+        assert!(!config.device_name.is_empty());
+        assert!(config.multiprocessor_count > 0);
+        assert!(config.compute_capability.0 > 0);
+        assert!(config.max_threads_per_block > 0);
+        assert!(
+            config.max_block_dim.0 > 0 && config.max_block_dim.1 > 0 && config.max_block_dim.2 > 0
+        );
+        assert!(
+            config.max_grid_size.0 > 0 && config.max_grid_size.1 > 0 && config.max_grid_size.2 > 0
+        );
+        assert!(config.max_threads_per_multiprocessor > 0);
+        assert!(config.max_blocks_per_multiprocessor > 0);
+        assert!(config.regs_per_multiprocessor > 0);
+        assert_eq!(config.warp_size, 32);
     }
 }

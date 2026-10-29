@@ -1,3 +1,4 @@
+use crate::block_reward::{full_block_reward, split_block_reward};
 use crate::block_tree_service::BlockTreeServiceMessage;
 use crate::data_tx_validation::{DataTxStructuralDefect, data_tx_structural_defect};
 use crate::{
@@ -593,8 +594,14 @@ impl PreValidationError {
             | Self::ValidationServiceUnreachable
             // OS clock failure.
             | Self::SystemTimeError(_)
-            // Local arithmetic on locally-derived inputs (height * block_time);
-            // the peer-supplied reward is checked separately via RewardMismatch.
+            // Local arithmetic on locally-derived inputs (height * block_time,
+            // curve from config). The Delta split also consumes the
+            // peer-supplied timestamp and PoA kind, but cannot fail on them:
+            // the miner-share subtraction underflows only if
+            // `capacity_chunk_reward_percent > 1.0`, which `Config::validate`
+            // rejects at node startup, and the percent multiplication cannot
+            // overflow because the full reward is bounded by the inflation cap.
+            // The peer-supplied reward is checked separately via RewardMismatch.
             | Self::RewardCurveError(_)
             // Local arithmetic with local config inputs; per-tx fee comparisons
             // use the separate Insufficient*Fee variants.
@@ -1955,21 +1962,30 @@ pub async fn prevalidate_block(
         return Err(PreValidationError::EmaMismatch);
     }
 
-    let target_block_time_seconds = config.consensus.difficulty_adjustment.block_time;
-
-    // Use height * target_block_time for consistent reward curve positioning
-    let previous_block_seconds = (previous_block.height() * target_block_time_seconds) as u128;
-    let current_block_seconds = previous_block_seconds + target_block_time_seconds as u128;
-
-    let reward = reward_curve
-        .reward_between(previous_block_seconds, current_block_seconds)
-        .map_err(|e| PreValidationError::RewardCurveError(e.to_string()))?;
+    let full_reward = full_block_reward(
+        &reward_curve,
+        config.consensus.difficulty_adjustment.block_time,
+        previous_block.height(),
+    )
+    .map_err(|e| PreValidationError::RewardCurveError(e.to_string()))?;
+    // The declared PoA kind is safe to use: `poa_is_valid` verifies a data PoA
+    // against its data path and an entropy PoA against computed entropy.
+    // Trusted sync skips `poa_is_valid`, so there the kind is trusted like the
+    // rest of the PoA.
+    let is_capacity_poa = !block.poa.is_data_poa();
+    let reward = split_block_reward(
+        full_reward,
+        &config.consensus,
+        block.timestamp_secs(),
+        is_capacity_poa,
+    )
+    .map_err(|e| PreValidationError::RewardCurveError(e.to_string()))?;
 
     // Check valid curve price
-    if reward.amount != block.reward_amount {
+    if reward.miner.amount != block.reward_amount {
         return Err(PreValidationError::RewardMismatch {
             got: block.reward_amount,
-            expected: reward.amount,
+            expected: reward.miner.amount,
         });
     }
 
@@ -4990,6 +5006,7 @@ pub async fn shadow_transactions_are_valid(
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
+    reward_curve: &HalvingCurve,
 ) -> Result<(), ValidationError> {
     // Helper: payload-structure rejections are always consensus.
     fn reject(msg: impl Into<String>) -> ValidationError {
@@ -5145,6 +5162,7 @@ pub async fn shadow_transactions_are_valid(
         parent_commitment_snapshot,
         block_index,
         transactions,
+        reward_curve,
     )
     .await?;
 
@@ -5425,6 +5443,7 @@ async fn generate_expected_shadow_transactions(
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
+    reward_curve: &HalvingCurve,
 ) -> Result<Vec<ShadowMetadata>, ValidationError> {
     // Helpers: classify common failure shapes.
     let parent_hash = block.previous_block_hash;
@@ -5682,11 +5701,31 @@ async fn generate_expected_shadow_transactions(
         }
     }
 
+    // Recompute the treasury share here rather than derive it from
+    // `block.reward_amount`, so this path does not depend on prevalidation
+    // having checked that field. A curve failure is local arithmetic, the
+    // same class as in prevalidation.
+    let block_reward = full_block_reward(
+        reward_curve,
+        config.consensus.difficulty_adjustment.block_time,
+        prev_block.height,
+    )
+    .and_then(|full_reward| {
+        split_block_reward(
+            full_reward,
+            &config.consensus,
+            block.timestamp_secs(),
+            !block.poa.is_data_poa(),
+        )
+    })
+    .map_err(|e| PreValidationError::RewardCurveError(e.to_string()))?;
+
     // Classification rationale: see `classify_shadow_tx_gen_err` doc.
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
         &block.reward_amount,
+        block_reward.treasury.amount,
         &prev_block,
         &block.solution_hash,
         &config.consensus,

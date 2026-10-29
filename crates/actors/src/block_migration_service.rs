@@ -1,3 +1,4 @@
+use crate::block_reward::block_emission;
 use crate::chunk_migration_service::ChunkMigrationServiceMessage;
 use crate::packing_service::{PackingRequest, PackingSender};
 use eyre::{OptionExt as _, ensure};
@@ -10,6 +11,7 @@ use irys_domain::{
     block_index_guard::BlockIndexReadGuard, forkchoice_markers::finalized_height,
     get_overlapped_storage_modules,
 };
+use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::block_stream::{BlockEvent, BlockRef, StreamEvent, StreamFrame};
 use irys_types::{
@@ -85,6 +87,10 @@ pub struct BlockMigrationService {
     stream_appends_since_prune: AtomicU64,
     block_index_guard: BlockIndexReadGuard,
     supply_state: Option<Arc<SupplyState>>,
+    /// Supply state counts each block's full reward-curve amount as emitted,
+    /// including the part that goes to the treasury.
+    reward_curve: Arc<HalvingCurve>,
+    block_time_secs: u64,
     chunk_size: u64,
     /// Epoch length, used to identify non-genesis epoch blocks: those APPLY
     /// (re-list) every commitment of the epoch but never first-INCLUDE one, so
@@ -198,6 +204,8 @@ impl BlockMigrationService {
         db: DatabaseProvider,
         block_index_guard: BlockIndexReadGuard,
         supply_state: Option<Arc<SupplyState>>,
+        reward_curve: Arc<HalvingCurve>,
+        block_time_secs: u64,
         chunk_size: u64,
         num_blocks_in_epoch: u64,
         block_tree_depth: u64,
@@ -237,6 +245,8 @@ impl BlockMigrationService {
             stream_appends_since_prune: AtomicU64::new(0),
             block_index_guard,
             supply_state,
+            reward_curve,
+            block_time_secs,
             chunk_size,
             num_blocks_in_epoch,
             block_tree_depth,
@@ -654,12 +664,12 @@ impl BlockMigrationService {
             "recovering from network partition"
         );
 
-        // Phase 1: Collect per-block chunk ranges, tx data_roots, and reward amounts
+        // Phase 1: Collect per-block chunk ranges, tx data_roots, and emissions
         // while the block index is still intact.
         struct BlockRollbackInfo {
             ledger_ranges: Vec<(DataLedger, LedgerChunkRange)>,
             data_roots: Vec<H256>,
-            reward_amount: U256,
+            emission: U256,
         }
 
         let mut rollback_infos = Vec::with_capacity(rollback_count as usize);
@@ -712,7 +722,7 @@ impl BlockMigrationService {
             rollback_infos.push(BlockRollbackInfo {
                 ledger_ranges,
                 data_roots,
-                reward_amount: header.reward_amount,
+                emission: block_emission(&self.reward_curve, self.block_time_secs, h)?,
             });
         }
 
@@ -904,9 +914,9 @@ impl BlockMigrationService {
 
             // Phase 4: Roll back supply state
             if let Some(supply_state) = &self.supply_state {
-                let reward_sum: U256 = rollback_infos.iter().fold(U256::zero(), |acc, info| {
-                    acc.saturating_add(info.reward_amount)
-                });
+                let reward_sum: U256 = rollback_infos
+                    .iter()
+                    .fold(U256::zero(), |acc, info| acc.saturating_add(info.emission));
                 supply_state.rollback_reward(fork_parent_height, reward_sum);
             }
 
@@ -973,8 +983,11 @@ impl BlockMigrationService {
             // the durable stream log (frame already committed with the index write).
             on_migrated(sealed_block, stream_frame);
             if let Some(supply_state) = &self.supply_state {
-                let block = sealed_block.header();
-                supply_state.add_block_reward(block.height, block.reward_amount)?;
+                let height = sealed_block.header().height;
+                supply_state.add_block_reward(
+                    height,
+                    block_emission(&self.reward_curve, self.block_time_secs, height)?,
+                )?;
             }
             self.send_chunk_migration(sealed_block)?;
         }
@@ -1272,6 +1285,7 @@ mod tests {
     //! (block_index_guard, cache, chunk_migration_sender, supply_state) are
     //! satisfied with cheap placeholders.
     use super::*;
+    use crate::block_reward::reward_curve_from_config;
     use irys_database::{
         IrysDatabaseArgs as _, cache_data_root, open_or_create_db, read_block_stream_from,
         tables::{CachedDataRoots, IrysTables},
@@ -1339,6 +1353,8 @@ mod tests {
             db,
             block_index_guard,
             None, // supply_state — unused by persist_metadata
+            Arc::new(reward_curve_from_config(&ConsensusConfig::testing())),
+            ConsensusConfig::testing().difficulty_adjustment.block_time,
             ConsensusConfig::testing().chunk_size,
             num_blocks_in_epoch,
             ConsensusConfig::testing().block_tree_depth,
@@ -3099,6 +3115,8 @@ mod tests {
             db.clone(),
             block_index_guard,
             None,
+            Arc::new(reward_curve_from_config(&config.consensus)),
+            config.consensus.difficulty_adjustment.block_time,
             config.consensus.chunk_size,
             ConsensusConfig::testing().epoch.num_blocks_in_epoch,
             ConsensusConfig::testing().block_tree_depth,

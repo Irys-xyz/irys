@@ -7,6 +7,7 @@ mod cascade_term_balance;
 mod cascade_term_expiry;
 mod commitment_replay;
 mod data_tx_pricing;
+mod delta_capacity_reward;
 mod ingress_proof_reanchor_dedup;
 mod ingress_proof_validation;
 mod invalid_perm_fee_refund;

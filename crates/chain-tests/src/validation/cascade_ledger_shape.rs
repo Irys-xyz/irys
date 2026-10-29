@@ -127,6 +127,7 @@ async fn heavy_cascade_midchain_activation_seeds_term_ledger_slots() -> eyre::Re
         c.hardforks.delta = Some(Delta {
             activation_timestamp: UnixTimestamp::from_secs(1),
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
         });
         // Cascade intentionally NOT configured yet — activated mid-chain below.
         c.hardforks.cascade = None;

@@ -70,6 +70,11 @@ index_wal_backstop_ms = 1000
 # A direct read of a range that still has dirty buffered pages returns the new
 # bytes: Linux writes that range back first (XFS and ext4 iomap).
 # recall_direct_io = true
+# On by default: while a mining recall reads, the disk lane holds the disk
+# for it and packing, data sync, and serving wait for the pread to return.
+# Set recall_io_priority = false when other IO should take priority: the
+# recall shares the disk with that IO instead of holding it.
+# recall_io_priority = true
 
 [data_sync]
 max_storage_throughput_bps = 1047961600
@@ -227,11 +232,14 @@ number_of_ingress_proofs_from_assignees = 0
 # annual_cost_per_gb = 0.028        # USD/GB/year override (default: 0.028)
 
 # Delta is a WIP hardfork and is not deployed. It accumulates changes that
-# need a hardfork. The change it carries now: a ledger activated mid-chain
-# gets its first slots in the activating epoch. Uncomment to enable:
+# need a hardfork. Changes it carries now: a ledger activated mid-chain
+# gets its first slots in the activating epoch, and a capacity (entropy) PoA
+# earns a reduced block reward from the first block at/after activation.
+# Uncomment to enable:
 # [consensus.Custom.hardforks.delta]
 # activation_timestamp = "2026-09-01T00:00:00+00:00"
 # initial_slots_per_new_ledger = 1   # slots seeded per newly activated ledger (default: 1)
+# capacity_chunk_reward_percent = 0.5   # miner share of the reward for a capacity PoA (default: 0.5)
 
 # Reth Prometheus endpoint (port 9001). The default 127.0.0.1 restricts the
 # listener to the host loopback; deployments expose it externally only via

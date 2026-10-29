@@ -128,7 +128,8 @@ fn mock_commitment_txs(count: usize) -> Vec<CommitmentTransaction> {
 #[tokio::test]
 async fn test_future_block_rejection() -> Result<()> {
     use irys_actors::{
-        BlockProdStrategy, BlockProducerInner, async_trait, reth_ethereum_primitives,
+        BlockProdStrategy, BlockProducerInner, async_trait, block_reward::BlockRewardSplit,
+        reth_ethereum_primitives,
     };
     use irys_types::{AdjustmentStats, block_production::SolutionContext, storage_pricing::Amount};
     use reth::{core::primitives::SealedBlock as RethSealedBlock, payload::EthBuiltPayload};
@@ -156,7 +157,7 @@ async fn test_future_block_rejection() -> Result<()> {
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             _timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
             reward_address: irys_types::IrysAddress,
@@ -167,7 +168,7 @@ async fn test_future_block_rejection() -> Result<()> {
                     prev_block_header,
                     perv_evm_block,
                     mempool,
-                    reward_amount,
+                    block_reward,
                     self.invalid_timestamp,
                     solution_hash,
                     reward_address,
