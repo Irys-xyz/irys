@@ -1284,6 +1284,11 @@ impl ValidationServiceInner {
         // progress check alive until the live counter walks the whole backlog.
         // The generation abort routes to the same `VdfReanchorGenerationChanged`
         // → `Cancelled` requeue lane as the send-side check.
+        //
+        // No block-tree absence check here, unlike Stage A: this block's steps
+        // are already validated and sent to fast-forward, so a `Stalled` wait
+        // means the VDF writer stopped. That is a node fault whether or not the
+        // block is still in the tree, so the stall panics.
         let final_wait_result = self
             .vdf_state
             .wait_for_step_or_reanchor(
