@@ -1,5 +1,5 @@
 {
-  "description": "Testing-geometry roots (spec §10): chunk_size 32, segments_per_chunk 4. Bytes are mod251, the pattern of the printed root table. The case holds the chunk roots, data_tree_root, size_witness, and data_commitment.",
+  "description": "Testing-geometry roots (spec §10): chunk_size 32, segments_per_chunk 4. Bytes are mod251, the pattern of the printed root table. The case holds the chunk roots, the chunk leaves chunk_leaf(c, R_c), data_tree_root, size_witness, and data_commitment.",
   "geometry": {
     "chunk_size": 32,
     "segments_per_chunk": 4,
@@ -13,9 +13,12 @@
       "chunk_roots": [
         "8521b87ff724236722cfb6d6306ad59bceb4aee3e35ae73c41326cd31915e13e"
       ],
-      "data_tree_root": "8521b87ff724236722cfb6d6306ad59bceb4aee3e35ae73c41326cd31915e13e",
+      "chunk_leaves": [
+        "0f5fe2ca48d3d3f37848fc851257fc094c8b27feaa82c905b2b8ffbd177f6543"
+      ],
+      "data_tree_root": "0f5fe2ca48d3d3f37848fc851257fc094c8b27feaa82c905b2b8ffbd177f6543",
       "size_witness": "d5ab56d309b6787ad2b444de2d3d8e5ea2ee9a97ca05547b8b676ac82b9cb57c",
-      "data_commitment": "594c8b3b9cff69e0b5dd50c7465a7b2f7dc722d445f0ac2952d135c04b79f2b6"
+      "data_commitment": "6766c8a6ed3afeaeb38d74b508b774ee33c8396d1061ac2bd272bedd02f5c421"
     },
     {
       "pattern": "mod251",
@@ -24,9 +27,12 @@
       "chunk_roots": [
         "2239889b93ac82ead2db9605f2584a25255c90206c1fccaddf54caa75b7fc1a1"
       ],
-      "data_tree_root": "2239889b93ac82ead2db9605f2584a25255c90206c1fccaddf54caa75b7fc1a1",
+      "chunk_leaves": [
+        "bed46322520adad4b5c1808a4a30269e4fdbf89e89b83a1b8439442c01db2c83"
+      ],
+      "data_tree_root": "bed46322520adad4b5c1808a4a30269e4fdbf89e89b83a1b8439442c01db2c83",
       "size_witness": "a67019ec9b57f752d6d83da74300e051e1a365806115b2fe3a1dfb69f6cab08f",
-      "data_commitment": "6e9c94693cb2fea535b79bb9938982db61ff23ade48119a60340e9a680423469"
+      "data_commitment": "e35809d4fdba5e31164f9e58ac91d659a117776eb7748cd7e518239039a92f2b"
     },
     {
       "pattern": "mod251",
@@ -35,9 +41,12 @@
       "chunk_roots": [
         "3ba2878285288e004dcd35a73e9a3df4a19f5fe5acccaf8d84b50fc7254e6ddb"
       ],
-      "data_tree_root": "3ba2878285288e004dcd35a73e9a3df4a19f5fe5acccaf8d84b50fc7254e6ddb",
+      "chunk_leaves": [
+        "ffa37bcad0b5968333e8f06b23b1f4cc430d4ae8a37a344de34ffc631dd8bf21"
+      ],
+      "data_tree_root": "ffa37bcad0b5968333e8f06b23b1f4cc430d4ae8a37a344de34ffc631dd8bf21",
       "size_witness": "9d1291454558131c86976393f491dd81109b911c8b794cfd603dc03a2f3a8648",
-      "data_commitment": "245a5af1aa8e606cb4e8878d93449d7872f68de9bb8b1db696c13ea81c393728"
+      "data_commitment": "515b428e3fa513840a5cf842a30d364a47d3cba26d7a483c845431d7ffebc852"
     },
     {
       "pattern": "mod251",
@@ -46,9 +55,12 @@
       "chunk_roots": [
         "d3e81f198d6bd3782d1941172c89e49721d8f5e33cc709d4f6ba3f54b9e35f82"
       ],
-      "data_tree_root": "d3e81f198d6bd3782d1941172c89e49721d8f5e33cc709d4f6ba3f54b9e35f82",
+      "chunk_leaves": [
+        "5a3b3c37b21874d69166aa06c52a0b5dd87ec378187adab4bc9d4ee42eb0ef0d"
+      ],
+      "data_tree_root": "5a3b3c37b21874d69166aa06c52a0b5dd87ec378187adab4bc9d4ee42eb0ef0d",
       "size_witness": "7794019bb4546df6e4fef536d63c217772a202227fcc0adfae4c7986b6c21e90",
-      "data_commitment": "aa774e6e5029925d0c43c6f019c56222cb4f220bad6626bb37bdf17180f5d6ea"
+      "data_commitment": "c21dea135c5673eb07cf2d641d7893b22ca83dd0986dc51b09b99b29026fdd6f"
     },
     {
       "pattern": "mod251",
@@ -58,9 +70,13 @@
         "d3e81f198d6bd3782d1941172c89e49721d8f5e33cc709d4f6ba3f54b9e35f82",
         "4c17c9dd474f9fba8dcb92dddfdf02c99132c4cf136fc06ab318b52903a4ea8f"
       ],
-      "data_tree_root": "bf98e27c471bfda3de1d44b4eb420f528238aa75e6e002fe1636c04a431713a9",
+      "chunk_leaves": [
+        "5a3b3c37b21874d69166aa06c52a0b5dd87ec378187adab4bc9d4ee42eb0ef0d",
+        "ad75c78bbe0e6298b0a30ec80bdf21c7c67ec504882b44f77e44bb9a6c695be2"
+      ],
+      "data_tree_root": "3bf5a0750be0980d8941fdf6778ba8b61b633599aee08a7d710d8566a4baa787",
       "size_witness": "bb0f138c586b530efb0a7f7f6fc9d6cf2aaf335db46f775c532e841d55089a47",
-      "data_commitment": "074db04f4bc2e5cf84f47d2772cf100c0c09d372e15c28264f9edf9187645d00"
+      "data_commitment": "c6ae46330fe254aebad232ff69bd954da161053bf629b8a64f130a4b2a4eb54d"
     },
     {
       "pattern": "mod251",
@@ -72,9 +88,15 @@
         "f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65",
         "dbc3c2433981a503f8ffa38629a9ec5d41501618b2afd860af52d6a93e06e8b6"
       ],
-      "data_tree_root": "7fd698c547deb0bbb8f8ab7db08dd34616a496f141167252487509cb74824564",
+      "chunk_leaves": [
+        "5a3b3c37b21874d69166aa06c52a0b5dd87ec378187adab4bc9d4ee42eb0ef0d",
+        "3aa18a228d2f3451956e247241308405d67fb04d8c590970eee71a6b0c7f9e98",
+        "fbc10578ab6a756a167ab57c071797202dd7a56d16acca9b268c230c87b0a7cc",
+        "ec954565828ae61fff557dcb9cc3b4e6a5da4b5417db597bffc7e9d6ac716332"
+      ],
+      "data_tree_root": "0a22641c8d9f53afbe333e832a5187307f4d4f31a0b43dad7ea3dfc0f84deb6e",
       "size_witness": "80a98067aa92e3bf32b45c5afa5ff2bf38640d51a0e4e338b938bf735f99b0e9",
-      "data_commitment": "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4"
+      "data_commitment": "82204503a718db465b3eeecea24b2896411211af0080555657eb2098fb969620"
     },
     {
       "pattern": "mod251",
@@ -87,9 +109,16 @@
         "9a956cc3bb04f7fb956b7b78c80d0cea73ecd53944407b7f9c84fb290cbc9920",
         "14c78ef36f831b0db9235850bb10e96f070dd80411da798b7105b1d4e4a1e7e7"
       ],
-      "data_tree_root": "81e7a996cd2ba141815aa48a1afe4f9c3d5c0ca450f12c9a605c20a0c3037c95",
+      "chunk_leaves": [
+        "5a3b3c37b21874d69166aa06c52a0b5dd87ec378187adab4bc9d4ee42eb0ef0d",
+        "3aa18a228d2f3451956e247241308405d67fb04d8c590970eee71a6b0c7f9e98",
+        "fbc10578ab6a756a167ab57c071797202dd7a56d16acca9b268c230c87b0a7cc",
+        "2cad763adc9dba6012664ea992e1fcaa3d4d4f94b6b052857e049f850d25653a",
+        "2dfd5b1ff72c13b0ac210bf51dab1427d8672f53d9734d6dc2efbf66714d4905"
+      ],
+      "data_tree_root": "ca4c355dba86031d9f6eb8d8955305abf03cdc51de06ed264873a247148d64e1",
       "size_witness": "7201edfdd30cd2c3e235398845aaa64b4f23238ac572cf2e0cfb6362f7a7b212",
-      "data_commitment": "8eb9e426d13ab02def39117e53b838110f8cebfdfb7d0b9c1726e05001c00e0d"
+      "data_commitment": "74e1e5bff4f5047875b49f5d20afc762335d3c07002b8e55acba6e65357ba20d"
     }
   ]
 }
