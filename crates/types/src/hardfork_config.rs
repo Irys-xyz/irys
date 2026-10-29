@@ -48,6 +48,8 @@ pub struct IrysHardforkConfig {
     /// - The capacity PoA reward reduction acts on every block. It applies from
     ///   the first block whose timestamp is >= `activation_timestamp`. The miner
     ///   share is `Delta::capacity_chunk_reward_percent`.
+    /// - The solution hash puts the VDF seed before the chunk, from the first
+    ///   block whose timestamp is >= `activation_timestamp`.
     ///
     /// None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,6 +152,9 @@ impl Cascade {
 /// - A capacity (entropy) PoA, that is, any PoA that is not a data PoA, receives
 ///   `capacity_chunk_reward_percent` of the full block reward; the treasury gets
 ///   the remainder.
+/// - The solution hash is `sha256(seed || offset_le || poa_chunk)`, not
+///   `sha256(poa_chunk || offset_le || seed)`. See
+///   [`crate::compute_solution_hash`].
 ///
 /// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
 /// but the epoch block's own header cannot list it: the producer derives the
@@ -160,13 +165,14 @@ impl Cascade {
 ///
 /// Resolved at each block's own timestamp. The first epoch block whose timestamp
 /// meets `activation_timestamp` seeds new ledgers; every block from the boundary
-/// onward applies the capacity-PoA reward adjustment. None means disabled.
+/// onward applies the capacity-PoA reward adjustment and the new solution hash
+/// order. None means disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Delta {
     /// Timestamp (seconds since epoch) at which this hardfork activates.
     /// Ledger changes happen at the first epoch block whose timestamp meets or
-    /// exceeds this value. The reward change happens at the first block of any
-    /// kind whose timestamp meets or exceeds this value.
+    /// exceeds this value. The reward and solution hash changes happen at the
+    /// first block of any kind whose timestamp meets or exceeds this value.
     #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
     /// Slots allocated to a data ledger in the epoch it becomes active
