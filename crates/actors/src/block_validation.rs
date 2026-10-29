@@ -36,7 +36,7 @@ use irys_types::{
     SealedBlock, SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
     app_state::DatabaseProvider,
     calculate_difficulty, ensure_proof_layout, expected_chunk_byte_range,
-    hardfork_config::{Cascade, ForEpoch},
+    hardfork_config::{Cascade, ForEpoch, IrysHardforkConfig},
     next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, validate_path_byte_range,
@@ -1863,7 +1863,7 @@ pub async fn prevalidate_block(
     );
 
     // Verify the solution_hash cryptographic link to PoA chunk, partition_chunk_offset and VDF seed
-    solution_hash_link_is_valid(block, poa_chunk)?;
+    solution_hash_link_is_valid(block, poa_chunk, &config.consensus.hardforks)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -2551,15 +2551,18 @@ pub fn solution_hash_is_valid(
 }
 
 /// Validates the cryptographic link between solution_hash and its inputs:
-/// PoA chunk bytes, partition_chunk_offset (little-endian), and the VDF seed (vdf_limiter_info.output)
+/// PoA chunk bytes, partition_chunk_offset (little-endian), and the VDF seed (vdf_limiter_info.output).
+/// Delta, resolved at the block's own timestamp, selects the hash order.
 pub fn solution_hash_link_is_valid(
     block: &IrysBlockHeader,
     poa_chunk: &[u8],
+    hardforks: &IrysHardforkConfig,
 ) -> Result<(), PreValidationError> {
     let expected = irys_types::compute_solution_hash(
         poa_chunk,
         block.poa.partition_chunk_offset,
         &block.vdf_limiter_info.output,
+        hardforks.delta_for_block(block.timestamp_secs()),
     );
 
     if block.solution_hash == expected {

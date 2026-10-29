@@ -5179,7 +5179,6 @@ dependencies = [
  "rust_decimal_macros",
  "serde",
  "serde_json",
- "sha2",
  "test-log",
  "thiserror 1.0.69",
  "tokio",

@@ -509,6 +509,16 @@ impl PartitionMiningServiceInner {
             );
         }
 
+        // The block's timestamp decides the hash order, and the block does not
+        // exist yet. The producer's timestamp is the clock at production, so
+        // the clock now is the best guess. The producer drops a solution
+        // hashed in the wrong order.
+        let delta = self
+            .config
+            .consensus
+            .hardforks
+            .delta_for_block(irys_types::global_clock().now_ms()?.to_secs());
+
         // Hash the recall before any index read. Only a winning chunk needs
         // its proof. A data proof must bind these bytes: block production copies
         // the paths into the PoA and does not check them, and a packed write
@@ -528,6 +538,7 @@ impl PartitionMiningServiceInner {
                 chunk_bytes,
                 *partition_chunk_offset,
                 &mining_seed,
+                delta,
             );
             let test_solution = u256_from_le_bytes(&solution_hash.0);
             if test_solution < self.difficulty {
@@ -2152,7 +2163,12 @@ mod tests {
         // The PoA hash must be computed over that same true offset.
         assert_eq!(
             solution.solution_hash,
-            irys_types::compute_solution_hash(&chunk, solution.chunk_offset, &seed),
+            irys_types::compute_solution_hash(
+                &chunk,
+                solution.chunk_offset,
+                &seed,
+                irys_types::hardfork_config::Activation::Inactive,
+            ),
             "solution hash must be over the true offset"
         );
         assert_eq!(
