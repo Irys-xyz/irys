@@ -1668,6 +1668,26 @@ impl BlockTreeServiceInner {
             ),
         };
 
+        // A soft result says only that this node could not decide the block's
+        // validity. For an `Onchain` block an earlier `Valid` result decided it, so
+        // keep the block and send no discard broadcast.
+        if matches!(kind, DiscardKind::SoftInternal) {
+            let cache = self.cache.read().map_err(|_| {
+                eyre::eyre!("block tree cache read lock poisoned in discard_and_broadcast")
+            })?;
+            if cache
+                .get_block_and_status(&block_hash)
+                .is_some_and(|(_, state)| *state == ChainState::Onchain)
+            {
+                warn!(
+                    block.hash = %block_hash,
+                    custom.error = %error_display,
+                    "soft validation result for an Onchain block; the block stays in the tree"
+                );
+                return Ok(());
+            }
+        }
+
         // SoftInternal is a documented non-fault recovery path — warn-level
         // keeps alerting tied to genuine peer rejections (Invalid arm).
         emit_discard_log(kind, block_hash, &error_display, error_log_msg);
@@ -1714,8 +1734,9 @@ impl BlockTreeServiceInner {
         //      never in block_tree at all → cache_write_succeeded = false.
         //   3. Cache-hit but `remove_block` Err: cache invariant
         //      corruption → cache_write_succeeded = false.
-        //   4. Cache-hit on an `Onchain` block: `remove_block` refuses it
-        //      and this helper returns the error (see the match arm).
+        //   4. Cache-hit on an `Onchain` block with an `Invalid` result:
+        //      `remove_block` refuses it and this helper returns the error
+        //      (see the match arm). A soft result returned earlier.
         //
         // Side effects split on this flag:
         //   - `BlockStateUpdated` broadcast: ALWAYS emitted. Downstream
@@ -1736,8 +1757,8 @@ impl BlockTreeServiceInner {
             match cache.remove_block(&block_hash, irys_domain::RemovalReason::ValidationInvalid) {
                 Ok(()) => true,
                 // An `Onchain` block is the tip or an ancestor of it. The tip only moves
-                // to a validated block, so this node already accepted this block, and a
-                // result that is not `Valid` contradicts that. Removing the block would
+                // to a validated block, so this node already accepted this block, and an
+                // `Invalid` result contradicts that. Removing the block would
                 // empty the canonical chain; keeping it and continuing would hide a node
                 // fault. Return the error: the service stops on the controlled-shutdown
                 // path, with the tree unchanged and no broadcast.
@@ -3451,6 +3472,33 @@ mod tests {
             cache.get_latest_canonical_entry().block_hash(),
             tip.block_hash
         );
+    }
+
+    /// A soft result for an `Onchain` block (here the tip) does not contradict the
+    /// earlier `Valid` result: the block stays, the tip does not change, and no
+    /// discard is broadcast.
+    #[test]
+    fn soft_result_for_onchain_block_keeps_the_block() {
+        let mut h = DiscardHarness::new();
+        let tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_200);
+
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::ValidationCancelled {
+                reason: crate::block_validation::ValidationCancelReason::HeightDifference,
+            }
+            .into();
+        assert!(matches!(result, ValidationResult::InternalFailure(_)));
+        h.inner
+            .discard_and_broadcast(tip.block_hash, result, DiscardKind::SoftInternal)
+            .expect("a soft result for an Onchain block is not an error");
+
+        assert_eq!(h.tip(), tip.block_hash, "the tip does not change");
+        assert!(
+            h.collect_broadcasts().is_empty(),
+            "no discard is broadcast for a block that stays"
+        );
+        let cache = h.inner.cache.read().expect("cache lock after discard");
+        assert!(cache.get_block(&tip.block_hash).is_some());
     }
 
     /// The LRU is intentionally bounded so that an unbounded soft-internal
