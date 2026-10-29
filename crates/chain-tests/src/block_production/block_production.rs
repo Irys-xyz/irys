@@ -1682,6 +1682,10 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Upper bound for a producer service reply or a mined block in the producer
+/// liveness tests, so a stuck service fails the test with a named cause.
+const PRODUCER_LIVENESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A block that fails its own pre-validation drops that solution only. The
 /// producer service replies with a recoverable error and serves the next
 /// solution; it does not stop the node.
@@ -1715,8 +1719,9 @@ async fn own_block_prevalidation_failure_keeps_producer_running() -> eyre::Resul
         })?;
 
     // A stopped service would drop the sender instead of replying.
-    let reply = response_rx
+    let reply = tokio::time::timeout(PRODUCER_LIVENESS_TIMEOUT, response_rx)
         .await
+        .expect("producer service must reply to the rejected solution within 60s")
         .expect("producer service must reply to the rejected solution");
     let err = reply
         .map(|_| ())
@@ -1741,7 +1746,10 @@ async fn own_block_prevalidation_failure_keeps_producer_running() -> eyre::Resul
     );
 
     // The same service produces a block from the next solution.
-    let (block, _, _) = node.mine_block_with_payload().await?;
+    let (block, _, _) =
+        tokio::time::timeout(PRODUCER_LIVENESS_TIMEOUT, node.mine_block_with_payload())
+            .await
+            .expect("producer service must produce a block from the next solution within 60s")?;
     assert_eq!(block.height, start_height + 1);
 
     node.stop().await;
@@ -1780,7 +1788,9 @@ async fn own_block_rejections_in_a_row_stop_the_producer() -> eyre::Result<()> {
                 solution: bad_solution.clone(),
                 response: response_tx,
             })?;
-        let reply = response_rx.await;
+        let reply = tokio::time::timeout(PRODUCER_LIVENESS_TIMEOUT, response_rx)
+            .await
+            .expect("producer service must reply or drop the sender within 60s");
         if attempt < DROP_STREAK_STOP_AT {
             let err = reply
                 .expect("below the threshold the producer service must reply")
