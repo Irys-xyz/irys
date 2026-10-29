@@ -35,6 +35,14 @@ fn worst_case_engine_payload_bytes(gas_limit: u64) -> u64 {
         .saturating_add(ENGINE_PAYLOAD_OVERHEAD_BYTES)
 }
 
+/// Highest `reth.gas_limit` whose worst-case engine payload fits the engine
+/// client request limit.
+fn max_gas_limit_for_engine_request_limit() -> u64 {
+    ((ENGINE_CLIENT_MAX_REQUEST_BYTES - ENGINE_PAYLOAD_OVERHEAD_BYTES) / 2 + 1)
+        * EIP_7623_FLOOR_GAS_PER_BYTE
+        - 1
+}
+
 impl Config {
     pub fn new(node_config: NodeConfig, peer_id: IrysPeerId) -> Self {
         let consensus = node_config.consensus_config();
@@ -127,10 +135,12 @@ impl Config {
         ensure!(
             worst_case_payload_bytes <= ENGINE_CLIENT_MAX_REQUEST_BYTES,
             "reth.gas_limit ({}) allows an engine payload of up to {} bytes, above the engine \
-             client request limit of {} bytes: valid blocks would be rejected as invalid",
+              client request limit of {} bytes: valid blocks would be rejected as invalid \
+              (maximum allowed reth.gas_limit: {})",
             self.consensus.reth.gas_limit,
             worst_case_payload_bytes,
-            ENGINE_CLIENT_MAX_REQUEST_BYTES
+            ENGINE_CLIENT_MAX_REQUEST_BYTES,
+            max_gas_limit_for_engine_request_limit()
         );
         // block_tree_depth must exceed block_migration_depth to prevent premature pruning
         ensure!(
@@ -1887,6 +1897,12 @@ mod tests {
             .expect_err("a gas limit above the bound must be rejected")
             .to_string();
         assert!(err.contains("reth.gas_limit"), "got: {err}");
+        assert!(
+            // (10 MiB - 1 MiB) / 2 bytes of calldata at 10 gas per byte, plus the
+            // 9 gas that integer division leaves below the next byte.
+            err.contains("maximum allowed reth.gas_limit: 47185929"),
+            "got: {err}"
+        );
 
         let mut max = NodeConfig::testing();
         max.consensus.get_mut().reth.gas_limit = u64::MAX;
