@@ -1,6 +1,8 @@
 use crate::db_cache::{GlobalChunkOffset, PartitionHashes};
 use crate::metadata::MetadataKey;
-use crate::submodule::tables::{DataRootInfos, PendingBodyMigration, TxLeafBinding};
+use crate::submodule::tables::{
+    DataRootInfo, DataRootInfoFlags, DataRootInfos, PendingBodyMigration, TxLeafBinding,
+};
 use crate::{
     db_cache::{
         CachedChunk, CachedChunkIndexEntry, CachedDataRoot, CachedIngressLeaf, CachedIngressLeafKey,
@@ -11,6 +13,7 @@ use alloy_primitives::B512;
 use irys_types::ingress::{CachedIngressProof, IngressProofV1};
 use irys_types::{
     Base64, BlockHeight, DataLedger, IrysAddress, IrysPeerId, LedgerIndexItem, PeerListItemInner,
+    RelativeChunkOffset, chunk::RelativeChunkOffsetFlags,
 };
 use irys_types::{ChunkPathHash, DataRoot, H256, PartitionChunkOffset, decode_address};
 use irys_types::{
@@ -267,8 +270,56 @@ impl_compact_row_check_for_flag_header!(
     PendingBodyMigration
 );
 
-/// Smallest `Vec` encoding: the varint element count (an empty vec).
-const MIN_VEC_COUNT_LEN: usize = 1;
+/// Longest varint `usize` the walk accepts. `decode_varuint` reads up to 33 bytes, but its
+/// shift overflows (and panics in debug builds) from the 11th byte on, and no valid length
+/// needs more than `usize::BITS` bits.
+const MAX_COMPACT_VARUINT_LEN: usize = (usize::BITS as usize).div_ceil(7);
+
+/// Non-panicking twin of the Reth `Vec` codec's `decode_varuint`. Returns the value and the
+/// bytes after it.
+fn read_compact_varuint(buf: &[u8]) -> Result<(usize, &[u8]), String> {
+    let mut value = 0_usize;
+    for (index, &byte) in buf.iter().take(MAX_COMPACT_VARUINT_LEN).enumerate() {
+        value |= usize::from(byte & 0x7F) << (index * 7);
+        if byte < 0x80 {
+            return Ok((value, &buf[index + 1..]));
+        }
+    }
+    Err("truncated or over-long varint".to_string())
+}
+
+/// Walks a compact-encoded `Vec<T>` (`count`, then per element `len` and `len` bytes) and
+/// runs `check_element` on each element slice, exactly as `Vec::from_compact` slices them.
+/// Fails on every input that makes `Vec::from_compact` panic or over-allocate: a truncated
+/// varint, an element longer than the rest of the row, or a count above the remaining
+/// bytes (each element needs at least its length prefix). Trailing bytes are tolerated.
+fn check_compact_vec_row(
+    buf: &[u8],
+    check_element: impl Fn(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    let (count, mut rest) =
+        read_compact_varuint(buf).map_err(|reason| format!("count: {reason}"))?;
+    if count > rest.len() {
+        return Err(format!(
+            "element count {count} exceeds the {} remaining bytes",
+            rest.len()
+        ));
+    }
+    for index in 0..count {
+        let (len, after_len) = read_compact_varuint(rest)
+            .map_err(|reason| format!("element {index} length: {reason}"))?;
+        if len > after_len.len() {
+            return Err(format!(
+                "element {index} length {len} exceeds the {} remaining bytes",
+                after_len.len()
+            ));
+        }
+        let (element, after_element) = after_len.split_at(len);
+        check_element(element).map_err(|reason| format!("element {index}: {reason}"))?;
+        rest = after_element;
+    }
+    Ok(())
+}
 
 // `Base64` is a raw byte string, so every buffer (including an empty one) is a valid row.
 impl CompactRowCheck for CompactBase64 {}
@@ -283,9 +334,52 @@ impl_compact_row_check_for_min_len!(
     // `end` (its own flag header) and `tx_path_hash`
     TxPathInterval => PartitionChunkOffset::bitflag_encoded_bytes() + size_of::<H256>(),
     TxLeafBinding => 2 * size_of::<H256>(),
-    PartitionHashes => MIN_VEC_COUNT_LEN,
-    DataRootInfos => MIN_VEC_COUNT_LEN,
 );
+
+// The wrapper derive emits no flag header, so the row is the bare `Vec` encoding.
+impl CompactRowCheck for PartitionHashes {
+    fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+        // `[u8; 32]::from_compact` returns zeroes for a zero length and reads 32 bytes otherwise.
+        check_compact_vec_row(buf, |element| {
+            if element.is_empty() {
+                return Ok(());
+            }
+            require_min_compact_row_len(element, size_of::<H256>())
+        })
+    }
+}
+
+impl CompactRowCheck for DataRootInfos {
+    fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+        check_compact_vec_row(buf, DataRootInfo::check_compact_row)
+    }
+}
+
+/// Layout: flag header (holds the `data_size` byte length), the nested `start_offset` (its
+/// own flag header holding the `i32` byte length, then those bytes), then `data_size`.
+impl CompactRowCheck for DataRootInfo {
+    fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+        const OFFSET_MAX_LEN: usize = size_of::<i32>();
+        const DATA_SIZE_MAX_LEN: usize = size_of::<u64>();
+        require_min_compact_row_len(buf, Self::bitflag_encoded_bytes())?;
+        let (flags, rest) = DataRootInfoFlags::from(buf);
+        let data_size_len = usize::from(flags.data_size_len());
+        if data_size_len > DATA_SIZE_MAX_LEN {
+            return Err(format!(
+                "data_size length {data_size_len} exceeds {DATA_SIZE_MAX_LEN}"
+            ));
+        }
+        require_min_compact_row_len(rest, RelativeChunkOffset::bitflag_encoded_bytes())?;
+        let (offset_flags, rest) = RelativeChunkOffsetFlags::from(rest);
+        let offset_len = usize::from(offset_flags.placeholder_len());
+        if offset_len > OFFSET_MAX_LEN {
+            return Err(format!(
+                "start_offset length {offset_len} exceeds {OFFSET_MAX_LEN}"
+            ));
+        }
+        require_min_compact_row_len(rest, offset_len + data_size_len)
+    }
+}
 
 /// `PeerListItemInner::from_compact` tolerates a row cut right after the 4-byte
 /// score/response-time prefix (older layout) but reads the Reth peer id (a `B512`) after the
@@ -591,6 +685,92 @@ mod compact_row_check_tests {
             ledger_row.len(),
             LedgerIndexItem::bitflag_encoded_bytes() + size_of::<H256>() + 1
         );
+    }
+
+    fn data_root_info(start_offset: i32, data_size: u64) -> crate::submodule::tables::DataRootInfo {
+        crate::submodule::tables::DataRootInfo {
+            start_offset: RelativeChunkOffset(start_offset),
+            data_size,
+        }
+    }
+
+    /// Rows that would panic `Vec::from_compact` must be decode errors, not panics.
+    fn assert_vec_row_rejections<T>(one_element_row: Vec<u8>)
+    where
+        T: Compress<Compressed = Vec<u8>> + Decompress,
+    {
+        let rejected = |row: &[u8]| T::decompress(row).is_err();
+        // count 1, no element
+        assert!(rejected(&[1]));
+        // count above the remaining bytes
+        assert!(rejected(&[5, 0]));
+        // element length above the remaining bytes
+        assert!(rejected(&[1, 9, 0, 0]));
+        // length varints cut after a continuation byte
+        assert!(rejected(&[0x80]));
+        assert!(rejected(&[1, 0x80]));
+        // varint longer than any usize
+        assert!(rejected(&[0xFF; 40]));
+        // u32::MAX count returns without allocating
+        assert!(rejected(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]));
+        // every strict prefix of a valid row is a decode error or a clean decode
+        for cut in 0..one_element_row.len() {
+            let _ = T::decompress(&one_element_row[..cut]);
+        }
+    }
+
+    #[test]
+    fn partition_hashes_malformed_rows_are_decode_errors() {
+        let one = PartitionHashes(vec![H256::repeat_byte(1)]).compress();
+        assert_vec_row_rejections::<PartitionHashes>(one.clone());
+        // element shorter than an H256 but not empty
+        assert!(PartitionHashes::decompress(&[1, 5, 1, 1, 1, 1, 1]).is_err());
+        // element cut inside the hash
+        assert!(PartitionHashes::decompress(&one[..one.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn data_root_infos_malformed_rows_are_decode_errors() {
+        let one = DataRootInfos(vec![data_root_info(70_000, u64::MAX)]).compress();
+        assert_vec_row_rejections::<DataRootInfos>(one.clone());
+        // element cut inside the fields, with a consistent outer length
+        assert!(DataRootInfos::decompress(&[1, 1, 8]).is_err());
+        assert!(DataRootInfos::decompress(&[1, 2, 8, 3]).is_err());
+        // data_size length above 8 bytes
+        assert!(DataRootInfos::decompress(&[1, 3, 9, 0, 0]).is_err());
+        // start_offset length above 4 bytes
+        assert!(DataRootInfos::decompress(&[1, 7, 0, 5, 0, 0, 0, 0, 0]).is_err());
+        assert!(DataRootInfos::decompress(&one[..one.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn vec_rows_round_trip() {
+        let hashes = [
+            PartitionHashes(vec![]),
+            PartitionHashes(vec![H256::repeat_byte(1)]),
+            PartitionHashes(vec![
+                H256::repeat_byte(1),
+                H256::zero(),
+                H256::repeat_byte(9),
+            ]),
+        ];
+        for value in hashes {
+            let decoded = PartitionHashes::decompress(&value.clone().compress()).unwrap();
+            assert_eq!(decoded, value);
+        }
+        let infos = [
+            DataRootInfos(vec![]),
+            DataRootInfos(vec![data_root_info(0, 0)]),
+            DataRootInfos(vec![
+                data_root_info(-1, 300),
+                data_root_info(70_000, u64::MAX),
+                data_root_info(i32::MIN, 1),
+            ]),
+        ];
+        for value in infos {
+            let decoded = DataRootInfos::decompress(&value.clone().compress()).unwrap();
+            assert_eq!(decoded, value);
+        }
     }
 
     #[test]
