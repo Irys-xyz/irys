@@ -5,7 +5,8 @@ use irys_domain::ChunkType;
 use irys_storage::ii;
 use irys_types::{
     BoundedFee, DataLedger, DataTransaction, H256, LedgerChunkOffset, NodeConfig,
-    PartitionChunkOffset, UnixTimestamp, hardfork_config::Cascade, irys::IrysSigner,
+    PartitionChunkOffset, U256, UnixTimestamp, hardfork_config::Cascade, hardfork_config::Delta,
+    irys::IrysSigner,
 };
 use irys_vdf::first_divergent_boundary;
 use tracing::info;
@@ -886,6 +887,220 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
         "the peer must adopt the healed miner's block as canonical, not merely hold its header"
     );
     info!("genesis mined a canonical block after re-anchor; peer adopted it as canonical");
+
+    genesis.stop().await;
+    peer.stop().await;
+
+    Ok(())
+}
+
+/// Network partition recovery on a Delta-active chain: the rollback of
+/// orphaned migrated blocks and the re-apply of adopted blocks must count the
+/// full reward-curve emission, not the reduced capacity PoA miner reward.
+///
+/// Timeline:
+///   Base (gossip ON)  — genesis mines, peer follows, peer owns a partition
+///   Fork (gossip OFF) — genesis mines 2, peer mines 3
+///   Reorg             — peer gossips the longer fork, genesis recovers
+///
+/// On an empty chain every block is a capacity PoA, so header rewards are a
+/// fraction of the emission. The post-recovery supply state must equal the
+/// sum of the full emissions, which only holds if rollback and re-apply use
+/// the curve, not the header rewards.
+#[test_log::test(tokio::test)]
+async fn heavy4_delta_partition_recovery_supply_uses_full_emission() -> eyre::Result<()> {
+    let seconds_to_wait = 30;
+    // migration_depth=1 so that 2+ orphaned fork blocks trigger recovery
+    let block_migration_depth: u32 = 1;
+
+    let mut genesis_config = NodeConfig::testing().with_consensus(|c| {
+        c.chunk_size = 32;
+        c.num_chunks_in_partition = 10;
+        c.num_chunks_in_recall_range = 2;
+        c.num_partitions_per_slot = 1;
+        c.num_partitions_per_term_ledger_slot = 1;
+        c.epoch.num_blocks_in_epoch = 2;
+        c.block_migration_depth = block_migration_depth;
+        c.entropy_packing_iterations = 1_000;
+        // Raise initial difficulty so cumulative_diff grows meaningfully per
+        // block, allowing fork choice to distinguish longer chains.
+        c.genesis.initial_packed_partitions = Some(5.0);
+        c.hardforks.delta = Some(Delta {
+            activation_timestamp: UnixTimestamp::from_secs(1),
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        });
+    });
+    genesis_config.storage.num_writes_before_sync = 1;
+
+    let genesis_signer = genesis_config.new_random_signer();
+    let peer_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&genesis_signer, &peer_signer]);
+
+    let genesis_test = IrysNodeTest::new_genesis(genesis_config.clone());
+    StorageSubmodulesConfig::load_for_test(genesis_test.cfg.base_directory.clone(), 10)?;
+    let genesis = genesis_test
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    let peer_config = genesis.testing_peer_with_signer(&peer_signer);
+    let peer_test = IrysNodeTest::new(peer_config);
+    StorageSubmodulesConfig::load_for_test(peer_test.cfg.base_directory.clone(), 10)?;
+    let peer = peer_test
+        .start_and_wait_for_packing("PEER", seconds_to_wait)
+        .await;
+
+    IrysNodeTest::announce_between(&genesis, &peer).await?;
+
+    // Peer only follows the shared base — stop it from producing competing
+    // blocks.
+    peer.stop_mining();
+
+    // Stake + pledge so the peer owns a partition it can mine at the fork.
+    let fork_height = genesis
+        .stake_and_pledge_peers(&[&peer], seconds_to_wait)
+        .await?;
+    peer.wait_for_packing(seconds_to_wait).await;
+    info!("Shared base complete at height {fork_height}");
+
+    // ─── Stage 2: Fork — each node mines independently (gossip OFF) ───
+    genesis.gossip_disable();
+    peer.gossip_disable();
+    info!("Gossip disabled, fork point at height {fork_height}");
+
+    // Re-enable the peer's VDF for its fork phase.
+    peer.node_ctx.start_vdf();
+    peer.wait_for_packing(seconds_to_wait).await;
+
+    // Genesis mines 2 blocks (minority fork). With migration_depth=1, the
+    // block index advances to genesis_height - 1. When the reorg happens,
+    // old_fork_blocks(2) > migration_depth(1) triggers recovery.
+    for i in 0..2 {
+        let (block, _payload, _txs) = genesis.mine_block_without_gossip().await?;
+        info!(height = block.height, "Genesis fork block {}", i + 1);
+    }
+    let genesis_height = fork_height + 2;
+    genesis
+        .wait_until_height(genesis_height, seconds_to_wait)
+        .await?;
+    let genesis_index_height = genesis_height - block_migration_depth as u64;
+    genesis
+        .wait_until_block_index_height(genesis_index_height, seconds_to_wait)
+        .await?;
+    info!(
+        genesis_index_height,
+        actual = genesis.get_block_index_height(),
+        "Genesis fork migrated"
+    );
+
+    // Peer mines 3 blocks (majority fork). The peer's last block is taller
+    // than genesis's tip, so the reorg triggers deterministically.
+    let mut peer_fork_blocks = Vec::new();
+    for i in 0..3 {
+        let (block, _payload, _txs) = peer.mine_block_without_gossip().await?;
+        info!(height = block.height, "Peer fork block {}", i + 1);
+        peer_fork_blocks.push(block);
+    }
+    let peer_height = fork_height + 3;
+
+    // ─── Stage 3: Reorg — gossip peer's longer chain to genesis ───
+    genesis.gossip_enable();
+    peer.gossip_enable();
+    IrysNodeTest::announce_between(&genesis, &peer).await?;
+
+    for block in &peer_fork_blocks {
+        peer.gossip_block_to_peers(block)?;
+        genesis
+            .wait_for_block(&block.block_hash, seconds_to_wait)
+            .await?;
+    }
+
+    genesis
+        .wait_until_height(peer_height, seconds_to_wait)
+        .await?;
+    let new_expected_index = peer_height - block_migration_depth as u64;
+    genesis
+        .wait_until_block_index_height(new_expected_index, seconds_to_wait)
+        .await?;
+    info!("Genesis adopted the peer's chain and re-migrated");
+
+    // ─── Stage 4: Verify the block index holds the winning fork ───
+    let index_height = genesis.get_block_index_height();
+    assert!(
+        index_height >= new_expected_index,
+        "Expected block index height >= {new_expected_index}, got {index_height}"
+    );
+    for h in (fork_height + 1)..=index_height {
+        let indexed_block = genesis.get_block_by_height_from_index(h, false)?;
+        let canonical_block = genesis.get_block_by_height(h).await?;
+        assert_eq!(
+            indexed_block.block_hash, canonical_block.block_hash,
+            "Block index at height {h} should contain the winning fork's block"
+        );
+    }
+    info!("Block index verified: all entries from winning fork");
+
+    // ─── Stage 5: Supply state counts the full curve emission ───
+    let block_time = genesis
+        .node_ctx
+        .config
+        .consensus
+        .difficulty_adjustment
+        .block_time;
+    let full_emission_at = |h: u64| -> eyre::Result<U256> {
+        let from = u128::from(h.saturating_sub(1) * block_time);
+        Ok(genesis
+            .node_ctx
+            .reward_curve
+            .reward_between(from, from + u128::from(block_time))?
+            .amount)
+    };
+    let supply_after = wait_supply_height(&genesis, index_height).await?;
+    let mut expected_emitted = U256::zero();
+    let mut reward_sum = U256::zero();
+    for h in 1..=supply_after.height {
+        expected_emitted += full_emission_at(h)?;
+        reward_sum += genesis
+            .get_block_by_height_from_index(h, false)?
+            .reward_amount;
+    }
+    // Every block on this empty chain is a capacity PoA, so the header rewards
+    // must be strictly below the full emission: if Delta were not in effect
+    // the two sums would be equal and this test would pass vacuously.
+    assert!(
+        reward_sum < expected_emitted,
+        "header rewards {reward_sum} should be below the full emission {expected_emitted}; Delta is not in effect"
+    );
+    assert_eq!(
+        supply_after.cumulative_emitted, expected_emitted,
+        "Supply state should count the full curve emission of the new canonical chain"
+    );
+    info!("Supply state verified: full emission, not the reduced miner reward");
+
+    // ─── Stage 6: Continued operation after recovery ───
+    genesis.mine_block().await?;
+    peer.wait_until_height(peer_height + 1, seconds_to_wait)
+        .await?;
+    // The index trails the tip by block_migration_depth.
+    genesis
+        .wait_until_block_index_height(peer_height - block_migration_depth as u64, seconds_to_wait)
+        .await?;
+
+    let final_index_height = genesis.get_block_index_height();
+    assert!(
+        final_index_height >= peer_height - block_migration_depth as u64,
+        "Block index should continue advancing after recovery, got {final_index_height}"
+    );
+    let final_supply = wait_supply_height(&genesis, final_index_height).await?;
+    let mut final_expected = U256::zero();
+    for h in 1..=final_supply.height {
+        final_expected += full_emission_at(h)?;
+    }
+    assert_eq!(
+        final_supply.cumulative_emitted, final_expected,
+        "Supply state should remain consistent after continued mining"
+    );
+    info!("Continued operation verified — supply state tracks the full emission");
 
     genesis.stop().await;
     peer.stop().await;

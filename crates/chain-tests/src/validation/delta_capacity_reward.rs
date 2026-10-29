@@ -4,7 +4,10 @@
 //! not tied to the partition kind: a data-assigned partition mines an entropy
 //! PoA at an unwritten offset.
 
-use crate::utils::{BlockValidationOutcome, IrysNodeTest, read_block_from_state, solution_context};
+use crate::utils::{
+    BlockValidationOutcome, IrysNodeTest, TimeMode, read_block_from_state, solution_context,
+    wait_supply_height,
+};
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
 use irys_actors::block_reward::BlockRewardSplit;
 use irys_actors::block_validation::{PreValidationError, ValidationError, prevalidate_block};
@@ -22,6 +25,7 @@ use irys_types::{
 };
 use reth::{core::primitives::SealedBlock as RethSealedBlock, payload::EthBuiltPayload};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 fn delta_from_genesis_config() -> NodeConfig {
     NodeConfig::testing().with_consensus(|consensus| {
@@ -425,6 +429,176 @@ async fn heavy_delta_capacity_poa_full_reward_rejected() -> eyre::Result<()> {
         ),
         "expected RewardMismatch, got {result:?}"
     );
+
+    node.stop().await;
+    Ok(())
+}
+
+/// Full reward-curve amount of every block in `1..=end_height`.
+fn sum_full_rewards(node: &IrysNodeTest<IrysNodeCtx>, end_height: u64) -> eyre::Result<U256> {
+    let mut sum = U256::zero();
+    for h in 1..=end_height {
+        sum += full_reward(node, h - 1)?;
+    }
+    Ok(sum)
+}
+
+/// Miner reward declared on the headers in `1..=end_height`. On a Delta chain
+/// this is below the full emission for capacity PoA blocks.
+async fn header_reward_sum(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    end_height: u64,
+) -> eyre::Result<U256> {
+    let mut sum = U256::zero();
+    for h in 1..=end_height {
+        sum += node.get_block_by_height(h).await?.reward_amount;
+    }
+    Ok(sum)
+}
+
+/// Mid-chain activation: capacity PoA blocks mined before the activation
+/// timestamp earn the full reward; from the first block whose timestamp meets
+/// the activation they earn the configured fraction, and the treasury gain
+/// starts on exactly that block.
+#[test_log::test(tokio::test)]
+async fn heavy_delta_midchain_activation_boundary() -> eyre::Result<()> {
+    // The accelerated test clock is anchored to real time, so the block
+    // timestamps cross the boundary after a few real seconds. At the 1s test
+    // block time, 100 seconds gives many pre-activation blocks. Real time
+    // would need 100+ real seconds, so the time mode is pinned.
+    let activation = UnixTimestamp::now()?.as_secs() + 100;
+    let config = NodeConfig::testing().with_consensus(|consensus| {
+        consensus.chunk_size = 32;
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: UnixTimestamp::from_secs(activation),
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        });
+    });
+    let node = IrysNodeTest::new_genesis(config)
+        .with_time_mode(TimeMode::Accelerated)
+        .start()
+        .await;
+
+    let wall_start = Instant::now();
+    let (mut pre, mut post) = (0_u32, 0_u32);
+    let mut boundary_checked = false;
+    loop {
+        eyre::ensure!(
+            wall_start.elapsed() < Duration::from_secs(180),
+            "did not cross the activation timestamp"
+        );
+        let block = node.mine_block().await?;
+        let full = full_reward(&node, block.height - 1)?;
+        if block.timestamp_secs() < UnixTimestamp::from_secs(activation) {
+            pre += 1;
+            eyre::ensure!(
+                block.reward_amount == full,
+                "height {}: pre-activation reward {} != full {}",
+                block.height,
+                block.reward_amount,
+                full
+            );
+        } else {
+            eyre::ensure!(
+                pre >= 5,
+                "only {pre} blocks before the activation timestamp, need 5"
+            );
+            post += 1;
+            let expected = capacity_reward(&node, full)?;
+            eyre::ensure!(
+                block.reward_amount == expected,
+                "height {}: post-activation reward {} != expected {}",
+                block.height,
+                block.reward_amount,
+                expected
+            );
+            if !boundary_checked {
+                let parent = node.get_block_by_height(block.height - 1).await?;
+                eyre::ensure!(
+                    parent.timestamp_secs() < UnixTimestamp::from_secs(activation),
+                    "boundary block {} has a post-activation parent",
+                    block.height
+                );
+                eyre::ensure!(
+                    block.treasury == parent.treasury + (full - expected),
+                    "height {}: treasury {} != parent {} + share {}",
+                    block.height,
+                    block.treasury,
+                    parent.treasury,
+                    full - expected
+                );
+                boundary_checked = true;
+            }
+        }
+        if post >= 3 {
+            break;
+        }
+    }
+    tracing::info!(pre, post, "midchain Delta activation boundary crossed");
+
+    node.stop().await;
+    Ok(())
+}
+
+/// Restarting a Delta-active node rebuilds the supply state from the reward
+/// curve, not from the header rewards: every migrated block counts its full
+/// curve amount as emitted, even though its capacity PoA miner earned only a
+/// fraction.
+#[test_log::test(tokio::test)]
+async fn heavy_delta_backfill_rebuilds_supply_from_curve() -> eyre::Result<()> {
+    let block_migration_depth: u64 = 1;
+    let config = delta_from_genesis_config().with_consensus(|consensus| {
+        consensus.block_migration_depth = block_migration_depth as u32;
+    });
+    let node = IrysNodeTest::new_genesis(config).start().await;
+
+    let mined = 10_u64;
+    for _ in 0..mined {
+        node.mine_block().await?;
+    }
+    let index_height = mined - 1;
+    node.wait_until_block_index_height(index_height, 30).await?;
+
+    let supply = wait_supply_height(&node, index_height).await?;
+    let expected = sum_full_rewards(&node, supply.height)?;
+    eyre::ensure!(
+        supply.cumulative_emitted == expected,
+        "supply at height {}: emitted {} != sum of full rewards {}",
+        supply.height,
+        supply.cumulative_emitted,
+        expected
+    );
+    let reward_sum = header_reward_sum(&node, supply.height).await?;
+    eyre::ensure!(
+        reward_sum < expected,
+        "header rewards {reward_sum} should be below the full emission {expected} on a Delta chain"
+    );
+    tracing::info!(?supply, reward_sum = %reward_sum, "live supply state counts full emission");
+
+    // Restart on the same data directory: the backfill recomputes the
+    // historical sum from the curve over the already-migrated blocks. The
+    // tree tip resets to the last migrated height on restart, and the index
+    // always trails the tip by block_migration_depth, so 3 mined blocks
+    // advance the index by 3 - depth.
+    let node = node.stop().await.start().await;
+    for _ in 0..3 {
+        node.mine_block().await?;
+    }
+    let final_index_height = index_height + 3 - block_migration_depth;
+    node.wait_until_block_index_height(final_index_height, 30)
+        .await?;
+
+    let supply = wait_supply_height(&node, final_index_height).await?;
+    let expected = sum_full_rewards(&node, supply.height)?;
+    eyre::ensure!(
+        supply.cumulative_emitted == expected,
+        "supply at height {} after restart: emitted {} != sum of full rewards {}",
+        supply.height,
+        supply.cumulative_emitted,
+        expected
+    );
+    tracing::info!(?supply, "restarted supply state rebuilt from the curve");
 
     node.stop().await;
     Ok(())
