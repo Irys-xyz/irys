@@ -814,6 +814,7 @@ mod tests {
             packing_address: mining_address,
             partition_offset: PartitionChunkOffset::from(chunk_offset as u32),
             partition_hash: H256::from(partition_hash),
+            packing_iterations: iterations,
         };
 
         let unpacked_chunk = unpack(
@@ -931,6 +932,7 @@ mod tests {
                     packing_address: mining_address,
                     partition_offset: PartitionChunkOffset::from(u32::try_from(chunk_offset).unwrap()),
                     partition_hash: H256::from(partition_hash),
+                    packing_iterations: iterations,
                 };
 
                 let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id)
@@ -979,6 +981,7 @@ mod tests {
                     packing_address: mining_address,
                     partition_offset: PartitionChunkOffset::from(u32::try_from(chunk_offset).unwrap()),
                     partition_hash: H256::from(partition_hash),
+                    packing_iterations: iterations,
                 };
 
                 let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id)

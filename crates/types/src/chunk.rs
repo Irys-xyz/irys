@@ -138,6 +138,10 @@ pub struct PackedChunk {
     pub tx_offset: TxChunkOffset,
     /// The hash of the partition containing this chunk
     pub partition_hash: PartitionHash,
+    /// The number of entropy packing iterations used to pack this chunk.
+    /// Receivers do not read it: consensus fixes the iteration count, and
+    /// unpacking takes it from the consensus config.
+    pub packing_iterations: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -167,6 +171,8 @@ pub struct PartialChunk {
     pub tx_offset: Option<TxChunkOffset>,
     /// The hash of the partition containing this chunk
     pub partition_hash: Option<PartitionHash>,
+    /// The number of entropy packing iterations used to pack this chunk
+    pub packing_iterations: Option<u32>,
 }
 
 impl PartialChunk {
@@ -184,6 +190,7 @@ impl PartialChunk {
             && self.packing_address.is_some()
             && self.partition_relative_offset.is_some()
             && self.partition_hash.is_some()
+            && self.packing_iterations.is_some()
     }
 }
 
@@ -230,6 +237,9 @@ impl TryInto<PackedChunk> for PartialChunk {
                 .partition_relative_offset
                 .ok_or(err_fn("partition_relative_offset"))?,
             partition_hash: self.partition_hash.ok_or(err_fn("partition_hash"))?,
+            packing_iterations: self
+                .packing_iterations
+                .ok_or(err_fn("packing_iterations"))?,
         })
     }
 }
@@ -398,6 +408,27 @@ pub type ChunkDataPath = Vec<u8>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_chunk_json_carries_packing_iterations_and_reads_it_as_zero_when_absent() {
+        let chunk = PackedChunk {
+            packing_iterations: 7,
+            ..Default::default()
+        };
+        let mut json = serde_json::to_value(ChunkFormat::Packed(chunk.clone())).unwrap();
+        assert_eq!(json["packingIterations"], 7);
+        assert_eq!(
+            serde_json::from_value::<ChunkFormat>(json.clone()).unwrap(),
+            ChunkFormat::Packed(chunk)
+        );
+
+        // A node that does not send the field.
+        json.as_object_mut().unwrap().remove("packingIterations");
+        let ChunkFormat::Packed(read) = serde_json::from_value(json).unwrap() else {
+            panic!("expected a packed chunk");
+        };
+        assert_eq!(read.packing_iterations, 0);
+    }
 
     mod offset_validation {
         use super::*;
