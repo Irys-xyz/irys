@@ -3056,7 +3056,7 @@ mod error_classification_tests {
             matches!(
                 err,
                 BlockProductionError::Recoverable {
-                    reason: "tx_selection",
+                    reason: "ledger_expiry",
                     ..
                 }
             ),
@@ -3123,6 +3123,17 @@ mod drop_streak_tests {
                 .continue_after(dropped(reason))
                 .expect("a peer-supplied cause must not stop the service");
         }
+    }
+
+    #[test]
+    fn ledger_expiry_drop_stops_the_service() {
+        let mut streaks = DropStreaks::default();
+        for _ in 1..DROP_STREAK_STOP_AT {
+            streaks
+                .continue_after(dropped("ledger_expiry"))
+                .expect("continues");
+        }
+        assert!(streaks.continue_after(dropped("ledger_expiry")).is_err());
     }
 
     #[test]

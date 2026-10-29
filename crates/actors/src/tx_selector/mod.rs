@@ -76,7 +76,9 @@ impl From<TxSelectorError> for crate::block_producer::BlockProductionError {
             TxSelectorError::LedgerExpiry(LedgerExpiryError::AttributedTxHeadersMismatch {
                 ..
             }) => Self::Irrecoverable { source: e.into() },
-            // TODO: Some `Other` errors are actually stale-parent races — the parent
+            // Local reads (block index, block tree, DB) fail here, not mempool data,
+            // so the drop counts toward the drop-streak stop.
+            // TODO: Some of these errors are actually stale-parent races — the parent
             // passes the initial canonical-chain check but a concurrent reorg removes
             // it before we query its snapshots/header (e.g. "Block not found",
             // "snapshot not found", "block header not found"). These should be
@@ -84,8 +86,13 @@ impl From<TxSelectorError> for crate::block_producer::BlockProductionError {
             // cleaner approach than downcasting the eyre chain — consider adding typed
             // error variants for the specific lookup failures so they can be matched
             // directly.
-            TxSelectorError::LedgerExpiry(LedgerExpiryError::Other(source))
-            | TxSelectorError::Other(source) => Self::Recoverable {
+            TxSelectorError::LedgerExpiry(LedgerExpiryError::Other(source)) => Self::Recoverable {
+                reason: "ledger_expiry",
+                parent: None,
+                source,
+            },
+            // The same stale-parent TODO applies to `Other`.
+            TxSelectorError::Other(source) => Self::Recoverable {
                 reason: "tx_selection",
                 parent: None,
                 source,
