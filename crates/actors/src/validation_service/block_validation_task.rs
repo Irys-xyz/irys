@@ -314,7 +314,7 @@ impl BlockValidationTask {
         let concurrent_started = Instant::now();
         let block_timestamp_ms = self.sealed_block.header().timestamp.as_millis();
         let into_cancelled_result = |reason: ValidationCancelReason| -> ValidationResult {
-            tracing::warn!(
+            tracing::info!(
                 block.hash = %self.sealed_block.header().block_hash,
                 cancel.reason = %reason,
                 "Validation cancelled"
