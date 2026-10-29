@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793288067136,
+  "lastUpdate": 1793298643372,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20239,6 +20239,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000157,
             "range": "± 0.000023",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "21f532d1e690d9c67e9719e0f8810d2b17c7811f",
+          "message": "fix(consensus): put the VDF seed first in the solution hash after Delta (#1748)\n\nFrom Delta activation the solution hash is\nsha256(seed || le32(offset) || chunk), not\nsha256(chunk || le32(offset) || seed). The block's own timestamp selects\nthe order, as for the Delta capacity reward change:\n\n- validation resolves Delta at the block timestamp\n- the miner resolves Delta at the clock now, because the block does not\n  exist yet\n- the producer hashes again at the block timestamp and drops a solution\n  hashed in the other order, so it never builds a block that fails its\n  own pre-validation\n\nThe chain-test solution helper uses compute_solution_hash instead of its\nown copy of the old order.",
+          "timestamp": "2026-10-29T18:00:54Z",
+          "tree_id": "5fec9c1647baccb98a44c865f1c58a94bc872f70",
+          "url": "https://github.com/Irys-xyz/irys/commit/21f532d1e690d9c67e9719e0f8810d2b17c7811f"
+        },
+        "date": 1793298637691,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015504,
+            "range": "± 0.00078",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.162301,
+            "range": "± 0.01341",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.670835,
+            "range": "± 0.124717",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 11.856001,
+            "range": "± 1.075886",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.086183,
+            "range": "± 0.006215",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 858.441055,
+            "range": "± 16.663743",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1101.634212,
+            "range": "± 53.098042",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.148769,
+            "range": "± 0.004181",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1552.762449,
+            "range": "± 49.975355",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 2057.621279,
+            "range": "± 70.093289",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.1661,
+            "range": "± 0.053289",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 287.840284,
+            "range": "± 36.650013",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 369.520608,
+            "range": "± 43.595082",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000157,
+            "range": "± 0.000012",
             "unit": "ms/iter"
           }
         ]
