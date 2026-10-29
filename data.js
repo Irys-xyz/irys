@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793298643372,
+  "lastUpdate": 1793300353632,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20347,6 +20347,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000157,
             "range": "± 0.000012",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5ddd86f30e7d1ba94432e72787f133806be00128",
+          "message": "docs: capture shadow-tx fee-in-packet hardfork follow-up (#1479)\n\n* docs: capture shadow-tx fee-in-packet hardfork follow-up\n\nAdd design/docs/shadow-tx-priority-fee-in-packet-hardfork.md describing the\ndeferred hardfork that embeds consensus fees in the borsh packet, and pin\ninterim dual-channel warnings at the CL match, EL fee charge, and compose\nsites so the soft-fork tip check is not dropped without the structural fix.\n\n* docs: mark shadow-tx tip soft-fork as shipped and refine hardfork notes\n\nPR #1478 is merged; clarify dual-channel interim state, legacy tip\nnormalization, unread envelope fields, and existing unit-test anchors.",
+          "timestamp": "2026-10-29T18:10:46Z",
+          "tree_id": "7c0eb1ac44d4c1983381f45a240c8a66d1033c7b",
+          "url": "https://github.com/Irys-xyz/irys/commit/5ddd86f30e7d1ba94432e72787f133806be00128"
+        },
+        "date": 1793300352097,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012606,
+            "range": "± 0.000522",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.126199,
+            "range": "± 0.006563",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.248582,
+            "range": "± 0.010134",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.018466,
+            "range": "± 0.13104",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075134,
+            "range": "± 0.001844",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 750.497291,
+            "range": "± 3.047147",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 975.479515,
+            "range": "± 1.5327",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120974,
+            "range": "± 0.003174",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1188.402756,
+            "range": "± 6.650463",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1542.406775,
+            "range": "± 7.034425",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034343,
+            "range": "± 0.000827",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.045467,
+            "range": "± 1.928811",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.371344,
+            "range": "± 0.219419",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
