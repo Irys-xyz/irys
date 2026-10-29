@@ -79,6 +79,15 @@ impl ApiState {
     }
 }
 
+/// `/` redirects to the info route of the highest API version. It is public, so
+/// it has CORS like the routes in [`routes`].
+fn root_redirect() -> impl HttpServiceFactory {
+    // not a permanent redirect, so we can redirect to the highest API version
+    web::resource("/")
+        .wrap(Cors::permissive())
+        .route(web::get().to(|| async { Redirect::to("/v1/info") }))
+}
+
 pub fn routes() -> impl HttpServiceFactory {
     // CORS covers only the public API; the unauthenticated `/internal/*` routes get none.
     web::scope(API_VERSION)
@@ -265,8 +274,7 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
                         .into()
                     }),
             )
-            // not a permanent redirect, so we can redirect to the highest API version
-            .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
+            .service(root_redirect())
             .service(routes());
         let app = if expose_internal_api {
             app.service(routes::internal::internal_routes())
@@ -424,6 +432,7 @@ mod cors_tests {
     async fn origin_header_for(path: &str) -> Option<String> {
         let app = test::init_service(
             App::new()
+                .service(root_redirect())
                 .service(routes())
                 .service(routes::internal::internal_routes()),
         )
@@ -443,6 +452,11 @@ mod cors_tests {
     #[actix_web::test]
     async fn public_routes_allow_cross_origin() {
         assert!(origin_header_for("/v1/info").await.is_some());
+    }
+
+    #[actix_web::test]
+    async fn root_redirect_allows_cross_origin() {
+        assert!(origin_header_for("/").await.is_some());
     }
 
     #[actix_web::test]
