@@ -1081,14 +1081,16 @@ async fn heavy4_delta_partition_recovery_supply_uses_full_emission() -> eyre::Re
     genesis.mine_block().await?;
     peer.wait_until_height(peer_height + 1, seconds_to_wait)
         .await?;
-    // The index trails the tip by block_migration_depth.
+    // The index trails the new tip (peer_height + 1) by block_migration_depth,
+    // so this target is one above the post-recovery index height.
+    let advanced_index_height = peer_height + 1 - block_migration_depth as u64;
     genesis
-        .wait_until_block_index_height(peer_height - block_migration_depth as u64, seconds_to_wait)
+        .wait_until_block_index_height(advanced_index_height, seconds_to_wait)
         .await?;
 
     let final_index_height = genesis.get_block_index_height();
     assert!(
-        final_index_height >= peer_height - block_migration_depth as u64,
+        final_index_height >= advanced_index_height,
         "Block index should continue advancing after recovery, got {final_index_height}"
     );
     let final_supply = wait_supply_height(&genesis, final_index_height).await?;
