@@ -8,6 +8,7 @@ use crate::types::{GossipError, GossipResult, GossipRoutes};
 use crate::wire_types::{self, GossipResponse, RejectionReason};
 use core::time::Duration;
 use futures::StreamExt as _;
+use irys_domain::execution_payload_cache::PayloadBodyMismatchError;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
@@ -20,6 +21,7 @@ use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use opentelemetry::propagation::Injector;
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
+use reth::consensus_common::validation::validate_body_against_header;
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
@@ -1934,7 +1936,7 @@ impl GossipClient {
             None,
             use_trusted_peers_only,
             peer_list,
-            Self::block,
+            |gossip_data| Self::requested_block_header(block_hash, gossip_data),
         )
         .await
     }
@@ -2012,7 +2014,7 @@ impl GossipClient {
             None,
             use_trusted_peers_only,
             peer_list,
-            Self::execution_payload,
+            |gossip_data| Self::requested_execution_payload(evm_payload_hash, gossip_data),
         )
         .await
     }
@@ -2061,8 +2063,17 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<(IrysPeerId, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockHeader(block_hash);
-        self.pull_data_from_peer_with_retry(data_request, None, peer, peer_list, Self::block, false)
-            .await
+        let (peer_id, header) = self
+            .pull_data_from_peer_with_retry(data_request, None, peer, peer_list, Self::block, false)
+            .await?;
+        if let Err(err) = Self::ensure_requested_block_header(block_hash, &header) {
+            peer_list.decrease_peer_score_by_peer_id(
+                &peer_id,
+                ScoreDecreaseReason::BogusData(format!("{err}")),
+            );
+            return Err(err);
+        }
+        Ok((peer_id, header))
     }
 
     pub async fn pull_transaction_from_peer(
@@ -2098,6 +2109,31 @@ impl GossipClient {
         }
     }
 
+    /// The reply must be the requested header. `block_hash` is the keccak of the
+    /// header signature, and block validation checks that binding and the
+    /// signature over the header contents, so comparing the field is enough here.
+    fn requested_block_header(
+        requested_hash: BlockHash,
+        gossip_data: GossipDataV2,
+    ) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
+        let header = Self::block(gossip_data)?;
+        Self::ensure_requested_block_header(requested_hash, &header)?;
+        Ok(header)
+    }
+
+    fn ensure_requested_block_header(
+        requested_hash: BlockHash,
+        header: &IrysBlockHeader,
+    ) -> Result<(), PeerNetworkError> {
+        if header.block_hash != requested_hash {
+            return Err(PeerNetworkError::UnexpectedData(format!(
+                "Requested block header {requested_hash}, got {}",
+                header.block_hash
+            )));
+        }
+        Ok(())
+    }
+
     fn execution_payload(gossip_data: GossipDataV2) -> Result<Block, PeerNetworkError> {
         match gossip_data {
             GossipDataV2::ExecutionPayload(block) => Ok(block),
@@ -2111,6 +2147,32 @@ impl GossipClient {
                 gossip_data.data_type_and_id()
             ))),
         }
+    }
+
+    /// A payload whose hash is not the requested one, or whose body does not
+    /// match its header, is bogus data from the peer: the pull scores the
+    /// peer down and tries the next one.
+    fn requested_execution_payload(
+        requested_hash: B256,
+        gossip_data: GossipDataV2,
+    ) -> Result<Block, PeerNetworkError> {
+        let block = Self::execution_payload(gossip_data)?;
+        let received_hash = block.hash_slow();
+        if received_hash != requested_hash {
+            return Err(PeerNetworkError::UnexpectedData(format!(
+                "Requested execution payload {requested_hash}, got {received_hash}"
+            )));
+        }
+        validate_body_against_header(&block.body, &block.header).map_err(|source| {
+            PeerNetworkError::UnexpectedData(
+                PayloadBodyMismatchError {
+                    evm_block_hash: requested_hash,
+                    source,
+                }
+                .to_string(),
+            )
+        })?;
+        Ok(block)
     }
 
     fn transaction(gossip_data: GossipDataV2) -> Result<IrysTransactionResponse, PeerNetworkError> {
@@ -6069,6 +6131,131 @@ mod tests {
             assert!(
                 result.is_err(),
                 "object-shaped response must be rejected, got {result:?}",
+            );
+        }
+    }
+
+    mod requested_block_header_tests {
+        use super::*;
+
+        fn header_with_hash(byte: u8) -> Arc<IrysBlockHeader> {
+            let mut header = IrysBlockHeader::default();
+            header.block_hash = BlockHash::repeat_byte(byte);
+            Arc::new(header)
+        }
+
+        #[test]
+        fn header_with_requested_hash_is_returned() {
+            let header = header_with_hash(1);
+            let result = GossipClient::requested_block_header(
+                header.block_hash,
+                GossipDataV2::BlockHeader(Arc::clone(&header)),
+            );
+            assert_eq!(result.expect("hash matches"), header);
+        }
+
+        #[test]
+        fn header_with_other_hash_is_rejected() {
+            let result = GossipClient::requested_block_header(
+                BlockHash::repeat_byte(1),
+                GossipDataV2::BlockHeader(header_with_hash(2)),
+            );
+            assert!(
+                matches!(result, Err(PeerNetworkError::UnexpectedData(_))),
+                "{result:?}"
+            );
+        }
+
+        #[test]
+        fn peer_check_rejects_other_hash_and_accepts_requested() {
+            let header = header_with_hash(1);
+            assert!(
+                GossipClient::ensure_requested_block_header(header.block_hash, &header).is_ok()
+            );
+            assert!(matches!(
+                GossipClient::ensure_requested_block_header(BlockHash::repeat_byte(2), &header),
+                Err(PeerNetworkError::UnexpectedData(_))
+            ));
+        }
+
+        #[tokio::test]
+        async fn single_peer_pull_of_other_header_lowers_the_peer_score() {
+            use crate::tests::util::{FakeGossipServer, peer_list_item};
+            use irys_types::PeerScore;
+
+            let server = FakeGossipServer::new();
+            server.set_on_pull_data_request(|_| {
+                GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(header_with_hash(2))))
+            });
+            let peer = peer_list_item(0x71, server.spawn(), true, PeerScore::INITIAL);
+            let peer_list = PeerList::test_mock().expect("peer list");
+            peer_list.add_or_update_peer(peer.clone(), true);
+            let client = GossipClient::new(
+                Duration::from_secs(5),
+                IrysAddress::from([1_u8; 20]),
+                IrysPeerId::from([2_u8; 20]),
+                tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            );
+
+            let result = client
+                .pull_block_header_from_peer(
+                    BlockHash::repeat_byte(1),
+                    &(peer.peer_id, peer.clone()),
+                    &peer_list,
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(PeerNetworkError::UnexpectedData(_))),
+                "{result:?}"
+            );
+            assert!(
+                peer_list
+                    .get_peer(&peer.peer_id)
+                    .expect("peer in the list")
+                    .reputation_score
+                    .get()
+                    < PeerScore::INITIAL,
+                "a peer that sends another header is scored down"
+            );
+        }
+    }
+
+    mod requested_execution_payload_tests {
+        use super::*;
+        use reth::primitives::Header;
+
+        fn block_with_number(number: u64) -> Block {
+            Block {
+                header: Header {
+                    number,
+                    ..Default::default()
+                },
+                body: Default::default(),
+            }
+        }
+
+        #[test]
+        fn payload_with_requested_hash_is_returned() {
+            let block = block_with_number(1);
+            let result = GossipClient::requested_execution_payload(
+                block.hash_slow(),
+                GossipDataV2::ExecutionPayload(block.clone()),
+            );
+            assert_eq!(result.expect("hash matches"), block);
+        }
+
+        #[test]
+        fn payload_with_other_hash_is_rejected() {
+            let requested = block_with_number(1).hash_slow();
+            let result = GossipClient::requested_execution_payload(
+                requested,
+                GossipDataV2::ExecutionPayload(block_with_number(2)),
+            );
+            assert!(
+                matches!(result, Err(PeerNetworkError::UnexpectedData(_))),
+                "{result:?}"
             );
         }
     }

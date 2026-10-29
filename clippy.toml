@@ -1,0 +1,4 @@
+disallowed-methods = [
+  { path = "bs58::decode", reason = "use irys_types::decode_base58_exact: it caps the input length and requires an exact byte count" },
+  { path = "bs58::encode", reason = "use irys_types::ToBase58 so all base58 encoding goes through one place" },
+]

@@ -7,7 +7,7 @@ use crate::{
         record_gossip_inbound_error,
     },
     rate_limiting::{DataRequestTracker, RequestCheckResult},
-    types::{InternalGossipError, InvalidDataError},
+    types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
 };
 use core::net::SocketAddr;
 use irys_actors::block_discovery::{
@@ -37,6 +37,14 @@ use std::time::{Duration, Instant};
 use tracing::{Instrument as _, debug, error, warn};
 
 const HEADER_AND_BODY_RETRIES: usize = 3;
+
+/// A failed header fetch for a pushed body is not repeated for this long. Short, so a
+/// block that peers did not have yet is fetched on a later push.
+const FAILED_HEADER_FETCH_TTL: Duration = Duration::from_secs(5);
+/// Upper bound on the number of remembered failed header fetches.
+const FAILED_HEADER_FETCH_CAPACITY: u64 = 10_000;
+/// Header fetches for pushed bodies above this number wait for a permit.
+const MAX_CONCURRENT_HEADER_FETCHES: usize = 16;
 
 /// Decide whether the outer body-pull retry should continue after an error.
 /// `NoPeersAvailable` means no candidate is reachable right now; the CB
@@ -88,6 +96,17 @@ pub(crate) fn block_body_serve_semaphore(limit: usize) -> Arc<tokio::sync::Semap
     Arc::new(tokio::sync::Semaphore::new(permits))
 }
 
+pub(crate) fn failed_header_fetch_cache() -> moka::sync::Cache<BlockHash, ()> {
+    moka::sync::Cache::builder()
+        .time_to_live(FAILED_HEADER_FETCH_TTL)
+        .max_capacity(FAILED_HEADER_FETCH_CAPACITY)
+        .build()
+}
+
+pub(crate) fn header_fetch_semaphore() -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HEADER_FETCHES))
+}
+
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
 pub struct GossipDataHandler<TMempoolFacade, TBlockDiscovery>
@@ -105,6 +124,9 @@ where
     pub execution_payload_cache: ExecutionPayloadCache,
     pub data_request_tracker: DataRequestTracker,
     pub(crate) block_body_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Hashes whose header fetch for a pushed body failed recently.
+    pub(crate) failed_header_fetches: moka::sync::Cache<BlockHash, ()>,
+    pub(crate) header_fetch_semaphore: Arc<tokio::sync::Semaphore>,
     pub block_index: BlockIndexReadGuard,
     pub block_tree: BlockTreeReadGuard,
     pub config: Config,
@@ -131,6 +153,8 @@ where
             execution_payload_cache: self.execution_payload_cache.clone(),
             data_request_tracker: DataRequestTracker::new(),
             block_body_semaphore: Arc::clone(&self.block_body_semaphore),
+            failed_header_fetches: self.failed_header_fetches.clone(),
+            header_fetch_semaphore: Arc::clone(&self.header_fetch_semaphore),
             block_index: self.block_index.clone(),
             block_tree: self.block_tree.clone(),
             config: self.config.clone(),
@@ -476,6 +500,15 @@ where
         Ok(self.block_pool.is_block_known_locally(block_hash).await)
     }
 
+    fn ensure_header_fetch_not_recently_failed(&self, block_hash: &BlockHash) -> GossipResult<()> {
+        if self.failed_header_fetches.contains_key(block_hash) {
+            return Err(GossipError::Advisory(
+                AdvisoryGossipError::HeaderFetchRecentlyFailed(*block_hash),
+            ));
+        }
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, fields(block.hash = ?block_header.block_hash))]
     pub(crate) async fn handle_block_header(
         &self,
@@ -639,13 +672,34 @@ where
         let block_header = match maybe_header {
             Some(header) => header,
             None => {
-                // When syncing from a trusted peer, we MUST only fetch from trusted peers —
-                // this is a hard security invariant.
-                self.fetch_header_with_retries(
-                    block_hash,
-                    self.sync_state.is_syncing_from_a_trusted_peer(),
-                )
-                .await?
+                // A hash that failed recently does not wait for a permit.
+                self.ensure_header_fetch_not_recently_failed(&block_hash)?;
+                let _permit = self
+                    .header_fetch_semaphore
+                    .acquire()
+                    .await
+                    .map_err(|e| GossipError::unknown(&e))?;
+                // Rechecked after the permit: pushes queued behind a failed fetch of the
+                // same hash do not repeat it, and a header that arrived while waiting
+                // is used instead of fetched.
+                self.ensure_header_fetch_not_recently_failed(&block_hash)?;
+                match self.block_pool.get_block_header(&block_hash).await? {
+                    Some(header) => header,
+                    None => {
+                        // When syncing from a trusted peer, we MUST only fetch from trusted peers —
+                        // this is a hard security invariant.
+                        let fetched = self
+                            .fetch_header_with_retries(
+                                block_hash,
+                                self.sync_state.is_syncing_from_a_trusted_peer(),
+                            )
+                            .await;
+                        if fetched.is_err() {
+                            self.failed_header_fetches.insert(block_hash, ());
+                        }
+                        fetched?
+                    }
+                }
             }
         };
 
@@ -760,6 +814,11 @@ where
         evm_block_hash: EvmBlockHash,
         use_trusted_peers_only: bool,
     ) -> GossipResult<()> {
+        // The pulled payload is requested: it goes to the requested tier of
+        // the cache, and a copy already marked as seen is not skipped.
+        self.execution_payload_cache
+            .mark_payload_as_requested(evm_block_hash)
+            .await;
         let mut last_err = None;
         for attempt in 1..=3 {
             match self
@@ -791,9 +850,7 @@ where
                         .await
                     {
                         last_err = Some(e);
-                        if attempt < 3 {
-                            continue;
-                        }
+                        continue;
                     }
                     return Ok(());
                 }
@@ -858,9 +915,17 @@ where
             ));
         }
 
+        // The cache rejects a body that does not match the header. Such a
+        // copy is not recorded as seen, so a correct copy with the same hash
+        // is still accepted.
         self.execution_payload_cache
             .add_payload_to_cache(sealed_block)
-            .await;
+            .await
+            .map_err(|err| {
+                GossipError::InvalidData(InvalidDataError::ExecutionPayloadBodyMismatch(
+                    err.to_string(),
+                ))
+            })?;
 
         // Only record as seen after validation and successful cache addition
         self.cache.record_seen(
@@ -1686,7 +1751,7 @@ mod body_fetch_recovery_tests {
     use irys_utils::circuit_breaker::CircuitBreakerConfig;
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -2123,6 +2188,273 @@ mod body_fetch_recovery_tests {
         let _ = first;
     }
 
+    /// Serves `header` to header pulls once `available` is set. Counts the
+    /// header pulls.
+    fn header_server(
+        header: &Arc<IrysBlockHeader>,
+        available: Arc<AtomicBool>,
+    ) -> (FakeGossipServer, Arc<AtomicUsize>) {
+        let pulls = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::clone(&pulls);
+        let served = Arc::clone(header);
+        let server = FakeGossipServer::new();
+        server.set_on_pull_data_request(move |request| match request {
+            GossipDataRequestV2::BlockHeader(hash) if hash == served.block_hash => {
+                hits.fetch_add(1, Ordering::SeqCst);
+                if available.load(Ordering::SeqCst) {
+                    GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::clone(&served))))
+                } else {
+                    GossipResponse::Accepted(None)
+                }
+            }
+            _ => GossipResponse::Accepted(None),
+        });
+        (server, pulls)
+    }
+
+    fn pushed_body(block_hash: BlockHash, byte: u8) -> GossipRequestV2<BlockBody> {
+        GossipRequestV2 {
+            peer_id: IrysPeerId::from(IrysAddress::repeat_byte(byte)),
+            miner_address: IrysAddress::repeat_byte(byte),
+            data: BlockBody {
+                block_hash,
+                data_transactions: vec![],
+                commitment_transactions: vec![],
+            },
+        }
+    }
+
+    fn with_failed_header_fetch_ttl(handler: &mut Arc<TestHandler>, ttl: Duration) {
+        Arc::get_mut(handler)
+            .expect("unique handler")
+            .failed_header_fetches = moka::sync::Cache::builder().time_to_live(ttl).build();
+    }
+
+    /// A pushed body for an unknown hash fetches the header once. A second
+    /// push within the TTL does not fetch again. A push after the TTL does.
+    #[tokio::test]
+    async fn failed_header_fetch_is_not_repeated_within_the_ttl() {
+        let ttl = Duration::from_secs(1);
+        let (_dir, peer_list, mut handler) = test_handler();
+        with_failed_header_fetch_ttl(&mut handler, ttl);
+        let header = orphan_header();
+        let block_hash = header.block_hash;
+        let (server, pulls) = header_server(&header, Arc::new(AtomicBool::new(false)));
+        let addr = server.spawn();
+        add_peer(&peer_list, 0xC1, addr, true);
+
+        let first = handler
+            .handle_block_body(pushed_body(block_hash, 0xC1), addr)
+            .await;
+        assert!(first.is_err(), "no peer has the header");
+        let pulls_after_first = pulls.load(Ordering::SeqCst);
+        assert!(pulls_after_first > 0, "the first push fetches the header");
+
+        let second = handler
+            .handle_block_body(pushed_body(block_hash, 0xC1), addr)
+            .await;
+        assert!(second.is_err());
+        assert_eq!(
+            pulls.load(Ordering::SeqCst),
+            pulls_after_first,
+            "a push within the TTL does not fetch the header"
+        );
+
+        tokio::time::sleep(ttl + Duration::from_millis(200)).await;
+        let third = handler
+            .handle_block_body(pushed_body(block_hash, 0xC1), addr)
+            .await;
+        assert!(third.is_err());
+        assert!(
+            pulls.load(Ordering::SeqCst) > pulls_after_first,
+            "a push after the TTL fetches the header again"
+        );
+    }
+
+    /// A header that peers serve only after a failed fetch is fetched and the
+    /// block is processed once the TTL expires.
+    #[tokio::test]
+    async fn block_is_processed_when_its_header_becomes_available_after_the_ttl() {
+        let ttl = Duration::from_secs(1);
+        let (_dir, peer_list, mut handler) = test_handler();
+        with_failed_header_fetch_ttl(&mut handler, ttl);
+        let header = orphan_header();
+        let block_hash = header.block_hash;
+        let available = Arc::new(AtomicBool::new(false));
+        let (server, pulls) = header_server(&header, Arc::clone(&available));
+        let addr = server.spawn();
+        add_peer(&peer_list, 0xC2, addr, true);
+
+        let first = handler
+            .handle_block_body(pushed_body(block_hash, 0xC2), addr)
+            .await;
+        assert!(first.is_err(), "no peer has the header");
+
+        available.store(true, Ordering::SeqCst);
+        let pulls_before = pulls.load(Ordering::SeqCst);
+        let within_ttl = handler
+            .handle_block_body(pushed_body(block_hash, 0xC2), addr)
+            .await;
+        assert!(within_ttl.is_err());
+        assert_eq!(pulls.load(Ordering::SeqCst), pulls_before);
+        assert!(!handler.block_pool.contains_block(&block_hash).await);
+
+        tokio::time::sleep(ttl + Duration::from_millis(200)).await;
+        let after_ttl = handler
+            .handle_block_body(pushed_body(block_hash, 0xC2), addr)
+            .await;
+        assert!(after_ttl.is_ok(), "the header is served now: {after_ttl:?}");
+        assert!(
+            handler.block_pool.contains_block(&block_hash).await,
+            "the block is processed once the header is fetched"
+        );
+    }
+
+    /// Pushes that wait for a header-fetch permit check the failed-fetch
+    /// cache after they get it, so only the first one fetches.
+    #[tokio::test]
+    async fn queued_pushes_do_not_repeat_a_failed_header_fetch() {
+        let (_dir, peer_list, mut handler) = test_handler();
+        Arc::get_mut(&mut handler)
+            .expect("unique handler")
+            .header_fetch_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let header = orphan_header();
+        let block_hash = header.block_hash;
+        let (server, pulls) = header_server(&header, Arc::new(AtomicBool::new(false)));
+        let addr = server.spawn();
+        add_peer(&peer_list, 0xC3, addr, true);
+
+        let pushes = (0..4).map(|_| {
+            let handler = Arc::clone(&handler);
+            tokio::spawn(async move {
+                handler
+                    .handle_block_body(pushed_body(block_hash, 0xC3), addr)
+                    .await
+            })
+        });
+        for result in futures::future::join_all(pushes).await {
+            assert!(
+                result.expect("push task").is_err(),
+                "no peer has the header"
+            );
+        }
+
+        let single_fetch = {
+            let (_dir, peer_list, handler) = test_handler();
+            let (server, pulls) = header_server(&header, Arc::new(AtomicBool::new(false)));
+            let addr = server.spawn();
+            add_peer(&peer_list, 0xC4, addr, true);
+            let _ = handler
+                .handle_block_body(pushed_body(block_hash, 0xC4), addr)
+                .await;
+            pulls.load(Ordering::SeqCst)
+        };
+        assert_eq!(
+            pulls.load(Ordering::SeqCst),
+            single_fetch,
+            "the queued pushes reuse the first failed fetch"
+        );
+    }
+
+    /// A hash that failed recently is rejected before the permit wait, with an
+    /// advisory error.
+    #[tokio::test]
+    async fn recently_failed_header_fetch_does_not_wait_for_a_permit() {
+        let (_dir, _peer_list, mut handler) = test_handler();
+        Arc::get_mut(&mut handler)
+            .expect("unique handler")
+            .header_fetch_semaphore = Arc::new(tokio::sync::Semaphore::new(0));
+        let block_hash = orphan_header().block_hash;
+        handler.failed_header_fetches.insert(block_hash, ());
+
+        let result = tokio::time::timeout(
+            loaded_wait(5),
+            handler.handle_block_body(pushed_body(block_hash, 0xC5), dummy_addr()),
+        )
+        .await
+        .expect("no permit wait for a recently failed hash");
+        assert!(
+            matches!(
+                result,
+                Err(GossipError::Advisory(
+                    AdvisoryGossipError::HeaderFetchRecentlyFailed(hash)
+                )) if hash == block_hash
+            ),
+            "{result:?}"
+        );
+    }
+
+    /// A header that arrives while a push waits for the permit is used, not
+    /// fetched.
+    #[tokio::test]
+    async fn header_that_arrives_during_the_permit_wait_is_not_fetched() {
+        let (_dir, peer_list, mut handler) = test_handler();
+        Arc::get_mut(&mut handler)
+            .expect("unique handler")
+            .header_fetch_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let header = orphan_header();
+        let block_hash = header.block_hash;
+        let pulls = Arc::new(AtomicUsize::new(0));
+        let header_pulls = Arc::clone(&pulls);
+        let served = Arc::clone(&header);
+        let server = FakeGossipServer::new();
+        server.set_on_pull_data_request(move |request| match request {
+            GossipDataRequestV2::BlockHeader(hash) if hash == served.block_hash => {
+                header_pulls.fetch_add(1, Ordering::SeqCst);
+                GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::clone(&served))))
+            }
+            GossipDataRequestV2::BlockBody(hash) if hash == served.block_hash => body_for(&served),
+            _ => GossipResponse::Accepted(None),
+        });
+        let addr = server.spawn();
+        add_peer(&peer_list, 0xC6, addr, true);
+
+        let held = Arc::clone(&handler.header_fetch_semaphore)
+            .acquire_owned()
+            .await
+            .expect("permit");
+        let waiting = {
+            let handler = Arc::clone(&handler);
+            tokio::spawn(async move {
+                handler
+                    .handle_block_body(pushed_body(block_hash, 0xC6), addr)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        handler
+            .handle_block_header(
+                IrysPeerId::from(IrysAddress::repeat_byte(0xC6)),
+                IrysAddress::repeat_byte(0xC6),
+                Arc::clone(&header),
+                addr,
+            )
+            .await
+            .expect("the header is processed");
+        assert!(
+            handler
+                .block_pool
+                .get_block_header(&block_hash)
+                .await
+                .expect("lookup")
+                .is_some(),
+            "the header is in the pool"
+        );
+        let pulls_before_release = pulls.load(Ordering::SeqCst);
+
+        drop(held);
+        let _ = tokio::time::timeout(loaded_wait(30), waiting)
+            .await
+            .expect("the waiting push finishes")
+            .expect("push task");
+        assert_eq!(
+            pulls.load(Ordering::SeqCst),
+            pulls_before_release,
+            "the header that arrived meanwhile is not fetched"
+        );
+    }
+
     /// Two peers push the same header at the same time. Each arrival pulls
     /// the body. The pool keeps one block, so a later arrival does not pull.
     #[tokio::test]
@@ -2442,5 +2774,245 @@ mod body_fetch_recovery_tests {
             0,
             "a recently processed block must not be pulled again"
         );
+    }
+}
+
+#[cfg(test)]
+mod execution_payload_tests {
+    use super::*;
+    use crate::tests::util::{FakeGossipServer, data_handler_stub, peer_list_item};
+    use crate::types::GossipResponse;
+    use irys_domain::PeerList;
+    use irys_domain::chain_sync_state::ChainSyncState;
+    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::v2::GossipDataV2;
+    use irys_types::{DatabaseProvider, DbSyncMode, NodeConfig, PeerScore};
+    use reth::primitives::Header;
+    use reth::primitives::proofs::calculate_ommers_root;
+    use reth_ethereum_primitives::BlockBody as EvmBlockBody;
+
+    type TestHandler =
+        GossipDataHandler<crate::tests::util::MempoolStub, crate::tests::util::BlockDiscoveryStub>;
+
+    fn test_handler() -> (irys_testing_utils::tempfile::TempDir, Arc<TestHandler>) {
+        let dir = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = dir.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(
+                &config.node_config.base_directory,
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("open test db"),
+        ));
+        let peer_list = PeerList::test_mock().expect("peer list");
+        let handler = data_handler_stub(&config, &peer_list, db, ChainSyncState::new(false, false));
+        (dir, handler)
+    }
+
+    fn payload_request(block: Block) -> GossipRequestV2<Block> {
+        let miner_address = IrysAddress::repeat_byte(0x33);
+        GossipRequestV2 {
+            peer_id: IrysPeerId::from(miner_address),
+            miner_address,
+            data: block,
+        }
+    }
+
+    /// Returns a block whose header commits to one ommer, and a copy with
+    /// the same header (so the same hash) but an empty body.
+    fn matching_and_mismatched_blocks() -> (Block, Block) {
+        let ommers = vec![Header::default()];
+        let header = Header {
+            number: 1,
+            ommers_hash: calculate_ommers_root(&ommers),
+            ..Default::default()
+        };
+        let matching = Block {
+            header: header.clone(),
+            body: EvmBlockBody {
+                ommers,
+                ..Default::default()
+            },
+        };
+        let mismatched = Block {
+            header,
+            body: EvmBlockBody::default(),
+        };
+        (matching, mismatched)
+    }
+
+    #[tokio::test]
+    async fn mismatched_payload_is_rejected_and_matching_copy_is_accepted() {
+        let (_dir, handler) = test_handler();
+        let (matching, mismatched) = matching_and_mismatched_blocks();
+        let evm_block_hash = matching.hash_slow();
+        assert_eq!(mismatched.hash_slow(), evm_block_hash);
+
+        let result = handler
+            .handle_execution_payload(payload_request(mismatched))
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(GossipError::InvalidData(
+                    InvalidDataError::ExecutionPayloadBodyMismatch(_)
+                ))
+            ),
+            "{result:?}"
+        );
+        assert!(
+            !handler
+                .execution_payload_cache
+                .is_payload_in_cache(&evm_block_hash)
+                .await
+        );
+        assert!(
+            !handler
+                .cache
+                .seen_execution_payload_from_any_peer(&evm_block_hash)
+                .expect("seen check"),
+            "a rejected copy must not be recorded as seen"
+        );
+
+        handler
+            .handle_execution_payload(payload_request(matching.clone()))
+            .await
+            .expect("matching copy is accepted");
+        let cached = handler
+            .execution_payload_cache
+            .get_sealed_block_from_cache(&evm_block_hash)
+            .await
+            .expect("matching copy is cached");
+        assert_eq!(cached.into_block(), matching);
+        assert!(
+            handler
+                .cache
+                .seen_execution_payload_from_any_peer(&evm_block_hash)
+                .expect("seen check")
+        );
+    }
+
+    /// A peer that serves a payload the pull rejects on every attempt
+    /// must surface as an error to the caller, not as success.
+    #[tokio::test]
+    async fn pull_fails_when_every_served_payload_is_rejected() {
+        let (_dir, handler) = test_handler();
+        let (matching, mismatched) = matching_and_mismatched_blocks();
+        let evm_block_hash = matching.hash_slow();
+
+        let server = FakeGossipServer::new();
+        server.set_on_pull_data_request(move |_| {
+            GossipResponse::Accepted(Some(GossipDataV2::ExecutionPayload(mismatched.clone())))
+        });
+        let addr = server.spawn();
+        let peer = peer_list_item(0x41, addr, true, PeerScore::INITIAL);
+        let peer_id = peer.peer_id;
+        handler.peer_list.add_or_update_peer(peer, true);
+
+        let result = handler
+            .pull_and_add_execution_payload_to_cache(evm_block_hash, false)
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(GossipError::PeerNetwork(
+                    PeerNetworkError::FailedToRequestData(_)
+                ))
+            ),
+            "{result:?}"
+        );
+        assert!(
+            !handler
+                .execution_payload_cache
+                .is_payload_in_cache(&evm_block_hash)
+                .await
+        );
+        let score = handler
+            .peer_list
+            .get_peer(&peer_id)
+            .expect("peer is known")
+            .reputation_score
+            .get();
+        assert!(score < PeerScore::INITIAL, "score {score}");
+    }
+
+    /// A peer that serves a payload with the requested hash but a body that
+    /// does not match its header is scored down, and the pull takes the
+    /// payload from the next peer.
+    #[tokio::test]
+    async fn pull_skips_peer_that_serves_mismatched_body() {
+        let (_dir, handler) = test_handler();
+        let (matching, mismatched) = matching_and_mismatched_blocks();
+        let evm_block_hash = matching.hash_slow();
+
+        let mismatched_server = FakeGossipServer::new();
+        mismatched_server.set_on_pull_data_request(move |_| {
+            GossipResponse::Accepted(Some(GossipDataV2::ExecutionPayload(mismatched.clone())))
+        });
+        let mismatched_peer =
+            peer_list_item(0x41, mismatched_server.spawn(), true, PeerScore::INITIAL);
+        let mismatched_peer_id = mismatched_peer.peer_id;
+        handler.peer_list.add_or_update_peer(mismatched_peer, true);
+
+        // The first request gets no data, so the first round always waits
+        // for the mismatched peer. Later requests get the matching payload.
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = matching.clone();
+        let matching_server = FakeGossipServer::new();
+        matching_server.set_on_pull_data_request(move |_| {
+            if requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                GossipResponse::Accepted(None)
+            } else {
+                GossipResponse::Accepted(Some(GossipDataV2::ExecutionPayload(served.clone())))
+            }
+        });
+        let matching_peer = peer_list_item(0x42, matching_server.spawn(), true, PeerScore::INITIAL);
+        handler.peer_list.add_or_update_peer(matching_peer, true);
+
+        handler
+            .pull_and_add_execution_payload_to_cache(evm_block_hash, false)
+            .await
+            .expect("pull takes the payload from the matching peer");
+        let cached = handler
+            .execution_payload_cache
+            .get_sealed_block_from_cache(&evm_block_hash)
+            .await
+            .expect("matching payload is cached");
+        assert_eq!(cached.into_block(), matching);
+        let score = handler
+            .peer_list
+            .get_peer(&mismatched_peer_id)
+            .expect("peer is known")
+            .reputation_score
+            .get();
+        assert!(score < PeerScore::INITIAL, "score {score}");
+    }
+
+    /// An EVM payload gossiped before its Irys block must be served when
+    /// validation of that block waits for it.
+    #[tokio::test]
+    async fn early_gossiped_payload_is_served_to_validation() {
+        let (_dir, handler) = test_handler();
+        let (matching, _) = matching_and_mismatched_blocks();
+        let evm_block_hash = matching.hash_slow();
+
+        handler
+            .handle_execution_payload(payload_request(matching.clone()))
+            .await
+            .expect("payload is accepted");
+
+        let payload = tokio::time::timeout(
+            Duration::from_secs(5),
+            handler
+                .execution_payload_cache
+                .wait_for_sealed_block(&evm_block_hash, false),
+        )
+        .await
+        .expect("served from the cache without a network request")
+        .expect("payload is in the cache");
+        assert_eq!(payload.into_block(), matching);
     }
 }

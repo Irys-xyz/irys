@@ -150,7 +150,8 @@ async fn spiky_slow_heavy4_tip_updated_correctly_in_forks_with_variying_cumulati
             .block_pool
             .execution_payload_provider
             .add_payload_to_cache(eth_block.block().clone())
-            .await;
+            .await
+            .expect("payload body matches its header");
 
         // 60s timeout (not max_seconds) because CI validation can be slower than mining
         wait_for_block_event(&mut block_state_rx, 60, |ev| {

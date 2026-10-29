@@ -444,6 +444,21 @@ impl Config {
             "sync.min_active_peers must be > 0 (zero makes startup skip sync immediately on the empty snapshot)"
         );
 
+        // The sync asks the block index from groups of this many peers.
+        ensure!(
+            self.node_config.sync.block_index_peer_count > 0,
+            "sync.block_index_peer_count must be > 0 (zero asks no peer for the block index)"
+        );
+
+        // The sync asks the block index in batches of this size. The server
+        // rejects a query above its maximum. Zero asks for
+        // `DEFAULT_BLOCK_INDEX_QUERY_LIMIT` entries.
+        ensure!(
+            self.node_config.sync.block_batch_size <= crate::MAX_BLOCK_INDEX_QUERY_LIMIT,
+            "sync.block_batch_size must be <= {} (the server rejects a larger block index query)",
+            crate::MAX_BLOCK_INDEX_QUERY_LIMIT
+        );
+
         // For nodes joining an existing network the chain_sync `count == 0`
         // skip path is only recovered via the periodic sync check. If the
         // operator disables the periodic check (or sets the interval to 0), a node that boots
@@ -1997,6 +2012,43 @@ mod tests {
         Config::new_with_random_peer_id(node_config)
             .validate()
             .expect("any positive cap is accepted");
+    }
+
+    #[test]
+    fn validate_rejects_zero_block_index_peer_count() {
+        let mut node_config = NodeConfig::testing();
+        node_config.sync.block_index_peer_count = 0;
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("zero peers per block index request")
+            .to_string();
+        assert!(err.contains("block_index_peer_count"), "got: {err}");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.sync.block_index_peer_count = 1;
+        Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect("any positive peer count is accepted");
+    }
+
+    #[test]
+    fn validate_rejects_block_batch_size_above_the_block_index_query_maximum() {
+        let mut node_config = NodeConfig::testing();
+        node_config.sync.block_batch_size = crate::MAX_BLOCK_INDEX_QUERY_LIMIT + 1;
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("batch above the server maximum")
+            .to_string();
+        assert!(err.contains("block_batch_size"), "got: {err}");
+
+        // Zero asks for `DEFAULT_BLOCK_INDEX_QUERY_LIMIT` entries.
+        for block_batch_size in [0, crate::MAX_BLOCK_INDEX_QUERY_LIMIT] {
+            let mut node_config = NodeConfig::testing();
+            node_config.sync.block_batch_size = block_batch_size;
+            Config::new_with_random_peer_id(node_config)
+                .validate()
+                .expect("batch within the server maximum is accepted");
+        }
     }
 
     #[test]

@@ -1,11 +1,15 @@
-use crate::{ApiState, error::ApiError};
+use crate::{
+    ApiState,
+    error::ApiError,
+    routes::tx_ingress::{MEMPOOL_REPLY_TIMEOUT, ingest_via_mempool},
+};
 use actix_web::{
     HttpResponse,
     web::{self, Json},
 };
 use awc::http::StatusCode;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
-use irys_types::{CommitmentTransaction, SendTraced as _, UnixTimestamp, VersionDiscriminant as _};
+use irys_types::{CommitmentTransaction, UnixTimestamp, VersionDiscriminant as _};
 
 pub async fn post_commitment_tx(
     state: web::Data<ApiState>,
@@ -39,32 +43,13 @@ async fn process_commitment_transaction(
     tx: CommitmentTransaction,
     state: web::Data<ApiState>,
 ) -> Result<HttpResponse, ApiError> {
-    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::IngestCommitmentTxFromApi(tx, oneshot_tx);
-
-    if let Err(err) = state.mempool_service.send_traced(tx_ingress_msg) {
-        tracing::error!(
-            "API Failed to deliver MempoolServiceMessage::CommitmentTxIngressMessage: {}",
-            err
-        );
-
-        return Err(ApiError::from((
-            "Failed to deliver transaction",
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )));
-    }
-
-    let msg_result = oneshot_rx.await;
-
-    if let Err(err) = msg_result {
-        tracing::error!("API: {}", err);
-        return Err(ApiError::from((
-            "Failed to deliver transaction",
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )));
-    }
-
-    let inner_result = msg_result.unwrap();
+    let inner_result = ingest_via_mempool(
+        &state.tx_ingress_admission,
+        &state.mempool_service,
+        MEMPOOL_REPLY_TIMEOUT,
+        |reply| MempoolServiceMessage::IngestCommitmentTxFromApi(tx, reply),
+    )
+    .await?;
     if let Err(err) = inner_result {
         tracing::warn!("API: {}", err);
         return match err {

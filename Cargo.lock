@@ -1794,12 +1794,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "base58"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6107fe1be6682a68940da878d9e9f5e90ca5745b3dec9fd1bb393c8777d4f581"
-
-[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5035,7 +5029,6 @@ dependencies = [
  "alloy-eips",
  "async-stream",
  "awc",
- "base58",
  "eyre",
  "hex",
  "irys-actors",
@@ -5085,7 +5078,6 @@ dependencies = [
  "alloy-contract",
  "alloy-signer",
  "alloy-sol-types",
- "base58",
  "core_affinity",
  "eyre",
  "futures",
@@ -5298,7 +5290,6 @@ dependencies = [
 name = "irys-debug-utils"
 version = "0.1.0"
 dependencies = [
- "bs58",
  "eyre",
  "hex",
  "irys-database",
@@ -5319,7 +5310,6 @@ dependencies = [
  "alloy-rpc-types",
  "assert_matches",
  "atomic-write-file",
- "base58",
  "crc32c",
  "derive_more",
  "eyre",
@@ -5605,6 +5595,7 @@ dependencies = [
  "irys-reth",
  "irys-testing-utils",
  "irys-types",
+ "jsonrpsee",
  "proptest",
  "reth",
  "reth-chainspec",
@@ -5736,10 +5727,10 @@ dependencies = [
  "arbitrary",
  "assert_matches",
  "async-trait",
- "base58",
  "base64-url",
  "borsh",
  "borsh-derive",
+ "bs58",
  "build-print",
  "bytemuck",
  "bytes",
@@ -5813,7 +5804,6 @@ dependencies = [
 name = "irys-vdf"
 version = "0.1.0"
 dependencies = [
- "base58",
  "criterion",
  "eyre",
  "hex",

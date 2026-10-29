@@ -20,7 +20,7 @@ db = [
 [dependencies]
 semver.workspace = true
 uint = "0.9.5"
-base58 = "0.2.0"
+bs58.workspace = true
 base64-url.workspace = true
 derive_more = { version = "2.0.1", features = [
     "add",
