@@ -23,7 +23,7 @@ use irys_vdf::state::VdfStateReadonly;
 use nodit::Interval;
 use openssl::sha;
 use reth::tasks::shutdown::Shutdown;
-use std::{sync::Arc, time::Duration};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{Instrument as _, debug, error, info, warn};
 
@@ -470,11 +470,15 @@ impl PartitionMiningServiceInner {
             .wrap_err("recall range larger than u64")
     }
 
+    /// Read and hash one recall range. The caller resolves
+    /// `recall_range_index` with `get_recall_range` in step order, so the
+    /// reads can run in any order.
     #[tracing::instrument(level = "trace", skip_all, err)]
     fn mine_partition_with_seed(
         &mut self,
         mining_seed: irys_types::H256,
         vdf_step: u64,
+        recall_range_index: u64,
         checkpoints: &H256List,
     ) -> eyre::Result<Option<SolutionContext>> {
         let partition_hash = match self.storage_module.partition_hash() {
@@ -484,9 +488,6 @@ impl PartitionMiningServiceInner {
                 return Ok(None);
             }
         };
-
-        // Pick a random recall range in the partition using efficient sampling
-        let recall_range_index = self.get_recall_range(vdf_step, &mining_seed, &partition_hash)?;
 
         // Starting chunk index within partition
         let start_chunk_offset = (recall_range_index as u32)
@@ -853,71 +854,124 @@ impl PartitionMiningServiceInner {
         sha::sha256(&unpacked[..span]) == leaf_hash
     }
 
+    /// Queued recall ranges kept while the miner is busy. Matches the
+    /// mining lag bound: a range is skipped at `lag >= 3`, so a backlog
+    /// deeper than this only holds ranges that are worth less than the
+    /// newer ones. The oldest is evicted on arrival.
+    const MAX_PENDING_RECALLS: usize = 3;
+
     #[tracing::instrument(level = "trace", skip_all)]
-    fn handle_seed(&mut self, msg: &BroadcastMiningSeed) {
-        let seed = msg.seed.clone();
+    fn handle_seeds(&mut self, seeds: &[&BroadcastMiningSeed]) {
         if !self.should_mine {
-            debug!("Mining disabled, skipping seed {:?}", seed);
+            debug!("Mining disabled, skipping {} queued seed(s)", seeds.len());
             return;
         }
 
-        if self.storage_module.partition_assignment().is_none() {
-            debug!("No partition assigned - skipping seed {:?}", seed);
-            return;
-        }
-
-        let current_step = self.steps_guard.current_step();
-
-        debug!(
-            "Mining partition {} with seed {:?} step number {} current step {}",
-            self.storage_module.partition_hash().unwrap(),
-            seed,
-            msg.global_step,
-            current_step
-        );
-
-        let lag = current_step.saturating_sub(msg.global_step);
-        if lag >= 3 {
-            warn!(
-                "Storage module {} is {} steps behind in mining. Skipping.",
-                self.storage_module.id, lag
+        let Some(partition_hash) = self.storage_module.partition_hash() else {
+            debug!(
+                "No partition assigned - skipping {} queued seed(s)",
+                seeds.len()
             );
             return;
+        };
+
+        // `seeds` arrives in step order. Keep only the newest
+        // `MAX_PENDING_RECALLS`, evicting the oldest, so a slow recall read
+        // drops the ranges least worth mining.
+        let mut pending: VecDeque<&BroadcastMiningSeed> = VecDeque::new();
+        for msg in seeds {
+            if pending
+                .iter()
+                .any(|queued| queued.global_step == msg.global_step)
+            {
+                continue;
+            }
+            if pending.len() == Self::MAX_PENDING_RECALLS {
+                let evicted = pending.pop_front().expect("pending is full");
+                debug!(
+                    "Dropping recall range for step {}: {} newer range(s) queued",
+                    evicted.global_step,
+                    Self::MAX_PENDING_RECALLS
+                );
+            }
+            pending.push_back(msg);
         }
 
-        debug!(
-            "Partition {} -- looking for solution with difficulty >= {}",
-            self.storage_module.partition_hash().unwrap(),
-            self.difficulty
-        );
+        // Resolve every range oldest first. The rotation only moves forward:
+        // resolving a step behind it rebuilds it from the reset step.
+        let mut resolved = Vec::with_capacity(pending.len());
+        for msg in &pending {
+            match self.get_recall_range(msg.global_step, &msg.seed.0, &partition_hash) {
+                Ok(recall_range_index) => resolved.push((*msg, recall_range_index)),
+                Err(err) => error!(
+                    "Error resolving recall range for storage_module {} partition_hash {} step {}: {:?}",
+                    self.storage_module.id, partition_hash, msg.global_step, err
+                ),
+            }
+        }
 
-        match self.mine_partition_with_seed(seed.into_inner(), msg.global_step, &msg.checkpoints) {
-            Ok(Some(s)) => {
-                let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
-                let cmd = BlockProducerCommand::SolutionFound {
-                    solution: s,
-                    response: response_tx,
-                };
-                if let Err(err) = self.service_senders.block_producer.send_traced(cmd) {
-                    error!(
-                        "Error submitting solution to block producer for storage_module {} partition_hash {:?} step {}: {:?}",
-                        self.storage_module.id,
-                        self.storage_module.partition_hash(),
-                        msg.global_step,
-                        err
-                    );
+        // Read newest first. Newer ranges are worth more; each costs a full
+        // recall read.
+        for (msg, recall_range_index) in resolved.into_iter().rev() {
+            // A recall read can lag the VDF by several steps. Each range's
+            // lag is measured at its own mining time, not at the batch head.
+            let current_step = self.steps_guard.current_step();
+            let lag = current_step.saturating_sub(msg.global_step);
+            if lag >= 3 {
+                warn!(
+                    "Storage module {} is {} steps behind in mining. Skipping step {}.",
+                    self.storage_module.id, lag, msg.global_step
+                );
+                continue;
+            }
+
+            debug!(
+                "Mining partition {} with seed {:?} step number {} current step {}",
+                partition_hash, msg.seed, msg.global_step, current_step
+            );
+
+            debug!(
+                "Partition {} -- looking for solution with difficulty >= {}",
+                partition_hash, self.difficulty
+            );
+
+            match self.mine_partition_with_seed(
+                msg.seed.clone().into_inner(),
+                msg.global_step,
+                recall_range_index,
+                &msg.checkpoints,
+            ) {
+                Ok(Some(s)) => {
+                    let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+                    let cmd = BlockProducerCommand::SolutionFound {
+                        solution: s,
+                        response: response_tx,
+                    };
+                    if let Err(err) = self.service_senders.block_producer.send_traced(cmd) {
+                        error!(
+                            "Error submitting solution to block producer for storage_module {} partition_hash {:?} step {}: {:?}",
+                            self.storage_module.id,
+                            self.storage_module.partition_hash(),
+                            msg.global_step,
+                            err
+                        );
+                    }
+                    // A solution for the newest range is in hand. The
+                    // remaining older ranges are worth less.
+                    return;
                 }
+                Ok(None) => {
+                    // No solution in this range. Try the next, older one.
+                }
+                Err(err) => error!(
+                    "Error in handling mining solution for storage_module {} partition_hash {:?} step {}: {:?}",
+                    self.storage_module.id,
+                    self.storage_module.partition_hash(),
+                    msg.global_step,
+                    err
+                ),
             }
-            Ok(None) => {
-                // No solution found this step.
-            }
-            Err(err) => error!(
-                "Error in handling mining solution for storage_module {} partition_hash {:?}: {:?}",
-                self.storage_module.id,
-                self.storage_module.partition_hash(),
-                err
-            ),
-        };
+        }
     }
 }
 
@@ -943,7 +997,12 @@ impl PartitionMiningServiceInner {
         vdf_step: u64,
         checkpoints: &H256List,
     ) -> Option<SolutionContext> {
-        self.mine_partition_with_seed(mining_seed, vdf_step, checkpoints)
+        let partition_hash = self
+            .storage_module
+            .partition_hash()
+            .expect("test module has a partition");
+        let recall_range_index = self.test_get_recall_range(vdf_step, mining_seed, partition_hash);
+        self.mine_partition_with_seed(mining_seed, vdf_step, recall_range_index, checkpoints)
             .expect("test_mine_partition_with_seed failed")
     }
 
@@ -1007,18 +1066,73 @@ impl PartitionMiningService {
         (controller, svc_handle)
     }
 
-    /// `handle_seed` reads `chunks.dat` and then hashes the recall range.
+    /// `handle_seeds` reads `chunks.dat` and then hashes the recall ranges.
     /// A multi-thread runtime moves this worker to the blocking pool so
-    /// other tasks still run during that read.
-    fn mine_seed(&mut self, msg: &BroadcastMiningSeed) {
+    /// other tasks still run during those reads.
+    fn mine_seeds(&mut self, batch: &[Arc<MiningBroadcastEvent>]) {
+        let seeds: Vec<&BroadcastMiningSeed> = batch
+            .iter()
+            .filter_map(|evt| match evt.as_ref() {
+                MiningBroadcastEvent::Seed(seed) => Some(seed),
+                _ => None,
+            })
+            .collect();
         let multi_thread = tokio::runtime::Handle::try_current().is_ok_and(|handle| {
             handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
         });
         if multi_thread {
-            tokio::task::block_in_place(|| self.state.handle_seed(msg));
+            tokio::task::block_in_place(|| self.state.handle_seeds(&seeds));
         } else {
-            self.state.handle_seed(msg);
+            self.state.handle_seeds(&seeds);
         }
+    }
+
+    /// Apply one non-seed broadcast event. Mirrors the event loop arms so a
+    /// flush of queued events applies them exactly as the loop would.
+    fn apply_broadcast(&mut self, evt: &MiningBroadcastEvent) {
+        match evt {
+            MiningBroadcastEvent::Difficulty(BroadcastDifficultyUpdate(h)) => {
+                self.state.finish_expiry_reset();
+                self.state.update_difficulty(h.diff);
+            }
+            MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration {
+                partition_hashes,
+                update_height,
+            }) => {
+                self.state
+                    .handle_partitions_expiration(partition_hashes, *update_height);
+            }
+            MiningBroadcastEvent::Reanchored => {
+                self.state.finish_expiry_reset();
+                self.state.handle_reanchored();
+            }
+            MiningBroadcastEvent::Seed(_) => {
+                // Collected by the caller into a seed batch.
+            }
+        }
+    }
+
+    /// Batch `first` with every seed queued behind it, then mine the batch.
+    /// Non-seed events queued in between apply now, in arrival order.
+    fn drain_and_mine(&mut self, first: Arc<MiningBroadcastEvent>) {
+        let mut batch = vec![first];
+        while let Ok(queued) = self.broadcast_rx.try_recv() {
+            match queued.as_ref() {
+                MiningBroadcastEvent::Seed(_) => {
+                    self.state.finish_expiry_reset();
+                    batch.push(queued);
+                }
+                // A reanchor rewrites the seed values the queued seeds carry.
+                // Only seeds broadcast after the reanchor match the healed
+                // buffer, so the collected batch is stale.
+                MiningBroadcastEvent::Reanchored => {
+                    batch.clear();
+                    self.apply_broadcast(&queued);
+                }
+                other => self.apply_broadcast(other),
+            }
+        }
+        self.mine_seeds(&batch);
     }
 
     async fn start(mut self) {
@@ -1053,25 +1167,14 @@ impl PartitionMiningService {
                 evt = self.broadcast_rx.recv() => {
                     match evt {
                         Some(arc_evt) => match arc_evt.as_ref() {
-                            MiningBroadcastEvent::Seed(msg) => {
+                            // A slow recall read lets newer seeds queue. Batch
+                            // them: the drain keeps only the newest ranges
+                            // and mines them first.
+                            MiningBroadcastEvent::Seed(_) => {
                                 self.state.finish_expiry_reset();
-                                self.mine_seed(msg);
+                                self.drain_and_mine(Arc::clone(&arc_evt));
                             }
-                            MiningBroadcastEvent::Difficulty(BroadcastDifficultyUpdate(h)) => {
-                                self.state.finish_expiry_reset();
-                                self.state.update_difficulty(h.diff);
-                            }
-                            MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration {
-                                partition_hashes,
-                                update_height,
-                            }) => {
-                                self.state
-                                    .handle_partitions_expiration(partition_hashes, *update_height);
-                            }
-                            MiningBroadcastEvent::Reanchored => {
-                                self.state.finish_expiry_reset();
-                                self.state.handle_reanchored();
-                            }
+                            other => self.apply_broadcast(other),
                         },
                         None => {
                             warn!("Mining broadcaster channel closed; stopping service");
@@ -2546,6 +2649,218 @@ mod tests {
             .expect("derive")
             .expect("derived path");
         assert_eq!(derived, expected);
+    }
+
+    fn backlog_seeds(steps: std::ops::RangeInclusive<u64>) -> Vec<Arc<BroadcastMiningSeed>> {
+        steps
+            .map(|step| {
+                Arc::new(BroadcastMiningSeed {
+                    seed: Seed(H256::repeat_byte(0x30 + step as u8)),
+                    checkpoints: H256List::default(),
+                    global_step: step,
+                })
+            })
+            .collect()
+    }
+
+    fn backlog_inner(
+        config: &Config,
+        storage_module: Arc<StorageModule>,
+        vdf_state: Arc<RwLock<VdfState>>,
+    ) -> (
+        PartitionMiningServiceInner,
+        crate::services::ServiceReceivers,
+    ) {
+        let (service_senders, receivers) = ServiceSenders::new();
+        let inner = PartitionMiningServiceInner::new(
+            config,
+            service_senders,
+            storage_module,
+            true,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            None,
+            None,
+        );
+        (inner, receivers)
+    }
+
+    /// A backlog deeper than the queue drops the oldest recall ranges and
+    /// mines the newest to the oldest. A data chunk with no stored path is
+    /// hashed, looked up, then skipped: two lookups per recall range, no
+    /// solution.
+    #[test]
+    fn seed_backlog_mines_only_the_newest_ranges() {
+        let (_tmp, config, storage_module, _partition_hash, vdf_state) = open_recall_miner(2);
+        let chunk_size = 32;
+        for offset in 0..10_u32 {
+            assert!(storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![0x11_u8; chunk_size],
+                ChunkType::Data
+            ));
+        }
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync data chunks");
+        // Steps 1..=4 let `get_recall_range` reconstruct for a step-5 start.
+        for step in 1..=4_u64 {
+            vdf_state
+                .write()
+                .unwrap()
+                .store_step(Seed(H256::repeat_byte(0x20 + step as u8)), step);
+        }
+
+        let (mut inner, mut receivers) =
+            backlog_inner(&config, Arc::clone(&storage_module), vdf_state);
+
+        let seeds = backlog_seeds(1..=5);
+        let refs: Vec<&BroadcastMiningSeed> = seeds.iter().map(AsRef::as_ref).collect();
+        inner.handle_seeds(&refs);
+
+        // The backlog keeps only the 3 newest ranges (steps 5, 4, 3): two
+        // looked-up data chunks each, none a solution.
+        assert_eq!(inner.data_path_lookup_count(), 6);
+        assert!(
+            receivers.block_producer.try_recv().is_err(),
+            "data chunks without stored paths are not submitted"
+        );
+        // The ranges resolve oldest first, so the rotation only moves
+        // forward and rests at the newest step. Resolving in read order
+        // (5, 4, 3) would rewind it and leave it at 2.
+        assert_eq!(inner.ranges.last_step_num, 5);
+    }
+
+    /// A solution ends the drain. The newest range is hashed first; an older
+    /// range wins only after the newer ones come up short.
+    #[test]
+    fn seed_backlog_stops_at_the_newest_solution() {
+        let (_tmp, config, storage_module, partition_hash, vdf_state) = open_recall_miner(2);
+        for step in 1..=4_u64 {
+            vdf_state
+                .write()
+                .unwrap()
+                .store_step(Seed(H256::repeat_byte(0x20 + step as u8)), step);
+        }
+        let (mut inner, mut receivers) =
+            backlog_inner(&config, Arc::clone(&storage_module), vdf_state);
+
+        // Discover the ranges the drain will hash (step 5 first, then 4) so
+        // the chunk layout can make step 5 lose and step 4 win. The picks are
+        // deterministic, so the drain sees the same ranges.
+        let seed5 = H256::repeat_byte(0x30 + 5);
+        let seed4 = H256::repeat_byte(0x30 + 4);
+        let range5 = inner.test_get_recall_range(5, seed5, partition_hash);
+        let range4 = inner.test_get_recall_range(4, seed4, partition_hash);
+        assert_ne!(range5, range4, "picks within a rotation do not repeat");
+        inner.ranges = fresh_ranges(&config.consensus);
+
+        let chunk_size = 32;
+        for offset in 0..10_u32 {
+            // The step-5 range is data without a stored path: loses. The
+            // step-4 range is entropy: wins at its first offset.
+            let kind = if (offset / 2) as u64 == range4 {
+                ChunkType::Entropy
+            } else {
+                ChunkType::Data
+            };
+            assert!(storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![0x11_u8; chunk_size],
+                kind
+            ));
+        }
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync chunks");
+
+        let seeds = backlog_seeds(1..=5);
+        let refs: Vec<&BroadcastMiningSeed> = seeds.iter().map(AsRef::as_ref).collect();
+        inner.handle_seeds(&refs);
+
+        let traced = receivers
+            .block_producer
+            .try_recv()
+            .expect("one solution submitted");
+        let solution = match traced.inner {
+            BlockProducerCommand::SolutionFound { solution, .. } => solution,
+            other => panic!("expected a solution, got {other:?}"),
+        };
+        assert_eq!(
+            solution.vdf_step, 4,
+            "the drain hashes the newest range first"
+        );
+        assert_eq!(solution.chunk_offset, range4 as u32 * 2);
+        assert!(
+            receivers.block_producer.try_recv().is_err(),
+            "older ranges are not mined after a solution"
+        );
+        assert_eq!(
+            inner.data_path_lookup_count(),
+            2,
+            "only the newest (step 5) range was hashed before the win"
+        );
+    }
+
+    /// Seeds queued before a `Reanchored` event carry the pre-reanchor seed
+    /// values, which no longer match the healed VDF buffer. They are dropped
+    /// at the boundary; only seeds queued after it are mined.
+    #[test]
+    fn reanchored_event_drops_queued_seeds() {
+        let (_tmp, config, storage_module, _partition_hash, vdf_state) = open_recall_miner(2);
+        let chunk_size = 32;
+        for offset in 0..10_u32 {
+            assert!(storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![0x11_u8; chunk_size],
+                ChunkType::Data
+            ));
+        }
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync data chunks");
+        for step in 1..=4_u64 {
+            vdf_state
+                .write()
+                .unwrap()
+                .store_step(Seed(H256::repeat_byte(0x20 + step as u8)), step);
+        }
+
+        let (service_senders, mut receivers) = ServiceSenders::new();
+        let bus = service_senders.mining_bus();
+        let broadcast_rx = service_senders.subscribe_mining_broadcast();
+        let inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            true,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            None,
+            None,
+        );
+        let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let (_cmd_tx, cmd_rx) = unbounded_channel();
+        let mut svc = PartitionMiningService {
+            shutdown: shutdown_rx,
+            state: inner,
+            cmd_rx,
+            broadcast_rx,
+        };
+
+        // The in-flight seed (step 4) queues behind a reanchor, which queues
+        // behind step 5. Only step 5 may be mined.
+        let pre = backlog_seeds(4..=4).into_iter().next().expect("one seed");
+        let post = backlog_seeds(5..=5).into_iter().next().expect("one seed");
+        bus.send_event(Arc::new(MiningBroadcastEvent::Reanchored));
+        bus.send_event(Arc::new(MiningBroadcastEvent::Seed((*post).clone())));
+        svc.drain_and_mine(Arc::new(MiningBroadcastEvent::Seed((*pre).clone())));
+
+        // Only the post-reanchor range was mined: two looked-up data chunks,
+        // no solution, and the rotation rests at step 5.
+        assert_eq!(svc.state.data_path_lookup_count(), 2);
+        assert!(receivers.block_producer.try_recv().is_err());
+        assert_eq!(svc.state.ranges.last_step_num, 5);
     }
 
     fn clear_stored_tx_paths(storage: &StorageModule) {

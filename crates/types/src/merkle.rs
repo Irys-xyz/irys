@@ -410,8 +410,8 @@ pub fn validate_chunk(
             // Deserialize proof.
             let branch_proofs: Vec<BranchProof> = branches
                 .chunks(HASH_SIZE * 2 + NOTE_SIZE)
-                .map(|b| BranchProof::try_from_proof_slice(b).unwrap())
-                .collect();
+                .map(BranchProof::try_from_proof_slice)
+                .collect::<Result<_, _>>()?;
             let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
 
             // Validate branches.
@@ -1008,6 +1008,24 @@ mod tests {
             &err_text,
             "Invalid proof buffer: length 31 is less than the minimum required length 64"
         );
+    }
+
+    #[test]
+    fn should_return_error_if_branch_region_is_not_a_multiple_of_branch_size() {
+        let root_id = [0_u8; HASH_SIZE];
+        let chunk_node = Node {
+            id: root_id,
+            data_hash: Some([1_u8; HASH_SIZE]),
+            min_byte_range: 0,
+            max_byte_range: 100,
+            left_child: None,
+            right_child: None,
+        };
+        let proof = Proof {
+            last_byte_index: 0,
+            proof: vec![0; HASH_SIZE * 2 + NOTE_SIZE + 10], // 10 stray bytes before the leaf
+        };
+        assert!(validate_chunk(root_id, &chunk_node, &proof).is_err());
     }
 
     #[test]

@@ -4305,6 +4305,27 @@ pub fn assert_reorg_event_lca_contract(reorg_event: &ReorgEvent) {
     );
 }
 
+/// Waits until the supply state is ready and has counted every block up to
+/// `height`. Migration writes the block index before it updates the supply
+/// state, so a wait on the index height alone can read a stale supply state.
+pub async fn wait_supply_height(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    height: u64,
+) -> eyre::Result<irys_domain::SupplyStateData> {
+    let supply_state = node
+        .node_ctx
+        .supply_state_guard
+        .clone()
+        .ok_or_else(|| eyre::eyre!("supply state not set"))?;
+    let mut waited = 0;
+    while !supply_state.is_ready() || supply_state.get().height < height {
+        eyre::ensure!(waited < 300, "supply state did not reach height {height}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        waited += 1;
+    }
+    Ok(supply_state.get())
+}
+
 #[diag_slow(state = format!("block_hash={}", block_hash))]
 pub async fn read_block_from_state(
     node_ctx: &IrysNodeCtx,

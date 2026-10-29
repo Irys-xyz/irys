@@ -24,8 +24,9 @@ use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 ///   Producer-side: code bug or corrupt local state.
 /// - `TreasuryArithmetic` → treasury under/overflow whose operand is
 ///   peer-supplied (e.g. `tx.term_fee`, `tx.perm_fee`, `block.reward_amount`,
-///   or the aggregated ingress-proof reward derived from publish-ledger tx
-///   fees). The running `treasury_balance` at the point of operation MAY
+///   the aggregated ingress-proof reward derived from publish-ledger tx
+///   fees, or the block reward's treasury share derived from the block's
+///   height, timestamp and PoA kind). The running `treasury_balance` at the point of operation MAY
 ///   have been mutated earlier in the iterator by snapshot-derived
 ///   deductions, but those inputs are deterministic from canonical state,
 ///   so every honest validator with the same parent reaches the same
@@ -55,7 +56,7 @@ pub enum ShadowTxGenError {
 
     /// Treasury arithmetic under/overflow on a peer-supplied operand
     /// (publish-ledger ingress-proof reward, term/perm-fee accumulation,
-    /// block reward). The running balance at this site is deterministic
+    /// block reward and its treasury share). The running balance at this site is deterministic
     /// from canonical, so an underflow means the peer's block is
     /// structurally bad on every honest validator.
     /// Validator-side: consensus rejection.
@@ -107,6 +108,9 @@ pub struct ShadowTxGenerator<'a> {
     pub block_height: &'a u64,
     pub reward_address: &'a IrysAddress,
     pub reward_amount: &'a U256,
+    /// Part of the block's reward-curve amount that goes to the treasury
+    /// instead of the miner.
+    pub treasury_reward_share: U256,
     pub solution_hash: &'a H256,
     pub config: &'a ConsensusConfig,
     /// Required ingress proofs per publish tx (N), taken at the block's own
@@ -141,7 +145,11 @@ impl Iterator for ShadowTxGenerator<'_> {
                 Phase::Header => {
                     self.phase = Phase::Commitments;
                     self.index = 0;
-                    // Block reward has no treasury impact
+                    // The miner gets `reward_amount` through the EVM; the
+                    // treasury share stays on the CL treasury.
+                    if let Err(e) = self.add_treasury_reward_share() {
+                        return Some(Err(e));
+                    }
                     return Some(Ok(ShadowMetadata {
                         shadow_tx: ShadowTransaction::new_v1(
                             TransactionPacket::BlockReward(BlockRewardIncrement {
@@ -233,6 +241,7 @@ impl<'a> ShadowTxGenerator<'a> {
         block_height: &'a u64,
         reward_address: &'a IrysAddress,
         reward_amount: &'a U256,
+        treasury_reward_share: U256,
         block_timestamp_secs: UnixTimestamp,
         solution_hash: &'a H256,
         config: &'a ConsensusConfig,
@@ -296,6 +305,7 @@ impl<'a> ShadowTxGenerator<'a> {
             block_height,
             reward_address,
             reward_amount,
+            treasury_reward_share,
             solution_hash,
             config,
             number_of_ingress_proofs_total,
@@ -358,6 +368,7 @@ impl<'a> ShadowTxGenerator<'a> {
             block_height,
             reward_address,
             reward_amount,
+            treasury_reward_share,
             solution_hash,
             config,
             number_of_ingress_proofs_total,
@@ -523,6 +534,24 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Get the current treasury balance
     pub fn treasury_balance(&self) -> U256 {
         self.treasury_balance
+    }
+
+    /// Add the block reward's treasury share to the treasury.
+    ///
+    /// The share comes from the reward curve and the block's height,
+    /// timestamp and PoA kind, so every honest validator computes the same
+    /// value from the same block. An overflow is a fault of the block, not
+    /// of local state: `TreasuryArithmetic` (consensus rejection).
+    fn add_treasury_reward_share(&mut self) -> Result<()> {
+        self.treasury_balance = self
+            .treasury_balance
+            .checked_add(self.treasury_reward_share)
+            .ok_or_else(|| {
+                ShadowTxGenError::TreasuryArithmetic(
+                    "Treasury balance overflow when adding block reward treasury share".to_string(),
+                )
+            })?;
+        Ok(())
     }
 
     /// Update treasury balance for snapshot-derived payouts.
@@ -1147,6 +1176,7 @@ mod tests {
             &block_height,
             &reward_address,
             &reward_amount,
+            U256::zero(),
             block_timestamp_secs,
             &solution_hash,
             &config,
@@ -1170,6 +1200,105 @@ mod tests {
                 let actual = actual.expect("Should be Ok");
                 assert_eq!(actual, expected);
             });
+    }
+
+    /// The treasury share raises the treasury by exactly its amount, and the
+    /// block reward shadow tx pays the miner part only.
+    #[test]
+    fn block_reward_treasury_share_goes_to_treasury() {
+        let config = ConsensusConfig::testing();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
+        let block_height = 101_u64;
+        let reward_address = IrysAddress::from([20_u8; 20]);
+        let miner_reward = U256::from(50);
+        let treasury_reward_share = U256::from(51);
+        let initial_treasury = U256::from(2_000_000);
+        let publish_ledger = PublishLedgerWithTxs::default();
+        let solution_hash = H256::zero();
+        let empty_fees = LedgerExpiryBalanceDelta::default();
+        let epoch_snapshot = test_epoch_snapshot();
+
+        let mut generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &miner_reward,
+            treasury_reward_share,
+            block_timestamp_secs,
+            &solution_hash,
+            &config,
+            &[],
+            &[],
+            &[],
+            &[],
+            &publish_ledger,
+            initial_treasury,
+            &empty_fees,
+            &[],
+            &[],
+            &epoch_snapshot,
+        )
+        .expect("Should create generator");
+
+        let shadow_txs: Vec<ShadowMetadata> = generator
+            .by_ref()
+            .collect::<Result<_>>()
+            .expect("Should be Ok");
+        assert_eq!(
+            shadow_txs,
+            vec![ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::BlockReward(BlockRewardIncrement {
+                        amount: miner_reward.into(),
+                    }),
+                    solution_hash.into(),
+                ),
+                transaction_fee: 0,
+            }]
+        );
+        assert_eq!(
+            generator.treasury_balance(),
+            initial_treasury + treasury_reward_share
+        );
+    }
+
+    /// A treasury share that overflows the treasury is a consensus rejection.
+    #[test]
+    fn block_reward_treasury_share_overflow_is_treasury_arithmetic() {
+        let config = ConsensusConfig::testing();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
+        let block_height = 101_u64;
+        let reward_address = IrysAddress::from([20_u8; 20]);
+        let miner_reward = U256::from(50);
+        let publish_ledger = PublishLedgerWithTxs::default();
+        let solution_hash = H256::zero();
+        let empty_fees = LedgerExpiryBalanceDelta::default();
+        let epoch_snapshot = test_epoch_snapshot();
+
+        let mut generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &miner_reward,
+            U256::one(),
+            block_timestamp_secs,
+            &solution_hash,
+            &config,
+            &[],
+            &[],
+            &[],
+            &[],
+            &publish_ledger,
+            U256::MAX,
+            &empty_fees,
+            &[],
+            &[],
+            &epoch_snapshot,
+        )
+        .expect("Should create generator");
+
+        assert!(matches!(
+            generator.next(),
+            Some(Err(ShadowTxGenError::TreasuryArithmetic(_)))
+        ));
     }
 
     /// H2 (partial): BlockReward packet is amount-only. The generator stores
@@ -1206,6 +1335,7 @@ mod tests {
                 &block_height,
                 reward_address,
                 &reward_amount,
+                U256::zero(),
                 block_timestamp_secs,
                 &solution_hash,
                 &config,
@@ -1354,6 +1484,7 @@ mod tests {
             &block_height,
             &reward_address,
             &reward_amount,
+            U256::zero(),
             block_timestamp_secs,
             &solution_hash,
             &config,
@@ -1440,6 +1571,7 @@ mod tests {
             &block_height,
             &reward_address,
             &reward_amount,
+            U256::zero(),
             block_timestamp_secs,
             &solution_hash,
             &config,
@@ -1650,6 +1782,7 @@ mod tests {
             &block_height,
             &reward_address,
             &reward_amount,
+            U256::zero(),
             block_timestamp_secs,
             &solution_hash,
             &config,
@@ -1749,6 +1882,7 @@ mod tests {
             &block_height,
             &reward_address,
             &reward_amount,
+            U256::zero(),
             block_timestamp_secs,
             &solution_hash,
             &config,
@@ -1854,6 +1988,7 @@ mod tests {
             &block_height,
             &reward_address,
             &reward_amount,
+            U256::zero(),
             block_timestamp_secs,
             &solution_hash,
             &config,
@@ -1921,6 +2056,7 @@ mod tests {
             &block_height,
             &reward_address,
             &reward_amount,
+            U256::zero(),
             block_timestamp_secs,
             &solution_hash,
             &config,
@@ -2034,6 +2170,7 @@ mod tests {
             &block_height,
             &reward_address,
             &reward_amount,
+            U256::zero(),
             block_timestamp_secs,
             &solution_hash,
             &config,
@@ -2147,6 +2284,7 @@ mod tests {
             &block_height,
             &reward_address,
             &reward_amount,
+            U256::zero(),
             block_timestamp_secs,
             &solution_hash,
             &config,
@@ -2235,6 +2373,7 @@ mod tests {
             &block_height,
             &reward_address,
             &reward_amount,
+            U256::zero(),
             block_timestamp_secs,
             &solution_hash,
             &config,
@@ -2344,6 +2483,7 @@ mod tests {
             &block_height,
             &reward_address,
             &reward_amount,
+            U256::zero(),
             block_timestamp_secs,
             &solution_hash,
             &config,

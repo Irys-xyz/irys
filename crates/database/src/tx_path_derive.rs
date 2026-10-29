@@ -780,7 +780,7 @@ fn spans_from_index(
         );
         return Ok(Vec::new());
     }
-    let mut prev = [0_u64; 4];
+    let mut prev = [0_u64; DataLedger::ALL.len()];
     let mut spans = Vec::new();
     for (ordinal, (height, hash)) in hashes.iter().enumerate() {
         let expected = u64::try_from(ordinal).map_err(|_| eyre!("height ordinal exceeds u64"))?;

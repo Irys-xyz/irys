@@ -2262,11 +2262,17 @@ mod tests {
             // Mark the cached chunk as very old so it qualifies for age-based pruning
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(tx_header.data_root), None)?;
+            // Put the aged entries back after the walk: MDBX aborts when this table gets a
+            // write while the walk deletes through its cursor (see
+            // `put_during_delete_current_walk_aborts` in irys-database).
+            let mut aged_entries = Vec::new();
             while let Some((_k, entry)) = walk.next().transpose()? {
-                // Delete the current index entry and reinsert with an old timestamp
-                wtx.delete::<CachedChunksIndex>(tx_header.data_root, Some(entry.clone()))?;
-                let mut updated = entry.clone();
+                walk.delete_current()?;
+                let mut updated = entry;
                 updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                aged_entries.push(updated);
+            }
+            for updated in aged_entries {
                 wtx.put::<CachedChunksIndex>(tx_header.data_root, updated)?;
             }
             eyre::Ok(())
@@ -2627,10 +2633,17 @@ mod tests {
             if chunk_count > 0 {
                 let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
                 let mut walk = cur.walk_dup(Some(data_root), None)?;
+                // Put the aged entries back after the walk: MDBX aborts when this table gets a
+                // write while the walk deletes through its cursor (see
+                // `put_during_delete_current_walk_aborts` in irys-database).
+                let mut aged_entries = Vec::new();
                 while let Some((_k, entry)) = walk.next().transpose()? {
-                    wtx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
-                    let mut updated = entry.clone();
+                    walk.delete_current()?;
+                    let mut updated = entry;
                     updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                    aged_entries.push(updated);
+                }
+                for updated in aged_entries {
                     wtx.put::<CachedChunksIndex>(data_root, updated)?;
                 }
             }
@@ -2761,10 +2774,17 @@ mod tests {
             database::cache_chunk(wtx, &chunk)?;
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(data_root), None)?;
+            // Put the aged entries back after the walk: MDBX aborts when this table gets a
+            // write while the walk deletes through its cursor (see
+            // `put_during_delete_current_walk_aborts` in irys-database).
+            let mut aged_entries = Vec::new();
             while let Some((_k, entry)) = walk.next().transpose()? {
-                wtx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
-                let mut updated = entry.clone();
+                walk.delete_current()?;
+                let mut updated = entry;
                 updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                aged_entries.push(updated);
+            }
+            for updated in aged_entries {
                 wtx.put::<CachedChunksIndex>(data_root, updated)?;
             }
             eyre::Ok(())
@@ -3247,10 +3267,17 @@ mod tests {
             database::cache_chunk(wtx, &chunk)?;
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(data_root), None)?;
+            // Put the aged entries back after the walk: MDBX aborts when this table gets a
+            // write while the walk deletes through its cursor (see
+            // `put_during_delete_current_walk_aborts` in irys-database).
+            let mut aged_entries = Vec::new();
             while let Some((_k, entry)) = walk.next().transpose()? {
-                wtx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
-                let mut updated = entry.clone();
+                walk.delete_current()?;
+                let mut updated = entry;
                 updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                aged_entries.push(updated);
+            }
+            for updated in aged_entries {
                 wtx.put::<CachedChunksIndex>(data_root, updated)?;
             }
             if matches!(label, SlotLabel::OwnData) {
@@ -3479,10 +3506,17 @@ mod tests {
             )?;
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(data_root), None)?;
+            // Put the aged entries back after the walk: MDBX aborts when this table gets a
+            // write while the walk deletes through its cursor (see
+            // `put_during_delete_current_walk_aborts` in irys-database).
+            let mut aged_entries = Vec::new();
             while let Some((_k, entry)) = walk.next().transpose()? {
-                wtx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
-                let mut updated = entry.clone();
+                walk.delete_current()?;
+                let mut updated = entry;
                 updated.meta.updated_at = irys_types::UnixTimestamp::from_secs(0);
+                aged_entries.push(updated);
+            }
+            for updated in aged_entries {
                 wtx.put::<CachedChunksIndex>(data_root, updated)?;
             }
             eyre::Ok(())
@@ -3763,10 +3797,17 @@ mod tests {
             // Mark both chunks as very old
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(tx_header.data_root), None)?;
+            // Put the aged entries back after the walk: MDBX aborts when this table gets a
+            // write while the walk deletes through its cursor (see
+            // `put_during_delete_current_walk_aborts` in irys-database).
+            let mut aged_entries = Vec::new();
             while let Some((_k, entry)) = walk.next().transpose()? {
-                wtx.delete::<CachedChunksIndex>(tx_header.data_root, Some(entry.clone()))?;
-                let mut updated = entry.clone();
+                walk.delete_current()?;
+                let mut updated = entry;
                 updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                aged_entries.push(updated);
+            }
+            for updated in aged_entries {
                 wtx.put::<CachedChunksIndex>(tx_header.data_root, updated)?;
             }
             eyre::Ok(())

@@ -286,6 +286,55 @@ mod compact_ingress_leaf_tests {
     }
 
     #[test]
+    fn cache_chunk_verified_skips_a_chunk_whose_data_root_is_gone() -> eyre::Result<()> {
+        let (_dir, db) = open_test_db()?;
+        let data_root = H256::random();
+        let tx_offset = TxChunkOffset::from(0);
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 8,
+            data_path: Base64::default(),
+            bytes: Base64(vec![7_u8; 8]),
+            tx_offset,
+        };
+
+        let outcome = db.update_eyre(|tx| cache_chunk_verified(tx, &chunk))?;
+        assert_eq!(outcome, CacheChunkOutcome::DataRootGone);
+        db.view_eyre(|tx| {
+            assert!(cached_chunk_meta_by_offset(tx, data_root, tx_offset)?.is_none());
+            assert!(cached_chunk_by_chunk_path_hash(tx, &chunk.chunk_path_hash())?.is_none());
+            assert_eq!(tx.entries::<CachedChunksIndex>()?, 0);
+            assert_eq!(tx.entries::<CachedChunks>()?, 0);
+            Ok(())
+        })?;
+
+        db.update_eyre(|tx| {
+            tx.put::<CachedDataRoots>(
+                data_root,
+                CachedDataRoot {
+                    data_size: 8,
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })?;
+        assert_eq!(
+            db.update_eyre(|tx| cache_chunk_verified(tx, &chunk))?,
+            CacheChunkOutcome::Written
+        );
+        assert_eq!(
+            db.update_eyre(|tx| cache_chunk_verified(tx, &chunk))?,
+            CacheChunkOutcome::Duplicate
+        );
+        db.view_eyre(|tx| {
+            assert!(cached_chunk_meta_by_offset(tx, data_root, tx_offset)?.is_some());
+            assert!(cached_chunk_by_chunk_path_hash(tx, &chunk.chunk_path_hash())?.is_some());
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
     fn capacity_eviction_requires_a_durable_storage_offset() -> eyre::Result<()> {
         let (_dir, db) = open_test_db()?;
         let data_root = H256::random();
@@ -1136,34 +1185,47 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
         ));
     }
 
-    cache_chunk_verified(tx, chunk)
+    Ok(cache_chunk_verified(tx, chunk)? == CacheChunkOutcome::Duplicate)
 }
 
-/// Caches a [`UnpackedChunk`] whose data root has already been verified to exist in [`CachedDataRoots`].
+/// What [`cache_chunk_verified`] did with a chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheChunkOutcome {
+    Written,
+    /// Already present in [`CachedChunks`]; nothing was inserted.
+    Duplicate,
+    /// The chunk's data root is absent from [`CachedDataRoots`]; nothing was inserted.
+    DataRootGone,
+}
+
+/// Caches a [`UnpackedChunk`] for callers that check the data root earlier than the commit
+/// (e.g. the write-behind writer).
 ///
-/// # SAFETY REQUIREMENT
-///
-/// The caller MUST ensure the chunk's `data_root` exists in [`CachedDataRoots`] before
-/// calling this function. Failure to do so will leave orphaned chunk data in the cache
-/// with no parent data-root entry. Use [`cache_chunk`] instead if you cannot guarantee this.
-///
-/// Skips the redundant `CachedDataRoots` lookup that [`cache_chunk`] performs, intended for
-/// callers (e.g. the write-behind writer) that have already validated the data root.
-/// Returns `true` if the chunk was a duplicate and was not inserted.
+/// The [`CachedDataRoots`] row is re-read in the same transaction as the writes, so a root
+/// pruned since the caller's check cannot leave orphaned chunk rows. A chunk whose root is
+/// gone is skipped and reported as [`CacheChunkOutcome::DataRootGone`].
 #[tracing::instrument(level = "trace", skip_all)]
 pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
     tx: &T,
     chunk: &UnpackedChunk,
-) -> eyre::Result<IsDuplicate> {
+) -> eyre::Result<CacheChunkOutcome> {
     let data_root = chunk.data_root;
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
+
+    if tx.get::<CachedDataRoots>(data_root)?.is_none() {
+        debug!(
+            "Data root {} is no longer cached, skipping chunk {}",
+            &data_root, &chunk_path_hash
+        );
+        return Ok(CacheChunkOutcome::DataRootGone);
+    }
 
     if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
         warn!(
             "Chunk {} of {} is already cached, skipping..",
             &chunk_path_hash, &data_root
         );
-        return Ok(true);
+        return Ok(CacheChunkOutcome::Duplicate);
     }
 
     let value = CachedChunkIndexEntry {
@@ -1182,7 +1244,7 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
 
     tx.put::<CachedChunksIndex>(data_root, value)?;
     tx.put::<CachedChunks>(chunk_path_hash, chunk.into())?;
-    Ok(false)
+    Ok(CacheChunkOutcome::Written)
 }
 
 /// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxChunkOffset`]
@@ -1557,7 +1619,7 @@ pub fn reclaim_cached_chunks_older_than<T: DbTx + DbTxMut>(
             continue;
         }
         tx.delete::<CachedChunks>(entry.meta.chunk_path_hash, None)?;
-        tx.delete::<CachedChunksIndex>(data_root, Some(entry))?;
+        walker.delete_current()?;
         counts.deleted += 1;
     }
     // MDBX removes the dupsort key with its final value, preserving the
@@ -1582,7 +1644,7 @@ pub fn delete_unprotected_cached_chunks_older_than<T: DbTxMut>(
             continue;
         }
         tx.delete::<CachedChunks>(entry.meta.chunk_path_hash, None)?;
-        tx.delete::<CachedChunksIndex>(data_root, Some(entry))?;
+        walker.delete_current()?;
         chunks_pruned += 1;
     }
     Ok(chunks_pruned)
@@ -3385,6 +3447,267 @@ mod tests {
                 cdr.expiry_height.is_none(),
                 "expiry intentionally left untouched"
             );
+        }
+    }
+
+    mod cached_chunk_reclaim {
+        use super::super::{
+            ReclaimCounts, delete_unprotected_cached_chunks_older_than,
+            reclaim_cached_chunks_older_than,
+        };
+        use super::*;
+        use crate::{
+            db_cache::{
+                CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedIngressLeaf,
+                CachedIngressLeafKey,
+            },
+            tables::{CachedChunksIndex, CachedIngressLeaves},
+        };
+        use irys_types::{ChunkPathHash, DataRoot, IrysAddress, TxChunkOffset, UnixTimestamp};
+        use reth_db::{
+            cursor::DbDupCursorRO as _,
+            transaction::{DbTx as _, DbTxMut as _},
+        };
+        use std::collections::BTreeSet;
+
+        const OLD: u64 = 100;
+        const YOUNG: u64 = 300;
+        const OLDER_THAN: u64 = 200;
+
+        fn offset(value: u32) -> TxChunkOffset {
+            TxChunkOffset::from(u64::from(value))
+        }
+
+        fn chunk_path_hash(index: u32) -> ChunkPathHash {
+            let mut bytes = [0_u8; 32];
+            bytes[..4].copy_from_slice(&index.to_be_bytes());
+            ChunkPathHash::from(bytes)
+        }
+
+        /// One root; per offset: (updated_at, has compact ingress leaf).
+        fn seed(
+            db: &reth_db::DatabaseEnv,
+            data_root: DataRoot,
+            address: IrysAddress,
+            rows: &[(u32, u64, bool)],
+        ) {
+            let tx = db.tx_mut().unwrap();
+            for &(index, updated_at, has_leaf) in rows {
+                tx.put::<CachedChunksIndex>(
+                    data_root,
+                    CachedChunkIndexEntry {
+                        index: offset(index),
+                        meta: CachedChunkIndexMetadata {
+                            chunk_path_hash: chunk_path_hash(index),
+                            updated_at: UnixTimestamp::from_secs(updated_at),
+                        },
+                    },
+                )
+                .unwrap();
+                if has_leaf {
+                    tx.put::<CachedIngressLeaves>(
+                        CachedIngressLeafKey { data_root, address },
+                        CachedIngressLeaf {
+                            tx_offset: offset(index),
+                            ingress_data_hash: H256::random(),
+                        },
+                    )
+                    .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+
+        fn remaining_offsets(db: &reth_db::DatabaseEnv, data_root: DataRoot) -> Vec<u32> {
+            let tx = db.tx().unwrap();
+            let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>().unwrap();
+            let mut walker = cursor.walk_dup(Some(data_root), None).unwrap();
+            let mut out = Vec::new();
+            while let Some((_, entry)) = walker.next().transpose().unwrap() {
+                out.push(entry.index.0);
+            }
+            out
+        }
+
+        fn open_db() -> (reth_db::DatabaseEnv, impl Sized) {
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let db = open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+            (db, path)
+        }
+
+        /// MDBX fails an internal assertion (`tree_rebalance: mc->tree->items > 0`) and aborts the
+        /// process when a dupsort walk deletes through its cursor and the same table gets a write
+        /// before the walk ends. Collect the changes and write them after the walk.
+        #[test]
+        #[ignore = "aborts the test process; kept as a reference for the MDBX behaviour"]
+        fn put_during_delete_current_walk_aborts() {
+            let (db, _dir) = open_db();
+            let data_root = H256::random();
+            let rows: Vec<_> = (0..200).map(|index| (index, YOUNG, false)).collect();
+            seed(&db, data_root, IrysAddress::random(), &rows);
+
+            let tx = db.tx_mut().unwrap();
+            let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>().unwrap();
+            let mut walker = cursor.walk_dup(Some(data_root), None).unwrap();
+            while let Some((_, mut entry)) = walker.next().transpose().unwrap() {
+                walker.delete_current().unwrap();
+                entry.meta.updated_at = UnixTimestamp::from_secs(OLD);
+                tx.put::<CachedChunksIndex>(data_root, entry).unwrap();
+            }
+            drop(walker);
+            tx.commit().unwrap();
+
+            assert_eq!(
+                remaining_offsets(&db, data_root),
+                (0..200).collect::<Vec<u32>>()
+            );
+        }
+
+        #[test]
+        fn reclaim_deletes_interleaved_entries_exactly() {
+            let (db, _dir) = open_db();
+            let data_root = H256::random();
+            let address = IrysAddress::random();
+            seed(
+                &db,
+                data_root,
+                address,
+                &[
+                    (0, OLD, true),
+                    (1, YOUNG, true),
+                    (2, OLD, true),
+                    (3, OLD, false),
+                    (4, OLD, true),
+                    (5, OLD, true),
+                    (6, YOUNG, true),
+                    (7, OLD, true),
+                ],
+            );
+            // Offset 7 is not durable: neither deleted nor counted.
+            let durable: BTreeSet<TxChunkOffset> = (0..7).map(offset).collect();
+
+            let tx = db.tx_mut().unwrap();
+            let counts = reclaim_cached_chunks_older_than(
+                &tx,
+                data_root,
+                address,
+                &durable,
+                UnixTimestamp::from_secs(OLDER_THAN),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+
+            assert_eq!(
+                counts,
+                ReclaimCounts {
+                    deleted: 4,
+                    too_young: 2,
+                    no_ingress_hash: 1,
+                }
+            );
+            assert_eq!(remaining_offsets(&db, data_root), vec![1, 3, 6, 7]);
+        }
+
+        #[test]
+        fn delete_unprotected_deletes_interleaved_entries_exactly() {
+            let (db, _dir) = open_db();
+            let data_root = H256::random();
+            let address = IrysAddress::random();
+            seed(
+                &db,
+                data_root,
+                address,
+                &[
+                    (0, OLD, false),
+                    (1, YOUNG, false),
+                    (2, OLD, false),
+                    (3, OLD, false),
+                    (4, OLD, false),
+                    (5, YOUNG, false),
+                    (6, OLD, false),
+                    (7, OLD, false),
+                ],
+            );
+            // Offsets 3 and 7 are old but outside the prune set.
+            let prune_set: BTreeSet<TxChunkOffset> =
+                [0, 1, 2, 4, 5, 6].into_iter().map(offset).collect();
+
+            let tx = db.tx_mut().unwrap();
+            let pruned = delete_unprotected_cached_chunks_older_than(
+                &tx,
+                data_root,
+                &prune_set,
+                UnixTimestamp::from_secs(OLDER_THAN),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+
+            assert_eq!(pruned, 4);
+            assert_eq!(remaining_offsets(&db, data_root), vec![1, 3, 5, 7]);
+        }
+
+        /// Enough dupsort values for the root's duplicates to spill out of a
+        /// single page into a nested tree.
+        const MANY: u32 = 5000;
+
+        #[test]
+        fn reclaim_deletes_across_many_duplicates() {
+            let (db, _dir) = open_db();
+            let data_root = H256::random();
+            let address = IrysAddress::random();
+            let rows: Vec<_> = (0..MANY)
+                .map(|index| (index, if index % 3 == 0 { YOUNG } else { OLD }, true))
+                .collect();
+            seed(&db, data_root, address, &rows);
+            let durable: BTreeSet<TxChunkOffset> = (0..MANY).map(offset).collect();
+
+            let tx = db.tx_mut().unwrap();
+            let counts = reclaim_cached_chunks_older_than(
+                &tx,
+                data_root,
+                address,
+                &durable,
+                UnixTimestamp::from_secs(OLDER_THAN),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+
+            let young: Vec<u32> = (0..MANY).filter(|index| index % 3 == 0).collect();
+            assert_eq!(counts.too_young, young.len() as u64);
+            assert_eq!(counts.deleted, u64::from(MANY) - young.len() as u64);
+            assert_eq!(counts.no_ingress_hash, 0);
+            assert_eq!(remaining_offsets(&db, data_root), young);
+        }
+
+        #[test]
+        fn delete_unprotected_deletes_across_many_duplicates() {
+            let (db, _dir) = open_db();
+            let data_root = H256::random();
+            let address = IrysAddress::random();
+            let rows: Vec<_> = (0..MANY)
+                .map(|index| (index, if index % 3 == 0 { YOUNG } else { OLD }, false))
+                .collect();
+            seed(&db, data_root, address, &rows);
+            let prune_set: BTreeSet<TxChunkOffset> = (0..MANY).map(offset).collect();
+
+            let tx = db.tx_mut().unwrap();
+            let pruned = delete_unprotected_cached_chunks_older_than(
+                &tx,
+                data_root,
+                &prune_set,
+                UnixTimestamp::from_secs(OLDER_THAN),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+
+            let young: Vec<u32> = (0..MANY).filter(|index| index % 3 == 0).collect();
+            assert_eq!(pruned, u64::from(MANY) - young.len() as u64);
+            assert_eq!(remaining_offsets(&db, data_root), young);
         }
     }
 }

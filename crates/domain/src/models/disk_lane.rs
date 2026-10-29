@@ -1,7 +1,9 @@
 //! One thread per storage module locks `chunks.dat`. Order is mining recall,
 //! then a ready packed write, then an entropy read. A recall does not cancel
 //! a `pwrite` already in the kernel, and this thread submits no new write
-//! while `recall_waiters` is set.
+//! while `recall_waiters` is set. With `storage.recall_io_priority` false a
+//! recall does not hold the disk: `recall_holds` stays clear and every IO
+//! that otherwise waits for a recall shares the disk with its preads.
 //!
 //! Presence rows and packed checksums are written only after this gap's
 //! `fdatasync`. `min_durable_interval_ms` can defer that pair. `0`, force,
@@ -422,6 +424,9 @@ pub(super) struct DiskGate {
     io_exclusive: AtomicUsize,
     /// A packed-write window is owed before the next recall may take the disk.
     recall_flush_owed: AtomicBool,
+    /// `storage.recall_io_priority`. When false, a recall does not hold the
+    /// disk and other IO does not wait for it.
+    recall_io_priority: bool,
     wake: DiskWake,
     queue: Mutex<SweepQueue>,
     sweep_busy: Mutex<()>,
@@ -773,7 +778,7 @@ impl Drop for ClearExclusive<'_> {
 }
 
 impl DiskGate {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(recall_io_priority: bool) -> Self {
         Self {
             recall_waiters: AtomicUsize::new(0),
             write_holds: AtomicUsize::new(0),
@@ -781,6 +786,7 @@ impl DiskGate {
             inflight_bytes: AtomicU64::new(0),
             io_exclusive: AtomicUsize::new(0),
             recall_flush_owed: AtomicBool::new(false),
+            recall_io_priority,
             wake: DiskWake::new(),
             queue: Mutex::new(SweepQueue::default()),
             sweep_busy: Mutex::new(()),
@@ -1018,9 +1024,16 @@ impl DiskGate {
         self.wake.lock()
     }
 
+    /// A mining recall holds the disk for other IO. With
+    /// `recall_io_priority` false the recall shares the disk and this stays
+    /// clear while its preads run.
+    pub(super) fn recall_holds(&self) -> bool {
+        self.recall_io_priority && self.recall_waiters.load(Ordering::SeqCst) > 0
+    }
+
     /// Recall, a file holder, and a full service budget all block a new submit.
     fn disk_available(&self) -> bool {
-        self.recall_waiters.load(Ordering::SeqCst) == 0
+        !self.recall_holds()
             && self.write_holds.load(Ordering::SeqCst) == 0
             && self.io_exclusive.load(Ordering::SeqCst) == 0
             && self.disk_ops.load(Ordering::SeqCst) < INFLIGHT_WRITES
@@ -1033,12 +1046,12 @@ impl DiskGate {
         self.disk_ops.load(Ordering::SeqCst) == 0 && self.io_exclusive.load(Ordering::SeqCst) == 0
     }
 
-    /// No recall, write hold, exclusive IO, or in-kernel chunk command.
+    /// No recall hold, write hold, exclusive IO, or in-kernel chunk command.
     /// A short packed write waits for a neighbor only while this is false.
     /// A short entropy span may wait while this is true.
     pub(super) fn chunk_disk_idle(&self) -> bool {
         self.disk_ops.load(Ordering::SeqCst) == 0
-            && self.recall_waiters.load(Ordering::SeqCst) == 0
+            && !self.recall_holds()
             && self.write_holds.load(Ordering::SeqCst) == 0
             && self.io_exclusive.load(Ordering::SeqCst) == 0
     }
@@ -1148,7 +1161,7 @@ impl DiskGate {
 
     fn submit_blocked(&self, limit: usize, is_read: bool, next_bytes: u64) -> bool {
         let count = self.disk_ops.load(Ordering::SeqCst);
-        self.recall_waiters.load(Ordering::SeqCst) > 0
+        self.recall_holds()
             || self.io_exclusive.load(Ordering::SeqCst) > 0
             || count >= limit
             || (is_read && self.write_holds.load(Ordering::SeqCst) > 0)
@@ -1216,13 +1229,11 @@ impl DiskGate {
         }
     }
 
-    /// Block until `next_bytes` can be submitted, or a recall is waiting.
+    /// Block until `next_bytes` can be submitted, or a recall holds the disk.
     /// The check and the wait share the wake lock.
     fn wait_for_write_slot(&self, next_bytes: u64) {
         let mut guard = self.lock_wake();
-        while self.recall_waiters.load(Ordering::SeqCst) == 0
-            && self.submit_blocked(INFLIGHT_WRITES, false, next_bytes)
-        {
+        while !self.recall_holds() && self.submit_blocked(INFLIGHT_WRITES, false, next_bytes) {
             guard = self.wake.wait(guard);
         }
     }
@@ -1235,7 +1246,11 @@ impl DiskGate {
     }
 
     /// Wait until no mining recall is queued or in progress.
+    /// A recall that does not hold the disk is not waited on.
     pub(super) fn yield_to_recall(&self) {
+        if !self.recall_io_priority {
+            return;
+        }
         let mut guard = self.lock_wake();
         while self.recall_waiters.load(Ordering::SeqCst) > 0 {
             guard = self.wake.wait(guard);
@@ -1244,7 +1259,11 @@ impl DiskGate {
 
     /// Wait until mining recall is clear, or until `deadline`.
     /// Returns false when the deadline passes while a recall still holds the disk.
+    /// A recall that does not hold the disk is not waited on.
     pub(super) fn yield_to_recall_until(&self, deadline: Instant) -> bool {
+        if !self.recall_io_priority {
+            return true;
+        }
         let mut guard = self.lock_wake();
         while self.recall_waiters.load(Ordering::SeqCst) > 0 {
             let Some(remain) = deadline.checked_duration_since(Instant::now()) else {
@@ -1264,10 +1283,6 @@ impl DiskGate {
         while self.write_holds.load(Ordering::SeqCst) > 0 {
             guard = self.wake.wait(guard);
         }
-    }
-
-    pub(super) fn recall_pending(&self) -> bool {
-        self.recall_waiters.load(Ordering::SeqCst) > 0
     }
 
     fn writes_active(&self) -> bool {
@@ -1400,7 +1415,7 @@ impl StorageModule {
     /// One entropy sweep when the disk is free, plus entropy already in memory.
     /// The service tick calls this after the packed-write flush.
     pub fn pump_entropy_reads(&self) {
-        if self.disk.recall_pending() || self.disk.writes_active() {
+        if self.disk.recall_holds() || self.disk.writes_active() {
             return;
         }
         self.fold_memory_entropy();
@@ -2077,7 +2092,7 @@ impl StorageModule {
         let mut deferred = Vec::new();
         let mut packed_any = false;
         for slot in ready {
-            if self.disk.recall_pending() {
+            if self.disk.recall_holds() {
                 deferred.push(slot);
                 continue;
             }
@@ -2099,7 +2114,7 @@ impl StorageModule {
         let Some(_busy) = self.disk.try_sweep_busy() else {
             return false;
         };
-        if self.disk.recall_pending() || self.disk.writes_active() {
+        if self.disk.recall_holds() || self.disk.writes_active() {
             return false;
         }
         let chunk_size = self.config.consensus.chunk_size.max(1);
@@ -2110,7 +2125,7 @@ impl StorageModule {
             self.restore_span(span);
             return false;
         }
-        if self.disk.recall_pending() || self.disk.writes_active() {
+        if self.disk.recall_holds() || self.disk.writes_active() {
             self.restore_span(span);
             return false;
         }
@@ -2131,12 +2146,12 @@ impl StorageModule {
         // A recall or flush that arrived after the span was taken goes
         // first. Put the span back and let the caller wait, so this sweep
         // does not sit inside a recall that never goes idle.
-        if self.disk.writes_active() || self.disk.recall_pending() {
+        if self.disk.writes_active() || self.disk.recall_holds() {
             self.restore_span(span);
             return false;
         }
         let file = self.disk.lock_chunks(&file_arc);
-        if self.disk.recall_pending() || self.disk.writes_active() {
+        if self.disk.recall_holds() || self.disk.writes_active() {
             drop(file);
             self.restore_span(span);
             return false;
@@ -2169,7 +2184,7 @@ impl StorageModule {
     /// still stop the pass. The lane thread XORs and submits the index only
     /// after those calls return.
     fn sweep_inflight(&self) {
-        if self.disk.recall_pending() || self.disk.writes_active() {
+        if self.disk.recall_holds() || self.disk.writes_active() {
             return;
         }
         let chunk_size = self.config.consensus.chunk_size.max(1);
@@ -2177,7 +2192,7 @@ impl StorageModule {
         let mut read_ends = Vec::new();
         let mut guards = Vec::with_capacity(INFLIGHT_WRITES);
         while spans.len() < INFLIGHT_WRITES {
-            if self.disk.recall_pending() || self.disk.writes_active() {
+            if self.disk.recall_holds() || self.disk.writes_active() {
                 break;
             }
             let Some(span) = self.take_ready_span() else {
@@ -3356,7 +3371,8 @@ impl StorageModule {
     }
 
     /// Lane path. Up to `INFLIGHT_WRITES` pwrites share the module file.
-    /// A recall stops new submits. Calls already submitted keep running.
+    /// A recall that holds the disk stops new submits. Calls already
+    /// submitted keep running.
     pub(super) fn write_runs_window(&self, runs: &[WriteRun]) -> eyre::Result<()> {
         self.disk.wait_until_idle();
         let mut next = 0;
@@ -3364,8 +3380,7 @@ impl StorageModule {
             let mut guards = Vec::with_capacity(INFLIGHT_WRITES);
             while guards.len() < INFLIGHT_WRITES && next + guards.len() < runs.len() {
                 let bytes = runs[next + guards.len()].bytes.len() as u64;
-                if self.disk.recall_pending() || !self.disk.try_submit_write(INFLIGHT_WRITES, bytes)
-                {
+                if self.disk.recall_holds() || !self.disk.try_submit_write(INFLIGHT_WRITES, bytes) {
                     break;
                 }
                 guards.push(OpGuard {
@@ -3374,7 +3389,7 @@ impl StorageModule {
                 });
             }
             if guards.is_empty() {
-                if self.disk.recall_pending() {
+                if self.disk.recall_holds() {
                     self.disk.yield_to_recall();
                 } else {
                     let bytes = runs[next].bytes.len() as u64;
@@ -3584,7 +3599,7 @@ impl StorageModule {
     /// is not a lane command, so `recall_hold` includes that service time.
     /// `irys.storage.recall_pread_us_total` is the pread itself.
     fn disk_idle_reason(&self) -> &'static str {
-        if self.disk.recall_pending() {
+        if self.disk.recall_holds() {
             return "recall_hold";
         }
         if self.disk.writes_active() {
@@ -3742,9 +3757,9 @@ impl StorageModule {
     }
 
     fn disk_lane_pass(&self) {
-        // Recall sets `recall_waiters` before it reads. Submit nothing until
-        // that hold drops.
-        if self.disk.recall_pending() {
+        // A recall that holds the disk sets `recall_waiters` before it reads.
+        // Submit nothing until that hold drops.
+        if self.disk.recall_holds() {
             return;
         }
         // Completion rewrites wait out an active recall, so a recall that is
@@ -3757,7 +3772,7 @@ impl StorageModule {
         }
         // A recall can arrive during the interval rewrite. It owns the disk
         // before this pass writes or reads entropy.
-        if self.disk.recall_pending() {
+        if self.disk.recall_holds() {
             return;
         }
         // An external flush or interval rewrite runs here, before this pass
@@ -3789,7 +3804,7 @@ impl StorageModule {
                 self.id
             );
         }
-        if !owed_flush && !self.disk.recall_pending() {
+        if !owed_flush && !self.disk.recall_holds() {
             self.pump_entropy_reads();
         }
     }
@@ -4001,7 +4016,7 @@ mod tests {
 
     #[test]
     fn write_window_stops_at_the_inflight_limit() {
-        let disk = DiskGate::new();
+        let disk = DiskGate::new(true);
         for _ in 0..INFLIGHT_WRITES {
             assert!(disk.try_submit_write(INFLIGHT_WRITES, 0));
         }
@@ -4015,7 +4030,7 @@ mod tests {
 
     #[test]
     fn recall_starts_while_a_write_is_inflight() {
-        let disk = Arc::new(DiskGate::new());
+        let disk = Arc::new(DiskGate::new(true));
         assert!(disk.try_submit_write(INFLIGHT_WRITES, 0));
         let waiting = Arc::clone(&disk);
         let (entered_tx, entered_rx) = mpsc::channel();
@@ -4030,19 +4045,41 @@ mod tests {
         entered_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("recall waited for the inflight write");
-        assert!(disk.recall_pending());
+        assert!(disk.recall_holds());
         assert!(!disk.try_submit_write(INFLIGHT_WRITES, 0));
         assert_eq!(disk.disk_ops.load(Ordering::SeqCst), 1);
         release_tx.send(()).expect("release send");
         recall.join().expect("recall thread");
-        assert!(!disk.recall_pending());
+        assert!(!disk.recall_holds());
         disk.finish_op(0);
         assert_eq!(disk.disk_ops.load(Ordering::SeqCst), 0);
     }
 
+    /// A recall that does not hold the disk is not waited on: other IO
+    /// shares the disk with the recall preads and the yields return at once.
+    #[test]
+    fn shared_disk_recall_does_not_hold_the_disk() {
+        let disk = DiskGate::new(false);
+        let _recall = disk.begin_recall();
+        assert_eq!(disk.recall_waiters.load(Ordering::SeqCst), 1);
+        assert!(!disk.recall_holds());
+        // No recall hold means the disk is idle for grace purposes and open
+        // for new submits while the recall preads run.
+        assert!(disk.chunk_disk_idle());
+        assert!(disk.disk_available());
+        assert!(disk.try_submit_write(INFLIGHT_WRITES, 0));
+        assert!(disk.try_submit_read(INFLIGHT_DISK_OPS, 0));
+        disk.finish_op(0);
+        disk.finish_op(0);
+        disk.yield_to_recall();
+        assert!(disk.yield_to_recall_until(Instant::now()));
+        drop(_recall);
+        assert_eq!(disk.recall_waiters.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn write_hold_blocks_entropy_reads() {
-        let disk = DiskGate::new();
+        let disk = DiskGate::new(true);
         let _hold = disk.hold_writes();
         assert!(!disk.try_submit_read(INFLIGHT_DISK_OPS, 0));
         assert!(disk.try_submit_write(INFLIGHT_DISK_OPS, 0));
@@ -4056,7 +4093,7 @@ mod tests {
 
     #[test]
     fn exclusive_io_waits_for_inflight_and_rejects_submit() {
-        let disk = Arc::new(DiskGate::new());
+        let disk = Arc::new(DiskGate::new(true));
         assert!(disk.try_submit_read(INFLIGHT_DISK_OPS, 0));
         let waiting = Arc::clone(&disk);
         let (done_tx, done_rx) = mpsc::channel();
@@ -4088,7 +4125,7 @@ mod tests {
 
     #[test]
     fn begin_recall_waits_for_owed_flush_without_holding_the_disk() {
-        let disk = Arc::new(DiskGate::new());
+        let disk = Arc::new(DiskGate::new(true));
         disk.arm_recall_flush();
         let waiting = Arc::clone(&disk);
         let (started_tx, started_rx) = mpsc::channel();
@@ -4119,7 +4156,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("recall did not start after the flush cleared");
         recall.join().expect("recall thread");
-        assert!(!disk.recall_pending());
+        assert!(!disk.recall_holds());
     }
 
     /// An unlimited sync must not report the batch durable while a recall
@@ -4188,7 +4225,7 @@ mod tests {
 
     #[test]
     fn write_budget_stops_before_five_hundred_ms() {
-        let disk = DiskGate::new();
+        let disk = DiskGate::new(true);
         let ten_mib = 10 * 1024 * 1024;
         for _ in 0..8 {
             assert!(disk.try_submit_write(INFLIGHT_WRITES, ten_mib));
@@ -4510,6 +4547,7 @@ mod tests {
                 entropy_readahead_cache_bytes: cache_bytes,
                 drop_recall_page_cache: false,
                 recall_direct_io: false,
+                recall_io_priority: true,
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 tx_path_derive_threads: irys_types::DEFAULT_TX_PATH_DERIVE_THREADS,
