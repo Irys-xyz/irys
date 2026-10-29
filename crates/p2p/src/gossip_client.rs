@@ -2064,7 +2064,13 @@ impl GossipClient {
         let (peer_id, header) = self
             .pull_data_from_peer_with_retry(data_request, None, peer, peer_list, Self::block, false)
             .await?;
-        Self::ensure_requested_block_header(block_hash, &header)?;
+        if let Err(err) = Self::ensure_requested_block_header(block_hash, &header) {
+            peer_list.decrease_peer_score_by_peer_id(
+                &peer_id,
+                ScoreDecreaseReason::BogusData(format!("{err}")),
+            );
+            return Err(err);
+        }
         Ok((peer_id, header))
     }
 
@@ -6168,6 +6174,49 @@ mod tests {
                 GossipClient::ensure_requested_block_header(BlockHash::repeat_byte(2), &header),
                 Err(PeerNetworkError::UnexpectedData(_))
             ));
+        }
+
+        #[tokio::test]
+        async fn single_peer_pull_of_other_header_lowers_the_peer_score() {
+            use crate::tests::util::{FakeGossipServer, peer_list_item};
+            use irys_types::PeerScore;
+
+            let server = FakeGossipServer::new();
+            server.set_on_pull_data_request(|_| {
+                GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(header_with_hash(2))))
+            });
+            let peer = peer_list_item(0x71, server.spawn(), true, PeerScore::INITIAL);
+            let peer_list = PeerList::test_mock().expect("peer list");
+            peer_list.add_or_update_peer(peer.clone(), true);
+            let client = GossipClient::new(
+                Duration::from_secs(5),
+                IrysAddress::from([1_u8; 20]),
+                IrysPeerId::from([2_u8; 20]),
+                tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            );
+
+            let result = client
+                .pull_block_header_from_peer(
+                    BlockHash::repeat_byte(1),
+                    &(peer.peer_id, peer.clone()),
+                    &peer_list,
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(PeerNetworkError::UnexpectedData(_))),
+                "{result:?}"
+            );
+            assert!(
+                peer_list
+                    .get_peer(&peer.peer_id)
+                    .expect("peer in the list")
+                    .reputation_score
+                    .get()
+                    < PeerScore::INITIAL,
+                "a peer that sends another header is scored down"
+            );
         }
     }
 
