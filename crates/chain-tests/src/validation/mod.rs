@@ -1389,11 +1389,7 @@ async fn heavy_block_validation_cancels_a_block_missing_from_the_tree() -> eyre:
     send_block_to_block_validation(&genesis_node.node_ctx, sealed_block)?;
 
     genesis_node.mine_blocks_without_gossip(3).await?;
-    genesis_node.gossip_enable();
-    peer_node.gossip_enable();
-    peer_node.gossip_block_to_peers(&header)?;
 
-    // Send block for validation
     let outcome = outcome.await;
 
     assert_validation_error(
