@@ -9,9 +9,9 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList, ScoreDecreaseReason};
 use irys_types::Traced;
 use irys_types::{
-    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysPeerId,
-    MAX_BLOCK_INDEX_QUERY_LIMIT, NodeInfo, NodeMode, PeerListItem, SyncMode, TokioServiceHandle,
-    U256,
+    BlockHash, BlockIndexItem, BlockIndexQuery, Config, DEFAULT_BLOCK_INDEX_QUERY_LIMIT,
+    EvmBlockHash, IrysPeerId, MAX_BLOCK_INDEX_QUERY_LIMIT, NodeInfo, NodeMode, PeerListItem,
+    SyncMode, TokioServiceHandle, U256,
 };
 use irys_vdf::state::VdfController;
 use rand::prelude::SliceRandom as _;
@@ -1923,6 +1923,13 @@ async fn get_block_index(
     retries: usize,
     fetch_from_trusted_peers_only: bool,
 ) -> ChainSyncResult<Vec<BlockIndexItem>> {
+    // A limit of 0 asks for the default page size of the server. Send that
+    // size explicitly, so the length rule of `check_index_answer` applies.
+    let limit = if limit == 0 {
+        DEFAULT_BLOCK_INDEX_QUERY_LIMIT
+    } else {
+        limit
+    };
     debug!(
         "Fetching block index starting from height {} with limit {}",
         start, limit
@@ -1971,11 +1978,10 @@ async fn get_block_index(
     let query = match anchor_hash {
         // `limit + 1` asks for the anchor entry and `limit` new entries. The
         // server rejects a limit above its maximum, so at the maximum ask for
-        // `limit` entries: one new entry fewer. A limit of 0 asks for the
-        // default page size of the server.
+        // `limit` entries: one new entry fewer.
         Some(_) => BlockIndexQuery {
             height: start - 1,
-            limit: if limit == 0 || limit >= MAX_BLOCK_INDEX_QUERY_LIMIT {
+            limit: if limit >= MAX_BLOCK_INDEX_QUERY_LIMIT {
                 limit
             } else {
                 limit + 1
@@ -2180,17 +2186,13 @@ fn check_index_answer(
 /// because the same answer is valid from a peer that advertises a higher
 /// height. The endpoint never returns more than `limit` entries.
 ///
-/// A `limit` of 0 asks for the default page size of the server, which this
-/// node does not know, so no length rule applies.
+/// `limit` is the limit sent in the query. `get_block_index` never sends 0.
 fn index_answer_length_matches(
     advertised_index_height: u64,
     start: usize,
     limit: usize,
     answer_length: usize,
 ) -> bool {
-    if limit == 0 {
-        return true;
-    }
     let entries_from_start = advertised_index_height
         .saturating_add(1)
         .saturating_sub(start as u64);
@@ -4038,6 +4040,70 @@ mod tests {
                     MAIN_CHAIN,
                     START as u64,
                     (START + MAX_BLOCK_INDEX_QUERY_LIMIT - 2) as u64
+                )
+            );
+        }
+
+        /// A batch size of 0 asks for the default page size explicitly, so a
+        /// short answer breaks the length rule.
+        #[rstest::rstest]
+        #[case::full_page(DEFAULT_BLOCK_INDEX_QUERY_LIMIT + 1, DEFAULT_BLOCK_INDEX_QUERY_LIMIT)]
+        // The only source breaks its claims, so there is nothing to fetch.
+        #[case::short_page(DEFAULT_BLOCK_INDEX_QUERY_LIMIT, 0)]
+        #[tokio::test]
+        async fn zero_batch_size_asks_for_the_default_page(
+            #[case] answer_length: usize,
+            #[case] fetched_length: usize,
+        ) {
+            let dir = TempDirBuilder::new().build();
+            let index = local_index(dir.path());
+            let index_height = START as u64 + 2 * DEFAULT_BLOCK_INDEX_QUERY_LIMIT as u64;
+            let server = FakeGossipServer::new();
+            server.set_on_info_request(move || {
+                GossipResponse::Accepted(NodeInfo {
+                    block_index_height: index_height,
+                    block_index_hash: entry_hash(MAIN_CHAIN, index_height),
+                    ..NodeInfo::default()
+                })
+            });
+            let sent_limit = Arc::new(AtomicUsize::new(0));
+            let sent_limit_in_server = Arc::clone(&sent_limit);
+            server.set_on_block_index_request(move |query| {
+                sent_limit_in_server.store(query.limit, std::sync::atomic::Ordering::SeqCst);
+                let first = query.height as u64;
+                GossipResponse::Accepted(entries(
+                    MAIN_CHAIN,
+                    first,
+                    first + answer_length as u64 - 1,
+                ))
+            });
+            let peer_list =
+                trusted_peer_list(vec![peer_list_item(0x11, server.spawn(), true, 100)]);
+
+            let fetched = get_block_index(
+                &peer_list,
+                &gossip_client(),
+                &index,
+                START,
+                0,
+                1,
+                RETRIES,
+                true,
+            )
+            .await;
+
+            // The anchored query asks for the anchor entry and a full page.
+            assert_eq!(
+                sent_limit.load(std::sync::atomic::Ordering::SeqCst),
+                DEFAULT_BLOCK_INDEX_QUERY_LIMIT + 1
+            );
+            let fetched = fetched.expect("block index");
+            assert_eq!(
+                fetched,
+                entries(
+                    MAIN_CHAIN,
+                    START as u64,
+                    (START + fetched_length) as u64 - 1
                 )
             );
         }

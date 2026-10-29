@@ -408,8 +408,8 @@ impl Config {
         );
 
         // The sync asks the block index in batches of this size. The server
-        // rejects a query above its maximum. Zero asks for the default page
-        // size of the server.
+        // rejects a query above its maximum. Zero asks for
+        // `DEFAULT_BLOCK_INDEX_QUERY_LIMIT` entries.
         ensure!(
             self.node_config.sync.block_batch_size <= crate::MAX_BLOCK_INDEX_QUERY_LIMIT,
             "sync.block_batch_size must be <= {} (the server rejects a larger block index query)",
@@ -1956,7 +1956,7 @@ mod tests {
             .to_string();
         assert!(err.contains("block_batch_size"), "got: {err}");
 
-        // Zero asks for the default page size of the server.
+        // Zero asks for `DEFAULT_BLOCK_INDEX_QUERY_LIMIT` entries.
         for block_batch_size in [0, crate::MAX_BLOCK_INDEX_QUERY_LIMIT] {
             let mut node_config = NodeConfig::testing();
             node_config.sync.block_batch_size = block_batch_size;

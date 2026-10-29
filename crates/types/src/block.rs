@@ -1212,6 +1212,10 @@ impl std::fmt::Display for DataLedger {
 /// The server rejects a query with a higher limit.
 pub const MAX_BLOCK_INDEX_QUERY_LIMIT: usize = 1_000;
 
+/// The number of entries the gossip server returns for a block index query
+/// with a `limit` of 0.
+pub const DEFAULT_BLOCK_INDEX_QUERY_LIMIT: usize = 100;
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BlockIndexQuery {
