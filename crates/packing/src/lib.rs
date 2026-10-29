@@ -706,18 +706,20 @@ mod tests {
         rng.fill(&mut partition_hash);
 
         let num_chunks: usize = 8000;
-        let mut chunks: Vec<u8> =
-            Vec::with_capacity(num_chunks * ConsensusConfig::CHUNK_SIZE as usize); // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
-        let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
+        let chunk_size = ConsensusConfig::CHUNK_SIZE as usize; // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
+        // The setup and the Rust packer below are single-threaded, so each CPU thread works
+        // on one contiguous range of chunks.
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let chunks_per_thread = num_chunks.div_ceil(threads);
 
-        for _i in 0..num_chunks {
-            let mut chunk = [0_u8; ConsensusConfig::CHUNK_SIZE as usize];
-            rng.fill_bytes(&mut chunk);
-            chunks_rust.push(chunk.to_vec());
-            for j in 0..ConsensusConfig::CHUNK_SIZE as usize {
-                chunks.push(chunk[j]);
+        let mut chunks: Vec<u8> = vec![0; num_chunks * chunk_size];
+        std::thread::scope(|scope| {
+            for range in chunks.chunks_mut(chunks_per_thread * chunk_size) {
+                scope.spawn(move || rand::thread_rng().fill_bytes(range));
             }
-        }
+        });
+        let mut chunks_rust: Vec<ChunkBytes> =
+            chunks.chunks(chunk_size).map(<[u8]>::to_vec).collect();
 
         let now = Instant::now();
 
@@ -735,27 +737,37 @@ mod tests {
         println!("C CUDA implementation: {:.2?}", elapsed);
 
         let now = Instant::now();
-        capacity_pack_range_with_data(
-            &mut chunks_rust,
-            mining_address,
-            chunk_offset,
-            partition_hash.into(),
-            ConsensusConfig::CHUNK_SIZE as usize,
-            testing_config.entropy_packing_iterations,
-            testing_config.chain_id,
-        );
+        std::thread::scope(|scope| {
+            for (range_idx, range) in chunks_rust.chunks_mut(chunks_per_thread).enumerate() {
+                let range_offset =
+                    chunk_offset + (range_idx * chunks_per_thread) as std::ffi::c_ulong;
+                let testing_config = &testing_config;
+                scope.spawn(move || {
+                    capacity_pack_range_with_data(
+                        range,
+                        mining_address,
+                        range_offset,
+                        partition_hash.into(),
+                        chunk_size,
+                        testing_config.entropy_packing_iterations,
+                        testing_config.chain_id,
+                    );
+                });
+            }
+        });
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
-        for i in 0..num_chunks {
-            for j in 0..ConsensusConfig::CHUNK_SIZE as usize {
-                //println!("chunk {} pos {}", i, j);
-                assert_eq!(
-                    chunks_rust[i][j],
-                    chunks[i * ConsensusConfig::CHUNK_SIZE as usize + j]
-                );
-            }
+        for (i, (rust_chunk, cuda_chunk)) in chunks_rust
+            .iter()
+            .zip(chunks.chunks(chunk_size))
+            .enumerate()
+        {
+            assert!(
+                rust_chunk.as_slice() == cuda_chunk,
+                "CUDA and Rust packing differ for chunk {i}"
+            );
         }
     }
 
@@ -802,6 +814,7 @@ mod tests {
             packing_address: mining_address,
             partition_offset: PartitionChunkOffset::from(chunk_offset as u32),
             partition_hash: H256::from(partition_hash),
+            packing_iterations: iterations,
         };
 
         let unpacked_chunk = unpack(
@@ -919,6 +932,7 @@ mod tests {
                     packing_address: mining_address,
                     partition_offset: PartitionChunkOffset::from(u32::try_from(chunk_offset).unwrap()),
                     partition_hash: H256::from(partition_hash),
+                    packing_iterations: iterations,
                 };
 
                 let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id)
@@ -967,6 +981,7 @@ mod tests {
                     packing_address: mining_address,
                     partition_offset: PartitionChunkOffset::from(u32::try_from(chunk_offset).unwrap()),
                     partition_hash: H256::from(partition_hash),
+                    packing_iterations: iterations,
                 };
 
                 let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id)

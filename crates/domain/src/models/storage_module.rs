@@ -2589,7 +2589,7 @@ impl StorageModule {
             submodules: submodule_map,
             recent_chunk_times: Arc::new(RwLock::new(CircularBuffer::new(8_000))), // sample window 10s = 10s x 800 chunks/s = capacity 8_000
             config: config.clone(),
-            disk: disk_lane::DiskGate::new(),
+            disk: disk_lane::DiskGate::new(config.node_config.storage.recall_io_priority),
             #[cfg(test)]
             recall_io: RecallIoAtoms::new(),
             crc_repairs: Mutex::new(BTreeSet::new()),
@@ -8603,6 +8603,7 @@ impl StorageModule {
             partition_hash: self
                 .partition_hash()
                 .ok_or_eyre("storage module has no partition")?,
+            packing_iterations: self.config.consensus.entropy_packing_iterations,
         };
         Ok(Some(unpack(
             &packed,
@@ -8746,6 +8747,7 @@ impl StorageModule {
         #[cfg(test)]
         self.wait_if_sync_paused(SyncPausePoint::AfterServeBodyRead);
         let packing_address = self.config.node_config.miner_address();
+        let packing_iterations = self.config.consensus.entropy_packing_iterations;
         let partition_hash = self
             .partition_hash()
             .ok_or_eyre("storage module has no partition")?;
@@ -8835,6 +8837,7 @@ impl StorageModule {
                                     tx_offset,
                                     packing_address,
                                     partition_hash,
+                                    packing_iterations,
                                 },
                             );
                             continue;
@@ -8880,6 +8883,7 @@ impl StorageModule {
                     tx_offset,
                     packing_address,
                     partition_hash,
+                    packing_iterations,
                 },
             );
         }
@@ -9482,7 +9486,7 @@ impl StorageModule {
             loop {
                 self.disk.yield_to_recall();
                 let file = self.disk.lock_chunks(&file_arc);
-                if self.disk.recall_pending() {
+                if self.disk.recall_holds() {
                     drop(file);
                     continue;
                 }
@@ -15280,6 +15284,7 @@ mod tests {
                 entropy_readahead_cache_bytes: 0,
                 drop_recall_page_cache: false,
                 recall_direct_io: false,
+                recall_io_priority: true,
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 tx_path_derive_threads: irys_types::DEFAULT_TX_PATH_DERIVE_THREADS,
@@ -19502,6 +19507,42 @@ mod tests {
         storage_module.read_recall_chunks(partition_chunk_offset_ii!(0, 0))?;
         assert!(!storage_module.has_pending_writes());
         assert_recall_window(&storage_module, 6);
+        Ok(())
+    }
+
+    /// The disk hold follows `storage.recall_io_priority` from module open.
+    #[test]
+    fn recall_hold_follows_recall_io_priority() -> eyre::Result<()> {
+        let chunk_size = 32;
+        let make_module =
+            |prefix: &str,
+             priority: bool|
+             -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
+                let tmp = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+                let config = testing_config_tuned(tmp.path(), chunk_size, 8, |node| {
+                    node.storage = StorageSyncConfig {
+                        recall_io_priority: priority,
+                        ..StorageSyncConfig::default()
+                    };
+                });
+                let module = StorageModule::new(
+                    &one_span(7, "chunks", Some(PartitionAssignment::default())),
+                    &config,
+                )?;
+                Ok((tmp, module))
+            };
+
+        let (_tmp, holding) = make_module("recall_hold_priority_on", true)?;
+        let _recall = holding.disk.begin_recall();
+        assert!(holding.disk.recall_holds());
+        assert!(!holding.disk.chunk_disk_idle());
+        drop(_recall);
+
+        let (_tmp, shared) = make_module("recall_hold_priority_off", false)?;
+        let _recall = shared.disk.begin_recall();
+        assert!(!shared.disk.recall_holds());
+        assert!(shared.disk.chunk_disk_idle());
+        drop(_recall);
         Ok(())
     }
 

@@ -741,10 +741,27 @@ pub struct StorageSyncConfig {
     /// (XFS and ext4 iomap).
     #[serde(default = "default_recall_direct_io")]
     pub recall_direct_io: bool,
+    /// When true, a mining recall holds the module disk while it reads:
+    /// the disk lane submits no packed write or entropy read, and non-lane
+    /// reads, writes, and durable points wait for the recall to finish.
+    ///
+    /// Set false when other IO should take priority: packing, data sync,
+    /// and serving then share the disk with the recall read instead of
+    /// waiting for it. The in-flight service-time budget still bounds the
+    /// lane's submitted writes and entropy reads; recall preads are not
+    /// counted against it and may run alongside a full admitted budget.
+    /// Read at module open; a change needs a restart.
+    #[serde(default = "default_recall_io_priority")]
+    pub recall_io_priority: bool,
 }
 
 /// Mining recall reads `chunks.dat` with `O_DIRECT` unless a config says otherwise.
 pub const fn default_recall_direct_io() -> bool {
+    true
+}
+
+/// A mining recall holds the module disk for other IO unless a config says otherwise.
+pub const fn default_recall_io_priority() -> bool {
     true
 }
 
@@ -762,6 +779,7 @@ impl Default for StorageSyncConfig {
             entropy_readahead_cache_bytes: default_entropy_readahead_cache_bytes(),
             drop_recall_page_cache: false,
             recall_direct_io: default_recall_direct_io(),
+            recall_io_priority: default_recall_io_priority(),
             intervals_persist_secs: default_intervals_persist_secs(),
             index_wal_backstop_ms: default_index_wal_backstop_ms(),
             tx_path_derive_threads: default_tx_path_derive_threads(),
@@ -1761,6 +1779,8 @@ impl NodeConfig {
                 entropy_readahead_cache_bytes: 0,
                 drop_recall_page_cache: false,
                 recall_direct_io: false,
+                // Tests rely on the recall holding the disk for other IO.
+                recall_io_priority: true,
                 // Tests read `intervals.json` as soon as `sync` returns.
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
@@ -1976,6 +1996,7 @@ impl NodeConfig {
                 entropy_readahead_cache_bytes: DEFAULT_ENTROPY_READAHEAD_CACHE_BYTES,
                 drop_recall_page_cache: false,
                 recall_direct_io: default_recall_direct_io(),
+                recall_io_priority: default_recall_io_priority(),
                 intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 tx_path_derive_threads: DEFAULT_TX_PATH_DERIVE_THREADS,
@@ -2233,6 +2254,13 @@ mod run_mode_tests {
         assert!(StorageSyncConfig::default().recall_direct_io);
         assert!(NodeConfig::testnet().storage.recall_direct_io);
         assert!(!NodeConfig::testing().storage.recall_direct_io);
+        // Absent key: the recall keeps the disk hold.
+        assert!(parsed.recall_io_priority);
+        let shared: StorageSyncConfig = toml::from_str("recall_io_priority = false").unwrap();
+        assert!(!shared.recall_io_priority);
+        assert!(StorageSyncConfig::default().recall_io_priority);
+        assert!(NodeConfig::testnet().storage.recall_io_priority);
+        assert!(NodeConfig::testing().storage.recall_io_priority);
     }
 
     #[test]

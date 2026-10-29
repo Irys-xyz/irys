@@ -5,7 +5,7 @@ use crate::{
     serialization::unix_timestamp_string_serde,
     storage_pricing::{
         Amount,
-        phantoms::{CostPerGb, Usd},
+        phantoms::{CostPerGb, Percentage, Usd},
     },
 };
 use rust_decimal_macros::dec;
@@ -40,10 +40,16 @@ pub struct IrysHardforkConfig {
     pub cascade: Option<Cascade>,
 
     /// Delta hardfork. WIP and not deployed: every preset leaves it unset, and
-    /// it accumulates consensus changes that need a hardfork. The change it
-    /// carries now seeds slots for a data ledger in the epoch it activates.
-    /// Resolved at the epoch block's own timestamp. It only acts during epoch
-    /// processing. None means disabled.
+    /// it accumulates consensus changes that need a hardfork. Resolved at each
+    /// block's own timestamp. It carries two changes:
+    /// - Ledger seeding (slots for a data ledger that activates mid-chain) can
+    ///   only act on an epoch block. It acts at the first epoch block whose
+    ///   timestamp is >= `activation_timestamp`.
+    /// - The capacity PoA reward reduction acts on every block. It applies from
+    ///   the first block whose timestamp is >= `activation_timestamp`. The miner
+    ///   share is `Delta::capacity_chunk_reward_percent`.
+    ///
+    /// None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
 }
@@ -138,8 +144,12 @@ impl Cascade {
 /// Delta hardfork. WIP and not deployed. It accumulates consensus changes that
 /// need a hardfork.
 ///
-/// The change it carries now: a data ledger that becomes active mid-chain gets
-/// its first slots in the epoch that activates it.
+/// Changes carried by Delta:
+/// - A data ledger that becomes active mid-chain gets its first slots in the
+///   epoch that activates it.
+/// - A capacity (entropy) PoA, that is, any PoA that is not a data PoA, receives
+///   `capacity_chunk_reward_percent` of the full block reward; the treasury gets
+///   the remainder.
 ///
 /// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
 /// but the epoch block's own header cannot list it: the producer derives the
@@ -148,15 +158,15 @@ impl Cascade {
 /// without this fork the ledger stays slotless — and therefore unassigned and
 /// unstorable — until the following epoch.
 ///
-/// Resolved at the epoch block's own timestamp — the first epoch block whose
-/// timestamp meets `activation_timestamp` is the one that seeds. There is no
-/// per-block effect: this fork only acts during epoch processing. None means
-/// disabled.
+/// Resolved at each block's own timestamp. The first epoch block whose timestamp
+/// meets `activation_timestamp` seeds new ledgers; every block from the boundary
+/// onward applies the capacity-PoA reward adjustment. None means disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Delta {
     /// Timestamp (seconds since epoch) at which this hardfork activates.
-    /// The actual activation happens at the first epoch boundary where the
-    /// epoch block's timestamp meets or exceeds this value.
+    /// Ledger changes happen at the first epoch block whose timestamp meets or
+    /// exceeds this value. The reward change happens at the first block of any
+    /// kind whose timestamp meets or exceeds this value.
     #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
     /// Slots allocated to a data ledger in the epoch it becomes active
@@ -164,9 +174,22 @@ pub struct Delta {
     /// Non-zero: seeding zero slots is what this fork exists to prevent.
     #[serde(default = "Delta::default_initial_slots_per_new_ledger")]
     pub initial_slots_per_new_ledger: NonZeroU64,
+    /// Share of the full reward-curve amount that the miner of a non-data
+    /// (capacity/entropy) PoA gets (default: 0.5). The rest goes to the
+    /// treasury and counts as emitted. Must be <= 1.0.
+    #[serde(
+        default = "Delta::default_capacity_chunk_reward_percent",
+        deserialize_with = "crate::serde_utils::percentage_amount",
+        serialize_with = "crate::serde_utils::serializes_percentage_amount"
+    )]
+    pub capacity_chunk_reward_percent: Amount<Percentage>,
 }
 
 impl Delta {
+    pub fn default_capacity_chunk_reward_percent() -> Amount<Percentage> {
+        Amount::percentage(dec!(0.5)).expect("valid percentage")
+    }
+
     pub const fn default_initial_slots_per_new_ledger() -> NonZeroU64 {
         NonZeroU64::MIN
     }
@@ -353,10 +376,9 @@ impl IrysHardforkConfig {
     /// Delta's activation state at a block's OWN timestamp (in seconds), with
     /// its parameters while active.
     ///
-    /// Named like [`Self::cascade_for_block`] because the scope is the same — the
-    /// epoch block's own timestamp decides the epoch it opens. It carries the
-    /// fork's parameters rather than a [`ForBlock`] tag because its single
-    /// consumer needs them.
+    /// Named like [`Self::cascade_for_block`] because the scope is the same — a
+    /// block's own timestamp decides activation. It carries the fork's parameters
+    /// rather than a [`ForBlock`] tag because epoch processing needs them.
     #[must_use]
     pub fn delta_for_block(&self, timestamp: UnixTimestamp) -> Activation<Delta> {
         self.delta
@@ -756,6 +778,7 @@ mod tests {
             delta: Some(Delta {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
                 initial_slots_per_new_ledger: NonZeroU64::new(2).expect("non-zero"),
+                capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             }),
         };
 

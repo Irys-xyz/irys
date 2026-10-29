@@ -78,8 +78,11 @@ fails module open. Durable points wait up to
 `min_durable_interval_ms` (250), and `intervals.json` completion
 rewrites wait up to `intervals_persist_secs` (30), once the disk lane
 can run. A mining recall holds that lane until its `pread` returns.
+`storage.recall_io_priority` (default true) controls that hold: when
+false, a recall does not hold the disk and packing, data sync, and
+serving share it with the recall preads.
 A write-ahead `Interrupted` mark is still written before the `pwrite`.
-`NodeConfig::testing()` sets the recall flag
+`NodeConfig::testing()` sets `recall_direct_io`
 false and both of those intervals to 0. A config that sets only
 `num_writes_before_sync` still takes the other defaults. The RocksDB
 cache and write-buffer keys are ignored while the engine stays MDBX.

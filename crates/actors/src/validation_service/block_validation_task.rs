@@ -815,6 +815,7 @@ impl BlockValidationTask {
                 parent_commitment_snapshot,
                 block_index,
                 sealed_block_for_shadow.transactions(),
+                &self.service_inner.reward_curve,
             )
             .instrument(tracing::info_span!(
                 "shadow_tx_validation",

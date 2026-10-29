@@ -103,6 +103,11 @@ index_wal_backstop_ms = 1000
 # A direct read of a range that still has dirty buffered pages returns the new
 # bytes: Linux writes that range back first (XFS and ext4 iomap).
 # recall_direct_io = true
+# On by default: while a mining recall reads, the disk lane holds the disk
+# for it and packing, data sync, and serving wait for the pread to return.
+# Set recall_io_priority = false when other IO should take priority: the
+# recall shares the disk with that IO instead of holding it.
+# recall_io_priority = true
 
 [data_sync]
 max_storage_throughput_bps = 1047961600
