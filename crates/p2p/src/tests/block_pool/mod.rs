@@ -1040,6 +1040,47 @@ async fn process_block_does_not_re_pull_parent_in_tree_pending_validation() {
     }
 }
 
+/// A block whose height is not `parent.height + 1` is rejected before the
+/// tree-capacity wait and never reaches block discovery.
+#[rstest::rstest]
+#[case::too_high(5)]
+#[case::equal_to_parent(0)]
+#[case::far_above(u64::MAX)]
+#[tokio::test]
+async fn process_block_rejects_height_not_following_parent(#[case] height_offset: u64) {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, services, _sync_receiver) = build_test_pool(&config);
+
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(2, Some(&genesis), &config.consensus);
+    let parent = &chain[0];
+    let mut child = chain[1].clone();
+    child.height = parent.height.saturating_add(height_offset);
+    assert_ne!(child.height, parent.height + 1);
+    irys_testing_utils::IrysBlockHeaderTestExt::test_sign(&mut child);
+
+    services
+        .block_status_provider_mock
+        .add_block_mock_to_the_tree(parent);
+
+    let sealed = create_test_sealed_block(child.clone(), create_test_block_body(child.block_hash));
+    let result = tokio::time::timeout(Duration::from_secs(5), pool.process_block(sealed, false))
+        .await
+        .expect("a mismatched height must be rejected without waiting");
+    let err = result.expect_err("a height that does not follow the parent must be rejected");
+    assert!(
+        matches!(
+            err,
+            BlockPoolError::Critical(CriticalBlockPoolError::BlockError(_))
+        ),
+        "expected BlockError, got: {err:?}"
+    );
+    assert!(
+        services.block_discovery_stub.get_blocks().is_empty(),
+        "rejected block must not reach block_discovery"
+    );
+}
+
 /// `check_block_status` must treat `InTreePendingValidation` as
 /// "already processed" so the gossip/process pipeline doesn't re-enter
 /// `process_block` for a block that's already in the tree awaiting validation.

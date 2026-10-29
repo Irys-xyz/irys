@@ -9,6 +9,7 @@ mod ledger_offset_endpoint;
 mod mempool_txs;
 mod partition_intervals_endpoint;
 mod pricing_endpoint;
+mod reth_rpc;
 mod supply_endpoint;
 mod tx;
 mod tx_commitments;

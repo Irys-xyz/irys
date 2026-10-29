@@ -469,7 +469,8 @@ async fn should_gossip_execution_payloads() -> eyre::Result<()> {
     fixture1
         .execution_payload_provider
         .add_payload_to_cache(sealed_block.clone())
-        .await;
+        .await
+        .expect("payload body matches its header");
     fixture1.persist_block_header_to_db(&block);
 
     let execution_payload_provider2 = fixture2.execution_payload_provider.clone();
@@ -486,7 +487,8 @@ async fn should_gossip_execution_payloads() -> eyre::Result<()> {
                 if evm_block_hash == sealed_block.hash() {
                     execution_payload_provider2
                         .add_payload_to_cache(sealed_block.clone())
-                        .await;
+                        .await
+                        .expect("payload body matches its header");
                     response.send(Ok(())).expect("to deliver response");
                     break;
                 } else {

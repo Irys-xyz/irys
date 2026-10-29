@@ -36,6 +36,7 @@ alloy-evm.workspace = true
 [dev-dependencies]
 irys-testing-utils.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
+jsonrpsee = { workspace = true, features = ["server"] }
 proptest.workspace = true
 rstest.workspace = true
 test-log.workspace = true

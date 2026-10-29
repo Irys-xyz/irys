@@ -1,13 +1,14 @@
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::Address;
 use alloy_rpc_types_engine::PayloadAttributes;
+use clap::{CommandFactory as _, FromArgMatches as _, parser::ValueSource};
 use irys_database::db::RethDbWrapper;
 use irys_reth::{IrysEngineValidatorBuilder, IrysEthereumNode, IrysPayloadBuilderAttributes};
 use irys_types::NetworkConfigWithDefaults as _;
 use reth::{
-    args::{DatabaseArgs, MetricArgs},
+    args::{DatabaseArgs, MetricArgs, RpcServerArgs},
     revm::primitives::B256,
-    rpc::builder::{RethRpcModule, RpcModuleSelection},
+    rpc::builder::{RethRpcModule, RpcModuleSelection, TransportRpcModules},
     tasks::TaskExecutor,
 };
 use reth_chainspec::ChainSpec;
@@ -110,6 +111,89 @@ fn compute_metrics_addr(
     Ok(addr)
 }
 
+/// Wraps Reth's RPC server flags so `reth.rpc_args` parses like `reth node` RPC flags.
+#[derive(clap::Parser)]
+struct RethRpcFlags {
+    #[command(flatten)]
+    rpc: RpcServerArgs,
+}
+
+/// Clap argument ids of the [`RpcServerArgs`] fields that `run_node` sets.
+/// `reth.rpc_args` must not set them.
+const IRYS_OWNED_RPC_ARGS: [&str; 3] = ["http", "http_addr", "http_corsdomain"];
+
+/// Parses `reth.rpc_args` into Reth's RPC server settings.
+///
+/// Fails if a flag is not valid or sets a field in [`IRYS_OWNED_RPC_ARGS`].
+/// Without `--http.api`, the HTTP RPC serves only the `eth` namespace.
+/// An explicit `--http.api` applies as given. See `RethConfig::rpc_args` for
+/// the namespaces that are unsafe on a public port.
+fn parse_rpc_args(rpc_args: &[String]) -> eyre::Result<RpcServerArgs> {
+    let command = RethRpcFlags::command();
+    let argv = std::iter::once("reth").chain(rpc_args.iter().map(String::as_str));
+    let matches = command
+        .clone()
+        .try_get_matches_from(argv)
+        .map_err(|e| eyre::eyre!("invalid reth.rpc_args: {e}"))?;
+
+    for id in IRYS_OWNED_RPC_ARGS {
+        if matches.value_source(id) == Some(ValueSource::CommandLine) {
+            let flag = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .and_then(|arg| arg.get_long())
+                .unwrap_or(id);
+            eyre::bail!("invalid reth.rpc_args: --{flag} is set by Irys and cannot be changed");
+        }
+    }
+
+    let mut rpc = RethRpcFlags::from_arg_matches(&matches)
+        .map_err(|e| eyre::eyre!("invalid reth.rpc_args: {e}"))?
+        .rpc;
+    if matches.value_source("http_api") != Some(ValueSource::CommandLine) {
+        rpc.http_api = Some(RpcModuleSelection::Selection(HashSet::from([
+            RethRpcModule::Eth,
+        ])));
+    }
+    Ok(rpc)
+}
+
+/// The `debug` namespace methods the Reth RPC serves: reads and traces only.
+/// Every other `debug_*` method is removed, including methods a later Reth adds.
+/// Methods that the pinned Reth does not implement are not listed, so an
+/// implementation in a later Reth is not served without review.
+const DEBUG_RPC_ALLOWED_METHODS: [&str; 17] = [
+    "debug_getRawHeader",
+    "debug_getRawBlock",
+    "debug_getRawTransaction",
+    "debug_getRawTransactions",
+    "debug_getRawReceipts",
+    "debug_getBadBlocks",
+    "debug_traceBlock",
+    "debug_traceBlockByHash",
+    "debug_traceBlockByNumber",
+    "debug_traceTransaction",
+    "debug_traceCall",
+    "debug_traceCallMany",
+    "debug_executionWitness",
+    "debug_executionWitnessByBlockHash",
+    "debug_chainConfig",
+    "debug_codeByHash",
+    "debug_stateRootWithUpdates",
+];
+
+/// Removes every `debug_*` method not in [`DEBUG_RPC_ALLOWED_METHODS`] from the
+/// http, ws and ipc transports.
+fn remove_unlisted_debug_methods(modules: &mut TransportRpcModules) {
+    let unlisted: Vec<&'static str> = modules
+        .methods_by(|name| name.starts_with("debug_") && !DEBUG_RPC_ALLOWED_METHODS.contains(&name))
+        .method_names()
+        .collect();
+    for name in unlisted {
+        modules.remove_method_from_configured(name);
+    }
+}
+
 pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
@@ -118,6 +202,7 @@ pub async fn run_node(
     random_ports: bool,
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
+    reth_config.rpc = parse_rpc_args(&node_config.reth.rpc_args)?;
 
     let unwind_runtime =
         reth::tasks::RuntimeBuilder::new(reth::tasks::RuntimeConfig::default().with_tokio(
@@ -143,10 +228,6 @@ pub async fn run_node(
 
     reth_config.network.discovery.disable_discovery = true;
     reth_config.rpc.http = true;
-    reth_config.rpc.http_api = Some(RpcModuleSelection::Selection(HashSet::from([
-        RethRpcModule::Eth,
-        RethRpcModule::Debug,
-    ])));
 
     reth_config.rpc.http_addr = node_config
         .reth
@@ -222,6 +303,10 @@ pub async fn run_node(
 
     let handle = builder
         .node(IrysEthereumNode)
+        .extend_rpc_modules(|ctx| {
+            remove_unlisted_debug_methods(ctx.modules);
+            Ok(())
+        })
         .launch_with_debug_capabilities()
         .into_future()
         .in_current_span()
@@ -272,5 +357,110 @@ mod tests {
         let cfg = irys_types::NodeConfig::testing();
         let addr = compute_metrics_addr(&cfg, true).expect("valid addr");
         assert_eq!(addr.port(), 0);
+    }
+
+    /// Every transport keeps the listed `debug_*` methods and the other
+    /// namespaces, and loses every other `debug_*` method.
+    #[test]
+    fn unlisted_debug_methods_are_removed_from_every_transport() {
+        let mut module = jsonrpsee::RpcModule::new(());
+        for name in [
+            "debug_traceTransaction",
+            "debug_traceChain",
+            "debug_getBlockAccessList",
+            "debug_storageRangeAt",
+            "debug_setHead",
+            "eth_chainId",
+        ] {
+            module
+                .register_method(name, |_, _, _| "")
+                .expect("unique method name");
+        }
+        let mut modules = TransportRpcModules::default()
+            .with_http(module.clone())
+            .with_ws(module.clone())
+            .with_ipc(module);
+
+        remove_unlisted_debug_methods(&mut modules);
+
+        let expected = HashSet::from(["debug_traceTransaction", "eth_chainId"]);
+        for methods in [
+            modules.http_methods(|_| true),
+            modules.ws_methods(|_| true),
+            modules.ipc_methods(|_| true),
+        ] {
+            let served: HashSet<_> = methods
+                .expect("transport configured")
+                .method_names()
+                .collect();
+            assert_eq!(served, expected);
+        }
+    }
+
+    fn to_args(flags: &[&str]) -> Vec<String> {
+        flags.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn rpc_args_empty_serves_only_eth() {
+        let rpc = parse_rpc_args(&[]).expect("empty rpc_args parse");
+        assert_eq!(
+            rpc,
+            RpcServerArgs {
+                http_api: Some(RpcModuleSelection::Selection(HashSet::from([
+                    RethRpcModule::Eth
+                ]))),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn rpc_args_valid_flags_are_applied() {
+        let rpc = parse_rpc_args(&to_args(&[
+            "--http.api=eth,debug",
+            "--rpc.max-tracing-requests=4",
+            "--rpc.gascap",
+            "1000000",
+        ]))
+        .expect("valid rpc_args parse");
+        assert_eq!(
+            rpc.http_api,
+            Some(RpcModuleSelection::Selection(HashSet::from([
+                RethRpcModule::Eth,
+                RethRpcModule::Debug
+            ])))
+        );
+        assert_eq!(rpc.rpc_max_tracing_requests, 4);
+        assert_eq!(rpc.rpc_gas_cap, 1_000_000);
+    }
+
+    #[test]
+    fn rpc_args_unknown_flag_fails() {
+        let err = parse_rpc_args(&to_args(&["--http.no-such-flag"])).unwrap_err();
+        assert!(err.to_string().contains("reth.rpc_args"), "{err}");
+    }
+
+    #[rstest::rstest]
+    #[case("--http", "--http")]
+    #[case("--http.addr=0.0.0.0", "--http.addr")]
+    #[case("--http.corsdomain=example.com", "--http.corsdomain")]
+    fn rpc_args_irys_owned_flag_fails(#[case] arg: &str, #[case] flag: &str) {
+        let err = parse_rpc_args(&to_args(&[arg])).unwrap_err().to_string();
+        assert!(err.contains("reth.rpc_args"), "{err}");
+        assert!(err.contains(&format!("{flag} is set by Irys")), "{err}");
+    }
+
+    /// Each owned id must name a Reth RPC argument, or the check above
+    /// would not see the flag.
+    #[test]
+    fn irys_owned_rpc_args_exist() {
+        let command = RethRpcFlags::command();
+        for id in IRYS_OWNED_RPC_ARGS {
+            assert!(
+                command.get_arguments().any(|arg| arg.get_id() == id),
+                "{id} is not an RpcServerArgs argument"
+            );
+        }
     }
 }

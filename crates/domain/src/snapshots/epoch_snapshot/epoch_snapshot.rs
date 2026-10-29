@@ -1701,7 +1701,7 @@ impl EpochSnapshot {
         use std::hash::Hasher as _;
 
         let res = hasher.finish();
-        use base58::ToBase58 as _;
+        use irys_types::ToBase58 as _;
         res.to_le_bytes().to_base58()
     }
 }

@@ -254,6 +254,8 @@ impl P2PService {
                     .p2p_gossip
                     .max_concurrent_block_body_serves,
             ),
+            failed_header_fetches: crate::gossip_data_handler::failed_header_fetch_cache(),
+            header_fetch_semaphore: crate::gossip_data_handler::header_fetch_semaphore(),
             block_index,
             block_tree,
             config: config.clone(),

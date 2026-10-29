@@ -6,8 +6,8 @@
 //! paths, header + resolved tx headers on the read paths — and are never derived onto the consensus
 //! types directly.
 
+use crate::ToBase58 as _;
 use crate::{DataLedger, DataTransactionHeader, H256, IrysAddress, IrysBlockHeader, SealedBlock};
-use base58::{FromBase58 as _, ToBase58 as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 
@@ -129,16 +129,9 @@ fn serialize_base58<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok,
 fn deserialize_base58<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
     use serde::de::Error as _;
     let encoded = String::deserialize(deserializer)?;
-    let bytes = encoded
-        .from_base58()
-        .map_err(|e| D::Error::custom(format!("invalid base58: {e:?}")))?;
-    if bytes.len() != 20 {
-        return Err(D::Error::custom(format!(
-            "invalid owner address length: expected 20 bytes, got {}",
-            bytes.len()
-        )));
-    }
-    Ok(bytes)
+    let bytes = crate::decode_base58_exact::<20>(&encoded)
+        .map_err(|e| D::Error::custom(format!("invalid owner address: {e}")))?;
+    Ok(bytes.to_vec())
 }
 
 /// Chunks occupied by a transaction of `data_size` bytes, rounding up.
@@ -337,23 +330,15 @@ mod tests {
         assert_eq!(v["seq"], 42);
         assert_eq!(v["kind"], "observed"); // flattened beside seq, lowercase
         assert_eq!(
-            v["header"]["block_hash"]
-                .as_str()
-                .unwrap()
-                .from_base58()
-                .unwrap(),
-            vec![7_u8; 32]
+            crate::decode_base58_exact::<32>(v["header"]["block_hash"].as_str().unwrap()).unwrap(),
+            [7_u8; 32]
         );
         assert_eq!(v["header"]["miner_address"]["sig_type"], 0);
         assert!(v["header"]["miner_address"]["bytes"].is_string());
         assert_eq!(v["txs"][0]["promoted_height"], serde_json::Value::Null);
         assert_eq!(
-            v["txs"][0]["data_root"]
-                .as_str()
-                .unwrap()
-                .from_base58()
-                .unwrap(),
-            vec![7_u8; 32]
+            crate::decode_base58_exact::<32>(v["txs"][0]["data_root"].as_str().unwrap()).unwrap(),
+            [7_u8; 32]
         );
     }
 
@@ -397,12 +382,8 @@ mod tests {
         assert_eq!(v["seq"], 5);
         assert_eq!(v["kind"], "observed");
         assert_eq!(
-            v["header"]["block_hash"]
-                .as_str()
-                .unwrap()
-                .from_base58()
-                .unwrap(),
-            vec![9_u8; 32]
+            crate::decode_base58_exact::<32>(v["header"]["block_hash"].as_str().unwrap()).unwrap(),
+            [9_u8; 32]
         );
     }
 

@@ -1146,6 +1146,8 @@ pub(crate) fn data_handler_stub_with_sync(
                 .p2p_gossip
                 .max_concurrent_block_body_serves,
         ),
+        failed_header_fetches: crate::gossip_data_handler::failed_header_fetch_cache(),
+        header_fetch_semaphore: crate::gossip_data_handler::header_fetch_semaphore(),
         block_index: block_index_read_guard_stub,
         block_tree: block_tree_read_guard_stub,
         config: config.clone(),
@@ -1217,6 +1219,8 @@ pub(crate) fn data_handler_with_stubbed_pool(
                 .p2p_gossip
                 .max_concurrent_block_body_serves,
         ),
+        failed_header_fetches: crate::gossip_data_handler::failed_header_fetch_cache(),
+        header_fetch_semaphore: crate::gossip_data_handler::header_fetch_semaphore(),
         block_index: block_index_read_guard_stub,
         block_tree: block_tree_read_guard_stub,
         config: config.clone(),

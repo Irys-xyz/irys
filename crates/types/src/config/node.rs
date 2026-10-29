@@ -1058,6 +1058,34 @@ pub struct RethConfig {
     /// Number of additional transaction validation tasks.
     #[serde(default = "default_additional_validation_tasks")]
     pub additional_validation_tasks: usize,
+
+    /// Reth RPC server flags, the same syntax as `reth node` RPC flags,
+    /// e.g. `["--http.api=eth,debug", "--rpc.max-tracing-requests=4"]`.
+    /// Empty by default: the HTTP RPC then serves only the `eth` namespace.
+    ///
+    /// Irys uses `--http.api`, `--ws.api` and `--ipc*` exactly as given.
+    /// The HTTP RPC binds to the Reth network `bind_ip` (`0.0.0.0` in the
+    /// mainnet and testnet templates). The Irys API proxies it at
+    /// `/v1/execution-rpc`. It has no authentication.
+    ///
+    /// Read-only namespaces do not change node state: `debug` (Irys removes
+    /// every `debug_*` method except a fixed set of reads and traces),
+    /// `trace`, `txpool`, `net`, `web3` and `rpc`. Some of their methods
+    /// (traces, `debug_stateRootWithUpdates`) can use much CPU, memory or I/O.
+    /// `/v1/execution-rpc` forwards every method. Before you add these
+    /// namespaces, restrict access to and rate-limit both the Reth port and
+    /// `/v1/execution-rpc`.
+    ///
+    /// Do not add namespaces that change node state to a reachable port.
+    /// Anyone who reaches the port can call them:
+    /// - `admin`: controls peers and clears the transaction pool.
+    /// - `miner`: changes block-building settings.
+    /// - `testing`: builds blocks from caller-supplied transactions.
+    /// - `flashbots` and `mev`: bundle submission methods.
+    ///
+    /// `all` includes every namespace above. Do not use it.
+    #[serde(default)]
+    pub rpc_args: Vec<String>,
 }
 
 fn default_reth_db_sync_mode() -> DbSyncMode {
@@ -1281,6 +1309,9 @@ impl Default for P2PPullConfig {
 pub struct SyncConfig {
     /// How many blocks to fetch in parallel per batch during the sync
     pub block_batch_size: usize,
+    /// How many peers to ask for the block index at the same time during the
+    /// sync. The sync uses the longest valid answer.
+    pub block_index_peer_count: usize,
     /// How often to check if we're behind and need to sync
     pub periodic_sync_check_interval_secs: u64,
     /// Timeout for retry block pull/process
@@ -1315,6 +1346,7 @@ impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             block_batch_size: 50,
+            block_index_peer_count: 3,
             // Check every 30 seconds if we're behind
             periodic_sync_check_interval_secs: 30,
             retry_block_request_timeout_secs: 30,
@@ -1801,6 +1833,7 @@ impl NodeConfig {
                 db_sync_mode: DbSyncMode::UtterlyNoSync,
                 cross_block_cache_size_megabytes: Some(10),
                 additional_validation_tasks: 0,
+                rpc_args: Vec::new(),
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
@@ -2015,6 +2048,7 @@ impl NodeConfig {
                 db_sync_mode: DbSyncMode::Durable,
                 cross_block_cache_size_megabytes: None,
                 additional_validation_tasks: 2,
+                rpc_args: Vec::new(),
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {

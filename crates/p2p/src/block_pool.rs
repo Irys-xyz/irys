@@ -14,6 +14,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::RethBlockProvider;
 
 use irys_domain::ExecutionPayloadCache;
+use irys_domain::execution_payload_cache::PayloadBodyMismatchError;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
@@ -1011,7 +1012,39 @@ where
             current_block_hash
         );
 
-        // TODO: validate this UNTRUSTED height against the parent block's height (as we have processed it)
+        // The height is untrusted until checked against the parent. The parent-height rule is
+        // checked before the capacity wait. Prevalidation enforces the same rule
+        // (`height_is_valid`), so no valid block is affected. A parent that is only in the index
+        // (finalized) was looked up by `height - 1`, so it matches by construction.
+        let parent_height = self
+            .block_status_provider
+            .block_tree_read_guard()
+            .read()
+            .get_block(&prev_block_hash)
+            .map(|parent| parent.height);
+        if let Some(parent_height) = parent_height
+            && block_height != parent_height.saturating_add(1)
+        {
+            warn!(
+                "Block pool: block {:?} has height {} but its parent {:?} has height {}, removing block from the pool",
+                current_block_hash, block_height, prev_block_hash, parent_height
+            );
+            self.blocks_cache
+                .remove_block(
+                    &block_hash,
+                    BlockRemovalReason::FailedToProcess(FailureReason::BlockPrevalidationFailed),
+                )
+                .await;
+            let err = CriticalBlockPoolError::BlockError(format!(
+                "Block {:?} height {} does not follow parent height {}",
+                current_block_hash, block_height, parent_height
+            ));
+            self.sync_state
+                .record_block_processing_error(err.to_string());
+            crate::metrics::record_block_pool_rejection("height_mismatch");
+            return Err(err.into());
+        }
+
         self.block_status_provider
             .wait_for_block_tree_can_process_height(block_height)
             .await;
@@ -1494,10 +1527,10 @@ where
     pub async fn add_execution_payload_to_cache(
         &self,
         sealed_block: reth::primitives::SealedBlock<reth_ethereum_primitives::Block>,
-    ) {
+    ) -> Result<(), PayloadBodyMismatchError> {
         self.execution_payload_provider
             .add_payload_to_cache(sealed_block)
-            .await;
+            .await
     }
 
     pub async fn get_block_header(
