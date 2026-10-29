@@ -1934,7 +1934,7 @@ impl GossipClient {
             None,
             use_trusted_peers_only,
             peer_list,
-            Self::block,
+            |gossip_data| Self::requested_block_header(block_hash, gossip_data),
         )
         .await
     }
@@ -2061,8 +2061,11 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<(IrysPeerId, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockHeader(block_hash);
-        self.pull_data_from_peer_with_retry(data_request, None, peer, peer_list, Self::block, false)
-            .await
+        let (peer_id, header) = self
+            .pull_data_from_peer_with_retry(data_request, None, peer, peer_list, Self::block, false)
+            .await?;
+        Self::ensure_requested_block_header(block_hash, &header)?;
+        Ok((peer_id, header))
     }
 
     pub async fn pull_transaction_from_peer(
@@ -2096,6 +2099,31 @@ impl GossipClient {
                 gossip_data.data_type_and_id()
             ))),
         }
+    }
+
+    /// The reply must be the requested header. `block_hash` is the keccak of the
+    /// header signature, and block validation checks that binding and the
+    /// signature over the header contents, so comparing the field is enough here.
+    fn requested_block_header(
+        requested_hash: BlockHash,
+        gossip_data: GossipDataV2,
+    ) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
+        let header = Self::block(gossip_data)?;
+        Self::ensure_requested_block_header(requested_hash, &header)?;
+        Ok(header)
+    }
+
+    fn ensure_requested_block_header(
+        requested_hash: BlockHash,
+        header: &IrysBlockHeader,
+    ) -> Result<(), PeerNetworkError> {
+        if header.block_hash != requested_hash {
+            return Err(PeerNetworkError::UnexpectedData(format!(
+                "Requested block header {requested_hash}, got {}",
+                header.block_hash
+            )));
+        }
+        Ok(())
     }
 
     fn execution_payload(gossip_data: GossipDataV2) -> Result<Block, PeerNetworkError> {
@@ -6096,6 +6124,50 @@ mod tests {
                 result.is_err(),
                 "object-shaped response must be rejected, got {result:?}",
             );
+        }
+    }
+
+    mod requested_block_header_tests {
+        use super::*;
+
+        fn header_with_hash(byte: u8) -> Arc<IrysBlockHeader> {
+            let mut header = IrysBlockHeader::default();
+            header.block_hash = BlockHash::repeat_byte(byte);
+            Arc::new(header)
+        }
+
+        #[test]
+        fn header_with_requested_hash_is_returned() {
+            let header = header_with_hash(1);
+            let result = GossipClient::requested_block_header(
+                header.block_hash,
+                GossipDataV2::BlockHeader(Arc::clone(&header)),
+            );
+            assert_eq!(result.expect("hash matches"), header);
+        }
+
+        #[test]
+        fn header_with_other_hash_is_rejected() {
+            let result = GossipClient::requested_block_header(
+                BlockHash::repeat_byte(1),
+                GossipDataV2::BlockHeader(header_with_hash(2)),
+            );
+            assert!(
+                matches!(result, Err(PeerNetworkError::UnexpectedData(_))),
+                "{result:?}"
+            );
+        }
+
+        #[test]
+        fn peer_check_rejects_other_hash_and_accepts_requested() {
+            let header = header_with_hash(1);
+            assert!(
+                GossipClient::ensure_requested_block_header(header.block_hash, &header).is_ok()
+            );
+            assert!(matches!(
+                GossipClient::ensure_requested_block_header(BlockHash::repeat_byte(2), &header),
+                Err(PeerNetworkError::UnexpectedData(_))
+            ));
         }
     }
 

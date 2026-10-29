@@ -2824,6 +2824,7 @@ mod tests {
                             random_signer
                                 .sign_block_header(&mut mock_header)
                                 .expect("to sign mock header");
+                            mock_header.block_hash = block_hash;
                             GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
                                 mock_header,
                             ))))
@@ -3093,12 +3094,12 @@ mod tests {
 
             let s2_calls_clone = s2_calls.clone();
             server2.set_on_pull_data_request(move |req| match req {
-                GossipDataRequestV2::BlockHeader(_hash) => {
+                GossipDataRequestV2::BlockHeader(hash) => {
                     let mut c = s2_calls_clone.lock().unwrap();
                     *c += 1;
-                    GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
-                        irys_testing_utils::new_mock_signed_header(),
-                    ))))
+                    let mut header = irys_testing_utils::new_mock_signed_header();
+                    header.block_hash = hash;
+                    GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(header))))
                 }
                 _ => GossipResponse::Accepted(None),
             });
