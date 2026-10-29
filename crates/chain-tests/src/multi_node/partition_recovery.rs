@@ -1,4 +1,4 @@
-use crate::utils::IrysNodeTest;
+use crate::utils::{IrysNodeTest, wait_supply_height};
 use irys_chain::IrysNodeCtx;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_domain::ChunkType;
@@ -331,14 +331,9 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     );
 
     // Verify supply state
-    let supply_after = genesis
-        .node_ctx
-        .supply_state_guard
-        .as_ref()
-        .expect("supply state not set")
-        .get();
+    let supply_after = wait_supply_height(&genesis, index_height).await?;
     let mut expected_emitted = irys_types::U256::zero();
-    for h in 1..=index_height {
+    for h in 1..=supply_after.height {
         let block = genesis.get_block_by_height_from_index(h, false)?;
         expected_emitted = expected_emitted.saturating_add(block.reward_amount);
     }
@@ -473,14 +468,9 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
         "Block index should continue advancing after recovery, got {final_index_height}"
     );
 
-    let final_supply = genesis
-        .node_ctx
-        .supply_state_guard
-        .as_ref()
-        .expect("supply state not set")
-        .get();
+    let final_supply = wait_supply_height(&genesis, final_index_height).await?;
     let mut final_expected = irys_types::U256::zero();
-    for h in 1..=final_index_height {
+    for h in 1..=final_supply.height {
         let block = genesis.get_block_by_height_from_index(h, false)?;
         final_expected = final_expected.saturating_add(block.reward_amount);
     }
