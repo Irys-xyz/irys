@@ -326,9 +326,11 @@ impl CompactRowCheck for CompactBase64 {}
 
 // The wrapper derive emits no flag header of its own, so each minimum is the wrapped type's
 // flag header plus the fields `from_compact` reads unconditionally.
+/// `DataLedger` is encoded as a varint, which is at least 1 byte.
+const DATA_LEDGER_MIN_ENCODED_LEN: usize = 1;
 impl_compact_row_check_for_min_len!(
     // flag header, `tx_root`, and the `DataLedger` variant (varint, at least 1 byte)
-    CompactLedgerIndexItem => LedgerIndexItem::bitflag_encoded_bytes() + size_of::<H256>() + 1,
+    CompactLedgerIndexItem => LedgerIndexItem::bitflag_encoded_bytes() + size_of::<H256>() + DATA_LEDGER_MIN_ENCODED_LEN,
     CompactCommitmentTxMetadata => CommitmentTransactionMetadata::bitflag_encoded_bytes(),
     CompactDataTxMetadata => DataTransactionMetadata::bitflag_encoded_bytes(),
     // `end` (its own flag header) and `tx_path_hash`
@@ -381,9 +383,9 @@ impl CompactRowCheck for DataRootInfo {
     }
 }
 
-/// `PeerListItemInner::from_compact` tolerates a row cut right after the 4-byte
-/// score/response-time prefix (older layout) but reads the Reth peer id (a `B512`) after the
-/// gossip, API and Reth peering addresses unconditionally, so a longer row must still hold one.
+/// `PeerListItemInner::from_compact` decodes a row that ends right after the 4-byte
+/// score/response-time prefix with default fields, but reads the Reth peer id (a `B512`) after
+/// the gossip, API and Reth peering addresses unconditionally, so a longer row must still hold one.
 impl CompactRowCheck for CompactPeerListItem {
     fn check_compact_row(buf: &[u8]) -> Result<(), String> {
         const PREFIX_LEN: usize = 4;
