@@ -76,8 +76,12 @@ async fn heavy_delta_reward_follows_poa_kind() -> eyre::Result<()> {
         .start_and_wait_for_packing("GENESIS", 30)
         .await;
 
-    // Write one chunk so the data partition holds both written and unwritten offsets.
-    let tx = node.post_publish_data_tx(&signer, vec![7_u8; 32]).await?;
+    // Write half of each data partition so it holds both written and
+    // unwritten offsets: the miner then finds both data and entropy PoAs there.
+    let chunk_size = node.node_ctx.config.consensus.chunk_size;
+    let half_partition = node.node_ctx.config.consensus.num_chunks_in_partition / 2;
+    let data = vec![7_u8; usize::try_from(chunk_size * half_partition)?];
+    let tx = node.post_publish_data_tx(&signer, data).await?;
     node.wait_for_mempool(tx.header.id, 20).await?;
     node.upload_chunks(&tx).await?;
 
@@ -92,8 +96,15 @@ async fn heavy_delta_reward_follows_poa_kind() -> eyre::Result<()> {
     };
     eyre::ensure!(!data_partitions.is_empty(), "no data partition assigned");
 
+    // Which PoA kind a block gets is random, so mine until each kind is seen.
     let (mut data_poas, mut capacity_poas, mut data_partition_entropy_poas) = (0_u32, 0_u32, 0_u32);
-    for _ in 0..30 {
+    let mut mined = 0;
+    while data_poas == 0 || data_partition_entropy_poas == 0 {
+        eyre::ensure!(
+            mined < 100,
+            "after {mined} blocks: data_poas={data_poas}, data_partition_entropy_poas={data_partition_entropy_poas}"
+        );
+        mined += 1;
         let block = node.mine_block().await?;
         let full = full_reward(&node, block.height - 1)?;
         let expected = if block.poa.is_data_poa() {
@@ -120,11 +131,6 @@ async fn heavy_delta_reward_follows_poa_kind() -> eyre::Result<()> {
         capacity_poas,
         data_partition_entropy_poas,
         "delta reward by PoA kind"
-    );
-    eyre::ensure!(capacity_poas > 0, "no capacity PoA mined");
-    eyre::ensure!(
-        data_partition_entropy_poas > 0,
-        "no entropy PoA from a data partition mined"
     );
 
     node.stop().await;
@@ -190,18 +196,11 @@ async fn heavy_delta_capacity_reward_share_goes_to_treasury() -> eyre::Result<()
         parent = block;
     }
 
-    let supply_state = node
-        .node_ctx
-        .supply_state_guard
-        .clone()
-        .ok_or_else(|| eyre::eyre!("supply state not set"))?;
-    let mut waited = 0;
-    while !supply_state.is_ready() || supply_state.get().height == 0 {
-        eyre::ensure!(waited < 300, "supply state not ready");
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        waited += 1;
-    }
-    let supply = supply_state.get();
+    // The index, and with it the supply state, trails the tip by the
+    // migration depth.
+    let migrated_height =
+        parent.height - u64::from(node.node_ctx.config.consensus.block_migration_depth);
+    let supply = wait_supply_height(&node, migrated_height).await?;
     let mut expected_emitted = U256::zero();
     for height in 1..=supply.height {
         expected_emitted += full_reward(&node, height - 1)?;
