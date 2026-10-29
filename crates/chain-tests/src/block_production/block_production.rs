@@ -1756,69 +1756,6 @@ async fn own_block_prevalidation_failure_keeps_producer_running() -> eyre::Resul
     Ok(())
 }
 
-/// Own blocks rejected on the same parent for the same local-cause reason
-/// stop the producer service once the run reaches the threshold. A local
-/// fault that one error does not prove then still stops the node.
-#[test_log::test(tokio::test)]
-async fn own_block_rejections_in_a_row_stop_the_producer() -> eyre::Result<()> {
-    use irys_actors::{
-        BlockProductionError,
-        block_producer::{BlockProducerCommand, DROP_STREAK_STOP_AT},
-    };
-    use irys_types::SendTraced as _;
-
-    let node = IrysNodeTest::new_genesis(NodeConfig::testing())
-        .start()
-        .await;
-
-    // Same corruption as `own_block_prevalidation_failure_keeps_producer_running`:
-    // pre-validation rejects the block, which is not a proven local fault.
-    let mut bad_solution = solution_context(&node.node_ctx).await?;
-    bad_solution.chunk[0] ^= 0xFF;
-
-    let senders = &node.node_ctx.service_senders;
-    senders
-        .block_producer
-        .send_traced(BlockProducerCommand::SetTestBlocksRemaining(Some(1)))?;
-    for attempt in 1..=DROP_STREAK_STOP_AT {
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        senders
-            .block_producer
-            .send_traced(BlockProducerCommand::SolutionFound {
-                solution: bad_solution.clone(),
-                response: response_tx,
-            })?;
-        let reply = tokio::time::timeout(PRODUCER_LIVENESS_TIMEOUT, response_rx)
-            .await
-            .expect("producer service must reply or drop the sender within 60s");
-        if attempt < DROP_STREAK_STOP_AT {
-            let err = reply
-                .expect("below the threshold the producer service must reply")
-                .map(|_| ())
-                .expect_err("a block that fails pre-validation must not be returned");
-            assert!(
-                matches!(
-                    err.downcast_ref::<BlockProductionError>(),
-                    Some(BlockProductionError::Recoverable {
-                        reason: "own_block_rejected",
-                        ..
-                    })
-                ),
-                "expected an own_block_rejected drop, got: {err:#}"
-            );
-        } else {
-            // A stopped service drops the sender instead of replying.
-            assert!(
-                reply.is_err(),
-                "the drop that reaches the threshold must stop the producer service"
-            );
-        }
-    }
-
-    node.stop().await;
-    Ok(())
-}
-
 /// A failed balance read is an error, not a zero balance: a zero would leave
 /// funded signers out of the block without any signal.
 #[test_log::test(tokio::test)]

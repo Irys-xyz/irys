@@ -76,8 +76,6 @@ pub enum BlockProductionError {
     Recoverable {
         /// Low-cardinality label for logs and the dropped-blocks metric.
         reason: &'static str,
-        /// The block the attempt built on, once known.
-        parent: Option<H256>,
         #[source]
         source: eyre::Error,
     },
@@ -95,24 +93,7 @@ impl BlockProductionError {
     pub fn recoverable<E: Into<eyre::Report>>(reason: &'static str) -> impl FnOnce(E) -> Self {
         move |source| Self::Recoverable {
             reason,
-            parent: None,
             source: source.into(),
-        }
-    }
-
-    /// Records the block the failed attempt built on, unless already known.
-    fn on_parent(self, parent_hash: H256) -> Self {
-        match self {
-            Self::Recoverable {
-                reason,
-                parent: None,
-                source,
-            } => Self::Recoverable {
-                reason,
-                parent: Some(parent_hash),
-                source,
-            },
-            other => other,
         }
     }
 
@@ -130,14 +111,6 @@ impl BlockProductionError {
             Self::Retryable { .. } => "retryable",
             Self::Recoverable { reason, .. } => reason,
             Self::Irrecoverable { .. } => "irrecoverable",
-        }
-    }
-
-    /// The block a dropped attempt built on, when known.
-    pub fn parent(&self) -> Option<H256> {
-        match self {
-            Self::Recoverable { parent, .. } => *parent,
-            Self::Retryable { .. } | Self::Irrecoverable { .. } => None,
         }
     }
 
@@ -166,7 +139,6 @@ fn ensure_payload_starts_with_shadow_txs(
     }
     Err(BlockProductionError::Recoverable {
         reason: "payload_missing_shadow_tx",
-        parent: None,
         source: eyre!(
             "built payload does not start with the {} expected shadow txs",
             expected_shadow_tx_hashes.len()
@@ -237,7 +209,6 @@ fn check_new_payload_status(status: &PayloadStatusEnum) -> Result<(), BlockProdu
     }
     Err(BlockProductionError::Recoverable {
         reason: "payload_not_valid",
-        parent: None,
         source: eyre!("engine returned {status:?} for our own payload"),
     })
 }
@@ -265,11 +236,10 @@ enum OwnBlockRejectionCause {
     /// Proven local fault: stop the node.
     LocalFault,
     /// A tx the producer selected, which a peer can supply: drop the attempt.
-    /// It does not count toward the drop-streak stop.
     SelectedTx,
     /// Local state that can change between attempts (stored chunk data,
     /// partition assignments, the VDF state, the clock, the block tree): drop
-    /// the attempt. It counts toward the drop-streak stop.
+    /// the attempt.
     ChangingLocalState,
 }
 
@@ -316,11 +286,7 @@ fn classify_own_block_discovery_error(
         OwnBlockRejectionCause::SelectedTx => "own_block_rejected_by_tx",
         OwnBlockRejectionCause::ChangingLocalState => "own_block_rejected",
     };
-    BlockProductionError::Recoverable {
-        reason,
-        parent: Some(block_header.previous_block_hash),
-        source,
-    }
+    BlockProductionError::Recoverable { reason, source }
 }
 
 /// Why a pre-validation failure of our own block happened.
@@ -531,81 +497,6 @@ pub struct BlockProducerService {
     /// new height, so a second block produced at an already-seen height (a
     /// rejected block's same-height replacement) does not consume the budget.
     highest_test_block_height_produced: Option<u64>,
-    /// Consecutive local-cause drops per drop reason on one parent.
-    drop_streaks: DropStreaks,
-}
-
-/// This many dropped attempts with the same local-cause reason on the same
-/// parent stop the producer service. A local fault that is not proven by one
-/// error then still stops the node instead of a silent halt.
-pub const DROP_STREAK_STOP_AT: u32 = 8;
-
-/// Whether a drop with this reason counts toward the stop. A reason whose
-/// cause can be a tx that a peer supplied does not count, so that a peer
-/// cannot stop the node with a tx. Such drops are still logged and counted
-/// in the dropped-blocks metric.
-fn drop_reason_has_local_cause(reason: &str) -> bool {
-    !matches!(
-        reason,
-        // Tx selection reads the mempool.
-        "tx_selection"
-        // Fee and refund amounts come from the selected txs.
-        | "shadow_tx_generation"
-        // A selected tx's payer can lack the EVM balance for its fee.
-        | "payload_missing_shadow_tx"
-        // Pre-validation rejected our block because of a selected tx.
-        | "own_block_rejected_by_tx"
-    )
-}
-
-/// Consecutive dropped attempts per drop reason. Only local-cause reasons
-/// count (see [`drop_reason_has_local_cause`]). A produced block clears all
-/// counts, and so does a counted drop on a parent other than the one of the
-/// previous counted drop: the stop means repeated failures on one parent.
-#[derive(Debug, Default)]
-struct DropStreaks {
-    by_reason: std::collections::HashMap<&'static str, u32>,
-    /// Parent of the previous counted drop.
-    parent: Option<H256>,
-}
-
-impl DropStreaks {
-    fn clear(&mut self) {
-        self.by_reason.clear();
-    }
-
-    /// Gives the error back when the service continues. `Err` stops the
-    /// service: an irrecoverable error, or the drop that brings its reason's
-    /// streak to [`DROP_STREAK_STOP_AT`].
-    fn continue_after(&mut self, err: BlockProductionError) -> eyre::Result<BlockProductionError> {
-        if matches!(err, BlockProductionError::Irrecoverable { .. }) {
-            return Err(err.into());
-        }
-        let reason = err.reason();
-        if !drop_reason_has_local_cause(reason) {
-            return Ok(err);
-        }
-        if err.parent() != self.parent {
-            self.by_reason.clear();
-            self.parent = err.parent();
-        }
-        let streak = self.by_reason.entry(reason).or_default();
-        *streak = streak.saturating_add(1);
-        if *streak >= DROP_STREAK_STOP_AT {
-            error!(
-                error.reason = reason,
-                streak = *streak,
-                block.parent = ?self.parent,
-                error.source = %format_args!("{:#}", err.source_report()),
-                "Stopping block producer: block production keeps failing for the same reason"
-            );
-            let streak = *streak;
-            return Err(eyre::Report::new(err).wrap_err(format!(
-                "block production dropped {streak} consecutive attempts ({reason})"
-            )));
-        }
-        Ok(err)
-    }
 }
 
 #[derive(Debug)]
@@ -738,7 +629,6 @@ impl BlockProducerService {
                     inner,
                     blocks_remaining_for_test,
                     highest_test_block_height_produced: None,
-                    drop_streaks: DropStreaks::default(),
                 };
                 service
                     .start()
@@ -839,12 +729,13 @@ impl BlockProducerService {
                 };
 
                 // One failed attempt ends this solution, not the service.
-                // A proven local inconsistency stops the service (and so the
-                // node), and so does a run of drops for one reason.
+                // Only a proven local inconsistency stops the service (and so the node).
                 let result = match result {
                     Ok(result) => result,
+                    Err(err @ BlockProductionError::Irrecoverable { .. }) => {
+                        return Err(err.into());
+                    }
                     Err(err) => {
-                        let err = self.drop_streaks.continue_after(err)?;
                         error!(
                             solution.hash = %solution_hash,
                             solution.vdf_step = solution_vdf_step,
@@ -859,7 +750,6 @@ impl BlockProducerService {
                 };
 
                 if let Some((block, eth_built_payload)) = result {
-                    self.drop_streaks.clear();
                     // Final guard: ensure tests haven't exhausted quota
                     if matches!(self.blocks_remaining_for_test, Some(0)) {
                         info!("Test guard exhausted; dropping candidate block before publication");
@@ -1266,7 +1156,6 @@ pub trait BlockProdStrategy {
                         );
                         return Err(BlockProductionError::Recoverable {
                             reason: "retries_exhausted",
-                            parent: Some(block_hash),
                             source: source
                                 .wrap_err(format!("max retries ({}) exceeded", MAX_RETRY_ATTEMPTS)),
                         });
@@ -1296,7 +1185,7 @@ pub trait BlockProdStrategy {
                         error.source = %format_args!("{:#}", e.source_report()),
                         "Block production failed on parent, aborting"
                     );
-                    return Err(e.on_parent(block_hash));
+                    return Err(e);
                 }
             }
         }
@@ -2392,7 +2281,6 @@ pub trait BlockProdStrategy {
         }
         .ok_or_else(|| BlockProductionError::Recoverable {
             reason: "parent_evm_block_unavailable",
-            parent: None,
             source: eyre!(
                 "parent EVM block {} for height {} not found in Reth",
                 prev_block_header.evm_block_hash,
@@ -2997,7 +2885,6 @@ mod error_classification_tests {
             ),
             Some(expected) => {
                 assert_eq!(classified.reason(), expected, "{classified:?}");
-                assert_eq!(classified.parent(), Some(header.previous_block_hash));
             }
         }
     }
@@ -3062,134 +2949,6 @@ mod error_classification_tests {
             ),
             "{err:?}"
         );
-    }
-}
-
-#[cfg(test)]
-mod drop_streak_tests {
-    use super::{BlockProductionError, DROP_STREAK_STOP_AT, DropStreaks};
-    use irys_types::H256;
-    use rstest::rstest;
-
-    fn dropped_on(reason: &'static str, parent: H256) -> BlockProductionError {
-        BlockProductionError::Recoverable {
-            reason,
-            parent: Some(parent),
-            source: eyre::eyre!("attempt failed"),
-        }
-    }
-
-    fn dropped(reason: &'static str) -> BlockProductionError {
-        dropped_on(reason, H256::zero())
-    }
-
-    // `handle_command` returns the `Err` of `continue_after` with `?`, which
-    // ends the service loop and so the node.
-    #[test]
-    fn irrecoverable_error_stops_the_service() {
-        let mut streaks = DropStreaks::default();
-        let err = BlockProductionError::Irrecoverable {
-            source: eyre::eyre!("local state is inconsistent"),
-        };
-        assert!(streaks.continue_after(err).is_err());
-    }
-
-    #[test]
-    fn local_drops_on_one_parent_at_the_threshold_stop_the_service() {
-        let mut streaks = DropStreaks::default();
-        for _ in 1..DROP_STREAK_STOP_AT {
-            streaks
-                .continue_after(dropped("own_block_rejected"))
-                .expect("below the threshold the service continues");
-        }
-        let stop = streaks
-            .continue_after(dropped("own_block_rejected"))
-            .expect_err("the drop that reaches the threshold stops the service");
-        assert!(
-            format!("{stop:#}").contains("own_block_rejected"),
-            "{stop:#}"
-        );
-    }
-
-    #[rstest]
-    #[case::tx_selection("tx_selection")]
-    #[case::shadow_tx_generation("shadow_tx_generation")]
-    #[case::payload_missing_shadow_tx("payload_missing_shadow_tx")]
-    #[case::own_block_rejected_by_tx("own_block_rejected_by_tx")]
-    fn drop_with_a_peer_supplied_cause_never_stops_the_service(#[case] reason: &'static str) {
-        let mut streaks = DropStreaks::default();
-        for _ in 0..DROP_STREAK_STOP_AT * 2 {
-            streaks
-                .continue_after(dropped(reason))
-                .expect("a peer-supplied cause must not stop the service");
-        }
-    }
-
-    #[test]
-    fn ledger_expiry_drop_stops_the_service() {
-        let mut streaks = DropStreaks::default();
-        for _ in 1..DROP_STREAK_STOP_AT {
-            streaks
-                .continue_after(dropped("ledger_expiry"))
-                .expect("continues");
-        }
-        assert!(streaks.continue_after(dropped("ledger_expiry")).is_err());
-    }
-
-    #[test]
-    fn streaks_count_each_reason_on_its_own() {
-        let mut streaks = DropStreaks::default();
-        for _ in 1..DROP_STREAK_STOP_AT {
-            streaks.continue_after(dropped("a")).expect("continues");
-            streaks.continue_after(dropped("b")).expect("continues");
-        }
-        assert!(streaks.continue_after(dropped("a")).is_err());
-    }
-
-    #[test]
-    fn new_parent_resets_the_streak() {
-        let mut streaks = DropStreaks::default();
-        for _ in 1..DROP_STREAK_STOP_AT {
-            streaks
-                .continue_after(dropped_on("a", H256::zero()))
-                .expect("continues");
-        }
-        for _ in 1..DROP_STREAK_STOP_AT {
-            streaks
-                .continue_after(dropped_on("a", H256::repeat_byte(1)))
-                .expect("a new parent starts a new streak");
-        }
-        assert!(
-            streaks
-                .continue_after(dropped_on("a", H256::repeat_byte(1)))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn excluded_drop_on_a_new_parent_does_not_reset_the_streak() {
-        let mut streaks = DropStreaks::default();
-        for _ in 1..DROP_STREAK_STOP_AT {
-            streaks.continue_after(dropped("a")).expect("continues");
-        }
-        streaks
-            .continue_after(dropped_on("tx_selection", H256::repeat_byte(1)))
-            .expect("continues");
-        assert!(streaks.continue_after(dropped("a")).is_err());
-    }
-
-    #[test]
-    fn produced_block_resets_the_streak() {
-        let mut streaks = DropStreaks::default();
-        for _ in 1..DROP_STREAK_STOP_AT {
-            streaks.continue_after(dropped("a")).expect("continues");
-        }
-        streaks.clear();
-        for _ in 1..DROP_STREAK_STOP_AT {
-            streaks
-                .continue_after(dropped("a"))
-                .expect("a produced block starts a new streak");
-        }
     }
 }
 

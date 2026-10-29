@@ -76,8 +76,7 @@ impl From<TxSelectorError> for crate::block_producer::BlockProductionError {
             TxSelectorError::LedgerExpiry(LedgerExpiryError::AttributedTxHeadersMismatch {
                 ..
             }) => Self::Irrecoverable { source: e.into() },
-            // Local reads (block index, block tree, DB) fail here, not mempool data,
-            // so the drop counts toward the drop-streak stop.
+            // Local reads (block index, block tree, DB) fail here, not mempool data.
             // TODO: Some of these errors are actually stale-parent races — the parent
             // passes the initial canonical-chain check but a concurrent reorg removes
             // it before we query its snapshots/header (e.g. "Block not found",
@@ -88,13 +87,11 @@ impl From<TxSelectorError> for crate::block_producer::BlockProductionError {
             // directly.
             TxSelectorError::LedgerExpiry(LedgerExpiryError::Other(source)) => Self::Recoverable {
                 reason: "ledger_expiry",
-                parent: None,
                 source,
             },
             // The same stale-parent TODO applies to `Other`.
             TxSelectorError::Other(source) => Self::Recoverable {
                 reason: "tx_selection",
-                parent: None,
                 source,
             },
         }
