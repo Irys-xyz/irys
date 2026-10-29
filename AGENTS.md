@@ -52,7 +52,7 @@ Rust 1.93.0, edition 2024 (pinned in `rust-toolchain.toml`). Requires clang, gmp
   not take the lock. `XTASK_NO_PRUNE=1` (or `--no-prune`) skips the prune on `test`, `check`,
   `full-check` and `clippy`. `cargo xtask prune` ignores that switch. Set `XTASK_NO_PRUNE=1` for
   every agent that runs plain `cargo`, `check`, `full-check` or `clippy` in a target dir shared
-  with others. `RUST_LOG=xtask=debug` logs why each file was kept or removed; the rules are in
+  with others. Reflink worktrees are _not_ shared, and you should not disable pruning unless required. `RUST_LOG=xtask=debug` logs why each file was kept or removed; the rules are in
   `xtask/src/prune.rs`.
 - Do not set `RUSTFLAGS`: that replaces `.cargo/config.toml`
   (`-C target-cpu=native`) and rebuilds the Reth graph. Warnings are denied by
