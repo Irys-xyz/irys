@@ -2015,11 +2015,12 @@ pub trait BlockProdStrategy {
             }
         }
 
-        // Pre-validation rejects a bad block before it enters the tree or
-        // gossip, so a rejected block was never published and dropping it is
-        // safe. The only failure after the block enters the tree is a closed
-        // validation-service channel. That occurs only at shutdown or after a
-        // panic that stops the node.
+        // Block discovery gossips the header only after `handle_block`
+        // succeeds, so a block that fails here was never published and
+        // dropping it is safe. Pre-validation rejects a bad block before it
+        // enters the tree. After the block enters the tree, validation
+        // scheduling or the reply to block discovery can still fail; the block
+        // then stays in the tree but is not gossiped.
         if let Err(e) = self
             .inner()
             .block_discovery
