@@ -1953,6 +1953,8 @@ pub async fn prevalidate_block(
     .map_err(|e| PreValidationError::RewardCurveError(e.to_string()))?;
     // The declared PoA kind is safe to use: `poa_is_valid` verifies a data PoA
     // against its data path and an entropy PoA against computed entropy.
+    // Trusted sync skips `poa_is_valid`, so there the kind is trusted like the
+    // rest of the PoA.
     let is_capacity_poa = !block.poa.is_data_poa();
     let reward = split_block_reward(
         full_reward,
