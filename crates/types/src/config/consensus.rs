@@ -1519,7 +1519,7 @@ mod tests {
             toml::from_str("activation_timestamp = \"2026-09-01T00:00:00+00:00\"").unwrap();
         assert_eq!(
             delta.capacity_chunk_reward_percent,
-            Delta::default_capacity_chunk_reward_percent()
+            Amount::percentage(dec!(0.5)).unwrap()
         );
     }
 
