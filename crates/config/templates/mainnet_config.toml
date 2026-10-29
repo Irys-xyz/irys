@@ -57,6 +57,13 @@ bind_port = 8081
 public_port = 8080
 bind_port = 8080
 
+# The Reth HTTP RPC serves only `eth` by default.
+# To add the read-only `debug` namespace, uncomment these two lines:
+# [reth]
+# rpc_args = ["--http.api=eth,debug"]
+# Do not add `all`, `admin`, `miner` or `testing`: the RPC has no authentication.
+# See `RethConfig::rpc_args`.
+
 [reth.network]
 use_random_ports = false
 public_port = 30303
