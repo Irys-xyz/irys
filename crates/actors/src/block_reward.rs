@@ -62,7 +62,8 @@ pub fn block_emission(
 /// A block's own timestamp controls Delta activation. The caller must pass
 /// `!poa.is_data_poa()` as `is_capacity_poa`. The PoA kind cannot be faked:
 /// PoA validation checks a data PoA against its data path and an entropy PoA
-/// against computed entropy.
+/// against computed entropy. Trusted sync skips PoA validation, so there the
+/// kind is trusted like the rest of the PoA.
 pub fn split_block_reward(
     full_reward: Amount<Irys>,
     consensus: &ConsensusConfig,
