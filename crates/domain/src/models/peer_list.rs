@@ -1731,7 +1731,10 @@ mod tests {
         ));
 
         let (_, peer_id, peer) = create_test_peer(1);
-        let bad_peer_id = IrysPeerId::from([0xEE; 20]);
+        // The malformed key sorts before the valid one, so the walk must continue
+        // past the decode error to find the valid peer.
+        let bad_peer_id = IrysPeerId::from([0x00; 20]);
+        assert!(bad_peer_id < peer_id);
 
         let write_tx = db.tx_mut().unwrap();
         insert_peer_list_item(&write_tx, &peer_id, &peer).unwrap();
