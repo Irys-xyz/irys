@@ -51,7 +51,7 @@ Rust 1.93.0, edition 2024 (pinned in `rust-toolchain.toml`). Requires clang, gmp
   exclusively and leaves the directory alone when another run holds it. Plain `cargo` commands do
   not take the lock. `XTASK_NO_PRUNE=1` (or `--no-prune`) skips the prune on `test`, `check`,
   `full-check` and `clippy`. `cargo xtask prune` ignores that switch. Set `XTASK_NO_PRUNE=1` for
-  every agent that runs `check`, `full-check` or `clippy` in a target dir shared
+  every agent that runs `test`, `check`, `full-check` or `clippy` in a target dir shared
   with others. Reflink worktrees are _not_ shared, and you should not disable pruning unless required. `RUST_LOG=xtask=debug` logs why each file was kept or removed; the rules are in
   `xtask/src/prune.rs`. prefer using xtask instead of cargo/cargo subcommands where xtask has the required functionality.
   if you notice builds recompiling work for crates/code that was unchanged, report it.
