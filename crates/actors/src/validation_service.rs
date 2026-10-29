@@ -485,7 +485,10 @@ impl ValidationService {
                             coordinator.reevaluate_priorities();
                         }
                         Ok(None) => { },
-                        Err(_) => break,
+                        Err(_) => {
+                            error!("Reorg event channel closed; stopping validation service");
+                            break;
+                        }
                     }
                 }
 
@@ -496,7 +499,10 @@ impl ValidationService {
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
                             coordinator.cancel_current_vdf_if_left_block_tree();
                         }
-                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Closed) => {
+                            error!("Block state channel closed; stopping validation service");
+                            break;
+                        }
                     }
                 }
 
