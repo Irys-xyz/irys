@@ -146,9 +146,9 @@ struct TreeStateAfterParentWait {
 ///   walk can miss when the block or an ancestor is removed during
 ///   validation. A node-fault result is only a fault of this node when the
 ///   parent is fully valid and the block is still in the tree. Thus:
-///   - parent not fully valid (invalid parents are removed from the tree, so
-///     this is "removed", or the wait was cancelled while the parent was
-///     pending) → cancel;
+///   - parent not fully valid at the read after the wait (invalid parents
+///     are removed from the tree, so this is "removed", or the parent is
+///     still pending) → cancel;
 ///   - parent fully valid but this block removed from the tree → cancel;
 ///   - parent fully valid and this block in the tree → the node fault,
 ///     unchanged. Its inputs are then validated, so it is a real fault of
@@ -159,6 +159,19 @@ struct TreeStateAfterParentWait {
 ///   must keep its node fault.
 /// - Any other result (`Invalid`, soft `InternalFailure`, cancellation) is
 ///   final without a parent wait.
+///
+/// Costs of the downgrade rule, both accepted:
+/// - Delayed surfacing: the parent wait lasts as long as the parent's
+///   remaining validation (minutes under a VDF backlog). A faulty node keeps
+///   running meanwhile and can mark other blocks valid before the fault is
+///   confirmed.
+/// - Masking: a persistent fault on a block whose parent left the in-memory
+///   tree becomes a soft cancel. It repeats on the next block built on the
+///   tip, where the parent is in the tree and the fault panics.
+///
+/// Each downgrade increments `irys.validation.node_faults_downgraded_total`,
+/// labelled `cause`: `parent_wait_cancelled`, `parent_not_valid_after_wait`
+/// or `block_missing`.
 async fn resolve_stage_result_against_parent<WaitForParent>(
     stage_result: ValidationResult,
     wait_for_parent: impl FnOnce() -> WaitForParent,
@@ -181,10 +194,16 @@ where
                 .is_some_and(is_parent_ready);
             if !parent_is_valid {
                 let reason = match parent_wait_outcome {
-                    ParentValidationResult::Cancelled(reason) => reason,
+                    ParentValidationResult::Cancelled(reason) => {
+                        metrics::record_validation_node_fault_downgraded("parent_wait_cancelled");
+                        reason
+                    }
                     // The parent was valid when the wait ended and left the
                     // tree before the read.
                     ParentValidationResult::Ready => {
+                        metrics::record_validation_node_fault_downgraded(
+                            "parent_not_valid_after_wait",
+                        );
                         metrics::record_validation_cancellation("parent_missing");
                         ValidationCancelReason::ParentMissing
                     }
@@ -197,6 +216,7 @@ where
                 return Err(reason);
             }
             if !tree_state.block_in_tree {
+                metrics::record_validation_node_fault_downgraded("block_missing");
                 metrics::record_validation_cancellation("block_missing");
                 warn!(
                     custom.error = %inner,

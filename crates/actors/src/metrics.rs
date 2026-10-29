@@ -127,6 +127,7 @@ irys_utils::define_metrics! {
     counter VALIDATION_RESULTS("irys.validation.results_total", "Validation results by stage and result (labelled)");
     counter VDF_PREEMPTIONS("irys.validation.vdf_preemptions_total", "VDF tasks preempted by higher-priority work");
     counter VALIDATION_CANCELLATIONS("irys.validation.cancellations_total", "Validation cancellations by reason (labelled)");
+    counter VALIDATION_NODE_FAULTS_DOWNGRADED("irys.validation.node_faults_downgraded_total", "Stage node faults downgraded to a cancel because the parent or block state did not confirm them (labelled by cause)");
     counter REORG_PRIORITY_REEVALUATIONS("irys.validation.reorg_priority_reevaluations_total", "Validation priority re-evaluations triggered by reorg events");
     counter PRODUCER_PARENT_WAIT_TARGET_SWITCHES("irys.block_producer.parent_wait_target_switches_total", "Times block producer switched parent target while waiting for validation");
     counter SOFT_INTERNAL_DISCARD("irys.block.soft_internal_discard_total", "Blocks discarded from block_tree due to soft-internal validation failure (labelled by reason). Pairs with soft_internal_recovered_total to gauge whether gossip-driven recovery is sufficient.");
@@ -309,6 +310,10 @@ pub(crate) fn record_vdf_preemption() {
 
 pub(crate) fn record_validation_cancellation(reason: &'static str) {
     VALIDATION_CANCELLATIONS.add(1, &[KeyValue::new("reason", reason)]);
+}
+
+pub(crate) fn record_validation_node_fault_downgraded(cause: &'static str) {
+    VALIDATION_NODE_FAULTS_DOWNGRADED.add(1, &[KeyValue::new("cause", cause)]);
 }
 
 pub(crate) fn record_parent_wait_duration_ms(ms: f64) {
