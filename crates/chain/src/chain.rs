@@ -2433,6 +2433,7 @@ impl IrysNode {
             gossip_server,
             gossip_server_handle,
             broadcast_task_handle,
+            Arc::clone(&irys_node_ctx.gossip_data_handler.chunk_announce),
             task_exec,
         );
 

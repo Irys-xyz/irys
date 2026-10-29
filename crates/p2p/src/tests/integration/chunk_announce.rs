@@ -125,6 +125,27 @@ pub(super) async fn post_announce(
         .expect("announcement reply is JSON")
 }
 
+pub(super) async fn post_push(
+    to: SocketAddr,
+    from: &PeerListItem,
+    chunk: UnpackedChunk,
+) -> GossipResponse<()> {
+    let body = crate::wire_types::GossipRequestV2 {
+        peer_id: from.peer_id,
+        miner_address: from.mining_address,
+        data: crate::wire_types::UnpackedChunk::from(chunk),
+    };
+    reqwest::Client::new()
+        .post(format!("http://{to}/gossip/v2/chunk"))
+        .json(&body)
+        .send()
+        .await
+        .expect("send push")
+        .json()
+        .await
+        .expect("push reply is JSON")
+}
+
 pub(super) async fn post_fetch(
     to: SocketAddr,
     from: &PeerListItem,
@@ -1420,6 +1441,106 @@ async fn cancelling_active_recovery_returns_claim_and_peer_capacity() -> eyre::R
     );
     handler.chunk_announce.finish(&claim);
     handle.stop().await?;
+    Ok(())
+}
+
+/// Gossip shutdown aborts a fetch task asleep in its first-round delay,
+/// and refuses later fetches, so no claim outlives the stop.
+#[tokio::test]
+async fn gossip_stop_cancels_fetch_waiting_in_first_round_delay() -> eyre::Result<()> {
+    let chunk = valid_chunk(32, 41);
+    let (receiver, handle) = receiver_for(std::slice::from_ref(&chunk), 60_000).await;
+    let handler = receiver
+        .data_handler()
+        .ok_or_else(|| eyre::eyre!("handler missing"))?;
+    // clone: the fake keeps the body and the claim is built from the original
+    let (fake, requests) = serving_fake(vec![chunk.clone()]);
+    let source = add_fake_peer(&receiver, 0x78, spawn_fake(fake).await);
+    let claim = ChunkAnnouncement::from(&chunk);
+    assert!(matches!(
+        post_announce(receiver.gossip_addr(), &source, claim).await,
+        GossipResponse::Accepted(())
+    ));
+    assert_eq!(handler.chunk_announce.claim_count(), 1);
+
+    // Well inside the 15-second claim lifetime, so expiry cannot pass
+    // for cancellation.
+    tokio::time::timeout(Duration::from_secs(5), handle.stop()).await??;
+
+    assert_eq!(
+        handler.chunk_announce.claim_count(),
+        0,
+        "gossip stop released the claim"
+    );
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "the aborted task fetched nothing"
+    );
+    handler.handle_chunk_announcement(source.peer_id, claim)?;
+    assert_eq!(
+        handler.chunk_announce.claim_count(),
+        0,
+        "a fetch admitted after the stop is dropped with its claim"
+    );
+    Ok(())
+}
+
+/// Fetch cancellation runs before the HTTP drain. A push whose ingest never
+/// replies keeps the graceful stop waiting for the push reply budget; the
+/// fetch claim must be released long before that.
+#[tokio::test]
+async fn gossip_stop_cancels_fetches_before_draining_http() -> eyre::Result<()> {
+    let held_open = valid_chunk(32, 42);
+    let fetched = valid_chunk(32, 43);
+    // clone: the receiver caches both roots and the test keeps both bodies
+    let (receiver, handle) = receiver_for(&[held_open.clone(), fetched.clone()], 60_000).await;
+    receiver.script_chunk_ingest(vec![ScriptedIngest::Stall]);
+    let handler = receiver
+        .data_handler()
+        .ok_or_else(|| eyre::eyre!("handler missing"))?;
+    // clone: the fake keeps the body and the claim is built from the original
+    let (fake, _) = serving_fake(vec![fetched.clone()]);
+    let source = add_fake_peer(&receiver, 0x79, spawn_fake(fake).await);
+    let push = {
+        let addr = receiver.gossip_addr();
+        // clone: the push task owns its sender entry
+        let from = source.clone();
+        tokio::spawn(async move { post_push(addr, &from, held_open).await })
+    };
+    poll_until(Duration::from_secs(3), "push is inside ingress", || {
+        !receiver
+            .mempool_chunks
+            .read()
+            .expect("chunk store")
+            .is_empty()
+    })
+    .await?;
+    assert!(matches!(
+        post_announce(
+            receiver.gossip_addr(),
+            &source,
+            ChunkAnnouncement::from(&fetched)
+        )
+        .await,
+        GossipResponse::Accepted(())
+    ));
+    assert_eq!(handler.chunk_announce.claim_count(), 1);
+
+    let stopping = tokio::spawn(handle.stop());
+    poll_until(
+        Duration::from_secs(1),
+        "claim released before the HTTP drain",
+        || handler.chunk_announce.claim_count() == 0,
+    )
+    .await?;
+    assert!(
+        !stopping.is_finished(),
+        "the graceful stop is still draining the held push"
+    );
+    let stopped = tokio::time::timeout(Duration::from_secs(10), stopping).await?;
+    stopped??;
+    push.abort();
     Ok(())
 }
 

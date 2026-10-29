@@ -69,7 +69,8 @@ enum SourceOutcome {
     NextSource,
     /// Local pressure must not consume a source round or rotate announcers.
     RetryLocal,
-    /// Active admission is shutting down.
+    /// `fetch_permits` is closed. Shutdown does not close it: it aborts
+    /// the task through `ChunkAnnounceState::stop_fetches`.
     Stopped,
 }
 
@@ -298,8 +299,10 @@ where
             return Err(GossipError::RateLimited);
         }
         if decision == AnnounceDecision::StartFetch {
-            self.runtime_handle
-                .spawn(self.chunk_fetch_task(announcement).in_current_span());
+            self.chunk_announce.spawn_fetch(
+                self.chunk_fetch_task(announcement).in_current_span(),
+                &self.runtime_handle,
+            );
         }
         self.cache.record_seen(announcer, key)
     }

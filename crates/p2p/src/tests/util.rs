@@ -533,12 +533,14 @@ impl GossipServiceTestFixture {
                     tokio_util::sync::CancellationToken::new(),
                 )
                 .expect("failed to run the gossip service");
+        let chunk_announce = Arc::clone(&data_handler.chunk_announce);
         self.data_handler = Some(data_handler);
 
         let service_handle = crate::spawn_p2p_server_watcher_task(
             server,
             server_handle,
             broadcast_task_handle,
+            chunk_announce,
             &self.task_executor,
         );
 

@@ -555,6 +555,7 @@ pub fn spawn_p2p_server_watcher_task(
     server: Server,
     server_handle: ServerHandle,
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,
+    chunk_announce: Arc<crate::chunk_announce::ChunkAnnounceState>,
     task_executor: &TaskExecutor,
 ) -> ServiceHandleWithShutdownSignal {
     let task_executor_clone = task_executor.clone();
@@ -576,6 +577,11 @@ pub fn spawn_p2p_server_watcher_task(
                             early_exit_result = Some(broadcast_res);
                         }
                     }
+
+                    // Before the HTTP drain: the graceful stop can take
+                    // the node's whole gossip stop budget.
+                    info!(shutdown.phase = "chunk_fetch_stop", "Gossip shutdown phase");
+                    chunk_announce.stop_fetches().await;
 
                     info!(
                         shutdown.phase = "server_stop_graceful",
