@@ -710,7 +710,7 @@ impl BlockMigrationService {
             // would silently drop the tx's data_root from the clear set,
             // leaving its orphaned placement in the offset index.
             let mut data_roots = Vec::new();
-            let tx_id_map = header.get_data_ledger_tx_ids();
+            let tx_id_map = header.get_data_ledger_tx_ids()?;
             for tx_ids in tx_id_map.values() {
                 for txid in tx_ids {
                     if let Some(tx_header) = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))? {

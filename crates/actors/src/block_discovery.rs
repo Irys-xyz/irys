@@ -460,12 +460,18 @@ impl BlockDiscoveryServiceInner {
             }
         }
 
+        let binding = new_block_header.get_data_ledger_tx_ids().map_err(|e| {
+            BlockDiscoveryError::BlockValidationError(
+                PreValidationError::DataLedgerExtractionFailed(e.to_string()),
+            )
+        })?;
+
         info!(
             "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",
             new_block_header.block_hash,
             new_block_header.height,
             new_block_header.commitment_tx_ids(),
-            new_block_header.get_data_ledger_tx_ids()
+            binding
         );
 
         //====================================
@@ -514,7 +520,6 @@ impl BlockDiscoveryServiceInner {
         let reorg_floor = block_height.saturating_sub(config.consensus.block_tree_depth);
         let map_floor = reorg_floor.min(min_tx_anchor_height);
 
-        let binding = new_block_header.get_data_ledger_tx_ids();
         let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
 
         // TODO: we can remove cloning (here and in the loop)
@@ -542,7 +547,12 @@ impl BlockDiscoveryServiceInner {
             let block_tree = block_tree_guard.read();
             while parent_block.height >= min_tx_anchor_height {
                 if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
-                    let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
+                    let parent_data_tx_ids =
+                        parent_block.get_data_ledger_tx_ids().map_err(|e| {
+                            BlockDiscoveryError::InternalError(
+                                BlockDiscoveryInternalError::BlockIndexInconsistency(e.to_string()),
+                            )
+                        })?;
                     if let Some(parent_txids) = parent_data_tx_ids.get(&DataLedger::Submit) {
                         for txid in incoming_data_tx_ids {
                             if parent_txids.contains(txid) {

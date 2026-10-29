@@ -126,6 +126,7 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
     // Sanity: all posted txs landed in the Submit ledger at the data block.
     let submit_ids: BTreeSet<_> = data_block
         .get_data_ledger_tx_ids()
+        .unwrap()
         .get(&DataLedger::Submit)
         .cloned()
         .unwrap_or_default()
@@ -189,6 +190,7 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
     let expiry_block = genesis_node.get_block_by_height(expiry_height).await?;
     let publish_ids: BTreeSet<_> = expiry_block
         .get_data_ledger_tx_ids()
+        .unwrap()
         .get(&DataLedger::Publish)
         .cloned()
         .unwrap_or_default()

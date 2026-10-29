@@ -908,12 +908,26 @@ pub enum ValidationCancelReason {
     /// two apart instead of conflating "broadcast channel closed at shutdown"
     /// with "PoA blocking task aborted mid-flight".
     PoAAborted,
+    /// Block absent from the in-memory block tree. Two sites report it:
+    /// - node-fault resolution: a stage reported a node fault and the parent
+    ///   is fully valid, but the block left the tree during validation. Tree
+    ///   walks done by the stages can miss when the block or an ancestor is
+    ///   removed during validation, so the fault is not confirmed as a fault
+    ///   of this node.
+    /// - VDF task: an ancestor's discard, a depth prune or an earlier verdict
+    ///   for the same block removed the block before or while its VDF task
+    ///   runs.
+    ///
+    /// Local, peer-innocent: the block's validity is unknown, and nothing
+    /// pursues it any more. Fresh gossip can re-enter it.
+    BlockMissing,
 }
 
 impl ValidationCancelReason {
     /// All variants are local-side outcomes. `HeightDifference`,
     /// `ParentMissing`, `ChannelClosed`, `RepeatedCancellation`,
-    /// `PoAAborted` — none are statements about the peer's block.
+    /// `PoAAborted`, `BlockMissing` — none are statements about the peer's
+    /// block.
     ///
     /// SAFETY CRITICAL: adding a new variant that classifies as Consensus
     /// REQUIRES changing this constant to a method and re-auditing every
@@ -932,7 +946,8 @@ const _: fn() = || {
             ValidationCancelReason::ParentMissing => {}
             ValidationCancelReason::ChannelClosed => {}
             ValidationCancelReason::RepeatedCancellation => {}
-            ValidationCancelReason::PoAAborted => {} // New variant? Update IS_INTERNAL above before adding an arm here.
+            ValidationCancelReason::PoAAborted => {}
+            ValidationCancelReason::BlockMissing => {} // New variant? Update IS_INTERNAL above before adding an arm here.
         }
     }
 };
@@ -945,6 +960,7 @@ impl std::fmt::Display for ValidationCancelReason {
             Self::ChannelClosed => write!(f, "channel closed"),
             Self::RepeatedCancellation => write!(f, "repeated cancellation"),
             Self::PoAAborted => write!(f, "poa aborted"),
+            Self::BlockMissing => write!(f, "block missing"),
         }
     }
 }
@@ -1206,7 +1222,7 @@ impl ValidationError {
             // node fault — that decision should be explicit at the reason
             // site. All current cancellation reasons (`HeightDifference`,
             // `ParentMissing`, `ChannelClosed`, `RepeatedCancellation`,
-            // `PoAAborted`) are local-side outcomes and route to
+            // `PoAAborted`, `BlockMissing`) are local-side outcomes and route to
             // `SoftInternal` — the `IS_INTERNAL` const documents the
             // invariant and the compile-time tripwire enforces it. No
             // cancellation reason ever peer-attributes the child block.
@@ -1348,6 +1364,7 @@ mod metric_label_tests {
             ValidationCancelReason::ChannelClosed,
             ValidationCancelReason::RepeatedCancellation,
             ValidationCancelReason::PoAAborted,
+            ValidationCancelReason::BlockMissing,
         ] {
             let err = ValidationError::ValidationCancelled { reason };
             assert_eq!(
@@ -2785,6 +2802,7 @@ mod prevalidation_error_classification_tests {
     #[case::parent_missing(ValidationCancelReason::ParentMissing)]
     #[case::repeated_cancellation(ValidationCancelReason::RepeatedCancellation)]
     #[case::poa_aborted(ValidationCancelReason::PoAAborted)]
+    #[case::block_missing(ValidationCancelReason::BlockMissing)]
     fn validation_cancel_reason_classifier_dispatch(#[case] reason: ValidationCancelReason) {
         // IS_INTERNAL is a const — verified at compile time by the tripwire below.
         // `ValidationError::is_internal_failure` must route through IS_INTERNAL.
@@ -2836,6 +2854,10 @@ mod prevalidation_error_classification_tests {
     )]
     #[case::poa_aborted(
         ValidationCancelReason::PoAAborted,
+        ExpectedRoundtripShape::InternalFailureSoft
+    )]
+    #[case::block_missing(
+        ValidationCancelReason::BlockMissing,
         ExpectedRoundtripShape::InternalFailureSoft
     )]
     fn validation_cancel_reason_roundtrip_through_dispatcher(
@@ -3084,6 +3106,7 @@ mod prevalidation_error_classification_tests {
             ValidationCancelReason::ChannelClosed,
             ValidationCancelReason::RepeatedCancellation,
             ValidationCancelReason::PoAAborted,
+            ValidationCancelReason::BlockMissing,
         ] {
             assert!(
                 !ValidationError::ValidationCancelled { reason }.is_node_fault(),
@@ -5254,6 +5277,25 @@ pub enum SubmitPayloadError {
     PayloadRejected(String),
 }
 
+/// Maps an engine-client error to a validation outcome. A request that exceeds
+/// the client's size limit fails locally before any byte is sent; its size is
+/// fixed by the block's payload, so the block is rejected. Every other client
+/// error (connection, IO, timeout, server-side failure) is a local fault.
+fn classify_engine_client_error(error: &jsonrpsee_core::client::Error) -> SubmitPayloadError {
+    use jsonrpsee_http_client::transport::Error as HttpTransportError;
+    if let jsonrpsee_core::client::Error::Transport(source) = error
+        && matches!(
+            source.downcast_ref::<HttpTransportError>(),
+            Some(HttpTransportError::RequestTooLarge)
+        )
+    {
+        return SubmitPayloadError::PayloadRejected(
+            "engine request exceeded the engine client's size limit".to_string(),
+        );
+    }
+    SubmitPayloadError::LocalTransport(error.to_string())
+}
+
 /// Submits the EVM payload to reth for execution layer validation.
 /// This should only be called after all consensus layer validations have passed.
 #[tracing::instrument(level = "trace", skip_all, err, fields(
@@ -5302,7 +5344,7 @@ pub async fn submit_payload_to_reth(
                 RequestsOrHash::Requests(Requests::new(vec![])),
             )
             .await
-            .map_err(|e| SubmitPayloadError::LocalTransport(e.to_string()))?;
+            .map_err(|e| classify_engine_client_error(&e))?;
         match payload_status.status {
             alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
                 return Err(SubmitPayloadError::PayloadRejected(validation_error));
@@ -11613,6 +11655,47 @@ mod canonical_header_field_tests {
                 expected: None,
                 actual: Some(0),
             })
+        );
+    }
+}
+
+#[cfg(test)]
+mod engine_client_error_tests {
+    use super::*;
+    use jsonrpsee_http_client::transport::Error as HttpTransportError;
+
+    #[test]
+    fn oversized_request_is_a_rejected_payload() {
+        let error =
+            jsonrpsee_core::client::Error::Transport(HttpTransportError::RequestTooLarge.into());
+        assert!(matches!(
+            classify_engine_client_error(&error),
+            SubmitPayloadError::PayloadRejected(_)
+        ));
+    }
+
+    #[test]
+    fn connection_failure_is_a_local_transport_failure() {
+        let error = jsonrpsee_core::client::Error::Transport(
+            HttpTransportError::Rejected { status_code: 503 }.into(),
+        );
+        assert!(matches!(
+            classify_engine_client_error(&error),
+            SubmitPayloadError::LocalTransport(_)
+        ));
+        assert!(matches!(
+            classify_engine_client_error(&jsonrpsee_core::client::Error::RequestTimeout),
+            SubmitPayloadError::LocalTransport(_)
+        ));
+    }
+
+    /// The startup gas-limit check uses a copy of the engine client's request
+    /// limit; it must match the jsonrpsee default the client uses.
+    #[test]
+    fn engine_client_request_limit_copy_matches_jsonrpsee_default() {
+        assert_eq!(
+            irys_types::config::ENGINE_CLIENT_MAX_REQUEST_BYTES,
+            u64::from(jsonrpsee_core::TEN_MB_SIZE_BYTES),
         );
     }
 }

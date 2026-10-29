@@ -1834,7 +1834,7 @@ fn load_data_transactions(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> eyre::Result<HashMap<DataLedger, Vec<DataTransactionHeader>>> {
-    let data_tx_ids_by_ledger = block.get_data_ledger_tx_ids();
+    let data_tx_ids_by_ledger = block.get_data_ledger_tx_ids()?;
     if data_tx_ids_by_ledger.is_empty() {
         return Ok(HashMap::new());
     }

@@ -368,7 +368,7 @@ impl LedgerExpiryTestContext {
                 let block = self.mine_block().await?;
 
                 // Verify inclusion
-                let tx_ids_map = block.get_data_ledger_tx_ids();
+                let tx_ids_map = block.get_data_ledger_tx_ids().unwrap();
                 let submit_txs = tx_ids_map
                     .get(&DataLedger::Submit)
                     .expect("Submit ledger should have transactions");
@@ -427,7 +427,7 @@ impl LedgerExpiryTestContext {
             self.total_block_rewards = self.total_block_rewards.saturating_add(block.reward_amount);
             info!("Block {} reward: {}", height, block.reward_amount);
 
-            let tx_ids = block.get_data_ledger_tx_ids();
+            let tx_ids = block.get_data_ledger_tx_ids().unwrap();
             let submit_count = tx_ids
                 .get(&DataLedger::Submit)
                 .map(std::vec::Vec::len)
@@ -474,7 +474,7 @@ impl LedgerExpiryTestContext {
         let expiry_block = &self.blocks_mined.last().unwrap();
         info!("Reached expiry block at height {}", expiry_block_height);
 
-        let expiry_tx_ids = expiry_block.get_data_ledger_tx_ids();
+        let expiry_tx_ids = expiry_block.get_data_ledger_tx_ids().unwrap();
         info!(
             "Expiry block ledgers: Submit: {:?}, Publish: {:?}",
             expiry_tx_ids.get(&DataLedger::Submit),
@@ -515,7 +515,7 @@ impl LedgerExpiryTestContext {
         // Log which blocks contain which transactions
         let mut tx_to_block = std::collections::HashMap::new();
         for block in &self.blocks_mined {
-            let tx_ids = block.get_data_ledger_tx_ids();
+            let tx_ids = block.get_data_ledger_tx_ids().unwrap();
             if let Some(submit_txs) = tx_ids.get(&DataLedger::Submit) {
                 for tx_id in submit_txs {
                     for (idx, tx) in self.transactions.iter().enumerate() {

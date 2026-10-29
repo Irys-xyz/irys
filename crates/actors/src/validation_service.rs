@@ -11,8 +11,8 @@
 //! 4. **Parent Dependencies**: Wait for parent validation before reporting
 //!     results of a child block.
 use crate::{
-    block_tree_service::{ReorgEvent, ValidationResult},
-    block_validation::ValidationError,
+    block_tree_service::{BlockStateUpdated, ReorgEvent, ValidationResult},
+    block_validation::{ValidationCancelReason, ValidationError},
     mempool_guard::MempoolReadGuard,
     metrics,
     services::ServiceSenders,
@@ -27,6 +27,7 @@ use irys_types::{
     BlockHash, Config, IrysBlockHeader, SealedBlock, SendTraced as _, TokioServiceHandle, Traced,
     app_state::DatabaseProvider,
 };
+use irys_vdf::ReanchorSignals;
 use irys_vdf::state::{VdfStateReadonly, vdf_step_batch_is_valid};
 use irys_vdf::verify::is_seed_data_valid;
 use reth::tasks::shutdown::Shutdown;
@@ -59,6 +60,12 @@ pub enum VdfValidationResult {
     /// for retry, no peer attribution.
     ParentMissing {
         parent_hash: BlockHash,
+    },
+    /// The block or its parent is no longer in the block tree. The dispatch
+    /// loop maps this to `ValidationError::ValidationCancelled` with
+    /// `reason` (SoftInternal: no peer attribution).
+    LeftBlockTree {
+        reason: ValidationCancelReason,
     },
 }
 
@@ -108,6 +115,73 @@ pub(crate) fn lookup_stage_b_parent(
         .ok_or(VdfStageBParentMissing {
             parent_hash: block.previous_block_hash,
         })
+}
+
+/// Sentinel error returned from `ensure_vdf_is_valid` when the block or its
+/// parent is not in `block_tree` at the wait for the parent's last VDF step.
+/// Downcast in `PreemptibleVdfTask::execute` and converted to
+/// `VdfValidationResult::LeftBlockTree`.
+#[derive(Debug, thiserror::Error)]
+#[error("VDF task: block or parent is not in the block tree ({reason})")]
+pub(crate) struct VdfTaskLeftBlockTree {
+    pub reason: ValidationCancelReason,
+}
+
+/// Returns the cancel reason when `block` or its parent is not in
+/// `block_tree`: `BlockMissing` when the block is absent, else
+/// `ParentMissing` when the parent is absent. Returns `None` when both are
+/// present.
+pub(crate) fn block_tree_absence_reason(
+    block_tree_guard: &BlockTreeReadGuard,
+    block: &IrysBlockHeader,
+) -> Option<ValidationCancelReason> {
+    let block_tree = block_tree_guard.read();
+    if block_tree.get_block(&block.block_hash).is_none() {
+        Some(ValidationCancelReason::BlockMissing)
+    } else if block_tree.get_block(&block.previous_block_hash).is_none() {
+        Some(ValidationCancelReason::ParentMissing)
+    } else {
+        None
+    }
+}
+
+/// Stage A: wait until the local VDF has the parent's last step.
+///
+/// When a parent fails VDF validation, it and its children leave the block
+/// tree, and possibly no validated block brings the local VDF to the
+/// parent's last step. A wait for that step then does not complete and ends
+/// as `Stalled`. Thus a block or parent that is not in
+/// `block_tree` finishes the task with the `VdfTaskLeftBlockTree` sentinel:
+/// before the wait, and when the wait ends with an error (the validation
+/// service fires `cancel` when the running task's block or parent leaves the
+/// tree). For a block and parent still in the tree, the wait result is
+/// unchanged.
+pub(crate) async fn wait_for_parent_last_step(
+    block_tree_guard: &BlockTreeReadGuard,
+    vdf_state: &VdfStateReadonly,
+    block: &IrysBlockHeader,
+    cancel: Arc<AtomicU8>,
+    progress_timeout: Duration,
+    reanchor_signals: &ReanchorSignals,
+) -> eyre::Result<()> {
+    if let Some(reason) = block_tree_absence_reason(block_tree_guard, block) {
+        return Err(VdfTaskLeftBlockTree { reason }.into());
+    }
+    let prev_output_step_number = block.vdf_limiter_info.first_step_number().saturating_sub(1);
+    let wait_result = vdf_state
+        .wait_for_step_or_suspect(
+            prev_output_step_number,
+            cancel,
+            progress_timeout,
+            reanchor_signals,
+        )
+        .await;
+    if wait_result.is_err()
+        && let Some(reason) = block_tree_absence_reason(block_tree_guard, block)
+    {
+        return Err(VdfTaskLeftBlockTree { reason }.into());
+    }
+    wait_result
 }
 
 #[repr(u8)]
@@ -237,6 +311,10 @@ pub struct ValidationService {
     msg_rx: UnboundedReceiver<Traced<ValidationServiceMessage>>,
     /// Reorg event receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,
+    /// Block state event receiver. A discard removes blocks from the block
+    /// tree and sends a state event, so each event re-checks the running VDF
+    /// task.
+    block_state_rx: broadcast::Receiver<BlockStateUpdated>,
     /// Inner service logic
     inner: Arc<ValidationServiceInner>,
 }
@@ -304,6 +382,7 @@ impl ValidationService {
         let config = config.clone();
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
+        let block_state_rx = service_senders.subscribe_block_state_updates();
         let validation_enabled = Arc::new(AtomicBool::new(true));
         let validation_enabled_clone = validation_enabled.clone();
 
@@ -314,6 +393,7 @@ impl ValidationService {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     reorg_rx,
+                    block_state_rx,
                     inner: Arc::new(ValidationServiceInner {
                         pool: irys_vdf::build_verification_pool(&config.vdf),
                         block_index_guard,
@@ -411,7 +491,24 @@ impl ValidationService {
                             coordinator.reevaluate_priorities();
                         }
                         Ok(None) => { },
-                        Err(_) => break,
+                        Err(_) => {
+                            error!("Reorg event channel closed; stopping validation service");
+                            break;
+                        }
+                    }
+                }
+
+                // Cancel the running VDF task when its block or parent left
+                // the block tree. A lagged receiver re-checks too.
+                result = self.block_state_rx.recv() => {
+                    match result {
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                            coordinator.cancel_current_vdf_if_left_block_tree();
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            error!("Block state channel closed; stopping validation service");
+                            break;
+                        }
                     }
                 }
 
@@ -471,6 +568,23 @@ impl ValidationService {
                                     ValidationError::ParentBlockMissing {
                                         block_hash: parent_hash,
                                     },
+                                );
+                            }
+                            VdfValidationResult::LeftBlockTree { reason } => {
+                                metrics::record_validation_result("vdf", "left_block_tree");
+                                metrics::record_validation_full_duration_ms(
+                                    task.enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                );
+                                warn!(
+                                    block.hash = %hash,
+                                    cancel.reason = %reason,
+                                    "VDF task: block or parent is not in the block tree; cancelling validation"
+                                );
+                                vdf_terminal_finalize_via(
+                                    &mut coordinator,
+                                    &self.inner.service_senders.block_tree,
+                                    hash,
+                                    ValidationError::ValidationCancelled { reason },
                                 );
                             }
                         }
@@ -905,7 +1019,7 @@ fn send_validation_result_via(
 /// VDF terminal-arm housekeeping: clear the per-hash concurrent-cancel
 /// retry counter (so a future fresh submission of the same hash starts
 /// from zero) and dispatch the validation result. Shared by the VDF
-/// `Invalid` and `ParentMissing` arms — both are terminal verdicts.
+/// `Invalid`, `ParentMissing` and `LeftBlockTree` arms — all are terminal.
 ///
 /// Mirrors the counter-clear at the concurrent-stage Ok arm and the
 /// panic arm in the validation select loop. Without the counter clear, a
@@ -1043,15 +1157,15 @@ impl ValidationServiceInner {
         // suspect — this stage only needs liveness (its real invariant,
         // `prev_output == parent.output`, was proven block-rootedly in
         // `prevalidate_block`), so a heal landing mid-wait is transparent.
-        let wait_result = self
-            .vdf_state
-            .wait_for_step_or_suspect(
-                prev_output_step_number,
-                Arc::clone(&cancel),
-                progress_timeout,
-                &self.service_senders.vdf_reanchor_signals,
-            )
-            .await;
+        let wait_result = wait_for_parent_last_step(
+            &self.block_tree_guard,
+            &self.vdf_state,
+            block,
+            Arc::clone(&cancel),
+            progress_timeout,
+            &self.service_senders.vdf_reanchor_signals,
+        )
+        .await;
         metrics::record_vdf_step_wait_duration_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
         wait_result?;
 
@@ -1182,6 +1296,11 @@ impl ValidationServiceInner {
         // progress check alive until the live counter walks the whole backlog.
         // The generation abort routes to the same `VdfReanchorGenerationChanged`
         // → `Cancelled` requeue lane as the send-side check.
+        //
+        // No block-tree absence check here, unlike Stage A: this block's steps
+        // are already validated and sent to fast-forward, so a `Stalled` wait
+        // means the VDF writer stopped. That is a node fault whether or not the
+        // block is still in the tree, so the stall panics.
         let final_wait_result = self
             .vdf_state
             .wait_for_step_or_reanchor(

@@ -81,12 +81,12 @@ pub enum ShadowTxGenError {
     Structural(String),
 }
 
-// Producer-side call sites return `eyre::Result` / `BlockProductionError`
-// (which has `From<eyre::Report>`); `eyre::Report` already provides a
-// blanket `From<E: std::error::Error + Send + Sync + 'static>` impl, so
-// `?` lifts `ShadowTxGenError` into `eyre::Report` automatically — no
-// explicit `From` needed (and adding one would conflict with the blanket
-// impl).
+// The block producer maps `ShadowTxGenError` into `BlockProductionError`
+// by variant (`classify_shadow_tx_error`). Call sites that return
+// `eyre::Result` use the blanket `From<E: std::error::Error + Send + Sync +
+// 'static>` impl on `eyre::Report`, so `?` lifts `ShadowTxGenError`
+// automatically — no explicit `From` needed (and adding one would conflict
+// with the blanket impl).
 
 /// Local `Result` alias for this module.
 type Result<T> = std::result::Result<T, ShadowTxGenError>;
@@ -2592,8 +2592,7 @@ mod tests {
             let s = err.to_string();
             assert_eq!(s, expected_msg, "Display mismatch for {err:?}");
             // `eyre::Report` has a blanket `From<E: std::error::Error + Send + Sync + 'static>`,
-            // so `?` lift works for producer-side call sites that return
-            // `eyre::Result` or `BlockProductionError`.
+            // so `?` lift works for call sites that return `eyre::Result`.
             let report: eyre::Report = err.into();
             assert_eq!(report.to_string(), expected_msg);
         }

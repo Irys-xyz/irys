@@ -1,6 +1,7 @@
 pub(crate) mod helpers;
 
 use crate::block_discovery::{TxLookupResult, get_data_tx_in_parallel_inner};
+use crate::block_producer::ledger_expiry::LedgerExpiryError;
 use crate::block_validation::get_assigned_ingress_proofs;
 use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
 use crate::data_tx_validation::data_tx_structural_defect;
@@ -48,6 +49,13 @@ pub enum TxSelectorError {
         parent_block_hash: BlockHash,
         canonical_tip: Option<BlockHash>,
     },
+    /// Commitment-refund derivation found the local commitment snapshot
+    /// internally inconsistent.
+    #[error(transparent)]
+    CommitmentRefund(#[from] crate::commitment_refunds::CommitmentRefundError),
+    /// Ledger-expiry fee calculation for an epoch block failed.
+    #[error(transparent)]
+    LedgerExpiry(#[from] LedgerExpiryError),
     /// Any other error during tx selection or bundle assembly.
     #[error(transparent)]
     Other(#[from] eyre::Error),
@@ -60,14 +68,32 @@ impl From<TxSelectorError> for crate::block_producer::BlockProductionError {
             // leaving our parent off the canonical chain. Retrying with the new tip
             // resolves it.
             TxSelectorError::StaleParent { .. } => Self::Retryable { source: e.into() },
-            // TODO: Some `Other` errors are actually stale-parent races — the parent
+            // A snapshot invariant violation proves local corruption; the
+            // validator treats the same error as a node fault.
+            TxSelectorError::CommitmentRefund(_) => Self::Irrecoverable { source: e.into() },
+            // A local bug that every attempt hits again; the validator treats
+            // every ledger-expiry failure as a node fault.
+            TxSelectorError::LedgerExpiry(LedgerExpiryError::AttributedTxHeadersMismatch {
+                ..
+            }) => Self::Irrecoverable { source: e.into() },
+            // Local reads (block index, block tree, DB) fail here, not mempool data.
+            // TODO: Some of these errors are actually stale-parent races — the parent
             // passes the initial canonical-chain check but a concurrent reorg removes
             // it before we query its snapshots/header (e.g. "Block not found",
             // "snapshot not found", "block header not found"). These should be
-            // Retryable, not Irrecoverable. Needs a cleaner approach than downcasting
-            // the eyre chain — consider adding typed error variants for the specific
-            // lookup failures so they can be matched directly.
-            TxSelectorError::Other(source) => Self::Irrecoverable { source },
+            // Retryable, not Recoverable, so the solution is not wasted. Needs a
+            // cleaner approach than downcasting the eyre chain — consider adding typed
+            // error variants for the specific lookup failures so they can be matched
+            // directly.
+            TxSelectorError::LedgerExpiry(LedgerExpiryError::Other(source)) => Self::Recoverable {
+                reason: "ledger_expiry",
+                source,
+            },
+            // The same stale-parent TODO applies to `Other`.
+            TxSelectorError::Other(source) => Self::Recoverable {
+                reason: "tx_selection",
+                source,
+            },
         }
     }
 }
@@ -314,7 +340,7 @@ pub async fn select_best_txs(
             parent_evm_block_id,
             &sorted_commitments,
         )
-        .await,
+        .await?,
     );
 
     // Process sorted commitments
@@ -518,7 +544,7 @@ pub async fn select_best_txs(
             parent_evm_block_id,
             &submit_ledger_txs,
         )
-        .await,
+        .await?,
     );
 
     // Select data transactions in fee-priority order, respecting funding limits
@@ -1401,7 +1427,7 @@ async fn get_pending_submit_ledger_txs(
     // Walk backwards through the canonical chain, removing Submit transactions
     // that have already been included in recent blocks within the anchor expiry window
     while block.height >= min_anchor_height {
-        let block_data_tx_ids = block.get_data_ledger_tx_ids();
+        let block_data_tx_ids = block.get_data_ledger_tx_ids()?;
 
         // Remove term ledger transactions that already exist in this historical block
         // This prevents double-inclusion and ensures we only return truly pending transactions

@@ -27,8 +27,8 @@ use crate::block_tree_service::ValidationResult;
 use crate::metrics;
 use crate::validation_service::block_validation_task::BlockValidationTask;
 use crate::validation_service::{
-    VdfBlockingTaskFailed, VdfStageBParentMissing, VdfTaskStage, VdfValidationResult,
-    record_vdf_task_progress,
+    VdfBlockingTaskFailed, VdfStageBParentMissing, VdfTaskLeftBlockTree, VdfTaskStage,
+    VdfValidationResult, block_tree_absence_reason, record_vdf_task_progress,
 };
 
 /// Block priority states for validation ordering
@@ -190,6 +190,23 @@ impl PreemptibleVdfTask {
                     metrics::record_validation_cancellation("vdf_parent_missing");
                     VdfValidationResult::ParentMissing {
                         parent_hash: parent_missing.parent_hash,
+                    }
+                // The block or its parent is not in the block tree at the
+                // wait for the parent's last step. Peer-innocent and terminal:
+                // nothing pursues the block any more.
+                } else if let Some(left) = e.downcast_ref::<VdfTaskLeftBlockTree>() {
+                    let label = match left.reason {
+                        crate::block_validation::ValidationCancelReason::BlockMissing => {
+                            "vdf_block_missing"
+                        }
+                        crate::block_validation::ValidationCancelReason::ParentMissing => {
+                            "vdf_left_tree_parent_missing"
+                        }
+                        _ => "vdf_left_block_tree",
+                    };
+                    metrics::record_validation_cancellation(label);
+                    VdfValidationResult::LeftBlockTree {
+                        reason: left.reason,
                     }
                 // An in-place re-anchor healed the seed buffer mid-validation:
                 // the batches were validated against the pre-heal buffer, so the
@@ -861,6 +878,23 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
     /// start fresh from zero rather than inheriting stale state.
     pub(super) fn clear_concurrent_cancel_retries(&mut self, block_hash: &BlockHash) {
         self.concurrent_cancel_retries.remove(block_hash);
+    }
+
+    /// Fire the running VDF task's cancel signal when its block or the
+    /// block's parent is not in the block tree. The task's wait then ends,
+    /// and the task finishes as `VdfValidationResult::LeftBlockTree` instead
+    /// of waiting for a step that only a removed block claimed.
+    pub(super) fn cancel_current_vdf_if_left_block_tree(&self) {
+        let Some(current) = &self.vdf_scheduler.current else {
+            return;
+        };
+        if block_tree_absence_reason(&self.block_tree_guard, current.sealed_block.header())
+            .is_some()
+        {
+            current
+                .cancel_signal
+                .store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
+        }
     }
 
     /// Reevaluate all priorities after reorg
@@ -2582,6 +2616,242 @@ mod tests {
             panic!(
                 "VDF blocking task panicked (stage={:?}, block={}); local-thread fault — crashing per never-mislabel rule",
                 blocking_failed.stage, "test-block-hash",
+            );
+        }
+    }
+
+    // =========================================================================
+    // VDF task of a block that left the block tree
+    // =========================================================================
+
+    mod left_block_tree {
+        use super::*;
+        use crate::block_validation::ValidationCancelReason;
+        use crate::validation_service::{VdfTaskLeftBlockTree, wait_for_parent_last_step};
+        use irys_vdf::ReanchorSignals;
+        use irys_vdf::state::{VdfStateReadonly, test_helpers::mocked_vdf_service};
+
+        const PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
+
+        /// The local VDF stays at step 0, far below this step.
+        const FAR_FUTURE_STEP: u64 = 1_000_000;
+
+        struct Fixture {
+            block_tree_guard: BlockTreeReadGuard,
+            /// Height 2, child of the canonical tip. Its parent's last step
+            /// is far ahead of the local VDF.
+            block: Arc<SealedBlock>,
+            vdf_state: VdfStateReadonly,
+            reanchor_signals: ReanchorSignals,
+        }
+
+        fn fixture() -> Fixture {
+            let (block_tree_guard, blocks) = setup_canonical_chain_scenario(1);
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = 2;
+            header.previous_block_hash = blocks[1].block_hash;
+            header.cumulative_diff = 2.into();
+            header.vdf_limiter_info.global_step_number = FAR_FUTURE_STEP;
+            header.vdf_limiter_info.steps = H256List(vec![Default::default()]);
+            header.test_sign();
+            let block = Arc::new(
+                SealedBlock::new(
+                    header.clone(),
+                    BlockBody {
+                        block_hash: header.block_hash,
+                        ..Default::default()
+                    },
+                )
+                .expect("sealing block"),
+            );
+            block_tree_guard
+                .write()
+                .add_common(
+                    header.block_hash,
+                    &block,
+                    Arc::new(CommitmentSnapshot::default()),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                    ChainState::NotOnchain(BlockState::ValidationScheduled),
+                )
+                .expect("adding block");
+
+            let config =
+                irys_types::Config::new_with_random_peer_id(irys_types::NodeConfig::testing());
+            let (service_senders, _receivers) = crate::test_helpers::build_test_service_senders();
+            Fixture {
+                block_tree_guard,
+                block,
+                vdf_state: VdfStateReadonly::new(mocked_vdf_service(&config)),
+                reanchor_signals: service_senders.vdf_reanchor_signals.clone(),
+            }
+        }
+
+        impl Fixture {
+            fn remove_block(&self) {
+                self.block_tree_guard
+                    .write()
+                    .remove_block(
+                        &self.block.header().block_hash,
+                        irys_domain::RemovalReason::ValidationInvalid,
+                    )
+                    .expect("removing block");
+            }
+
+            async fn wait(&self, cancel: Arc<std::sync::atomic::AtomicU8>) -> eyre::Result<()> {
+                wait_for_parent_last_step(
+                    &self.block_tree_guard,
+                    &self.vdf_state,
+                    self.block.header(),
+                    cancel,
+                    PROGRESS_TIMEOUT,
+                    &self.reanchor_signals,
+                )
+                .await
+            }
+        }
+
+        fn new_cancel() -> Arc<std::sync::atomic::AtomicU8> {
+            Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8))
+        }
+
+        fn left_block_tree_reason(err: &eyre::Report) -> Option<ValidationCancelReason> {
+            err.downcast_ref::<VdfTaskLeftBlockTree>()
+                .map(|left| left.reason)
+        }
+
+        /// A queued task whose block was removed from the tree finishes as a
+        /// soft cancellation before the wait starts.
+        #[tokio::test(start_paused = true)]
+        async fn queued_task_of_removed_block_finishes_without_waiting() {
+            let fixture = fixture();
+            fixture.remove_block();
+
+            let started = tokio::time::Instant::now();
+            let err = fixture
+                .wait(new_cancel())
+                .await
+                .expect_err("a removed block must not pass the wait");
+
+            assert_eq!(
+                left_block_tree_reason(&err),
+                Some(ValidationCancelReason::BlockMissing),
+                "got: {err}"
+            );
+            assert_eq!(started.elapsed(), Duration::ZERO, "must not wait");
+        }
+
+        /// A task whose parent was removed from the tree (the block itself
+        /// stays) finishes as a soft cancellation before the wait starts.
+        #[tokio::test(start_paused = true)]
+        async fn task_with_removed_parent_finishes_without_waiting() {
+            let fixture = fixture();
+            let block_hash = fixture.block.header().block_hash;
+            let parent_hash = fixture.block.header().previous_block_hash;
+            {
+                let mut tree = fixture.block_tree_guard.write();
+                tree.mark_tip(&block_hash).expect("marking tip");
+                // Keeps only height 2: removes genesis and the parent.
+                tree.prune(0);
+                assert!(tree.get_block(&block_hash).is_some(), "precondition");
+                assert!(tree.get_block(&parent_hash).is_none(), "precondition");
+            }
+
+            let started = tokio::time::Instant::now();
+            let err = fixture
+                .wait(new_cancel())
+                .await
+                .expect_err("a block without its parent must not pass the wait");
+
+            assert_eq!(
+                left_block_tree_reason(&err),
+                Some(ValidationCancelReason::ParentMissing),
+                "got: {err}"
+            );
+            assert_eq!(started.elapsed(), Duration::ZERO, "must not wait");
+        }
+
+        /// A block and parent still in the tree keep the old behaviour: a
+        /// local VDF that does not advance ends the wait with `Stalled`.
+        #[tokio::test(start_paused = true)]
+        async fn task_of_block_in_tree_still_stalls() {
+            let fixture = fixture();
+
+            let started = tokio::time::Instant::now();
+            let err = fixture
+                .wait(new_cancel())
+                .await
+                .expect_err("a frozen local VDF must stall");
+
+            assert!(
+                matches!(
+                    err.downcast_ref::<WaitForStepError>(),
+                    Some(WaitForStepError::Stalled { .. })
+                ),
+                "must be Stalled, got: {err}"
+            );
+            assert!(started.elapsed() >= PROGRESS_TIMEOUT);
+        }
+
+        /// Removal during the wait: the validation service fires the running
+        /// task's cancel signal, and the wait ends as a soft cancellation
+        /// before `progress_timeout`. While the block is in the tree, the
+        /// signal is not fired.
+        #[tokio::test(start_paused = true)]
+        async fn removal_during_wait_cancels_the_wait() {
+            let fixture = Arc::new(fixture());
+            let cancel = new_cancel();
+            let mut coordinator = ValidationCoordinator::new(
+                fixture.block_tree_guard.clone(),
+                tokio::runtime::Handle::current(),
+            );
+            coordinator.vdf_scheduler.current = Some(RunningVdfTask {
+                hash: fixture.block.header().block_hash,
+                priority: BlockPriorityMeta::new(fixture.block.header(), BlockPriority::Fork),
+                cancel_signal: Arc::clone(&cancel),
+                stage_signal: Arc::new(std::sync::atomic::AtomicU8::new(
+                    VdfTaskStage::WaitPrevStep as u8,
+                )),
+                last_progress_at: Arc::new(Mutex::new(Instant::now())),
+                completed_at: Arc::new(Mutex::new(None)),
+                started_at: Instant::now(),
+                sealed_block: Arc::clone(&fixture.block),
+                handle: tokio::spawn(std::future::pending()),
+                requeue_task: None,
+            });
+
+            let started = tokio::time::Instant::now();
+            let wait = tokio::spawn({
+                let fixture = Arc::clone(&fixture);
+                let cancel = Arc::clone(&cancel);
+                async move { fixture.wait(cancel).await }
+            });
+            tokio::time::sleep(PROGRESS_TIMEOUT / 3).await;
+
+            coordinator.cancel_current_vdf_if_left_block_tree();
+            assert_eq!(
+                cancel.load(Ordering::Relaxed),
+                CancelEnum::Continue as u8,
+                "a block in the tree must not be cancelled"
+            );
+            assert!(!wait.is_finished(), "the wait must still run");
+
+            fixture.remove_block();
+            coordinator.cancel_current_vdf_if_left_block_tree();
+            assert_eq!(cancel.load(Ordering::Relaxed), CancelEnum::Cancelled as u8);
+
+            let err = wait
+                .await
+                .expect("wait task")
+                .expect_err("a removed block must not pass the wait");
+            assert_eq!(
+                left_block_tree_reason(&err),
+                Some(ValidationCancelReason::BlockMissing),
+                "got: {err}"
+            );
+            assert!(
+                started.elapsed() < PROGRESS_TIMEOUT,
+                "must not reach Stalled"
             );
         }
     }

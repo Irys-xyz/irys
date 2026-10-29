@@ -215,6 +215,7 @@ async fn slow_heavy_per_miner_expiry_reward_attribution_two_miners() -> eyre::Re
         let block = node.mine_block().await?;
         let submit = block
             .get_data_ledger_tx_ids()
+            .unwrap()
             .get(&DataLedger::Submit)
             .cloned()
             .unwrap_or_default();
