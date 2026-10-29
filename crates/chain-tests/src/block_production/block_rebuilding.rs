@@ -9,12 +9,19 @@
 //! 1. VDF too old - solution's VDF step is not greater than parent's VDF step
 //! 2. Valid solution reuse - parent changes but solution remains valid
 //! 3. Below difficulty - solution hash does not clear the parent's difficulty
+//! 4. Wrong hash order - solution hash order does not match Delta at the block timestamp
 
 use irys_actors::{
     BlockProdStrategy, BlockProducerInner, InvalidReason, ParentCheckResult, ProductionStrategy,
     async_trait,
 };
-use irys_types::{H256, NodeConfig, U256, block_production::SolutionContext};
+use irys_types::{
+    H256, NodeConfig, U256, UnixTimestamp,
+    block_production::SolutionContext,
+    compute_solution_hash,
+    hardfork_config::{Activation, Delta},
+    u256_from_le_bytes,
+};
 use std::sync::Arc;
 use tokio::sync::{Mutex, oneshot};
 use tracing::info;
@@ -449,5 +456,76 @@ async fn heavy_solution_reused_when_parent_changes_but_valid() -> eyre::Result<(
     node1.stop().await;
     node2.stop().await;
 
+    Ok(())
+}
+
+/// Tests that the producer discards a solution hashed in the order that does
+/// not match the block's timestamp. The miner picks the order from its clock
+/// before the block exists. Near Delta activation the block timestamp can be on
+/// the other side, and the block would fail `solution_hash_link_is_valid`.
+#[test_log::test(tokio::test)]
+async fn heavy_solution_discarded_wrong_hash_order() -> eyre::Result<()> {
+    // Delta is active from genesis, so every block needs the seed-first order.
+    let delta = Delta {
+        activation_timestamp: UnixTimestamp::from_secs(1),
+        initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+        capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+    };
+    let config = NodeConfig::testing().with_consensus(|consensus| {
+        consensus.chunk_size = 32;
+        consensus.epoch.num_blocks_in_epoch = 4;
+        consensus.hardforks.delta = Some(delta);
+    });
+    let node = IrysNodeTest::new_genesis(config).start().await;
+    let block = node.mine_block().await?;
+    node.wait_for_block_at_height(block.height, 10).await?;
+    let parent_diff = {
+        let read = node.node_ctx.block_tree_guard.read();
+        let parent_hash = read.get_max_cumulative_difficulty_block().1;
+        read.get_block(&parent_hash)
+            .expect("parent block present in block tree")
+            .diff
+    };
+
+    // The difficulty gate runs first. Find a solution whose chunk-first hash
+    // also clears the parent difficulty, so only the order check can drop it.
+    let mut attempts = 0;
+    let wrong_order = loop {
+        attempts += 1;
+        assert!(attempts <= 30, "no chunk-first hash cleared the difficulty");
+        let mut solution = solution_context(&node.node_ctx).await?;
+        assert_eq!(
+            solution.solution_hash,
+            compute_solution_hash(
+                &solution.chunk,
+                solution.chunk_offset,
+                &solution.seed.0,
+                Activation::Active(delta),
+            ),
+            "the test helper must mine in the Delta order"
+        );
+        solution.solution_hash = compute_solution_hash(
+            &solution.chunk,
+            solution.chunk_offset,
+            &solution.seed.0,
+            Activation::Inactive,
+        );
+        if u256_from_le_bytes(&solution.solution_hash.0) >= parent_diff {
+            break solution;
+        }
+    };
+
+    let strategy = ProductionStrategy {
+        inner: node.node_ctx.block_producer_inner.clone(),
+    };
+    // Without the order check this returns `Err` (terminal pre-validation
+    // failure), which the service turns into a panic.
+    let result = strategy.fully_produce_new_block(wrong_order).await?;
+    assert!(
+        result.is_none(),
+        "a solution hashed in the wrong order must be discarded (Ok(None)), not built"
+    );
+
+    node.stop().await;
     Ok(())
 }
