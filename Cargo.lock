@@ -5593,6 +5593,7 @@ dependencies = [
  "irys-reth",
  "irys-testing-utils",
  "irys-types",
+ "jsonrpsee",
  "proptest",
  "reth",
  "reth-chainspec",

@@ -191,6 +191,9 @@ alloy-rpc-types-trace = { version = "1.7.3", default-features = false }
 alloy-signer = { version = "1.7.3", default-features = false }
 alloy-signer-local = { version = "1.7.3", default-features = false }
 
+# Same version as Reth, so tests can build Reth RPC modules
+jsonrpsee = { version = "0.26.0", default-features = false }
+
 # Reth crates
 # These point to a fork of reth with Irys-specific changes (branch: irys-changes)
 reth = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c", default-features = false }

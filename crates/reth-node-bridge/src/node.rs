@@ -160,14 +160,15 @@ fn parse_rpc_args(rpc_args: &[String]) -> eyre::Result<RpcServerArgs> {
 
 /// The `debug` namespace methods the Reth RPC serves: reads and traces only.
 /// Every other `debug_*` method is removed, including methods a later Reth adds.
-const DEBUG_RPC_ALLOWED_METHODS: [&str; 20] = [
+/// Methods that the pinned Reth does not implement are not listed, so an
+/// implementation in a later Reth is not served without review.
+const DEBUG_RPC_ALLOWED_METHODS: [&str; 17] = [
     "debug_getRawHeader",
     "debug_getRawBlock",
     "debug_getRawTransaction",
     "debug_getRawTransactions",
     "debug_getRawReceipts",
     "debug_getBadBlocks",
-    "debug_traceChain",
     "debug_traceBlock",
     "debug_traceBlockByHash",
     "debug_traceBlockByNumber",
@@ -176,10 +177,8 @@ const DEBUG_RPC_ALLOWED_METHODS: [&str; 20] = [
     "debug_traceCallMany",
     "debug_executionWitness",
     "debug_executionWitnessByBlockHash",
-    "debug_getBlockAccessList",
     "debug_chainConfig",
     "debug_codeByHash",
-    "debug_storageRangeAt",
     "debug_stateRootWithUpdates",
 ];
 
@@ -358,6 +357,44 @@ mod tests {
         let cfg = irys_types::NodeConfig::testing();
         let addr = compute_metrics_addr(&cfg, true).expect("valid addr");
         assert_eq!(addr.port(), 0);
+    }
+
+    /// Every transport keeps the listed `debug_*` methods and the other
+    /// namespaces, and loses every other `debug_*` method.
+    #[test]
+    fn unlisted_debug_methods_are_removed_from_every_transport() {
+        let mut module = jsonrpsee::RpcModule::new(());
+        for name in [
+            "debug_traceTransaction",
+            "debug_traceChain",
+            "debug_getBlockAccessList",
+            "debug_storageRangeAt",
+            "debug_setHead",
+            "eth_chainId",
+        ] {
+            module
+                .register_method(name, |_, _, _| "")
+                .expect("unique method name");
+        }
+        let mut modules = TransportRpcModules::default()
+            .with_http(module.clone())
+            .with_ws(module.clone())
+            .with_ipc(module);
+
+        remove_unlisted_debug_methods(&mut modules);
+
+        let expected = HashSet::from(["debug_traceTransaction", "eth_chainId"]);
+        for methods in [
+            modules.http_methods(|_| true),
+            modules.ws_methods(|_| true),
+            modules.ipc_methods(|_| true),
+        ] {
+            let served: HashSet<_> = methods
+                .expect("transport configured")
+                .method_names()
+                .collect();
+            assert_eq!(served, expected);
+        }
     }
 
     fn to_args(flags: &[&str]) -> Vec<String> {
