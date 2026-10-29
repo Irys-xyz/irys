@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793288067136,
+  "lastUpdate": 1793289149842,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20239,6 +20239,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000157,
             "range": "± 0.000023",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "1aa8ddc4e4de13358eea61011b08cb0a2c912df1",
+          "message": "fix(consensus): put the VDF seed first in the solution hash after Delta",
+          "timestamp": "2026-10-29T15:19:52Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1748/commits/1aa8ddc4e4de13358eea61011b08cb0a2c912df1"
+        },
+        "date": 1793289147415,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012024,
+            "range": "± 0.000518",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.124524,
+            "range": "± 0.003523",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.29833,
+            "range": "± 0.031367",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.955549,
+            "range": "± 0.176921",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075251,
+            "range": "± 0.000643",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 750.385077,
+            "range": "± 7.319632",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 975.234511,
+            "range": "± 7.246703",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120343,
+            "range": "± 0.001627",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1215.234774,
+            "range": "± 9.292686",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1661.413345,
+            "range": "± 135.703443",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.172265,
+            "range": "± 0.08062",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 292.674259,
+            "range": "± 19.616293",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 374.644071,
+            "range": "± 29.142547",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00016,
+            "range": "± 0.000024",
             "unit": "ms/iter"
           }
         ]
