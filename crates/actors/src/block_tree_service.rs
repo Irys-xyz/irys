@@ -1636,7 +1636,7 @@ impl BlockTreeServiceInner {
         //     the event as a validation-finalization signal independent
         //     of cache state, so suppressing it on a direct-submission
         //     path would break tests like
-        //     `heavy_block_validation_cancels_a_block_whose_parent_was_pruned`
+        //     `heavy_block_validation_cancels_a_block_missing_from_the_tree`
         //     that exercise the validation pipeline without going through
         //     block_tree.
         //   - Soft-internal-recovery metric + LRU put: ONLY when
@@ -3111,7 +3111,7 @@ mod tests {
     /// `block_validation_tracker`) treat it as a validation-finalization
     /// signal independent of cache state. Suppressing it on the
     /// cache-miss path would break tests like
-    /// `heavy_block_validation_cancels_a_block_whose_parent_was_pruned` that
+    /// `heavy_block_validation_cancels_a_block_missing_from_the_tree` that
     /// drive validation without going through block_tree.
     #[test]
     fn discard_on_cache_miss_skips_metrics_but_still_broadcasts() {
