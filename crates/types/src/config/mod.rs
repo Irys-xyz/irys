@@ -17,7 +17,7 @@ pub struct Config(Arc<CombinedConfigInner>);
 
 /// Request size limit of the reth engine client. This is the jsonrpsee default
 /// (`TEN_MB_SIZE_BYTES`) of `HttpClientBuilder::default()`.
-const ENGINE_CLIENT_MAX_REQUEST_BYTES: u64 = 10 * 1024 * 1024;
+pub const ENGINE_CLIENT_MAX_REQUEST_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Allowance for the non-calldata part of the payload JSON (header fields,
 /// withdrawals, tx envelopes).

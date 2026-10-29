@@ -11457,4 +11457,14 @@ mod engine_client_error_tests {
             SubmitPayloadError::LocalTransport(_)
         ));
     }
+
+    /// The startup gas-limit check uses a copy of the engine client's request
+    /// limit; it must match the jsonrpsee default the client uses.
+    #[test]
+    fn engine_client_request_limit_copy_matches_jsonrpsee_default() {
+        assert_eq!(
+            irys_types::config::ENGINE_CLIENT_MAX_REQUEST_BYTES,
+            u64::from(jsonrpsee_core::TEN_MB_SIZE_BYTES),
+        );
+    }
 }
