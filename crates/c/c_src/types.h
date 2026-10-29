@@ -18,8 +18,6 @@ typedef enum {
     INVALID_ARGUMENTS,
     CUDA_ERROR,
     CUDA_KERNEL_LAUNCH_FAILED,
-    HIP_ERROR,
-    HIP_KERNEL_LAUNCH_FAILED,
 } entropy_chunk_errors;
 
 // TODO: add an error struct that passes through the underlying error code & some text context
