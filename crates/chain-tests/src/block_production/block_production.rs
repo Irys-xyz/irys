@@ -1699,12 +1699,17 @@ async fn own_block_prevalidation_failure_keeps_producer_running() -> eyre::Resul
         .await;
     let start_height = node.get_max_difficulty_block().height;
 
-    // Corrupt the PoA chunk. The solution hash still clears the difficulty and
-    // the partition is still ours, so the block is built and sealed, but
-    // pre-validation rejects it (`solution_hash_link_is_valid` recomputes the
-    // hash from the chunk).
+    // Corrupt one VDF checkpoint of the solution. The producer copies the
+    // checkpoints into the block without checking them, and the solution hash
+    // does not cover them, so the block is built and sealed, but pre-validation
+    // rejects it (`last_step_checkpoints_is_valid`).
     let mut bad_solution = solution_context(&node.node_ctx).await?;
-    bad_solution.chunk[0] ^= 0xFF;
+    let checkpoint = bad_solution
+        .checkpoints
+        .0
+        .first_mut()
+        .expect("a solution carries the VDF checkpoints of its step");
+    checkpoint.0[0] ^= 0xFF;
 
     let senders = &node.node_ctx.service_senders;
     senders
