@@ -594,8 +594,14 @@ impl PreValidationError {
             | Self::ValidationServiceUnreachable
             // OS clock failure.
             | Self::SystemTimeError(_)
-            // Local arithmetic on locally-derived inputs (height * block_time);
-            // the peer-supplied reward is checked separately via RewardMismatch.
+            // Local arithmetic on locally-derived inputs (height * block_time,
+            // curve from config). The Delta split also consumes the
+            // peer-supplied timestamp and PoA kind, but cannot fail on them:
+            // the miner-share subtraction underflows only if
+            // `capacity_chunk_reward_percent > 1.0`, which `Config::validate`
+            // rejects at node startup, and the percent multiplication cannot
+            // overflow because the full reward is bounded by the inflation cap.
+            // The peer-supplied reward is checked separately via RewardMismatch.
             | Self::RewardCurveError(_)
             // Local arithmetic with local config inputs; per-tx fee comparisons
             // use the separate Insufficient*Fee variants.
