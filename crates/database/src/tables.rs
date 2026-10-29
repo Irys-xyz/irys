@@ -7,11 +7,12 @@ use crate::{
     },
     submodule::tables::{ChunkPathHashes, TxPathInterval},
 };
+use alloy_primitives::B512;
 use irys_types::ingress::{CachedIngressProof, IngressProofV1};
 use irys_types::{
     Base64, BlockHeight, DataLedger, IrysAddress, IrysPeerId, LedgerIndexItem, PeerListItemInner,
 };
-use irys_types::{ChunkPathHash, DataRoot, H256};
+use irys_types::{ChunkPathHash, DataRoot, H256, PartitionChunkOffset, decode_address};
 use irys_types::{
     CommitmentTransaction, CommitmentTransactionMetadata, CommitmentTransactionV1,
     CommitmentTransactionV2, DataTransactionHeader, DataTransactionHeaderV1,
@@ -109,6 +110,21 @@ macro_rules! impl_compact_row_check_for_flag_header {
             impl CompactRowCheck for $name {
                 fn check_compact_row(buf: &[u8]) -> Result<(), String> {
                     require_min_compact_row_len(buf, <$name>::bitflag_encoded_bytes())
+                }
+            }
+        )+
+    };
+}
+
+/// Implements `CompactRowCheck` with an explicit minimum row length, for types whose flag
+/// header is empty (`bitflag_encoded_bytes() == 0`) but whose `from_compact` still reads fixed
+/// fields unconditionally. The length must never exceed a well-formed encoding of any value.
+macro_rules! impl_compact_row_check_for_min_len {
+    ($($name:ty => $min_len:expr),+ $(,)?) => {
+        $(
+            impl CompactRowCheck for $name {
+                fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+                    require_min_compact_row_len(buf, $min_len)
                 }
             }
         )+
@@ -245,20 +261,51 @@ impl CompactRowCheck for CompactCachedIngressProof {
 }
 
 impl_compact_row_check_for_flag_header!(
-    CompactPeerListItem,
     CachedDataRoot,
     CachedChunk,
     ChunkPathHashes,
-    TxPathInterval,
-    PartitionHashes,
-    DataRootInfos,
-    TxLeafBinding,
-    PendingBodyMigration,
-    CompactBase64,
-    CompactLedgerIndexItem,
-    CompactCommitmentTxMetadata,
-    CompactDataTxMetadata
+    PendingBodyMigration
 );
+
+/// Smallest `Vec` encoding: the varint element count (an empty vec).
+const MIN_VEC_COUNT_LEN: usize = 1;
+
+// `Base64` is a raw byte string, so every buffer (including an empty one) is a valid row.
+impl CompactRowCheck for CompactBase64 {}
+
+// The wrapper derive emits no flag header of its own, so each minimum is the wrapped type's
+// flag header plus the fields `from_compact` reads unconditionally.
+impl_compact_row_check_for_min_len!(
+    // flag header, `tx_root`, and the `DataLedger` variant (varint, at least 1 byte)
+    CompactLedgerIndexItem => LedgerIndexItem::bitflag_encoded_bytes() + size_of::<H256>() + 1,
+    CompactCommitmentTxMetadata => CommitmentTransactionMetadata::bitflag_encoded_bytes(),
+    CompactDataTxMetadata => DataTransactionMetadata::bitflag_encoded_bytes(),
+    // `end` (its own flag header) and `tx_path_hash`
+    TxPathInterval => PartitionChunkOffset::bitflag_encoded_bytes() + size_of::<H256>(),
+    TxLeafBinding => 2 * size_of::<H256>(),
+    PartitionHashes => MIN_VEC_COUNT_LEN,
+    DataRootInfos => MIN_VEC_COUNT_LEN,
+);
+
+/// `PeerListItemInner::from_compact` tolerates a row cut right after the 4-byte
+/// score/response-time prefix (older layout) but reads the Reth peer id (a `B512`) after the
+/// gossip, API and Reth peering addresses unconditionally, so a longer row must still hold one.
+impl CompactRowCheck for CompactPeerListItem {
+    fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+        const PREFIX_LEN: usize = 4;
+        require_min_compact_row_len(buf, PREFIX_LEN)?;
+        if buf.len() == PREFIX_LEN {
+            return Ok(());
+        }
+        let mut rest = &buf[PREFIX_LEN..];
+        for _ in 0..3 {
+            let (_, consumed) = decode_address(rest);
+            rest = &rest[consumed..];
+        }
+        require_min_compact_row_len(rest, B512::len_bytes())
+            .map_err(|reason| format!("peer id after addresses: {reason}"))
+    }
+}
 
 use paste::paste;
 use reth_db::table::TableInfo;
@@ -453,6 +500,16 @@ mod compact_row_check_tests {
     #[case::cached_chunk(row_case(CachedChunk::default(), 1, None))]
     #[case::chunk_path_hashes(row_case(ChunkPathHashes::default(), 1, None))]
     #[case::pending_body_migration(row_case(PendingBodyMigration::default(), 2, None))]
+    #[case::peer_list_item(row_case(CompactPeerListItem::default(), 4, None))]
+    #[case::base64(row_case(CompactBase64::default(), 0, None))]
+    #[case::ledger_index_item(row_case(CompactLedgerIndexItem::default(), 34, None))]
+    #[case::commitment_metadata(row_case(CompactCommitmentTxMetadata::default(), 1, None))]
+    #[case::data_metadata(row_case(CompactDataTxMetadata::default(), 1, None))]
+    #[case::tx_path_interval(row_case(TxPathInterval::default(), 33, None))]
+    #[case::tx_leaf_binding(row_case(TxLeafBinding::default(), 64, None))]
+    #[case::data_root_infos(row_case(DataRootInfos::default(), 1, None))]
+    #[case::partition_hashes(row_case(PartitionHashes::default(), 1, None))]
+    #[case::h256(row_case(H256::repeat_byte(1), 32, None))]
     fn malformed_rows_are_decode_errors(#[case] case: RowCase) {
         assert!(
             case.valid.len() >= case.min_len,
@@ -462,14 +519,16 @@ mod compact_row_check_tests {
             !(case.decompress_fails)(&case.valid),
             "valid row must decode"
         );
-        assert!(
-            (case.decompress_fails)(&[]),
-            "empty buffer must be rejected"
-        );
-        assert!(
-            (case.decompress_fails)(&case.valid[..case.min_len - 1]),
-            "truncated buffer must be rejected"
-        );
+        if case.min_len > 0 {
+            assert!(
+                (case.decompress_fails)(&[]),
+                "empty buffer must be rejected"
+            );
+            assert!(
+                (case.decompress_fails)(&case.valid[..case.min_len - 1]),
+                "truncated buffer must be rejected"
+            );
+        }
         if let Some(offset) = case.version_offset {
             let mut unknown = case.valid.clone();
             unknown[offset] = 0xFF;
@@ -506,6 +565,58 @@ mod compact_row_check_tests {
         assert_round_trip(CachedChunk::default());
         assert_round_trip(ChunkPathHashes::default());
         assert_round_trip(PendingBodyMigration::default());
+        assert_round_trip(CompactPeerListItem::default());
+        assert_round_trip(CompactBase64::default());
+        assert_round_trip(CompactLedgerIndexItem::default());
+        assert_round_trip(CompactCommitmentTxMetadata::default());
+        assert_round_trip(CompactDataTxMetadata::default());
+        assert_round_trip(TxPathInterval::default());
+        assert_round_trip(TxLeafBinding::default());
+        assert_round_trip(DataRootInfos::default());
+        assert_round_trip(PartitionHashes::default());
+        assert_round_trip(H256::repeat_byte(1));
+    }
+
+    /// Rows holding the minimum amount of data (all fields at their smallest encoding) decode.
+    #[test]
+    fn minimal_rows_decode() {
+        let base64 = CompactBase64(Base64(vec![7, 8, 9]));
+        assert_eq!(
+            CompactBase64::decompress(&base64.compress()).unwrap().0.0,
+            vec![7, 8, 9]
+        );
+        assert!(CompactBase64::decompress(&[]).unwrap().0.0.is_empty());
+        let ledger_row = CompactLedgerIndexItem::default().compress();
+        assert_eq!(
+            ledger_row.len(),
+            LedgerIndexItem::bitflag_encoded_bytes() + size_of::<H256>() + 1
+        );
+    }
+
+    #[test]
+    fn peer_list_item_rows_between_prefix_and_peer_id_are_rejected() {
+        let valid = CompactPeerListItem::default().compress();
+        // Prefix-only rows decode to defaults; any other cut before the peer id panics.
+        assert!(CompactPeerListItem::decompress(&valid[..4]).is_ok());
+        for len in 5..(valid.len() - 8 - 1 - 4) {
+            assert!(
+                CompactPeerListItem::decompress(&valid[..len]).is_err(),
+                "cut at {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn commitment_v1_row_round_trips() {
+        let value = CommitmentTransaction::V1(irys_types::CommitmentV1WithMetadata {
+            tx: CommitmentTransactionV1::default(),
+            metadata: CommitmentTransactionMetadata::new(),
+        });
+        let row = CompactCommitment(value).compress();
+        assert_eq!(row[0], CommitmentTransactionV1::VERSION);
+        let decoded = CompactCommitment::decompress(&row).expect("V1 row decodes");
+        assert!(matches!(decoded.0, CommitmentTransaction::V1(_)));
+        assert_eq!(decoded.compress(), row);
     }
 
     #[test]
@@ -517,7 +628,16 @@ mod compact_row_check_tests {
 
     #[test]
     fn ingress_proof_variant_constant_matches_the_derived_encoding() {
-        let encoded = CompactCachedIngressProof::default().compress();
+        // Distinct non-zero address bytes: a shifted offset would read an address byte.
+        let address = IrysAddress::from([
+            1_u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ]);
+        let encoded = CompactCachedIngressProof(CachedIngressProof {
+            address,
+            ..Default::default()
+        })
+        .compress();
+        assert_eq!(encoded[..CACHED_INGRESS_PROOF_VARIANT_OFFSET], address.0.0);
         assert_eq!(
             encoded[CACHED_INGRESS_PROOF_VARIANT_OFFSET],
             INGRESS_PROOF_V1_COMPACT_VARIANT

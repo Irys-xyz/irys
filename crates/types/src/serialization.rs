@@ -529,6 +529,9 @@ impl Compress for H256 {
 #[cfg(feature = "db")]
 impl Decompress for H256 {
     fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
+        if value.len() < size_of::<Self>() {
+            return Err(DatabaseError::Decode);
+        }
         let (obj, _) = Compact::from_compact(value, value.len());
         Ok(obj)
     }
