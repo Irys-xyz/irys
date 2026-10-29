@@ -8603,6 +8603,7 @@ impl StorageModule {
             partition_hash: self
                 .partition_hash()
                 .ok_or_eyre("storage module has no partition")?,
+            packing_iterations: self.config.consensus.entropy_packing_iterations,
         };
         Ok(Some(unpack(
             &packed,
@@ -8746,6 +8747,7 @@ impl StorageModule {
         #[cfg(test)]
         self.wait_if_sync_paused(SyncPausePoint::AfterServeBodyRead);
         let packing_address = self.config.node_config.miner_address();
+        let packing_iterations = self.config.consensus.entropy_packing_iterations;
         let partition_hash = self
             .partition_hash()
             .ok_or_eyre("storage module has no partition")?;
@@ -8835,6 +8837,7 @@ impl StorageModule {
                                     tx_offset,
                                     packing_address,
                                     partition_hash,
+                                    packing_iterations,
                                 },
                             );
                             continue;
@@ -8880,6 +8883,7 @@ impl StorageModule {
                     tx_offset,
                     packing_address,
                     partition_hash,
+                    packing_iterations,
                 },
             );
         }
