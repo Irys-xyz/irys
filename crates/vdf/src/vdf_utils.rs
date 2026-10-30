@@ -137,12 +137,15 @@ impl VdfFastForwardSender {
     }
 
     /// Replay a pre-validated step batch, stamped with `captured_generation`.
-    /// `reset_seed` is the validated block's `vdf_limiter_info.seed`: the seed it
-    /// folds at every reset boundary in its range.
+    /// `predecessor` is the block's own step before `start_step_number` (its
+    /// `prev_output` for the block's first step). `reset_seed` is the validated
+    /// block's `vdf_limiter_info.seed`: the seed it folds at every reset boundary
+    /// in its range.
     /// Fails with [`VdfReanchorGenerationChanged`] if a heal applied since capture.
     pub async fn send_validated_batch(
         &self,
         start_step_number: u64,
+        predecessor: H256,
         steps: &[H256],
         reset_seed: H256,
         send_timeout: Duration,
@@ -158,6 +161,7 @@ impl VdfFastForwardSender {
         }
         fast_forward_validated_steps(
             start_step_number,
+            predecessor,
             steps,
             reset_seed,
             &self.sender,
@@ -294,7 +298,7 @@ pub fn canonical_reset_seed(
     }
     let next_step = boundary + 1;
     snapshot
-        .unconfirmed_block_seeds
+        .unconfirmed_blocks
         .iter()
         .find(|block| block.first_step <= next_step && next_step <= block.last_step)
         .map(|block| block.seed)
@@ -323,6 +327,7 @@ pub fn reanchor_channel() -> (VdfReanchorSender, ReanchorReceiver) {
 #[tracing::instrument(level = "trace", skip_all, err)]
 pub(crate) async fn fast_forward_validated_steps(
     start_step_number: u64,
+    predecessor: H256,
     steps: &[H256],
     reset_seed: H256,
     vdf_fast_forward_sender: &Sender<Traced<VdfStep>>,
@@ -336,11 +341,13 @@ pub(crate) async fn fast_forward_validated_steps(
         start_step_number,
         end_step_number
     );
-    for (i, hash) in steps.iter().enumerate() {
+    let predecessors = std::iter::once(predecessor).chain(steps.iter().copied());
+    for (i, (hash, predecessor)) in steps.iter().zip(predecessors).enumerate() {
         match timeout(
             send_timeout,
             vdf_fast_forward_sender.send(Traced::new(VdfStep {
                 step: *hash,
+                predecessor,
                 global_step_number: start_step_number + i as u64,
                 reset_seed,
                 generation,
@@ -493,15 +500,17 @@ mod tests {
     /// Below the tip the covering unconfirmed block decides; below those, nothing does.
     #[test]
     fn canonical_reset_seed_reads_covering_block_then_tip_child() {
-        let block_a = irys_types::block_provider::CanonicalBlockSeed {
+        let block_a = irys_types::block_provider::CanonicalBlockVdf {
             first_step: 3,
             last_step: 6,
             seed: H256::repeat_byte(0x0A),
+            steps: None,
         };
-        let block_b = irys_types::block_provider::CanonicalBlockSeed {
+        let block_b = irys_types::block_provider::CanonicalBlockVdf {
             first_step: 7,
             last_step: 12,
             seed: H256::repeat_byte(0x0B),
+            steps: None,
         };
         let snapshot = CanonicalVdfSnapshot {
             vdf_info: VDFLimiterInfo {
@@ -512,7 +521,7 @@ mod tests {
             },
             confirmed_global_step_number: 2,
             reset_seed_for_step: H256::zero(),
-            unconfirmed_block_seeds: vec![block_a, block_b],
+            unconfirmed_blocks: vec![block_a.clone(), block_b.clone()],
         };
         assert_eq!(
             canonical_reset_seed(&snapshot, 5, 20, 5),
@@ -541,13 +550,21 @@ mod tests {
 
         let steps = [H256::from_low_u64_be(1), H256::from_low_u64_be(2)];
         sender
-            .send_validated_batch(10, &steps, H256::zero(), Duration::from_secs(1), captured)
+            .send_validated_batch(
+                10,
+                H256::zero(),
+                &steps,
+                H256::zero(),
+                Duration::from_secs(1),
+                captured,
+            )
             .await
             .expect("validated batch should send");
 
         let (first, _span) = rx.recv().await.expect("first step").into_parts();
         assert_eq!(first.global_step_number, 10);
         assert_eq!(first.step, steps[0]);
+        assert_eq!(first.predecessor, H256::zero(), "the batch predecessor");
         assert_eq!(
             first.generation, captured,
             "steps carry the captured generation"
@@ -555,6 +572,10 @@ mod tests {
         let (second, _span) = rx.recv().await.expect("second step").into_parts();
         assert_eq!(second.global_step_number, 11);
         assert_eq!(second.step, steps[1]);
+        assert_eq!(
+            second.predecessor, steps[0],
+            "the previous step in the batch"
+        );
         assert_eq!(
             second.generation, captured,
             "steps carry the captured generation"
@@ -575,6 +596,7 @@ mod tests {
         let err = sender
             .send_validated_batch(
                 1,
+                H256::zero(),
                 &[H256::zero()],
                 H256::zero(),
                 Duration::from_secs(1),
@@ -648,6 +670,7 @@ mod tests {
         let error = sender
             .send_validated_batch(
                 7,
+                H256::zero(),
                 &[H256::zero()],
                 H256::zero(),
                 Duration::from_millis(50),
@@ -673,6 +696,7 @@ mod tests {
         sender
             .send_validated_batch(
                 1,
+                H256::zero(),
                 &[H256::zero()],
                 H256::zero(),
                 Duration::from_millis(50),
@@ -693,7 +717,14 @@ mod tests {
         let steps = vec![H256::zero(); VDF_FAST_FORWARD_CHANNEL_CAPACITY + 1];
         let captured = sender.current_generation();
         sender
-            .send_validated_batch(1, &steps, H256::zero(), Duration::from_millis(50), captured)
+            .send_validated_batch(
+                1,
+                H256::zero(),
+                &steps,
+                H256::zero(),
+                Duration::from_millis(50),
+                captured,
+            )
             .await
             .expect("must panic before returning");
     }

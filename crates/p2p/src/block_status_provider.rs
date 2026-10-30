@@ -1,7 +1,7 @@
 use irys_domain::{BlockIndexReadGuard, BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{
     BlockHash, BlockIndexItem, H256,
-    block_provider::{BlockProvider, CanonicalBlockSeed, CanonicalVdfSnapshot},
+    block_provider::{BlockProvider, CanonicalBlockVdf, CanonicalVdfSnapshot},
 };
 use tracing::debug;
 #[cfg(test)]
@@ -465,8 +465,8 @@ impl BlockStatusProvider {
     }
 }
 
-impl BlockProvider for BlockStatusProvider {
-    fn canonical_vdf_snapshot(&self, step_number: u64) -> Option<CanonicalVdfSnapshot> {
+impl BlockStatusProvider {
+    fn vdf_snapshot(&self, step_number: u64, include_steps: bool) -> CanonicalVdfSnapshot {
         let binding = self.block_tree_read_guard.read();
         let tip = binding.get_latest_canonical_entry();
         let reset_seed_for_step = binding
@@ -475,25 +475,36 @@ impl BlockProvider for BlockStatusProvider {
             // If `step_number` predates the earliest cached canonical entry, preserve the prior
             // tip-seed fallback rather than synthesizing a new policy here.
             .unwrap_or(tip.header().vdf_limiter_info.next_seed);
-        let unconfirmed_block_seeds = binding
+        let unconfirmed_blocks = binding
             .unconfirmed_canonical_entries(self.block_migration_depth)
             .iter()
             .map(|entry| {
                 let info = &entry.header().vdf_limiter_info;
-                CanonicalBlockSeed {
+                CanonicalBlockVdf {
                     first_step: info.first_step_number(),
                     last_step: info.global_step_number,
                     seed: info.seed,
+                    steps: include_steps.then(|| info.steps.clone()),
                 }
             })
             .collect();
-        Some(CanonicalVdfSnapshot {
+        CanonicalVdfSnapshot {
             vdf_info: tip.header().vdf_limiter_info.clone(),
             confirmed_global_step_number: binding
                 .confirmed_canonical_step(self.block_migration_depth),
             reset_seed_for_step,
-            unconfirmed_block_seeds,
-        })
+            unconfirmed_blocks,
+        }
+    }
+}
+
+impl BlockProvider for BlockStatusProvider {
+    fn canonical_vdf_snapshot(&self, step_number: u64) -> Option<CanonicalVdfSnapshot> {
+        Some(self.vdf_snapshot(step_number, false))
+    }
+
+    fn canonical_vdf_snapshot_with_steps(&self, step_number: u64) -> Option<CanonicalVdfSnapshot> {
+        Some(self.vdf_snapshot(step_number, true))
     }
 }
 

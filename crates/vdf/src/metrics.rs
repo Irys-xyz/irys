@@ -14,6 +14,10 @@ irys_utils::define_metrics! {
         "irys.vdf.reanchor_skipped_total",
         "Number of VDF re-anchor requests skipped without rewriting the buffer"
     );
+    counter VDF_FAST_FORWARD_LINEAGE_REFUSED(
+        "irys.vdf.fast_forward_lineage_refused_total",
+        "Number of fast-forward steps refused because their predecessor was not the buffered step"
+    );
     counter VDF_RESET_SEED_RECOMPUTE(
         "irys.vdf.reset_seed_recompute_total",
         "Number of times the VDF loop found a folded reset seed that is no longer canonical and recomputed the steps after it"
@@ -34,6 +38,10 @@ pub fn record_reanchor_healed() {
 
 pub fn record_reanchor_skipped() {
     VDF_REANCHOR_SKIPPED.add(1, &[]);
+}
+
+pub fn record_fast_forward_lineage_refused() {
+    VDF_FAST_FORWARD_LINEAGE_REFUSED.add(1, &[]);
 }
 
 pub fn record_reset_seed_recompute() {

@@ -1270,6 +1270,11 @@ impl ValidationServiceInner {
             vdf_ff
                 .send_validated_batch(
                     batch_start_step_number,
+                    if batch_start_index == 0 {
+                        vdf_info.prev_output
+                    } else {
+                        vdf_info.steps[batch_start_index - 1]
+                    },
                     batch_steps,
                     vdf_info.seed,
                     progress_timeout,
@@ -1664,6 +1669,7 @@ mod tests {
         let captured = tx.current_generation();
         tx.send_validated_batch(
             1,
+            vdf_info.prev_output,
             &vdf_info.steps.0[..1],
             H256::zero(),
             Duration::from_secs(1),

@@ -1,4 +1,4 @@
-use crate::{H256, VDFLimiterInfo};
+use crate::{H256, H256List, VDFLimiterInfo};
 
 /// A consistent snapshot of the canonical chain for the VDF loop: the tip's VDF limiter
 /// info (its `seed`, `next_seed` and tip step), the global step number of the block that is
@@ -26,16 +26,20 @@ pub struct CanonicalVdfSnapshot {
     /// folds every reset boundary `b` with `b + 1` in a block's step range with that block's
     /// `seed`, so these entries give the canonical seed of every boundary above the confirmed step
     /// that a canonical block already covers.
-    pub unconfirmed_block_seeds: Vec<CanonicalBlockSeed>,
+    pub unconfirmed_blocks: Vec<CanonicalBlockVdf>,
 }
 
-/// The VDF step range of one canonical block and the reset seed its validation folds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CanonicalBlockSeed {
+/// The VDF step range of one canonical block, the reset seed its validation folds and,
+/// when requested, its steps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalBlockVdf {
     pub first_step: u64,
     pub last_step: u64,
     /// The block's `vdf_limiter_info.seed`.
     pub seed: H256,
+    /// The block's `vdf_limiter_info.steps`; only filled by
+    /// [`BlockProvider::canonical_vdf_snapshot_with_steps`].
+    pub steps: Option<H256List>,
 }
 
 /// A trait that is used to provide access to blocks by their hash. Used to avoid circular dependencies,
@@ -49,4 +53,12 @@ pub trait BlockProvider {
     /// During partition-recovery catch-up this lets the loop apply the seed pinned for the
     /// boundary it is actually about to cross.
     fn canonical_vdf_snapshot(&self, step_number: u64) -> Option<CanonicalVdfSnapshot>;
+
+    /// [`Self::canonical_vdf_snapshot`] with the steps of every unconfirmed canonical block.
+    /// Heavier: the VDF loop asks for it only when it must rewrite buffered steps, so it can
+    /// copy the steps canonical blocks hold instead of recomputing them. The default gives no
+    /// steps, and the loop then recomputes.
+    fn canonical_vdf_snapshot_with_steps(&self, step_number: u64) -> Option<CanonicalVdfSnapshot> {
+        self.canonical_vdf_snapshot(step_number)
+    }
 }
