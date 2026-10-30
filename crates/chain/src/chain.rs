@@ -403,14 +403,14 @@ async fn start_reth_node(
     task_executor: TaskExecutor,
     chainspec: Arc<ChainSpec>,
     config: Config,
-    latest_block: u64,
+    latest_evm_block_hash: irys_types::EvmBlockHash,
 ) -> eyre::Result<(RethNodeHandle, RethNode)> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
         chainspec.clone(),
         task_executor.clone(),
         config.node_config.clone(),
-        latest_block,
+        latest_evm_block_hash,
         random_ports,
     )
     .in_current_span()
@@ -1416,22 +1416,26 @@ impl IrysNode {
     ) -> ShutdownReason {
         // Phase 1: Start reth (sequential)
         let exec = reth_runtime.clone();
-        let (node_handle, reth_node) =
-            match start_reth_node(exec, reth_chainspec, config.clone(), latest_block_height)
-                .in_current_span()
-                .await
-            {
-                Ok(result) => result,
-                Err(e) => {
-                    let err = e.wrap_err(format!(
-                        "start_reth_node failed at block height {latest_block_height}"
-                    ));
-                    let reason = format!("{err:?}");
-                    error!(error = ?err, "Failed to start reth node");
-                    let _ = irys_node_ctx_tx.send(Err(err));
-                    return ShutdownReason::FatalError(reason);
-                }
-            };
+        let (node_handle, reth_node) = match start_reth_node(
+            exec,
+            reth_chainspec,
+            config.clone(),
+            latest_block.evm_block_hash,
+        )
+        .in_current_span()
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                let err = e.wrap_err(format!(
+                    "start_reth_node failed at block height {latest_block_height}"
+                ));
+                let reason = format!("{err:?}");
+                error!(error = ?err, "Failed to start reth node");
+                let _ = irys_node_ctx_tx.send(Err(err));
+                return ShutdownReason::FatalError(reason);
+            }
+        };
 
         // Phase 2: Init services (sequential, receives reth_node directly)
         let (irys_node_ctx, actix_server, vdf_exit_token, gossip_service_handle, service_set) =

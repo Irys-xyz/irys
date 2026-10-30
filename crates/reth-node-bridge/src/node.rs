@@ -118,7 +118,7 @@ pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
     node_config: irys_types::NodeConfig,
-    latest_block: u64,
+    latest_evm_block_hash: B256,
     random_ports: bool,
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
@@ -131,14 +131,16 @@ pub async fn run_node(
     if let Err(e) = unwind_to(
         &node_config,
         chainspec.clone(),
-        latest_block,
+        latest_evm_block_hash,
         unwind_runtime,
     )
     .await
     {
         // hack to ignore trying to unwind future blocks
         // (this can happen sometimes, but should be resolved by the payload repair process - erroring here won't help.)
-        if e.to_string().starts_with("Target block number") {
+        // Reth not having the Irys tip's EVM block at all is the same situation, seen by hash.
+        let msg = e.to_string();
+        if msg.starts_with("Target block number") || msg.starts_with("Block hash not found") {
             warn!("Error unwinding - Reth/Irys head block mismatch {}", &e)
         } else {
             return Err(e);
@@ -242,12 +244,23 @@ pub async fn run_node(
         .await?
         .expect("latest block should be Some");
 
-    if latest.header.number > latest_block {
+    // Compare against the EVM number of the Irys tip's EVM block, not the Irys
+    // height: the two can differ. If reth doesn't have that block it is behind.
+    let irys_tip = context
+        .rpc
+        .inner
+        .eth_api()
+        .block_by_hash(latest_evm_block_hash, false)
+        .await?;
+    if let Some(irys_tip) = irys_tip
+        && latest.header.number > irys_tip.header.number
+    {
         //Note: if this happens, let Jesse know ASAP
         eyre::bail!(
-            "Error: Reth is ahead of Irys (Reth: {}, Irys: {})",
+            "Error: Reth is ahead of Irys (Reth: {}, Irys EVM tip: {} @ {})",
             &latest.header.number,
-            &latest_block
+            &latest_evm_block_hash,
+            &irys_tip.header.number
         )
     }
 
