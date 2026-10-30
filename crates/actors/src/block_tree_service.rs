@@ -200,6 +200,22 @@ enum DiscardKind {
     Invalid,
 }
 
+/// A tip move made by `BlockTreeServiceInner::try_move_tip_to` under the block tree
+/// write lock. `publish_tip_move` sends it to the other services after the lock is
+/// released, because those sends wait on the other services.
+struct TipMove {
+    /// The new tip.
+    new_tip: Arc<IrysBlockHeader>,
+    /// Fork-choice markers of the new canonical chain.
+    fcu_markers: ForkChoiceMarkers,
+    /// Set when the move abandons blocks of the old canonical chain.
+    reorg_event: Option<ReorgEvent>,
+    /// The first epoch block among the new canonical blocks.
+    epoch_block: Option<Arc<IrysBlockHeader>>,
+    /// The new canonical blocks after the fork point, oldest first.
+    blocks_to_confirm: Vec<Arc<SealedBlock>>,
+}
+
 /// Capacity of [`BlockTreeServiceInner::recent_soft_internal_discards`].
 /// 4096 entries × (32-byte hash + ~24 bytes overhead + tag pointer) is well
 /// under 256 KB and far exceeds any plausible burst of soft-internal
@@ -775,11 +791,8 @@ impl BlockTreeServiceInner {
                     block_hash, height, validation_error
                 );
             }
-            return self.discard_and_broadcast(
-                block_hash,
-                validation_result,
-                DiscardKind::SoftInternal,
-            );
+            self.discard_and_broadcast(block_hash, validation_result, DiscardKind::SoftInternal)?;
+            return self.move_tip_after_discard().await;
         }
 
         // Handle a failed validation
@@ -799,7 +812,8 @@ impl BlockTreeServiceInner {
             } else {
                 crate::metrics::record_block_validation_failed(reason);
             }
-            return self.discard_and_broadcast(block_hash, validation_result, DiscardKind::Invalid);
+            self.discard_and_broadcast(block_hash, validation_result, DiscardKind::Invalid)?;
+            return self.move_tip_after_discard().await;
         }
 
         // From here, we are processing a fully validated block.
@@ -854,24 +868,14 @@ impl BlockTreeServiceInner {
             block_hash, validation_result, height
         );
 
-        let (
-            arc_block,
-            epoch_block,
-            reorg_event,
-            tip_changed,
-            state,
-            new_canonical_markers,
-            blocks_to_confirm,
-        ) = {
+        let (tip_move, state) = {
             let binding = self.cache.clone();
             let mut cache = binding.write().map_err(|_| {
                 eyre::eyre!("block tree cache write lock poisoned in on_block_validation_finished")
             })?;
 
-            // Get the current tip before any changes
-            // Note: We can't rely on canonical chain here, because the canonical chain was already updated when this
-            //       block arrived and was added after pre-validation. While the canonical head advances immediately, the
-            //       `cache.tip` only moves after full validation.
+            // Get the current tip before any changes. The canonical chain follows
+            // `cache.tip`, which only moves after full validation (in `mark_tip` below).
             let old_tip = cache.tip;
             let old_tip_block = cache
                 .get_block(&old_tip)
@@ -884,9 +888,7 @@ impl BlockTreeServiceInner {
                 return Ok(());
             }
 
-            let Some((_block_entry, fork_blocks, _)) =
-                cache.get_earliest_not_onchain_in_longest_chain()
-            else {
+            let Some(_) = cache.get_earliest_not_onchain_in_longest_chain() else {
                 if block_hash == old_tip {
                     debug!(
                         "Same Tip Marked current tip {} cdiff: {} height: {}",
@@ -955,18 +957,13 @@ impl BlockTreeServiceInner {
                 return Ok(());
             };
 
-            // if the old tip isn't in the fork_blocks, it's a reorg
-            let is_reorg = !fork_blocks
-                .iter()
-                .any(|bh| bh.header().block_hash == old_tip);
-
             // Get block info before mutable operations.
             // We just observed the block in cache when computing `height` above (under
             // the read lock), and mark_block_as_valid succeeded under this write lock.
             // A missing entry means a concurrent prune raced these two locks — drop
             // this stale validation result, mirroring the height-lookup `None` path
             // earlier in the function rather than tearing down the service.
-            let Some(block_entry) = cache.blocks.get(&block_hash) else {
+            let Some(_) = cache.blocks.get(&block_hash) else {
                 warn!(
                     block.hash = %block_hash,
                     block.height = height,
@@ -1007,239 +1004,363 @@ impl BlockTreeServiceInner {
                 }
                 return Ok(());
             };
-            let arc_block = block_entry.block.header().clone();
-
-            let tip_changed = {
-                let old_tip_block = cache
-                    .get_block(&cache.tip)
-                    .ok_or_eyre("tip block must always be present")?;
-                let old_tip_hash = old_tip_block.block_hash;
-                let old_tip_height = old_tip_block.height;
-
-                // only mark the tip if the new tip has higher cumulative difficulty than the old one
-                if old_tip_block.cumulative_diff >= arc_block.cumulative_diff {
-                    // this also means that the tip can point to a block in a chain that is not
-                    // the canonical one (aka which the self.max_cumulative_difficulty is pointing at).
-                    // That is valid because the blocks below self.max_cumulative_difficulty
-                    // could still be undergoing validation, which is not guaranteed to succeed
-                    debug!(
-                        block.hash = %block_hash,
-                        block.height = arc_block.height,
-                        old_tip.hash = %old_tip_hash,
-                        old_tip.height = old_tip_height,
-                        "block_tree.transition: validated as Fork (kept current tip)"
-                    );
-                    false
-                } else {
-                    let changed = cache.mark_tip(&block_hash)?;
-                    debug!(
-                        block.hash = %block_hash,
-                        block.height = arc_block.height,
-                        old_tip.hash = %old_tip_hash,
-                        old_tip.height = old_tip_height,
-                        tip_changed = changed,
-                        "block_tree.transition: mark_tip"
-                    );
-                    changed
-                }
-            };
-
-            let (epoch_block, reorg_event, fcu_markers, blocks_to_confirm) = if tip_changed {
-                let block_index_read = self.block_index_guard.read();
-                let markers = ForkChoiceMarkers::from_block_tree(
-                    &cache,
-                    block_index_read,
-                    &self.db,
-                    self.config.consensus.block_migration_depth as usize,
-                    self.config.consensus.block_tree_depth as usize,
-                )?;
-                let new_fcu_markers = Some(markers);
-
-                // Compute the reorg split BEFORE pruning so the parent-walk
-                // sees both lineages in `cache.blocks`. Independent of
-                // `ChainState` flags by construction.
-                let split: Option<ReorgSplit> = if is_reorg {
-                    Some(cache.find_reorg_split(ReorgTips {
-                        new_tip: block_hash,
-                        old_tip: old_tip_block.block_hash,
-                    })?)
-                } else {
-                    None
-                };
-
-                // A reorg whose fork point predates the post-prune cache window
-                // cannot complete safely. `cache.prune()` below drops every block
-                // below `new_tip.height - (block_tree_depth - 1)`; once the LCA is
-                // in that range, `BlockTree::prune`'s recursive child removal
-                // cascades the whole old fork (and the new-fork blocks below the
-                // window) out of the cache, evicting their epoch and commitment
-                // snapshots. Downstream reorg consumers re-read those by hash
-                // (`send_epoch_events` -> `get_epoch_snapshot`,
-                // `handle_confirmed_commitment_tx_reorg` -> `get_commitment_snapshot`)
-                // and would fail mid-reorg, after the event was broadcast and
-                // metadata persisted.
-                //
-                // Abort before prune mutates the cache, so the failure is pre-commit
-                // with an accurate diagnostic. Matches master, whose post-prune
-                // `prune_chains_at_ancestor` errored whenever the LCA had been
-                // evicted from the canonical chain. The trigger — a new fork at
-                // least `block_tree_depth` long diverging inside the window — is
-                // pathological (attack / severe partition); halting is correct.
-                // Returning `Err` drives the controlled-shutdown path.
-                if let Some(split) = &split {
-                    let fork_height = split.lca.header().height;
-                    if let Err(e) = validate_reorg_within_cache_window(
-                        fork_height,
-                        arc_block.height,
-                        self.config.consensus.block_tree_depth,
-                    ) {
-                        error!(
-                            fork_height,
-                            new_tip = %block_hash,
-                            new_tip_height = arc_block.height,
-                            block_tree_depth = self.config.consensus.block_tree_depth,
-                            "reorg fork point is older than the block-tree cache window; aborting before prune evicts divergent blocks (and their epoch/commitment snapshots) that downstream reorg consumers re-read, to trigger controlled shutdown",
-                        );
-                        return Err(e);
-                    }
-                }
-
-                // Prune the cache after the LCA is captured.
-                //
-                // Subtract 1 to ensure we keep exactly `depth` blocks.
-                // The cache.prune() implementation does not count `tip` into the depth
-                // equation, so it's always tip + `depth` that's kept around
-                cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
-
-                if let Some(split) = split {
-                    // Handle blockchain reorganization
-                    let fork_block: Arc<IrysBlockHeader> = split.lca.header().clone();
-                    let fork_hash: BlockHash = fork_block.block_hash;
-                    let fork_height: u64 = fork_block.height;
-                    let old_fork_blocks: Vec<Arc<SealedBlock>> = split.old_divergent;
-                    let new_fork_blocks: Vec<Arc<SealedBlock>> = split.new_divergent;
-                    let blocks_to_confirm = new_fork_blocks.clone();
-
-                    debug!("fork_height: {} fork_hash: {}", fork_height, fork_hash);
-
-                    debug!(
-                        "Reorg at block height {} with {}, old fork is {} blocks long, new one is {} blocks",
-                        arc_block.height,
-                        arc_block.block_hash,
-                        old_fork_blocks.len(),
-                        new_fork_blocks.len()
-                    );
-
-                    // Migration for the current tick hasn't run yet (it happens after
-                    // this reorg path, in migrate_block()). The highest migrated block is
-                    // at old_tip - migration_depth, from the previous tick's migration.
-                    // old_fork_blocks excludes the fork point (common ancestor), so a
-                    // migrated block is orphaned only when the fork is strictly deeper
-                    // than migration_depth.
-                    if old_fork_blocks.len() as u32 > self.config.consensus.block_migration_depth {
-                        error!(
-                            fork_depth = old_fork_blocks.len(),
-                            new_fork_depth = new_fork_blocks.len(),
-                            fork_height,
-                            current_height = arc_block.height,
-                            "NETWORK PARTITION RECOVERY: this node was isolated from the network \
-                             and fell behind the canonical chain. Deep reorg rolling back {} \
-                             migrated blocks. Investigate peer connectivity — check firewall \
-                             rules, network routes, and gossip health between this node and \
-                             its peers.",
-                            old_fork_blocks.len() as u32
-                                - self.config.consensus.block_migration_depth,
-                        );
-                        // Roll back blocks migrated on the minority fork before
-                        // proceeding with the new canonical chain.
-                        self.block_migration_service
-                            .recover_from_network_partition(fork_height)?;
-                    }
-
-                    metrics::record_reorg();
-                    metrics::record_reorg_depth(u64::try_from(old_fork_blocks.len()).unwrap_or(0));
-                    self.lifecycle_timestamps.note_reorg();
-
-                    // Create reorg event with all necessary data for downstream processing
-                    let event = ReorgEvent {
-                        old_fork: Arc::new(old_fork_blocks),
-                        new_fork: Arc::new(new_fork_blocks),
-                        fork_parent: fork_block,
-                        new_tip: block_hash,
-                        timestamp: SystemTime::now(),
-                        db: Some(self.db.clone()),
-                    };
-
-                    // Was there a new epoch block found in the reorg
-                    let new_epoch_block = event
-                        .new_fork
-                        .iter()
-                        .find(|sb| self.is_epoch_block(sb.header()))
-                        .map(|sb| Arc::clone(sb.header()));
-
-                    (
-                        new_epoch_block,
-                        Some(event),
-                        new_fcu_markers,
-                        blocks_to_confirm,
-                    )
-                } else {
-                    // Handle normal chain extension
-                    debug!(
-                        "Extending longest chain to height {} with {} parent: {} height: {}",
-                        arc_block.height,
-                        arc_block.block_hash,
-                        old_tip_block.block_hash,
-                        old_tip_block.height
-                    );
-
-                    let new_epoch_block = if self.is_epoch_block(&arc_block) {
-                        Some(arc_block.clone())
-                    } else {
-                        None
-                    };
-
-                    // The block was just confirmed under this same write lock — it
-                    // must be in the cache. A missing entry indicates the invariant
-                    // was violated by a future refactor; abort the confirmation
-                    // path rather than panicking.
-                    let tip_sealed = cache
-                        .blocks
-                        .get(&block_hash)
-                        .map(|meta| Arc::clone(&meta.block))
-                        .ok_or_else(|| {
-                            error!(
-                                block.hash = %block_hash,
-                                "confirmed block missing from cache after tip change"
-                            );
-                            eyre::eyre!(
-                                "confirmed block {block_hash} missing from cache after tip change"
-                            )
-                        })?;
-                    let blocks_to_confirm = vec![tip_sealed];
-
-                    (new_epoch_block, None, new_fcu_markers, blocks_to_confirm)
-                }
-            } else {
-                let blocks_to_confirm: Vec<Arc<SealedBlock>> = vec![];
-                (None, None, None, blocks_to_confirm)
-            };
+            let tip_move = self.try_move_tip_to(&mut cache, block_hash)?;
 
             let state = cache
                 .get_block_and_status(&block_hash)
                 .map(|(_, state)| *state)
                 .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
 
-            (
-                arc_block,
-                epoch_block,
-                reorg_event,
-                tip_changed,
-                state,
-                fcu_markers,
-                blocks_to_confirm,
-            )
+            (tip_move, state)
         }; // RwLockWriteGuard is dropped here, before the await
+
+        match tip_move {
+            Some(tip_move) => self.publish_tip_move(tip_move).await?,
+            None => {
+                // Metadata is persisted for every validated block, also when the tip
+                // does not move: then there is no block to clear or confirm.
+                use crate::block_migration_service::StreamEmission;
+                let stream = if self.block_stream_enabled() {
+                    StreamEmission::Observed
+                } else {
+                    StreamEmission::Disabled
+                };
+                self.block_migration_service
+                    .persist_metadata(&[], &[], stream)?;
+            }
+        }
+
+        // Confirmed-success boundary 2 of 2: mark_block_as_valid succeeded
+        // and the second cache check passed — this is a confirmed valid arrival
+        // that reached a stable onchain state. Pop the recovery LRU here.
+        if let Some(reason) = self.recent_soft_internal_discards.pop(&block_hash) {
+            metrics::record_soft_internal_recovered(reason);
+            info!(
+                block.hash = %block_hash,
+                reason,
+                "block previously discarded as soft-internal reached Valid via gossip re-delivery"
+            );
+        }
+
+        let event = BlockStateUpdated {
+            block_hash,
+            height,
+            state,
+            discarded: false,
+            validation_result: ValidationResult::Valid,
+        };
+        if let Err(e) = self.service_senders.block_state_events.send(event) {
+            tracing::trace!(
+                block.hash = ?block_hash,
+                block.height = height,
+                "Failed to broadcast block state update event: {}", e
+            );
+        }
+
+        Ok(())
+    }
+
+    /// After a discard, move the tip to the max cumulative difficulty block when it is
+    /// heavier than the tip and every block from it back to its first `Onchain` ancestor
+    /// is fully validated.
+    ///
+    /// A validated block that does not become the tip (for example, `mark_tip` refused a
+    /// cumulative difficulty tie with the max block) waits for a later tip change. When
+    /// the discard removes the max block, such a block can become the max block, and no
+    /// validation result for it follows. Without this step the tip stays on a lighter
+    /// block, the max block cannot be built upon, and block production waits.
+    async fn move_tip_after_discard(&mut self) -> eyre::Result<()> {
+        let tip_move = {
+            let binding = self.cache.clone();
+            let mut cache = binding.write().map_err(|_| {
+                eyre::eyre!("block tree cache write lock poisoned in move_tip_after_discard")
+            })?;
+
+            // The gate that a validated block passes in `on_block_validation_finished`:
+            // the max block is heavier than the tip and its fork attaches to the tree.
+            if cache.get_earliest_not_onchain_in_longest_chain().is_none() {
+                return Ok(());
+            }
+            // `mark_tip` sets the ancestry of the new tip `Onchain`, so every block of
+            // that ancestry must be fully validated.
+            let (_, max_hash) = cache.get_max_cumulative_difficulty_block();
+            if cache.get_max_chain_validated_head() != Some(max_hash) {
+                return Ok(());
+            }
+            self.try_move_tip_to(&mut cache, max_hash)?
+        }; // RwLockWriteGuard is dropped here, before the await
+
+        if let Some(tip_move) = tip_move {
+            let (new_tip_hash, new_tip_height) =
+                (tip_move.new_tip.block_hash, tip_move.new_tip.height);
+            self.publish_tip_move(tip_move).await?;
+
+            // The discard event went out before the tip moved. Services that wait for a
+            // block they can build on read the tree when an event arrives, so send one
+            // more event now that the new tip is in place.
+            let event = BlockStateUpdated {
+                block_hash: new_tip_hash,
+                height: new_tip_height,
+                state: ChainState::Onchain,
+                discarded: false,
+                validation_result: ValidationResult::Valid,
+            };
+            if let Err(e) = self.service_senders.block_state_events.send(event) {
+                tracing::trace!(
+                    block.hash = ?new_tip_hash,
+                    block.height = new_tip_height,
+                    "Failed to broadcast block state update event: {}", e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Move the tip to `candidate`, a validated block, when it is heavier than the tip.
+    /// The caller holds the block tree write lock across this call, so the tip change,
+    /// the reorg classification and the prune see one tree state. Returns `None` when the
+    /// tip does not move. `publish_tip_move` sends a returned move to the other services
+    /// after the caller releases the lock.
+    fn try_move_tip_to(
+        &self,
+        cache: &mut BlockTree,
+        candidate: BlockHash,
+    ) -> eyre::Result<Option<TipMove>> {
+        let new_tip = cache
+            .blocks
+            .get(&candidate)
+            .map(|entry| Arc::clone(entry.block.header()))
+            .ok_or_else(|| eyre::eyre!("tip candidate {candidate} not found in cache"))?;
+        let old_tip_block = cache
+            .get_block(&cache.tip)
+            .ok_or_eyre("tip block must always be present")?;
+        let old_tip_hash = old_tip_block.block_hash;
+        let old_tip_height = old_tip_block.height;
+
+        // only mark the tip if the new tip has higher cumulative difficulty than the old one
+        if old_tip_block.cumulative_diff >= new_tip.cumulative_diff {
+            // this also means that the tip can point to a block in a chain that is not
+            // the canonical one (aka which the self.max_cumulative_difficulty is pointing at).
+            // That is valid because the blocks below self.max_cumulative_difficulty
+            // could still be undergoing validation, which is not guaranteed to succeed
+            debug!(
+                block.hash = %candidate,
+                block.height = new_tip.height,
+                old_tip.hash = %old_tip_hash,
+                old_tip.height = old_tip_height,
+                "block_tree.transition: validated as Fork (kept current tip)"
+            );
+            return Ok(None);
+        }
+
+        // `mark_tip` keeps the tip when the candidate ties the max cumulative difficulty
+        // block and is not that block. Check this first, so the cache-window check below
+        // runs only for a tip that moves.
+        let (max_diff, max_hash) = cache.get_max_cumulative_difficulty_block();
+        if new_tip.cumulative_diff == max_diff && max_hash != candidate {
+            debug!(
+                block.hash = %candidate,
+                block.height = new_tip.height,
+                max_block.hash = %max_hash,
+                "block_tree.transition: ties the max cumulative difficulty block (kept current tip)"
+            );
+            return Ok(None);
+        }
+
+        // Compute the reorg split BEFORE `mark_tip` and the prune, so the parent-walk
+        // sees both lineages in `cache.blocks` and the cache-window check below can
+        // abort before the tree changes. Independent of `ChainState` flags by
+        // construction.
+        //
+        // The tip change is a reorg only when it abandons blocks of the old
+        // canonical chain. Classify from the old tip -> new tip transition, not
+        // from the max-difficulty chain: that chain can be a fork still waiting
+        // for validation, unrelated to the block that just became the tip.
+        let split: ReorgSplit = cache.find_reorg_split(ReorgTips {
+            new_tip: candidate,
+            old_tip: old_tip_hash,
+        })?;
+        let is_reorg = !split.old_divergent.is_empty();
+
+        // A reorg whose fork point predates the post-prune cache window
+        // cannot complete safely. `cache.prune()` below drops every block
+        // below `new_tip.height - (block_tree_depth - 1)`; once the LCA is
+        // in that range, `BlockTree::prune`'s recursive child removal
+        // cascades the whole old fork (and the new-fork blocks below the
+        // window) out of the cache, evicting their epoch and commitment
+        // snapshots. Downstream reorg consumers re-read those by hash
+        // (`send_epoch_events` -> `get_epoch_snapshot`,
+        // `handle_confirmed_commitment_tx_reorg` -> `get_commitment_snapshot`)
+        // and would fail mid-reorg, after the event was broadcast and
+        // metadata persisted.
+        //
+        // Abort before `mark_tip` and the prune change the tree, so the failure is
+        // pre-commit with an accurate diagnostic and readers never see a moved tip. Matches master, whose post-prune
+        // `prune_chains_at_ancestor` errored whenever the LCA had been
+        // evicted from the canonical chain. The trigger — a new fork at
+        // least `block_tree_depth` long diverging inside the window — is
+        // pathological (attack / severe partition); halting is correct.
+        // Returning `Err` drives the controlled-shutdown path.
+        //
+        // A tip extension that spans the window fails the same way: prune
+        // evicts its oldest new blocks before they are confirmed, and the
+        // epoch snapshot and migration reads that follow fail by hash.
+        let fork_height = split.lca.header().height;
+        if let Err(e) = validate_reorg_within_cache_window(
+            fork_height,
+            new_tip.height,
+            self.config.consensus.block_tree_depth,
+        ) {
+            error!(
+                fork_height,
+                is_reorg,
+                new_tip = %candidate,
+                new_tip_height = new_tip.height,
+                new_block_count = split.new_divergent.len(),
+                block_tree_depth = self.config.consensus.block_tree_depth,
+                "tip change fork point is older than the block-tree cache window; aborting before prune evicts divergent blocks (and their epoch/commitment snapshots) that downstream consumers re-read, to trigger controlled shutdown",
+            );
+            return Err(e);
+        }
+
+        let changed = cache.mark_tip(&candidate)?;
+        debug!(
+            block.hash = %candidate,
+            block.height = new_tip.height,
+            old_tip.hash = %old_tip_hash,
+            old_tip.height = old_tip_height,
+            tip_changed = changed,
+            "block_tree.transition: mark_tip"
+        );
+        if !changed {
+            return Ok(None);
+        }
+
+        let block_index_read = self.block_index_guard.read();
+        let fcu_markers = ForkChoiceMarkers::from_block_tree(
+            cache,
+            block_index_read,
+            &self.db,
+            self.config.consensus.block_migration_depth as usize,
+            self.config.consensus.block_tree_depth as usize,
+        )?;
+
+        // Prune the cache after the LCA is captured.
+        //
+        // Subtract 1 to ensure we keep exactly `depth` blocks.
+        // The cache.prune() implementation does not count `tip` into the depth
+        // equation, so it's always tip + `depth` that's kept around
+        cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
+
+        let (epoch_block, reorg_event, blocks_to_confirm) = if is_reorg {
+            // Handle blockchain reorganization
+            let fork_block: Arc<IrysBlockHeader> = split.lca.header().clone();
+            let fork_hash: BlockHash = fork_block.block_hash;
+            let fork_height: u64 = fork_block.height;
+            let old_fork_blocks: Vec<Arc<SealedBlock>> = split.old_divergent;
+            let new_fork_blocks: Vec<Arc<SealedBlock>> = split.new_divergent;
+            let blocks_to_confirm = new_fork_blocks.clone();
+
+            debug!("fork_height: {} fork_hash: {}", fork_height, fork_hash);
+
+            debug!(
+                "Reorg at block height {} with {}, old fork is {} blocks long, new one is {} blocks",
+                new_tip.height,
+                new_tip.block_hash,
+                old_fork_blocks.len(),
+                new_fork_blocks.len()
+            );
+
+            // Migration for the current tick hasn't run yet (it happens after
+            // this reorg path, in migrate_block()). The highest migrated block is
+            // at old_tip - migration_depth, from the previous tick's migration.
+            // old_fork_blocks excludes the fork point (common ancestor), so a
+            // migrated block is orphaned only when the fork is strictly deeper
+            // than migration_depth.
+            if old_fork_blocks.len() as u32 > self.config.consensus.block_migration_depth {
+                error!(
+                    fork_depth = old_fork_blocks.len(),
+                    new_fork_depth = new_fork_blocks.len(),
+                    fork_height,
+                    current_height = new_tip.height,
+                    "NETWORK PARTITION RECOVERY: this node was isolated from the network \
+                     and fell behind the canonical chain. Deep reorg rolling back {} \
+                     migrated blocks. Investigate peer connectivity — check firewall \
+                     rules, network routes, and gossip health between this node and \
+                     its peers.",
+                    old_fork_blocks.len() as u32 - self.config.consensus.block_migration_depth,
+                );
+                // Roll back blocks migrated on the minority fork before
+                // proceeding with the new canonical chain.
+                self.block_migration_service
+                    .recover_from_network_partition(fork_height)?;
+            }
+
+            metrics::record_reorg();
+            metrics::record_reorg_depth(u64::try_from(old_fork_blocks.len()).unwrap_or(0));
+            self.lifecycle_timestamps.note_reorg();
+
+            // Create reorg event with all necessary data for downstream processing
+            let event = ReorgEvent {
+                old_fork: Arc::new(old_fork_blocks),
+                new_fork: Arc::new(new_fork_blocks),
+                fork_parent: fork_block,
+                new_tip: candidate,
+                timestamp: SystemTime::now(),
+                db: Some(self.db.clone()),
+            };
+
+            // Was there a new epoch block found in the reorg
+            let new_epoch_block = event
+                .new_fork
+                .iter()
+                .find(|sb| self.is_epoch_block(sb.header()))
+                .map(|sb| Arc::clone(sb.header()));
+
+            (new_epoch_block, Some(event), blocks_to_confirm)
+        } else {
+            // Handle normal chain extension
+            debug!(
+                "Extending longest chain to height {} with {} parent: {} height: {}",
+                new_tip.height, new_tip.block_hash, old_tip_hash, old_tip_height
+            );
+
+            // The tip can move by more than one block: a validated block that
+            // did not become the tip (for example, `mark_tip` refused a cumulative
+            // difficulty tie) joins the canonical chain with its child. The new
+            // side of the split holds each block after the old tip up to the new
+            // tip, oldest first. Confirm each one and detect an epoch block among
+            // them, as on a reorg.
+            let blocks_to_confirm: Vec<Arc<SealedBlock>> = split.new_divergent;
+            let new_epoch_block = blocks_to_confirm
+                .iter()
+                .find(|sb| self.is_epoch_block(sb.header()))
+                .map(|sb| Arc::clone(sb.header()));
+
+            (new_epoch_block, None, blocks_to_confirm)
+        };
+
+        Ok(Some(TipMove {
+            new_tip,
+            fcu_markers,
+            reorg_event,
+            epoch_block,
+            blocks_to_confirm,
+        }))
+    }
+
+    /// Send a tip move made by `try_move_tip_to` to the other services, after the block
+    /// tree write lock is released: epoch events, metadata, the reorg event, the
+    /// fork-choice update, mempool confirmations, block migration and the difficulty
+    /// update.
+    async fn publish_tip_move(&mut self, tip_move: TipMove) -> eyre::Result<()> {
+        let TipMove {
+            new_tip,
+            fcu_markers,
+            reorg_event,
+            epoch_block,
+            blocks_to_confirm,
+        } = tip_move;
 
         // Send epoch events which require a Read lock
         if let Some(epoch_block) = epoch_block {
@@ -1274,7 +1395,7 @@ impl BlockTreeServiceInner {
         let reorg_occurred = reorg_event.is_some();
         if let Some(reorg_event) = reorg_event {
             // Deep reorg may poison VDF seeds; re-anchor before reorg fans out.
-            self.maybe_reanchor_vdf_after_reorg(&arc_block, &reorg_event);
+            self.maybe_reanchor_vdf_after_reorg(&new_tip, &reorg_event);
 
             if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
                 error!(
@@ -1284,64 +1405,58 @@ impl BlockTreeServiceInner {
             }
         }
 
-        if let Some(markers) = &new_canonical_markers {
-            if tip_changed {
-                // Per-block hot path: emit at debug to avoid flooding info-level
-                // logs (~7k entries/day at 12s blocks). Operators monitoring tip
-                // progress should consume the canonical_tip_height metric below
-                // instead.
-                debug!(
-                    block.height = arc_block.height,
-                    block.hash = ?arc_block.block_hash,
-                    block.timestamp_ms = arc_block.timestamp.as_millis(),
-                    "New canonical tip",
+        // Per-block hot path: emit at debug to avoid flooding info-level
+        // logs (~7k entries/day at 12s blocks). Operators monitoring tip
+        // progress should consume the canonical_tip_height metric below
+        // instead.
+        debug!(
+            block.height = new_tip.height,
+            block.hash = ?new_tip.block_hash,
+            block.timestamp_ms = new_tip.timestamp.as_millis(),
+            "New canonical tip",
+        );
+        metrics::record_canonical_tip_height(new_tip.height);
+        self.lifecycle_timestamps.note_canonical_advance();
+
+        // Suspect buffer with no reorg on this tip: re-send re-anchor.
+        if !reorg_occurred
+            && self
+                .service_senders
+                .vdf_reanchor_signals
+                .is_buffer_suspect()
+        {
+            self.send_reanchor_request(&new_tip);
+        }
+
+        // Emit consensus events
+        self.emit_fcu(&fcu_markers).await?;
+
+        // Live stream fan-out only after FCU succeeds, so a follower reacting to `observed`
+        // never races the execution-layer head update (the pre-change ordering). The frames
+        // are already durable; on an FCU error the follower recovers them via replay.
+        self.fanout_durable_stream_frames(stream_frames);
+
+        // Mempool confirmations. The mempool may already be shutting down (its receiver
+        // dropped); log and continue — block confirmation itself is still valid.
+        // Stream `observed`/`reorged` frames were durable-appended inside `persist_metadata`;
+        // migration appends `finalized` the same way.
+        for sealed_block in &blocks_to_confirm {
+            if let Err(e) =
+                self.service_senders
+                    .mempool
+                    .send_traced(MempoolServiceMessage::BlockConfirmed(Arc::clone(
+                        sealed_block,
+                    )))
+            {
+                error!(
+                    block.hash = %sealed_block.header().block_hash,
+                    ?e,
+                    "Failed to send BlockConfirmed to mempool — mempool service unreachable"
                 );
-                metrics::record_canonical_tip_height(arc_block.height);
-                self.lifecycle_timestamps.note_canonical_advance();
-
-                // Suspect buffer with no reorg on this tip: re-send re-anchor.
-                if !reorg_occurred
-                    && self
-                        .service_senders
-                        .vdf_reanchor_signals
-                        .is_buffer_suspect()
-                {
-                    self.send_reanchor_request(&arc_block);
-                }
-            }
-
-            // Emit consensus events
-            self.emit_fcu(markers).await?;
-
-            // Live stream fan-out only after FCU succeeds, so a follower reacting to `observed`
-            // never races the execution-layer head update (the pre-change ordering). The frames
-            // are already durable; on an FCU error the follower recovers them via replay.
-            self.fanout_durable_stream_frames(stream_frames);
-
-            // Mempool confirmations. The mempool may already be shutting down (its receiver
-            // dropped); log and continue — block confirmation itself is still valid.
-            // Stream `observed`/`reorged` frames were durable-appended inside `persist_metadata`;
-            // migration appends `finalized` the same way.
-            for sealed_block in &blocks_to_confirm {
-                if let Err(e) =
-                    self.service_senders
-                        .mempool
-                        .send_traced(MempoolServiceMessage::BlockConfirmed(Arc::clone(
-                            sealed_block,
-                        )))
-                {
-                    error!(
-                        block.hash = %sealed_block.header().block_hash,
-                        ?e,
-                        "Failed to send BlockConfirmed to mempool — mempool service unreachable"
-                    );
-                }
-            }
-
-            if tip_changed {
-                self.migrate_block(&markers.migration_block)?;
             }
         }
+
+        self.migrate_block(&fcu_markers.migration_block)?;
 
         // Broadcast difficulty update to miners if tip difficulty changed from parent.
         // On either lock poisoning or missing parent (the latter is a strong invariant
@@ -1349,56 +1464,26 @@ impl BlockTreeServiceInner {
         // would take the node down for a non-critical broadcast), skip the diff check
         // and log instead. The downstream miners will pick up the difficulty on the
         // next canonical update.
-        let parent_diff_changed = tip_changed
-            && match self.cache.read() {
-                Ok(cache) => match cache.get_block(&arc_block.previous_block_hash) {
-                    Some(parent_block) => parent_block.diff != arc_block.diff,
-                    None => {
-                        error!(
-                            parent_hash = %arc_block.previous_block_hash,
-                            block.hash = %arc_block.block_hash,
-                            "parent block missing from cache while broadcasting difficulty update; skipping"
-                        );
-                        false
-                    }
-                },
-                Err(_) => {
+        let parent_diff_changed = match self.cache.read() {
+            Ok(cache) => match cache.get_block(&new_tip.previous_block_hash) {
+                Some(parent_block) => parent_block.diff != new_tip.diff,
+                None => {
                     error!(
-                        "block tree cache read lock poisoned during difficulty broadcast; skipping"
+                        parent_hash = %new_tip.previous_block_hash,
+                        block.hash = %new_tip.block_hash,
+                        "parent block missing from cache while broadcasting difficulty update; skipping"
                     );
                     false
                 }
-            };
+            },
+            Err(_) => {
+                error!("block tree cache read lock poisoned during difficulty broadcast; skipping");
+                false
+            }
+        };
         if parent_diff_changed {
             self.service_senders
-                .send_mining_difficulty(BroadcastDifficultyUpdate(arc_block.clone()));
-        }
-
-        // Confirmed-success boundary 2 of 2: mark_block_as_valid succeeded
-        // and the second cache check passed — this is a confirmed valid arrival
-        // that reached a stable onchain state. Pop the recovery LRU here.
-        if let Some(reason) = self.recent_soft_internal_discards.pop(&block_hash) {
-            metrics::record_soft_internal_recovered(reason);
-            info!(
-                block.hash = %block_hash,
-                reason,
-                "block previously discarded as soft-internal reached Valid via gossip re-delivery"
-            );
-        }
-
-        let event = BlockStateUpdated {
-            block_hash,
-            height,
-            state,
-            discarded: false,
-            validation_result: ValidationResult::Valid,
-        };
-        if let Err(e) = self.service_senders.block_state_events.send(event) {
-            tracing::trace!(
-                block.hash = ?block_hash,
-                block.height = height,
-                "Failed to broadcast block state update event: {}", e
-            );
+                .send_mining_difficulty(BroadcastDifficultyUpdate(new_tip.clone()));
         }
 
         Ok(())
@@ -1583,6 +1668,26 @@ impl BlockTreeServiceInner {
             ),
         };
 
+        // A soft result says only that this node could not decide the block's
+        // validity. For an `Onchain` block an earlier `Valid` result decided it, so
+        // keep the block and send no discard broadcast.
+        if matches!(kind, DiscardKind::SoftInternal) {
+            let cache = self.cache.read().map_err(|_| {
+                eyre::eyre!("block tree cache read lock poisoned in discard_and_broadcast")
+            })?;
+            if cache
+                .get_block_and_status(&block_hash)
+                .is_some_and(|(_, state)| *state == ChainState::Onchain)
+            {
+                warn!(
+                    block.hash = %block_hash,
+                    custom.error = %error_display,
+                    "soft validation result for an Onchain block; the block stays in the tree"
+                );
+                return Ok(());
+            }
+        }
+
         // SoftInternal is a documented non-fault recovery path — warn-level
         // keeps alerting tied to genuine peer rejections (Invalid arm).
         emit_discard_log(kind, block_hash, &error_display, error_log_msg);
@@ -1629,6 +1734,9 @@ impl BlockTreeServiceInner {
         //      never in block_tree at all → cache_write_succeeded = false.
         //   3. Cache-hit but `remove_block` Err: cache invariant
         //      corruption → cache_write_succeeded = false.
+        //   4. Cache-hit on an `Onchain` block with an `Invalid` result:
+        //      `remove_block` refuses it and this helper returns the error
+        //      (see the match arm). A soft result returned earlier.
         //
         // Side effects split on this flag:
         //   - `BlockStateUpdated` broadcast: ALWAYS emitted. Downstream
@@ -1648,6 +1756,23 @@ impl BlockTreeServiceInner {
         let cache_write_succeeded = if maybe_height.is_some() {
             match cache.remove_block(&block_hash, irys_domain::RemovalReason::ValidationInvalid) {
                 Ok(()) => true,
+                // An `Onchain` block is the tip or an ancestor of it. The tip only moves
+                // to a validated block, so this node already accepted this block, and an
+                // `Invalid` result contradicts that. Removing the block would
+                // empty the canonical chain; keeping it and continuing would hide a node
+                // fault. Return the error: the service stops on the controlled-shutdown
+                // path, with the tree unchanged and no broadcast.
+                Err(err) if state == ChainState::Onchain => {
+                    error!(
+                        block.hash = %block_hash,
+                        block.height = height,
+                        ?err,
+                        "validation result that is not Valid for an Onchain block; the block stays in the tree and the service stops"
+                    );
+                    return Err(
+                        err.wrap_err(format!("discard of Onchain block {block_hash} refused"))
+                    );
+                }
                 Err(err) => {
                     tracing::error!(block.hash = %block_hash, ?err, "Failed to remove block from cache");
                     false
@@ -1764,30 +1889,6 @@ impl BlockTreeServiceInner {
         )?;
         Ok(())
     }
-}
-
-/// Reject reorgs that would un-migrate already-finalised blocks.
-///
-/// `old_fork_len` is the number of blocks on the old fork excluding the common
-/// ancestor. The previous tick's migration has already moved the block at
-/// `old_tip - migration_depth` and below into the block index, so a fork
-/// strictly deeper than `migration_depth` would require reverting a
-/// migrated block — which the FCU + downstream migration path cannot do
-/// safely. The caller treats `Err` as a controlled-shutdown trigger.
-pub fn validate_reorg_within_migration_depth(
-    old_fork_len: usize,
-    migration_depth: u32,
-    fork_height: u64,
-) -> eyre::Result<()> {
-    if u32::try_from(old_fork_len).unwrap_or(u32::MAX) > migration_depth {
-        return Err(eyre::eyre!(
-            "reorg depth ({}) exceeds migration depth ({}); already-migrated block at fork height {} would be reverted",
-            old_fork_len,
-            migration_depth,
-            fork_height,
-        ));
-    }
-    Ok(())
 }
 
 /// Reject reorgs whose fork point would be evicted by the cache prune that runs
@@ -1983,6 +2084,7 @@ mod tests {
     use crate::block_validation::PreValidationError;
     use irys_types::BlockTransactions;
     use rstest::rstest;
+    use std::sync::Mutex;
 
     /// A consensus-rejection error must convert to `ValidationResult::Invalid`.
     #[test]
@@ -2195,6 +2297,22 @@ mod tests {
         /// Retained VDF re-anchor receiver so the gate tests can observe a queued
         /// `ReanchorRequest`; unused by the discard/recovery tests.
         vdf_reanchor_rx: irys_vdf::ReanchorReceiver,
+        /// Subscribed before any test step runs, so the tip-change tests can observe
+        /// every broadcast `ReorgEvent`.
+        reorg_rx: tokio::sync::broadcast::Receiver<ReorgEvent>,
+        /// Retained Reth service receiver; `answer_fork_choice_updates` takes it so a
+        /// tip change can complete its FCU round trip.
+        reth_service_rx: Option<UnboundedReceiver<Traced<RethServiceMessage>>>,
+        /// Retained mempool receiver, so the tip-change tests can observe every
+        /// `BlockConfirmed`.
+        mempool_rx: UnboundedReceiver<Traced<MempoolServiceMessage>>,
+        /// Retained storage module receiver: epoch block detection sends to it and
+        /// fails when it is closed.
+        storage_modules_rx: UnboundedReceiver<Traced<StorageModuleServiceMessage>>,
+        /// Retained chunk migration receiver: block migration sends to it and fails
+        /// when it is closed.
+        _chunk_migration_rx:
+            UnboundedReceiver<Traced<crate::chunk_migration_service::ChunkMigrationServiceMessage>>,
         /// Hash of the synthetic genesis seeded into the cache by `new()`.
         /// Use as `previous_block_hash` when inserting test blocks via
         /// `insert_block_in_cache`.
@@ -2252,9 +2370,14 @@ mod tests {
             let (service_senders, service_rx) = crate::test_helpers::build_test_service_senders();
             // Subscribe BEFORE the discard path runs so the broadcast event is
             // observable. Retain the VDF re-anchor receiver so gate tests can
-            // observe a queued request; the rest of `service_rx` drops here.
+            // observe a queued request, and the Reth, mempool and storage module
+            // receivers for the tip-change tests; the rest of `service_rx` drops here.
             let block_state_rx = service_senders.subscribe_block_state_updates();
+            let reorg_rx = service_senders.subscribe_reorgs();
             let vdf_reanchor_rx = service_rx.vdf_reanchor;
+            let reth_service_rx = Some(service_rx.reth_service);
+            let mempool_rx = service_rx.mempool;
+            let storage_modules_rx = service_rx.storage_modules;
 
             let mut node_config = NodeConfig::testing();
             configure(&mut node_config);
@@ -2263,11 +2386,9 @@ mod tests {
 
             let chain_sync_state = ChainSyncState::new(false, false);
 
-            // The migration service is wired but unused by both
-            // `discard_and_broadcast` and the Valid-recovery pop in
-            // `on_block_validation_finished` — supply a real instance with
-            // an orphan chunk-migration channel.
-            let (chunk_migration_sender, _chunk_migration_rx) =
+            // A real migration service: the tip-change tests migrate blocks
+            // and roll back the block index through it.
+            let (chunk_migration_sender, chunk_migration_rx) =
                 tokio::sync::mpsc::unbounded_channel();
             let block_migration_service = BlockMigrationService::new(
                 db.clone(),
@@ -2318,6 +2439,11 @@ mod tests {
                 inner,
                 block_state_rx,
                 vdf_reanchor_rx,
+                reorg_rx,
+                reth_service_rx,
+                mempool_rx,
+                storage_modules_rx,
+                _chunk_migration_rx: chunk_migration_rx,
                 genesis_hash,
                 _tempdir: tmp,
             }
@@ -2375,6 +2501,178 @@ mod tests {
                 out.push(event);
             }
             out
+        }
+
+        /// Answer every fork-choice update the service sends, as the Reth service does,
+        /// so a tip change runs to completion. Returns the recorded updates, in order.
+        fn answer_fork_choice_updates(&mut self) -> Arc<Mutex<Vec<ForkChoiceUpdateMessage>>> {
+            let mut reth_service_rx = self
+                .reth_service_rx
+                .take()
+                .expect("Reth service receiver not yet taken");
+            let recorded = Arc::new(Mutex::new(Vec::new()));
+            let recorder = Arc::clone(&recorded);
+            tokio::spawn(async move {
+                while let Some(message) = reth_service_rx.recv().await {
+                    let (message, _span) = message.into_parts();
+                    if let RethServiceMessage::ForkChoice { update, response } = message {
+                        recorder.lock().expect("fork-choice recorder").push(update);
+                        let _ = response.send(());
+                    }
+                }
+            });
+            recorded
+        }
+
+        /// The last fork-choice update names the tip as head, and its confirmed and
+        /// finalized blocks are ancestors of the tip.
+        fn assert_last_fork_choice_follows_tip(
+            &self,
+            updates: &Arc<Mutex<Vec<ForkChoiceUpdateMessage>>>,
+        ) {
+            let updates = updates.lock().expect("fork-choice recorder");
+            let last = updates.last().expect("at least one fork-choice update");
+            let cache = self
+                .inner
+                .cache
+                .read()
+                .expect("cache lock for tip ancestry");
+            let tip = cache.tip;
+            assert_eq!(last.head_hash, tip, "the fork-choice head is the tip");
+
+            let mut tip_ancestry = vec![tip];
+            let mut current = tip;
+            while let Some(block) = cache.get_block(&current)
+                && block.height > 0
+            {
+                current = block.previous_block_hash;
+                tip_ancestry.push(current);
+            }
+            assert!(
+                tip_ancestry.contains(&last.confirmed_hash),
+                "the confirmed block is an ancestor of the tip"
+            );
+            assert!(
+                tip_ancestry.contains(&last.finalized_hash),
+                "the finalized block is an ancestor of the tip"
+            );
+        }
+
+        /// Add a child of `parent` with `cumulative_diff` to the cache. With
+        /// `schedule_validation` the block waits for its validation result, as a block
+        /// handed to the validation service does.
+        fn add_child_block(
+            &mut self,
+            parent: &IrysBlockHeader,
+            cumulative_diff: u64,
+            schedule_validation: bool,
+        ) -> IrysBlockHeader {
+            use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
+            use irys_testing_utils::IrysBlockHeaderTestExt as _;
+
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = parent.height + 1;
+            header.previous_block_hash = parent.block_hash;
+            header.cumulative_diff = irys_types::U256::from(cumulative_diff);
+            header.test_sign();
+
+            let sealed = Arc::new(SealedBlock::new_unchecked(
+                Arc::new(header.clone()),
+                BlockTransactions::default(),
+            ));
+            let ema = EmaSnapshot::genesis(sealed.header());
+            let mut cache = self
+                .inner
+                .cache
+                .write()
+                .expect("cache lock for child block");
+            cache
+                .add_block(
+                    &sealed,
+                    Arc::new(CommitmentSnapshot::default()),
+                    Arc::new(EpochSnapshot::default()),
+                    ema,
+                )
+                .expect("add child block");
+            if schedule_validation {
+                cache
+                    .mark_block_as_validation_scheduled(&header.block_hash)
+                    .expect("mark ValidationScheduled for child block");
+            }
+            header
+        }
+
+        /// Record the genesis block as migrated, so a tip change can run block migration.
+        fn index_genesis(&self) {
+            self.inner
+                .block_index_guard
+                .read()
+                .push_item(
+                    &irys_types::BlockIndexItem {
+                        block_hash: self.genesis_hash,
+                        num_ledgers: 0,
+                        ledgers: vec![],
+                    },
+                    0,
+                )
+                .expect("index genesis");
+        }
+
+        fn genesis(&self) -> IrysBlockHeader {
+            let cache = self.inner.cache.read().expect("cache lock for genesis");
+            cache
+                .get_block(&self.genesis_hash)
+                .expect("genesis in cache")
+                .clone()
+        }
+
+        fn tip(&self) -> BlockHash {
+            self.inner.cache.read().expect("cache lock for tip").tip
+        }
+
+        /// Add a chain of blocks on `parent`, one block for each cumulative difficulty,
+        /// and give each block a `Valid` result before the next block is added.
+        async fn add_validated_chain(
+            &mut self,
+            parent: &IrysBlockHeader,
+            cumulative_diffs: &[u64],
+        ) -> Vec<IrysBlockHeader> {
+            let mut chain: Vec<IrysBlockHeader> = vec![];
+            for &cumulative_diff in cumulative_diffs {
+                let block =
+                    self.add_child_block(chain.last().unwrap_or(parent), cumulative_diff, true);
+                self.inner
+                    .on_block_validation_finished(block.block_hash, ValidationResult::Valid)
+                    .await
+                    .expect("validation result handled");
+                chain.push(block);
+            }
+            chain
+        }
+
+        /// Hashes of the blocks sent to the mempool as `BlockConfirmed`, in send order.
+        fn take_confirmed_blocks(&mut self) -> Vec<BlockHash> {
+            let mut confirmed = vec![];
+            while let Ok(message) = self.mempool_rx.try_recv() {
+                if let (MempoolServiceMessage::BlockConfirmed(block), _span) = message.into_parts()
+                {
+                    confirmed.push(block.header().block_hash);
+                }
+            }
+            confirmed
+        }
+
+        /// Hashes of the migrated blocks, from height 0 up.
+        fn indexed_block_hashes(&self) -> Vec<BlockHash> {
+            let block_index = self.inner.block_index_guard.read();
+            (0..block_index.num_blocks())
+                .map(|height| {
+                    block_index
+                        .get_item(height)
+                        .expect("block index item below num_blocks")
+                        .block_hash
+                })
+                .collect()
         }
     }
 
@@ -3154,6 +3452,61 @@ mod tests {
         );
     }
 
+    /// A discard of an `Onchain` block (here the tip) returns an error and leaves the
+    /// tip and the block in the tree: the block tree refuses to remove it, and the
+    /// service must not continue as if the block were gone.
+    #[test]
+    fn discard_of_onchain_block_returns_error() {
+        let mut h = DiscardHarness::new();
+        let tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::ShadowTransactionInvalid("bad".into()).into();
+        let err = h
+            .inner
+            .discard_and_broadcast(tip.block_hash, result, DiscardKind::Invalid)
+            .expect_err("a discard of an Onchain block must return an error");
+        assert!(
+            format!("{err:#}").contains("Onchain"),
+            "error must name the Onchain block; got: {err:#}"
+        );
+
+        assert_eq!(h.tip(), tip.block_hash, "the tip does not change");
+        let cache = h.inner.cache.read().expect("cache lock after discard");
+        assert!(cache.get_block(&tip.block_hash).is_some());
+        assert_eq!(
+            cache.get_latest_canonical_entry().block_hash(),
+            tip.block_hash
+        );
+    }
+
+    /// A soft result for an `Onchain` block (here the tip) does not contradict the
+    /// earlier `Valid` result: the block stays, the tip does not change, and no
+    /// discard is broadcast.
+    #[test]
+    fn soft_result_for_onchain_block_keeps_the_block() {
+        let mut h = DiscardHarness::new();
+        let tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_200);
+
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::ValidationCancelled {
+                reason: crate::block_validation::ValidationCancelReason::HeightDifference,
+            }
+            .into();
+        assert!(matches!(result, ValidationResult::InternalFailure(_)));
+        h.inner
+            .discard_and_broadcast(tip.block_hash, result, DiscardKind::SoftInternal)
+            .expect("a soft result for an Onchain block is not an error");
+
+        assert_eq!(h.tip(), tip.block_hash, "the tip does not change");
+        assert!(
+            h.collect_broadcasts().is_empty(),
+            "no discard is broadcast for a block that stays"
+        );
+        let cache = h.inner.cache.read().expect("cache lock after discard");
+        assert!(cache.get_block(&tip.block_hash).is_some());
+    }
+
     /// The LRU is intentionally bounded so that an unbounded soft-internal
     /// failure rate cannot cause memory growth. Beyond capacity, `put`
     /// silently evicts the LRU-tail entry (a hash we no longer expect to
@@ -3208,64 +3561,6 @@ mod tests {
             panic!("expected InternalFailure for ParentBlockMissing");
         };
         assert!(!inner.is_node_fault());
-    }
-
-    /// Reorgs at or within `migration_depth` are reversible: nothing on the
-    /// old fork has been migrated to the block index yet, so the FCU path can
-    /// switch chains cleanly.
-    #[rstest]
-    #[case::depth_zero_no_orphans(0, 5)]
-    #[case::depth_strictly_below_migration(3, 5)]
-    #[case::depth_equals_migration_boundary(5, 5)]
-    fn validate_reorg_within_migration_depth_passes_for_safe_depths(
-        #[case] old_fork_len: usize,
-        #[case] migration_depth: u32,
-    ) {
-        validate_reorg_within_migration_depth(old_fork_len, migration_depth, 100)
-            .expect("reorg at or within migration depth must be permitted");
-    }
-
-    /// Reorgs strictly deeper than `migration_depth` would un-migrate a block
-    /// that the previous tick committed to the block index. The gate must
-    /// surface a typed error so the caller can trigger controlled shutdown
-    /// rather than silently corrupting the on-disk index.
-    #[rstest]
-    #[case::just_over_boundary(6, 5)]
-    #[case::well_over_boundary(20, 5)]
-    #[case::large_reorg_small_window(100, 10)]
-    fn validate_reorg_within_migration_depth_returns_err_when_exceeds(
-        #[case] old_fork_len: usize,
-        #[case] migration_depth: u32,
-    ) {
-        let fork_height = 12345_u64;
-        let err = validate_reorg_within_migration_depth(old_fork_len, migration_depth, fork_height)
-            .expect_err("reorg deeper than migration depth must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("reorg depth"),
-            "error must mention reorg depth; got: {msg}"
-        );
-        assert!(
-            msg.contains(&format!("({old_fork_len})")),
-            "error must include the offending depth value; got: {msg}"
-        );
-        assert!(
-            msg.contains(&format!("({migration_depth})")),
-            "error must include the migration depth value; got: {msg}"
-        );
-        assert!(
-            msg.contains(&fork_height.to_string()),
-            "error must include the fork height; got: {msg}"
-        );
-    }
-
-    /// `usize::MAX` reorg lengths must clamp to `u32::MAX` rather than wrap;
-    /// the gate should still fire and the error message must surface.
-    #[test]
-    fn validate_reorg_within_migration_depth_clamps_oversized_lengths() {
-        let err = validate_reorg_within_migration_depth(usize::MAX, 5, 0)
-            .expect_err("usize::MAX must be treated as exceeding migration depth");
-        assert!(err.to_string().contains("reorg depth"));
     }
 
     /// A reorg whose fork point stays within the post-prune cache window
@@ -3540,6 +3835,580 @@ mod tests {
         assert!(
             third.is_none(),
             "duplicate Valid for already-recovered hash must not double-count"
+        );
+    }
+
+    fn block_hashes(blocks: &[Arc<SealedBlock>]) -> Vec<BlockHash> {
+        blocks
+            .iter()
+            .map(|block| block.header().block_hash)
+            .collect()
+    }
+
+    /// The validated block extends the tip while a heavier fork from below the tip waits
+    /// for validation. The tip moves without abandoning a block, so no `ReorgEvent`.
+    #[tokio::test]
+    async fn tip_extension_with_pending_heavier_fork_is_not_a_reorg() {
+        let mut h = DiscardHarness::new();
+        let fork_choice_updates = h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (canonical tip)
+        //         -> pending_fork_start -> pending_fork_max (heaviest, not validated)
+        // old_tip -> new_tip (validated now)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let pending_fork_start = h.add_child_block(&genesis, 5_050, true);
+        let _pending_fork_max = h.add_child_block(&pending_fork_start, 5_300, false);
+        let new_tip = h.add_child_block(&old_tip, 5_200, true);
+
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+
+        assert_eq!(
+            h.tip(),
+            new_tip.block_hash,
+            "the tip moves to the new block"
+        );
+        let event = h.reorg_rx.try_recv();
+        assert!(
+            event.is_err(),
+            "a tip extension abandons no block and must not broadcast a ReorgEvent, got {:?}",
+            event.map(|event| block_hashes(&event.old_fork))
+        );
+        h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
+    }
+
+    /// The validated block is on a sibling fork of the tip, lighter than a pending fork
+    /// that extends the tip. The tip moves to the sibling fork and abandons the old tip,
+    /// so a `ReorgEvent` must report the old tip as orphaned.
+    #[tokio::test]
+    async fn tip_move_to_sibling_fork_below_pending_max_is_a_reorg() {
+        let mut h = DiscardHarness::new();
+        let fork_choice_updates = h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (canonical tip) -> pending_start -> pending_max (heaviest)
+        //         -> new_tip (validated now, heavier than old_tip)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let pending_start = h.add_child_block(&old_tip, 5_200, true);
+        let _pending_max = h.add_child_block(&pending_start, 5_400, false);
+        let new_tip = h.add_child_block(&genesis, 5_150, true);
+
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+
+        assert_eq!(
+            h.tip(),
+            new_tip.block_hash,
+            "the tip moves to the sibling fork"
+        );
+        let event = h
+            .reorg_rx
+            .try_recv()
+            .expect("a tip move that abandons the old tip must broadcast a ReorgEvent");
+        assert_eq!(block_hashes(&event.old_fork), vec![old_tip.block_hash]);
+        assert_eq!(block_hashes(&event.new_fork), vec![new_tip.block_hash]);
+        assert_eq!(event.fork_parent.block_hash, genesis.block_hash);
+        assert_eq!(event.new_tip, new_tip.block_hash);
+        h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
+    }
+
+    /// The tip moves two blocks at once: an exact cumulative difficulty tie with a
+    /// pending fork kept the tip when `first_new_block` was validated, and its child
+    /// is validated now. The tip move abandons no block, so no `ReorgEvent`, but both
+    /// new blocks join the canonical chain: each one is confirmed, and the epoch block
+    /// among them is detected.
+    #[tokio::test]
+    async fn tip_extension_by_two_blocks_confirms_each_new_block() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().epoch.num_blocks_in_epoch = 2;
+        });
+        let fork_choice_updates = h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (canonical tip) -> first_new_block (epoch block) -> new_tip
+        //         -> pending_fork_start -> pending_fork_max (heaviest, not validated)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let pending_fork_start = h.add_child_block(&genesis, 5_200, true);
+        let first_new_block = h.add_child_block(&old_tip, 5_200, true);
+        // Epoch block detection maps the epoch snapshot's storage modules, which needs
+        // a storage submodule config.
+        h.inner
+            .cache
+            .write()
+            .expect("cache lock for epoch snapshot")
+            .blocks
+            .get_mut(&first_new_block.block_hash)
+            .expect("first new block in cache")
+            .epoch_snapshot = Arc::new(irys_domain::EpochSnapshot {
+            storage_submodules_config: Some(irys_config::StorageSubmodulesConfig {
+                is_using_hardcoded_paths: false,
+                submodule_paths: vec![],
+            }),
+            ..Default::default()
+        });
+        h.inner
+            .on_block_validation_finished(first_new_block.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(
+            h.tip(),
+            old_tip.block_hash,
+            "a tie with the max cumulative difficulty block keeps the tip"
+        );
+
+        let _pending_fork_max = h.add_child_block(&pending_fork_start, 5_400, false);
+        let new_tip = h.add_child_block(&first_new_block, 5_300, true);
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+
+        assert_eq!(
+            h.tip(),
+            new_tip.block_hash,
+            "the tip moves to the new block"
+        );
+        let event = h.reorg_rx.try_recv();
+        assert!(
+            event.is_err(),
+            "a tip extension abandons no block and must not broadcast a ReorgEvent, got {:?}",
+            event.map(|event| block_hashes(&event.old_fork))
+        );
+
+        let mut confirmed = vec![];
+        while let Ok(message) = h.mempool_rx.try_recv() {
+            if let (MempoolServiceMessage::BlockConfirmed(block), _span) = message.into_parts() {
+                confirmed.push(block.header().block_hash);
+            }
+        }
+        assert_eq!(
+            confirmed,
+            vec![first_new_block.block_hash, new_tip.block_hash],
+            "each new canonical block is confirmed, oldest first"
+        );
+
+        let mut epoch_heights = vec![];
+        while let Ok(message) = h.storage_modules_rx.try_recv() {
+            let (
+                StorageModuleServiceMessage::PartitionAssignmentsUpdated { update_height, .. },
+                _span,
+            ) = message.into_parts()
+            else {
+                panic!("block tree sends only partition assignment updates");
+            };
+            epoch_heights.push(update_height);
+        }
+        assert_eq!(
+            epoch_heights,
+            vec![first_new_block.height],
+            "the epoch block among the new canonical blocks is detected"
+        );
+        h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
+    }
+
+    /// A tip extension whose fork point is below the post-prune cache window aborts
+    /// before prune, as a deep reorg does: prune would evict the oldest new block before
+    /// it is confirmed. With `block_tree_depth = 2`, a two-block extension is one block
+    /// too long.
+    #[tokio::test]
+    async fn tip_extension_past_cache_window_aborts_before_prune() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().block_tree_depth = 2;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (canonical tip) -> first_new_block -> new_tip
+        //         -> pending_fork_start (ties first_new_block, added first)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let _pending_fork_start = h.add_child_block(&genesis, 5_200, true);
+        let first_new_block = h.add_child_block(&old_tip, 5_200, true);
+        h.inner
+            .on_block_validation_finished(first_new_block.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(
+            h.tip(),
+            old_tip.block_hash,
+            "a tie with the max cumulative difficulty block keeps the tip"
+        );
+
+        let new_tip = h.add_child_block(&first_new_block, 5_300, true);
+        let err = h
+            .inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect_err("a tip extension past the cache window must abort");
+        assert!(
+            err.to_string().contains("deeper than cache window"),
+            "error must name the cache-window violation; got: {err}"
+        );
+
+        let cache = h.inner.cache.read().expect("cache lock after abort");
+        assert!(
+            cache.get_block(&first_new_block.block_hash).is_some(),
+            "the abort happens before prune evicts the oldest new block"
+        );
+        assert_eq!(
+            cache.tip, old_tip.block_hash,
+            "the abort happens before the tip moves"
+        );
+        drop(cache);
+        while let Ok(message) = h.mempool_rx.try_recv() {
+            let (message, _span) = message.into_parts();
+            assert!(
+                !matches!(message, MempoolServiceMessage::BlockConfirmed(_)),
+                "no block is confirmed when the tip change aborts"
+            );
+        }
+        assert!(
+            h.reorg_rx.try_recv().is_err(),
+            "no ReorgEvent is sent when the tip change aborts"
+        );
+    }
+
+    /// Two children of the tip have the same cumulative difficulty. The child added
+    /// first is the max block, so the other child keeps the tip when it is validated.
+    /// When the max block is invalid, the validated child is the heaviest valid block.
+    /// It must become the tip and be confirmed, so that the block producer can build
+    /// on the max block.
+    #[tokio::test]
+    async fn invalid_max_block_after_refused_tie_moves_tip_to_valid_sibling() {
+        let mut h = DiscardHarness::new();
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+
+        // genesis -> old_tip (canonical tip) -> invalid_max_block (added first)
+        //                                    -> valid_sibling (same cumulative difficulty)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let invalid_max_block = h.add_child_block(&old_tip, 5_200, true);
+        let valid_sibling = h.add_child_block(&old_tip, 5_200, true);
+        h.inner
+            .on_block_validation_finished(valid_sibling.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(
+            h.tip(),
+            old_tip.block_hash,
+            "a tie with the max cumulative difficulty block keeps the tip"
+        );
+
+        let invalid_result: ValidationResult =
+            crate::block_validation::ValidationError::ShadowTransactionInvalid("bad".into()).into();
+        h.inner
+            .on_block_validation_finished(invalid_max_block.block_hash, invalid_result)
+            .await
+            .expect("validation result handled");
+
+        let cache = h.inner.cache.read().expect("cache lock after discard");
+        assert!(cache.get_block(&invalid_max_block.block_hash).is_none());
+        assert_eq!(
+            cache.get_max_cumulative_difficulty_block().1,
+            valid_sibling.block_hash,
+            "the validated sibling is the max block"
+        );
+        assert_eq!(
+            cache.tip, valid_sibling.block_hash,
+            "the heaviest valid block becomes the tip"
+        );
+        assert!(
+            cache.can_be_built_upon(&valid_sibling.block_hash),
+            "the block producer can build on the max block"
+        );
+        drop(cache);
+        assert_eq!(
+            h.take_confirmed_blocks(),
+            vec![valid_sibling.block_hash],
+            "the new tip is confirmed"
+        );
+
+        // The discard event goes out before the tip moves, so a last event after the
+        // move wakes the services that wait for a block they can build on.
+        let last_event = h
+            .collect_broadcasts()
+            .pop()
+            .expect("block state events are broadcast");
+        assert_eq!(last_event.block_hash, valid_sibling.block_hash);
+        assert!(!last_event.discarded);
+        assert_eq!(last_event.state, ChainState::Onchain);
+    }
+
+    /// Same start as `invalid_max_block_after_refused_tie_moves_tip_to_valid_sibling`,
+    /// with a third tied child added after the max block and before the validated
+    /// sibling. When the max block is invalid, the pending tie is the max block, so the
+    /// discard leaves the tip, sends no fork-choice update and confirms no block.
+    #[tokio::test]
+    async fn discard_with_pending_max_block_keeps_tip() {
+        let mut h = DiscardHarness::new();
+        let fork_choice_updates = h.answer_fork_choice_updates();
+        h.index_genesis();
+
+        // genesis -> old_tip (canonical tip) -> invalid_max_block (added first)
+        //                                    -> pending_tie (added second, not validated)
+        //                                    -> valid_sibling (validated)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let invalid_max_block = h.add_child_block(&old_tip, 5_200, true);
+        let pending_tie = h.add_child_block(&old_tip, 5_200, true);
+        let valid_sibling = h.add_child_block(&old_tip, 5_200, true);
+        h.inner
+            .on_block_validation_finished(valid_sibling.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+
+        let invalid_result: ValidationResult =
+            crate::block_validation::ValidationError::ShadowTransactionInvalid("bad".into()).into();
+        h.inner
+            .on_block_validation_finished(invalid_max_block.block_hash, invalid_result)
+            .await
+            .expect("validation result handled");
+
+        let cache = h.inner.cache.read().expect("cache lock after discard");
+        assert_eq!(
+            cache.get_max_cumulative_difficulty_block().1,
+            pending_tie.block_hash,
+            "the pending tie is the max block"
+        );
+        assert_eq!(cache.tip, old_tip.block_hash, "the tip does not move");
+        drop(cache);
+        assert!(
+            fork_choice_updates
+                .lock()
+                .expect("fork-choice recorder")
+                .is_empty(),
+            "no fork-choice update is sent"
+        );
+        assert!(
+            h.take_confirmed_blocks().is_empty(),
+            "no block is confirmed"
+        );
+        assert!(h.reorg_rx.try_recv().is_err(), "no ReorgEvent is sent");
+    }
+
+    /// Same start as `invalid_max_block_after_refused_tie_moves_tip_to_valid_sibling`.
+    /// A child of the validated sibling that is validated after the discard moves the
+    /// tip by two blocks, and both new blocks are confirmed.
+    #[tokio::test]
+    async fn child_of_valid_sibling_moves_tip_after_invalid_max_block() {
+        let mut h = DiscardHarness::new();
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+
+        // genesis -> old_tip (canonical tip) -> invalid_max_block (added first)
+        //                                    -> valid_sibling -> new_tip
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let invalid_max_block = h.add_child_block(&old_tip, 5_200, true);
+        let valid_sibling = h.add_child_block(&old_tip, 5_200, true);
+        h.inner
+            .on_block_validation_finished(valid_sibling.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        let invalid_result: ValidationResult =
+            crate::block_validation::ValidationError::ShadowTransactionInvalid("bad".into()).into();
+        h.inner
+            .on_block_validation_finished(invalid_max_block.block_hash, invalid_result)
+            .await
+            .expect("validation result handled");
+
+        let new_tip = h
+            .add_validated_chain(&valid_sibling, &[5_300])
+            .await
+            .remove(0);
+
+        assert_eq!(
+            h.tip(),
+            new_tip.block_hash,
+            "the tip moves to the new block"
+        );
+        assert!(
+            h.inner
+                .cache
+                .read()
+                .expect("cache lock for tip state")
+                .can_be_built_upon(&new_tip.block_hash),
+            "the block producer can build on the new tip"
+        );
+        let event = h.reorg_rx.try_recv();
+        assert!(
+            event.is_err(),
+            "a tip extension abandons no block and must not broadcast a ReorgEvent, got {:?}",
+            event.map(|event| block_hashes(&event.old_fork))
+        );
+        assert_eq!(
+            h.take_confirmed_blocks(),
+            vec![valid_sibling.block_hash, new_tip.block_hash],
+            "each new canonical block is confirmed, oldest first"
+        );
+    }
+
+    /// A reorg through the service with `block_tree_depth = 3`. The post-prune cache
+    /// window starts at `new_tip.height - (block_tree_depth - 1)`. A fork point at the
+    /// start of the window completes the reorg. A fork point one block below it aborts
+    /// before prune, so that no fork block is evicted and nothing is sent downstream.
+    #[rstest]
+    #[case::fork_point_at_window_start(2, true)]
+    #[case::fork_point_one_below_window(3, false)]
+    #[tokio::test]
+    async fn reorg_fork_point_at_cache_window_boundary(
+        #[case] new_fork_len: usize,
+        #[case] reorg_completes: bool,
+    ) {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().block_tree_depth = 3;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> fork_point (height 1) -> old_tip (canonical tip)
+        //                                  -> new fork, new_fork_len blocks
+        let old_chain = h.add_validated_chain(&genesis, &[5_100, 5_200]).await;
+        let (fork_point, old_tip) = (&old_chain[0], &old_chain[1]);
+        h.take_confirmed_blocks();
+
+        // Each new block is lighter than the old tip, except the last one.
+        let mut new_fork = h
+            .add_validated_chain(fork_point, &vec![5_150; new_fork_len - 1])
+            .await;
+        new_fork.push(h.add_child_block(new_fork.last().expect("new fork block"), 5_300, true));
+        let new_tip = new_fork.last().expect("new tip").clone();
+        let new_fork_hashes: Vec<BlockHash> =
+            new_fork.iter().map(|block| block.block_hash).collect();
+        let result = h
+            .inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await;
+
+        if reorg_completes {
+            result.expect("a fork point at the start of the cache window must not abort");
+            assert_eq!(h.tip(), new_tip.block_hash, "the tip moves to the new fork");
+            let event = h
+                .reorg_rx
+                .try_recv()
+                .expect("a tip move that abandons the old tip must broadcast a ReorgEvent");
+            assert_eq!(block_hashes(&event.old_fork), vec![old_tip.block_hash]);
+            assert_eq!(block_hashes(&event.new_fork), new_fork_hashes);
+            assert_eq!(event.fork_parent.block_hash, fork_point.block_hash);
+            assert_eq!(
+                h.take_confirmed_blocks(),
+                new_fork_hashes,
+                "each new canonical block is confirmed, oldest first"
+            );
+        } else {
+            let err = result.expect_err("a fork point below the cache window must abort");
+            assert!(
+                err.to_string().contains("deeper than cache window"),
+                "error must name the cache-window violation; got: {err}"
+            );
+            let cache = h.inner.cache.read().expect("cache lock after abort");
+            for block in new_fork.iter().chain(&old_chain) {
+                assert!(
+                    cache.get_block(&block.block_hash).is_some(),
+                    "the abort happens before prune evicts block {}",
+                    block.height
+                );
+            }
+            assert_eq!(
+                cache.tip, old_tip.block_hash,
+                "the abort happens before the tip moves"
+            );
+            drop(cache);
+            assert!(
+                h.reorg_rx.try_recv().is_err(),
+                "no ReorgEvent is sent when the tip change aborts"
+            );
+            assert_eq!(
+                h.take_confirmed_blocks(),
+                Vec::<BlockHash>::new(),
+                "no block is confirmed when the tip change aborts"
+            );
+        }
+    }
+
+    /// A reorg through the service with `block_migration_depth = 2`. Migration keeps
+    /// the block index `block_migration_depth` blocks behind the tip, so only a reorg
+    /// deeper than `block_migration_depth` abandons a migrated block. That reorg rolls
+    /// the block index back to the fork point before the new fork is migrated. In each
+    /// case, after the reorg the block index holds only blocks of the new canonical
+    /// chain.
+    #[rstest]
+    #[case::depth_equals_migration_depth(2)]
+    #[case::depth_one_past_migration_depth(3)]
+    #[tokio::test]
+    async fn reorg_around_migration_depth_keeps_block_index_canonical(#[case] reorg_depth: usize) {
+        const MIGRATION_DEPTH: usize = 2;
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let consensus = c.consensus.get_mut();
+            consensus.block_migration_depth = MIGRATION_DEPTH as u32;
+            consensus.block_tree_depth = 10;
+        });
+        // The block index roll back reads the storage modules; this node has none.
+        h.inner
+            .block_migration_service
+            .set_storage_modules_guard(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![]))));
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_1 -> old_2 -> old_3 -> old_4 (canonical tip)
+        let old_chain = h
+            .add_validated_chain(&genesis, &[5_100, 5_200, 5_300, 5_400])
+            .await;
+        h.take_confirmed_blocks();
+        let mut canonical: Vec<BlockHash> = std::iter::once(&genesis)
+            .chain(&old_chain)
+            .map(|block| block.block_hash)
+            .collect();
+        assert_eq!(
+            h.indexed_block_hashes(),
+            canonical[..=old_chain.len() - MIGRATION_DEPTH],
+            "migration keeps the block index block_migration_depth blocks behind the tip"
+        );
+
+        // The new fork starts reorg_depth blocks below the old tip and ends one block
+        // above it. Each new block is lighter than the old tip, except the last one.
+        let fork_height = old_chain.len() - reorg_depth;
+        let fork_point = if fork_height == 0 {
+            &genesis
+        } else {
+            &old_chain[fork_height - 1]
+        };
+        let mut new_fork = h
+            .add_validated_chain(fork_point, &vec![5_150; reorg_depth])
+            .await;
+        new_fork.push(h.add_child_block(new_fork.last().expect("new fork block"), 5_500, true));
+        let new_tip = new_fork.last().expect("new tip").clone();
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("a reorg within the cache window completes");
+
+        let event = h
+            .reorg_rx
+            .try_recv()
+            .expect("a tip move that abandons the old tip must broadcast a ReorgEvent");
+        assert_eq!(
+            block_hashes(&event.old_fork),
+            canonical[fork_height + 1..],
+            "the old fork is reorg_depth blocks long"
+        );
+        canonical.truncate(fork_height + 1);
+        canonical.extend(new_fork.iter().map(|block| block.block_hash));
+        assert_eq!(block_hashes(&event.new_fork), canonical[fork_height + 1..]);
+
+        let new_migration_height = new_tip.height as usize - MIGRATION_DEPTH;
+        assert_eq!(
+            h.indexed_block_hashes(),
+            canonical[..=new_migration_height],
+            "the block index holds only blocks of the new canonical chain"
         );
     }
 

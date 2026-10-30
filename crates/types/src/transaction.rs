@@ -58,6 +58,9 @@ pub enum CommitmentValidationError {
     InvalidUnpledgeCountZero,
     #[error("Signer address is not allowed to stake/pledge")]
     ForbiddenSigner,
+    /// Stake from a signer that already has an active or pending stake
+    #[error("Signer already has an active or pending stake")]
+    AlreadyStaked,
     /// Invalid update reward address value (must be zero)
     #[error("Invalid update reward address value: {provided} (must be 0)")]
     InvalidUpdateRewardAddressValue { provided: U256 },

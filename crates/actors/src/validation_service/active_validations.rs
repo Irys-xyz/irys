@@ -744,21 +744,28 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
         BlockPriorityMeta::new(block, state)
     }
 
-    /// Check if block extends canonical tip
+    /// Check if the block extends the validated prefix of the heaviest fork
+    /// ([`BlockTree::get_max_chain_validated_head`]).
+    ///
+    /// Weight comes before canonicity: the max cumulative difficulty block is the target
+    /// for the next tip, so the blocks that let the tip move to it validate first. A block
+    /// that extends only the tip, while a heavier fork waits for validation, is a `Fork`.
+    /// When the max block is the tip, the validated head is the tip.
     #[instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
     fn is_canonical_extension(&self, block_hash: &BlockHash, block_tree: &BlockTree) -> bool {
-        let (canonical_chain, _) = block_tree.get_canonical_chain();
-        let canonical_tip = canonical_chain.last().unwrap().block_hash();
+        let Some(validated_head) = block_tree.get_max_chain_validated_head() else {
+            return false;
+        };
 
         let mut current = *block_hash;
         while let Some((block, _)) = block_tree.get_block_and_status(&current) {
-            if current == canonical_tip {
+            if current == validated_head {
                 return true;
             }
             current = block.previous_block_hash;
 
             if let Some((_, ChainState::Onchain)) = block_tree.get_block_and_status(&current) {
-                return current == canonical_tip;
+                return current == validated_head;
             }
         }
         false

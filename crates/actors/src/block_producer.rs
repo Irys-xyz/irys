@@ -187,6 +187,12 @@ fn assemble_poa(
     Ok(Some((poa, poa_chunk_hash)))
 }
 
+/// True when the PoA has a tx path or a data path but no ledger id: a data PoA
+/// that block validation rejects (`PoALedgerIdMissing`).
+fn poa_has_paths_without_ledger(poa: &PoaData) -> bool {
+    (poa.tx_path.is_some() || poa.data_path.is_some()) && poa.ledger_id.is_none()
+}
+
 /// Classifies PayloadBuilderError into retryable or recoverable categories
 fn classify_payload_error(err: PayloadBuilderError) -> BlockProductionError {
     match err {
@@ -314,6 +320,7 @@ fn own_block_rejection_cause(err: &PreValidationError) -> OwnBlockRejectionCause
         | PreValidationError::MissingTransactions(_)
         | PreValidationError::OraclePriceInvalid
         | PreValidationError::PoAChunkMissing
+        | PreValidationError::PoALedgerIdMissing
         | PreValidationError::PoALedgerMismatch { .. }
         | PreValidationError::PoAPartitionNotOwned { .. }
         | PreValidationError::PreviousCumulativeDifficultyMismatch { .. }
@@ -838,6 +845,21 @@ pub trait BlockProdStrategy {
                 .map_err(|error| eyre!("tx path assemble task failed: {error}"))??
         };
         self.note_tx_path_streak(built.is_some());
+        if let Some((poa, _)) = &built
+            && poa_has_paths_without_ledger(poa)
+        {
+            // Block validation rejects a PoA with paths and no ledger id. The solution
+            // has data paths, but the parent epoch snapshot gives its partition no data
+            // ledger: the partition left its ledger at an epoch boundary after the
+            // solution was mined. A data PoA cannot be turned into a capacity PoA, so
+            // drop the solution.
+            warn!(
+                solution.hash = %solution.solution_hash,
+                partition.hash = %solution.partition_hash,
+                "dropping solution: its partition has no data ledger in the parent epoch snapshot"
+            );
+            return Ok(None);
+        }
         Ok(built)
     }
 
@@ -1408,7 +1430,7 @@ pub trait BlockProdStrategy {
             &reward_address,
             &block_reward.miner.amount,
             block_reward.treasury.amount,
-            prev_block_header,
+            timestamp_ms.to_secs(),
             &solution_hash,
             &self.inner().config.consensus,
             &mempool.commitment_txs_to_bill,
@@ -2684,7 +2706,7 @@ mod shadow_tx_presence_tests {
 
 #[cfg(test)]
 mod tx_path_poa_tests {
-    use super::assemble_poa;
+    use super::{assemble_poa, poa_has_paths_without_ledger};
     use irys_types::{
         H256,
         block_production::{SolutionContext, TxPathJob, TxPathSource},
@@ -2730,6 +2752,37 @@ mod tx_path_poa_tests {
         };
         let (poa, _) = assemble_poa(&solution, None).expect("ok").expect("poa");
         assert_eq!(poa.tx_path.expect("tx path").0, bytes);
+    }
+
+    /// A data solution whose partition has no ledger in the parent epoch snapshot
+    /// gives a PoA that block validation rejects, so the producer drops it. A
+    /// capacity PoA (no paths) and a data PoA with its ledger id are kept.
+    #[test]
+    fn data_poa_without_ledger_id_is_detected() {
+        let data_solution = SolutionContext {
+            tx_path: TxPathSource::Stored(Some(vec![1])),
+            data_path: Some(vec![2]),
+            chunk: vec![3],
+            ..SolutionContext::default()
+        };
+        let (no_ledger, _) = assemble_poa(&data_solution, None)
+            .expect("ok")
+            .expect("poa");
+        assert!(poa_has_paths_without_ledger(&no_ledger));
+        let (with_ledger, _) = assemble_poa(&data_solution, Some(1))
+            .expect("ok")
+            .expect("poa");
+        assert!(!poa_has_paths_without_ledger(&with_ledger));
+
+        let capacity_solution = SolutionContext {
+            tx_path: TxPathSource::Stored(None),
+            chunk: vec![3],
+            ..SolutionContext::default()
+        };
+        let (capacity, _) = assemble_poa(&capacity_solution, None)
+            .expect("ok")
+            .expect("poa");
+        assert!(!poa_has_paths_without_ledger(&capacity));
     }
 }
 

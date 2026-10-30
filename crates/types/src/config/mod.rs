@@ -149,6 +149,13 @@ impl Config {
             &self.consensus.block_tree_depth,
             &self.consensus.block_migration_depth
         );
+        // A tip move by one block keeps the old tip as the fork point, and the cache
+        // window check rejects a fork point that the prune would evict.
+        ensure!(
+            self.consensus.block_tree_depth >= 2,
+            "Block tree depth ({}) must be at least 2: the block-tree cache must keep the old tip when the tip moves by one block",
+            &self.consensus.block_tree_depth
+        );
 
         // Zero leaves nothing to confirm a block against: `lookup_via_block_tree`
         // asserts a positive depth, and it also zeroes the reset-window floor
@@ -2279,6 +2286,13 @@ mod validate_tests {
             c.block_migration_depth = 2;
         },
         "Block tree depth"
+    )]
+    #[case::tree_depth_below_two(
+        |c: &mut ConsensusConfig| {
+            c.block_migration_depth = 0;
+            c.block_tree_depth = 1;
+        },
+        "must be at least 2"
     )]
     #[case::anchor_expiry_less_than_migration_depth(
         |c: &mut ConsensusConfig| {

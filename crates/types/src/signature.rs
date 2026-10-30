@@ -36,7 +36,14 @@ impl IrysSignature {
             .is_ok_and(|recovered_address| expected_address == recovered_address)
     }
 
+    /// Requires the canonical low-s form (EIP-2). alloy's
+    /// `recover_address_from_prehash` normalizes s before it verifies, so it
+    /// accepts both forms.
     pub fn recover_signer(&self, prehash: [u8; 32]) -> eyre::Result<IrysAddress> {
+        eyre::ensure!(
+            self.0.normalize_s().is_none(),
+            "signature s value is above secp256k1n / 2"
+        );
         Ok(self.0.recover_address_from_prehash(&prehash.into())?.into())
     }
 
@@ -255,6 +262,44 @@ mod tests {
             "mutating prefix_size must invalidate the signature"
         );
 
+        Ok(())
+    }
+
+    /// The high-s form `(r, n - s, !v)` of a valid signature must be rejected.
+    #[test]
+    fn high_s_signature_is_rejected() -> eyre::Result<()> {
+        use crate::IrysTransactionCommon as _;
+        use alloy_primitives::{U256, keccak256};
+
+        const SECP256K1N: U256 = alloy_primitives::uint!(
+            0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141_U256
+        );
+
+        let testing_config = ConsensusConfig::testing();
+        let irys_signer = IrysSigner::random_signer(&testing_config);
+        let tx = irys_signer.create_transaction(vec![7_u8; 1024], H256::zero())?;
+        let original = irys_signer.sign_transaction(tx)?.header;
+        assert!(original.is_signature_valid());
+
+        let low_s = original.signature.reth_signature();
+        let high_s = Signature::new(low_s.r(), SECP256K1N - low_s.s(), !low_s.v());
+        let mut high_s_tx = original.clone();
+        high_s_tx.signature = IrysSignature::new(high_s);
+        high_s_tx.id = H256::from(keccak256(high_s.as_bytes()).0);
+
+        // alloy's recovery normalizes s, so it accepts the high-s form
+        let alloy_signer: IrysAddress = high_s
+            .recover_address_from_prehash(&high_s_tx.signature_hash().into())?
+            .into();
+        assert_eq!(alloy_signer, original.signer);
+
+        assert!(
+            high_s_tx
+                .signature
+                .recover_signer(high_s_tx.signature_hash())
+                .is_err()
+        );
+        assert!(!high_s_tx.is_signature_valid());
         Ok(())
     }
 

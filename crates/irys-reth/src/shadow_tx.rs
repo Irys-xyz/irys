@@ -240,7 +240,8 @@ impl ShadowTransaction {
     }
 
     /// Decode a shadow transaction from a buffer that contains the
-    /// [`IRYS_SHADOW_EXEC`] prefix followed by the borsh-encoded transaction.
+    /// [`IRYS_SHADOW_EXEC`] prefix followed by the borsh-encoded transaction
+    /// and no other bytes.
     #[expect(
         clippy::indexing_slicing,
         reason = "prefix length checked before slicing"
@@ -254,7 +255,17 @@ impl ShadowTransaction {
             ));
         }
         *buf = &buf[IRYS_SHADOW_EXEC.len()..];
-        <Self as BorshDeserialize>::deserialize_reader(buf)
+        let shadow_tx = <Self as BorshDeserialize>::deserialize_reader(buf)?;
+        // Validators compare decoded packets, not raw input. Each shadow tx must
+        // have exactly one valid input encoding, so a producer cannot change the
+        // tx input (and its hash) without changing the decoded packet.
+        if !buf.is_empty() {
+            return Err(borsh::io::Error::new(
+                borsh::io::ErrorKind::InvalidData,
+                "Trailing bytes after shadow tx payload",
+            ));
+        }
+        Ok(shadow_tx)
     }
 }
 
@@ -1052,5 +1063,104 @@ mod tests {
 
         let result = ShadowTransaction::deserialize_reader(&mut &buf[..]);
         assert!(result.is_err(), "should fail with missing solution hash");
+    }
+
+    /// One shadow tx per `TransactionPacket` variant.
+    fn one_shadow_tx_per_variant() -> Vec<ShadowTransaction> {
+        let increment = BalanceIncrement {
+            amount: U256::from(7_u64),
+            target: Address::repeat_byte(0x11),
+            irys_ref: FixedBytes::repeat_byte(0x22),
+        };
+        let decrement = BalanceDecrement {
+            amount: U256::from(9_u64),
+            target: Address::repeat_byte(0x33),
+            irys_ref: FixedBytes::repeat_byte(0x44),
+        };
+        let packets = vec![
+            TransactionPacket::UnstakeDebit(UnstakeDebit {
+                target: Address::repeat_byte(0x55),
+                irys_ref: FixedBytes::repeat_byte(0x66),
+            }),
+            TransactionPacket::BlockReward(BlockRewardIncrement {
+                amount: U256::from(5_u64),
+            }),
+            TransactionPacket::Stake(decrement.clone()),
+            TransactionPacket::StorageFees(decrement.clone()),
+            TransactionPacket::Pledge(decrement),
+            TransactionPacket::Unpledge(UnpledgeDebit {
+                target: Address::repeat_byte(0x77),
+                irys_ref: FixedBytes::repeat_byte(0x88),
+            }),
+            TransactionPacket::UnpledgeRefund(increment.clone()),
+            TransactionPacket::TermFeeReward(increment.clone()),
+            TransactionPacket::IngressProofReward(increment.clone()),
+            TransactionPacket::PermFeeRefund(increment.clone()),
+            TransactionPacket::UnstakeRefund(increment),
+            TransactionPacket::UpdateRewardAddress(UpdateRewardAddressDebit {
+                target: Address::repeat_byte(0x99),
+                irys_ref: FixedBytes::repeat_byte(0xaa),
+                new_reward_address: Address::repeat_byte(0xbb),
+            }),
+        ];
+        // Compile guard: a new variant needs an arm here and an entry above.
+        for packet in &packets {
+            match packet {
+                TransactionPacket::UnstakeDebit(_)
+                | TransactionPacket::BlockReward(_)
+                | TransactionPacket::Stake(_)
+                | TransactionPacket::StorageFees(_)
+                | TransactionPacket::Pledge(_)
+                | TransactionPacket::Unpledge(_)
+                | TransactionPacket::UnpledgeRefund(_)
+                | TransactionPacket::TermFeeReward(_)
+                | TransactionPacket::IngressProofReward(_)
+                | TransactionPacket::PermFeeRefund(_)
+                | TransactionPacket::UnstakeRefund(_)
+                | TransactionPacket::UpdateRewardAddress(_) => {}
+            }
+        }
+        let distinct_topics: std::collections::BTreeSet<_> =
+            packets.iter().map(TransactionPacket::topic).collect();
+        assert_eq!(
+            distinct_topics.len(),
+            packets.len(),
+            "each variant must appear once"
+        );
+        packets
+            .into_iter()
+            .map(|packet| ShadowTransaction::new_v1(packet, FixedBytes::repeat_byte(0xcc)))
+            .collect()
+    }
+
+    /// The producer builds shadow tx input only with `encode_prefixed_input`.
+    /// For every variant, the Borsh payload after the prefix must be read to its
+    /// last byte, so the trailing-bytes rule cannot reject a block from this producer.
+    #[test]
+    fn encoded_input_has_no_trailing_bytes_for_every_variant() {
+        for tx in one_shadow_tx_per_variant() {
+            let input = encode_prefixed_input(&tx);
+            let mut payload = &input[IRYS_SHADOW_EXEC.len()..];
+            let decoded = ShadowTransaction::deserialize_reader(&mut payload).unwrap();
+            assert_eq!(decoded, tx);
+            assert!(payload.is_empty(), "bytes left after payload for {tx:?}");
+
+            assert_eq!(try_decode_prefixed(&input).unwrap(), tx);
+        }
+    }
+
+    #[test]
+    fn reject_trailing_byte_after_payload() {
+        for tx in one_shadow_tx_per_variant() {
+            let mut input = encode_prefixed_input(&tx).to_vec();
+            input.push(0x00);
+
+            let err = detect_and_decode_from_parts(Some(*SHADOW_TX_DESTINATION_ADDR), &input)
+                .expect_err("trailing byte must be rejected");
+            assert!(
+                matches!(&err, ShadowTxError::Decode(e) if e.kind() == borsh::io::ErrorKind::InvalidData),
+                "unexpected error: {err:?}"
+            );
+        }
     }
 }

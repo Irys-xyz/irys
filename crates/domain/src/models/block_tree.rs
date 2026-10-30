@@ -6,6 +6,7 @@ use irys_types::{
 };
 use reth_db::Database as _;
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::SystemTime,
@@ -133,6 +134,9 @@ pub struct BlockTree {
     // Track max cumulative difficulty
     max_cumulative_difficulty: (U256, BlockHash), // (difficulty, block_hash)
 
+    // `insertion_sequence` for the next block added to the tree
+    next_insertion_sequence: u64,
+
     // Height -> Hash mapping.  The inner container is intentionally
     // `HashSet`: the only reader (`get_hashes_for_height`) is API-server
     // observability and does not feed consensus.  If a consensus-path
@@ -157,6 +161,9 @@ pub struct BlockMetadata {
     pub epoch_snapshot: Arc<EpochSnapshot>,
     pub commitment_snapshot: Arc<CommitmentSnapshot>,
     pub ema_snapshot: Arc<EmaSnapshot>,
+    /// Order in which blocks were first added to the block tree (lower = earlier).
+    /// Blocks loaded at startup all have 0; blocks added after count up from 1.
+    pub insertion_sequence: u64,
 }
 
 /// Represents the `ChainState` of a block, is it Onchain? or a valid fork?
@@ -241,6 +248,7 @@ impl BlockTree {
             epoch_snapshot: dummy_epoch_snapshot(),
             commitment_snapshot,
             ema_snapshot,
+            insertion_sequence: 0,
         };
 
         // Initialize all indices
@@ -253,6 +261,7 @@ impl BlockTree {
             solutions,
             tip: block_hash,
             max_cumulative_difficulty: (cumulative_diff, block_hash),
+            next_insertion_sequence: 1,
             height_index,
             longest_chain_cache,
             consensus_config,
@@ -366,6 +375,7 @@ impl BlockTree {
             solutions: BTreeMap::new(),
             tip: start_block_hash,
             max_cumulative_difficulty: (start_block.cumulative_diff, start_block_hash),
+            next_insertion_sequence: 0,
             height_index: BTreeMap::new(),
             longest_chain_cache: (vec![entry], 0),
             consensus_config: consensus_config.clone(),
@@ -396,6 +406,7 @@ impl BlockTree {
             epoch_snapshot: arc_epoch_snapshot,
             commitment_snapshot: arc_commitment_snapshot.clone(),
             ema_snapshot: ema_snapshot.clone(),
+            insertion_sequence: 0,
         };
 
         block_tree_cache
@@ -488,6 +499,13 @@ impl BlockTree {
                 .unwrap();
         }
 
+        // Blocks loaded from the block index share sequence 0: they load in height order,
+        // which says nothing about the order this node first added them to a block tree.
+        for entry in block_tree_cache.blocks.values_mut() {
+            entry.insertion_sequence = 0;
+        }
+        block_tree_cache.next_insertion_sequence = 1;
+
         let tip_hash = {
             let block_index = block_index_guard.read();
             block_index.get_latest_item().unwrap().block_hash
@@ -562,6 +580,16 @@ impl BlockTree {
             self.max_cumulative_difficulty = (block.header().cumulative_diff, hash);
         }
 
+        // A block added again keeps the sequence of its first add.
+        let insertion_sequence = match self.blocks.get(&hash) {
+            Some(existing) => existing.insertion_sequence,
+            None => {
+                let sequence = self.next_insertion_sequence;
+                self.next_insertion_sequence += 1;
+                sequence
+            }
+        };
+
         self.blocks.insert(
             hash,
             BlockMetadata {
@@ -572,6 +600,7 @@ impl BlockTree {
                 epoch_snapshot,
                 commitment_snapshot,
                 ema_snapshot,
+                insertion_sequence,
             },
         );
 
@@ -690,17 +719,30 @@ impl BlockTree {
     /// recorded on its `delete_block` log line). Descendants are removed with
     /// [`RemovalReason::RecursiveDescendantOf`] so post-hoc log reading can
     /// tell the original target from the cascaded children.
+    ///
+    /// Returns an error, and changes nothing, for an `Onchain` block. An `Onchain` block
+    /// is the tip or an ancestor of it, and the canonical chain is the tip's ancestry:
+    /// removing one leaves the canonical chain empty. `mark_tip` sets every ancestor of
+    /// the tip to `Onchain`, so a block that is not `Onchain` has no `Onchain`
+    /// descendant, and the check on the target covers the whole subtree. `prune` removes
+    /// old `Onchain` blocks with `delete_block`, not with this function.
     pub fn remove_block(
         &mut self,
         block_hash: &BlockHash,
         reason: RemovalReason,
     ) -> eyre::Result<()> {
-        // Get children before deleting the block
-        let children = self
+        let entry = self
             .blocks
             .get(block_hash)
-            .map(|entry| entry.children.iter().copied().collect::<Vec<_>>())
             .ok_or_else(|| eyre::eyre!("Block not found"))?;
+        if entry.chain_state == ChainState::Onchain {
+            return Err(eyre::eyre!(
+                "cannot remove block {block_hash}: it is Onchain (the tip or an ancestor of the tip)"
+            ));
+        }
+
+        // Get children before deleting the block
+        let children = entry.children.iter().copied().collect::<Vec<_>>();
 
         // Recursively remove all children first
         for child in children {
@@ -711,13 +753,50 @@ impl BlockTree {
         self.delete_block(block_hash, &reason)
     }
 
-    // Helper to find new max difficulty when current max is removed
+    /// Finds the new max difficulty block when the current max is removed.
+    ///
+    /// Among the blocks with the highest cumulative difficulty:
+    /// 1. The block first added to the block tree wins (lowest `insertion_sequence`). This
+    ///    matches the add path, where the max moves only on a strictly greater difficulty.
+    /// 2. On equal sequence (blocks loaded at startup), the block whose fork point with the
+    ///    canonical chain is highest wins: the smallest reorg away from the current tip.
+    /// 3. The block hash orders what is left, so the result does not depend on `HashMap`
+    ///    iteration order. The add paths do not make this case: blocks added after startup get
+    ///    unique sequences, and the startup blocks form one chain, so their difficulties differ.
     fn find_max_difficulty(&self) -> (U256, BlockHash) {
+        let Some(max_diff) = self
+            .blocks
+            .values()
+            .map(|entry| entry.block.header().cumulative_diff)
+            .max()
+        else {
+            return (U256::zero(), BlockHash::default());
+        };
+
         self.blocks
             .iter()
-            .map(|(hash, entry)| (entry.block.header().cumulative_diff, *hash))
-            .max_by_key(|(diff, _)| *diff)
-            .unwrap_or((U256::zero(), BlockHash::default()))
+            .filter(|(_, entry)| entry.block.header().cumulative_diff == max_diff)
+            .min_by_key(|(hash, entry)| {
+                (
+                    entry.insertion_sequence,
+                    Reverse(self.canonical_fork_height(entry)),
+                    **hash,
+                )
+            })
+            .map(|(hash, _)| (max_diff, *hash))
+            .expect("at least one block has the max difficulty")
+    }
+
+    /// Height of the newest `Onchain` block (the ancestry of `tip`) in the ancestry of `entry`,
+    /// `entry` included. `None` when the parent walk leaves the tree first.
+    fn canonical_fork_height(&self, entry: &BlockMetadata) -> Option<u64> {
+        let mut current = entry;
+        while current.chain_state != ChainState::Onchain {
+            current = self
+                .blocks
+                .get(&current.block.header().previous_block_hash)?;
+        }
+        Some(current.block.header().height)
     }
 
     /// Returns the canonical chain as a cached sequence of block entries.
@@ -729,7 +808,9 @@ impl BlockTree {
     ///
     /// ## Canonical Chain Structure
     /// * **First element**: Genesis block or the oldest block within `block_tree_depth`
-    /// * **Last element**: Current chain tip (highest cumulative difficulty)
+    /// * **Last element**: Current chain tip (`tip`, the last fully validated block the
+    ///   tree moved to; not the block with the highest cumulative difficulty, which can
+    ///   still wait for validation)
     /// * **Ordering**: Chronological from oldest to newest block
     ///
     /// ## Returns
@@ -775,13 +856,11 @@ impl BlockTree {
     /// Global step number of the most recent canonical block confirmed past reorg risk —
     /// the deepest block that is both `Onchain` and at least `depth` blocks below the tip.
     /// Used by the VDF reset-boundary gate so the loop never applies a seed pinned by a
-    /// still-forkable block (issue #1447). Reads the cache in place — no chain clone.
+    /// still-forkable block. Reads the cache in place — no chain clone.
     ///
-    /// The chain cache (`.0`) keeps trailing non-`Onchain` head blocks (`Validated` /
-    /// `NotOnchain(ValidBlock)`), counted in `.1`. Those are forkable, so the confirmed step
-    /// must skip them: `Onchain` ⟹ migrated ⟹ at least `block_migration_depth` deep. We skip
-    /// `max(not_onchain_count, depth)` from the tip so the result is confirmed even when
-    /// migration lags during sync or a wide reorg window (where `not_onchain_count > depth`).
+    /// The chain cache (`.0`) is the tip's ancestry; `.1` counts the entries that are not
+    /// `Onchain` (normally zero). We skip `max(not_onchain_count, depth)` from the tip so
+    /// the result is at least `depth` blocks below the tip.
     #[must_use]
     pub fn confirmed_canonical_step(&self, depth: u64) -> u64 {
         let (chain, not_onchain_count) = &self.longest_chain_cache;
@@ -874,6 +953,15 @@ impl BlockTree {
         })
     }
 
+    /// Rebuild the canonical chain: the tip and its ancestors, up to `block_tree_depth`
+    /// blocks. The tip only moves to a fully validated block, so this chain is what the
+    /// node reports as canonical and what the fork-choice head follows. The block with the
+    /// max cumulative difficulty can be on a fork that still waits for validation; it is
+    /// the target for the next tip, not the canonical head.
+    ///
+    /// `mark_tip` sets every block on the tip's ancestry to `Onchain`, so the count of
+    /// blocks that are not `Onchain` is normally zero. It stays in the cache for trees
+    /// that set chain states directly.
     fn update_longest_chain_cache(&mut self) {
         let pairs = {
             self.longest_chain_cache.0.clear();
@@ -881,69 +969,21 @@ impl BlockTree {
         };
         let mut not_onchain_count = 0;
 
-        let mut current = self.max_cumulative_difficulty.1;
+        let mut current = self.tip;
         let mut blocks_to_collect = self.consensus_config.block_tree_depth;
-        debug!(
-            "updating canonical chain cache latest_cache_tip: {}",
-            current
-        );
+        debug!("updating canonical chain cache from tip: {}", current);
 
         while let Some(entry) = self.blocks.get(&current) {
-            match &entry.chain_state {
-                // For blocks awaiting initial validation, restart chain from parent
-                ChainState::NotOnchain(BlockState::Unknown | BlockState::ValidationScheduled) => {
-                    // Reset everything and continue from parent block
-                    pairs.clear();
-                    not_onchain_count = 0;
-                    current = entry.block.header().previous_block_hash;
-                    blocks_to_collect = self.consensus_config.block_tree_depth;
-                    continue;
-                }
-
-                ChainState::Onchain => {
-                    // Include OnChain blocks in pairs
-                    let chain_cache_entry = make_block_tree_entry(Arc::clone(&entry.block));
-                    pairs.push(chain_cache_entry);
-
-                    if blocks_to_collect == 0 {
-                        break;
-                    }
-                    blocks_to_collect -= 1;
-                }
-
-                ChainState::Validated(_) => {
-                    let chain_cache_entry = make_block_tree_entry(Arc::clone(&entry.block));
-                    pairs.push(chain_cache_entry);
-
-                    not_onchain_count += 1;
-
-                    if blocks_to_collect == 0 {
-                        break;
-                    }
-                    blocks_to_collect -= 1;
-                }
-
-                ChainState::NotOnchain(block_state) => {
-                    let chain_cache_entry = make_block_tree_entry(Arc::clone(&entry.block));
-                    pairs.push(chain_cache_entry);
-
-                    // We only count this as not onchain if it's validated
-                    if *block_state == BlockState::ValidBlock {
-                        not_onchain_count += 1;
-                    }
-
-                    if blocks_to_collect == 0 {
-                        break;
-                    }
-                    blocks_to_collect -= 1;
-                }
+            pairs.push(make_block_tree_entry(Arc::clone(&entry.block)));
+            if !matches!(entry.chain_state, ChainState::Onchain) {
+                not_onchain_count += 1;
             }
 
-            if entry.block.header().height == 0 {
+            if blocks_to_collect == 0 || entry.block.header().height == 0 {
                 break;
-            } else {
-                current = entry.block.header().previous_block_hash;
             }
+            blocks_to_collect -= 1;
+            current = entry.block.header().previous_block_hash;
         }
 
         pairs.reverse();
@@ -1165,6 +1205,34 @@ impl BlockTree {
     /// Get the block with maximum cumulative difficulty
     pub fn get_max_cumulative_difficulty_block(&self) -> (U256, BlockHash) {
         self.max_cumulative_difficulty
+    }
+
+    /// The head of the validated prefix of the max cumulative difficulty chain: the highest
+    /// block on the ancestry of the max block that is fully validated (`NotOnchain(ValidBlock)`
+    /// or `Validated(ValidBlock)`), with every block between it and its first `Onchain`
+    /// ancestor also fully validated. When no such block exists, it is that first `Onchain`
+    /// ancestor. It is the max block when the whole fork is validated, and the tip when the
+    /// max block is the tip.
+    ///
+    /// Returns `None` when the walk leaves the tree before it gets to an `Onchain` block.
+    #[must_use]
+    pub fn get_max_chain_validated_head(&self) -> Option<BlockHash> {
+        let mut validated_head = None;
+        let mut current = self.max_cumulative_difficulty.1;
+        loop {
+            let entry = self.blocks.get(&current)?;
+            match entry.chain_state {
+                ChainState::Onchain => return Some(validated_head.unwrap_or(current)),
+                ChainState::NotOnchain(BlockState::ValidBlock)
+                | ChainState::Validated(BlockState::ValidBlock) => {
+                    validated_head.get_or_insert(current);
+                }
+                // A block that waits for validation ends the prefix below it, so a
+                // validated block above it is not part of the prefix.
+                ChainState::NotOnchain(_) | ChainState::Validated(_) => validated_head = None,
+            }
+            current = entry.block.header().previous_block_hash;
+        }
     }
 
     /// Returns max-difficulty block info: (hash, height, can_build_upon)
@@ -2169,11 +2237,11 @@ mod tests {
         );
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
 
-        // Even though b2 is marked as a tip, it is still lower difficulty than b1_2 so will
-        // not be included in the longest chain
+        // b2 is marked as the tip, so the canonical chain follows it although b1_2 has
+        // the higher difficulty
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
         assert_eq!(Some(&b1_2), cache.get_block(&b1_2.block_hash));
-        assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1, &b2], 0, &cache), Ok(()));
 
         // Remove b1_2, causing b2 to now be the tip of the heaviest chain
         assert_matches!(
@@ -2343,7 +2411,8 @@ mod tests {
                 .block_hash,
             b2_3.block_hash
         );
-        assert_matches!(check_longest_chain(&[&b1, &b2, &b2_2], 1, &cache), Ok(()));
+        // b2_2 is validated but not the tip, so it is not canonical
+        assert_matches!(check_longest_chain(&[&b1, &b2], 0, &cache), Ok(()));
 
         // Now the b3->b2->b1 fork is heaviest
         let mut b3 = extend_chain(random_block(U256::from(4)), &b2);
@@ -2375,7 +2444,7 @@ mod tests {
         assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
         assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 0, &cache), Ok(()));
 
-        // b3->b2->b1 fork is still heaviest
+        // b3->b2->b1 fork is still heaviest, but the canonical chain follows the tip
         assert_matches!(cache.mark_tip(&b2_2.block_hash), Ok(_));
         assert_eq!(
             cache
@@ -2387,7 +2456,7 @@ mod tests {
                 .block_hash,
             b3.block_hash
         );
-        assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1, &b2, &b2_2], 0, &cache), Ok(()));
 
         // add not validated b4, b3->b2->b1 fork is still heaviest
         let mut b4 = extend_chain(random_block(U256::from(5)), &b3);
@@ -2414,7 +2483,7 @@ mod tests {
                 .block_hash,
             b4.block_hash
         );
-        assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b1, &b2, &b2_2], 0, &cache), Ok(()));
 
         // Prune to a depth of 1 past the tip and verify b1 and the b1_2 branch are pruned
         cache.prune(1);
@@ -2428,7 +2497,7 @@ mod tests {
                 U256::zero()
             )
         );
-        assert_matches!(check_longest_chain(&[&b2, &b3], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b2, &b2_2], 0, &cache), Ok(()));
 
         // Mark a new tip for the longest chain, validating b2_3, and pruning again
         assert_matches!(cache.mark_tip(&b2_3.block_hash), Ok(_));
@@ -2629,10 +2698,9 @@ mod tests {
                 .block_hash,
             b14.block_hash
         );
-        // by adding b14 we've now made the b13->b11 chain heavier and because
-        // b13 is isn't already validated so it counts towards not_onchain_count
-        // b14 isn't validated so it doesn't count towards the not_onchain_count
-        assert_matches!(check_longest_chain(&[&b11, &b13], 1, &cache), Ok(()));
+        // by adding b14 we've now made the b13->b11 chain heavier, but the tip is still
+        // b11, so the canonical chain does not change
+        assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(()));
 
         // Now mark b13 as the tip, it should succeed as b14 made it canonical
         let reorg = cache.mark_tip(&b13.block_hash).unwrap();
@@ -2699,9 +2767,8 @@ mod tests {
             ),
             Ok(())
         );
-        // Now that b14 is vdf validated it can be considered a NotOnchain
-        // part of the longest chain
-        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
+        // b14 is vdf validated but not the tip, so it is not canonical
+        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(()));
 
         // add a b15 block
         let mut b15 = extend_chain(random_block(U256::from(3)), &b14);
@@ -2722,7 +2789,7 @@ mod tests {
             ),
             Ok(())
         );
-        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(()));
 
         // Validate b14
         assert_matches!(
@@ -2748,8 +2815,8 @@ mod tests {
             cache.get_block_and_status(&b14.block_hash).unwrap(),
             (&b14, &ChainState::Validated(BlockState::ValidBlock))
         );
-        // b14 is validated, but wont be onchain until is tip_height or lower
-        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
+        // b14 is validated, but wont be canonical until it is the tip
+        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(()));
 
         // add a b16 block
         let mut b16 = extend_chain(random_block(U256::from(4)), &b15);
@@ -2775,7 +2842,7 @@ mod tests {
             Ok(())
         );
         // Verify the longest chain state isn't changed by b16 pending Vdf validation
-        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(()));
 
         // Mark b16 as vdf validated eve though b15 is not
         assert_matches!(cache.mark_block_as_valid(&b16.block_hash), Ok(()));
@@ -2791,7 +2858,7 @@ mod tests {
             cache.get_block_and_status(&b16.block_hash).unwrap(),
             (&b16, &ChainState::NotOnchain(BlockState::ValidBlock))
         );
-        assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(()));
 
         // Make b14 the tip (making it OnChain)
         assert_matches!(cache.mark_tip(&b14.block_hash), Ok(_));
@@ -2841,7 +2908,8 @@ mod tests {
             ),
             Ok(())
         );
-        assert_matches!(check_longest_chain(&[&b11, &b12, &b13], 1, &cache), Ok(()));
+        // b13 waits for validation and is not the tip, so it is not canonical
+        assert_matches!(check_longest_chain(&[&b11, &b12], 0, &cache), Ok(()));
 
         // When a locally produced block is added as validated "onchain" but it
         // hasn't yet been validated by the validation_service
@@ -2902,7 +2970,8 @@ mod tests {
             Ok(())
         );
 
-        assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 1, &cache), Ok(()));
+        // b13a and b13b are validated but neither is the tip
+        assert_matches!(check_longest_chain(&[&b11, &b12], 0, &cache), Ok(()));
 
         assert_matches!(cache.mark_tip(&b13a.block_hash), Ok(_));
         assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 0, &cache), Ok(()));
@@ -2921,10 +2990,7 @@ mod tests {
             Ok(())
         );
 
-        assert_matches!(
-            check_longest_chain(&[&b11, &b12, &b13b, &b14b], 2, &cache),
-            Ok(())
-        );
+        assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 0, &cache), Ok(()));
 
         // Mark the new tip
         assert_matches!(cache.mark_tip(&b14b.block_hash), Ok(_));
@@ -2935,12 +3001,11 @@ mod tests {
         );
     }
 
-    /// Regression for issue #1447 (review finding P1 #1): the chain cache keeps trailing
-    /// non-`Onchain` (still forkable) head blocks, so `confirmed_canonical_step` must skip
-    /// them — otherwise the VDF reset-boundary gate would treat a reorgable block's seed as
-    /// confirmed during a sync/reorg window.
+    /// A validated block that is not the tip is not canonical, so `confirmed_canonical_step`
+    /// never reports its step: the VDF reset-boundary gate must not treat a still-forkable
+    /// block's seed as confirmed during a sync/reorg window.
     #[test]
-    fn confirmed_canonical_step_skips_non_onchain_head() {
+    fn confirmed_canonical_step_ignores_validated_block_above_tip() {
         let comm_cache = Arc::new(CommitmentSnapshot::default());
 
         let mut b1 = random_block(U256::from(1));
@@ -2971,7 +3036,7 @@ mod tests {
             .unwrap();
         cache.mark_tip(&b2.block_hash).unwrap(); // b2 becomes Onchain
 
-        // b3 is the heaviest tip but only Validated — NOT Onchain, so still forkable.
+        // b3 is the heaviest block but only Validated, not the tip, so still forkable.
         let mut b3 = random_block(U256::from(3));
         b3.vdf_limiter_info.global_step_number = 30;
         let mut b3 = extend_chain(b3, &b2);
@@ -2994,14 +3059,14 @@ mod tests {
             )
             .unwrap();
 
-        // Cache = [b1, b2, b3] with one non-onchain trailing block (b3).
-        check_longest_chain(&[&b1, &b2, &b3], 1, &cache).unwrap();
+        // Cache = [b1, b2]: the canonical chain follows the tip, not the heaviest block.
+        check_longest_chain(&[&b1, &b2], 0, &cache).unwrap();
 
-        // The gate must report the newest ONCHAIN block (b2, step 20), never the forkable
-        // tip b3 (step 30) — even at depth 0. Pre-fix this returned 30.
+        // The gate reports the tip (b2, step 20) at depth 0 and never the forkable b3
+        // (step 30).
         assert_eq!(cache.confirmed_canonical_step(0), 20);
-        assert_eq!(cache.confirmed_canonical_step(1), 20);
-        // The `depth` floor still reaches deeper than the non-onchain skip.
+        assert_eq!(cache.confirmed_canonical_step(1), 10);
+        // `depth` past the oldest cached block saturates to it.
         assert_eq!(cache.confirmed_canonical_step(2), 10);
     }
 
@@ -3553,6 +3618,7 @@ mod tests {
                 epoch_snapshot: dummy_epoch_snapshot(),
                 commitment_snapshot: comm.clone(),
                 ema_snapshot: dummy_ema_snapshot(),
+                insertion_sequence: 0,
             },
         );
         let mut o1 = extend_chain(random_block(U256::from(101)), &g2);
@@ -3576,5 +3642,340 @@ mod tests {
             .expect_err("chains with no shared ancestor must Err, not panic");
         let msg = format!("{err}");
         assert!(msg.contains("no common ancestor"), "unexpected err: {msg}");
+    }
+
+    fn add_validated(cache: &mut BlockTree, header: &mut IrysBlockHeader) {
+        let sealed = seal_block(header);
+        cache
+            .add_common(
+                sealed.header().block_hash,
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
+            )
+            .expect("add_common");
+    }
+
+    /// Canonical chain `genesis -> c1 -> c2`, `c2` marked as tip.
+    fn canonical_chain_of_three() -> (BlockTree, [IrysBlockHeader; 3]) {
+        let genesis = random_block(U256::from(0));
+        let mut cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let mut c1 = extend_chain(random_block(U256::from(1)), &genesis);
+        add_validated(&mut cache, &mut c1);
+        let mut c2 = extend_chain(random_block(U256::from(2)), &c1);
+        add_validated(&mut cache, &mut c2);
+        cache.mark_tip(&c2.block_hash).expect("mark_tip");
+        (cache, [genesis, c1, c2])
+    }
+
+    fn remove_and_get_max(cache: &mut BlockTree, block_hash: &BlockHash) -> (U256, BlockHash) {
+        cache
+            .remove_block(block_hash, RemovalReason::ValidationInvalid)
+            .expect("remove_block");
+        cache.get_max_cumulative_difficulty_block()
+    }
+
+    /// Removing the max block among equal-difficulty siblings hands the max to the
+    /// remaining tie first added to the tree, not to a hash-ordered pick.
+    #[test]
+    fn max_block_removal_picks_earliest_added_tie() {
+        let genesis = random_block(U256::from(0));
+        let mut cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+
+        let mut by_hash: Vec<IrysBlockHeader> = (0..4)
+            .map(|_| extend_chain(random_block(U256::from(5)), &genesis))
+            .collect();
+        by_hash.sort_by_key(|header| header.block_hash);
+        // Add order by hash rank 0, 2, 3, 1: after each removal the earliest-added
+        // remaining tie is not always the lowest or the highest remaining hash.
+        let mut added: Vec<IrysBlockHeader> = [0, 2, 3, 1]
+            .iter()
+            .map(|&rank| by_hash[rank].clone())
+            .collect();
+        for header in &mut added {
+            add_validated(&mut cache, header);
+        }
+        assert_eq!(
+            cache.get_max_cumulative_difficulty_block(),
+            (U256::from(5), added[0].block_hash),
+            "the add path keeps the first-added tie"
+        );
+
+        for pair in added.windows(2) {
+            assert_eq!(
+                remove_and_get_max(&mut cache, &pair[0].block_hash),
+                (U256::from(5), pair[1].block_hash)
+            );
+        }
+    }
+
+    /// With equal insertion sequence (as for blocks loaded at startup), the tie whose fork
+    /// point with the canonical chain is highest wins. A lower sequence still wins over a
+    /// higher fork point.
+    #[test]
+    fn max_block_removal_on_equal_sequence_picks_highest_fork_point() {
+        let (mut cache, [genesis, c1, c2]) = canonical_chain_of_three();
+
+        let mut heaviest = extend_chain(random_block(U256::from(10)), &c2);
+        add_validated(&mut cache, &mut heaviest);
+
+        // Ties fork from the canonical chain at heights 0, 1 and 2.
+        let mut fork_at_genesis = extend_chain(random_block(U256::from(5)), &genesis);
+        let mut fork_at_c1 = extend_chain(random_block(U256::from(5)), &c1);
+        let low = fork_at_genesis.block_hash.min(fork_at_c1.block_hash);
+        let high = fork_at_genesis.block_hash.max(fork_at_c1.block_hash);
+        // Keep the expected winner's hash between the other two, so no hash order picks it.
+        let mut fork_at_c2 = loop {
+            let candidate = extend_chain(random_block(U256::from(5)), &c2);
+            if low < candidate.block_hash && candidate.block_hash < high {
+                break candidate;
+            }
+        };
+        for header in [&mut fork_at_c2, &mut fork_at_genesis, &mut fork_at_c1] {
+            add_validated(&mut cache, header);
+        }
+        for header in [&fork_at_genesis, &fork_at_c1, &fork_at_c2] {
+            cache
+                .blocks
+                .get_mut(&header.block_hash)
+                .expect("tie in tree")
+                .insertion_sequence = 0;
+        }
+
+        assert_eq!(
+            remove_and_get_max(&mut cache, &heaviest.block_hash),
+            (U256::from(5), fork_at_c2.block_hash)
+        );
+
+        // A new heaviest block, then give the shallowest fork the lowest sequence.
+        let mut heaviest = extend_chain(random_block(U256::from(10)), &c2);
+        add_validated(&mut cache, &mut heaviest);
+        for (header, sequence) in [(&fork_at_genesis, 0), (&fork_at_c1, 1), (&fork_at_c2, 1)] {
+            cache
+                .blocks
+                .get_mut(&header.block_hash)
+                .expect("tie in tree")
+                .insertion_sequence = sequence;
+        }
+        assert_eq!(
+            remove_and_get_max(&mut cache, &heaviest.block_hash),
+            (U256::from(5), fork_at_genesis.block_hash)
+        );
+    }
+
+    /// The strictly heaviest remaining block becomes the max, whatever its add order or
+    /// fork point.
+    #[test]
+    fn max_block_removal_picks_strictly_heaviest() {
+        let (mut cache, [genesis, _, c2]) = canonical_chain_of_three();
+
+        let mut heaviest = extend_chain(random_block(U256::from(10)), &c2);
+        add_validated(&mut cache, &mut heaviest);
+        let mut lighter_earlier_deeper = extend_chain(random_block(U256::from(5)), &c2);
+        add_validated(&mut cache, &mut lighter_earlier_deeper);
+        let mut heavier_later_shallower = extend_chain(random_block(U256::from(6)), &genesis);
+        add_validated(&mut cache, &mut heavier_later_shallower);
+
+        assert_eq!(
+            remove_and_get_max(&mut cache, &heaviest.block_hash),
+            (U256::from(6), heavier_later_shallower.block_hash)
+        );
+    }
+
+    /// Add `header` as a gossip block does: not validated, then scheduled for
+    /// validation.
+    fn add_block_for_validation(cache: &mut BlockTree, header: &mut IrysBlockHeader) {
+        let sealed = seal_block(header);
+        cache
+            .add_block(
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+            )
+            .expect("add_block");
+        cache
+            .mark_block_as_validation_scheduled(&header.block_hash)
+            .expect("mark_block_as_validation_scheduled");
+    }
+
+    /// Finish validation of `header` and move the tip to it.
+    fn validate_and_mark_tip(cache: &mut BlockTree, header: &IrysBlockHeader) {
+        cache
+            .mark_block_as_valid(&header.block_hash)
+            .expect("mark_block_as_valid");
+        assert!(cache.mark_tip(&header.block_hash).expect("mark_tip"));
+    }
+
+    fn canonical_hashes(cache: &BlockTree) -> Vec<BlockHash> {
+        cache
+            .get_canonical_chain()
+            .0
+            .iter()
+            .map(BlockTreeEntry::block_hash)
+            .collect()
+    }
+
+    /// The canonical chain is the tip's ancestry while a heavier fork from below the tip
+    /// waits for validation, before and after the tip extends.
+    #[test]
+    fn canonical_chain_follows_tip_extension_with_pending_heavier_fork() {
+        let genesis = random_block(U256::from(0));
+        let mut cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+
+        // genesis -> old_tip (tip)
+        //         -> pending_fork_start -> pending_fork_max (heaviest, not validated)
+        // old_tip -> new_tip
+        let mut old_tip = extend_chain(random_block(U256::from(10)), &genesis);
+        add_block_for_validation(&mut cache, &mut old_tip);
+        validate_and_mark_tip(&mut cache, &old_tip);
+        let mut pending_fork_start = extend_chain(random_block(U256::from(5)), &genesis);
+        add_block_for_validation(&mut cache, &mut pending_fork_start);
+        let mut pending_fork_max = extend_chain(random_block(U256::from(30)), &pending_fork_start);
+        add_block_for_validation(&mut cache, &mut pending_fork_max);
+        assert_eq!(
+            canonical_hashes(&cache),
+            vec![genesis.block_hash, old_tip.block_hash],
+            "a pending heavier fork does not change the canonical chain"
+        );
+
+        let mut new_tip = extend_chain(random_block(U256::from(20)), &old_tip);
+        add_block_for_validation(&mut cache, &mut new_tip);
+        validate_and_mark_tip(&mut cache, &new_tip);
+
+        assert_eq!(
+            canonical_hashes(&cache),
+            vec![genesis.block_hash, old_tip.block_hash, new_tip.block_hash],
+        );
+        assert_eq!(
+            cache.get_latest_canonical_entry().block_hash(),
+            new_tip.block_hash
+        );
+        assert_eq!(
+            cache.get_max_cumulative_difficulty_block().1,
+            pending_fork_max.block_hash,
+            "the max cumulative difficulty block stays the pending fork"
+        );
+    }
+
+    /// The tip moves to a sibling fork that is lighter than a pending fork extending the
+    /// old tip. The canonical chain follows the tip, not the pending fork's ancestry.
+    #[test]
+    fn canonical_chain_follows_tip_move_to_sibling_below_pending_max() {
+        let genesis = random_block(U256::from(0));
+        let mut cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+
+        // genesis -> old_tip (tip) -> pending_start -> pending_max (heaviest, not validated)
+        //         -> new_tip (heavier than old_tip)
+        let mut old_tip = extend_chain(random_block(U256::from(10)), &genesis);
+        add_block_for_validation(&mut cache, &mut old_tip);
+        validate_and_mark_tip(&mut cache, &old_tip);
+        let mut pending_start = extend_chain(random_block(U256::from(20)), &old_tip);
+        add_block_for_validation(&mut cache, &mut pending_start);
+        let mut pending_max = extend_chain(random_block(U256::from(40)), &pending_start);
+        add_block_for_validation(&mut cache, &mut pending_max);
+
+        let mut new_tip = extend_chain(random_block(U256::from(15)), &genesis);
+        add_block_for_validation(&mut cache, &mut new_tip);
+        validate_and_mark_tip(&mut cache, &new_tip);
+
+        assert_eq!(
+            canonical_hashes(&cache),
+            vec![genesis.block_hash, new_tip.block_hash],
+        );
+        assert_eq!(
+            cache.get_latest_canonical_entry().block_hash(),
+            new_tip.block_hash
+        );
+        assert_eq!(
+            cache.get_block_and_status(&old_tip.block_hash).unwrap().1,
+            &ChainState::Validated(BlockState::ValidBlock),
+            "the old tip is validated but no longer canonical"
+        );
+    }
+
+    /// The validated head of the max chain is the tip while the tip is the max block,
+    /// the fork point while the first fork block waits for validation, the highest
+    /// block of a contiguous validated prefix, and the max block when the whole fork
+    /// is validated.
+    #[test]
+    fn max_chain_validated_head_follows_the_validated_prefix() {
+        let genesis = random_block(U256::from(0));
+        let mut cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+
+        // genesis -> tip
+        //         -> fork_1 -> fork_2 -> fork_3 (max)
+        let mut tip = extend_chain(random_block(U256::from(10)), &genesis);
+        add_block_for_validation(&mut cache, &mut tip);
+        validate_and_mark_tip(&mut cache, &tip);
+        assert_eq!(cache.get_max_chain_validated_head(), Some(tip.block_hash));
+
+        let mut fork_1 = extend_chain(random_block(U256::from(5)), &genesis);
+        add_block_for_validation(&mut cache, &mut fork_1);
+        let mut fork_2 = extend_chain(random_block(U256::from(15)), &fork_1);
+        add_block_for_validation(&mut cache, &mut fork_2);
+        let mut fork_3 = extend_chain(random_block(U256::from(20)), &fork_2);
+        add_block_for_validation(&mut cache, &mut fork_3);
+        cache.mark_block_as_valid(&fork_2.block_hash).unwrap();
+        assert_eq!(
+            cache.get_max_chain_validated_head(),
+            Some(genesis.block_hash),
+            "a validated block above a pending block is not part of the prefix"
+        );
+
+        cache.mark_block_as_valid(&fork_1.block_hash).unwrap();
+        assert_eq!(
+            cache.get_max_chain_validated_head(),
+            Some(fork_2.block_hash)
+        );
+
+        cache.mark_block_as_valid(&fork_3.block_hash).unwrap();
+        assert_eq!(
+            cache.get_max_chain_validated_head(),
+            Some(fork_3.block_hash)
+        );
+    }
+
+    /// Removing an `Onchain` block (the tip or an ancestor of it) returns an error and
+    /// leaves the tip, the canonical chain, the max block and the blocks unchanged.
+    #[test]
+    fn remove_block_refuses_onchain_block() {
+        let (mut cache, [genesis, c1, c2]) = canonical_chain_of_three();
+        let mut fork = extend_chain(random_block(U256::from(1)), &genesis);
+        add_block_for_validation(&mut cache, &mut fork);
+
+        let block_hashes_before: HashSet<BlockHash> = cache.blocks.keys().copied().collect();
+        let canonical_before = canonical_hashes(&cache);
+        let max_before = cache.get_max_cumulative_difficulty_block();
+
+        for onchain in [&c1, &c2] {
+            let err = cache
+                .remove_block(&onchain.block_hash, RemovalReason::ValidationInvalid)
+                .expect_err("an Onchain block must not be removed");
+            assert!(
+                err.to_string().contains("Onchain"),
+                "error must name the Onchain state; got: {err}"
+            );
+
+            assert_eq!(cache.tip, c2.block_hash);
+            assert_eq!(canonical_hashes(&cache), canonical_before);
+            assert_eq!(cache.get_max_cumulative_difficulty_block(), max_before);
+            assert_eq!(
+                cache.blocks.keys().copied().collect::<HashSet<_>>(),
+                block_hashes_before
+            );
+            assert_eq!(
+                cache.get_block_and_status(&c1.block_hash).unwrap().1,
+                &ChainState::Onchain
+            );
+        }
+
+        assert_matches!(
+            cache.remove_block(&fork.block_hash, RemovalReason::ValidationInvalid),
+            Ok(()),
+            "a block that is not Onchain can still be removed"
+        );
     }
 }

@@ -14,6 +14,7 @@ use irys_actors::block_discovery::{
     build_block_body_for_processed_block_header, get_commitment_tx_in_parallel,
     get_data_tx_in_parallel,
 };
+use irys_actors::block_validation::block_header_fields_are_canonical;
 use irys_actors::{
     MempoolFacade, block_discovery::BlockDiscoveryFacade,
     chunk_ingress_service::facade::ChunkIngressFacadeImpl,
@@ -550,8 +551,9 @@ where
             return Ok(());
         }
 
-        // This check also validates block hash, thus validating that block's fields hasn't
-        //  been tampered with
+        // Checks that the signature recovers over the header's RLP encoding. A valid
+        // signature does not by itself prove the header is well formed, so structural
+        // checks (`block_header_fields_are_canonical`) and full validation still apply.
         if !block_header.is_signature_valid() {
             warn!(
                 "Node: {}: Block {} has an invalid signature",
@@ -576,6 +578,20 @@ where
             return Err(GossipError::InvalidData(
                 InvalidDataError::InvalidBlockSignature,
             ));
+        }
+
+        if let Err(error) = block_header_fields_are_canonical(&block_header) {
+            warn!(
+                "Node: {}: Block {} has non-canonical header fields: {}",
+                self.gossip_client.mining_address, block_header.block_hash, error
+            );
+            self.peer_list.decrease_peer_score_by_peer_id(
+                &source_peer_id,
+                ScoreDecreaseReason::BogusData("Non-canonical block header fields".into()),
+            );
+            return Err(GossipError::InvalidData(InvalidDataError::InvalidBlock(
+                error.to_string(),
+            )));
         }
 
         // The body pull reads the header's data ledgers, so a header with an
@@ -1197,6 +1213,30 @@ where
                             ScoreDecreaseReason::BogusData("Invalid block signature".into()),
                         );
                         failed_attempts.push((Some(source_peer_id), error));
+                        continue;
+                    }
+                    if let Err(error) = block_header_fields_are_canonical(&header) {
+                        warn!(
+                            "Node: {}: Block {} fetched from {} has non-canonical header fields: {} (attempt {}/{})",
+                            self.gossip_client.mining_address,
+                            header.block_hash,
+                            source_peer_id,
+                            error,
+                            attempt,
+                            HEADER_AND_BODY_RETRIES
+                        );
+                        self.peer_list.decrease_peer_score_by_peer_id(
+                            &source_peer_id,
+                            ScoreDecreaseReason::BogusData(
+                                "Non-canonical block header fields".into(),
+                            ),
+                        );
+                        failed_attempts.push((
+                            Some(source_peer_id),
+                            GossipError::InvalidData(InvalidDataError::InvalidBlock(
+                                error.to_string(),
+                            )),
+                        ));
                         continue;
                     }
                     fetched_header = Some(header);
