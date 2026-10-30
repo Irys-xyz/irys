@@ -5,7 +5,7 @@ use irys_reth::shadow_tx::{
 };
 use irys_types::{
     BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, H256,
-    IngressProofsList, IrysAddress, IrysBlockHeader, U256, UnixTimestamp,
+    IngressProofsList, IrysAddress, U256, UnixTimestamp,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
 };
 use reth::revm::primitives::ruint::Uint;
@@ -81,12 +81,12 @@ pub enum ShadowTxGenError {
     Structural(String),
 }
 
-// Producer-side call sites return `eyre::Result` / `BlockProductionError`
-// (which has `From<eyre::Report>`); `eyre::Report` already provides a
-// blanket `From<E: std::error::Error + Send + Sync + 'static>` impl, so
-// `?` lifts `ShadowTxGenError` into `eyre::Report` automatically — no
-// explicit `From` needed (and adding one would conflict with the blanket
-// impl).
+// The block producer maps `ShadowTxGenError` into `BlockProductionError`
+// by variant (`classify_shadow_tx_error`). Call sites that return
+// `eyre::Result` use the blanket `From<E: std::error::Error + Send + Sync +
+// 'static>` impl on `eyre::Report`, so `?` lifts `ShadowTxGenError`
+// automatically — no explicit `From` needed (and adding one would conflict
+// with the blanket impl).
 
 /// Local `Result` alias for this module.
 type Result<T> = std::result::Result<T, ShadowTxGenError>;
@@ -111,9 +111,12 @@ pub struct ShadowTxGenerator<'a> {
     /// Part of the block's reward-curve amount that goes to the treasury
     /// instead of the miner.
     pub treasury_reward_share: U256,
-    pub parent_block: &'a IrysBlockHeader,
     pub solution_hash: &'a H256,
     pub config: &'a ConsensusConfig,
+    /// Required ingress proofs per publish tx (N), taken at the block's own
+    /// timestamp. Block production and validation size the block's proof list
+    /// by this same N, so the generator must slice and price with it too.
+    number_of_ingress_proofs_total: u64,
 
     // Transaction slices
     commitment_txs: &'a [CommitmentTransaction],
@@ -239,7 +242,7 @@ impl<'a> ShadowTxGenerator<'a> {
         reward_address: &'a IrysAddress,
         reward_amount: &'a U256,
         treasury_reward_share: U256,
-        parent_block: &'a IrysBlockHeader,
+        block_timestamp_secs: UnixTimestamp,
         solution_hash: &'a H256,
         config: &'a ConsensusConfig,
         commitment_txs: &'a [CommitmentTransaction],
@@ -293,15 +296,19 @@ impl<'a> ShadowTxGenerator<'a> {
             ledger_expiry_balance_delta.user_perm_fee_refunds.len()
         );
 
+        let number_of_ingress_proofs_total = config
+            .hardforks
+            .number_of_ingress_proofs_total_at(block_timestamp_secs);
+
         // Create a temporary generator to initialize the iterators
         let generator = Self {
             block_height,
             reward_address,
             reward_amount,
             treasury_reward_share,
-            parent_block,
             solution_hash,
             config,
+            number_of_ingress_proofs_total,
             commitment_txs,
             submit_txs,
             one_year_txs,
@@ -331,12 +338,10 @@ impl<'a> ShadowTxGenerator<'a> {
             .into_iter();
 
         // Initialize publish ledger iterator with aggregated ingress proof rewards
-        // Use parent block's timestamp for hardfork params (convert millis to seconds)
-        let parent_block_timestamp_secs = parent_block.timestamp_secs();
         let aggregated_rewards = Self::accumulate_ingress_rewards_for_init(
             publish_ledger,
             config,
-            parent_block_timestamp_secs,
+            number_of_ingress_proofs_total,
             epoch_snapshot,
         )?;
         let publish_ledger_txs = if !aggregated_rewards.is_empty() {
@@ -364,9 +369,9 @@ impl<'a> ShadowTxGenerator<'a> {
             reward_address,
             reward_amount,
             treasury_reward_share,
-            parent_block,
             solution_hash,
             config,
+            number_of_ingress_proofs_total,
             commitment_txs,
             submit_txs,
             one_year_txs,
@@ -433,7 +438,7 @@ impl<'a> ShadowTxGenerator<'a> {
     fn accumulate_ingress_rewards_for_init(
         publish_ledger: &PublishLedgerWithTxs,
         config: &ConsensusConfig,
-        timestamp_secs: UnixTimestamp,
+        number_of_ingress_proofs_total: u64,
         epoch_snapshot: &EpochSnapshot,
     ) -> Result<BTreeMap<IrysAddress, (RewardAmount, RollingHash)>> {
         let mut rewards_map: BTreeMap<IrysAddress, (RewardAmount, RollingHash)> = BTreeMap::new();
@@ -449,11 +454,6 @@ impl<'a> ShadowTxGenerator<'a> {
         if proofs.is_empty() {
             return Ok(BTreeMap::new());
         }
-
-        // Get ingress proof params for this timestamp
-        let number_of_ingress_proofs_total = config
-            .hardforks
-            .number_of_ingress_proofs_total_at(timestamp_secs);
 
         // Process all transactions (MUST BE SORTED)
         for (index, tx) in publish_ledger.txs.iter().enumerate() {
@@ -717,12 +717,6 @@ impl<'a> ShadowTxGenerator<'a> {
             .map_err(|e| ShadowTxGenError::Structural(e.to_string()))?;
 
         // Construct perm fee charges if applicable
-        // Use parent block's timestamp for hardfork params (convert millis to seconds)
-        let parent_block_timestamp_secs = self.parent_block.timestamp_secs();
-        let number_of_ingress_proofs_total = self
-            .config
-            .hardforks
-            .number_of_ingress_proofs_total_at(parent_block_timestamp_secs);
         let perm_charges = tx
             .perm_fee
             .map(|perm_fee| {
@@ -730,7 +724,7 @@ impl<'a> ShadowTxGenerator<'a> {
                     perm_fee,
                     tx.term_fee,
                     self.config,
-                    number_of_ingress_proofs_total,
+                    self.number_of_ingress_proofs_total,
                 )
                 .map_err(|e| ShadowTxGenError::Structural(e.to_string()))
             })
@@ -1041,8 +1035,7 @@ mod tests {
     use irys_types::ingress::IngressProofV1;
     use irys_types::{BlockHash, CommitmentStatus, CommitmentTransactionV2, CommitmentTypeV1};
     use irys_types::{
-        ConsensusConfig, H256, IrysBlockHeader, IrysSignature, Signature, ingress::IngressProof,
-        irys::IrysSigner,
+        ConsensusConfig, H256, IrysSignature, Signature, ingress::IngressProof, irys::IrysSigner,
     };
     use itertools::Itertools as _;
 
@@ -1150,7 +1143,7 @@ mod tests {
     #[test]
     fn test_header_only() {
         let config = ConsensusConfig::testing();
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let block_height = 101;
         let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
@@ -1184,7 +1177,7 @@ mod tests {
             &reward_address,
             &reward_amount,
             U256::zero(),
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &[],
@@ -1214,7 +1207,7 @@ mod tests {
     #[test]
     fn block_reward_treasury_share_goes_to_treasury() {
         let config = ConsensusConfig::testing();
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let block_height = 101_u64;
         let reward_address = IrysAddress::from([20_u8; 20]);
         let miner_reward = U256::from(50);
@@ -1230,7 +1223,7 @@ mod tests {
             &reward_address,
             &miner_reward,
             treasury_reward_share,
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &[],
@@ -1272,7 +1265,7 @@ mod tests {
     #[test]
     fn block_reward_treasury_share_overflow_is_treasury_arithmetic() {
         let config = ConsensusConfig::testing();
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let block_height = 101_u64;
         let reward_address = IrysAddress::from([20_u8; 20]);
         let miner_reward = U256::from(50);
@@ -1286,7 +1279,7 @@ mod tests {
             &reward_address,
             &miner_reward,
             U256::one(),
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &[],
@@ -1318,7 +1311,7 @@ mod tests {
     #[test]
     fn block_reward_packet_ignores_reward_address() {
         let config = ConsensusConfig::testing();
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let block_height = 101_u64;
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(2_000_000);
@@ -1343,7 +1336,7 @@ mod tests {
                 reward_address,
                 &reward_amount,
                 U256::zero(),
-                &parent_block,
+                block_timestamp_secs,
                 &solution_hash,
                 &config,
                 &[],
@@ -1384,7 +1377,7 @@ mod tests {
     #[test]
     fn test_three_commitments() {
         let config = ConsensusConfig::testing();
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let block_height = 101;
         let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
@@ -1492,7 +1485,7 @@ mod tests {
             &reward_address,
             &reward_amount,
             U256::zero(),
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &commitments,
@@ -1520,7 +1513,7 @@ mod tests {
     #[test]
     fn test_one_submit_tx() {
         let config = ConsensusConfig::testing();
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let signer = IrysSigner::random_signer(&config);
 
         let term_fee = U256::from(20000);
@@ -1579,7 +1572,7 @@ mod tests {
             &reward_address,
             &reward_amount,
             U256::zero(),
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &[],
@@ -1614,7 +1607,7 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         // Use custom hardfork params with 4 proofs for this test
         config.hardforks.frontier.number_of_ingress_proofs_total = 4;
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
 
         // Calculate proper fees for publish transaction
         let term_fee = U256::from(30000);
@@ -1790,7 +1783,7 @@ mod tests {
             &reward_address,
             &reward_amount,
             U256::zero(),
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &[],
@@ -1818,7 +1811,7 @@ mod tests {
     #[test]
     fn test_expired_ledger_miner_rewards() {
         let config = ConsensusConfig::testing();
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let block_height = 101;
         let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
@@ -1890,7 +1883,7 @@ mod tests {
             &reward_address,
             &reward_amount,
             U256::zero(),
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &[],
@@ -1923,7 +1916,7 @@ mod tests {
     #[test]
     fn test_user_perm_fee_refunds() {
         let config = ConsensusConfig::testing();
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let block_height = 101;
         let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
@@ -1996,7 +1989,7 @@ mod tests {
             &reward_address,
             &reward_amount,
             U256::zero(),
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &[],
@@ -2029,7 +2022,7 @@ mod tests {
     #[test]
     fn test_empty_expired_ledger_fees() {
         let config = ConsensusConfig::testing();
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let block_height = 101;
         let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
@@ -2064,7 +2057,7 @@ mod tests {
             &reward_address,
             &reward_amount,
             U256::zero(),
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &[],
@@ -2115,7 +2108,7 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         // Pin to 1 proof for arithmetic simplicity.
         config.hardforks.frontier.number_of_ingress_proofs_total = 1;
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
 
         // Build a single publish tx whose ingress-proof reward we can
         // bound. With 1 proof the total ingress reward equals
@@ -2178,7 +2171,7 @@ mod tests {
             &reward_address,
             &reward_amount,
             U256::zero(),
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &[],
@@ -2246,7 +2239,7 @@ mod tests {
     fn publish_ingress_underflow_with_no_snapshot_taint_is_peer_attributable() {
         let mut config = ConsensusConfig::testing();
         config.hardforks.frontier.number_of_ingress_proofs_total = 1;
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
 
         let term_fee = U256::from(100_000_u64);
         let inclusion_pct = config.immediate_tx_inclusion_reward_percent.amount;
@@ -2292,7 +2285,7 @@ mod tests {
             &reward_address,
             &reward_amount,
             U256::zero(),
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &[],
@@ -2331,7 +2324,7 @@ mod tests {
     /// list is shorter than `publish_txs.len() * number_of_ingress_proofs_total`
     /// must surface as a peer-attributable `Structural` consensus rejection —
     /// NEVER an out-of-bounds slice panic. The generator slices the flat
-    /// proofs list by `N` (`number_of_ingress_proofs_total`, at the parent
+    /// proofs list by `N` (`number_of_ingress_proofs_total`, at the block
     /// timestamp); a short list is fully peer-controlled input, so panicking
     /// on it would let one crafted block crash every honest validator.
     #[test]
@@ -2339,7 +2332,7 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         // N = 3, but the block will carry only 1 proof for its 1 tx.
         config.hardforks.frontier.number_of_ingress_proofs_total = 3;
-        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
 
         let term_fee = U256::from(100_000_u64);
         // Ample perm_fee so `PublishFeeCharges::new` succeeds and execution
@@ -2381,7 +2374,7 @@ mod tests {
             &reward_address,
             &reward_amount,
             U256::zero(),
-            &parent_block,
+            block_timestamp_secs,
             &solution_hash,
             &config,
             &[],
@@ -2414,6 +2407,164 @@ mod tests {
         );
     }
 
+    /// Generate the ingress-proof rewards of the first block after a hardfork
+    /// that changes N from `frontier_n` to `fork_n`. The parent is one second
+    /// before activation (N = `frontier_n`), the block is at activation
+    /// (N = `fork_n`). The block carries one publish tx with a proof list sized
+    /// by the block's N, as the producer emits it and the validator accepts it.
+    ///
+    /// Returns the generator result, the proof signers, and the total ingress
+    /// reward that the block's N gives.
+    fn boundary_block_ingress_rewards(
+        frontier_n: u64,
+        fork_n: u64,
+    ) -> (Result<Vec<ShadowMetadata>>, Vec<IrysAddress>, U256) {
+        use irys_types::hardfork_config::NextNameTBD;
+
+        let activation_secs = 1_000_u64;
+        let mut config = ConsensusConfig::testing();
+        config.hardforks.frontier.number_of_ingress_proofs_total = frontier_n;
+        config.hardforks.next_name_tbd = Some(NextNameTBD {
+            activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+            number_of_ingress_proofs_total: fork_n,
+            number_of_ingress_proofs_from_assignees: 0,
+        });
+
+        let parent_timestamp_secs = UnixTimestamp::from_secs(activation_secs - 1);
+        let block_timestamp_secs = UnixTimestamp::from_secs(activation_secs);
+        assert_eq!(
+            config
+                .hardforks
+                .number_of_ingress_proofs_total_at(parent_timestamp_secs),
+            frontier_n,
+        );
+        assert_eq!(
+            config
+                .hardforks
+                .number_of_ingress_proofs_total_at(block_timestamp_secs),
+            fork_n,
+        );
+
+        let term_fee = U256::from(100_000_u64);
+        let perm_fee = U256::from(10_000_000_u64);
+        let tx_signer = IrysSigner::random_signer(&config);
+        let publish_tx = create_data_tx_header(&tx_signer, term_fee, Some(perm_fee));
+
+        let proof_signers: Vec<IrysSigner> = (0..fork_n)
+            .map(|_| IrysSigner::random_signer(&config))
+            .collect();
+        let proofs = proof_signers
+            .iter()
+            .map(|signer| {
+                create_test_ingress_proof(signer, H256::from([31_u8; 32]), H256::from([32_u8; 32]))
+            })
+            .collect();
+        let publish_ledger = PublishLedgerWithTxs {
+            txs: vec![publish_tx],
+            proofs: Some(IngressProofsList(proofs)),
+        };
+
+        let expected_total_reward =
+            PublishFeeCharges::new(perm_fee.into(), term_fee.into(), &config, fork_n)
+                .expect("fee charges at the block's N")
+                .ingress_proof_reward;
+
+        let expired_fees = LedgerExpiryBalanceDelta {
+            reward_balance_increment: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
+        };
+        let block_height = 101_u64;
+        let reward_address = IrysAddress::from([30_u8; 20]);
+        let reward_amount = U256::from(5000_u64);
+        let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
+
+        let result = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            U256::zero(),
+            block_timestamp_secs,
+            &solution_hash,
+            &config,
+            &[],
+            &[],
+            &[],
+            &[],
+            &publish_ledger,
+            U256::from(100_000_000_u64),
+            &expired_fees,
+            &[],
+            &[],
+            &epoch_snapshot,
+        )
+        .and_then(Iterator::collect::<Result<Vec<_>>>);
+
+        (
+            result,
+            proof_signers.iter().map(IrysSigner::address).collect(),
+            expected_total_reward,
+        )
+    }
+
+    /// Sum the ingress-proof rewards per target address.
+    fn ingress_rewards_by_target(shadow_txs: &[ShadowMetadata]) -> BTreeMap<IrysAddress, U256> {
+        let mut rewards = BTreeMap::new();
+        for metadata in shadow_txs {
+            if let ShadowTransaction::V1 {
+                packet: TransactionPacket::IngressProofReward(increment),
+                ..
+            } = &metadata.shadow_tx
+            {
+                *rewards
+                    .entry(IrysAddress::from(increment.target))
+                    .or_insert(U256::zero()) += U256::from(increment.amount);
+            }
+        }
+        rewards
+    }
+
+    /// N decreases at the hardfork. The boundary block carries fewer proofs than
+    /// the parent's N. The generator must take N at the block's timestamp: if it
+    /// takes N at the parent's timestamp, it asks for more proofs than the list
+    /// holds and no block with Publish txs can be built at the boundary.
+    #[test]
+    fn boundary_block_pays_all_proofs_when_ingress_proof_count_decreases() {
+        let (result, proof_signers, expected_total_reward) = boundary_block_ingress_rewards(3, 1);
+        let shadow_txs = result.expect("boundary block with N decreasing must generate");
+
+        let rewards = ingress_rewards_by_target(&shadow_txs);
+        assert_eq!(
+            rewards.keys().copied().collect::<Vec<_>>(),
+            proof_signers.iter().copied().sorted().collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            rewards.values().copied().fold(U256::zero(), |a, b| a + b),
+            expected_total_reward,
+        );
+    }
+
+    /// N increases at the hardfork. The boundary block carries more proofs than
+    /// the parent's N. Every proof in the list must be paid: if the generator
+    /// takes N at the parent's timestamp, it slices only the first proofs and
+    /// the tail is unpaid.
+    #[test]
+    fn boundary_block_pays_all_proofs_when_ingress_proof_count_increases() {
+        let (result, proof_signers, expected_total_reward) = boundary_block_ingress_rewards(1, 3);
+        let shadow_txs = result.expect("boundary block with N increasing must generate");
+
+        let rewards = ingress_rewards_by_target(&shadow_txs);
+        assert_eq!(
+            rewards.keys().copied().collect::<Vec<_>>(),
+            proof_signers.iter().copied().sorted().collect::<Vec<_>>(),
+            "every proof in the boundary block's list must be paid",
+        );
+        assert_eq!(
+            rewards.values().copied().fold(U256::zero(), |a, b| a + b),
+            expected_total_reward,
+        );
+    }
+
     /// `ShadowTxGenError::Display` carries the message verbatim with the
     /// variant-specific prefix. Round-trip through `eyre::Report` preserves
     /// the message so producer-side `?` lift keeps the failure debuggable.
@@ -2441,8 +2592,7 @@ mod tests {
             let s = err.to_string();
             assert_eq!(s, expected_msg, "Display mismatch for {err:?}");
             // `eyre::Report` has a blanket `From<E: std::error::Error + Send + Sync + 'static>`,
-            // so `?` lift works for producer-side call sites that return
-            // `eyre::Result` or `BlockProductionError`.
+            // so `?` lift works for call sites that return `eyre::Result`.
             let report: eyre::Report = err.into();
             assert_eq!(report.to_string(), expected_msg);
         }

@@ -1879,6 +1879,7 @@ async fn heavy4_reorg_tip_moves_across_nodes_publish_txs(
                 .get_block_by_height(height)
                 .await?
                 .get_data_ledger_tx_ids()
+                .unwrap()
                 .get(&ledger)
                 .cloned()
                 .unwrap_or_default();

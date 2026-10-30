@@ -187,7 +187,10 @@ async fn test_future_block_rejection() -> Result<()> {
             prev_block_ema_snapshot: &EmaSnapshot,
             treasury: U256,
             reward_address: irys_types::IrysAddress,
-        ) -> eyre::Result<Option<(Arc<SealedBlock>, Option<AdjustmentStats>)>> {
+        ) -> Result<
+            Option<(Arc<SealedBlock>, Option<AdjustmentStats>)>,
+            irys_actors::block_producer::BlockProductionError,
+        > {
             self.prod
                 .produce_block_without_broadcasting(
                     solution,

@@ -99,7 +99,7 @@ async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<(
     }
     let data_block = node.mine_block().await?;
 
-    let tx_ids = data_block.get_data_ledger_tx_ids();
+    let tx_ids = data_block.get_data_ledger_tx_ids().unwrap();
     assert!(
         tx_ids
             .get(&DataLedger::Submit)

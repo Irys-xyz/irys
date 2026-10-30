@@ -18,6 +18,8 @@
 //! ## Stage 3: Parent Dependency Resolution
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
+//! A node-fault result also waits for the parent: it is reported only when
+//! the parent is fully valid and the block is still in the block tree.
 
 use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
@@ -123,6 +125,111 @@ fn is_parent_ready(parent_state: &ChainState) -> bool {
     )
 }
 
+/// Block tree state read after the parent wait, under one read lock.
+#[derive(Debug, Clone, Copy)]
+struct TreeStateAfterParentWait {
+    /// Chain state of the parent, `None` when the parent is not in the tree.
+    parent_state: Option<ChainState>,
+    /// Whether the block under validation is still in the tree.
+    block_in_tree: bool,
+}
+
+/// Resolve the stage verdict of `validate_block` against the parent's
+/// validation. `Err(reason)` means: report a `ValidationCancelled` with that
+/// reason.
+///
+/// - `Valid`: wait for the parent. Report `Valid` only when the parent is
+///   fully valid; a block that is valid on its own is not valid if its chain
+///   is not.
+/// - Node-fault `InternalFailure`: wait for the parent, then read the tree.
+///   The stages run before the parent has finished validation, and a tree
+///   walk can miss when the block or an ancestor is removed during
+///   validation. A node-fault result is only a fault of this node when the
+///   parent is fully valid and the block is still in the tree. Thus:
+///   - parent not fully valid at the read after the wait (invalid parents
+///     are removed from the tree, so this is "removed", or the parent is
+///     still pending) → cancel;
+///   - parent fully valid but this block removed from the tree → cancel;
+///   - parent fully valid and this block in the tree → the node fault,
+///     unchanged. Its inputs are then validated, so it is a real fault of
+///     this node and must still panic.
+///
+///   The parent state is read again after the wait because the wait checks
+///   the height difference first: a too-old block with a fully valid parent
+///   must keep its node fault.
+/// - Any other result (`Invalid`, soft `InternalFailure`, cancellation) is
+///   final without a parent wait.
+///
+/// Costs of the downgrade rule, both accepted:
+/// - Delayed surfacing: the parent wait lasts as long as the parent's
+///   remaining validation (minutes under a VDF backlog). A faulty node keeps
+///   running meanwhile and can mark other blocks valid before the fault is
+///   confirmed.
+/// - Masking: a persistent fault on a block whose parent left the in-memory
+///   tree becomes a soft cancel. It repeats on the next block built on the
+///   tip, where the parent is in the tree and the fault panics.
+///
+/// Each downgrade increments `irys.validation.node_faults_downgraded_total`,
+/// labelled `cause`: `parent_wait_cancelled`, `parent_not_valid_after_wait`
+/// or `block_missing`.
+async fn resolve_stage_result_against_parent<WaitForParent>(
+    stage_result: ValidationResult,
+    wait_for_parent: impl FnOnce() -> WaitForParent,
+    read_tree_after_parent_wait: impl FnOnce() -> TreeStateAfterParentWait,
+) -> Result<ValidationResult, ValidationCancelReason>
+where
+    WaitForParent: std::future::Future<Output = ParentValidationResult>,
+{
+    match &stage_result {
+        ValidationResult::Valid => match wait_for_parent().await {
+            ParentValidationResult::Ready => Ok(stage_result),
+            ParentValidationResult::Cancelled(reason) => Err(reason),
+        },
+        ValidationResult::InternalFailure(inner) if inner.is_node_fault() => {
+            let parent_wait_outcome = wait_for_parent().await;
+            let tree_state = read_tree_after_parent_wait();
+            let parent_is_valid = tree_state
+                .parent_state
+                .as_ref()
+                .is_some_and(is_parent_ready);
+            if !parent_is_valid {
+                let reason = match parent_wait_outcome {
+                    ParentValidationResult::Cancelled(reason) => {
+                        metrics::record_validation_node_fault_downgraded("parent_wait_cancelled");
+                        reason
+                    }
+                    // The parent was valid when the wait ended and left the
+                    // tree before the read.
+                    ParentValidationResult::Ready => {
+                        metrics::record_validation_node_fault_downgraded(
+                            "parent_not_valid_after_wait",
+                        );
+                        metrics::record_validation_cancellation("parent_missing");
+                        ValidationCancelReason::ParentMissing
+                    }
+                };
+                warn!(
+                    custom.error = %inner,
+                    cancel.reason = %reason,
+                    "Node fault not confirmed: parent is not fully valid"
+                );
+                return Err(reason);
+            }
+            if !tree_state.block_in_tree {
+                metrics::record_validation_node_fault_downgraded("block_missing");
+                metrics::record_validation_cancellation("block_missing");
+                warn!(
+                    custom.error = %inner,
+                    "Node fault not confirmed: block was removed from the block tree"
+                );
+                return Err(ValidationCancelReason::BlockMissing);
+            }
+            Ok(stage_result)
+        }
+        ValidationResult::Invalid(_) | ValidationResult::InternalFailure(_) => Ok(stage_result),
+    }
+}
+
 impl BlockValidationTask {
     pub(super) fn new(
         sealed_block: Arc<SealedBlock>,
@@ -207,7 +314,7 @@ impl BlockValidationTask {
         let concurrent_started = Instant::now();
         let block_timestamp_ms = self.sealed_block.header().timestamp.as_millis();
         let into_cancelled_result = |reason: ValidationCancelReason| -> ValidationResult {
-            tracing::warn!(
+            tracing::info!(
                 block.hash = %self.sealed_block.header().block_hash,
                 cancel.reason = %reason,
                 "Validation cancelled"
@@ -225,6 +332,12 @@ impl BlockValidationTask {
         // "node faults must always win and panic" invariant of this branch.
         // See the doc on `validate_block` for the inner-select shape.
         //
+        // A `NodeFault` from the stages is not final until the parent is
+        // fully valid. The stages run while the parent has passed only
+        // prevalidation, so some node-fault inputs come from parent header
+        // fields or tree state that the parent's own validation has not yet
+        // checked. See `resolve_stage_result_against_parent` for the rule.
+        //
         // The `poa_abort_slot` is still threaded through so the cancel arm
         // inside `validate_block` can mark the PoA JoinHandle aborted.
         // Note: `AbortHandle::abort()` on a `spawn_blocking` task does NOT
@@ -233,20 +346,33 @@ impl BlockValidationTask {
         let poa_abort_slot: Arc<OnceLock<AbortHandle>> = Arc::new(OnceLock::new());
         let validation_result = self.validate_block(Arc::clone(&poa_abort_slot)).await;
 
-        let final_result = if matches!(validation_result, ValidationResult::Valid) {
-            // Stages passed and no in-flight cancel fired: now block on
-            // parent validation before reporting upward.
+        let wait_for_parent = || async {
             let parent_wait_started = Instant::now();
             let parent_wait_outcome = self.wait_for_parent_validation().await;
             metrics::record_parent_wait_duration_ms(
                 parent_wait_started.elapsed().as_secs_f64() * 1000.0,
             );
-            match parent_wait_outcome {
-                ParentValidationResult::Cancelled(reason) => into_cancelled_result(reason),
-                ParentValidationResult::Ready => validation_result,
+            parent_wait_outcome
+        };
+        let read_tree_after_parent_wait = || {
+            let header = self.sealed_block.header();
+            let tree = self.block_tree_guard.read();
+            TreeStateAfterParentWait {
+                parent_state: tree
+                    .get_block_and_status(&header.previous_block_hash)
+                    .map(|(_header, state)| *state),
+                block_in_tree: tree.get_block(&header.block_hash).is_some(),
             }
-        } else {
-            validation_result
+        };
+        let final_result = match resolve_stage_result_against_parent(
+            validation_result,
+            wait_for_parent,
+            read_tree_after_parent_wait,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(reason) => into_cancelled_result(reason),
         };
 
         metrics::record_validation_stage_duration_ms(
@@ -2745,5 +2871,257 @@ mod side_channel_cancel_race_tests {
                 other
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_stage_result_against_parent_tests {
+    //! Tests for `resolve_stage_result_against_parent`: a node fault from the
+    //! stages is reported only when the parent is fully valid and the block
+    //! is still in the tree. The parent wait and the tree read are injected,
+    //! so each case fixes what the wait returns and what the tree holds after
+    //! it.
+    use super::*;
+    use crate::block_validation::ValidationError;
+    use irys_types::H256;
+    use rstest::rstest;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Node-fault result from a stage (shadow-tx generation).
+    fn shadow_tx_node_fault() -> ValidationError {
+        ValidationError::ShadowTxNodeFault("treasury underflow".to_string())
+    }
+
+    fn parent_valid() -> Option<ChainState> {
+        Some(ChainState::NotOnchain(BlockState::ValidBlock))
+    }
+
+    fn parent_pending() -> Option<ChainState> {
+        Some(ChainState::NotOnchain(BlockState::ValidationScheduled))
+    }
+
+    fn tree_state(
+        parent_state: Option<ChainState>,
+        block_in_tree: bool,
+    ) -> TreeStateAfterParentWait {
+        TreeStateAfterParentWait {
+            parent_state,
+            block_in_tree,
+        }
+    }
+
+    async fn resolve(
+        stage_result: ValidationResult,
+        parent_wait_outcome: ParentValidationResult,
+        tree_after_wait: TreeStateAfterParentWait,
+    ) -> Result<ValidationResult, ValidationCancelReason> {
+        resolve_stage_result_against_parent(
+            stage_result,
+            || async move { parent_wait_outcome },
+            || tree_after_wait,
+        )
+        .await
+    }
+
+    fn assert_same_node_fault(
+        result: Result<ValidationResult, ValidationCancelReason>,
+        expected: &ValidationError,
+    ) {
+        match result {
+            Ok(ValidationResult::InternalFailure(inner)) => {
+                assert!(inner.is_node_fault());
+                assert_eq!(inner.err(), expected);
+            }
+            other => panic!("expected the original node fault, got {:?}", other),
+        }
+    }
+
+    /// The parent is found invalid: the block tree removes it and, with it,
+    /// this block. The wait sees the parent leave the tree.
+    #[tokio::test]
+    async fn node_fault_with_parent_found_invalid_is_cancelled() {
+        let result = resolve(
+            shadow_tx_node_fault().into(),
+            ParentValidationResult::Cancelled(ValidationCancelReason::ParentMissing),
+            tree_state(None, false),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), ValidationCancelReason::ParentMissing);
+    }
+
+    /// The parent leaves the tree while this block stays (e.g. a prune).
+    #[tokio::test]
+    async fn node_fault_with_parent_removed_is_cancelled() {
+        let result = resolve(
+            shadow_tx_node_fault().into(),
+            ParentValidationResult::Cancelled(ValidationCancelReason::ParentMissing),
+            tree_state(None, true),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), ValidationCancelReason::ParentMissing);
+    }
+
+    /// The wait ends with the parent valid, but the parent leaves the tree
+    /// before the tree read.
+    #[tokio::test]
+    async fn node_fault_with_parent_removed_after_wait_is_cancelled() {
+        let result = resolve(
+            shadow_tx_node_fault().into(),
+            ParentValidationResult::Ready,
+            tree_state(None, true),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), ValidationCancelReason::ParentMissing);
+    }
+
+    /// The wait reports the parent ready, but the tree read finds the parent
+    /// still pending (not fully valid): the fault is not confirmed.
+    #[tokio::test]
+    async fn node_fault_with_parent_pending_after_ready_wait_is_cancelled() {
+        let result = resolve(
+            shadow_tx_node_fault().into(),
+            ParentValidationResult::Ready,
+            tree_state(parent_pending(), true),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), ValidationCancelReason::ParentMissing);
+    }
+
+    /// The parent is fully valid but this block was removed from the tree.
+    #[tokio::test]
+    async fn node_fault_with_block_removed_is_cancelled() {
+        let node_fault = ValidationError::PreValidation(
+            crate::block_validation::PreValidationError::PreviousTxInclusionsFailed(
+                "ancestor walk".to_string(),
+            ),
+        );
+        assert!(node_fault.is_node_fault());
+        let result = resolve(
+            node_fault.into(),
+            ParentValidationResult::Ready,
+            tree_state(parent_valid(), false),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), ValidationCancelReason::BlockMissing);
+    }
+
+    /// The wait is cancelled while the parent is still pending: the node
+    /// fault is not confirmed, so the wait's reason is reported.
+    #[rstest]
+    #[case::height_difference(ValidationCancelReason::HeightDifference)]
+    #[case::channel_closed(ValidationCancelReason::ChannelClosed)]
+    #[tokio::test]
+    async fn node_fault_with_wait_cancelled_while_parent_pending_is_cancelled(
+        #[case] reason: ValidationCancelReason,
+    ) {
+        let result = resolve(
+            shadow_tx_node_fault().into(),
+            ParentValidationResult::Cancelled(reason),
+            tree_state(parent_pending(), true),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), reason);
+    }
+
+    /// Parent fully valid, block in the tree: the node fault is real and is
+    /// returned unchanged.
+    #[rstest]
+    #[case::not_onchain_valid(ChainState::NotOnchain(BlockState::ValidBlock))]
+    #[case::validated_valid(ChainState::Validated(BlockState::ValidBlock))]
+    #[case::onchain(ChainState::Onchain)]
+    #[tokio::test]
+    async fn node_fault_with_valid_parent_is_unchanged(#[case] parent_state: ChainState) {
+        let node_fault = shadow_tx_node_fault();
+        let result = resolve(
+            node_fault.clone().into(),
+            ParentValidationResult::Ready,
+            tree_state(Some(parent_state), true),
+        )
+        .await;
+        assert_same_node_fault(result, &node_fault);
+    }
+
+    /// A cancelled wait does not decide the outcome: the tree read after the
+    /// wait does. With the parent fully valid and the block in the tree, the
+    /// node fault is kept for every wait cancel reason. The wait checks the
+    /// height difference before the parent state, so a too-old block can
+    /// reach this; a parent seen missing and then valid again, or a shutdown
+    /// during the wait, must not hide a confirmed fault either.
+    #[rstest]
+    #[case::height_difference(ValidationCancelReason::HeightDifference)]
+    #[case::parent_missing(ValidationCancelReason::ParentMissing)]
+    #[case::channel_closed(ValidationCancelReason::ChannelClosed)]
+    #[tokio::test]
+    async fn node_fault_with_valid_parent_survives_wait_cancel(
+        #[case] reason: ValidationCancelReason,
+    ) {
+        let node_fault = shadow_tx_node_fault();
+        let result = resolve(
+            node_fault.clone().into(),
+            ParentValidationResult::Cancelled(reason),
+            tree_state(parent_valid(), true),
+        )
+        .await;
+        assert_same_node_fault(result, &node_fault);
+    }
+
+    /// `Invalid`, soft `InternalFailure` and cancellation are final: no
+    /// parent wait and no tree read.
+    #[rstest]
+    #[case::invalid(ValidationError::ShadowTransactionInvalid("mismatch".to_string()))]
+    #[case::soft_internal(ValidationError::ParentBlockMissing { block_hash: H256::zero() })]
+    #[case::cancelled(ValidationError::ValidationCancelled {
+        reason: ValidationCancelReason::PoAAborted,
+    })]
+    #[tokio::test]
+    async fn non_node_fault_result_is_unchanged_without_parent_wait(
+        #[case] error: ValidationError,
+    ) {
+        assert!(!error.is_node_fault());
+        let stage_result: ValidationResult = error.clone().into();
+        let expected_is_invalid = matches!(stage_result, ValidationResult::Invalid(_));
+        let result = resolve_stage_result_against_parent(
+            stage_result,
+            || async { panic!("non-node-fault result must not wait for the parent") },
+            || panic!("non-node-fault result must not read the tree"),
+        )
+        .await;
+        match result {
+            Ok(ValidationResult::Invalid(rejection)) => {
+                assert!(expected_is_invalid);
+                assert_eq!(rejection.err(), &error);
+            }
+            Ok(ValidationResult::InternalFailure(inner)) => {
+                assert!(!expected_is_invalid);
+                assert_eq!(inner.err(), &error);
+            }
+            other => panic!("expected the stage result unchanged, got {:?}", other),
+        }
+    }
+
+    /// `Valid` keeps its parent wait: reported only when the parent is
+    /// ready, and the tree is not read.
+    #[tokio::test]
+    async fn valid_result_waits_for_parent() {
+        let waited = AtomicBool::new(false);
+        let result = resolve_stage_result_against_parent(
+            ValidationResult::Valid,
+            || async {
+                waited.store(true, Ordering::SeqCst);
+                ParentValidationResult::Ready
+            },
+            || panic!("valid result must not read the tree"),
+        )
+        .await;
+        assert!(waited.load(Ordering::SeqCst));
+        assert!(matches!(result, Ok(ValidationResult::Valid)));
+
+        let result = resolve_stage_result_against_parent(
+            ValidationResult::Valid,
+            || async { ParentValidationResult::Cancelled(ValidationCancelReason::ParentMissing) },
+            || panic!("valid result must not read the tree"),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), ValidationCancelReason::ParentMissing);
     }
 }

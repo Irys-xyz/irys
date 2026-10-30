@@ -9,6 +9,7 @@ use crate::{
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowMetadata, ShadowTxGenerator},
 };
 use alloy_consensus::Transaction as _;
+use alloy_consensus::transaction::SignerRecoverable as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
@@ -179,6 +180,10 @@ pub enum PreValidationError {
     },
     #[error("Missing PoA chunk to be pre validated")]
     PoAChunkMissing,
+    /// A PoA with `tx_path` or `data_path` set must name its ledger. The header
+    /// signature cannot tell `ledger_id = None` from `Some(0)`.
+    #[error("PoA carries a tx_path or data_path but no ledger_id")]
+    PoALedgerIdMissing,
     #[error(
         "PoA chunk length {got} exceeds packing limit {limit} (configured chunk size {chunk_size})"
     )]
@@ -672,6 +677,7 @@ impl PreValidationError {
             | Self::PoACapacityChunkMismatch { .. }
             | Self::PoAChunkHashMismatch { .. }
             | Self::PoAChunkMissing
+            | Self::PoALedgerIdMissing
             | Self::PoAChunkTooLong { .. }
             | Self::PoAChunkTooShort { .. }
             | Self::PoAChunkPaddingNotZero { .. }
@@ -758,6 +764,7 @@ impl PreValidationError {
             Self::PoACapacityChunkMismatch { .. } => "poa_capacity_chunk_mismatch",
             Self::PoAChunkHashMismatch { .. } => "poa_chunk_hash_mismatch",
             Self::PoAChunkMissing => "poa_chunk_missing",
+            Self::PoALedgerIdMissing => "poa_ledger_id_missing",
             Self::PoAChunkTooLong { .. } => "poa_chunk_too_long",
             Self::PoAChunkTooShort { .. } => "poa_chunk_too_short",
             Self::PoAChunkPaddingNotZero { .. } => "poa_chunk_padding_not_zero",
@@ -901,12 +908,26 @@ pub enum ValidationCancelReason {
     /// two apart instead of conflating "broadcast channel closed at shutdown"
     /// with "PoA blocking task aborted mid-flight".
     PoAAborted,
+    /// Block absent from the in-memory block tree. Two sites report it:
+    /// - node-fault resolution: a stage reported a node fault and the parent
+    ///   is fully valid, but the block left the tree during validation. Tree
+    ///   walks done by the stages can miss when the block or an ancestor is
+    ///   removed during validation, so the fault is not confirmed as a fault
+    ///   of this node.
+    /// - VDF task: an ancestor's discard, a depth prune or an earlier verdict
+    ///   for the same block removed the block before or while its VDF task
+    ///   runs.
+    ///
+    /// Local, peer-innocent: the block's validity is unknown, and nothing
+    /// pursues it any more. Fresh gossip can re-enter it.
+    BlockMissing,
 }
 
 impl ValidationCancelReason {
     /// All variants are local-side outcomes. `HeightDifference`,
     /// `ParentMissing`, `ChannelClosed`, `RepeatedCancellation`,
-    /// `PoAAborted` — none are statements about the peer's block.
+    /// `PoAAborted`, `BlockMissing` — none are statements about the peer's
+    /// block.
     ///
     /// SAFETY CRITICAL: adding a new variant that classifies as Consensus
     /// REQUIRES changing this constant to a method and re-auditing every
@@ -925,7 +946,8 @@ const _: fn() = || {
             ValidationCancelReason::ParentMissing => {}
             ValidationCancelReason::ChannelClosed => {}
             ValidationCancelReason::RepeatedCancellation => {}
-            ValidationCancelReason::PoAAborted => {} // New variant? Update IS_INTERNAL above before adding an arm here.
+            ValidationCancelReason::PoAAborted => {}
+            ValidationCancelReason::BlockMissing => {} // New variant? Update IS_INTERNAL above before adding an arm here.
         }
     }
 };
@@ -938,6 +960,7 @@ impl std::fmt::Display for ValidationCancelReason {
             Self::ChannelClosed => write!(f, "channel closed"),
             Self::RepeatedCancellation => write!(f, "repeated cancellation"),
             Self::PoAAborted => write!(f, "poa aborted"),
+            Self::BlockMissing => write!(f, "block missing"),
         }
     }
 }
@@ -1199,7 +1222,7 @@ impl ValidationError {
             // node fault — that decision should be explicit at the reason
             // site. All current cancellation reasons (`HeightDifference`,
             // `ParentMissing`, `ChannelClosed`, `RepeatedCancellation`,
-            // `PoAAborted`) are local-side outcomes and route to
+            // `PoAAborted`, `BlockMissing`) are local-side outcomes and route to
             // `SoftInternal` — the `IS_INTERNAL` const documents the
             // invariant and the compile-time tripwire enforces it. No
             // cancellation reason ever peer-attributes the child block.
@@ -1341,6 +1364,7 @@ mod metric_label_tests {
             ValidationCancelReason::ChannelClosed,
             ValidationCancelReason::RepeatedCancellation,
             ValidationCancelReason::PoAAborted,
+            ValidationCancelReason::BlockMissing,
         ] {
             let err = ValidationError::ValidationCancelled { reason };
             assert_eq!(
@@ -1600,6 +1624,37 @@ impl ValidationError {
     }
 }
 
+/// Require the canonical encoding of the header fields.
+///
+/// The block signature covers the RLP encoding of the header, and an absent
+/// `Option` field can share its encoding with a zero value. A header therefore
+/// has one canonical form:
+/// - a PoA with `tx_path` or `data_path` has `ledger_id = Some(_)`
+///   (a data PoA has all three; the producer takes `ledger_id` from the partition
+///   assignment in the parent epoch snapshot, and drops a solution whose partition
+///   has no data ledger there);
+/// - the Publish ledger has `expires = None` (see `validate_term_ledger_expiry`).
+///
+/// Cheap and independent of chain state, so it runs before any signature work.
+pub fn block_header_fields_are_canonical(
+    block: &IrysBlockHeader,
+) -> Result<(), PreValidationError> {
+    let poa = &block.poa;
+    if (poa.tx_path.is_some() || poa.data_path.is_some()) && poa.ledger_id.is_none() {
+        return Err(PreValidationError::PoALedgerIdMissing);
+    }
+    for dl in &block.data_ledgers {
+        if dl.ledger_id == DataLedger::Publish as u32 && dl.expires.is_some() {
+            return Err(PreValidationError::TermLedgerExpiryMismatch {
+                ledger_id: dl.ledger_id,
+                expected: None,
+                actual: dl.expires,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Reject step counts that would underflow [`VDFLimiterInfo::first_step_number`].
 fn vdf_step_count_is_consistent(
     global_step_number: u64,
@@ -1644,14 +1699,10 @@ fn expected_ledger_total_chunks(
 /// backstop; this guard just moves the rejection earlier.)
 ///
 /// N MUST be taken at the block's OWN timestamp so this guard agrees with block
-/// production and `data_txs_are_valid`, which both size proofs by N at the block
-/// timestamp. An honestly-produced block therefore always passes this guard,
-/// including the first block after a hardfork that changes N.
-///
-/// Note: the generator still slices by N at the PARENT timestamp, so at an
-/// N-changing boundary it groups proofs by the old N (a reward-attribution
-/// divergence). Reconciling the generator's N-source is a separate concern and
-/// is not required for this guard's correctness.
+/// production, `data_txs_are_valid` and `ShadowTxGenerator`, which all size
+/// proofs by N at the block timestamp. An honestly-produced block therefore
+/// always passes this guard, including the first block after a hardfork that
+/// changes N.
 fn publish_ingress_proof_count_is_valid(
     publish_ledger: &DataTransactionLedger,
     publish_tx_count: usize,
@@ -1704,6 +1755,8 @@ pub async fn prevalidate_block(
 ) -> Result<(), PreValidationError> {
     let block = sealed_block.header();
     let transactions = sealed_block.transactions();
+
+    block_header_fields_are_canonical(block)?;
 
     // Length compare. Reject before PoA, VDF, and ingress-proof signer recovery.
     // `SealedBlock::new` rejects duplicate ledger entries and pairs header ids
@@ -2749,6 +2802,7 @@ mod prevalidation_error_classification_tests {
     #[case::parent_missing(ValidationCancelReason::ParentMissing)]
     #[case::repeated_cancellation(ValidationCancelReason::RepeatedCancellation)]
     #[case::poa_aborted(ValidationCancelReason::PoAAborted)]
+    #[case::block_missing(ValidationCancelReason::BlockMissing)]
     fn validation_cancel_reason_classifier_dispatch(#[case] reason: ValidationCancelReason) {
         // IS_INTERNAL is a const — verified at compile time by the tripwire below.
         // `ValidationError::is_internal_failure` must route through IS_INTERNAL.
@@ -2800,6 +2854,10 @@ mod prevalidation_error_classification_tests {
     )]
     #[case::poa_aborted(
         ValidationCancelReason::PoAAborted,
+        ExpectedRoundtripShape::InternalFailureSoft
+    )]
+    #[case::block_missing(
+        ValidationCancelReason::BlockMissing,
         ExpectedRoundtripShape::InternalFailureSoft
     )]
     fn validation_cancel_reason_roundtrip_through_dispatcher(
@@ -3048,6 +3106,7 @@ mod prevalidation_error_classification_tests {
             ValidationCancelReason::ChannelClosed,
             ValidationCancelReason::RepeatedCancellation,
             ValidationCancelReason::PoAAborted,
+            ValidationCancelReason::BlockMissing,
         ] {
             assert!(
                 !ValidationError::ValidationCancelled { reason }.is_node_fault(),
@@ -3437,6 +3496,7 @@ mod c1_side_fork_regression_tests {
             epoch_snapshot: dummy_epoch_snapshot(),
             commitment_snapshot: Arc::new(CommitmentSnapshot::default()),
             ema_snapshot: EmaSnapshot::genesis(&header),
+            insertion_sequence: 0,
         };
         tree.blocks.insert(block_hash, entry);
     }
@@ -5117,7 +5177,7 @@ pub async fn shadow_transactions_are_valid(
     let block_miner_address: Address = block.miner_address.into();
     let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
         let (stx, tx_ref) = res?;
-        let tx_signer = tx_ref.clone().into_signed().recover_signer()?;
+        let tx_signer = tx_ref.recover_signer()?;
         ensure!(
             block_miner_address == tx_signer,
             "Shadow tx signer is not the miner"
@@ -5217,6 +5277,25 @@ pub enum SubmitPayloadError {
     PayloadRejected(String),
 }
 
+/// Maps an engine-client error to a validation outcome. A request that exceeds
+/// the client's size limit fails locally before any byte is sent; its size is
+/// fixed by the block's payload, so the block is rejected. Every other client
+/// error (connection, IO, timeout, server-side failure) is a local fault.
+fn classify_engine_client_error(error: &jsonrpsee_core::client::Error) -> SubmitPayloadError {
+    use jsonrpsee_http_client::transport::Error as HttpTransportError;
+    if let jsonrpsee_core::client::Error::Transport(source) = error
+        && matches!(
+            source.downcast_ref::<HttpTransportError>(),
+            Some(HttpTransportError::RequestTooLarge)
+        )
+    {
+        return SubmitPayloadError::PayloadRejected(
+            "engine request exceeded the engine client's size limit".to_string(),
+        );
+    }
+    SubmitPayloadError::LocalTransport(error.to_string())
+}
+
 /// Submits the EVM payload to reth for execution layer validation.
 /// This should only be called after all consensus layer validations have passed.
 #[tracing::instrument(level = "trace", skip_all, err, fields(
@@ -5265,7 +5344,7 @@ pub async fn submit_payload_to_reth(
                 RequestsOrHash::Requests(Requests::new(vec![])),
             )
             .await
-            .map_err(|e| SubmitPayloadError::LocalTransport(e.to_string()))?;
+            .map_err(|e| classify_engine_client_error(&e))?;
         match payload_status.status {
             alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
                 return Err(SubmitPayloadError::PayloadRejected(validation_error));
@@ -5687,7 +5766,7 @@ async fn generate_expected_shadow_transactions(
         &block.reward_address,
         &block.reward_amount,
         block_reward.treasury.amount,
-        &prev_block,
+        block.timestamp_secs(),
         &block.solution_hash,
         &config.consensus,
         commitment_txs,
@@ -5977,6 +6056,76 @@ mod shadow_tx_priority_fee_match_tests {
             err.to_string().contains("priority fee mismatch"),
             "error should name the fee mismatch, got: {err}"
         );
+    }
+
+    /// Signer recovery on a shadow tx envelope requires the canonical low-s form
+    /// (EIP-2): a high-s signature `(r, n - s, !v)` of the same tx is rejected.
+    #[test]
+    fn shadow_tx_high_s_signature_is_rejected() -> eyre::Result<()> {
+        use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844, TxLegacy};
+        use alloy_network::TxSignerSync as _;
+        use alloy_signer_local::PrivateKeySigner;
+        use irys_reth::shadow_tx::{SHADOW_TX_DESTINATION_ADDR, encode_prefixed_input};
+        use reth::primitives::transaction::signature::Signature;
+        use reth::revm::primitives::TxKind;
+
+        let secp256k1n = AlloyU256::from_str_radix(
+            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141",
+            16,
+        )?;
+
+        let miner = PrivateKeySigner::random();
+        let mut tx = TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_price: 1,
+            gas_limit: 21_000,
+            to: TxKind::Call(*SHADOW_TX_DESTINATION_ADDR),
+            value: AlloyU256::ZERO,
+            input: encode_prefixed_input(&stake_packet(0)),
+        };
+        let low_s = miner.sign_transaction_sync(&mut tx)?;
+        let normal = EthereumTxEnvelope::<TxEip4844>::Legacy(tx.clone().into_signed(low_s));
+        assert_eq!(normal.recover_signer()?, miner.address());
+
+        let high_s = Signature::new(low_s.r(), secp256k1n - low_s.s(), !low_s.v());
+        let malleated = EthereumTxEnvelope::<TxEip4844>::Legacy(tx.into_signed(high_s));
+        assert!(malleated.recover_signer().is_err());
+        Ok(())
+    }
+
+    /// Validators compare decoded packets, so extraction must reject a shadow tx
+    /// whose input has bytes after the encoded payload.
+    #[test]
+    fn extraction_rejects_trailing_bytes_after_shadow_payload() {
+        use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
+        use reth::primitives::transaction::signature::Signature;
+        use reth_ethereum_primitives::TransactionSigned;
+
+        let packet = stake_packet(0);
+        let sign = |tx: alloy_consensus::TxEip1559| -> TransactionSigned {
+            EthereumTxEnvelope::<TxEip4844>::Eip1559(tx.into_signed(Signature::test_signature()))
+        };
+
+        let canonical = sign(packet.compose(1, 0));
+        let (decoded, _) = extract_leading_shadow_txs(std::slice::from_ref(&canonical))
+            .next()
+            .expect("one item")
+            .expect("canonical input must decode");
+        assert_eq!(decoded, packet);
+
+        let mut with_trailing_byte = packet.compose(1, 0);
+        let mut input = with_trailing_byte.input.to_vec();
+        input.push(0x00);
+        with_trailing_byte.input = input.into();
+        let with_trailing_byte = sign(with_trailing_byte);
+
+        let mut extracted = extract_leading_shadow_txs(std::slice::from_ref(&with_trailing_byte));
+        assert!(
+            extracted.next().expect("one item").is_err(),
+            "trailing byte must be rejected"
+        );
+        assert!(extracted.next().is_none());
     }
 }
 
@@ -8016,8 +8165,7 @@ mod tests {
     /// hardfork boundary in BOTH directions: the first block after the fork carries
     /// a proof list sized by the block's (new) N, so it passes the guard when N is
     /// taken at the block timestamp — and would be wrongly rejected if N were taken
-    /// at the parent (pre-fork) timestamp. Keying off the parent is the
-    /// `ShadowTxGenerator`'s separate, documented divergence, not this guard's.
+    /// at the parent (pre-fork) timestamp.
     ///
     /// This locks in the guard's arithmetic under each N-source; the call site's
     /// choice of `block.timestamp_secs()` is covered end-to-end elsewhere.
@@ -11433,6 +11581,119 @@ mod ingress_proof_local_bytes_tests {
         assert!(
             !err.is_node_fault(),
             "an unmigrated body must not abort the node, got {err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod canonical_header_field_tests {
+    use super::*;
+    use irys_types::{Base64, IngressProofsList, Signable as _};
+
+    fn signing_bytes(header: &IrysBlockHeader) -> Vec<u8> {
+        let mut buf = Vec::new();
+        header.encode_for_signing(&mut buf);
+        buf
+    }
+
+    fn data_poa_header() -> IrysBlockHeader {
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.poa.ledger_id = Some(DataLedger::Publish.into());
+        header.poa.tx_path = Some(Base64(vec![1, 2, 3]));
+        header.poa.data_path = Some(Base64(vec![4, 5, 6]));
+        header
+    }
+
+    #[test]
+    fn honest_headers_are_canonical() {
+        assert!(block_header_fields_are_canonical(&IrysBlockHeader::new_mock_header()).is_ok());
+        assert!(block_header_fields_are_canonical(&data_poa_header()).is_ok());
+
+        // Entropy PoA from a data partition: ledger_id set, no paths.
+        let mut entropy = IrysBlockHeader::new_mock_header();
+        entropy.poa.ledger_id = Some(DataLedger::Submit.into());
+        assert!(block_header_fields_are_canonical(&entropy).is_ok());
+    }
+
+    #[test]
+    fn data_poa_without_ledger_id_is_rejected_and_shares_signing_bytes() {
+        let honest = data_poa_header();
+        let mut twin = honest.clone();
+        twin.poa.ledger_id = None;
+
+        assert_eq!(signing_bytes(&honest), signing_bytes(&twin));
+        assert!(!twin.poa.is_data_poa());
+        assert_eq!(
+            block_header_fields_are_canonical(&twin),
+            Err(PreValidationError::PoALedgerIdMissing)
+        );
+
+        let mut only_tx_path = twin.clone();
+        only_tx_path.poa.data_path = None;
+        assert_eq!(
+            block_header_fields_are_canonical(&only_tx_path),
+            Err(PreValidationError::PoALedgerIdMissing)
+        );
+    }
+
+    #[test]
+    fn publish_ledger_with_expires_is_rejected_and_shares_signing_bytes() {
+        let mut honest = IrysBlockHeader::new_mock_header();
+        honest.data_ledgers[DataLedger::Publish].proofs = Some(IngressProofsList(vec![]));
+        assert_eq!(honest.data_ledgers[DataLedger::Publish].expires, None);
+        let mut twin = honest.clone();
+        twin.data_ledgers[DataLedger::Publish].expires = Some(0);
+
+        assert!(block_header_fields_are_canonical(&honest).is_ok());
+        assert_eq!(signing_bytes(&honest), signing_bytes(&twin));
+        assert_eq!(
+            block_header_fields_are_canonical(&twin),
+            Err(PreValidationError::TermLedgerExpiryMismatch {
+                ledger_id: DataLedger::Publish.into(),
+                expected: None,
+                actual: Some(0),
+            })
+        );
+    }
+}
+
+#[cfg(test)]
+mod engine_client_error_tests {
+    use super::*;
+    use jsonrpsee_http_client::transport::Error as HttpTransportError;
+
+    #[test]
+    fn oversized_request_is_a_rejected_payload() {
+        let error =
+            jsonrpsee_core::client::Error::Transport(HttpTransportError::RequestTooLarge.into());
+        assert!(matches!(
+            classify_engine_client_error(&error),
+            SubmitPayloadError::PayloadRejected(_)
+        ));
+    }
+
+    #[test]
+    fn connection_failure_is_a_local_transport_failure() {
+        let error = jsonrpsee_core::client::Error::Transport(
+            HttpTransportError::Rejected { status_code: 503 }.into(),
+        );
+        assert!(matches!(
+            classify_engine_client_error(&error),
+            SubmitPayloadError::LocalTransport(_)
+        ));
+        assert!(matches!(
+            classify_engine_client_error(&jsonrpsee_core::client::Error::RequestTimeout),
+            SubmitPayloadError::LocalTransport(_)
+        ));
+    }
+
+    /// The startup gas-limit check uses a copy of the engine client's request
+    /// limit; it must match the jsonrpsee default the client uses.
+    #[test]
+    fn engine_client_request_limit_copy_matches_jsonrpsee_default() {
+        assert_eq!(
+            irys_types::config::ENGINE_CLIENT_MAX_REQUEST_BYTES,
+            u64::from(jsonrpsee_core::TEN_MB_SIZE_BYTES),
         );
     }
 }

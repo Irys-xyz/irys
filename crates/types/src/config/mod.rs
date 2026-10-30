@@ -15,6 +15,34 @@ use crate::{H256, IrysPeerId, UnixTimestamp};
 #[derive(Debug, Clone)]
 pub struct Config(Arc<CombinedConfigInner>);
 
+/// Request size limit of the reth engine client. This is the jsonrpsee default
+/// (`TEN_MB_SIZE_BYTES`) of `HttpClientBuilder::default()`.
+pub const ENGINE_CLIENT_MAX_REQUEST_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Allowance for the non-calldata part of the payload JSON (header fields,
+/// withdrawals, tx envelopes).
+const ENGINE_PAYLOAD_OVERHEAD_BYTES: u64 = 1024 * 1024;
+
+/// EIP-7623 floor cost per calldata token. A zero byte is one token, so the
+/// densest calldata a block can hold is `gas_limit / 10` bytes.
+const EIP_7623_FLOOR_GAS_PER_BYTE: u64 = 10;
+
+/// Largest engine payload JSON a block under `gas_limit` can produce: floor-limited
+/// calldata bytes, doubled for hex encoding, plus `ENGINE_PAYLOAD_OVERHEAD_BYTES`.
+fn worst_case_engine_payload_bytes(gas_limit: u64) -> u64 {
+    (gas_limit / EIP_7623_FLOOR_GAS_PER_BYTE)
+        .saturating_mul(2)
+        .saturating_add(ENGINE_PAYLOAD_OVERHEAD_BYTES)
+}
+
+/// Highest `reth.gas_limit` whose worst-case engine payload fits the engine
+/// client request limit.
+fn max_gas_limit_for_engine_request_limit() -> u64 {
+    ((ENGINE_CLIENT_MAX_REQUEST_BYTES - ENGINE_PAYLOAD_OVERHEAD_BYTES) / 2 + 1)
+        * EIP_7623_FLOOR_GAS_PER_BYTE
+        - 1
+}
+
 impl Config {
     pub fn new(node_config: NodeConfig, peer_id: IrysPeerId) -> Self {
         let consensus = node_config.consensus_config();
@@ -99,12 +127,34 @@ impl Config {
             self.node_config.max_peer_response_bytes > 0,
             "max_peer_response_bytes must be > 0: a zero ceiling rejects every peer response body"
         );
+        // The engine client rejects any request above its size limit locally, and
+        // that rejection marks the block invalid. The gas limit must therefore keep
+        // every valid payload under the limit.
+        let worst_case_payload_bytes =
+            worst_case_engine_payload_bytes(self.consensus.reth.gas_limit);
+        ensure!(
+            worst_case_payload_bytes <= ENGINE_CLIENT_MAX_REQUEST_BYTES,
+            "reth.gas_limit ({}) allows an engine payload of up to {} bytes, above the engine \
+              client request limit of {} bytes: valid blocks would be rejected as invalid \
+              (maximum allowed reth.gas_limit: {})",
+            self.consensus.reth.gas_limit,
+            worst_case_payload_bytes,
+            ENGINE_CLIENT_MAX_REQUEST_BYTES,
+            max_gas_limit_for_engine_request_limit()
+        );
         // block_tree_depth must exceed block_migration_depth to prevent premature pruning
         ensure!(
             (self.consensus.block_migration_depth as u64) < self.consensus.block_tree_depth,
             "Block tree depth ({}) must be strictly greater than block migration depth ({}) - cache.prune(depth-1) retains exactly depth blocks, so equal values risk pruning the migration block",
             &self.consensus.block_tree_depth,
             &self.consensus.block_migration_depth
+        );
+        // A tip move by one block keeps the old tip as the fork point, and the cache
+        // window check rejects a fork point that the prune would evict.
+        ensure!(
+            self.consensus.block_tree_depth >= 2,
+            "Block tree depth ({}) must be at least 2: the block-tree cache must keep the old tip when the tip moves by one block",
+            &self.consensus.block_tree_depth
         );
 
         // Zero leaves nothing to confirm a block against: `lookup_via_block_tree`
@@ -1902,6 +1952,48 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_gas_limit_exceeding_engine_request_limit() {
+        // Largest gas limit whose worst-case payload still fits.
+        let max_gas_limit = (ENGINE_CLIENT_MAX_REQUEST_BYTES - ENGINE_PAYLOAD_OVERHEAD_BYTES) / 2
+            * EIP_7623_FLOOR_GAS_PER_BYTE;
+
+        for consensus in [
+            ConsensusConfig::testing(),
+            ConsensusConfig::testnet(),
+            ConsensusConfig::mainnet(),
+        ] {
+            assert!(consensus.reth.gas_limit <= max_gas_limit);
+        }
+
+        let mut at_limit = NodeConfig::testing();
+        at_limit.consensus.get_mut().reth.gas_limit = max_gas_limit;
+        Config::new_with_random_peer_id(at_limit)
+            .validate()
+            .expect("a gas limit at the bound is accepted");
+
+        let mut over = NodeConfig::testing();
+        over.consensus.get_mut().reth.gas_limit = max_gas_limit + EIP_7623_FLOOR_GAS_PER_BYTE;
+        let err = Config::new_with_random_peer_id(over)
+            .validate()
+            .expect_err("a gas limit above the bound must be rejected")
+            .to_string();
+        assert!(err.contains("reth.gas_limit"), "got: {err}");
+        assert!(
+            // (10 MiB - 1 MiB) / 2 bytes of calldata at 10 gas per byte, plus the
+            // 9 gas that integer division leaves below the next byte.
+            err.contains("maximum allowed reth.gas_limit: 47185929"),
+            "got: {err}"
+        );
+
+        let mut max = NodeConfig::testing();
+        max.consensus.get_mut().reth.gas_limit = u64::MAX;
+        assert!(
+            Config::new_with_random_peer_id(max).validate().is_err(),
+            "u64::MAX must not overflow the bound"
+        );
+    }
+
+    #[test]
     fn validate_rejects_zero_peer_response_cap() {
         assert_eq!(
             NodeConfig::testing().max_peer_response_bytes,
@@ -2194,6 +2286,13 @@ mod validate_tests {
             c.block_migration_depth = 2;
         },
         "Block tree depth"
+    )]
+    #[case::tree_depth_below_two(
+        |c: &mut ConsensusConfig| {
+            c.block_migration_depth = 0;
+            c.block_tree_depth = 1;
+        },
+        "must be at least 2"
     )]
     #[case::anchor_expiry_less_than_migration_depth(
         |c: &mut ConsensusConfig| {

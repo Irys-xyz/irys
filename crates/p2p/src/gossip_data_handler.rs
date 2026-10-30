@@ -14,6 +14,7 @@ use irys_actors::block_discovery::{
     build_block_body_for_processed_block_header, get_commitment_tx_in_parallel,
     get_data_tx_in_parallel,
 };
+use irys_actors::block_validation::block_header_fields_are_canonical;
 use irys_actors::{
     MempoolFacade, block_discovery::BlockDiscoveryFacade,
     chunk_ingress_service::facade::ChunkIngressFacadeImpl,
@@ -550,8 +551,9 @@ where
             return Ok(());
         }
 
-        // This check also validates block hash, thus validating that block's fields hasn't
-        //  been tampered with
+        // Checks that the signature recovers over the header's RLP encoding. A valid
+        // signature does not by itself prove the header is well formed, so structural
+        // checks (`block_header_fields_are_canonical`) and full validation still apply.
         if !block_header.is_signature_valid() {
             warn!(
                 "Node: {}: Block {} has an invalid signature",
@@ -576,6 +578,36 @@ where
             return Err(GossipError::InvalidData(
                 InvalidDataError::InvalidBlockSignature,
             ));
+        }
+
+        if let Err(error) = block_header_fields_are_canonical(&block_header) {
+            warn!(
+                "Node: {}: Block {} has non-canonical header fields: {}",
+                self.gossip_client.mining_address, block_header.block_hash, error
+            );
+            self.peer_list.decrease_peer_score_by_peer_id(
+                &source_peer_id,
+                ScoreDecreaseReason::BogusData("Non-canonical block header fields".into()),
+            );
+            return Err(GossipError::InvalidData(InvalidDataError::InvalidBlock(
+                error.to_string(),
+            )));
+        }
+
+        // The body pull reads the header's data ledgers, so a header with an
+        // unknown or repeated ledger id is rejected before any pull starts.
+        if let Err(err) = block_header.get_data_ledger_tx_ids() {
+            warn!(
+                "Node: {}: Block {} has invalid data ledgers: {}",
+                self.gossip_client.mining_address, block_header.block_hash, err
+            );
+            self.peer_list.decrease_peer_score_by_peer_id(
+                &source_peer_id,
+                ScoreDecreaseReason::BogusData("Invalid block data ledgers".into()),
+            );
+            return Err(GossipError::InvalidData(InvalidDataError::InvalidBlock(
+                err.to_string(),
+            )));
         }
 
         // Record block in cache
@@ -1181,6 +1213,30 @@ where
                             ScoreDecreaseReason::BogusData("Invalid block signature".into()),
                         );
                         failed_attempts.push((Some(source_peer_id), error));
+                        continue;
+                    }
+                    if let Err(error) = block_header_fields_are_canonical(&header) {
+                        warn!(
+                            "Node: {}: Block {} fetched from {} has non-canonical header fields: {} (attempt {}/{})",
+                            self.gossip_client.mining_address,
+                            header.block_hash,
+                            source_peer_id,
+                            error,
+                            attempt,
+                            HEADER_AND_BODY_RETRIES
+                        );
+                        self.peer_list.decrease_peer_score_by_peer_id(
+                            &source_peer_id,
+                            ScoreDecreaseReason::BogusData(
+                                "Non-canonical block header fields".into(),
+                            ),
+                        );
+                        failed_attempts.push((
+                            Some(source_peer_id),
+                            GossipError::InvalidData(InvalidDataError::InvalidBlock(
+                                error.to_string(),
+                            )),
+                        ));
                         continue;
                     }
                     fetched_header = Some(header);
@@ -1830,6 +1886,52 @@ mod body_fetch_recovery_tests {
             data_transactions: vec![],
             commitment_transactions: vec![],
         }))))
+    }
+
+    /// A signed header with an unknown or repeated data ledger id is rejected
+    /// as invalid data before any body pull starts.
+    #[rstest::rstest]
+    #[case::unknown_ledger_id(vec![99])]
+    #[case::duplicate_ledger_id(vec![0, 0])]
+    #[tokio::test]
+    async fn header_with_invalid_data_ledgers_is_rejected_before_body_pull(
+        #[case] ledger_ids: Vec<u32>,
+    ) {
+        let (_dir, peer_list, handler) = test_handler();
+        let mut header = irys_testing_utils::new_mock_signed_header();
+        header.height = 1;
+        header.previous_block_hash = H256::random();
+        header.data_ledgers = ledger_ids
+            .into_iter()
+            .map(|ledger_id| irys_types::DataTransactionLedger {
+                ledger_id,
+                ..Default::default()
+            })
+            .collect();
+        header.test_sign();
+        let header = Arc::new(header);
+
+        let pulls = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::clone(&pulls);
+        let server = FakeGossipServer::new();
+        server.set_on_pull_data_request(move |_| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            GossipResponse::Accepted(None)
+        });
+        let addr = server.spawn();
+        let peer = peer_list_item(0x61, addr, true, PeerScore::INITIAL);
+        let peer_id = peer.peer_id;
+        peer_list.add_or_update_peer(peer, true);
+
+        let result = handler
+            .handle_block_header(peer_id, IrysAddress::repeat_byte(0x61), header, addr)
+            .await;
+
+        assert!(
+            matches!(result, Err(GossipError::InvalidData(_))),
+            "expected invalid data, got {result:?}"
+        );
+        assert_eq!(pulls.load(Ordering::SeqCst), 0, "no body pull may start");
     }
 
     /// A failed body pull records the hash in the seen cache. That cache is the

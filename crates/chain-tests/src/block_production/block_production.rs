@@ -1715,3 +1715,118 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
 
     Ok(())
 }
+
+/// Upper bound for a producer service reply or a mined block in the producer
+/// liveness tests, so a stuck service fails the test with a named cause.
+const PRODUCER_LIVENESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A block that fails its own pre-validation drops that solution only. The
+/// producer service replies with a recoverable error and serves the next
+/// solution; it does not stop the node.
+#[test_log::test(tokio::test)]
+async fn own_block_prevalidation_failure_keeps_producer_running() -> eyre::Result<()> {
+    use irys_actors::{BlockProductionError, block_producer::BlockProducerCommand};
+    use irys_types::SendTraced as _;
+
+    let node = IrysNodeTest::new_genesis(NodeConfig::testing())
+        .start()
+        .await;
+    let start_height = node.get_max_difficulty_block().height;
+
+    // Corrupt one VDF checkpoint of the solution. The producer copies the
+    // checkpoints into the block without checking them, and the solution hash
+    // does not cover them, so the block is built and sealed, but pre-validation
+    // rejects it (`last_step_checkpoints_is_valid`).
+    let mut bad_solution = solution_context(&node.node_ctx).await?;
+    let checkpoint = bad_solution
+        .checkpoints
+        .0
+        .first_mut()
+        .expect("a solution carries the VDF checkpoints of its step");
+    checkpoint.0[0] ^= 0xFF;
+
+    let senders = &node.node_ctx.service_senders;
+    senders
+        .block_producer
+        .send_traced(BlockProducerCommand::SetTestBlocksRemaining(Some(1)))?;
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    senders
+        .block_producer
+        .send_traced(BlockProducerCommand::SolutionFound {
+            solution: bad_solution,
+            response: response_tx,
+        })?;
+
+    // A stopped service would drop the sender instead of replying.
+    let reply = tokio::time::timeout(PRODUCER_LIVENESS_TIMEOUT, response_rx)
+        .await
+        .expect("producer service must reply to the rejected solution within 60s")
+        .expect("producer service must reply to the rejected solution");
+    let err = reply
+        .map(|_| ())
+        .expect_err("a block that fails pre-validation must not be returned");
+    let production_err = err
+        .downcast_ref::<BlockProductionError>()
+        .unwrap_or_else(|| panic!("expected a BlockProductionError, got: {err:#}"));
+    assert!(
+        matches!(
+            production_err,
+            BlockProductionError::Recoverable {
+                reason: "own_block_rejected",
+                ..
+            }
+        ),
+        "expected an own_block_rejected drop, got: {production_err:?}"
+    );
+    assert_eq!(
+        node.get_max_difficulty_block().height,
+        start_height,
+        "the rejected block must not extend the chain"
+    );
+
+    // The same service produces a block from the next solution.
+    let (block, _, _) =
+        tokio::time::timeout(PRODUCER_LIVENESS_TIMEOUT, node.mine_block_with_payload())
+            .await
+            .expect("producer service must produce a block from the next solution within 60s")?;
+    assert_eq!(block.height, start_height + 1);
+
+    node.stop().await;
+    Ok(())
+}
+
+/// A failed balance read is an error, not a zero balance: a zero would leave
+/// funded signers out of the block without any signal.
+#[test_log::test(tokio::test)]
+async fn balance_read_at_unknown_block_is_an_error() -> eyre::Result<()> {
+    use alloy_eips::BlockId;
+
+    let node = IrysNodeTest::new_genesis(NodeConfig::testing())
+        .start()
+        .await;
+    let adapter = &node.node_ctx.reth_node_adapter;
+    let signer = node.node_ctx.config.node_config.miner_address();
+    let unknown_block = Some(BlockId::from(alloy_primitives::B256::repeat_byte(0xAB)));
+
+    assert!(
+        adapter
+            .get_balance_irys(signer, unknown_block)
+            .await
+            .is_err(),
+        "an unknown block must not read as a zero balance"
+    );
+    assert!(
+        adapter
+            .get_balances_irys(&[signer], unknown_block)
+            .await
+            .is_err(),
+        "the batch read must surface the error"
+    );
+    adapter
+        .get_balance_irys(signer, None)
+        .await
+        .expect("a latest-state read succeeds");
+
+    node.stop().await;
+    Ok(())
+}

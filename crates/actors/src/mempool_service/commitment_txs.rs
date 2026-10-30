@@ -160,6 +160,9 @@ impl Inner {
 
                 need_to_process_pending_pledges_and_then_gossip = true;
             }
+            CommitmentSnapshotStatus::AlreadyStaked => {
+                return Err(CommitmentValidationError::AlreadyStaked.into());
+            }
             CommitmentSnapshotStatus::Unstaked => {
                 warn!(
                     tx.id = ?commitment_tx.id(),
@@ -412,7 +415,8 @@ impl Inner {
             | CommitmentSnapshotStatus::HasActivePledges
             | CommitmentSnapshotStatus::InvalidPledgeCount
             | CommitmentSnapshotStatus::Unowned
-            | CommitmentSnapshotStatus::UnpledgePending => {
+            | CommitmentSnapshotStatus::UnpledgePending
+            | CommitmentSnapshotStatus::AlreadyStaked => {
                 warn!(
                     "Commitment rejected: {:?} id={} ",
                     cache_status,

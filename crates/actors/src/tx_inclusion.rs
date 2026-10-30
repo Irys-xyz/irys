@@ -354,10 +354,11 @@ mod tests {
 
     /// Build a BlockTree with `genesis` seeded as Onchain, then add `extra` blocks
     /// via `add_common` using `SealedBlock::new_unchecked` (so we don't have to
-    /// populate matching tx bodies).
+    /// populate matching tx bodies). The last extra block becomes the tip.
     fn build_tree(genesis: IrysBlockHeader, extras: Vec<IrysBlockHeader>) -> BlockTreeReadGuard {
         // Genesis must seal successfully — it has no tx_ids in either ledger.
         let mut tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let tip = extras.last().map(|header| header.block_hash);
         for header in extras {
             let sealed = Arc::new(SealedBlock::new_unchecked(
                 Arc::new(header.clone()),
@@ -372,6 +373,9 @@ mod tests {
                 ChainState::Onchain,
             )
             .expect("add_common succeeds");
+        }
+        if let Some(tip) = tip {
+            tree.mark_tip(&tip).expect("mark_tip succeeds");
         }
         BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)))
     }
@@ -978,6 +982,7 @@ mod tests {
             )
             .expect("add_common succeeds");
         }
+        tree.mark_tip(&h_tx.block_hash).expect("mark_tip succeeds");
         // Surgically drop h_parent from the tree.  `delete_block` calls
         // `update_longest_chain_cache`, which walks back from the tip and
         // stops where the parent chain breaks — leaving canonical = [h_tx].
@@ -1050,6 +1055,8 @@ mod tests {
             )
             .expect("add_common succeeds");
         }
+        tree.mark_tip(&h_tx_tree.block_hash)
+            .expect("mark_tip succeeds");
         tree.test_delete(&h_parent_tree.block_hash)
             .expect("test_delete of intermediate block succeeds");
         let guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));

@@ -563,6 +563,12 @@ mod tests {
             .write()
             .mark_block_as_valid(&chain[1].block_hash)
             .expect("mark second block valid");
+        // The canonical chain follows the tip, which moves to a block once it is valid.
+        provider
+            .block_tree_read_guard
+            .write()
+            .mark_tip(&chain[1].block_hash)
+            .expect("mark second block as tip");
 
         let snap = provider
             .canonical_vdf_snapshot(20)

@@ -36,7 +36,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     node.mine_block().await?;
     assert_eq!(node.get_canonical_chain_height().await, 1);
     let block1 = node.get_block_by_height(1).await?;
-    let txid_map = block1.get_data_ledger_tx_ids();
+    let txid_map = block1.get_data_ledger_tx_ids().unwrap();
     assert!(txid_map.get(&DataLedger::Submit).unwrap().contains(&txid));
 
     // Post the chunks for the data tx
@@ -54,7 +54,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     node.mine_block().await?;
     let block2 = node.get_block_by_height(2).await?;
     assert_eq!(node.get_canonical_chain_height().await, 2);
-    let txid_map = block2.get_data_ledger_tx_ids();
+    let txid_map = block2.get_data_ledger_tx_ids().unwrap();
     assert!(!txid_map.get(&DataLedger::Submit).unwrap().contains(&txid));
 
     // Verify the tx is published
@@ -77,7 +77,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(node.get_canonical_chain_height().await, 3);
     let block3 = node.get_block_by_height(3).await?;
     let tx_ids = block3.commitment_tx_ids();
-    let txid_map = block3.get_data_ledger_tx_ids();
+    let txid_map = block3.get_data_ledger_tx_ids().unwrap();
     assert_eq!(tx_ids, vec![stake_tx.id()]);
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
@@ -92,7 +92,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(node.get_canonical_chain_height().await, 4);
     let block4 = node.get_block_by_height(4).await?;
     let tx_ids = block4.commitment_tx_ids();
-    let txid_map = block4.get_data_ledger_tx_ids();
+    let txid_map = block4.get_data_ledger_tx_ids().unwrap();
     assert_eq!(tx_ids, vec![]);
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
@@ -118,7 +118,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(node.get_canonical_chain_height().await, 5);
     let block5 = node.get_block_by_height(5).await?;
     let tx_ids = block5.commitment_tx_ids();
-    let txid_map = block5.get_data_ledger_tx_ids();
+    let txid_map = block5.get_data_ledger_tx_ids().unwrap();
     assert_eq!(tx_ids, vec![pledge_tx.id()]);
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
@@ -133,7 +133,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(node.get_canonical_chain_height().await, 6);
     let block6 = node.get_block_by_height(6).await?;
     let tx_ids = block6.commitment_tx_ids();
-    let txid_map = block6.get_data_ledger_tx_ids();
+    let txid_map = block6.get_data_ledger_tx_ids().unwrap();
     assert_eq!(tx_ids, vec![]);
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
@@ -143,7 +143,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(node.get_canonical_chain_height().await, 8);
     let block8 = node.get_block_by_height(8).await?;
     let tx_ids = block8.commitment_tx_ids();
-    let txid_map = block8.get_data_ledger_tx_ids();
+    let txid_map = block8.get_data_ledger_tx_ids().unwrap();
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
@@ -167,7 +167,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     node.mine_block().await?;
     assert_eq!(node.get_canonical_chain_height().await, 9);
     let block9 = node.get_block_by_height(9).await?;
-    let txid_map = block9.get_data_ledger_tx_ids();
+    let txid_map = block9.get_data_ledger_tx_ids().unwrap();
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     let tx_ids = block9.commitment_tx_ids();
     assert_eq!(tx_ids, vec![]);
