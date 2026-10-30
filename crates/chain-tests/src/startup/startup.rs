@@ -134,6 +134,14 @@ async fn slow_heavy_failed_initial_sync_stops_the_peer() -> eyre::Result<()> {
         .start()
         .await;
 
+    let error = match started {
+        Err(error) => error,
+        Ok(node) => {
+            node.stop(irys_types::ShutdownReason::ServiceCompleted("test".into()))
+                .await;
+            panic!("start must fail while every peer is syncing");
+        }
+    };
     for port in ports {
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         assert!(
@@ -141,9 +149,6 @@ async fn slow_heavy_failed_initial_sync_stops_the_peer() -> eyre::Result<()> {
             "{address} still accepts connections after the failed start"
         );
     }
-    let Err(error) = started else {
-        panic!("start must fail while every peer is syncing");
-    };
     assert!(
         format!("{error:#}").contains("initial sync failed"),
         "unexpected start error: {error:#}"
