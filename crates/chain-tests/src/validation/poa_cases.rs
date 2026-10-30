@@ -144,6 +144,8 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
             let partition_assignments =
                 epoch_snapshot.get_partition_assignments(genesis_signer.address());
 
+            // The chunks are in the Submit ledger, so take that ledger's partition for the
+            // slot: a PoA must name the ledger its partition is assigned to.
             let pa = partition_assignments
                 .iter()
                 .find(|pa| {
