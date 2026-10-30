@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793314037784,
+  "lastUpdate": 1793374393414,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20563,6 +20563,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0e07e083242250948e15fed18fee24c41f036409",
+          "message": "fix(consensus): tighten consensus rules and fork choice (#1711)\n\n* chore(types): require canonical low-s signatures\n\nalloy's `Signature::recover_address_from_prehash` normalizes s before\nit verifies, so it accepts both the low-s and high-s forms of a\nsignature. Require the low-s form (EIP-2) in\n`IrysSignature::recover_signer`, matching Ethereum's transaction rules.\nk256 always signs low-s, so signatures made by this codebase are\nunchanged.\n\n* chore(validation): recover shadow-tx signers with the low-s check\n\n* fix(commitments): reject a second stake from a staked or stake-pending signer\n\nA signer has at most one stake. A Stake from a signer that is already\nstaked in the epoch snapshot, or that has a pending stake in the\ncommitment snapshot, now gets the new CommitmentSnapshotStatus\nAlreadyStaked. Before, it was accepted and charged, but never recorded\nor refunded.\n\nThe rule applies at mempool ingress (CommitmentValidationError\nAlreadyStaked), block-producer selection, block prevalidation and full\nvalidation. Re-adding the same stake tx stays idempotent and returns\nAccepted. Snapshot contents do not change.\n\n* fix(validation): require the canonical block header encoding\n\nA block header has one canonical encoding: a PoA with a tx_path or\ndata_path names its ledger_id, and a Publish ledger has no expires.\nPre-validation rejects other forms.\n\nAlso correct the gossip comment on what the signature check guarantees.\n\n* fix(chunks): require zero notepad bytes in a chunk data path\n\nA chunk data path has one encoding: path validation does not read the\nnotepad bytes, so they must be zero. Ingest rejects a path with non-zero\nnotepad bytes.\n\n* fix(types): return an error when decoding an empty commitment type list\n\n* fix(shadow-tx): decode must consume the whole input\n\nShadowTransaction::decode now rejects bytes left after the Borsh payload.\nThe CL (extract_leading_shadow_txs), the EVM (process_shadow_tx) and the\npool prefilter all decode through this function, so they share the rule.\n\nThe producer encodes input only with encode_prefixed_input (prefix plus\nBorsh payload), so honest blocks are not affected. A test decodes the\nencoded input of every packet variant and checks that no bytes remain.\n\n* fix(shadow-tx): take the ingress proof count at the block's timestamp\n\nBlock production and validation size a block's Publish ingress-proof list\nby N (number_of_ingress_proofs_total) at the block's own timestamp. The\nshadow tx generator took N at the parent's timestamp, both to slice the\nproof list for rewards and to split Submit perm fees. At a hardfork that\nchanges N, the first block after activation disagreed: when N increases,\nthe tail proofs were unpaid; when N decreases, the generator asked for more\nproofs than the list holds and returned a Structural error, so no block\nwith Publish txs could be built at the boundary.\n\nThe generator now takes the block's timestamp instead of the parent header\nand resolves N once from it. The parent header was used only for this\ntimestamp. When N is the same at the parent and block timestamps, all\noutput is unchanged.\n\n* fix(types): keep adjusted difficulty below U256::MAX\n\n* fix(block-tree): pick the replacement max block by appearance order\n\nWhen the max cumulative difficulty block is removed, the replacement\namong equal-difficulty blocks was chosen by HashMap iteration order.\n\nRecord the order in which blocks are first added to the block tree\n(`insertion_sequence`; blocks loaded at startup share 0) and break ties:\n1. the block first added to the tree wins, as on the add path;\n2. on equal sequence, the block whose fork point with the canonical\n   chain is highest wins (smallest reorg);\n3. block hash, only to make the result independent of iteration order.\n   The add paths do not produce this case.\n\n* fix(block-tree): classify a reorg from the actual tip transition\n\nA validated block that became the tip was classified as a reorg when the\nold tip was not on the max cumulative difficulty chain. That chain can be\na fork still waiting for validation, so the classification did not match\nthe old tip -> new tip transition that the split is computed from:\n\n- a tip extension broadcast a ReorgEvent with an empty old fork, which\n  starts a full mempool revalidation and writes an empty reorg frame;\n- a tip move to a sibling fork, lighter than a pending chain that extends\n  the old tip, abandoned the old tip with no ReorgEvent, so its txs stayed\n  marked as included.\n\nCompute the split on every tip change and treat it as a reorg only when\nthe old tip side of the split has blocks.\n\n* fix(block-tree): confirm every new block on a multi-block tip extension\n\nA tip extension confirmed only the new tip. The tip can move by more than\none block: a validated block that did not become the tip (for example,\nmark_tip refused a cumulative difficulty tie) joins the canonical chain\nwith its child. That block got no BlockConfirmed and no persisted\nmetadata, and an epoch block among those blocks was not detected.\n\nConfirm each block of the new side of the split, oldest first, and detect\nan epoch block among them, as the reorg path does. No ReorgEvent is sent.\nA one-block extension is unchanged.\n\n* chore(block-tree): warn when a tip extension exceeds the cache window\n\nA tip extension abandons no fork, so it logs a warning instead of running\nthe reorg-path cache-window shutdown check. No control flow changes.\n\n* fix(types): decode a commitment type list only from its declared payload\n\nThe list decoder of CommitmentTypeV2 read the type id and fields from all\nof the remaining input. A list header with a shorter declared length could\nthen take its fields from bytes after the list.\n\nDecode the fields only from the declared payload, require the fields to\nuse all of it, and continue the outer decode after the payload. Canonical\nencodings decode as before.\n\n* fix(types): saturate cumulative difficulty at U256::MAX\n\nnext_cumulative_diff added the block's expected hash count with a plain\nadd, which panics on U256 overflow when the difficulty is near\nU256::MAX. Use a saturating add. The result is the same for every input\nthat did not overflow.\n\n* fix(block-tree): abort a tip extension past the cache window before prune\n\nA tip extension that spans more blocks than the block-tree cache window\nonly logged a warning. Prune then evicts its oldest new blocks before\nthey are confirmed, and the epoch snapshot and migration reads that\nfollow fail by hash, after confirmation side effects.\n\nRun the cache-window check on every tip change before prune, so an\nextension aborts with the same controlled shutdown as a deep reorg.\n\n* fix(validation): recover shadow-tx signers from the tx envelope\n\nRecover the shadow-tx signer with SignerRecoverable on the transaction\nenvelope, the same low-s (EIP-2) checked path that Reth uses for sender\nrecovery, and remove the call-site workaround.\n\nBan the inherent alloy Signed::recover_signer and\nSigned::try_into_recovered with clippy: they do not require the low-s\nform.\n\n* fix(block-tree): make the canonical chain follow the tip\n\nThe canonical chain cache walked back from the block with the max\ncumulative difficulty and skipped blocks that still wait for validation.\nWhen the heaviest fork is pending, that walk ends on a different block\nthan the tip: an ancestor of the tip when the tip extends, or an orphaned\nblock when the tip moved to a sibling fork. The fork-choice head, the\ncanonical snapshots, the mempool anchors and the API tip followed that\nblock instead of the tip.\n\nWalk back from the tip. The tip only moves to a fully validated block,\nso its ancestry is the canonical chain. The max cumulative difficulty\nblock stays the target for the next tip and the validation gate.\n\nRecord every fork-choice update in the block tree service harness and\nassert that the head is the tip and the confirmed and finalized blocks\nare ancestors of the tip. Add unit tests for a pending heavier fork\nbelow the tip, for a tip extension and for a tip move to a sibling.\nUpdate tests whose expectations encoded the old walk: test trees that\nset chain states directly now mark the tip, and the canonical chain no\nlonger includes validated blocks above the tip.\n\n* test(block-tree): cover reorg window, migration depth and an invalid max block\n\nDrive these cases through on_block_validation_finished in the service\nharness:\n\n- A reorg with the fork point at the start of the post-prune cache window\n  completes. A fork point one block below it aborts before prune, with no\n  ReorgEvent, no BlockConfirmed, and the fork blocks still in the cache.\n- A reorg as deep as block_migration_depth keeps the block index. A reorg\n  one block deeper rolls the block index back to the fork point. In both\n  cases the block index then holds only blocks of the new canonical chain.\n- After a cumulative difficulty tie keeps the tip, the max block is\n  invalid. A child of the validated sibling moves the tip by two blocks\n  and confirms both.\n\nAn ignored test records that the invalid max block alone does not move\nthe tip to the validated sibling.\n\nThe harness keeps the chunk migration receiver open, so that block\nmigration can run.\n\n* fix(validation): prioritise blocks that extend the heaviest fork\n\nThe validation priority read the last entry of the canonical chain as\nthe tip to extend. The canonical chain follows the tip, so a block that\nextends the tip was a canonical extension while a heavier fork that\nwaits for validation was a fork. The heavier fork is the target for the\nnext tip, and the tip cannot move to it until its blocks are validated.\n\nPrioritise weight before canonicity: a block is a canonical extension\nwhen it extends the validated prefix of the max cumulative difficulty\nchain. Add BlockTree::get_max_chain_validated_head, which returns the\nhead of that prefix. When the max block is the tip, the head is the\ntip, so the priority does not change.\n\nRestore the expectation of the fork-becomes-canonical priority test:\nthe blocks of a heavier pending fork are canonical extensions.\n\n* fix(block-tree): refuse to remove an Onchain block\n\nThe canonical chain cache walks back from the tip. An Onchain block is\nthe tip or an ancestor of it, so a removal of one leaves the canonical\nchain empty, and later reads of its last entry panic. No path removes an\nOnchain block today, but nothing prevents it.\n\nBlockTree::remove_block now returns an error for an Onchain block and\nchanges nothing. mark_tip sets every ancestor of the tip to Onchain, so\nthe check on the target covers the subtree. prune still deletes old\nOnchain blocks through delete_block.\n\ndiscard_and_broadcast returns that error. A result that is not Valid\nfor a block the node already made canonical is a node fault: the block\ntree service stops on the controlled-shutdown path instead of logging\nand continuing. Other removal errors keep their current handling.\n\n* fix(block-tree): move the tip after a discard makes a validated block the max\n\nOnly a Valid result ran tip selection. When mark_tip refuses an exact\ncumulative difficulty tie, the validated block stays off the canonical\nchain while the max block waits for validation. If the max block is\nthen invalid, the discard makes the validated block the max block, but\nnothing moves the tip to it: the max block cannot be built upon, no\nfork-choice update or confirmation is sent, and block production waits.\n\nExtract the tip change from on_block_validation_finished into two\nhelpers. try_move_tip_to runs under the block tree write lock: the\ncumulative difficulty check, mark_tip, the fork-choice markers, the\nreorg split and classification, the cache-window abort and prune.\npublish_tip_move runs after the lock is released: epoch events,\nmetadata, the reorg event, the fork-choice update, confirmations,\nmigration and the difficulty update. on_block_validation_finished\nkeeps its behaviour.\n\nAfter a discard, move_tip_after_discard moves the tip to the max block\nwhen the existing gate passes (the max block is heavier than the tip)\nand every block from the max block back to its first Onchain ancestor\nis fully validated. Enable the test for the refused-tie case and add a\ntest that a discard which leaves a pending block as the max keeps the\ntip and sends no fork-choice update.\n\n* refactor(block-tree): remove the unused reorg migration-depth gate\n\nvalidate_reorg_within_migration_depth has no caller: a reorg deeper\nthan the migration depth goes through network partition recovery. The\nlive path is covered by reorg_around_migration_depth_keeps_block_index_canonical.\n\n* fix(domain): report the tip's cumulative difficulty in node info\n\nNode info took the cumulative difficulty from the block with the max\ncumulative difficulty, which can still wait for validation, while height\nand block hash come from the tip. Report the tip's value so all three\ndescribe the same block.\n\n* fix(block-tree): broadcast a block state event after a discard moves the tip\n\nThe discard event goes out before the tip moves. A service that waits for\na block it can build on reads the tree when an event arrives, so it can\nread the tree before the move and then wait for an unrelated event. Send\none more event for the new tip after the move.\n\n* test(p2p): move the tip in the canonical VDF snapshot test\n\nThe canonical chain follows the tip, so the test marks its last valid\nblock as the tip, as block validation does.\n\n* fix(config): require a block tree depth of at least 2\n\nEvery tip change checks that the fork point stays in the block-tree\ncache after the prune. With a depth of 1 the old tip is pruned even when\nthe tip moves by one block, so every tip change would fail.\n\n* fix(block-producer): drop a data solution whose partition has no ledger\n\nThe producer takes the PoA ledger id from the parent epoch snapshot. When\nthe partition left its data ledger at an epoch boundary after the\nsolution was mined, the PoA has data paths and no ledger id, which block\nvalidation rejects. Drop the solution instead of producing that block,\nand state the rule in the canonical-encoding doc comment.\n\n* fix(block-tree): check the cache window before the tip moves\n\nThe cache-window check ran after mark_tip, so an abort left the tree\nwith the moved tip. Check the max-cdiff tie first, then the reorg split\nand the cache window, and only then call mark_tip.\n\n* fix(block-tree): keep an Onchain block on a soft validation result\n\nA soft result says only that this node could not decide a block's\nvalidity. For an Onchain block an earlier Valid result decided it, so a\nsoft result does not contradict it. Keep the block, log a warning and\nsend no discard broadcast. An Invalid result for an Onchain block still\nreturns an error and stops the service.\n\n* test(chain): give the peer's Reth the injected parent's payload\n\nThe VDF-cancel test puts the head's parent into the peer's block tree and\nmarks it valid without validation. After the head is discarded, the parent\nis the valid max block, so the tip moves to it and the peer sends Reth a\nfork-choice update for the parent's EVM block. Reth did not have that\nblock, answered Syncing, and the node shut down before the VDF task was\ncancelled.\n\nSubmit the parent's payload to the peer's Reth before the parent is marked\nvalid, as real validation does. The parent's VDF steps still do not reach\nthe peer, so the head's VDF task still waits.\n\n* test(chain): keep genesis gossip off in the VDF-cancel test\n\n`mine_block_without_gossip` turns gossip off only while the block is\nproduced. Genesis validates the block after that and then broadcasts it,\nso the parent could reach the peer by gossip. The peer then validated the\nparent and got its VDF steps, so the head's VDF task did not wait, or the\ninjection found the parent already Onchain.\n\nTurn genesis gossip off before the parent is mined and keep it off. The\ntest delivers each later block to the peer directly.\n\n* test(mempool): wait for every pre-header chunk before the overflow\n\n`POST /v1/chunk` returns before the ingest worker parks the chunk, and\nthe worker can park chunks out of order. The test waited only for the\nlast offset, so an earlier offset could still be in flight when the\noverflow chunk was sent. The overflow chunk then took the last cache slot\nand the late chunk was dropped instead.\n\nWait until each of the 64 offsets is parked before the overflow chunk is\nsent.",
+          "timestamp": "2026-10-30T15:11:11Z",
+          "tree_id": "0c7d188fc500b0456b4b05d7066b90efe1ab8021",
+          "url": "https://github.com/Irys-xyz/irys/commit/0e07e083242250948e15fed18fee24c41f036409"
+        },
+        "date": 1793374390175,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012668,
+            "range": "± 0.000803",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.128621,
+            "range": "± 0.004135",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.229823,
+            "range": "± 0.028833",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.54812,
+            "range": "± 0.287482",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078746,
+            "range": "± 0.001704",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 785.724942,
+            "range": "± 24.728405",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 995.544787,
+            "range": "± 19.341044",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.125161,
+            "range": "± 0.001477",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1385.293341,
+            "range": "± 155.496777",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1540.336337,
+            "range": "± 20.054068",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.032538,
+            "range": "± 0.003544",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 219.866522,
+            "range": "± 21.732024",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 288.952213,
+            "range": "± 27.165697",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
