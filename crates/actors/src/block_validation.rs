@@ -176,6 +176,8 @@ pub enum PreValidationError {
     },
     #[error("Missing PoA chunk to be pre validated")]
     PoAChunkMissing,
+    #[error("block miner {miner} is not an allowed mainnet miner")]
+    MinerNotAllowed { miner: IrysAddress },
     #[error("PoA chunk offset out of tx's data chunks bounds")]
     PoAChunkOffsetOutOfDataChunksBounds,
     #[error("PoA chunk offset out of block bounds")]
@@ -626,6 +628,7 @@ impl PreValidationError {
             | Self::PoACapacityChunkMismatch { .. }
             | Self::PoAChunkHashMismatch { .. }
             | Self::PoAChunkMissing
+            | Self::MinerNotAllowed { .. }
             | Self::PoAChunkOffsetOutOfBlockBounds
             | Self::PoAChunkOffsetOutOfDataChunksBounds
             | Self::PoAChunkOffsetOutOfTxBounds
@@ -706,6 +709,7 @@ impl PreValidationError {
             Self::PoACapacityChunkMismatch { .. } => "poa_capacity_chunk_mismatch",
             Self::PoAChunkHashMismatch { .. } => "poa_chunk_hash_mismatch",
             Self::PoAChunkMissing => "poa_chunk_missing",
+            Self::MinerNotAllowed { .. } => "miner_not_allowed",
             Self::PoAChunkOffsetOutOfDataChunksBounds => "poa_chunk_offset_out_of_data_bounds",
             Self::PoAChunkOffsetOutOfBlockBounds => "poa_chunk_offset_out_of_block_bounds",
             Self::PoALedgerInactive { .. } => "poa_ledger_inactive",
@@ -1633,6 +1637,54 @@ fn publish_ingress_proof_count_is_valid(
     Ok(())
 }
 
+/// Mainnet chain id. Must equal `ConsensusConfig::mainnet().chain_id`.
+const MAINNET_CHAIN_ID: u64 = 3282;
+/// From this height, a mainnet block must be mined by one of `MAINNET_ALLOWED_MINERS`.
+/// Lower blocks are validated as before, so the chain history stays valid.
+const MAINNET_ALLOWED_MINERS_FROM_HEIGHT: u64 = 2779313;
+/// The mainnet miner addresses.
+const MAINNET_ALLOWED_MINERS: [[u8; 20]; 4] = [
+    // 0xfaf11d0e472d0b2dc4dab8d4817d0854e3f9e03e
+    [
+        0xfa, 0xf1, 0x1d, 0x0e, 0x47, 0x2d, 0x0b, 0x2d, 0xc4, 0xda, 0xb8, 0xd4, 0x81, 0x7d, 0x08,
+        0x54, 0xe3, 0xf9, 0xe0, 0x3e,
+    ],
+    // 0x22be097b43d65142d32f44dde485de48439385ca
+    [
+        0x22, 0xbe, 0x09, 0x7b, 0x43, 0xd6, 0x51, 0x42, 0xd3, 0x2f, 0x44, 0xdd, 0xe4, 0x85, 0xde,
+        0x48, 0x43, 0x93, 0x85, 0xca,
+    ],
+    // 0xdfab8da4fe97bcc440d8663bfa268f750e177b83
+    [
+        0xdf, 0xab, 0x8d, 0xa4, 0xfe, 0x97, 0xbc, 0xc4, 0x40, 0xd8, 0x66, 0x3b, 0xfa, 0x26, 0x8f,
+        0x75, 0x0e, 0x17, 0x7b, 0x83,
+    ],
+    // 0x3e0ee0dfef24990f655673b22673c0665238c72d
+    [
+        0x3e, 0x0e, 0xe0, 0xdf, 0xef, 0x24, 0x99, 0x0f, 0x65, 0x56, 0x73, 0xb2, 0x26, 0x73, 0xc0,
+        0x66, 0x52, 0x38, 0xc7, 0x2d,
+    ],
+];
+
+/// On mainnet, from `MAINNET_ALLOWED_MINERS_FROM_HEIGHT`, the block miner must be
+/// one of `MAINNET_ALLOWED_MINERS`.
+pub fn mainnet_miner_is_allowed(
+    chain_id: u64,
+    height: u64,
+    miner: IrysAddress,
+) -> Result<(), PreValidationError> {
+    if chain_id != MAINNET_CHAIN_ID || height < MAINNET_ALLOWED_MINERS_FROM_HEIGHT {
+        return Ok(());
+    }
+    if MAINNET_ALLOWED_MINERS
+        .iter()
+        .any(|allowed| IrysAddress::from(*allowed) == miner)
+    {
+        return Ok(());
+    }
+    Err(PreValidationError::MinerNotAllowed { miner })
+}
+
 /// Full pre-validation steps for a block
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
 pub async fn prevalidate_block(
@@ -1652,6 +1704,8 @@ pub async fn prevalidate_block(
         block.height = ?block.height,
         "Prevalidating block",
     );
+
+    mainnet_miner_is_allowed(config.consensus.chain_id, block.height, block.miner_address)?;
 
     let poa_chunk: &[u8] = match &block.poa.chunk {
         Some(chunk) => chunk.as_ref(),
@@ -4834,6 +4888,27 @@ pub async fn shadow_transactions_are_valid(
     if payload_timestamp != block_timestamp_sec {
         return Err(reject(format!(
             "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
+        )));
+    }
+
+    // The EVM block must build on the parent block's EVM block. Reth checks the
+    // EVM block number and state only against the EVM parent that the payload
+    // names, which can be any EVM block that Reth has, also one from another fork.
+    let parent = crate::block_tree_service::get_block_header(
+        block_tree_guard,
+        db,
+        block.previous_block_hash,
+        false,
+    )
+    .map_err(|e| ValidationError::ShadowTxNodeFault(e.to_string()))?
+    .ok_or(ValidationError::ParentBlockMissing {
+        block_hash: block.previous_block_hash,
+    })?;
+    let payload_parent_hash = payload_v3.payload_inner.payload_inner.parent_hash;
+    if payload_parent_hash != parent.evm_block_hash {
+        return Err(reject(format!(
+            "EVM payload parent {payload_parent_hash} is not the parent block's EVM block {}",
+            parent.evm_block_hash
         )));
     }
 
@@ -9379,5 +9454,47 @@ mod commitment_version_tests {
                 prop_assert!(result.is_some());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod mainnet_miner_allowlist_tests {
+    use super::*;
+
+    #[test]
+    fn mainnet_chain_id_matches_the_mainnet_config() {
+        assert_eq!(MAINNET_CHAIN_ID, ConsensusConfig::mainnet().chain_id);
+    }
+
+    #[test]
+    fn allowed_miners_match_their_base58_addresses() {
+        let base58 = [
+            "4VmghPr46SyHsCjSWBWjtF3g4TeD",
+            "V5Evzt8eyJJPAvqVumo9uPtfRGd",
+            "47jZfpkE6iYdkwkMPjDoyMPgvSee",
+            "s9Rk6MfxHvwu2GaN5tuxBrXLLY4",
+        ];
+        for (allowed, encoded) in MAINNET_ALLOWED_MINERS.iter().zip(base58) {
+            assert_eq!(
+                IrysAddress::from(*allowed),
+                IrysAddress::from_base58(encoded).expect("valid base58 address")
+            );
+        }
+    }
+
+    #[test]
+    fn only_allowed_miners_pass_on_mainnet_from_the_activation_height() {
+        let allowed = IrysAddress::from(MAINNET_ALLOWED_MINERS[0]);
+        let other = IrysAddress::from([7_u8; 20]);
+        let from = MAINNET_ALLOWED_MINERS_FROM_HEIGHT;
+
+        assert!(mainnet_miner_is_allowed(MAINNET_CHAIN_ID, from, allowed).is_ok());
+        assert!(mainnet_miner_is_allowed(MAINNET_CHAIN_ID, from - 1, other).is_ok());
+        assert!(mainnet_miner_is_allowed(1270, from, other).is_ok());
+        assert_eq!(
+            mainnet_miner_is_allowed(MAINNET_CHAIN_ID, from, other),
+            Err(PreValidationError::MinerNotAllowed { miner: other })
+        );
+        assert!(mainnet_miner_is_allowed(MAINNET_CHAIN_ID, from + 1, other).is_err());
     }
 }
