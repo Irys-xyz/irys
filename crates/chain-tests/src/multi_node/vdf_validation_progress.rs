@@ -403,8 +403,30 @@ async fn heavy_test_vdf_wait_is_cancelled_when_block_leaves_tree() -> eyre::Resu
 
     // Parent goes straight into the peer's tree, so its steps never reach the
     // peer's VDF state.
-    let (parent_header, _parent_payload, _parent_txs) = genesis.mine_block_without_gossip().await?;
+    let (parent_header, parent_payload, _parent_txs) = genesis.mine_block_without_gossip().await?;
     let parent_hash = parent_header.block_hash;
+    // The parent is marked valid below, so it becomes the tip once the head
+    // is discarded. The peer's Reth must hold the parent's payload, as it
+    // would after real validation, or the tip's fork-choice update fails.
+    peer.node_ctx
+        .block_pool
+        .add_execution_payload_to_cache(parent_payload.block().clone())
+        .await
+        .map_err(|e| eyre::eyre!("parent payload rejected by cache: {e:?}"))?;
+    let parent_execution_data = peer
+        .node_ctx
+        .block_pool
+        .execution_payload_provider
+        .wait_for_payload(&parent_header.evm_block_hash)
+        .await
+        .map_err(|e| eyre::eyre!("parent payload missing from cache: {e:?}"))?;
+    irys_actors::block_validation::submit_payload_to_reth(
+        &parent_header,
+        &peer.node_ctx.reth_node_adapter,
+        parent_execution_data,
+    )
+    .await
+    .map_err(|e| eyre::eyre!("peer Reth rejected parent payload: {e:?}"))?;
     {
         let sealed_parent = std::sync::Arc::new(irys_types::SealedBlock::new(
             parent_header.as_ref().clone(),
