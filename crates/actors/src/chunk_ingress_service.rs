@@ -967,6 +967,10 @@ mod overload_helpers_tests {
     #[test]
     fn cache_watermark_is_reached_at_max_cache_size() {
         use irys_database::db::IrysDatabaseExt as _;
+        use irys_types::{
+            DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+            DataTransactionMetadata,
+        };
 
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix("ingress-cache-watermark")
@@ -985,11 +989,24 @@ mod overload_helpers_tests {
                 data_path: vec![byte].into(),
                 bytes: vec![byte; 32].into(),
             };
-            state
+            // `cache_chunk_verified` skips a chunk whose data root is not cached.
+            let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    data_root: chunk.data_root,
+                    data_size: chunk.data_size,
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
+            });
+            let outcome = state
                 .cache_watermark
                 .db
-                .update_eyre(|tx| irys_database::cache_chunk_verified(tx, &chunk).map(|_| ()))
+                .update_eyre(|tx| {
+                    irys_database::cache_data_root(tx, &header, None)?;
+                    irys_database::cache_chunk_verified(tx, &chunk)
+                })
                 .expect("cache body");
+            assert_eq!(outcome, irys_database::CacheChunkOutcome::Written);
         };
 
         assert!(!state.cache_watermark_reached(), "empty cache");
