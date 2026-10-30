@@ -1596,6 +1596,15 @@ async fn term_ledger_reverse_scan_visits_the_prefix_after_the_frontier() {
     );
 }
 
+/// Offset 0 is in the first window when the cursor is 0, so the wrapped
+/// window must be empty.
+#[test]
+fn forward_scan_ranges_visit_offset_zero_once() {
+    assert_eq!(forward_scan_ranges(0, 7), [(0, 7), (1, 0)]);
+    assert_eq!(forward_scan_ranges(1, 7), [(1, 7), (0, 0)]);
+    assert_eq!(forward_scan_ranges(5, 7), [(5, 7), (0, 4)]);
+}
+
 fn interval_count(sm: &StorageModule) -> usize {
     sm.intervals().read().unwrap().iter().count()
 }

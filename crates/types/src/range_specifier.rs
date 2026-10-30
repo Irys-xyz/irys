@@ -358,7 +358,7 @@ mod bytes_range_specifier_tests {
 
         assert_eq!(specifier.chunk_offset, 5);
         assert_eq!(u64::try_from(specifier.byte_offset)?, 300);
-        assert_eq!(specifier.length, specifier.length);
+        assert_eq!(specifier.length, U34::from(50));
         Ok(())
     }
 
@@ -377,7 +377,7 @@ mod bytes_range_specifier_tests {
 
         assert_eq!(specifier.chunk_offset, 11);
         assert_eq!(u64::try_from(specifier.byte_offset)?, 100);
-        assert_eq!(specifier.length, specifier.length);
+        assert_eq!(specifier.length, U34::from(100));
         Ok(())
     }
 
@@ -396,7 +396,7 @@ mod bytes_range_specifier_tests {
 
         assert_eq!(specifier.chunk_offset, 23);
         assert_eq!(u64::try_from(specifier.byte_offset)?, 0);
-        assert_eq!(specifier.length, specifier.length);
+        assert_eq!(specifier.length, U34::from(200));
         Ok(())
     }
 
@@ -415,7 +415,7 @@ mod bytes_range_specifier_tests {
 
         assert_eq!(specifier.chunk_offset, 15);
         assert_eq!(u64::try_from(specifier.byte_offset)?, 250);
-        assert_eq!(specifier.length, specifier.length);
+        assert_eq!(specifier.length, U34::from(75));
         Ok(())
     }
 
@@ -434,7 +434,7 @@ mod bytes_range_specifier_tests {
 
         assert_eq!(specifier.chunk_offset, 31);
         assert_eq!(u64::try_from(specifier.byte_offset)?, 0);
-        assert_eq!(specifier.length, specifier.length);
+        assert_eq!(specifier.length, U34::from(150));
         Ok(())
     }
 

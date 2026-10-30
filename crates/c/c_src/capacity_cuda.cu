@@ -182,82 +182,83 @@ extern "C" int irys_cuda_device_name(int device, char *name, size_t name_len) {
  */
 extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char *mining_addr, size_t mining_addr_size, unsigned long int chunk_offset_start, unsigned long int chain_id, long int chunks_count, const unsigned char *partition_hash, size_t partition_hash_size, unsigned char *chunks, unsigned int packing_sha_1_5_s, int blocks, int threads_per_block)
 {
-    unsigned char *d_chunks;
-    unsigned char *d_chunk_id;
+    unsigned char *d_chunks = NULL;
+    unsigned char *d_chunk_id = NULL;
+    cudaEvent_t stop = NULL;
+    entropy_chunk_errors result = CUDA_ERROR;
 
     // We need to allocate memory for each layer here, as kernel/device functions can't allocate any
     // additional memory, so we need to prepare it for them.
     if (cudaMalloc(&d_chunks, DATA_CHUNK_SIZE * chunks_count) != cudaSuccess) {
         printf("cudaMalloc failed\n");
-        return CUDA_ERROR;
+        goto cleanup;
     }
 
     if (cudaMalloc(&d_chunk_id, CHUNK_ID_LEN) != cudaSuccess) {
-        printf("cudaMalloc failed\n");        
-        return CUDA_ERROR;
+        printf("cudaMalloc failed\n");
+        goto cleanup;
     }
 
     if (cudaMemcpy(d_chunk_id, mining_addr, mining_addr_size, cudaMemcpyHostToDevice) != cudaSuccess) {
-        printf("cudaMalloc failed\n");        
-        return CUDA_ERROR;
+        printf("cudaMemcpy failed\n");
+        goto cleanup;
     }
 
     if (cudaMemcpy(d_chunk_id + mining_addr_size, partition_hash, partition_hash_size, cudaMemcpyHostToDevice) != cudaSuccess) {
-        printf("cudaMalloc failed\n");        
-        return CUDA_ERROR;
+        printf("cudaMemcpy failed\n");
+        goto cleanup;
     }
 
     if (cudaMemcpy(d_chunk_id + mining_addr_size + partition_hash_size, &chain_id, sizeof(uint64_t), cudaMemcpyHostToDevice) != cudaSuccess) {
-        printf("cudaMalloc failed\n");  
-        return CUDA_ERROR;
+        printf("cudaMemcpy failed\n");
+        goto cleanup;
     }
-    // Create CUDA events
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    
 
+    // The stop event marks the end of the kernel; the host waits on it below.
+    if (cudaEventCreate(&stop) != cudaSuccess) {
+        printf("cudaEventCreate failed\n");
+        goto cleanup;
+    }
 
     // Launch kernel
-    // Record start event
-    cudaEventRecord(start);
-    
-    printf("%ix%i\n", threads_per_block, blocks);
-
-
     compute_entropy_chunks_cuda_kernel<<<blocks, threads_per_block>>>(d_chunk_id, chunk_offset_start, chunks_count, d_chunks, packing_sha_1_5_s);
 
-    // Record stop event
-    cudaEventRecord(stop);
-    
+    if (cudaEventRecord(stop) != cudaSuccess) {
+        printf("cudaEventRecord failed\n");
+        result = CUDA_KERNEL_LAUNCH_FAILED;
+        goto cleanup;
+    }
+
     // Wait for the stop event to complete
-    cudaEventSynchronize(stop);
-    
-    // Calculate elapsed time
-    float milliseconds = 0;
-    cudaEventElapsedTime(&milliseconds, start, stop);
-    
-    printf("Kernel execution time: %.3f ms\n", milliseconds);
-    
-    // Clean up events
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    if (cudaEventSynchronize(stop) != cudaSuccess) {
+        printf("cudaEventSynchronize failed\n");
+        result = CUDA_KERNEL_LAUNCH_FAILED;
+        goto cleanup;
+    }
 
     // Check for errors after kernel launch
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("CUDA failed, error code %d\n", err);  
-        return CUDA_KERNEL_LAUNCH_FAILED;
+    {
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            printf("CUDA failed, error code %d\n", err);
+            result = CUDA_KERNEL_LAUNCH_FAILED;
+            goto cleanup;
+        }
     }
 
-    cudaError_t errm = cudaMemcpy(chunks, d_chunks, DATA_CHUNK_SIZE * chunks_count, cudaMemcpyDeviceToHost);
-    if (errm != cudaSuccess) {
-        printf("cudaMalloc failed\n");          
-        return CUDA_ERROR;
+    if (cudaMemcpy(chunks, d_chunks, DATA_CHUNK_SIZE * chunks_count, cudaMemcpyDeviceToHost) != cudaSuccess) {
+        printf("cudaMemcpy failed\n");
+        goto cleanup;
     }
 
+    result = NO_ERROR;
+
+cleanup:
+    if (stop) cudaEventDestroy(stop);
     cudaFree(d_chunks);
     cudaFree(d_chunk_id);
 
-    return NO_ERROR;
+    if (result != NO_ERROR) (void)cudaGetLastError();
+
+    return result;
 }

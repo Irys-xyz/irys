@@ -6,7 +6,9 @@ use futures::StreamExt as _;
 use irys_domain::{EntropyRejection, EntropyWrite, StorageModule};
 use irys_types::{
     Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig, ii,
-    partition::PartitionHash, partition_chunk_offset_ii, remote_packing::RemotePackingRequest,
+    partition::PartitionHash,
+    partition_chunk_offset_ii,
+    remote_packing::{REMOTE_PACK_WINDOW_CHUNKS, RemotePackingRequest},
 };
 use reth::revm::primitives::bytes::{Bytes, BytesMut};
 use tokio::sync::Notify;
@@ -16,8 +18,6 @@ use crate::packing_service::{
     REMOTE_STREAM_BUFFER_MULTIPLIER, client_pool::HttpClientPool, config::PackingConfig,
 };
 
-/// Chunks one remote `/pack` request may cover. The next span is a new request.
-const REMOTE_PACK_WINDOW_CHUNKS: u32 = 1024;
 /// Stream budget, in configured timeouts. Not one timeout per chunk.
 const REMOTE_STREAM_BUDGET_TIMEOUTS: u32 = 4;
 

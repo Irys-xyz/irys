@@ -27,6 +27,13 @@ pub struct MempoolTxsQuery {
     pub cursor: Option<String>,
 }
 
+/// Applies the documented default (100) and bounds (1..=500) to a requested page size.
+fn effective_mempool_txs_limit(requested: Option<usize>) -> usize {
+    requested
+        .unwrap_or(MEMPOOL_TXS_DEFAULT_LIMIT)
+        .clamp(1, MEMPOOL_TXS_MAX_LIMIT)
+}
+
 /// GET /v1/mempool/txs — light unconfirmed pending-tx list (empty pool → 200 + `[]`).
 ///
 /// When `truncated`, continue with `?cursor=<next_cursor>`. See `MempoolPendingTxs`.
@@ -34,10 +41,7 @@ pub async fn get_mempool_txs(
     state: web::Data<ApiState>,
     query: web::Query<MempoolTxsQuery>,
 ) -> Result<HttpResponse> {
-    let limit = query
-        .limit
-        .unwrap_or(MEMPOOL_TXS_DEFAULT_LIMIT)
-        .clamp(1, MEMPOOL_TXS_MAX_LIMIT);
+    let limit = effective_mempool_txs_limit(query.limit);
 
     let cursor = match query.cursor.as_deref() {
         Some(s) => match MempoolTxsCursor::decode(s) {
@@ -120,14 +124,18 @@ mod tests {
     }
 
     #[test]
-    fn limit_clamp_matches_documented_bounds() {
-        assert_eq!(0_usize.clamp(1, MEMPOOL_TXS_MAX_LIMIT), 1);
+    fn limit_bounds_match_documented_values() {
+        assert_eq!(MEMPOOL_TXS_DEFAULT_LIMIT, 100);
+        assert_eq!(MEMPOOL_TXS_MAX_LIMIT, 500);
+    }
+
+    #[test]
+    fn effective_limit_defaults_and_clamps() {
+        assert_eq!(effective_mempool_txs_limit(None), MEMPOOL_TXS_DEFAULT_LIMIT);
+        assert_eq!(effective_mempool_txs_limit(Some(0)), 1);
+        assert_eq!(effective_mempool_txs_limit(Some(250)), 250);
         assert_eq!(
-            MEMPOOL_TXS_DEFAULT_LIMIT.clamp(1, MEMPOOL_TXS_MAX_LIMIT),
-            MEMPOOL_TXS_DEFAULT_LIMIT
-        );
-        assert_eq!(
-            10_000_usize.clamp(1, MEMPOOL_TXS_MAX_LIMIT),
+            effective_mempool_txs_limit(Some(10_000)),
             MEMPOOL_TXS_MAX_LIMIT
         );
     }

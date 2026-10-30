@@ -110,7 +110,8 @@ impl ChunkCounts {
     pub(crate) fn from_intervals(intervals: &[ChunkInterval]) -> u64 {
         intervals
             .iter()
-            .map(|interval| (interval.end - interval.start + 1) as u64)
+            .filter(|interval| interval.end >= interval.start)
+            .map(|interval| u64::from(interval.end) - u64::from(interval.start) + 1)
             .sum()
     }
 }
@@ -264,3 +265,24 @@ pub struct BlockTreeForksResponse {
 
 // Re-export ConsensusConfig from irys_types as NodeConfig for compatibility
 pub use irys_types::config::ConsensusConfig as NodeConfig;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_intervals_skips_inverted_intervals_and_does_not_overflow() {
+        let intervals = [
+            ChunkInterval { start: 0, end: 9 },
+            ChunkInterval { start: 10, end: 5 },
+            ChunkInterval {
+                start: 0,
+                end: u32::MAX,
+            },
+        ];
+        assert_eq!(
+            ChunkCounts::from_intervals(&intervals),
+            10 + u64::from(u32::MAX) + 1
+        );
+    }
+}

@@ -1258,10 +1258,10 @@ mod tests {
 
     #[test]
     fn step_log_writes_run_and_phase_stamps() {
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../.tmp/sm-bench-step-log");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("steps.jsonl");
+        let dir = irys_testing_utils::TempDirBuilder::new()
+            .prefix("sm-bench-step-log")
+            .build();
+        let path = dir.path().join("steps.jsonl");
         let mut log = StepLog::create(&path).unwrap();
         log.mark_run().unwrap();
         log.mark(0, "idle", "start").unwrap();
@@ -1292,7 +1292,6 @@ mod tests {
         assert_eq!(end["phase"], "end");
         assert!(end["monotonic_ns"].as_u64().unwrap() >= start["monotonic_ns"].as_u64().unwrap());
         assert!(lines.next().is_none());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]

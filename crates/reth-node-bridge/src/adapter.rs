@@ -273,9 +273,8 @@ impl IrysRethNodeAdapter {
     }
 
     /// Sends forkchoice update to the engine api
-    // we can set safe or finalized to ZERO to skip updating them, but head is mandatory.
-    // safe (confirmed) we update in the block confirmed handler
-    // finalized we update in the block finalized handler
+    // head is mandatory. `None` for confirmed (safe) or finalized sends ZERO, which skips that marker.
+    // RethService::process_fcu sends head, confirmed and finalized together in one update.
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn update_forkchoice_full(
         &self,

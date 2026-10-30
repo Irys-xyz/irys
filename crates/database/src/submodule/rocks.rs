@@ -10669,7 +10669,7 @@ mod tests {
             put_offset(&store, offset, offset as u8)?;
             flush_every_family(&store)?;
         }
-        let settled = wait_until_manifest_settles(&rocks)?;
+        let settled = wait_until_manifest_settles(&store, &rocks)?;
         let names = dir_names(&rocks)?;
         let moved = root.path().join("rocks-moved");
         fs::rename(&rocks, &moved)?;
@@ -10706,24 +10706,39 @@ mod tests {
         Ok(())
     }
 
-    fn wait_until_manifest_settles(path: &Path) -> eyre::Result<Vec<u8>> {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut previous = manifest_bytes(path)?;
-        while Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(100));
-            let now = manifest_bytes(path)?;
-            if now != previous {
-                previous = now;
-                continue;
+    fn background_work_is_idle(store: &RocksSubmoduleStore) -> eyre::Result<bool> {
+        let mut busy = property_u64(&store.db, "rocksdb.num-running-compactions")?
+            .saturating_add(property_u64(&store.db, "rocksdb.num-running-flushes")?);
+        for cf in families() {
+            let handle = cf_handle(&store.db, cf)?;
+            for name in [
+                "rocksdb.compaction-pending",
+                "rocksdb.mem-table-flush-pending",
+            ] {
+                busy = busy.saturating_add(int_property_cf(&store.db, handle, name)?);
             }
-            std::thread::sleep(Duration::from_millis(200));
-            let again = manifest_bytes(path)?;
-            if again == now {
-                return Ok(again);
-            }
-            previous = again;
         }
-        eyre::bail!("manifest still moving before the swap")
+        Ok(busy == 0)
+    }
+
+    /// Returns the manifest once no flush or compaction is running or queued
+    /// and the manifest bytes are unchanged across a quiet interval.
+    fn wait_until_manifest_settles(
+        store: &RocksSubmoduleStore,
+        path: &Path,
+    ) -> eyre::Result<Vec<u8>> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if background_work_is_idle(store)? {
+                let before = manifest_bytes(path)?;
+                std::thread::sleep(Duration::from_millis(200));
+                if background_work_is_idle(store)? && manifest_bytes(path)? == before {
+                    return Ok(before);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        eyre::bail!("background work still running before the swap")
     }
 
     /// Proofs at the start of each of three sub-spans, plus one just past the span.

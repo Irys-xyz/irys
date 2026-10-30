@@ -84,7 +84,8 @@ pub fn unpack_with_entropy(
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
 /// returns the computed entropy chunk by overwriting the out_entropy_chunk parameter.
-/// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (defined in capacity.h file) capacity
+/// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (defined in capacity.h file) capacity (asserted)
+/// Panics if the C implementation reports an error
 /// Uses C 2D Packing implementation
 pub fn capacity_pack_range_c(
     mining_address: IrysAddress,
@@ -98,12 +99,20 @@ pub fn capacity_pack_range_c(
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
-    let entropy_chunk_ptr = out_entropy_chunk.as_ptr() as *mut u8;
+    let entropy_chunk_ptr = out_entropy_chunk.as_mut_ptr();
 
     let iterations: u32 = entropy_packing_iterations;
 
+    let chunk_size = irys_types::ConsensusConfig::CHUNK_SIZE as usize;
+    assert!(
+        out_entropy_chunk.capacity() >= chunk_size,
+        "entropy buffer capacity must be at least CHUNK_SIZE ({}), got {}",
+        chunk_size,
+        out_entropy_chunk.capacity()
+    );
+
     unsafe {
-        capacity::compute_entropy_chunk(
+        let result = capacity::compute_entropy_chunk(
             mining_addr,
             mining_addr_len,
             chunk_offset,
@@ -113,8 +122,13 @@ pub fn capacity_pack_range_c(
             entropy_chunk_ptr,
             iterations,
         );
+        assert_eq!(
+            result,
+            capacity::entropy_chunk_errors_NO_ERROR,
+            "C entropy chunk computation failed"
+        );
         // we need to move the `len` ptr so rust picks up on the data the C fn wrote to the vec
-        out_entropy_chunk.set_len(out_entropy_chunk.capacity());
+        out_entropy_chunk.set_len(chunk_size);
     }
 }
 
@@ -135,7 +149,7 @@ pub fn capacity_pack_range_cuda_c(
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
 
-    let entropy_ptr = entropy.as_ptr() as *mut u8;
+    let entropy_ptr = entropy.as_mut_ptr();
 
     // Sanity check: enforce capacity matches CUDA C implementation expectations
     let expected_entropy_capacity =
@@ -151,7 +165,6 @@ pub fn capacity_pack_range_cuda_c(
 
     let blocks = config.blocks;
     let threads_per_block = config.threads_per_block;
-    println!("blocks: {}, threads: {}", blocks, threads_per_block);
 
     unsafe {
         result = capacity_cuda::compute_entropy_chunks_cuda(
@@ -167,12 +180,14 @@ pub fn capacity_pack_range_cuda_c(
             blocks,
             threads_per_block,
         );
-
-        entropy.set_len(entropy.capacity());
     }
     use capacity_cuda::entropy_chunk_errors::*;
     match result {
-        NO_ERROR => Ok(()),
+        NO_ERROR => {
+            // SAFETY: the kernel wrote all `capacity` bytes of the buffer
+            unsafe { entropy.set_len(entropy.capacity()) };
+            Ok(())
+        }
         _ => Err(eyre::eyre!("GPU kernel error: {:?}", &result)),
     }
 }
@@ -509,6 +524,20 @@ mod tests {
         };
         let unpacked = unpack(&short_body, 1, chunk_size, 1).expect("short body unpacks");
         assert_eq!(unpacked.bytes.0.len(), 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "entropy buffer capacity must be at least CHUNK_SIZE")]
+    fn capacity_pack_range_c_rejects_undersized_buffer() {
+        let mut undersized = Vec::<u8>::with_capacity(1024);
+        capacity_pack_range_c(
+            IrysAddress::random(),
+            0,
+            PartitionHash::zero(),
+            &mut undersized,
+            1,
+            1,
+        );
     }
 
     // Enable with CUDA hardware

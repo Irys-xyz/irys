@@ -52,6 +52,9 @@ pub async fn process_packing_job(
     state: web::Data<PackingWorkerState>,
     body: Json<RemotePackingRequest>,
 ) -> actix_web::Result<HttpResponse> {
+    if let Err(reason) = crate::packing::validate_request(&body.0) {
+        return Ok(HttpResponse::BadRequest().body(reason));
+    }
     match state.pack(body.0) {
         Ok(stream) => {
             let mstream = stream.map(|r| r.map(std::convert::Into::into));

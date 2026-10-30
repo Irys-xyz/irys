@@ -22,11 +22,18 @@ pub struct MainMenu {
 
 /// Truncates a hash string to the specified length, adding ellipsis if truncated.
 fn truncate_hash(hash: &str, max_len: usize) -> String {
-    if hash.len() > max_len {
-        format!("{}...", &hash[..max_len])
+    if hash.chars().count() > max_len {
+        format!("{}...", prefix_chars(hash, max_len))
     } else {
         hash.to_string()
     }
+}
+
+/// Returns the first `max_chars` characters of `text`, always cutting on a char boundary.
+fn prefix_chars(text: &str, max_chars: usize) -> &str {
+    text.char_indices()
+        .nth(max_chars)
+        .map_or(text, |(byte_index, _)| &text[..byte_index])
 }
 
 impl Default for MainMenu {
@@ -1535,8 +1542,8 @@ impl MainMenu {
             .get_selected_node()
             .map(|node| {
                 let name = node.display_name();
-                if name.len() > 20 {
-                    format!("{}...", &name[..17])
+                if name.chars().count() > 20 {
+                    format!("{}...", prefix_chars(&name, 17))
                 } else {
                     name
                 }
@@ -1588,5 +1595,18 @@ impl MainMenu {
         } else {
             Color::Red
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_hash_cuts_on_char_boundary() {
+        assert_eq!(truncate_hash("abcdef", 3), "abc...");
+        assert_eq!(truncate_hash("abc", 3), "abc");
+        // each char is 3 bytes: a byte-index slice at 4 would panic
+        assert_eq!(truncate_hash("日本語日本語", 4), "日本語日...");
     }
 }
