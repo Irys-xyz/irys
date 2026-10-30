@@ -401,6 +401,12 @@ async fn heavy_test_vdf_wait_is_cancelled_when_block_leaves_tree() -> eyre::Resu
     peer.stop_mining();
     let peer_frozen_step = peer.node_ctx.vdf_steps_guard.current_step();
 
+    // Genesis broadcasts a block after its own validation, which can finish
+    // after `mine_block_without_gossip` returns. The peer must not validate
+    // the parent from that gossip, so genesis gossip stays off: the test
+    // delivers each later block to the peer directly.
+    genesis.gossip_disable();
+
     // Parent goes straight into the peer's tree, so its steps never reach the
     // peer's VDF state.
     let (parent_header, parent_payload, _parent_txs) = genesis.mine_block_without_gossip().await?;
