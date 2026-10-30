@@ -1,10 +1,11 @@
 //! Streaming chunk tree (spec §4).
 //!
-//! Layer 0 holds chunk roots. Layer `l + 1` holds pairs of layer `l`, left to
-//! right. An unpaired last node is carried up unchanged: the same `NodeHash`,
-//! not a new hash. After each push, a layer whose length just became even
-//! appends `node(left, right)` to the next layer. `finish` carries odd tails
-//! until one root remains.
+//! Layer 0 holds chunk leaves: each pushed chunk root `R_c` is stored as
+//! `chunk_leaf(c, R_c)`, with `c` the push index. Layer `l + 1` holds pairs of
+//! layer `l`, left to right. An unpaired last node is carried up unchanged:
+//! the same `NodeHash`, not a new hash. After each push, a layer whose length
+//! just became even appends `node(left, right)` to the next layer. `finish`
+//! carries odd tails until one root remains.
 //!
 //! The stack is `build_layer` kept between pushes, not a fresh recursive `path`
 //! (spec §4). A `path` recomputes each sibling subtree; this cache stores those
@@ -16,11 +17,11 @@
 use crate::chunk::{chunk_root, segment_siblings};
 use crate::error::{BuildError, ChunkLengthError, ProofError, SizeError};
 use crate::geometry::Geometry;
-use crate::hash::{self, node};
+use crate::hash::{self, chunk_leaf, node};
 use crate::shape::depth;
 use crate::types::{ChunkKey, DataCommitment, DataTreeRoot, HASH_SIZE, NodeHash, SizeWitness};
 
-/// Accumulates chunk roots into a data tree.
+/// Accumulates chunk roots, as chunk leaves, into a data tree.
 #[derive(Debug, Clone)]
 pub struct DataTreeBuilder {
     geometry: Geometry,
@@ -51,7 +52,7 @@ impl DataTreeBuilder {
     /// with [`Self::new`]. A `data_size` of 0, or one above the geometry
     /// maximum, is the same [`crate::SizeError`] as [`Geometry::chunk_count`].
     ///
-    /// Layer 0 holds the chunk roots. Each next layer holds `ceil(len / 2)`
+    /// Layer 0 holds the chunk leaves. Each next layer holds `ceil(len / 2)`
     /// nodes, the `build_layer` shape with the carried node included (spec §4),
     /// until one node remains. The reservation runs when that layer is created.
     /// A failed reservation is ignored, and the layer then grows on demand, the
@@ -71,7 +72,7 @@ impl DataTreeBuilder {
         })
     }
 
-    /// Hash `bytes` with `chunk_root` and append that root.
+    /// Hash `bytes` with `chunk_root` and append its chunk leaf.
     ///
     /// The length is checked before hashing (spec §9).
     pub fn push_chunk(&mut self, bytes: &[u8]) -> Result<(), BuildError> {
@@ -85,6 +86,8 @@ impl DataTreeBuilder {
 
     /// Append a chunk root hashed by the caller, with the chunk's byte length.
     ///
+    /// The builder wraps the root with its push index: layer 0 holds
+    /// `chunk_leaf(c, R_c)`, and the caller never passes an index (spec §4).
     /// Callers that hash chunks in parallel use this. `chunk_length` is 0 or
     /// above `chunk_size`, a push after a short chunk, and a chunk count above
     /// `max_data_tx_chunks` are errors.
@@ -210,7 +213,9 @@ impl DataTreeBuilder {
     }
 
     fn commit_push(&mut self, root: NodeHash, chunk_length: u64) {
-        self.push_node_at(0, root);
+        // The push index is `c`: the number of chunks already pushed (spec §4).
+        let chunk_index = self.pushed_chunk_count();
+        self.push_node_at(0, chunk_leaf(chunk_index, &root));
         // `max_data_tx_chunks * chunk_size` fits `u64`, and each push is at most
         // one chunk, so the running total fits.
         self.data_size = self
@@ -271,7 +276,7 @@ impl DataTreeBuilder {
     }
 }
 
-/// A finished data tree: chunk roots, internal nodes, and `data_size`.
+/// A finished data tree: chunk leaves, internal nodes, and `data_size`.
 #[derive(Debug, Clone)]
 pub struct DataTree {
     geometry: Geometry,
@@ -317,7 +322,7 @@ impl DataTree {
         self.data_size
     }
 
-    /// Number of chunk roots.
+    /// Number of chunks.
     pub fn chunk_count(&self) -> u32 {
         self.layers.first().map_or(0, |layer| {
             // `finish` only returns a tree whose chunk count fits `u32`.
@@ -325,10 +330,10 @@ impl DataTree {
         })
     }
 
-    /// Chunk root stored at index `c`.
+    /// Chunk leaf `chunk_leaf(c, R_c)` stored at index `c` (spec §4).
     ///
     /// `c` is `chunk_index`.
-    pub fn chunk_root(&self, chunk_index: u32) -> Result<NodeHash, SizeError> {
+    pub fn chunk_leaf(&self, chunk_index: u32) -> Result<NodeHash, SizeError> {
         let layer = self.layers.first();
         let layer_length = layer.map_or(0, Vec::len);
         let chunk_count = u32::try_from(layer_length).expect("chunk count fits u32");
@@ -407,8 +412,9 @@ impl DataTree {
     /// whole segment proof. That includes a one-chunk upload, whose chunk proof
     /// is only the witness.
     ///
-    /// `chunk_bytes` must be exactly `chunk_len` and must hash to the stored
-    /// chunk root. Those checks run before the sibling hashes are built.
+    /// `chunk_bytes` must be exactly `chunk_len`, and its chunk root with index
+    /// `c` must give the stored chunk leaf. Those checks run before the sibling
+    /// hashes are built.
     ///
     /// `c` is `chunk_index`. `j` is `segment_index`.
     pub fn segment_proof(
@@ -433,7 +439,7 @@ impl DataTree {
         // `c < C` is in `1..=chunk_size`, which is `chunk_root`'s precondition.
         let computed =
             chunk_root(&self.geometry, chunk_bytes).expect("chunk length is in 1..=chunk_size");
-        if computed != self.chunk_root(chunk_index)? {
+        if chunk_leaf(chunk_index, &computed) != self.chunk_leaf(chunk_index)? {
             return Err(ProofError::ChunkRootMismatch);
         }
         let mut proof = Vec::new();
@@ -485,9 +491,9 @@ impl DataTree {
     }
 }
 
-/// Final length of each cache layer for `chunk_count` chunk roots.
+/// Final length of each cache layer for `chunk_count` chunks.
 ///
-/// Layer 0 is the chunk roots. Each next layer is `ceil(previous / 2)`: one
+/// Layer 0 is the chunk leaves. Each next layer is `ceil(previous / 2)`: one
 /// slot per pair, plus the carried unpaired node (spec §4 `build_layer`). Stop
 /// when one node remains. The loop is that rule; it is not a closed form.
 fn layer_capacities(chunk_count: u32) -> Vec<usize> {
