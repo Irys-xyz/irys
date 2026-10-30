@@ -57,7 +57,11 @@ pub struct IrysHardforkConfig {
 
     /// Echo hardfork - requires the PoA partition to belong to the block miner.
     /// Active for blocks at or above `activation_height`. None means disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// A config file that does not set it gets Echo from genesis.
+    #[serde(
+        default = "Echo::from_genesis",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub echo: Option<Echo>,
 }
 
@@ -100,6 +104,15 @@ pub struct Aurora {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Echo {
     pub activation_height: u64,
+}
+
+impl Echo {
+    /// Echo active from genesis: the default for a config file that does not set it.
+    pub fn from_genesis() -> Option<Self> {
+        Some(Self {
+            activation_height: 0,
+        })
+    }
 }
 
 /// Borealis hardfork - enables UpdateRewardAddress commitment transactions.
@@ -885,7 +898,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
-            echo: None,
+            echo: Echo::from_genesis(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -907,6 +920,27 @@ mod tests {
         assert_eq!(config.frontier.number_of_ingress_proofs_from_assignees, 2);
         assert!(config.next_name_tbd.is_none());
         assert!(config.delta.is_none());
+        // A config file without [echo] gets Echo from genesis.
+        assert_eq!(config.echo, Echo::from_genesis());
+    }
+
+    #[test]
+    fn test_toml_echo_activation_height_is_kept() {
+        let toml_str = "
+            [frontier]
+            number_of_ingress_proofs_total = 5
+            number_of_ingress_proofs_from_assignees = 2
+
+            [echo]
+            activation_height = 2779313
+        ";
+        let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.echo,
+            Some(Echo {
+                activation_height: 2_779_313
+            })
+        );
     }
 
     proptest! {
@@ -1173,6 +1207,7 @@ mod tests {
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
                 delta: None,
+                echo: Echo::from_genesis(),
                 ..base_config()
             };
             let toml_str = toml::to_string_pretty(&config).unwrap();

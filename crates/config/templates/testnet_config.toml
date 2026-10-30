@@ -251,7 +251,8 @@ number_of_ingress_proofs_from_assignees = 0
 # initial_slots_per_new_ledger = 1   # slots seeded per newly activated ledger (default: 1)
 # capacity_chunk_reward_percent = 0.5   # miner share of the reward for a capacity PoA (default: 0.5)
 
-# To enable Echo (the PoA partition must belong to the block miner), uncomment:
+# Echo (the PoA partition must belong to the block miner) is enabled from genesis
+# when this section is absent. To activate it at a later height instead, uncomment:
 # [consensus.Custom.hardforks.echo]
 # activation_height = 0
 
