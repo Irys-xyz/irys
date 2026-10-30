@@ -2652,7 +2652,7 @@ mod tests {
         let path_hash = chunk.chunk_path_hash();
 
         let err = inner
-            .handle_chunk_ingress_message(chunk)
+            .handle_chunk_ingress_message(chunk, ChunkBroadcastMode::Push, ModuleWritePolicy::Await)
             .await
             .expect_err("wrong byte length must be rejected");
         assert!(
@@ -2692,7 +2692,7 @@ mod tests {
         let path_hash = chunk.chunk_path_hash();
 
         let err = inner
-            .handle_chunk_ingress_message(chunk)
+            .handle_chunk_ingress_message(chunk, ChunkBroadcastMode::Push, ModuleWritePolicy::Await)
             .await
             .expect_err("wrong byte length must be rejected");
         assert!(
