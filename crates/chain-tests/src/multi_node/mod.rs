@@ -1,5 +1,6 @@
 pub(crate) mod api_ingress_validation;
 pub(crate) mod cascade_reorg;
+pub(crate) mod chunk_announce;
 pub(crate) mod ema_forks;
 pub(crate) mod epoch_replay;
 pub(crate) mod fork_recovery;
@@ -11,6 +12,7 @@ pub(crate) mod partition_recovery_epoch_boundary;
 pub(crate) mod partition_recovery_multi_epoch;
 pub(crate) mod peer_discovery;
 pub(crate) mod peer_mining;
+pub(crate) mod replica_custody;
 pub(crate) mod reth_restart;
 pub(crate) mod sync_chain_state;
 pub(crate) mod validation;

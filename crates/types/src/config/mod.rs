@@ -845,6 +845,7 @@ impl From<&NodeConfig> for MempoolConfig {
             max_http_chunk_admission: value.mempool.max_http_chunk_admission,
             max_http_chunk_waiters: value.mempool.max_http_chunk_waiters,
             http_chunk_admission_timeout_millis: value.mempool.http_chunk_admission_timeout_millis,
+            http_ingest_waits_for_module_write: value.mempool.http_ingest_waits_for_module_write,
         }
     }
 }
@@ -987,6 +988,8 @@ pub struct MempoolConfig {
     pub max_http_chunk_waiters: usize,
     /// Monotonic wait for an admission permit, in milliseconds.
     pub http_chunk_admission_timeout_millis: u64,
+    /// See `MempoolNodeConfig::http_ingest_waits_for_module_write`.
+    pub http_ingest_waits_for_module_write: bool,
 }
 
 impl MempoolConfig {
@@ -1017,6 +1020,7 @@ impl MempoolConfig {
             max_http_chunk_admission: 256,
             max_http_chunk_waiters: 32,
             http_chunk_admission_timeout_millis: 5000,
+            http_ingest_waits_for_module_write: false,
         }
     }
 }
@@ -2857,6 +2861,7 @@ mod validate_tests {
         assert_eq!(nc.mempool.max_http_chunk_admission, 256);
         assert_eq!(nc.mempool.max_http_chunk_waiters, 32);
         assert_eq!(nc.mempool.http_chunk_admission_timeout_millis, 5000);
+        assert!(!nc.mempool.http_ingest_waits_for_module_write);
 
         Config::new_with_random_peer_id(nc)
             .validate()
@@ -3109,5 +3114,28 @@ mod validate_tests {
             err.contains("stake_pledge_drives"),
             "expected the stake_pledge_drives rule to fire, got: {err}"
         );
+    }
+
+    /// The rollback switch for HTTP chunk ingest defaults to the
+    /// non-waiting path, parses from an operator `[mempool]` section, and
+    /// reaches the runtime `MempoolConfig` the chunk ingress service reads.
+    #[test]
+    fn http_ingest_waits_for_module_write_defaults_off_and_reaches_runtime_config() {
+        assert!(
+            !NodeConfig::testing()
+                .mempool
+                .http_ingest_waits_for_module_write
+        );
+        assert!(!MempoolNodeConfig::default().http_ingest_waits_for_module_write);
+        assert!(!MempoolConfig::testing().http_ingest_waits_for_module_write);
+
+        let parsed: MempoolNodeConfig =
+            toml::from_str("http_ingest_waits_for_module_write = true").expect("parse");
+        assert!(parsed.http_ingest_waits_for_module_write);
+
+        let mut node_config = NodeConfig::testing();
+        node_config.mempool.http_ingest_waits_for_module_write = true;
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.mempool.http_ingest_waits_for_module_write);
     }
 }

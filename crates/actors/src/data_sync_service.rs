@@ -94,33 +94,6 @@ async fn attempt_data_sync_write(
     }
 }
 
-/// The peer body must match its own data path. Ingress can return `Ok`
-/// without this check: a recent-chunk hit keys only the path hash, and a
-/// wrong length returns `Ok` before the leaf hash is compared.
-fn validate_peer_unpacked_chunk(chunk: &UnpackedChunk, chunk_size: u64) -> eyre::Result<()> {
-    let (min_byte, max_byte) =
-        irys_types::expected_chunk_byte_range(chunk.tx_offset, chunk.data_size, chunk_size)
-            .map_err(|error| eyre::eyre!("peer chunk data path range: {error}"))?;
-    let target = u128::from(max_byte - 1);
-    let path = irys_types::validate_path(chunk.data_root.0, &chunk.data_path, target)
-        .map_err(|error| eyre::eyre!("peer chunk data path: {error}"))?;
-    let chunk_len = u64::try_from(chunk.bytes.len())
-        .map_err(|_| eyre::eyre!("peer chunk length exceeds u64"))?;
-    let expected_len = max_byte - min_byte;
-    eyre::ensure!(
-        chunk_len == expected_len,
-        "peer chunk length {chunk_len} does not match the data path range {expected_len}"
-    );
-    irys_types::validate_path_byte_range(&path, (min_byte, max_byte))
-        .map_err(|error| eyre::eyre!("peer chunk data path range: {error}"))?;
-    let hash = irys_types::hash_sha256(&chunk.bytes.0);
-    eyre::ensure!(
-        path.leaf_hash == hash,
-        "peer chunk hash does not match the data path leaf"
-    );
-    Ok(())
-}
-
 fn ingress_error_is_invalid_peer_data(error: &ChunkIngressError) -> bool {
     matches!(
         error,
@@ -238,7 +211,7 @@ fn check_against_placement(
             ),
         });
     }
-    validate_peer_unpacked_chunk(&unpacked, chunk_size)
+    irys_types::validate_unpacked_chunk(&unpacked, chunk_size)
         .map_err(|error| DeliveryError::InvalidBody(error.to_string()))?;
     Ok(unpacked)
 }
@@ -347,7 +320,7 @@ async fn process_delivered_body(
             pipeline.chunk_size,
         );
     }
-    validate_peer_unpacked_chunk(&unpacked, pipeline.chunk_size)
+    irys_types::validate_unpacked_chunk(&unpacked, pipeline.chunk_size)
         .map_err(|error| DeliveryError::InvalidBody(error.to_string()))?;
     let _permit = Arc::clone(&pipeline.ingress_permits)
         .acquire_owned()
@@ -932,6 +905,9 @@ impl DataSyncServiceInner {
     /// tick cursor. Publish is tried first when the previous refill started a
     /// term module, so a shared peer does not stay on term work. The tick
     /// still refills each queue, stays term-first, and advances the cursors.
+    // Retaining prior requests as span parents makes teardown recurse without bound
+    // and overflow the worker stack. Each refill starts an independent trace.
+    #[tracing::instrument(skip_all, parent = None)]
     fn dispatch_after_release(&mut self) {
         #[cfg(test)]
         if !self.refill_on_release {
@@ -3739,6 +3715,60 @@ mod peer_chunk_validation_tests {
         }
     }
 
+    /// Chunk ingress answers `Ok` to a duplicate while another write occupies
+    /// the offset, so the duplicate's `Ok` writes nothing if that write then
+    /// fails, as the stub here does. Data sync's Submit route must still
+    /// write the offset.
+    #[tokio::test]
+    async fn a_submit_offset_left_by_a_failed_occupying_write_is_written_by_data_sync() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let offset = PartitionChunkOffset::from(0_u32);
+        let peer = IrysAddress::from([9_u8; 20]);
+        let (mut h, _tmp) = route_harness(DataLedger::Submit, true);
+
+        h.sm.hold_ingress_after_occupy_for_test();
+        let module = Arc::clone(&h.sm);
+        let queued = h.chunk.clone();
+        let writer = std::thread::spawn(move || module.write_data_chunk(&queued));
+        assert!(
+            h.sm.ingress_occupy_hold_arrived_for_test(Duration::from_secs(5)),
+            "the occupying write did not stop after taking the offset"
+        );
+        assert!(h.sm.has_in_flight_index_for(&h.chunk));
+        // A pause after occupancy makes the held write stale.
+        h.sm.pause_data_writes();
+        h.sm.resume_data_writes();
+        h.sm.release_ingress_occupy_hold_for_test();
+        let result = writer.join().expect("writer thread");
+        assert!(
+            matches!(result, Err(irys_domain::WriteDataChunkError::WritesPaused)),
+            "the occupying write must fail after occupancy, got {result:?}"
+        );
+        assert!(!h.sm.has_in_flight_index_for(&h.chunk));
+        assert!(!h.sm.is_data_write_pending_at(offset));
+        assert!(!h.sm.is_data_chunk_durable_at(offset));
+
+        mark_requested(&mut h.inner, h.sm.id, offset, peer);
+        let chunk = ChunkFormat::Unpacked(h.chunk.clone());
+        deliver(
+            &mut h.inner,
+            &mut h.data_sync_rx,
+            h.sm.id,
+            offset,
+            peer,
+            chunk,
+        )
+        .await
+        .expect("data sync stores the body");
+        assert_eq!(h.ingested.load(Ordering::SeqCst), 1);
+        assert!(
+            h.sm.is_data_write_pending_at(offset),
+            "data sync wrote the offset that ingress skipped"
+        );
+    }
+
     /// The direct route checks the body against this offset's placement. A
     /// body that disagrees on data size is the peer's fault.
     /// A rollback can change the placement while a body is in delivery. A
@@ -4770,6 +4800,18 @@ mod assignment_follow_tests {
     const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
     fn pipelined() -> Pipelined {
+        pipelined_with_fetcher(|_| {
+            Box::new(|ledger_id| {
+                Arc::new(MockChunkFetcher::new(
+                    usize::try_from(ledger_id).expect("ledger ID fits usize"),
+                ))
+            })
+        })
+    }
+
+    fn pipelined_with_fetcher(
+        factory: impl FnOnce(&[UnpackedChunk]) -> ChunkFetcherFactory,
+    ) -> Pipelined {
         use crate::chunk_ingress_service::ChunkIngressMessage;
 
         let tmp = TempDirBuilder::new().with_tracing().build();
@@ -4832,12 +4874,13 @@ mod assignment_follow_tests {
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         install_epoch(&block_tree_guard, &[slot0]);
+        let chunk_fetcher_factory = factory(&chunks);
         let mut inner = DataSyncServiceInner::new(
             block_tree_guard,
             Arc::new(RwLock::new(vec![Arc::clone(&sm)])),
             peer_list,
             open_db(tmp.path()),
-            Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize))),
+            chunk_fetcher_factory,
             service_senders,
             config,
             tokio::runtime::Handle::current(),
@@ -5115,6 +5158,22 @@ mod assignment_follow_tests {
         let _third = t.next_ingress().await;
         t.apply_results(1).await;
         t.wait_held_below(3).await;
+        // An accepted body opens the bandwidth window. Once that window is
+        // past 1ms the allowance ramps to the chunk-size ceiling (30 for
+        // these 32-byte chunks) and the next tick fills 30 slots. A loaded
+        // host crosses that cutoff before this tick; an idle one does not.
+        // Pin the ceiling so the assertion measures the held-body limit.
+        {
+            let mut peers = t
+                .inner
+                .active_peer_bandwidth_managers
+                .write()
+                .expect("peer bandwidth lock");
+            peers
+                .get_mut(&t.assignee)
+                .expect("assignee")
+                .set_max_concurrency(20);
+        }
         t.inner.tick().expect("tick under the limit");
         assert_eq!(t.slots().0, 20, "fetching resumes under the limit");
     }
@@ -5167,6 +5226,186 @@ mod assignment_follow_tests {
             20,
             "the finished body's result refilled the slot"
         );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum RefillTrigger {
+        Failed,
+        Fetched,
+        Ingressed,
+    }
+
+    #[derive(Debug)]
+    struct RefillFetcher {
+        body: UnpackedChunk,
+    }
+
+    #[async_trait::async_trait]
+    impl ChunkFetcher for RefillFetcher {
+        async fn fetch_chunk_by_ledger_offset(
+            &self,
+            _offset: irys_types::LedgerChunkOffset,
+            _api_addr: std::net::SocketAddr,
+            _timeout: std::time::Duration,
+        ) -> Result<irys_types::ChunkFormat, super::chunk_fetcher::ChunkFetchError> {
+            // The fixture has no placement index; each fetch delivers a valid body.
+            Ok(irys_types::ChunkFormat::Unpacked(self.body.clone()))
+        }
+
+        async fn fetch_chunk_by_data_root(
+            &self,
+            _data_root: irys_types::DataRoot,
+            _tx_offset: irys_types::TxChunkOffset,
+            _api_addr: std::net::SocketAddr,
+            _timeout: std::time::Duration,
+        ) -> Result<irys_types::ChunkFormat, super::chunk_fetcher::ChunkFetchError> {
+            Err(super::chunk_fetcher::ChunkFetchError::InvalidResponse {
+                message: "the assigned peer must be queried by ledger offset".into(),
+            })
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::info(tracing_subscriber::filter::LevelFilter::INFO)]
+    #[case::trace(tracing_subscriber::filter::LevelFilter::TRACE)]
+    fn repeated_refills_keep_trace_ancestry_bounded(
+        #[case] level: tracing_subscriber::filter::LevelFilter,
+        #[values(
+            RefillTrigger::Failed,
+            RefillTrigger::Fetched,
+            RefillTrigger::Ingressed
+        )]
+        trigger: RefillTrigger,
+    ) -> eyre::Result<()> {
+        use irys_types::Traced;
+        use tracing_subscriber::{layer::SubscriberExt as _, registry::LookupSpan as _};
+
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(level));
+        let registry = dispatch
+            .downcast_ref::<tracing_subscriber::Registry>()
+            .ok_or_else(|| eyre::eyre!("subscriber has no registry"))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()?;
+
+        // Keep the subscriber installed while spawned fetches and the actor are polled.
+        tracing::dispatcher::with_default(&dispatch, || {
+            runtime.block_on(async {
+                let mut t = match trigger {
+                    RefillTrigger::Failed => pipelined(),
+                    RefillTrigger::Fetched | RefillTrigger::Ingressed => {
+                        pipelined_with_fetcher(|chunks| {
+                            let fetcher = Arc::new(RefillFetcher {
+                                body: chunks[0].clone(),
+                            });
+                            Box::new(move |_| Arc::clone(&fetcher) as Arc<dyn ChunkFetcher>)
+                        })
+                    }
+                };
+                t.inner
+                    .active_peer_bandwidth_managers
+                    .write()
+                    .map_err(|e| eyre::eyre!("peer manager lock: {e}"))?
+                    .get_mut(&t.assignee)
+                    .ok_or_else(|| eyre::eyre!("missing assignee"))?
+                    .set_max_concurrency(1);
+                t.inner.max_delivered_bodies = match trigger {
+                    RefillTrigger::Ingressed => 1,
+                    RefillTrigger::Failed | RefillTrigger::Fetched => 64,
+                };
+                t.inner.dispatch_after_release();
+
+                let (actor_tx, actor_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+                let mut peer_rx = t.inner.peer_list.subscribe_to_peer_events();
+                let mut service = super::DataSyncService {
+                    shutdown: shutdown_rx,
+                    msg_rx: actor_rx,
+                    inner: t.inner,
+                };
+                let ingress_count = match trigger {
+                    RefillTrigger::Failed => 0,
+                    RefillTrigger::Fetched | RefillTrigger::Ingressed => 64,
+                };
+                let started = tokio::time::Instant::now();
+                let observe = async {
+                    let mut fetched = 0;
+                    let mut ingressed = 0;
+                    let mut max_depth = 0;
+                    let mut span_ids = Vec::new();
+                    while fetched < 64 || ingressed < ingress_count {
+                        let traced = tokio::time::timeout(WAIT, t.data_sync_rx.recv())
+                            .await?
+                            .ok_or_else(|| eyre::eyre!("data-sync channel closed"))?;
+                        match (&traced.inner, trigger) {
+                            (
+                                DataSyncServiceMessage::ChunkFailed {
+                                    failure_kind:
+                                        super::chunk_fetcher::ChunkFetchFailureKind::NotFound,
+                                    ..
+                                },
+                                RefillTrigger::Failed,
+                            )
+                            | (
+                                DataSyncServiceMessage::ChunkCompleted { .. },
+                                RefillTrigger::Fetched | RefillTrigger::Ingressed,
+                            ) => fetched += 1,
+                            (DataSyncServiceMessage::ChunkIngressed { result: Ok(_), .. }, _) => {
+                                ingressed += 1;
+                            }
+                            _ => eyre::bail!("unexpected completion for {trigger:?}"),
+                        }
+                        let id = traced
+                            .span
+                            .id()
+                            .ok_or_else(|| eyre::eyre!("missing span"))?;
+                        let depth = registry
+                            .span(&id)
+                            .ok_or_else(|| eyre::eyre!("span not registered"))?
+                            .scope()
+                            .count();
+                        max_depth = max_depth.max(depth);
+                        span_ids.push(id);
+
+                        // Forward the real task result unchanged through the production loop.
+                        actor_tx.send(traced)?;
+                        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                        actor_tx.send(Traced::new(DataSyncServiceMessage::GetActivePeersList(
+                            ack_tx,
+                        )))?;
+                        ack_rx.await?;
+                    }
+                    drop(shutdown_tx);
+                    Ok::<_, eyre::Report>((max_depth, span_ids))
+                };
+                let ingress = async {
+                    for _ in 0..ingress_count {
+                        let (_, reply) = tokio::time::timeout(WAIT, t.held_rx.recv())
+                            .await?
+                            .ok_or_else(|| eyre::eyre!("ingress channel closed"))?;
+                        reply
+                            .send(Ok(()))
+                            .map_err(|_| eyre::eyre!("delivery stopped"))?;
+                    }
+                    Ok::<_, eyre::Report>(())
+                };
+                let ((), (max_depth, span_ids), ()) =
+                    tokio::try_join!(service.run_until_stopped(&mut peer_rx), observe, ingress,)?;
+                assert!(
+                    max_depth <= 5,
+                    "successive refills retained prior request spans: depth {max_depth}"
+                );
+                assert_eq!(
+                    tokio::time::Instant::now(),
+                    started,
+                    "refill waited for a tick"
+                );
+                assert_eq!(peer_slot_counts(&service.inner, t.assignee).0, 0);
+                assert!(span_ids.iter().all(|id| registry.span(id).is_none()));
+                Ok(())
+            })
+        })
     }
 
     /// A finished request's slot is used at once, not at the next tick.

@@ -1,6 +1,7 @@
+mod chunk_announce;
+
 use super::util::{
-    FakeGossipServer, GossipServiceTestFixture, create_test_chunks, generate_test_tx, poll_until,
-    wait_until_listening,
+    FakeGossipServer, GossipServiceTestFixture, generate_test_tx, poll_until, wait_until_listening,
 };
 use crate::types::GossipResponse;
 use crate::{GossipClient, SyncChainServiceMessage};
@@ -194,9 +195,8 @@ async fn heavy3_should_broadcast_chunk_data() -> eyre::Result<()> {
     wait_until_listening(fixture2.gossip_addr()).await;
 
     // Create and send chunk data
-    let chunks = create_test_chunks(&generate_test_tx());
-    #[expect(clippy::indexing_slicing, reason = "just a test")]
-    let data = GossipBroadcastMessageV2::from(chunks[0].clone());
+    let chunk = chunk_announce::valid_chunk(chunk_announce::chunk_size(&fixture1), 1);
+    let data = GossipBroadcastMessageV2::from(chunk);
 
     gossip_service1_message_bus
         .send_traced(data)

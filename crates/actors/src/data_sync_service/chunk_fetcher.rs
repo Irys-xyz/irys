@@ -3,7 +3,7 @@ use irys_types::{
     ChunkFormat, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
 };
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     net::SocketAddr,
     sync::{Arc, RwLock},
     time::Duration,
@@ -114,6 +114,70 @@ pub fn parse_data_intervals(
         intervals,
         coverage,
     })
+}
+
+/// Most entries one persisted-placement query may carry. The route rejects
+/// more, and the client splits a slot's offsets into requests of this size.
+pub const MAX_PERSISTED_QUERY_ENTRIES: usize = 4_096;
+
+/// One chunk a custodian asks an assignee about: a partition-relative offset
+/// in the assignee's slot, and the chunk expected there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedQueryEntry {
+    pub offset: u32,
+    pub data_root: DataRoot,
+    pub tx_offset: TxChunkOffset,
+}
+
+/// Answer of `POST /v1/storage/persisted/{ledger}/{slot_index}`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedOffsetsResponse {
+    pub ledger: DataLedger,
+    pub slot_index: usize,
+    /// Whether the answering node has a storage module for the slot.
+    pub assigned: bool,
+    /// Requested offsets whose placement of the requested chunk survives a
+    /// crash on the answering node: persisted `Data` in `intervals.json`,
+    /// not mid-write, and indexed as that `(data_root, tx_offset)`.
+    pub persisted: Vec<u32>,
+}
+
+/// Parse and check one persisted-placement answer. The peer is not trusted:
+/// the echo must match the request, every listed offset must have been
+/// asked about, and an unassigned node attests nothing. Returns the
+/// attested offsets, ascending and unique.
+pub fn parse_persisted_offsets(
+    body: &[u8],
+    ledger: DataLedger,
+    slot_index: usize,
+    requested: &[PersistedQueryEntry],
+) -> Result<Vec<u32>, ChunkFetchError> {
+    let invalid = |message: String| ChunkFetchError::InvalidResponse { message };
+    let wire: PersistedOffsetsResponse =
+        serde_json::from_slice(body).map_err(|e| invalid(format!("persisted JSON: {e}")))?;
+    if wire.ledger != ledger || wire.slot_index != slot_index {
+        return Err(invalid(format!(
+            "persisted answer is for {:?} slot {}",
+            wire.ledger, wire.slot_index
+        )));
+    }
+    let asked: BTreeSet<u32> = requested.iter().map(|entry| entry.offset).collect();
+    let mut persisted = wire.persisted;
+    persisted.sort_unstable();
+    persisted.dedup();
+    if let Some(stray) = persisted.iter().find(|offset| !asked.contains(offset)) {
+        return Err(invalid(format!(
+            "persisted answer lists offset {stray}, which was not asked"
+        )));
+    }
+    if !wire.assigned && !persisted.is_empty() {
+        return Err(invalid(
+            "an unassigned node cannot attest a placement".to_string(),
+        ));
+    }
+    Ok(persisted)
 }
 
 // Define a factory function type
@@ -254,6 +318,21 @@ pub trait ChunkFetcher: Send + Sync + std::fmt::Debug {
     ) -> Result<DataIntervalsPage, ChunkFetchError> {
         Err(ChunkFetchError::NotFound {
             detail: "this fetcher does not read peer intervals".to_string(),
+        })
+    }
+    /// Offsets of `entries` that the assignee at `api_addr` holds for its
+    /// `slot_index` on this fetcher's ledger, each as a crash-safe placement
+    /// of exactly the requested chunk. A fetcher that cannot ask attests
+    /// nothing, which keeps the body that asked.
+    async fn fetch_persisted_offsets(
+        &self,
+        _slot_index: usize,
+        _entries: &[PersistedQueryEntry],
+        _api_addr: SocketAddr,
+        _timeout: Duration,
+    ) -> Result<Vec<u32>, ChunkFetchError> {
+        Err(ChunkFetchError::NotFound {
+            detail: "this fetcher does not ask for persisted placements".to_string(),
         })
     }
 }
@@ -432,6 +511,67 @@ impl ChunkFetcher for HttpChunkFetcher {
             .map_err(|_| ChunkFetchError::Timeout)??;
         parse_data_intervals(&body, ledger, slot_index, start, end)
     }
+    async fn fetch_persisted_offsets(
+        &self,
+        slot_index: usize,
+        entries: &[PersistedQueryEntry],
+        api_addr: SocketAddr,
+        timeout: Duration,
+    ) -> Result<Vec<u32>, ChunkFetchError> {
+        let ledger =
+            DataLedger::try_from(self.ledger_id).map_err(|e| ChunkFetchError::InvalidResponse {
+                message: e.to_string(),
+            })?;
+        // The route takes the ledger's serde name, e.g. `ThirtyDay`.
+        let invalid_url = || ChunkFetchError::InvalidResponse {
+            message: "invalid persisted-placement URL".into(),
+        };
+        let mut url = reqwest::Url::parse("http://localhost/").map_err(|_| invalid_url())?;
+        url.set_ip_host(api_addr.ip()).map_err(|()| invalid_url())?;
+        url.set_port(Some(api_addr.port()))
+            .map_err(|()| invalid_url())?;
+        url.path_segments_mut()
+            .map_err(|()| invalid_url())?
+            .extend([
+                "v1",
+                "storage",
+                "persisted",
+                &format!("{ledger:?}"),
+                &slot_index.to_string(),
+            ]);
+        let cap = self.max_peer_response_bytes;
+        let read = async {
+            let response = self
+                .client
+                .post(url)
+                .json(entries)
+                .send()
+                .await
+                .map_err(|e| ChunkFetchError::NetworkError {
+                    message: e.to_string(),
+                })?;
+            match response.status() {
+                reqwest::StatusCode::OK => {}
+                reqwest::StatusCode::NOT_FOUND => {
+                    return Err(ChunkFetchError::NotFound {
+                        detail: "peer does not serve persisted placements".to_string(),
+                    });
+                }
+                status => {
+                    return Err(ChunkFetchError::ServerError {
+                        message: format!("persisted status {status}"),
+                    });
+                }
+            }
+            read_capped_bytes(response, cap)
+                .await
+                .map_err(|message| ChunkFetchError::InvalidResponse { message })
+        };
+        let body = tokio::time::timeout(timeout, read)
+            .await
+            .map_err(|_| ChunkFetchError::Timeout)??;
+        parse_persisted_offsets(&body, ledger, slot_index, entries)
+    }
 }
 
 // Mock implementation
@@ -447,6 +587,12 @@ pub struct MockChunkFetcher {
     pub interval_responses:
         Arc<RwLock<HashMap<SocketAddr, Result<DataIntervalsPage, ChunkFetchError>>>>,
     pub interval_request_log: Arc<RwLock<Vec<(usize, u32, u32, SocketAddr)>>>,
+    /// Persisted-placement answer per peer: the offsets it would attest.
+    /// A peer with no entry has no persisted route.
+    pub persisted_responses: Arc<RwLock<HashMap<SocketAddr, Result<Vec<u32>, ChunkFetchError>>>>,
+    /// Delay before a peer's persisted answer, to model a slow peer.
+    pub persisted_delays: Arc<RwLock<HashMap<SocketAddr, Duration>>>,
+    pub persisted_request_log: Arc<RwLock<Vec<(usize, Vec<PersistedQueryEntry>, SocketAddr)>>>,
 }
 
 #[async_trait::async_trait]
@@ -518,6 +664,44 @@ impl ChunkFetcher for MockChunkFetcher {
                 })
             })
     }
+    async fn fetch_persisted_offsets(
+        &self,
+        slot_index: usize,
+        entries: &[PersistedQueryEntry],
+        api_addr: SocketAddr,
+        _timeout: Duration,
+    ) -> Result<Vec<u32>, ChunkFetchError> {
+        self.persisted_request_log
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((slot_index, entries.to_vec(), api_addr));
+        let delay = self
+            .persisted_delays
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&api_addr)
+            .copied();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        let asked: BTreeSet<u32> = entries.iter().map(|entry| entry.offset).collect();
+        self.persisted_responses
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&api_addr)
+            .cloned()
+            .unwrap_or_else(|| {
+                Err(ChunkFetchError::NotFound {
+                    detail: "no persisted route".to_string(),
+                })
+            })
+            .map(|offsets| {
+                offsets
+                    .into_iter()
+                    .filter(|offset| asked.contains(offset))
+                    .collect()
+            })
+    }
 }
 
 impl MockChunkFetcher {
@@ -530,6 +714,9 @@ impl MockChunkFetcher {
             data_root_request_log: Default::default(),
             interval_responses: Default::default(),
             interval_request_log: Default::default(),
+            persisted_responses: Default::default(),
+            persisted_delays: Default::default(),
+            persisted_request_log: Default::default(),
         }
     }
 
@@ -566,6 +753,14 @@ impl MockChunkFetcher {
             .write()
             .unwrap()
             .insert(offset, Err(ChunkFetchError::Timeout));
+        self
+    }
+    /// `peer` attests every offset in `offsets` that it is asked about.
+    pub fn with_persisted(self, peer: SocketAddr, offsets: Vec<u32>) -> Self {
+        self.persisted_responses
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(peer, Ok(offsets));
         self
     }
 }
@@ -739,6 +934,162 @@ mod tests {
                 "{name} must be rejected"
             );
         }
+    }
+    /// Serve one canned answer to a request that carries a body, and hand
+    /// back the request line and the body. Reading the whole body first
+    /// keeps the close from resetting the client mid-request.
+    async fn serve_post_once(
+        status: &'static str,
+        answer: String,
+    ) -> (SocketAddr, tokio::task::JoinHandle<(String, Vec<u8>)>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 4096];
+            let header_end = loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                request.extend_from_slice(&buf[..n]);
+                if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&request[..header_end]).to_string();
+            let length: usize = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if name.eq_ignore_ascii_case("content-length") {
+                        value.trim().parse().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            while request.len() < header_end + length {
+                let n = socket.read(&mut buf).await.unwrap();
+                request.extend_from_slice(&buf[..n]);
+            }
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                answer.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            let line = head.lines().next().unwrap_or_default().to_string();
+            (line, request[header_end..header_end + length].to_vec())
+        });
+        (addr, handle)
+    }
+
+    fn query(offsets: &[u32]) -> Vec<PersistedQueryEntry> {
+        offsets
+            .iter()
+            .map(|offset| PersistedQueryEntry {
+                offset: *offset,
+                data_root: DataRoot::repeat_byte(1),
+                tx_offset: TxChunkOffset::from(*offset),
+            })
+            .collect()
+    }
+
+    fn persisted_answer(slot_index: usize, assigned: bool, persisted: &[u32]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "ledger": "ThirtyDay",
+            "slotIndex": slot_index,
+            "assigned": assigned,
+            "persisted": persisted,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn http_fetcher_posts_the_persisted_route_and_parses_the_answer() {
+        let answer = String::from_utf8(persisted_answer(3, true, &[7, 5])).unwrap();
+        let (addr, request) = serve_post_once("200 OK", answer).await;
+        let fetcher = HttpChunkFetcher::new(
+            DataLedger::ThirtyDay.into(),
+            irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+        );
+        let asked = query(&[5, 6, 7]);
+
+        let persisted = fetcher
+            .fetch_persisted_offsets(3, &asked, addr, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let (line, body) = request.await.unwrap();
+        assert_eq!(line, "POST /v1/storage/persisted/ThirtyDay/3 HTTP/1.1");
+        let sent: Vec<PersistedQueryEntry> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(sent, asked);
+        assert_eq!(persisted, vec![5, 7], "ascending, only what was attested");
+    }
+
+    #[tokio::test]
+    async fn http_fetcher_reports_a_missing_persisted_route_as_not_found() {
+        let (addr, _request) = serve_post_once("404 Not Found", String::new()).await;
+        let fetcher = HttpChunkFetcher::new(
+            DataLedger::ThirtyDay.into(),
+            irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+        );
+        let result = fetcher
+            .fetch_persisted_offsets(0, &query(&[1]), addr, Duration::from_secs(5))
+            .await;
+        assert!(matches!(result, Err(ChunkFetchError::NotFound { .. })));
+    }
+
+    #[test]
+    fn persisted_answers_are_deduplicated_and_sorted() {
+        let body = persisted_answer(0, true, &[9, 2, 9]);
+        let persisted =
+            parse_persisted_offsets(&body, DataLedger::ThirtyDay, 0, &query(&[2, 9])).unwrap();
+        assert_eq!(persisted, vec![2, 9]);
+    }
+
+    #[test]
+    fn untrusted_persisted_answers_are_rejected() {
+        let asked = query(&[1, 2, 3]);
+        let mut wrong_ledger: serde_json::Value =
+            serde_json::from_slice(&persisted_answer(0, true, &[1])).unwrap();
+        wrong_ledger["ledger"] = serde_json::json!("Submit");
+        for (name, body) in [
+            ("wrong ledger", serde_json::to_vec(&wrong_ledger).unwrap()),
+            ("wrong slot", persisted_answer(1, true, &[1])),
+            ("offset never asked", persisted_answer(0, true, &[1, 4])),
+            ("unassigned yet attesting", persisted_answer(0, false, &[1])),
+            ("not JSON", b"nope".to_vec()),
+        ] {
+            assert!(
+                matches!(
+                    parse_persisted_offsets(&body, DataLedger::ThirtyDay, 0, &asked),
+                    Err(ChunkFetchError::InvalidResponse { .. })
+                ),
+                "{name} must be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_fetcher_answers_persisted_offsets_per_peer() {
+        let attesting: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        let silent: SocketAddr = "127.0.0.1:9002".parse().unwrap();
+        let fetcher = MockChunkFetcher::new(
+            usize::try_from(DataLedger::ThirtyDay).expect("ledger id fits usize"),
+        )
+        .with_persisted(attesting, vec![1, 3, 8]);
+
+        let answered = fetcher
+            .fetch_persisted_offsets(0, &query(&[1, 2, 3]), attesting, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let missing = fetcher
+            .fetch_persisted_offsets(0, &query(&[1]), silent, Duration::from_secs(1))
+            .await;
+
+        assert_eq!(answered, vec![1, 3], "only offsets that were asked");
+        assert!(matches!(missing, Err(ChunkFetchError::NotFound { .. })));
+        assert_eq!(fetcher.persisted_request_log.read().unwrap().len(), 2);
     }
 }
 

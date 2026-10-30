@@ -49,6 +49,7 @@ pub struct ApiState {
     pub http_chunk_admission: Arc<Semaphore>,
     pub http_chunk_waiters: Arc<Semaphore>,
     pub tx_ingress_admission: Arc<Semaphore>,
+    pub persisted_query_admission: Arc<Semaphore>,
     pub mempool_guard: MempoolReadGuard,
     pub chunk_provider: Arc<ChunkProvider>,
     pub peer_list: PeerList,
@@ -228,6 +229,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route(
             storage::PARTITION_INTERVALS_ROUTE,
             web::get().to(storage::get_partition_intervals),
+        )
+        .route(
+            storage::PERSISTED_ROUTE,
+            web::post().to(storage::post_persisted),
         )
         .route(
             "/mempool/status",

@@ -102,6 +102,33 @@ fn rejection_response(wire: ProtocolVersion, reason: RejectionReason) -> HttpRes
     }
 }
 
+/// A cache miss is `Accepted(None)`. A local failure is not: the fetcher
+/// would treat that as the peer no longer holding the chunk.
+fn chunk_fetch_response(
+    result: GossipResult<Option<UnpackedChunk>>,
+) -> GossipResponse<Option<wire_types::UnpackedChunk>> {
+    match result {
+        Ok(maybe) => GossipResponse::Accepted(maybe.map(wire_types::UnpackedChunk::from)),
+        Err(GossipError::RateLimited) => GossipResponse::Rejected(RejectionReason::RateLimited),
+        Err(error) => {
+            warn!(%error, "chunk fetch failed");
+            GossipResponse::Rejected(RejectionReason::InvalidData)
+        }
+    }
+}
+
+/// A local failure is a server error, not an empty whitelist: an empty list
+/// would replace the caller's whitelist. The fetcher moves on to its next peer.
+fn stake_and_pledge_whitelist_response(result: GossipResult<Vec<IrysAddress>>) -> HttpResponse {
+    match result {
+        Ok(whitelist) => HttpResponse::Ok().json(GossipResponse::Accepted(whitelist)),
+        Err(error) => {
+            tracing::error!("Failed to get the stake and pledge whitelist: {error}");
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
 impl<M, B> GossipServer<M, B>
 where
     M: MempoolFacade,
@@ -1171,11 +1198,12 @@ where
     }
 
     async fn handle_stake_and_pledge_whitelist(server: Data<Self>) -> HttpResponse {
-        let whitelist = server
-            .data_handler
-            .handle_get_stake_and_pledge_whitelist()
-            .await;
-        HttpResponse::Ok().json(GossipResponse::Accepted(whitelist))
+        stake_and_pledge_whitelist_response(
+            server
+                .data_handler
+                .handle_get_stake_and_pledge_whitelist()
+                .await,
+        )
     }
 
     async fn fetch_node_info(server: &Data<Self>) -> Result<NodeInfo, HttpResponse> {
@@ -1894,6 +1922,70 @@ where
         }
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_chunk_announce_v2(
+        server: Data<Self>,
+        request: web::Json<wire_types::GossipRequestV2<wire_types::ChunkAnnouncement>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let request = request.into_inner();
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
+        if let Err(error_response) = Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            request.peer_id,
+            request.miner_address,
+        ) {
+            return error_response;
+        }
+        server.peer_list.set_is_online(&request.miner_address, true);
+        match server
+            .data_handler
+            .handle_chunk_announcement(request.peer_id, request.data)
+        {
+            Ok(()) => HttpResponse::Ok().json(GossipResponse::Accepted(())),
+            Err(GossipError::RateLimited) => HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited)),
+            Err(error) => {
+                // Only `record_seen` fails here. The chunk is held, or its
+                // claim already has a fetch task, so the announcement is
+                // still accepted.
+                warn!(%error, "chunk announcement bookkeeping failed");
+                HttpResponse::Ok().json(GossipResponse::Accepted(()))
+            }
+        }
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_chunk_fetch_v2(
+        server: Data<Self>,
+        request: web::Json<wire_types::GossipRequestV2<wire_types::ChunkAnnouncement>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let request = request.into_inner();
+        if let Err(error_response) = Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            request.peer_id,
+            request.miner_address,
+        ) {
+            return error_response;
+        }
+        HttpResponse::Ok().json(chunk_fetch_response(
+            server.data_handler.handle_chunk_fetch(&request.data),
+        ))
+    }
+
     pub fn routes() -> impl HttpServiceFactory {
         web::scope("/gossip")
             .service(
@@ -1933,6 +2025,14 @@ where
                     .route(
                         GossipRoutes::PullData.as_str(),
                         web::post().to(Self::handle_pull_data),
+                    )
+                    .route(
+                        GossipRoutes::ChunkFetch.as_str(),
+                        web::post().to(Self::handle_chunk_fetch_v2),
+                    )
+                    .route(
+                        GossipRoutes::ChunkAnnounce.as_str(),
+                        web::post().to(Self::handle_chunk_announce_v2),
                     )
                     .route(
                         GossipRoutes::Handshake.as_str(),
@@ -2116,6 +2216,45 @@ mod tests {
             v1_json,
             serde_json::json!({ "Rejected": "HandshakeRequired" }),
             "v1 routes must flatten to the bare string mainnet v1 peers parse",
+        );
+    }
+
+    #[test]
+    fn chunk_fetch_database_error_is_not_a_miss() {
+        assert!(matches!(
+            chunk_fetch_response(Ok(None)),
+            GossipResponse::Accepted(None)
+        ));
+        assert!(matches!(
+            chunk_fetch_response(Err(GossipError::RateLimited)),
+            GossipResponse::Rejected(RejectionReason::RateLimited)
+        ));
+        assert!(matches!(
+            chunk_fetch_response(Err(GossipError::Internal(InternalGossipError::Database(
+                "read failed".into(),
+            )))),
+            GossipResponse::Rejected(RejectionReason::InvalidData)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stake_and_pledge_whitelist_failure_is_not_an_empty_list() {
+        let address = IrysAddress::repeat_byte(7);
+        let accepted = stake_and_pledge_whitelist_response(Ok(vec![address]));
+        assert_eq!(accepted.status(), actix_web::http::StatusCode::OK);
+        let body = actix_web::body::to_bytes(accepted.into_body())
+            .await
+            .expect("whitelist body");
+        let response: GossipResponse<Vec<IrysAddress>> =
+            serde_json::from_slice(&body).expect("whitelist json");
+        assert!(matches!(response, GossipResponse::Accepted(list) if list == vec![address]));
+
+        let failed = stake_and_pledge_whitelist_response(Err(GossipError::Internal(
+            InternalGossipError::Unknown("mempool stopped".into()),
+        )));
+        assert_eq!(
+            failed.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
         );
     }
 

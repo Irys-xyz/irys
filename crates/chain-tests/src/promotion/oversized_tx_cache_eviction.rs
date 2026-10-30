@@ -59,8 +59,8 @@ async fn heavy_test_oversized_tx_cache_eviction_allows_promotion() -> eyre::Resu
     // Keep batching enabled: chunks stripe together and the tail is flushed by
     // the storage module's idle drain, so nothing on the write path force-syncs.
     config.storage.num_writes_before_sync = 2;
-    // Cache far below the 3-chunk (96 B) tx, and prune eagerly.
-    config.cache.max_cache_size_bytes = 32;
+    // Admit the first two chunks, but keep the cache below the 3-chunk (96 B) tx.
+    config.cache.max_cache_size_bytes = 64;
     config.cache.cache_clean_lag = 0;
 
     let signer = IrysSigner::random_signer(&config.consensus_config());

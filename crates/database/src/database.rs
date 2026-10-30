@@ -1292,6 +1292,43 @@ pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
     tx.get::<CachedChunks>(*key)
 }
 
+/// Unpacked body for `(data_root, tx_offset)` from the chunk cache.
+///
+/// `data_size` comes from [`CachedDataRoots`], never from a caller, so a
+/// peer cannot make us echo a wrong size. `Ok(None)` when the data root is
+/// not cached, the offset is outside `[0, chunk_count(data_size))`, the
+/// offset is not indexed, or the body was reclaimed.
+pub fn cached_unpacked_chunk<T: DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+    tx_offset: TxChunkOffset,
+    chunk_size: u64,
+) -> eyre::Result<Option<UnpackedChunk>> {
+    let Some(cdr) = cached_data_root_by_data_root(tx, data_root)? else {
+        return Ok(None);
+    };
+    let Ok(chunk_count) = crate::db_cache::data_size_to_chunk_count(cdr.data_size, chunk_size)
+    else {
+        return Ok(None);
+    };
+    if *tx_offset >= chunk_count {
+        return Ok(None);
+    }
+    let Some((_meta, cached)) = cached_chunk_by_chunk_offset(tx, data_root, tx_offset)? else {
+        return Ok(None);
+    };
+    let Some(bytes) = cached.chunk else {
+        return Ok(None);
+    };
+    Ok(Some(UnpackedChunk {
+        data_root,
+        data_size: cdr.data_size,
+        data_path: cached.data_path,
+        bytes,
+        tx_offset,
+    }))
+}
+
 /// Retrieves one validated compact ingress leaf for an exact signer and tx offset.
 pub fn cached_ingress_leaf<T: DbTx>(
     tx: &T,
@@ -2179,6 +2216,115 @@ mod tests {
         IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
         tx_header_by_txid,
     };
+
+    #[test]
+    fn cached_unpacked_chunk_reads_body_and_local_data_size() -> eyre::Result<()> {
+        use super::{cache_chunk, cache_data_root, cached_unpacked_chunk};
+        use irys_types::{
+            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+            TxChunkOffset, UnpackedChunk,
+        };
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let data_root = H256::random();
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 999,
+            data_path: vec![1, 2, 3].into(),
+            bytes: vec![9_u8; 32].into(),
+            tx_offset: TxChunkOffset::from(0),
+        };
+        db.update_eyre(|tx| {
+            cache_data_root(tx, &header, None)?;
+            cache_chunk(tx, &chunk)?;
+            Ok(())
+        })?;
+
+        let read = db
+            .view_eyre(|tx| cached_unpacked_chunk(tx, data_root, TxChunkOffset::from(0), 32))?
+            .expect("cached body");
+        assert_eq!(read.data_size, 32, "data_size comes from CachedDataRoots");
+        assert_eq!(read.bytes.0, vec![9_u8; 32]);
+        assert_eq!(read.chunk_path_hash(), chunk.chunk_path_hash());
+
+        assert!(
+            db.view_eyre(|tx| cached_unpacked_chunk(
+                tx,
+                H256::random(),
+                TxChunkOffset::from(0),
+                32
+            ))?
+            .is_none()
+        );
+        assert!(
+            db.view_eyre(|tx| cached_unpacked_chunk(tx, data_root, TxChunkOffset::from(1), 32))?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cached_unpacked_chunk_is_none_when_body_reclaimed() -> eyre::Result<()> {
+        use super::{cache_chunk, cache_data_root, cached_unpacked_chunk};
+        use crate::tables::CachedChunks;
+        use irys_types::{
+            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+            TxChunkOffset, UnpackedChunk,
+        };
+        use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let data_root = H256::random();
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 32,
+            data_path: vec![1, 2, 3].into(),
+            bytes: vec![9_u8; 32].into(),
+            tx_offset: TxChunkOffset::from(0),
+        };
+        db.update_eyre(|tx| {
+            cache_data_root(tx, &header, None)?;
+            cache_chunk(tx, &chunk)?;
+            let mut row = tx
+                .get::<CachedChunks>(chunk.chunk_path_hash())?
+                .expect("row");
+            row.chunk = None;
+            tx.put::<CachedChunks>(chunk.chunk_path_hash(), row)?;
+            Ok(())
+        })?;
+
+        assert!(
+            db.view_eyre(|tx| cached_unpacked_chunk(tx, data_root, TxChunkOffset::from(0), 32))?
+                .is_none()
+        );
+        Ok(())
+    }
     use reth_db::mdbx::DatabaseArguments;
 
     #[test]

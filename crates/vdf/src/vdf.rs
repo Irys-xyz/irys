@@ -128,6 +128,9 @@ pub fn run_vdf<B: BlockProvider>(
     loop {
         if shutdown_token.is_cancelled() {
             tracing::info!("VDF loop: shutdown token cancelled, exiting");
+            // Before the fast-forward receiver drops, so validation still
+            // draining can tell this exit from a dead VDF thread.
+            reanchor_signals.record_shutdown_stop();
             break;
         }
 
@@ -983,6 +986,8 @@ mod tests {
         // it ever reads the mining flag, so no need to enable mining here.
         let chain_sync_state = ChainSyncState::new(false, false);
         let shutdown_token = CancellationToken::new();
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        let thread_signals = signals.clone(); // clone: shared flags for the VDF thread
 
         let join_result = std::thread::spawn(move || {
             run_vdf(
@@ -992,7 +997,7 @@ mod tests {
                 H256::zero(),
                 ff_rx,
                 crate::reanchor_channel().1,
-                crate::vdf_utils::ReanchorSignals::new(),
+                thread_signals,
                 MockMining,
                 vdf_state,
                 MockBlockProvider::new(),
@@ -1006,6 +1011,48 @@ mod tests {
             join_result.is_ok(),
             "run_vdf must not panic on poisoned state lock; got: {:?}",
             join_result.err()
+        );
+        assert!(
+            !signals.is_stopped_for_shutdown(),
+            "a poisoned-lock exit is a dead VDF thread, not a shutdown stop"
+        );
+    }
+
+    /// The token exit is the only one that records a shutdown stop, and it does
+    /// so while `run_vdf` still owns the fast-forward receiver.
+    #[test]
+    fn run_vdf_records_shutdown_stop_on_token_exit() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let vdf_state = mocked_vdf_service(&config);
+        let (ff_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+        let shutdown_token = CancellationToken::new();
+        shutdown_token.cancel();
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        let thread_signals = signals.clone(); // clone: shared flags for the VDF thread
+
+        std::thread::spawn(move || {
+            run_vdf(
+                &config.vdf,
+                0,
+                H256::zero(),
+                H256::zero(),
+                ff_rx,
+                crate::reanchor_channel().1,
+                thread_signals,
+                MockMining,
+                vdf_state,
+                MockBlockProvider::new(),
+                ChainSyncState::new(false, false),
+                shutdown_token,
+            );
+        })
+        .join()
+        .expect("run_vdf must exit cleanly on a cancelled token");
+
+        assert!(signals.is_stopped_for_shutdown());
+        assert!(
+            ff_tx.is_closed(),
+            "run_vdf must have dropped the fast-forward receiver"
         );
     }
 

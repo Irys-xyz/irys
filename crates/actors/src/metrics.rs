@@ -248,6 +248,9 @@ pub(crate) fn record_cache_prune_pass(tally: &crate::cache_service::PruneTally) 
         ("root_not_migrated_placed", tally.root_not_migrated_placed),
         ("kept_unreadable", tally.unreadable),
         ("kept_unplaced", tally.unplaced_kept()),
+        ("kept_unreplicated", tally.kept_unreplicated),
+        ("kept_hold_only", tally.hold_only),
+        ("reannounced", tally.reannounced),
     ] {
         CACHE_PRUNE_PASS_BODIES.record(bodies, &[KeyValue::new("outcome", outcome)]);
     }

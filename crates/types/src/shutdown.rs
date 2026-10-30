@@ -14,6 +14,7 @@ pub enum ShutdownReason {
     VdfExited,
     ShutdownChannelClosed,
     ApiReadinessFailed,
+    InitialSyncFailed,
 }
 
 impl ShutdownReason {
@@ -27,7 +28,8 @@ impl ShutdownReason {
             | Self::RethExit
             | Self::VdfExited
             | Self::ShutdownChannelClosed
-            | Self::ApiReadinessFailed => "lifecycle",
+            | Self::ApiReadinessFailed
+            | Self::InitialSyncFailed => "lifecycle",
         }
     }
 }
@@ -47,6 +49,7 @@ impl std::fmt::Display for ShutdownReason {
             Self::VdfExited => write!(f, "VDF thread exited"),
             Self::ShutdownChannelClosed => write!(f, "shutdown channel closed"),
             Self::ApiReadinessFailed => write!(f, "API readiness check failed"),
+            Self::InitialSyncFailed => write!(f, "initial sync failed"),
         }
     }
 }

@@ -1,6 +1,6 @@
+use irys_database::cached_unpacked_chunk;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::db_cache::data_size_to_chunk_count;
-use irys_database::{cached_chunk_by_chunk_offset, cached_data_root_by_data_root};
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk,
     PartitionChunkOffset, RelativeChunkOffset, TxChunkOffset, UnpackedChunk,
@@ -553,42 +553,9 @@ impl ChunkProvider {
             return Err(eyre::eyre!("injected cache read error"));
         }
         let chunk_size = self.config.consensus.chunk_size;
-        self.db.view_eyre(|tx| {
-            let Some(cdr) = cached_data_root_by_data_root(tx, data_root)? else {
-                return Ok(None);
-            };
-            if !tx_offset_within_data_size(data_tx_offset, cdr.data_size, chunk_size) {
-                debug!(
-                    data_root = %data_root,
-                    tx_offset = %data_tx_offset,
-                    data_size = cdr.data_size,
-                    "data_root offset is past the cached data size"
-                );
-                return Ok(None);
-            }
-            let Some((_meta, cached)) =
-                cached_chunk_by_chunk_offset(tx, data_root, data_tx_offset)?
-            else {
-                return Ok(None);
-            };
-            // Index-only rows (body pruned / stored only in a partition) cannot be served.
-            let Some(bytes) = cached.chunk else {
-                debug!(
-                    data_root = %data_root,
-                    tx_offset = %data_tx_offset,
-                    "cache index hit but chunk body missing; cannot serve data_root fetch"
-                );
-                return Ok(None);
-            };
-
-            Ok(Some(ChunkFormat::Unpacked(UnpackedChunk {
-                data_root,
-                data_size: cdr.data_size,
-                data_path: cached.data_path,
-                bytes,
-                tx_offset: data_tx_offset,
-            })))
-        })
+        self.db
+            .view_eyre(|tx| cached_unpacked_chunk(tx, data_root, data_tx_offset, chunk_size))
+            .map(|maybe| maybe.map(ChunkFormat::Unpacked))
     }
 
     pub fn get_ledger_offsets_for_data_root(
