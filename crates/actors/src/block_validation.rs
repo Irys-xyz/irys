@@ -3961,6 +3961,7 @@ impl RecallRangeError {
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     geometry: PartitionGeometry,
+    vdf_reset_frequency: u64,
     steps_guard: &VdfStateReadonly,
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
@@ -4019,11 +4020,28 @@ pub async fn recall_recall_range_is_valid(
         return fork_local_check("buffer suspect: re-anchor pending".into());
     }
 
-    // Fast path: check the recall range against the local seed buffer.
-    let steps = steps_guard
-        .read()
-        .get_steps(ii(reset_step_number, global_step_number))
-        .map_err(RecallRangeError::StepsUnavailable)?;
+    // Fast path: check the recall range against the local seed buffer, but only when the
+    // buffer holds this block's own VDF lineage (`VdfState::holds_block_steps`). The buffer
+    // may still carry another fork's reset seed, or a seed free-run guessed on an older tip,
+    // until the VDF loop recomputes it; such a buffer must not decide this block.
+    let vdf_info = &block.vdf_limiter_info;
+    let (holds_block_lineage, steps) = {
+        let guard = steps_guard.read();
+        (
+            guard.holds_block_steps(
+                vdf_info.prev_output,
+                vdf_info.first_step_number(),
+                &vdf_info.steps.0,
+                vdf_info.seed,
+                vdf_reset_frequency,
+            ),
+            guard.get_steps(ii(reset_step_number, global_step_number)),
+        )
+    };
+    let steps = steps.map_err(RecallRangeError::StepsUnavailable)?;
+    if !matches!(holds_block_lineage, Ok(true)) {
+        return fork_local_check("buffer does not hold the block's VDF lineage".into());
+    }
 
     let Err(buffer_mismatch) = irys_efficient_sampling::recall_range_is_valid(
         recall_offset,
@@ -4330,6 +4348,7 @@ mod recall_range_buffer_authority_tests {
             recall_recall_range_is_valid(
                 &self.block,
                 PartitionGeometry::legacy(&self.config),
+                self.config.vdf.reset_frequency as u64,
                 &self.steps_guard,
                 &self.block_tree_guard,
                 &self.db,
@@ -4357,12 +4376,17 @@ mod recall_range_buffer_authority_tests {
             "fork-local disagreement is a consensus mismatch, got: {err:?}"
         );
 
-        // Documented residual (accepted): outside the suspect window the
-        // buffer fast path would accept the same block. Pinned here so any
-        // change to that trade-off is a conscious one.
-        f.run(false)
+        // Outside the suspect window the buffer decides only when it holds the
+        // block's own lineage (`VdfState::holds_block_steps`). This buffer does
+        // not, so the fork-local window rejects the same block.
+        let err = f
+            .run(false)
             .await
-            .expect("outside the suspect window the buffer fast path accepts");
+            .expect_err("a buffer off the block's lineage must not decide the block");
+        assert!(
+            matches!(err, RecallRangeError::Mismatch(_)),
+            "fork-local disagreement is a consensus mismatch, got: {err:?}"
+        );
     }
 
     /// The false-reject heal (pre-existing behaviour, re-pinned): a canonical
