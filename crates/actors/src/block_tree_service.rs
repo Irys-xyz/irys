@@ -2,7 +2,7 @@ use crate::{
     StorageModuleServiceMessage,
     block_migration_service::BlockMigrationService,
     block_validation::{
-        PreValidationError, build_fork_local_step_window, resolve_header_tree_or_db,
+        PreValidationError, build_fork_local_step_window_visiting, resolve_header_tree_or_db,
     },
     chunk_ingress_service::ChunkIngressMessage,
     mempool_service::MempoolServiceMessage,
@@ -28,12 +28,13 @@ use irys_types::{
 };
 use irys_vdf::{
     ReanchorRequest, first_divergent_boundary, reorg_crossed_divergent_boundary,
+    reset_seeds_folded_by_block,
     state::{VdfStateReadonly, calc_capacity},
 };
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
     sync::{Arc, RwLock},
     time::SystemTime,
@@ -1494,9 +1495,13 @@ impl BlockTreeServiceInner {
 
     /// Queue a VDF seed-buffer re-anchor after a deep reorg that may have
     /// crossed a divergent reset boundary. See
-    /// `design/docs/vdf-reset-seed-confirmation-gate.md`.
+    /// `design/docs/vdf-reset-seed-fork-handling.md`.
     fn maybe_reanchor_vdf_after_reorg(&self, canonical_tip: &IrysBlockHeader, reorg: &ReorgEvent) {
-        // Shallow reorgs stay inside the confirmation gate's safe window.
+        // A reorg within the migration depth only changes seeds of boundaries above
+        // the confirmed step. `run_vdf` checks those against the canonical chain
+        // itself and recomputes the steps after the first changed one: at most the
+        // steps above the confirmed step. A deeper reorg can change seeds below the
+        // confirmed step, which `run_vdf` does not check.
         let migration_depth = usize::try_from(self.config.consensus.block_migration_depth)
             .expect("block_migration_depth must fit in usize");
         if reorg.old_fork.len() <= migration_depth {
@@ -1555,8 +1560,21 @@ impl BlockTreeServiceInner {
         let want_start = c_step.saturating_sub(capacity.saturating_sub(1)).max(1);
         let block_tree_guard = BlockTreeReadGuard::new(Arc::clone(&self.cache));
         let resolve = |hash: &H256| resolve_header_tree_or_db(&block_tree_guard, &self.db, hash);
-        let Some(window) = build_fork_local_step_window(canonical_tip, want_start, c_step, resolve)
-        else {
+        let reset_frequency = self.config.consensus.vdf.reset_frequency as u64;
+        let mut reset_seed_by_boundary = BTreeMap::new();
+        let collect_reset_seeds = |header: &IrysBlockHeader| {
+            reset_seed_by_boundary.extend(
+                reset_seeds_folded_by_block(&header.vdf_limiter_info, reset_frequency)
+                    .filter(|(boundary, _)| *boundary + 1 >= want_start),
+            );
+        };
+        let Some(window) = build_fork_local_step_window_visiting(
+            canonical_tip,
+            want_start,
+            c_step,
+            resolve,
+            collect_reset_seeds,
+        ) else {
             warn!(
                 c_step,
                 want_start,
@@ -1571,6 +1589,7 @@ impl BlockTreeServiceInner {
             c_step,
             seed: canonical_tip.vdf_limiter_info.seed,
             next_seed: canonical_tip.vdf_limiter_info.next_seed,
+            reset_seed_by_boundary,
         };
         if self.service_senders.vdf_reanchor.try_send(request) {
             info!(c_step, "Queued a VDF seed-buffer re-anchor request");

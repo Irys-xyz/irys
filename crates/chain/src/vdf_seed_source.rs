@@ -7,9 +7,10 @@ use irys_database::DatabaseProvider;
 use irys_database::block_header_by_hash;
 use irys_domain::BlockIndex;
 use irys_types::{BlockHash, IrysBlockHeader, block_production::Seed};
+use irys_vdf::reset_seeds_folded_by_block;
 use irys_vdf::state::{VdfBootstrap, VdfSeedSource};
 use reth_db::Database as _;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 /// DB/header-replay [`VdfSeedSource`].
 pub struct DbVdfSeedSource<'a> {
@@ -18,7 +19,7 @@ pub struct DbVdfSeedSource<'a> {
 }
 
 impl VdfSeedSource for DbVdfSeedSource<'_> {
-    fn vdf_bootstrap(&self, capacity: usize) -> VdfBootstrap {
+    fn vdf_bootstrap(&self, capacity: usize, reset_frequency: u64) -> VdfBootstrap {
         let block_hash = self
             .block_index
             .get_latest_item()
@@ -26,7 +27,7 @@ impl VdfSeedSource for DbVdfSeedSource<'_> {
             .expect("To have at least genesis block");
 
         let tx = self.db.tx().unwrap();
-        replay_vdf_seeds(block_hash, capacity, |hash| {
+        replay_vdf_seeds(block_hash, capacity, reset_frequency, |hash| {
             block_header_by_hash(&tx, hash, false).unwrap().unwrap()
         })
     }
@@ -35,14 +36,23 @@ impl VdfSeedSource for DbVdfSeedSource<'_> {
 /// Replay VDF seeds via `get_header` (testable without DB). May return
 /// `capacity + 1` seeds when the capacity cut lands exactly on the height-1
 /// boundary (genesis prepend only if the window abuts step 2).
+///
+/// Reset seeds come from the same headers ([`reset_seeds_folded_by_block`]), plus the
+/// latest block's own `seed` when its last step is a boundary: the anchor fold
+/// `init_vdf_thread` applies (`reset_applied_anchor_hash`).
 fn replay_vdf_seeds(
     latest_block_hash: BlockHash,
     capacity: usize,
+    reset_frequency: u64,
     mut get_header: impl FnMut(&BlockHash) -> IrysBlockHeader,
 ) -> VdfBootstrap {
     let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
+    let mut reset_seed_by_boundary = BTreeMap::new();
     let mut block = get_header(&latest_block_hash);
     let global_step_number = block.vdf_limiter_info.global_step_number;
+    if global_step_number > 0 && global_step_number.is_multiple_of(reset_frequency) {
+        reset_seed_by_boundary.insert(global_step_number, block.vdf_limiter_info.seed);
+    }
     let mut steps_remaining = capacity;
 
     while steps_remaining > 0 && block.height > 0 {
@@ -59,6 +69,10 @@ fn replay_vdf_seeds(
             "non-contiguous VDF seed history during bootstrap replay",
         );
 
+        reset_seed_by_boundary.extend(reset_seeds_folded_by_block(
+            &block.vdf_limiter_info,
+            reset_frequency,
+        ));
         // get all the steps out of the block
         for step in block.vdf_limiter_info.steps.0.iter().rev() {
             seeds.push_front(Seed(*step));
@@ -95,6 +109,7 @@ fn replay_vdf_seeds(
         global_step: global_step_number,
         first_step,
         ordered_seeds: seeds,
+        reset_seed_by_boundary,
     }
 }
 
@@ -132,12 +147,20 @@ mod tests {
         H256::from([n; 32])
     }
 
+    /// Large enough that no fixture step range holds a reset boundary.
+    const RESET_FREQUENCY: u64 = 1_000;
+
     /// Genesis-only chain (post `run_vdf_for_genesis_block`): global step 1, one
     /// step. One-based contract: `{1, 1, [genesis.steps[0]]}`.
     #[test]
     fn genesis_only_is_one_based() {
         let genesis = header(h(0), H256::zero(), 0, 1, &[h(1)]);
-        let bootstrap = replay_vdf_seeds(genesis.block_hash, 64, reader(vec![genesis]));
+        let bootstrap = replay_vdf_seeds(
+            genesis.block_hash,
+            64,
+            RESET_FREQUENCY,
+            reader(vec![genesis]),
+        );
 
         assert_eq!(bootstrap.global_step, 1);
         assert_eq!(bootstrap.first_step, 1);
@@ -150,13 +173,40 @@ mod tests {
     fn shallow_chain_replays_all_steps_with_genesis_anchor() {
         let genesis = header(h(0), H256::zero(), 0, 1, &[h(1)]);
         let block1 = header(h(10), h(0), 1, 4, &[h(2), h(3), h(4)]);
-        let bootstrap = replay_vdf_seeds(block1.block_hash, 64, reader(vec![genesis, block1]));
+        let bootstrap = replay_vdf_seeds(
+            block1.block_hash,
+            64,
+            RESET_FREQUENCY,
+            reader(vec![genesis, block1]),
+        );
 
         assert_eq!(bootstrap.global_step, 4);
         assert_eq!(bootstrap.first_step, 1);
         assert_eq!(
             bootstrap.ordered_seeds,
             VecDeque::from(vec![Seed(h(1)), Seed(h(2)), Seed(h(3)), Seed(h(4))]),
+        );
+    }
+
+    /// Reset seeds come from the headers: each block records its own `seed` for every
+    /// boundary it folds, and the latest block's `seed` covers its last step when that step
+    /// is a boundary (the anchor fold `init_vdf_thread` applies).
+    #[test]
+    fn records_reset_seeds_from_headers_and_anchor() {
+        let genesis = header(h(0), H256::zero(), 0, 1, &[h(1)]);
+        let mut b1 = header(h(10), h(0), 1, 3, &[h(2), h(3)]);
+        b1.vdf_limiter_info.seed = h(0xA1);
+        // Folds boundary 3 (computing step 4).
+        let mut b2 = header(h(20), h(10), 2, 5, &[h(4), h(5)]);
+        b2.vdf_limiter_info.seed = h(0xA2);
+        // Ends on boundary 6: the anchor fold uses its own seed.
+        let mut b3 = header(h(30), h(20), 3, 6, &[h(6)]);
+        b3.vdf_limiter_info.seed = h(0xA3);
+        let bootstrap = replay_vdf_seeds(b3.block_hash, 64, 3, reader(vec![genesis, b1, b2, b3]));
+
+        assert_eq!(
+            bootstrap.reset_seed_by_boundary,
+            BTreeMap::from([(3, h(0xA2)), (6, h(0xA3))])
         );
     }
 
@@ -168,7 +218,12 @@ mod tests {
         let genesis = header(h(0), H256::zero(), 0, 1, &[h(1)]);
         let b1 = header(h(10), h(0), 1, 3, &[h(2), h(3)]);
         let b2 = header(h(20), h(10), 2, 5, &[h(4), h(5)]);
-        let bootstrap = replay_vdf_seeds(b2.block_hash, 2, reader(vec![genesis, b1, b2]));
+        let bootstrap = replay_vdf_seeds(
+            b2.block_hash,
+            2,
+            RESET_FREQUENCY,
+            reader(vec![genesis, b1, b2]),
+        );
 
         assert_eq!(bootstrap.global_step, 5);
         // exactly `capacity` (2) newest seeds, no genesis anchor.
@@ -187,8 +242,12 @@ mod tests {
         let capacity = 3;
         let genesis = header(h(0), H256::zero(), 0, 1, &[h(1)]);
         let block1 = header(h(10), h(0), 1, 4, &[h(2), h(3), h(4)]);
-        let bootstrap =
-            replay_vdf_seeds(block1.block_hash, capacity, reader(vec![genesis, block1]));
+        let bootstrap = replay_vdf_seeds(
+            block1.block_hash,
+            capacity,
+            RESET_FREQUENCY,
+            reader(vec![genesis, block1]),
+        );
 
         assert_eq!(bootstrap.ordered_seeds.len(), capacity + 1);
         assert_eq!(bootstrap.global_step, 4);
@@ -210,7 +269,12 @@ mod tests {
         // 4 and 3; step 2 is skipped.
         let genesis = header(h(0), H256::zero(), 0, 1, &[h(1)]);
         let block1 = header(h(10), h(0), 1, 4, &[h(2), h(3), h(4)]);
-        let bootstrap = replay_vdf_seeds(block1.block_hash, 2, reader(vec![genesis, block1]));
+        let bootstrap = replay_vdf_seeds(
+            block1.block_hash,
+            2,
+            RESET_FREQUENCY,
+            reader(vec![genesis, block1]),
+        );
 
         assert_eq!(bootstrap.global_step, 4);
         assert_eq!(
@@ -233,6 +297,11 @@ mod tests {
         // — step 2 is missing, so block1 does not bridge from genesis.
         let genesis = header(h(0), H256::zero(), 0, 1, &[h(1)]);
         let block1 = header(h(10), h(0), 1, 4, &[h(3), h(4)]);
-        let _ = replay_vdf_seeds(block1.block_hash, 64, reader(vec![genesis, block1]));
+        let _ = replay_vdf_seeds(
+            block1.block_hash,
+            64,
+            RESET_FREQUENCY,
+            reader(vec![genesis, block1]),
+        );
     }
 }

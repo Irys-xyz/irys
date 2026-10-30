@@ -14,6 +14,10 @@ irys_utils::define_metrics! {
         "irys.vdf.reanchor_skipped_total",
         "Number of VDF re-anchor requests skipped without rewriting the buffer"
     );
+    counter VDF_RESET_SEED_RECOMPUTE(
+        "irys.vdf.reset_seed_recompute_total",
+        "Number of times the VDF loop found a folded reset seed that is no longer canonical and recomputed the steps after it"
+    );
 }
 
 pub fn record_vdf_global_step(step: u64) {
@@ -30,6 +34,10 @@ pub fn record_reanchor_healed() {
 
 pub fn record_reanchor_skipped() {
     VDF_REANCHOR_SKIPPED.add(1, &[]);
+}
+
+pub fn record_reset_seed_recompute() {
+    VDF_RESET_SEED_RECOMPUTE.add(1, &[]);
 }
 
 // VDF_MINING_ENABLED keeps its original "irys-chain" instrumentation scope (an

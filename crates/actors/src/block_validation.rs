@@ -4068,6 +4068,18 @@ pub(crate) fn build_fork_local_step_window(
     want_end: u64,
     resolve: impl Fn(&H256) -> Option<IrysBlockHeader>,
 ) -> Option<H256List> {
+    build_fork_local_step_window_visiting(block, want_start, want_end, resolve, |_| {})
+}
+
+/// [`build_fork_local_step_window`] that also passes each header it reads, tip first, to
+/// `visit`.
+pub(crate) fn build_fork_local_step_window_visiting(
+    block: &IrysBlockHeader,
+    want_start: u64,
+    want_end: u64,
+    resolve: impl Fn(&H256) -> Option<IrysBlockHeader>,
+    mut visit: impl FnMut(&IrysBlockHeader),
+) -> Option<H256List> {
     if want_start > want_end {
         return None;
     }
@@ -4076,6 +4088,7 @@ pub(crate) fn build_fork_local_step_window(
 
     let mut header: IrysBlockHeader = block.clone();
     loop {
+        visit(&header);
         let info = &header.vdf_limiter_info;
         let h_first = info.first_step_number();
         let h_last = info.global_step_number;

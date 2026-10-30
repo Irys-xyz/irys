@@ -1,14 +1,15 @@
 use crate::{H256, VDFLimiterInfo};
 
 /// A consistent snapshot of the canonical chain for the VDF loop: the tip's VDF limiter
-/// info (its `next_seed` and tip step), plus the global step number of the block that is
-/// `block_migration_depth` deep — the most recent reset seed confirmed past the migration
-/// threshold. Also includes the reset seed pinned by the canonical block with the greatest
-/// `global_step_number <= requested_step_number`, so the loop reads the tip, confirmed step,
-/// and per-step seed from one provider snapshot under one canonical-chain read.
+/// info (its `seed`, `next_seed` and tip step), the global step number of the block that is
+/// `block_migration_depth` deep, the reset seed pinned by the canonical block with the greatest
+/// `global_step_number <= requested_step_number`, and the seeds of the canonical blocks above
+/// the confirmed one. One canonical-chain read gives all of them, so the loop never mixes two
+/// views of the chain.
 ///
-/// The VDF reset-boundary gate compares against `confirmed_global_step_number` so it never
-/// applies a seed pinned by a still-forkable block (issue #1447).
+/// The VDF loop checks the reset seeds it folded above `confirmed_global_step_number` against
+/// this snapshot and recomputes from the first boundary that disagrees. See
+/// `design/docs/vdf-reset-seed-fork-handling.md`.
 ///
 /// Invariant: `confirmed_global_step_number <= vdf_info.global_step_number` — the confirmed
 /// step comes from a block at or below the tip.
@@ -21,6 +22,20 @@ pub struct CanonicalVdfSnapshot {
     /// `next_seed` alone is wrong when the local loop is behind the tip across one
     /// or more reset boundaries.
     pub reset_seed_for_step: H256,
+    /// Canonical blocks above the confirmed one, oldest first, ending with the tip. Validation
+    /// folds every reset boundary `b` with `b + 1` in a block's step range with that block's
+    /// `seed`, so these entries give the canonical seed of every boundary above the confirmed step
+    /// that a canonical block already covers.
+    pub unconfirmed_block_seeds: Vec<CanonicalBlockSeed>,
+}
+
+/// The VDF step range of one canonical block and the reset seed its validation folds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalBlockSeed {
+    pub first_step: u64,
+    pub last_step: u64,
+    /// The block's `vdf_limiter_info.seed`.
+    pub seed: H256,
 }
 
 /// A trait that is used to provide access to blocks by their hash. Used to avoid circular dependencies,
@@ -28,10 +43,10 @@ pub struct CanonicalVdfSnapshot {
 pub trait BlockProvider {
     /// A consistent canonical snapshot for the current VDF loop step. `step_number` is the
     /// loop's current global step; implementations return the canonical tip info, the deepest
-    /// confirmed canonical step, and the reset seed pinned by the canonical block whose VDF
-    /// range ends at or before `step_number`.
+    /// confirmed canonical step, the reset seed pinned by the canonical block whose VDF
+    /// range ends at or before `step_number`, and the seeds of the unconfirmed canonical blocks.
     ///
     /// During partition-recovery catch-up this lets the loop apply the seed pinned for the
-    /// boundary it is actually about to cross, while preserving the confirmed-step gate.
+    /// boundary it is actually about to cross.
     fn canonical_vdf_snapshot(&self, step_number: u64) -> Option<CanonicalVdfSnapshot>;
 }

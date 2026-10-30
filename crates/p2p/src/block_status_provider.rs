@@ -1,7 +1,7 @@
 use irys_domain::{BlockIndexReadGuard, BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{
     BlockHash, BlockIndexItem, H256,
-    block_provider::{BlockProvider, CanonicalVdfSnapshot},
+    block_provider::{BlockProvider, CanonicalBlockSeed, CanonicalVdfSnapshot},
 };
 use tracing::debug;
 #[cfg(test)]
@@ -475,11 +475,24 @@ impl BlockProvider for BlockStatusProvider {
             // If `step_number` predates the earliest cached canonical entry, preserve the prior
             // tip-seed fallback rather than synthesizing a new policy here.
             .unwrap_or(tip.header().vdf_limiter_info.next_seed);
+        let unconfirmed_block_seeds = binding
+            .unconfirmed_canonical_entries(self.block_migration_depth)
+            .iter()
+            .map(|entry| {
+                let info = &entry.header().vdf_limiter_info;
+                CanonicalBlockSeed {
+                    first_step: info.first_step_number(),
+                    last_step: info.global_step_number,
+                    seed: info.seed,
+                }
+            })
+            .collect();
         Some(CanonicalVdfSnapshot {
             vdf_info: tip.header().vdf_limiter_info.clone(),
             confirmed_global_step_number: binding
                 .confirmed_canonical_step(self.block_migration_depth),
             reset_seed_for_step,
+            unconfirmed_block_seeds,
         })
     }
 }

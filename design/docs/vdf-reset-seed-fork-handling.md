@@ -1,0 +1,70 @@
+# VDF Reset-Seed Fork Handling
+
+## Status
+
+Accepted. Replaces the reset-seed confirmation gate.
+
+## Context
+
+The VDF step buffer is one sequence with two writers: the local stepping loop in `run_vdf`, which advances ~1 step/sec, and the validation fast-forward path, which writes the steps of a validated block when they are ahead of the loop. At every reset boundary `B` (a step number that is a multiple of `reset_frequency`) the loop folds a reset seed into the running hash before it computes step `B + 1`. Validation decides which seed is correct: a block folds its own `vdf_limiter_info.seed` at every boundary `b` with `b + 1` in its step range, and `VDFLimiterInfo::calculate_seeds` sets that seed from the parent — the parent's `next_seed` when the block's range holds a reset step, else the parent's `seed`.
+
+So the correct seed for a boundary is a property of the canonical chain, and the chain can change after the loop has folded it:
+
+- A reorg can replace the block whose hash pins the seed, so the loop may have folded a fork-loser seed.
+- When the loop runs past the tip, no block covers the boundary yet. The loop folds the seed a child of the tip would carry. A block that arrives later and ends between two boundaries makes the next boundary's seed its own `next_seed`, not the old tip's.
+- When the tip ends exactly on a boundary `b`, a child that also holds the next boundary carries the tip's `next_seed`, and it folds that seed at `b` too. A shorter child folds the tip's `seed` at `b`. The seed at `b` therefore depends on how far the next block reaches.
+
+The earlier fix parked the loop at `B` until the block `block_migration_depth` deep had reached `B - reset_frequency`. That made every folded seed final, but it tied VDF progress to block arrival: when blocks became slower than the reset window divided by the migration depth (mainnet, after a hashrate drop), the loop parked, no new steps were mined, no block could confirm, and the network halted. Liveness must not depend on block arrival.
+
+## Decision
+
+The loop never waits for a block. It records which seed it folded at each boundary, keeps checking those seeds against the canonical chain, and recomputes the steps after any boundary whose seed changed. A fork costs a recompute, never a halt.
+
+### Seed-tagged buffer
+
+`VdfState` keeps `reset_seed_by_boundary`: for every reset boundary from the step before the oldest buffered step up to the current step, the seed folded there to compute the next buffered step. Every writer records it:
+
+- Local stepping and fast-forward folds record the seed they apply (`store_step` in `crates/vdf/src/vdf.rs`).
+- A fast-forwarded step also records the validated block's `seed` for the boundary just before it (`VdfStep::reset_seed`), because that block computed the step.
+- Bootstrap (`crates/chain/src/vdf_seed_source.rs`) and the block-tree re-anchor take the seeds from the block headers (`irys_vdf::reset_seeds_folded_by_block`), and the anchor fold at a bootstrap tip that ends on a boundary records the tip's own `seed`.
+
+A seed identifies the block it came from (it is a block hash), so the buffer does not store the block separately.
+
+### Canonical seed of a boundary
+
+`irys_vdf::canonical_reset_seed` mirrors validation, from one canonical snapshot (`CanonicalVdfSnapshot`, which now carries the step range and `seed` of every canonical block above the confirmed one):
+
+- If a canonical block holds step `b + 1`, its `seed` is the canonical seed of `b`.
+- Otherwise `b` is at or above the tip, and the seed is the one a child of the tip reaching the live step would carry (`irys_vdf::tip_child_reset_seed`): the tip's `next_seed` when that child's range holds a reset step, else the tip's `seed`.
+
+The loop uses this rule both to choose the seed it folds and to check the seeds it already folded, so the two can never disagree.
+
+### Free-run crosses every boundary
+
+There is no reset-boundary gate. Free-run folds the canonical seed of each boundary as it reaches it, including boundaries above the tip. When the tip does not move for many reset windows, the loop keeps stepping on the child-of-tip seed; this is also what an honest miner's next block will carry, because that block spans every step since the tip.
+
+### The loop re-checks its seeds and recomputes
+
+Every iteration, unless a block-tree re-anchor is pending, the loop compares the recorded seed of every buffered boundary from the confirmed step up to the live step with the canonical seed (`first_non_canonical_reset_seed`). A missing record counts as a mismatch. At the first boundary that differs it recomputes the steps from that boundary to the live step from the buffered step at the boundary, with canonical seeds, and rewrites them in place (`VdfState::rewrite_tail`); the step counter does not move. While it recomputes, the step counter stops; the loop sets `ReanchorSignals::is_recompute_in_progress`, and validation's VDF waits hold their stall timer open while it is set, as they do while the buffer is suspect, so a long recompute is not read as a dead VDF thread. When steps were rewritten it bumps the re-anchor generation and tells miners to rebuild their recall ranges, as a block-tree re-anchor does; it leaves the suspect flag alone, since that belongs to a pending block-tree re-anchor. If only the fold at the live step changed, it re-folds the running hash and rewrites nothing.
+
+This covers a reorg within the migration depth (including a fork at the block that pins the seed, with the loop already past the boundary), a late block after a free-run guess, and the boundary whose seed depends on the next block's reach. The recompute costs at most the steps above the confirmed step. With normal block times and the configuration floor `reset_frequency >= 2 × block_migration_depth × block_time` (`Config::validate`), a reorg within the migration depth cannot change a seed the loop already folded; that needs a chain much slower than `block_time`.
+
+### Deep reorgs keep the block-tree re-anchor
+
+A reorg deeper than `block_migration_depth` can change seeds below the confirmed step, which the loop does not check. The block tree keeps handling those (`maybe_reanchor_vdf_after_reorg` in `crates/actors/src/block_tree_service.rs`, with `irys_vdf::first_divergent_boundary` / `reorg_crossed_divergent_boundary`): it sends a `ReanchorRequest` with the canonical steps and their reset seeds from the block headers, and `apply_reanchor` rewrites the buffer and recomputes the free-run tail with the child-of-tip rule. The re-anchor no longer skips a tail that crosses a second boundary past the tip: like free-run, it must not wait for a block.
+
+### Validation trusts the buffer only for the same lineage
+
+The VDF step fast path (`vdf_step_batch_is_valid`) and the recall-range fast path (`recall_recall_range_is_valid`) use `VdfState::holds_block_steps`. The buffer counts for a block only when its step before the block's steps equals the block's predecessor, its steps equal the block's, and every boundary the block folds was recorded with the block's `seed`. Each buffered step is the VDF of the one before it under the recorded seed, so these checks prove the block's steps without recomputing them. Any other buffer state, such as another fork's seed or a free-run guess on an older tip, makes validation recompute from the block's own data. A node with a stale buffer therefore rejects exactly the blocks a clean node rejects, including blocks it produced from its own stale steps.
+
+## Consequences
+
+- VDF progress never depends on block arrival. The deadlock that the confirmation gate caused at slow block times cannot occur.
+- A seed change costs a recompute of the steps after the changed boundary, at ~1 step/sec. Local mining pauses during the recompute, and the loop does not drain fast-forward steps until it finishes (the channel holds 4096 steps). Every node that sees the same canonical change recomputes at about the same time, so network-wide mining pauses for that long. The worst case is the boundary whose seed depends on the next block's reach: when the tip ends on a boundary and no block arrives for a whole reset window, every node recomputes one full reset window when its live step reaches the next boundary.
+- Validation correctness does not depend on the buffer: the fast paths accept only what a recompute would accept.
+- The buffer is exact only if every buffered step is the VDF of the one before it. Fast-forward appends a validated block's step without checking that the buffered step before it is the block's own predecessor, so a fork block can join a different lineage at that point until a re-check or re-anchor rewrites it.
+- Covered by the unit tests in `crates/vdf/src/vdf.rs` (`free_run_keeps_stepping_while_tip_is_stalled`, `late_block_after_free_run_guess_recomputes_the_tail`, `crosses_on_fork_loser_seed_then_recomputes_when_fork_resolves`, `shallow_fork_at_rotation_block_after_loop_crossed_the_boundary`, `heals_when_tail_crosses_several_boundaries`), `crates/vdf/src/state.rs` (`fast_path_requires_the_blocks_reset_seed`, `fast_path_requires_recorded_seed_and_predecessor`) and `crates/vdf/src/vdf_utils.rs` (the seed-rule tests).
+
+## Source
+
+Replaces the reset-seed confirmation gate, which halted a network whose blocks became slower than the reset window allowed.

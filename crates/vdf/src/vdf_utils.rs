@@ -1,8 +1,10 @@
 use crate::VdfStep;
 use irys_types::H256;
 use irys_types::Traced;
+use irys_types::VDFLimiterInfo;
 use irys_types::block_production::Seed;
-use std::collections::VecDeque;
+use irys_types::block_provider::CanonicalVdfSnapshot;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -16,13 +18,15 @@ pub const VDF_FAST_FORWARD_CHANNEL_CAPACITY: usize = 4_096;
 
 /// Shared re-anchor generation + buffer-suspect flag (FF senders, `run_vdf`,
 /// block-tree gate, recall-range validation). Generation bumps on applied heal;
-/// suspect is set while a heal is pending/running. Also records whether
-/// `run_vdf` stopped because the node is shutting down.
+/// suspect is set while a heal is pending/running. `recompute_in_progress` is set
+/// while `run_vdf` recomputes its tail after a reset seed changed. Also records
+/// whether `run_vdf` stopped because the node is shutting down.
 #[derive(Debug, Clone)]
 pub struct ReanchorSignals {
     generation: Arc<AtomicU64>,
     buffer_suspect: Arc<AtomicBool>,
     stopped_for_shutdown: Arc<AtomicBool>,
+    recompute_in_progress: Arc<AtomicBool>,
 }
 
 impl ReanchorSignals {
@@ -31,6 +35,7 @@ impl ReanchorSignals {
             generation: Arc::new(AtomicU64::new(0)),
             buffer_suspect: Arc::new(AtomicBool::new(false)),
             stopped_for_shutdown: Arc::new(AtomicBool::new(false)),
+            recompute_in_progress: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -44,6 +49,28 @@ impl ReanchorSignals {
     /// never sets it, so a closed channel without it still means a dead VDF thread.
     pub fn is_stopped_for_shutdown(&self) -> bool {
         self.stopped_for_shutdown.load(Ordering::Acquire)
+    }
+
+    /// `run_vdf` starts recomputing its tail; the step counter stops until
+    /// [`Self::finish_recompute`].
+    pub(crate) fn begin_recompute(&self) {
+        self.recompute_in_progress.store(true, Ordering::Release);
+    }
+
+    /// `run_vdf` finished (or abandoned) a tail recompute. When it rewrote buffered
+    /// steps, bump the generation as a heal does, but leave the suspect flag alone:
+    /// it belongs to a pending block-tree re-anchor.
+    pub(crate) fn finish_recompute(&self, rewrote_steps: bool) {
+        if rewrote_steps {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
+        self.recompute_in_progress.store(false, Ordering::Release);
+    }
+
+    /// True while `run_vdf` recomputes its tail: the step counter is frozen on
+    /// purpose, so a waiter must not read that as a dead VDF thread.
+    pub fn is_recompute_in_progress(&self) -> bool {
+        self.recompute_in_progress.load(Ordering::Acquire)
     }
 
     /// Current re-anchor generation (`0` until first applied heal). Acquire.
@@ -110,11 +137,14 @@ impl VdfFastForwardSender {
     }
 
     /// Replay a pre-validated step batch, stamped with `captured_generation`.
+    /// `reset_seed` is the validated block's `vdf_limiter_info.seed`: the seed it
+    /// folds at every reset boundary in its range.
     /// Fails with [`VdfReanchorGenerationChanged`] if a heal applied since capture.
     pub async fn send_validated_batch(
         &self,
         start_step_number: u64,
         steps: &[H256],
+        reset_seed: H256,
         send_timeout: Duration,
         captured_generation: u64,
     ) -> eyre::Result<()> {
@@ -129,6 +159,7 @@ impl VdfFastForwardSender {
         fast_forward_validated_steps(
             start_step_number,
             steps,
+            reset_seed,
             &self.sender,
             &self.signals,
             captured_generation,
@@ -167,6 +198,9 @@ pub struct ReanchorRequest {
     pub seed: H256,
     /// `next_seed` for the first boundary strictly after `c_step`.
     pub next_seed: H256,
+    /// Canonical reset seed of every boundary `b` with `b + 1` in the window, from the
+    /// covering block headers ([`reset_seeds_folded_by_block`]).
+    pub reset_seed_by_boundary: BTreeMap<u64, H256>,
 }
 
 /// First reset boundary where forks splitting at `lca_step` can fold different seeds.
@@ -186,6 +220,84 @@ pub fn reorg_crossed_divergent_boundary(
     reset_frequency: u64,
 ) -> bool {
     crossing_step >= first_divergent_boundary(lca_step, reset_frequency)
+}
+
+/// The reset boundaries that validation of a block with `info` folds, each paired with the seed
+/// it folds there (`info.seed`): every multiple `b > 0` of `reset_frequency` with `b + 1` in the
+/// block's step range. Mirrors `vdf_step_batch_is_valid`. `reset_frequency` must be non-zero.
+pub fn reset_seeds_folded_by_block(
+    info: &VDFLimiterInfo,
+    reset_frequency: u64,
+) -> impl Iterator<Item = (u64, H256)> {
+    let lowest = info.first_step_number().saturating_sub(1).max(1);
+    let highest = info.global_step_number.saturating_sub(1);
+    let first_boundary = lowest
+        .div_ceil(reset_frequency)
+        .saturating_mul(reset_frequency);
+    let seed = info.seed;
+    (first_boundary..=highest)
+        .step_by(usize::try_from(reset_frequency).unwrap_or(usize::MAX))
+        .map(move |boundary| (boundary, seed))
+}
+
+/// The seed a child of the canonical tip folds at `boundary` (`boundary >= tip_last_step`) when
+/// the child's step range runs from `tip_last_step + 1` to `max(live_step, boundary + 1)`.
+///
+/// Mirrors `VDFLimiterInfo::calculate_seeds`: a child whose range holds a reset step carries the
+/// tip's `next_seed`, otherwise the tip's `seed`, and validation folds that one seed at every
+/// boundary in its range. For `boundary > tip_last_step` the range holds `boundary` itself, so
+/// the answer is always `tip_next_seed`. For `boundary == tip_last_step` the answer depends on
+/// how far the child reaches: `tip_seed` until `live_step` gets to the next boundary, then
+/// `tip_next_seed`. `reset_frequency` must be non-zero.
+#[must_use]
+pub fn tip_child_reset_seed(
+    tip_last_step: u64,
+    tip_seed: H256,
+    tip_next_seed: H256,
+    boundary: u64,
+    live_step: u64,
+    reset_frequency: u64,
+) -> H256 {
+    let child_last_step = live_step.max(boundary.saturating_add(1));
+    let first_reset_after_tip = (tip_last_step / reset_frequency)
+        .saturating_add(1)
+        .saturating_mul(reset_frequency);
+    if first_reset_after_tip <= child_last_step {
+        tip_next_seed
+    } else {
+        tip_seed
+    }
+}
+
+/// The reset seed the canonical chain in `snapshot` folds at `boundary`, for a loop whose live
+/// step is `live_step`. A canonical block that covers `boundary + 1` decides it with its own
+/// `seed`; above the tip, the child-of-tip rule ([`tip_child_reset_seed`]) decides it. `None`
+/// when `boundary + 1` is in a confirmed block (not in the snapshot). `reset_frequency` must be
+/// non-zero.
+#[must_use]
+pub fn canonical_reset_seed(
+    snapshot: &CanonicalVdfSnapshot,
+    boundary: u64,
+    live_step: u64,
+    reset_frequency: u64,
+) -> Option<H256> {
+    let tip = &snapshot.vdf_info;
+    if boundary >= tip.global_step_number {
+        return Some(tip_child_reset_seed(
+            tip.global_step_number,
+            tip.seed,
+            tip.next_seed,
+            boundary,
+            live_step,
+            reset_frequency,
+        ));
+    }
+    let next_step = boundary + 1;
+    snapshot
+        .unconfirmed_block_seeds
+        .iter()
+        .find(|block| block.first_step <= next_step && next_step <= block.last_step)
+        .map(|block| block.seed)
 }
 
 /// Latest-value re-anchor channel (coalesces to newest request).
@@ -212,6 +324,7 @@ pub fn reanchor_channel() -> (VdfReanchorSender, ReanchorReceiver) {
 pub(crate) async fn fast_forward_validated_steps(
     start_step_number: u64,
     steps: &[H256],
+    reset_seed: H256,
     vdf_fast_forward_sender: &Sender<Traced<VdfStep>>,
     signals: &ReanchorSignals,
     generation: u64,
@@ -229,6 +342,7 @@ pub(crate) async fn fast_forward_validated_steps(
             vdf_fast_forward_sender.send(Traced::new(VdfStep {
                 step: *hash,
                 global_step_number: start_step_number + i as u64,
+                reset_seed,
                 generation,
             })),
         )
@@ -325,6 +439,96 @@ mod tests {
         );
     }
 
+    fn limiter(first_step: u64, last_step: u64, seed: H256) -> VDFLimiterInfo {
+        VDFLimiterInfo {
+            global_step_number: last_step,
+            steps: irys_types::H256List(vec![H256::zero(); (last_step - first_step + 1) as usize]),
+            seed,
+            ..VDFLimiterInfo::default()
+        }
+    }
+
+    /// Validation folds `seed` at every boundary `b > 0` with `b + 1` in the block's range.
+    #[rstest]
+    #[case::no_boundary(7, 9, vec![])]
+    #[case::boundary_inside(4, 7, vec![5])]
+    // The step before the first one is a boundary: computing step 6 folds boundary 5.
+    #[case::boundary_just_before_first_step(6, 7, vec![5])]
+    #[case::boundary_on_last_step_not_folded(8, 10, vec![])]
+    #[case::two_boundaries(4, 16, vec![5, 10, 15])]
+    #[case::step_zero_never_folded(1, 3, vec![])]
+    fn reset_seeds_folded_by_block_matches_validation(
+        #[case] first_step: u64,
+        #[case] last_step: u64,
+        #[case] expected: Vec<u64>,
+    ) {
+        let seed = H256::repeat_byte(0x5E);
+        let folded: Vec<(u64, H256)> =
+            reset_seeds_folded_by_block(&limiter(first_step, last_step, seed), 5).collect();
+        let expected: Vec<(u64, H256)> = expected.into_iter().map(|b| (b, seed)).collect();
+        assert_eq!(folded, expected);
+    }
+
+    /// A child of the tip carries `next_seed` when its range (tip + 1 ..= live) holds a
+    /// reset step, else the tip's `seed`.
+    #[rstest]
+    // Boundary above the tip: the child's range holds it.
+    #[case::boundary_above_tip(7, 10, 10, true)]
+    #[case::second_boundary_above_tip(7, 15, 15, true)]
+    // Tip ends on boundary 10: the child folds 10 with the tip's seed until it reaches 15.
+    #[case::tip_on_boundary_short_child(10, 10, 14, false)]
+    #[case::tip_on_boundary_child_reaches_next(10, 10, 15, true)]
+    fn tip_child_reset_seed_follows_calculate_seeds(
+        #[case] tip_last_step: u64,
+        #[case] boundary: u64,
+        #[case] live_step: u64,
+        #[case] expect_next_seed: bool,
+    ) {
+        let seed = H256::repeat_byte(0x01);
+        let next_seed = H256::repeat_byte(0x02);
+        let got = tip_child_reset_seed(tip_last_step, seed, next_seed, boundary, live_step, 5);
+        assert_eq!(got, if expect_next_seed { next_seed } else { seed });
+    }
+
+    /// Below the tip the covering unconfirmed block decides; below those, nothing does.
+    #[test]
+    fn canonical_reset_seed_reads_covering_block_then_tip_child() {
+        let block_a = irys_types::block_provider::CanonicalBlockSeed {
+            first_step: 3,
+            last_step: 6,
+            seed: H256::repeat_byte(0x0A),
+        };
+        let block_b = irys_types::block_provider::CanonicalBlockSeed {
+            first_step: 7,
+            last_step: 12,
+            seed: H256::repeat_byte(0x0B),
+        };
+        let snapshot = CanonicalVdfSnapshot {
+            vdf_info: VDFLimiterInfo {
+                global_step_number: 12,
+                seed: block_b.seed,
+                next_seed: H256::repeat_byte(0x0C),
+                ..VDFLimiterInfo::default()
+            },
+            confirmed_global_step_number: 2,
+            reset_seed_for_step: H256::zero(),
+            unconfirmed_block_seeds: vec![block_a, block_b],
+        };
+        assert_eq!(
+            canonical_reset_seed(&snapshot, 5, 20, 5),
+            Some(block_a.seed)
+        );
+        assert_eq!(
+            canonical_reset_seed(&snapshot, 10, 20, 5),
+            Some(block_b.seed)
+        );
+        assert_eq!(
+            canonical_reset_seed(&snapshot, 15, 20, 5),
+            Some(H256::repeat_byte(0x0C))
+        );
+        assert_eq!(canonical_reset_seed(&snapshot, 0, 20, 5), None);
+    }
+
     #[tokio::test]
     async fn factory_delivers_validated_steps() {
         let (sender, mut rx, signals) = fast_forward_channel();
@@ -337,7 +541,7 @@ mod tests {
 
         let steps = [H256::from_low_u64_be(1), H256::from_low_u64_be(2)];
         sender
-            .send_validated_batch(10, &steps, Duration::from_secs(1), captured)
+            .send_validated_batch(10, &steps, H256::zero(), Duration::from_secs(1), captured)
             .await
             .expect("validated batch should send");
 
@@ -369,7 +573,13 @@ mod tests {
         signals.record_heal_applied();
 
         let err = sender
-            .send_validated_batch(1, &[H256::zero()], Duration::from_secs(1), captured)
+            .send_validated_batch(
+                1,
+                &[H256::zero()],
+                H256::zero(),
+                Duration::from_secs(1),
+                captured,
+            )
             .await
             .expect_err("stale captured generation must be rejected");
         let changed = err
@@ -405,6 +615,7 @@ mod tests {
             c_step,
             seed: H256::zero(),
             next_seed: H256::zero(),
+            reset_seed_by_boundary: Default::default(),
         };
         assert!(tx.try_send(request_at(10)));
         assert!(tx.try_send(request_at(20)));
@@ -435,7 +646,13 @@ mod tests {
         drop(rx);
         let captured = sender.current_generation();
         let error = sender
-            .send_validated_batch(7, &[H256::zero()], Duration::from_millis(50), captured)
+            .send_validated_batch(
+                7,
+                &[H256::zero()],
+                H256::zero(),
+                Duration::from_millis(50),
+                captured,
+            )
             .await
             .expect_err("a shutdown stop must fail the send");
         let stopped = error
@@ -454,7 +671,13 @@ mod tests {
         drop(rx);
         let captured = sender.current_generation();
         sender
-            .send_validated_batch(1, &[H256::zero()], Duration::from_millis(50), captured)
+            .send_validated_batch(
+                1,
+                &[H256::zero()],
+                H256::zero(),
+                Duration::from_millis(50),
+                captured,
+            )
             .await
             .expect("must panic before returning");
     }
@@ -470,7 +693,7 @@ mod tests {
         let steps = vec![H256::zero(); VDF_FAST_FORWARD_CHANNEL_CAPACITY + 1];
         let captured = sender.current_generation();
         sender
-            .send_validated_batch(1, &steps, Duration::from_millis(50), captured)
+            .send_validated_batch(1, &steps, H256::zero(), Duration::from_millis(50), captured)
             .await
             .expect("must panic before returning");
     }

@@ -1271,6 +1271,7 @@ impl ValidationServiceInner {
                 .send_validated_batch(
                     batch_start_step_number,
                     batch_steps,
+                    vdf_info.seed,
                     progress_timeout,
                     captured_generation,
                 )
@@ -1661,9 +1662,15 @@ mod tests {
         .expect("valid prefix should be accepted");
 
         let captured = tx.current_generation();
-        tx.send_validated_batch(1, &vdf_info.steps.0[..1], Duration::from_secs(1), captured)
-            .await
-            .expect("validated prefix should fast-forward");
+        tx.send_validated_batch(
+            1,
+            &vdf_info.steps.0[..1],
+            H256::zero(),
+            Duration::from_secs(1),
+            captured,
+        )
+        .await
+        .expect("validated prefix should fast-forward");
         let (ff_step, _span) = rx
             .recv()
             .await
