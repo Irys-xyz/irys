@@ -1857,19 +1857,25 @@ pub async fn prevalidate_block(
     check_poa_data_expiration(&block.poa, parent_epoch_snapshot.clone())?;
     debug!("poa data not expired");
 
-    // Cheap ownership check before the expensive entropy work in `poa_is_valid`
-    poa_partition_is_owned_by_miner(
-        block.poa.partition_hash,
-        block.miner_address,
-        &parent_epoch_snapshot,
-    )?;
-    // Here as well as in `poa_is_valid`, which trusted sync skips
-    poa_ledger_matches_assignment(&block.poa, &parent_epoch_snapshot)?;
-    debug!(
-        block.hash = ?block.block_hash,
-        block.height = ?block.height,
-        "poa_partition_is_owned_by_miner and poa_ledger_matches_assignment",
-    );
+    if config
+        .consensus
+        .hardforks
+        .is_echo_active_at(block.timestamp_secs())
+    {
+        // Cheap ownership check before the expensive entropy work in `poa_is_valid`
+        poa_partition_is_owned_by_miner(
+            block.poa.partition_hash,
+            block.miner_address,
+            &parent_epoch_snapshot,
+        )?;
+        // Here as well as in `poa_is_valid`, which trusted sync skips
+        poa_ledger_matches_assignment(&block.poa, &parent_epoch_snapshot)?;
+        debug!(
+            block.hash = ?block.block_hash,
+            block.height = ?block.height,
+            "poa_partition_is_owned_by_miner and poa_ledger_matches_assignment",
+        );
+    }
 
     // Check the solution_hash
     solution_hash_is_valid(block, previous_block)?;
@@ -4770,6 +4776,7 @@ pub fn poa_is_valid(
     epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
     miner_address: &IrysAddress,
+    block_timestamp: UnixTimestamp,
 ) -> Result<(), PreValidationError> {
     debug!("PoA validating");
     let poa_chunk_bytes: &[u8] = match &poa.chunk {
@@ -4777,8 +4784,10 @@ pub fn poa_is_valid(
         None => return Err(PreValidationError::PoAChunkMissing),
     };
     poa_chunk_within_configured_len(poa_chunk_bytes, config.chunk_size)?;
-    poa_partition_is_owned_by_miner(poa.partition_hash, *miner_address, epoch_snapshot)?;
-    poa_ledger_matches_assignment(poa, epoch_snapshot)?;
+    if config.hardforks.is_echo_active_at(block_timestamp) {
+        poa_partition_is_owned_by_miner(poa.partition_hash, *miner_address, epoch_snapshot)?;
+        poa_ledger_matches_assignment(poa, epoch_snapshot)?;
+    }
     let mut poa_chunk: Vec<u8> = poa_chunk_bytes.to_vec();
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_id)) =
@@ -5092,22 +5101,28 @@ pub async fn shadow_transactions_are_valid(
     // The EVM block must build on the parent block's EVM block. Reth checks the
     // EVM block number and state only against the EVM parent that the payload
     // names, which can be any EVM block that Reth has, also one from another fork.
-    let parent = crate::block_tree_service::get_block_header(
-        block_tree_guard,
-        db,
-        block.previous_block_hash,
-        false,
-    )
-    .map_err(|e| ValidationError::ShadowTxNodeFault(e.to_string()))?
-    .ok_or(ValidationError::ParentBlockMissing {
-        block_hash: block.previous_block_hash,
-    })?;
-    let payload_parent_hash = payload_v3.payload_inner.payload_inner.parent_hash;
-    if payload_parent_hash != parent.evm_block_hash {
-        return Err(reject(format!(
-            "EVM payload parent {payload_parent_hash} is not the parent block's EVM block {}",
-            parent.evm_block_hash
-        )));
+    if config
+        .consensus
+        .hardforks
+        .is_echo_active_at(block.timestamp_secs())
+    {
+        let parent = crate::block_tree_service::get_block_header(
+            block_tree_guard,
+            db,
+            block.previous_block_hash,
+            false,
+        )
+        .map_err(|e| ValidationError::ShadowTxNodeFault(e.to_string()))?
+        .ok_or(ValidationError::ParentBlockMissing {
+            block_hash: block.previous_block_hash,
+        })?;
+        let payload_parent_hash = payload_v3.payload_inner.payload_inner.parent_hash;
+        if payload_parent_hash != parent.evm_block_hash {
+            return Err(reject(format!(
+                "EVM payload parent {payload_parent_hash} is not the parent block's EVM block {}",
+                parent.evm_block_hash
+            )));
+        }
     }
 
     let evm_block: Block = payload_v3
@@ -8114,6 +8129,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             };
 
             let parent_n = hardforks.number_of_ingress_proofs_total_at(parent_ts);
@@ -9287,6 +9303,7 @@ mod tests {
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
+            irys_types::UnixTimestamp::from_secs(0),
         )
     }
 
@@ -9402,6 +9419,7 @@ mod tests {
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
+            irys_types::UnixTimestamp::from_secs(0),
         )
     }
 
@@ -9568,6 +9586,7 @@ mod tests {
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
+            irys_types::UnixTimestamp::from_secs(0),
         )
     }
 
@@ -9834,6 +9853,7 @@ mod tests {
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
+            irys_types::UnixTimestamp::from_secs(0),
         );
 
         match poa_valid {
@@ -10564,6 +10584,7 @@ mod commitment_version_tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -10581,6 +10602,7 @@ mod commitment_version_tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             },
             ..ConsensusConfig::testing()
         }

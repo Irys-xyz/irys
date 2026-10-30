@@ -702,6 +702,7 @@ impl BlockValidationTask {
             let block_hash = self.sealed_block.header().block_hash;
             let block_height = self.sealed_block.header().height;
             let parent_block_hash = self.sealed_block.header().previous_block_hash;
+            let block_timestamp = self.sealed_block.header().timestamp_secs();
             // Clone the Arc for the blocking task; the non-PoA tasks below
             // get their own clones from the same single fetch.
             let poa_epoch_snapshot = Arc::clone(&parent_epoch_snapshot);
@@ -727,6 +728,7 @@ impl BlockValidationTask {
                         &poa_epoch_snapshot,
                         &consensus_config,
                         &miner_address,
+                        block_timestamp,
                     )
                     .map(|()| ValidationResult::Valid)
                 });

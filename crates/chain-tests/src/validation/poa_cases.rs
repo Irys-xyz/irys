@@ -204,6 +204,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                 &epoch_snapshot,
                 &node_config.consensus_config(),
                 &genesis_signer.address(),
+                irys_types::UnixTimestamp::from_secs(0),
             )?;
 
             // Create a PoA for the data chunks
@@ -229,6 +230,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                 &epoch_snapshot,
                 &node_config.consensus_config(),
                 &genesis_signer.address(),
+                irys_types::UnixTimestamp::from_secs(0),
             )?;
         }
     }
@@ -416,6 +418,7 @@ async fn data_poa_at_tip_validates_via_block_tree_fallback() -> eyre::Result<()>
         &epoch_snapshot,
         &node_config.consensus_config(),
         &genesis_signer.address(),
+        irys_types::UnixTimestamp::from_secs(0),
     );
 
     result.expect(

@@ -54,6 +54,19 @@ pub struct IrysHardforkConfig {
     /// None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
+
+    /// Echo hardfork - requires the PoA partition to belong to the block miner and
+    /// the EVM payload to build on the parent block's EVM block. Resolved at the
+    /// block's own timestamp. None means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo: Option<Echo>,
+}
+
+/// Echo hardfork - see `IrysHardforkConfig::echo`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Echo {
+    #[serde(with = "unix_timestamp_string_serde")]
+    pub activation_timestamp: UnixTimestamp,
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
@@ -368,6 +381,14 @@ impl IrysHardforkConfig {
         self.cascade_at(timestamp).is_some()
     }
 
+    /// Check if the Echo hardfork is active at the given timestamp (in seconds).
+    #[must_use]
+    pub fn is_echo_active_at(&self, timestamp: UnixTimestamp) -> bool {
+        self.echo
+            .as_ref()
+            .is_some_and(|f| timestamp >= f.activation_timestamp)
+    }
+
     /// Cascade's activation state at a block's OWN timestamp (in seconds).
     ///
     /// This is the value epoch processing uses (the epoch block's own timestamp
@@ -506,6 +527,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
         };
 
         assert_eq!(
@@ -539,6 +561,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
         };
 
         // Before activation timestamp
@@ -571,6 +594,7 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
+            echo: None,
         };
 
         // Before activation timestamp
@@ -595,6 +619,7 @@ mod tests {
         let no_cascade = IrysHardforkConfig {
             cascade: None,
             delta: None,
+            echo: None,
             ..config
         };
         assert!(
@@ -622,6 +647,7 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
+            echo: None,
         };
 
         let before = UnixTimestamp::from_secs(1499);
@@ -642,6 +668,7 @@ mod tests {
         let no_cascade = IrysHardforkConfig {
             cascade: None,
             delta: None,
+            echo: None,
             ..config
         };
         assert!(no_cascade.ledger_absence_expected(DataLedger::OneYear as u32, at));
@@ -669,6 +696,7 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
+            echo: None,
         };
 
         // Cascade active at the block's timestamp.
@@ -706,6 +734,7 @@ mod tests {
             }),
             cascade: None,
             delta: None,
+            echo: None,
         };
 
         assert!(!config.is_borealis_active_at(UnixTimestamp::from_secs(1499)));
@@ -735,6 +764,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
         };
 
         // Before activation timestamp
@@ -771,6 +801,20 @@ mod tests {
     }
 
     #[test]
+    fn is_echo_active_at_resolves_at_the_timestamp() {
+        let mut config = crate::ConsensusConfig::testing().hardforks;
+        config.echo = None;
+        assert!(!config.is_echo_active_at(UnixTimestamp::from_secs(u64::MAX)));
+
+        config.echo = Some(Echo {
+            activation_timestamp: UnixTimestamp::from_secs(1500),
+        });
+        assert!(!config.is_echo_active_at(UnixTimestamp::from_secs(1499)));
+        assert!(config.is_echo_active_at(UnixTimestamp::from_secs(1500)));
+        assert!(config.is_echo_active_at(UnixTimestamp::from_secs(1501)));
+    }
+
+    #[test]
     fn test_delta_for_block_activation_boundary() {
         let config = IrysHardforkConfig {
             frontier: FrontierParams {
@@ -786,6 +830,7 @@ mod tests {
                 initial_slots_per_new_ledger: NonZeroU64::new(2).expect("non-zero"),
                 capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             }),
+            echo: None,
         };
 
         assert_eq!(
@@ -805,6 +850,7 @@ mod tests {
         // Unconfigured means never active.
         let no_delta = IrysHardforkConfig {
             delta: None,
+            echo: None,
             ..config
         };
         assert_eq!(
@@ -844,6 +890,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -892,6 +939,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -919,6 +967,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             };
 
             let result = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -939,6 +988,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -972,6 +1022,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             };
 
             let aurora = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -1005,6 +1056,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             }
         }
 
@@ -1019,6 +1071,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             }
         }
 
@@ -1111,6 +1164,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             }
         }
 
@@ -1124,6 +1178,7 @@ mod tests {
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
                 delta: None,
+                echo: None,
                 ..base_config()
             };
             let toml_str = toml::to_string_pretty(&config).unwrap();

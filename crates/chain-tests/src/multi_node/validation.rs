@@ -1,5 +1,6 @@
 use crate::utils::{
-    IrysNodeTest, assert_validation_error, read_block_from_state, solution_context,
+    BlockValidationOutcome, IrysNodeTest, assert_validation_error, read_block_from_state,
+    solution_context,
 };
 use irys_actors::block_reward::BlockRewardSplit;
 use irys_actors::{
@@ -15,8 +16,8 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
     BoundedFee, CommitmentTransaction, DataLedger, DataTransactionHeader, H256, IngressProofsList,
-    IrysBlockHeader, NodeConfig, SendTraced as _, U256, UnixTimestampMs,
-    ingress::generate_ingress_proof, storage_pricing::Amount,
+    IrysBlockHeader, NodeConfig, SendTraced as _, U256, UnixTimestamp, UnixTimestampMs,
+    hardfork_config::Echo, ingress::generate_ingress_proof, storage_pricing::Amount,
 };
 use reth::payload::EthBuiltPayload;
 use reth_db::transaction::DbTxMut as _;
@@ -140,9 +141,14 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
 
 // A producer builds the EVM block on the grandparent block's EVM block, not on the parent
 // block's EVM block. Reth accepts that EVM block, because its own EVM parent exists, so the
-// Irys validation must reject the block.
+// Irys validation must reject the block once Echo is active. Before Echo, the block is accepted.
+#[rstest::rstest]
+#[case::echo_active(true)]
+#[case::before_echo(false)]
 #[test_log::test(tokio::test)]
-async fn heavy_block_evm_payload_on_wrong_evm_parent_gets_rejected() -> eyre::Result<()> {
+async fn heavy_block_evm_payload_on_wrong_evm_parent(
+    #[case] echo_active: bool,
+) -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub wrong_parent_evm_hash: irys_types::EvmBlockHash,
@@ -187,6 +193,11 @@ async fn heavy_block_evm_payload_on_wrong_evm_parent_gets_rejected() -> eyre::Re
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     // speeds up POA
     genesis_config.consensus.get_mut().chunk_size = 32;
+    if !echo_active {
+        genesis_config.consensus.get_mut().hardforks.echo = Some(Echo {
+            activation_timestamp: UnixTimestamp::from_secs(u64::MAX),
+        });
+    }
 
     let peer_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&peer_signer]);
@@ -234,11 +245,18 @@ async fn heavy_block_evm_payload_on_wrong_evm_parent_gets_rejected() -> eyre::Re
 
     let outcome =
         read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash, event_rx).await;
-    assert_validation_error(
-        outcome,
-        |e| matches!(e, ValidationError::ShadowTransactionInvalid(msg) if msg.contains("EVM payload parent")),
-        "block whose EVM payload builds on another EVM block should be rejected",
-    );
+    if echo_active {
+        assert_validation_error(
+            outcome,
+            |e| matches!(e, ValidationError::ShadowTransactionInvalid(msg) if msg.contains("EVM payload parent")),
+            "block whose EVM payload builds on another EVM block should be rejected",
+        );
+    } else {
+        assert!(
+            matches!(outcome, BlockValidationOutcome::StoredOnNode(_)),
+            "before Echo the block is accepted: {outcome:?}"
+        );
+    }
 
     peer_node.stop().await;
     genesis_node.stop().await;

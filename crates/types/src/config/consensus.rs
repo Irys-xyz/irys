@@ -1,4 +1,4 @@
-use crate::hardfork_config::{Aurora, Borealis, Cascade, FrontierParams, IrysHardforkConfig};
+use crate::hardfork_config::{Aurora, Borealis, Cascade, Echo, FrontierParams, IrysHardforkConfig};
 use crate::{
     H256, IrysAddress,
     storage_pricing::{
@@ -871,6 +871,8 @@ impl ConsensusConfig {
                 }),
                 // Delta hardfork - not scheduled yet
                 delta: None,
+                // Echo hardfork - not scheduled yet
+                echo: None,
             },
         }
     }
@@ -1015,6 +1017,10 @@ impl ConsensusConfig {
                 // Delta hardfork - not active by default in testing;
                 // tests that need it should override via with_consensus()
                 delta: None,
+                // Echo hardfork - enabled from genesis for testing
+                echo: Some(Echo {
+                    activation_timestamp: UnixTimestamp::from_secs(0),
+                }),
             },
         }
     }
@@ -1153,6 +1159,8 @@ impl ConsensusConfig {
                 }),
                 // Delta hardfork - not scheduled yet
                 delta: None,
+                // Echo hardfork - not scheduled yet
+                echo: None,
             },
         }
     }

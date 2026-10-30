@@ -148,6 +148,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         &epoch_snapshot,
         &config,
         &IrysAddress::ZERO,
+        irys_types::UnixTimestamp::from_secs(0),
     );
 
     assert!(matches!(
@@ -192,6 +193,7 @@ fn poa_chunk_longer_than_chunk_size_is_too_long() {
         &EpochSnapshot::default(),
         &config,
         &IrysAddress::ZERO,
+        irys_types::UnixTimestamp::from_secs(0),
     );
 
     assert!(
@@ -493,6 +495,7 @@ fn poa_is_valid_rejects_unowned_partition(#[case] kind: UnownedPartition) {
         &epoch_snapshot,
         &config,
         &miner,
+        irys_types::UnixTimestamp::from_secs(0),
     );
 
     assert!(
@@ -547,6 +550,7 @@ fn poa_is_valid_accepts_owned_entropy_poa() {
         &epoch_snapshot,
         &config,
         &miner,
+        irys_types::UnixTimestamp::from_secs(0),
     );
 
     assert!(matches!(&res, Ok(())), "{res:?}");
@@ -580,6 +584,7 @@ fn data_poa_ledger_must_match_partition_assignment() {
         &epoch_snapshot,
         &config,
         &miner,
+        irys_types::UnixTimestamp::from_secs(0),
     );
 
     assert!(matches!(
