@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793376728922,
+  "lastUpdate": 1793377615153,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20778,6 +20778,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000113,
+            "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "26b0673e41648533b1fb5431b80e9ff8f1209f35",
+          "message": "fix(docker): ship irys-cli in the release image (#1756)\n\nOperators running the Docker image need irys-cli for rollback-blocks. Build it in its own cargo invocation so its extra features on shared crates are not unified into the node binary.\n\n(cherry picked from commit 8e0c52240754ce3cc1060e9465cb20bf50fec8f9)",
+          "timestamp": "2026-10-30T15:52:20Z",
+          "tree_id": "587018755d2322085ee103edcadcb3e25242f4bd",
+          "url": "https://github.com/Irys-xyz/irys/commit/26b0673e41648533b1fb5431b80e9ff8f1209f35"
+        },
+        "date": 1793377611995,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011994,
+            "range": "± 0.000233",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.121793,
+            "range": "± 0.002495",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.208758,
+            "range": "± 0.035193",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.950614,
+            "range": "± 0.1489",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075349,
+            "range": "± 0.001458",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 749.892647,
+            "range": "± 5.114921",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 979.242299,
+            "range": "± 6.079416",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.118549,
+            "range": "± 0.003098",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1201.9844,
+            "range": "± 9.118246",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1565.819952,
+            "range": "± 6.108351",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034197,
+            "range": "± 0.000976",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.071047,
+            "range": "± 0.491565",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.105162,
+            "range": "± 1.41354",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
             "range": "± 0.000001",
             "unit": "ms/iter"
           }
