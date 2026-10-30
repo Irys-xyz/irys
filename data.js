@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793374393414,
+  "lastUpdate": 1793376728922,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20671,6 +20671,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "62cafe6a3597dcb8c67d7984efe64cae127a8c92",
+          "message": "chore: low-priority fixes, dead code removal and test fixes (#1715)\n\n* test(chain): assert block rewards in rewards_get_calculated_correctly\n\n* test(chain): build a commitment ledger in the too-many-commitments prevalidation test\n\n* test(vdf): wait on VDF steps instead of sleeping in the too-far-ahead gate test\n\n* test(types): compare translated byte range length to its expected value\n\n* fix(chunk-orchestrator): visit offset 0 once per forward scan wrap\n\n* docs(reth-node-bridge): describe how update_forkchoice_full is used\n\n* refactor(p2p): remove unused wait_for_block_to_appear_in_index\n\n* docs(block-validation): drop stale treasury TODO\n\n* refactor(mempool): remove unused take_all_valid_txs\n\n* refactor(mempool): remove the unimplemented Default for MempoolService\n\n* fix(packing): check the C single-chunk entropy result and buffer capacity\n\ncompute_entropy_chunk always writes a full chunk and reports failure through\nits return code. Assert the buffer holds one chunk, panic on a C error and\nset the length to one chunk instead of the buffer capacity.\n\n* fix(packing): free CUDA device memory on every path and drop debug prints\n\nRoute all error returns of compute_entropy_chunks_cuda through one cleanup\nthat frees device buffers and events, check event creation and\nsynchronisation, and remove timing prints. Set the host buffer length only\nafter the kernel reports success.\n\n* chore(c): remove unused HIP implementation\n\n* fix(c): reject big-endian targets at compile time\n\nThe C and CUDA code hash chain id and chunk offset in native byte order while\nthe Rust implementation uses little-endian.\n\n* fix(packing-worker): widen bind_port to u16\n\n* fix(packing-worker): use checked usize math for the CUDA buffer size\n\nReturn an error instead of panicking when a batch size overflows, and\npropagate GPU setup and packing errors from the blocking task.\n\n* fix(tui): skip inverted chunk intervals when counting chunks\n\n* fix(tui): truncate text on char boundaries\n\n* fix(tui): await manual refresh to completion\n\nThe 50 ms ceiling dropped the refresh future mid-way and left the\nrefreshing flag set.\n\n* fix(tui): keep focus on the same node when an earlier node is removed\n\n* fix(packing-worker): reject out-of-limit pack requests before allocating\n\nAnswer 400 when chunk_size differs from the consensus chunk size or the chunk\nrange is empty or wider than the node's request window.\n\n* test(database): wait for idle background work before the L0 probe swap\n\nThe probe waited a fixed 3 s for the manifest to stop changing. It now\nwaits until no flush or compaction is running or queued, then checks\nthe manifest bytes are stable.\n\n* test(api-client): drop the pre-connect sleep in the cap test server\n\nThe bound listener already queues connections before accept().\n\n* test(multiversion): bound the upgrade re-verification client with the data client timeout\n\n* test(sm-bench): write the step-log test output to a per-test temp dir\n\n* test(api-server): test the mempool limit clamp through the function the handler calls\n\n* test(packing-worker): use a non-zero GPU batch size and check the pack response status\n\n* fix(packing-worker): accept only whole-hash chunk sizes on the CPU path\n\nThe CPU packer builds entropy from whole SHA-256 outputs. A chunk size below\nthe hash size, or not a multiple of it, fails or packs a short buffer, so the\nrequest check now rejects it.\n\n* fix(c): check the CUDA stop-event record and remove the unused start event\n\n* chore(c): remove unused HIP error variants\n\n* fix(c): also assert little-endian byte order in a const\n\nNext to the cfg(target_endian) compile_error, check the target byte\norder with a const assert on u32::from_ne_bytes, so the guard is a\nvalue the compiler evaluates, not only a cfg.",
+          "timestamp": "2026-10-30T15:51:51Z",
+          "tree_id": "ac0691716fbb5eed9b9f0873a07a854c1c8fdba3",
+          "url": "https://github.com/Irys-xyz/irys/commit/62cafe6a3597dcb8c67d7984efe64cae127a8c92"
+        },
+        "date": 1793376726920,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011937,
+            "range": "± 0.00003",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119974,
+            "range": "± 0.001088",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.206068,
+            "range": "± 0.015358",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.942034,
+            "range": "± 0.368537",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074771,
+            "range": "± 0.001211",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 748.430424,
+            "range": "± 4.05384",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 989.80844,
+            "range": "± 31.313573",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.126644,
+            "range": "± 0.006063",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1250.46117,
+            "range": "± 78.596616",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1786.037574,
+            "range": "± 185.266312",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.03447,
+            "range": "± 0.000756",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.86208,
+            "range": "± 0.422591",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.985147,
+            "range": "± 0.620301",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
