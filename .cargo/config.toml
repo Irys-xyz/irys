@@ -6,8 +6,9 @@
 # is a clippy-driver argument (`cargo xtask clippy` passes `-- -D warnings`) so
 # it does not fingerprint git deps. Setting `RUSTFLAGS` in the environment
 # *replaces* this list and will rebuild Reth; leave it unset locally.
+# note: do NOT use the array form! it can get concatenated twice with worktrees. TODO: a better solution
 [build]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = "-C target-cpu=native"
 
 [alias]
 xtask = "run --package xtask --"
