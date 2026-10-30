@@ -1,4 +1,4 @@
-use crate::hardfork_config::{Aurora, Borealis, Cascade, FrontierParams, IrysHardforkConfig};
+use crate::hardfork_config::{Aurora, Borealis, Cascade, Echo, FrontierParams, IrysHardforkConfig};
 use crate::{
     H256, IrysAddress,
     storage_pricing::{
@@ -871,6 +871,10 @@ impl ConsensusConfig {
                 }),
                 // Delta hardfork - not scheduled yet
                 delta: None,
+                // Echo hardfork - PoA ownership from the first block after height 2779312
+                echo: Some(Echo {
+                    activation_height: 2779313,
+                }),
             },
         }
     }
@@ -1015,6 +1019,10 @@ impl ConsensusConfig {
                 // Delta hardfork - not active by default in testing;
                 // tests that need it should override via with_consensus()
                 delta: None,
+                // Echo hardfork - enabled from genesis for testing
+                echo: Some(Echo {
+                    activation_height: 0,
+                }),
             },
         }
     }
@@ -1153,6 +1161,10 @@ impl ConsensusConfig {
                 }),
                 // Delta hardfork - not scheduled yet
                 delta: None,
+                // Echo hardfork - enabled from genesis
+                echo: Some(Echo {
+                    activation_height: 0,
+                }),
             },
         }
     }
@@ -1269,7 +1281,7 @@ mod tests {
         // update this snapshot.
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("G5heBnSRbPT1tBFUkeHpWuvGZUF1hapEaosBkkgFeiKD"), // spellchecker:disable-line
+            H256::from_base58("NrcKdsugNBhC5UFZopY5QcU3jKknN1VQ7UgbyVJakAJ"), // spellchecker:disable-line
             "mainnet consensus-config hash snapshot changed"
         );
     }
@@ -1287,7 +1299,7 @@ mod tests {
         );
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("HN8GRtD7rYKAprfZq6p2eBrixTVFEhyE4NNCPizKukWb"), // spellchecker:disable-line
+            H256::from_base58("7ezpvzP5jjArqbEgQYYbKEHFaS5Rgnim7HhtTKCp4bez"), // spellchecker:disable-line
             "testnet consensus-config hash snapshot changed"
         );
     }
@@ -1505,7 +1517,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("E7fxtrRXiJiBmC9ZFBpDW8SvUiNe85ZGkaJ8AKNHNYYM");
+        let expected_hash = H256::from_base58("6C4dY4hxb739SMMqa4FpkLABykUidRLeak1FvsBqQfd2");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,

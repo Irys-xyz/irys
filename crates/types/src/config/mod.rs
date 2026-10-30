@@ -1365,6 +1365,9 @@ mod tests {
         thirty_day_epoch_length = 30
         annual_cost_per_gb = 0.028
 
+        [hardforks.echo]
+        activation_height = 0
+
         "#;
 
         // Create the expected config
