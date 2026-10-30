@@ -1945,6 +1945,7 @@ where
         ) {
             return error_response;
         }
+        server.peer_list.set_is_online(&request.miner_address, true);
         match server
             .data_handler
             .handle_chunk_announcement(request.peer_id, request.data)

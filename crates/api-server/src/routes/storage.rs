@@ -9,6 +9,7 @@ use irys_domain::{ChunkType, StorageModule};
 use irys_types::{DataLedger, DataRoot, H256, PartitionChunkOffset, TxChunkOffset, ii};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Route path templates registered in [`crate::routes()`]. actix-web matches placeholders to
 /// `Path`-extracted struct fields by their serde-visible names; a mismatch rejects every
@@ -232,6 +233,24 @@ fn check_persisted_query_size(entries: usize) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Persisted lookups running at once on this node. Each one runs up to
+/// `MAX_PERSISTED_QUERY_ENTRIES` index reads and `interval_disk` locks on the
+/// blocking pool, and durable-point completion takes the same lock. Matches a
+/// querying node's own `CoverageLimits::max_in_flight`.
+pub const MAX_IN_FLIGHT_PERSISTED_QUERIES: usize = 8;
+
+/// A permit for one persisted lookup, or 503 when every permit is taken. A
+/// querying node that gets no answer attests nothing and keeps its bodies,
+/// so shedding cannot cause a deletion.
+fn admit_persisted_query(admission: &Arc<Semaphore>) -> Result<OwnedSemaphorePermit, ApiError> {
+    Arc::clone(admission).try_acquire_owned().map_err(|_| {
+        ApiError::from((
+            "Too many persisted lookups in flight. Please try again later.",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ))
+    })
+}
+
 /// Offsets of `entries` that hold a crash-safe placement of exactly the
 /// requested chunk, ascending and unique. `persisted` is
 /// `StorageModule::is_data_chunk_persisted_at`; `indexed` is
@@ -295,9 +314,12 @@ pub async fn post_persisted(
     let persisted = match module {
         Some(module) => {
             let entries = entries.into_inner();
+            let permit = admit_persisted_query(&app_state.persisted_query_admission)?;
             // Up to one index point read per entry: keep them off the
-            // actix worker.
+            // actix worker. The blocking task owns the permit, because a
+            // dropped request does not stop it.
             web::block(move || {
+                let _permit = permit;
                 persisted_offsets(
                     &entries,
                     |offset| module.is_data_chunk_persisted_at(offset),
@@ -1014,6 +1036,16 @@ mod tests {
         let err = check_persisted_query_size(MAX_PERSISTED_QUERY_ENTRIES + 1)
             .expect_err("one entry over the limit");
         assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[core::prelude::v1::test]
+    fn persisted_admission_sheds_when_full_and_recovers_on_release() {
+        let admission = Arc::new(Semaphore::new(1));
+        let held = admit_persisted_query(&admission).expect("first lookup is admitted");
+        let err = admit_persisted_query(&admission).expect_err("a full gate sheds");
+        assert_eq!(err.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(held);
+        assert!(admit_persisted_query(&admission).is_ok());
     }
 
     #[actix_web::test]

@@ -489,6 +489,48 @@ async fn announcement_for_held_chunk_is_accepted_without_a_claim() -> eyre::Resu
     Ok(())
 }
 
+/// An announcement stands in for a relayed push, so it marks its sender
+/// online as a push does.
+#[tokio::test]
+async fn announcement_marks_the_announcer_online() -> eyre::Result<()> {
+    let mut receiver = GossipServiceTestFixture::new();
+    let announcer = GossipServiceTestFixture::new();
+    receiver.add_peer(&announcer);
+    let chunk = valid_chunk(chunk_size(&receiver), 12);
+    cache_body(&receiver, &chunk);
+    let from = announcer.create_default_peer_entry();
+    receiver
+        .peer_list
+        .set_is_online(&from.mining_address, false);
+    assert!(
+        receiver
+            .peer_list
+            .get_peer(&from.peer_id)
+            .is_some_and(|peer| !peer.is_online),
+        "precondition: the announcer starts offline"
+    );
+    let (handle, _) = receiver.run_service();
+    wait_until_listening(receiver.gossip_addr()).await;
+
+    assert!(matches!(
+        post_announce(
+            receiver.gossip_addr(),
+            &from,
+            ChunkAnnouncement::from(&chunk)
+        )
+        .await,
+        GossipResponse::Accepted(())
+    ));
+    assert!(
+        receiver
+            .peer_list
+            .get_peer(&from.peer_id)
+            .is_some_and(|peer| peer.is_online)
+    );
+    handle.stop().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn announcement_over_capacity_is_rate_limited_and_not_recorded() -> eyre::Result<()> {
     let mut receiver = GossipServiceTestFixture::new();
