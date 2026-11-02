@@ -2872,7 +2872,8 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn stop(self) -> IrysNodeTest<()> {
         let pre_stop_state = self.diag_wait_state().await;
         info!("Stopping node with state: {}", pre_stop_state);
-        let db_inner = Arc::clone(self.node_ctx.db.consensus());
+        let consensus_db = Arc::clone(self.node_ctx.db.consensus());
+        let cache_db = Arc::clone(self.node_ctx.db.cache());
         // Internal timeouts in stop() now handle hung subsystems, so no outer timeout needed.
         self.node_ctx
             .stop(irys_types::ShutdownReason::ServiceCompleted("test".into()))
@@ -2888,14 +2889,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             info!("Dedicated test runtime stopped");
         }
         debug!(
-            refs = Arc::strong_count(&db_inner),
+            consensus_refs = Arc::strong_count(&consensus_db),
+            cache_refs = Arc::strong_count(&cache_db),
             "Waiting for DB references to drain"
         );
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Arc::strong_count(&db_inner) > 1 {
+        while Arc::strong_count(&consensus_db) > 1 || Arc::strong_count(&cache_db) > 1 {
             if Instant::now() > deadline {
                 warn!(
-                    refs = Arc::strong_count(&db_inner),
+                    consensus_refs = Arc::strong_count(&consensus_db),
+                    cache_refs = Arc::strong_count(&cache_db),
                     "DB still has outstanding references after 5s, proceeding"
                 );
                 break;
@@ -2903,7 +2906,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             sleep(Duration::from_millis(10)).await;
         }
         info!(
-            refs = Arc::strong_count(&db_inner),
+            consensus_refs = Arc::strong_count(&consensus_db),
+            cache_refs = Arc::strong_count(&cache_db),
             "Node test stop completed"
         );
         let cfg = self.cfg;

@@ -154,8 +154,8 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
             .node_ctx
             .db
             .view_cache(|read_tx| walk_all::<IngressProofs, _>(read_tx.inner()))
-            .unwrap()
-            .unwrap();
+            .map_err(|e| eyre::eyre!("cache view_cache failed: {e}"))?
+            .map_err(|e| eyre::eyre!("walk_all<IngressProofs> failed: {e}"))?;
         if ingress_proofs.len() == expected_proofs {
             break;
         }
