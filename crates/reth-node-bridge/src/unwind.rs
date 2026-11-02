@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 /// Unwinds reth so that `target` (an EVM block hash) becomes its tip.
 ///
-/// Targets by hash, not number: an Irys block's height and its EVM block's
-/// number are not guaranteed to be equal, so unwinding to the Irys height can
-/// remove the very EVM block the startup FCU then points at.
+/// Targets by hash, not number. Validation requires an EVM block's number to
+/// equal its Irys block's height, but a database written by an older build can
+/// hold blocks where they differ. Unwinding to the Irys height would then remove
+/// the very EVM block the startup FCU points at.
 pub async fn unwind_to(
     config: &NodeConfig,
     chainspec: Arc<ChainSpec>,

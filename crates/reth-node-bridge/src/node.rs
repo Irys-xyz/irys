@@ -324,7 +324,8 @@ pub async fn run_node(
         .expect("latest block should be Some");
 
     // Compare against the EVM number of the Irys tip's EVM block, not the Irys
-    // height: the two can differ. If reth doesn't have that block it is behind.
+    // height: they can differ in a database written by an older build. If reth
+    // doesn't have that block it is behind.
     let irys_tip = context
         .eth_api()
         .block_by_hash(latest_evm_block_hash, false)
