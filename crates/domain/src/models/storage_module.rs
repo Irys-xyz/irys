@@ -78,6 +78,24 @@ pub use split_backing::SplitBacking;
 
 type SubmodulePath = PathBuf;
 
+/// `true` when `Data` runs in `map` cover every offset of `span`.
+fn data_runs_cover(map: &StorageIntervals, span: Interval<PartitionChunkOffset>) -> bool {
+    let mut cursor = span.start();
+    for (run, chunk_type) in map.overlapping(span) {
+        if *chunk_type != ChunkType::Data || run.start() > cursor {
+            return false;
+        }
+        if run.end() >= span.end() {
+            return true;
+        }
+        let Some(next) = run.end().up() else {
+            return true;
+        };
+        cursor = next;
+    }
+    false
+}
+
 /// Real `data_root` for a stored tx path, checked against the proof leaf.
 ///
 /// `Ok(None)` when the tx-path bytes are absent. A missing binding, or a leaf
@@ -3501,6 +3519,98 @@ impl StorageModule {
         self.tx_offsets_placed_where(data_root, candidates, |offset| {
             self.is_data_chunk_persisted_at(offset)
         })
+    }
+
+    /// True when one placement of `data_root` is `data_size` bytes, lies
+    /// entirely inside this partition, and every chunk of that placement is
+    /// persisted `Data`.
+    ///
+    /// Ingress-proof refresh uses this. A miner that has finished storing the
+    /// body can re-sign from its compact leaves without keeping the body in
+    /// the chunk cache.
+    pub fn holds_full_persisted_data_root(
+        &self,
+        data_root: DataRoot,
+        data_size: u64,
+    ) -> eyre::Result<bool> {
+        let infos = self.collect_data_root_infos(data_root)?;
+        for info in &infos.0 {
+            if info.data_size == data_size && self.is_placement_persisted(info)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// True when `info` lies entirely inside this partition and every chunk
+    /// of its `data_size` is persisted `Data`. A placement that starts before
+    /// the partition or runs past its end is not a full copy here.
+    pub fn is_placement_persisted(&self, info: &DataRootInfo) -> eyre::Result<bool> {
+        let chunk_size = self.config.consensus.chunk_size;
+        if chunk_size == 0 || info.data_size == 0 {
+            return Ok(false);
+        }
+        let Ok(start) = u64::try_from(info.start_offset.0) else {
+            return Ok(false);
+        };
+        let Some(end) = start.checked_add(info.data_size.div_ceil(chunk_size) - 1) else {
+            return Ok(false);
+        };
+        if end >= self.config.consensus.num_chunks_in_partition {
+            return Ok(false);
+        }
+        let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(end)) else {
+            return Ok(false);
+        };
+        self.is_data_span_persisted(ii(
+            PartitionChunkOffset::from(start),
+            PartitionChunkOffset::from(end),
+        ))
+    }
+
+    /// [`Self::is_data_chunk_persisted_at`] for every offset of `span`, read
+    /// per run instead of per offset: nothing in the span is pending or
+    /// written ahead, the live label and `intervals.json` both say `Data`,
+    /// no `mid_write_intervals.json` entry overlaps it, and every offset has
+    /// a presence row where the index stores one. A presence read error is
+    /// returned, not reported as "not persisted".
+    pub fn is_data_span_persisted(
+        &self,
+        span: Interval<PartitionChunkOffset>,
+    ) -> eyre::Result<bool> {
+        let pending = self.pending_writes.read().unwrap();
+        let queued = pending.range(span.start()..=span.end()).next().is_some()
+            || pending
+                .written_ahead
+                .range(span.start()..=span.end())
+                .next()
+                .is_some();
+        drop(pending);
+        if queued {
+            return Ok(false);
+        }
+        if !data_runs_cover(&self.intervals.read().unwrap(), span) {
+            return Ok(false);
+        }
+        let disk = self.lock_interval_disk();
+        let stored = data_runs_cover(&disk.written, span)
+            && !disk.mid_write.values().any(|log| log.overlaps(span));
+        drop(disk);
+        if !stored {
+            return Ok(false);
+        }
+        for (range, submodule) in self.submodules.overlapping(span) {
+            // MDBX-SUBMODULE-INDEX: delete this check. MDBX stores no presence row; the label is enough.
+            if !submodule.db.stores_offset_crc() {
+                continue;
+            }
+            let start = range.start().max(span.start());
+            let end = range.end().min(span.end());
+            if submodule.db.view(|tx| tx.offset_crc_missing(start, end))? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Candidate offsets of `data_root` that this module is assigned to
@@ -11761,6 +11871,245 @@ mod tests {
                 .copied(),
             Some(ChunkType::Uninitialized)
         );
+        Ok(())
+    }
+
+    /// `Data` runs cover a span only when they reach every offset of it.
+    /// Adjacent runs that were not merged still count; a gap or a non-`Data`
+    /// run does not.
+    #[test]
+    fn data_runs_cover_needs_every_offset_labeled_data() {
+        let mut map = StorageIntervals::new();
+        for (start, end, chunk_type) in [
+            (0, 3, ChunkType::Data),
+            (4, 5, ChunkType::Data),
+            (6, 6, ChunkType::Entropy),
+            (7, 8, ChunkType::Data),
+            (10, 11, ChunkType::Data),
+        ] {
+            map.insert_strict(partition_chunk_offset_ii!(start, end), chunk_type)
+                .expect("disjoint runs");
+        }
+        let covers =
+            |start: u32, end: u32| data_runs_cover(&map, partition_chunk_offset_ii!(start, end));
+        assert!(covers(0, 5), "adjacent unmerged runs cover");
+        assert!(covers(2, 4), "a run that starts before the span covers it");
+        assert!(covers(7, 8));
+        assert!(!covers(4, 7), "an Entropy run inside the span");
+        assert!(!covers(7, 10), "offset 9 is not in the map");
+        assert!(!covers(12, 12), "past every run");
+
+        let top = u32::MAX;
+        let mut map = StorageIntervals::new();
+        map.insert_strict(partition_chunk_offset_ii!(top - 1, top), ChunkType::Data)
+            .expect("one run");
+        assert!(data_runs_cover(
+            &map,
+            partition_chunk_offset_ii!(top - 1, top)
+        ));
+    }
+
+    /// A span is persisted only once every offset has passed the same steps
+    /// as [`StorageModule::is_data_chunk_persisted_at`]: queued, fsynced
+    /// with the file still behind, then written to `intervals.json`. A
+    /// missing checksum row takes it back out.
+    #[test]
+    fn data_span_persisted_follows_the_per_offset_gate() -> eyre::Result<()> {
+        let (_tmp, _config, storage) =
+            open_presence_module_with("span_persisted", SubmoduleIndexEngine::Rocksdb, 3600)?;
+        let span = partition_chunk_offset_ii!(1, 2);
+        let per_offset = |storage: &StorageModule| {
+            (1_u32..=2).all(|o| storage.is_data_chunk_persisted_at(PartitionChunkOffset::from(o)))
+        };
+
+        for offset in [1_u32, 2] {
+            assert!(storage.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![9_u8; 32],
+                ChunkType::Data
+            ));
+        }
+        assert!(!storage.is_data_span_persisted(span)?, "writes are queued");
+
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
+        assert!(
+            !storage.is_data_span_persisted(span)?,
+            "fsynced, but intervals.json does not say Data yet"
+        );
+        assert_eq!(storage.is_data_span_persisted(span)?, per_offset(&storage));
+
+        storage.flush_interval_completions_locked(true)?;
+        assert!(storage.is_data_span_persisted(span)?);
+        assert_eq!(storage.is_data_span_persisted(span)?, per_offset(&storage));
+        assert!(
+            !storage.is_data_span_persisted(partition_chunk_offset_ii!(1, 3))?,
+            "offset 3 was never written"
+        );
+
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(2))?;
+        submodule.db.drop_presence_in_ranges(&[(
+            PartitionChunkOffset::from(2),
+            PartitionChunkOffset::from(2),
+        )])?;
+        assert!(
+            !storage.is_data_span_persisted(span)?,
+            "offset 2 has no checksum row"
+        );
+        assert_eq!(storage.is_data_span_persisted(span)?, per_offset(&storage));
+        Ok(())
+    }
+
+    /// The checksum check is clipped per submodule. A missing row in the
+    /// second submodule fails a span that crosses the boundary.
+    #[test]
+    fn data_span_persisted_checks_presence_in_each_submodule() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("span_two_submodules").build();
+        let config = testing_config_tuned(tmp.path(), 32, 8, |node| {
+            node.storage = StorageSyncConfig {
+                num_writes_before_sync: 1,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms: 0,
+                ..StorageSyncConfig::default()
+            };
+            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
+        });
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: None,
+            submodules: vec![
+                (partition_chunk_offset_ii!(0, 3), "low".into()),
+                (partition_chunk_offset_ii!(4, 7), "high".into()),
+            ],
+        };
+        let storage = StorageModule::new(&info, &config)?;
+        for offset in 2_u32..=5 {
+            assert!(storage.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![9_u8; 32],
+                ChunkType::Data
+            ));
+        }
+        storage.force_sync_pending_chunks()?;
+        let span = partition_chunk_offset_ii!(2, 5);
+        assert!(storage.is_data_span_persisted(span)?);
+
+        let (_, high) = storage.get_submodule_for_offset(PartitionChunkOffset::from(5))?;
+        high.db.drop_presence_in_ranges(&[(
+            PartitionChunkOffset::from(5),
+            PartitionChunkOffset::from(5),
+        )])?;
+        assert!(!storage.is_data_span_persisted(span)?);
+        assert!(
+            storage.is_data_span_persisted(partition_chunk_offset_ii!(2, 4))?,
+            "the clipped low half and offset 4 still have their rows"
+        );
+        Ok(())
+    }
+
+    /// A placement is a full local copy only when it starts inside the
+    /// partition, ends inside it, and every chunk of its `data_size` is
+    /// persisted. `holds_full_persisted_data_root` needs one such placement
+    /// with the asked-for size.
+    #[test]
+    fn placement_persisted_needs_the_whole_placement_inside_the_partition() -> eyre::Result<()> {
+        // 8 chunks of 32 bytes. Offsets 0 and 1 are persisted `Data`.
+        let (_tmp, _config, storage) =
+            open_presence_module_with("placement_persisted", SubmoduleIndexEngine::Rocksdb, 0)?;
+        let placement = |start: i32, data_size: u64| DataRootInfo {
+            start_offset: RelativeChunkOffset(start),
+            data_size,
+        };
+        // Two placements of one root: offsets 0..=1 (written below) and
+        // 4..=5 (never written).
+        let data_root = H256::repeat_byte(7);
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        for (tx_path_hash, start) in [
+            (H256::repeat_byte(0x10), 4_u32),
+            (H256::repeat_byte(0x11), 0),
+        ] {
+            submodule.db.update_registration(|tx| {
+                tx.add_tx_leaf_binding(
+                    tx_path_hash,
+                    &TxLeafBinding {
+                        data_root,
+                        prefix_hash: tx_path_hash,
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(start),
+                    PartitionChunkOffset::from(start + 1),
+                    Some(tx_path_hash),
+                )?;
+                tx.add_data_root_info(data_root, &placement(start as i32, 64))
+            })?;
+        }
+        for offset in [0_u32, 1] {
+            assert!(storage.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![9_u8; 32],
+                ChunkType::Data
+            ));
+        }
+        storage.force_sync_pending_chunks()?;
+
+        assert!(storage.is_placement_persisted(&placement(0, 64))?);
+        assert!(
+            storage.is_placement_persisted(&placement(0, 40))?,
+            "a partial last chunk still needs only two chunks"
+        );
+        assert!(storage.is_placement_persisted(&placement(1, 32))?);
+        assert!(
+            !storage.is_placement_persisted(&placement(0, 65))?,
+            "a third chunk is needed"
+        );
+        assert!(
+            !storage.is_placement_persisted(&placement(-1, 96))?,
+            "starts before the partition"
+        );
+        assert!(
+            !storage.is_placement_persisted(&placement(6, 96))?,
+            "runs past the partition end"
+        );
+        assert!(!storage.is_placement_persisted(&placement(0, 0))?);
+
+        assert_eq!(storage.collect_data_root_infos(data_root)?.0.len(), 2);
+        assert!(
+            storage.holds_full_persisted_data_root(data_root, 64)?,
+            "one full placement is enough; the one at offset 4 is not written"
+        );
+        assert!(
+            !storage.holds_full_persisted_data_root(data_root, 32)?,
+            "no placement has that data_size"
+        );
+        assert!(!storage.holds_full_persisted_data_root(H256::repeat_byte(8), 64)?);
+        Ok(())
+    }
+
+    /// A span `mid_write_intervals.json` still lists is not persisted, even
+    /// after the retried write is durable.
+    #[test]
+    fn data_span_persisted_rejects_a_logged_mid_write() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = entropy_batch_module("span_mid_write", 30)?;
+        let offset = PartitionChunkOffset::from(3);
+        assert!(storage.write_chunk(offset, vec![7_u8; 32], ChunkType::Data));
+        storage.disk.fail_next_pwrites(1);
+        let _ = storage.sync_pending_chunks();
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(offset));
+        assert_eq!(
+            mid_write_spans(&storage)?,
+            vec![partition_chunk_offset_ii!(3, 3)]
+        );
+        assert!(
+            storage
+                .lock_interval_disk()
+                .mid_write
+                .values()
+                .any(|log| log.overlaps(partition_chunk_offset_ii!(2, 4)))
+        );
+        assert!(!storage.is_data_span_persisted(partition_chunk_offset_ii!(3, 3))?);
+        assert!(!storage.is_data_chunk_persisted_at(offset));
         Ok(())
     }
 

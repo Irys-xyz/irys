@@ -6,7 +6,7 @@ use crate::chunk_ingress_service::ingress_proofs::{
 use crate::metrics;
 use irys_database::{
     cached_data_root_by_data_root, delete_ingress_proof_if_unchanged,
-    delete_unprotected_cached_chunks_older_than, get_data_tx_metadata,
+    delete_unprotected_cached_chunks_older_than, get_data_tx_metadata, ingress_leaf_count_complete,
     reclaim_cached_chunks_older_than, tx_header_by_txid,
 };
 use irys_database::{
@@ -18,7 +18,7 @@ use irys_database::{
 };
 use irys_domain::{
     BlockBoundsError, BlockIndexReadGuard, BlockTreeReadGuard, ChainState, EpochSnapshot,
-    StorageModulesReadGuard,
+    StorageModule, StorageModulesReadGuard,
 };
 use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
@@ -125,6 +125,11 @@ impl PruneTally {
 }
 /// Maximum ingress proofs to scan per pruning invocation.
 const MAX_PROOF_CHECKS_PER_RUN: usize = 1_000;
+/// Maximum cached data roots the restore sweep checks per pruning invocation.
+const MAX_RESTORE_CHECKS_PER_RUN: usize = 1_000;
+/// Maximum ingress proofs the restore sweep tries to generate per pruning
+/// invocation.
+const MAX_RESTORES_PER_RUN: usize = 4;
 
 #[derive(Debug)]
 pub enum CacheServiceAction {
@@ -329,7 +334,8 @@ impl InnerCacheTask {
             debug!("Cache under target capacity, skipping chunk pruning");
         }
 
-        Ok(())
+        // Last: the restore sweep must not delay the reclaim that frees space.
+        self.restore_submit_ingress_proofs()
     }
 
     /// True when this node's own ingress proof for `data_root` is present.
@@ -1382,10 +1388,16 @@ impl InnerCacheTask {
     /// Scans ingress proofs with capacity-aware deletion and regeneration:
     /// - (a) Promoted + expired: delete
     /// - (b) Unpromoted + expired + at capacity: delete, except a proof this
-    ///   node produced while a cached body for that root is still unpersisted.
-    ///   That proof is reanchored. The cap is for chunk bytes; the proof row
-    ///   is what keeps those bytes servable.
+    ///   node produced while a cached body for that root is still unpersisted,
+    ///   or while a live Submit module here durably stores the full
+    ///   placement. That proof is reanchored. The cap is for chunk bytes; the
+    ///   proof row is what keeps those bytes servable. An expired Submit slot
+    ///   fails the stored-copy check, so the proof stops once the cache
+    ///   bodies are gone.
     /// - (c) Unpromoted + expired + under capacity + local author: regenerate
+    ///
+    /// [`Self::restore_submit_ingress_proofs`] recreates a local proof that is
+    /// already gone; `prune_cache` runs it after chunk reclamation.
     #[tracing::instrument(level = "trace", skip_all)]
     fn prune_ingress_proofs(&self) -> eyre::Result<()> {
         // A stable prefix of still-valid proofs must not consume the budget
@@ -1417,6 +1429,8 @@ impl InnerCacheTask {
         let mut to_reanchor: Vec<IngressProof> = Vec::new();
         let mut to_regen: Vec<IngressProof> = Vec::new();
         let mut processed = 0_usize;
+        // Filled on the first at-capacity local proof that needs it.
+        let mut proof_modules: Option<Vec<Arc<StorageModule>>> = None;
         let max_cache_size_bytes = &self.config.node_config.cache.max_cache_size_bytes;
 
         // Determine if cache is at capacity based on the CachedChunks table
@@ -1472,25 +1486,44 @@ impl InnerCacheTask {
                 let is_locally_produced = address == local_addr;
 
                 if at_capacity {
-                    // A local unpromoted proof is the fence for cached bodies
-                    // no module has persisted. Deleting it in this pass makes
-                    // the body prune treat those bytes as unprotected.
-                    if is_locally_produced
-                        && any_unpromoted
-                        && self.cached_body_still_unpersisted(&tx, data_root)?
-                    {
+                    // The cap is for chunk bytes. A local unpromoted proof
+                    // stays while it fences cached bodies no module has
+                    // persisted (deleting it would leave those bytes
+                    // unprotected), or while a live Submit module here holds
+                    // a full durable copy and this node is staked: that miner
+                    // can still serve the chunks and re-signs from the
+                    // compact leaves.
+                    let keep_reason = if !(is_locally_produced && any_unpromoted) {
+                        None
+                    } else if self.cached_body_still_unpersisted(&tx, data_root)? {
+                        Some("cached bodies are unpersisted")
+                    } else if self.live_submit_module_holds_full_copy(
+                        proof_modules.get_or_insert_with(|| self.proof_submit_modules()),
+                        data_root,
+                        cached_data_root.data_size,
+                    ) {
+                        info!(
+                            ingress_proof.data_root = ?data_root,
+                            "Keeping expired local ingress proof at cache capacity: a live Submit module stores the full data root"
+                        );
+                        metrics::record_ingress_proof_kept_stored_copy();
+                        Some("a live Submit module stores the full data root")
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = keep_reason {
                         match check_result.regeneration_action {
                             RegenAction::Reanchor => {
                                 to_reanchor.push(proof);
-                                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for reanchoring; cached bodies are unpersisted");
+                                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for reanchoring; {reason}");
                             }
                             RegenAction::Regenerate => {
                                 to_regen.push(proof);
-                                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for full regeneration; cached bodies are unpersisted");
+                                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for full regeneration; {reason}");
                             }
                             RegenAction::DoNotRegenerate => {
                                 error!(
-                                    "Cache is at capacity and the local proof for data root {} is expired with unpromoted txs and unpersisted cached bodies, but it does not meet reanchoring or regeneration criteria. Leaving the proof in place.",
+                                    "Cache is at capacity and the local proof for data root {} is expired with unpromoted txs ({reason}), but it does not meet reanchoring or regeneration criteria. Leaving the proof in place.",
                                     &data_root
                                 );
                             }
@@ -1620,6 +1653,212 @@ impl InnerCacheTask {
         Ok(())
     }
 
+    /// Local modules whose stored copy keeps or restores this node's proof:
+    /// those assigned to a live Submit slot. Empty while this node is not
+    /// staked: it cannot re-sign, and peers reject an unstaked signer's proof,
+    /// so no module read can help. Stake and slot liveness are copied out of
+    /// the canonical epoch snapshot and the block-tree lock is dropped before
+    /// the caller does any storage-module IO.
+    fn proof_submit_modules(&self) -> Vec<Arc<StorageModule>> {
+        let local_address = self.config.irys_signer().address();
+        let slot_live: Vec<bool> = {
+            let block_tree = self.block_tree_guard.read();
+            let epoch_snapshot = block_tree.canonical_epoch_snapshot();
+            if !epoch_snapshot.is_staked(local_address) {
+                return Vec::new();
+            }
+            epoch_snapshot.ledgers[DataLedger::Submit]
+                .get_slots()
+                .iter()
+                .map(|slot| !slot.is_expired)
+                .collect()
+        };
+        let submit_ledger_id = u32::from(DataLedger::Submit);
+        self.storage_modules_guard
+            .read()
+            .iter()
+            .filter(|sm| {
+                sm.partition_assignment().is_some_and(|assignment| {
+                    assignment.ledger_id == Some(submit_ledger_id)
+                        && assignment
+                            .slot_index
+                            .is_some_and(|slot_index| submit_slot_is_live(&slot_live, slot_index))
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// True when one of `modules` holds a placement of `data_root` that is
+    /// `data_size` bytes, lies inside its partition, and is persisted `Data`.
+    /// An unreadable module counts as holding it: a read error must not
+    /// delete the proof.
+    fn live_submit_module_holds_full_copy(
+        &self,
+        modules: &[Arc<StorageModule>],
+        data_root: DataRoot,
+        data_size: u64,
+    ) -> bool {
+        modules.iter().any(|storage_module| {
+            storage_module
+                .holds_full_persisted_data_root(data_root, data_size)
+                .unwrap_or_else(|error| {
+                    warn!(
+                        chunk.data_root = ?data_root,
+                        storage_module = %storage_module.id,
+                        ?error,
+                        "Keeping local ingress proof: storage metadata is unreadable"
+                    );
+                    true
+                })
+        })
+    }
+
+    /// Recreate this node's ingress proof for data roots a live Submit module
+    /// fully stores, when the proof row is gone and a tx is still unpromoted.
+    ///
+    /// A miner that finished writing a body may have lost its proof to the
+    /// cache cap, and generation does not wake again once every offset is
+    /// `Data`. Generation reads the compact leaves, not chunk bodies; with
+    /// incomplete leaves it returns `IncompleteLeaves` and a later pass tries
+    /// again.
+    fn restore_submit_ingress_proofs(&self) -> eyre::Result<()> {
+        // Same rotation as the proof scan: a random start, wrapped once, so a
+        // stable prefix of cached roots does not take the whole budget.
+        self.restore_submit_ingress_proofs_limited(
+            H256::random(),
+            MAX_RESTORE_CHECKS_PER_RUN,
+            MAX_RESTORES_PER_RUN,
+        )
+        .map(|_| ())
+    }
+
+    /// Check at most `max_checks` cached data roots, starting at `seek_key`
+    /// and wrapping once, and try at most `max_restores` generations.
+    /// Returns the number of generations tried.
+    ///
+    /// A root is tried when this node is staked, has no proof for the root
+    /// but has a leaf for every chunk, a tx is still unpromoted, and a live
+    /// Submit module holds a full persisted placement of the cached
+    /// `data_size`: the same copy that keeps a proof at capacity. Placement
+    /// reads run only for roots the database filter passes, after the read
+    /// transaction is closed.
+    fn restore_submit_ingress_proofs_limited(
+        &self,
+        seek_key: DataRoot,
+        max_checks: usize,
+        max_restores: usize,
+    ) -> eyre::Result<usize> {
+        let modules = self.proof_submit_modules();
+        if modules.is_empty() || max_restores == 0 {
+            return Ok(0);
+        }
+
+        let local_address = self.config.irys_signer().address();
+        let mut candidates: Vec<(DataRoot, u64)> = Vec::new();
+        {
+            let tx = self.db.tx()?;
+            let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
+            let mut walker = cursor.walk(Some(seek_key))?;
+            let mut wrapped = false;
+            let mut checked = 0_usize;
+            loop {
+                while let Some((data_root, cached_data_root)) = walker.next().transpose()? {
+                    if wrapped && data_root >= seek_key {
+                        break;
+                    }
+                    if checked >= max_checks {
+                        break;
+                    }
+                    checked += 1;
+                    if Self::has_local_ingress_proof(&tx, data_root, local_address)? {
+                        continue;
+                    }
+                    // Generation needs every leaf and does not rebuild them
+                    // from module bytes. A count is one read; it keeps a root
+                    // whose chunks are still arriving off the module reads
+                    // and out of the generation budget.
+                    if !ingress_leaf_count_complete(
+                        &tx,
+                        data_root,
+                        local_address,
+                        cached_data_root.data_size,
+                        self.config.consensus.chunk_size,
+                    )? {
+                        continue;
+                    }
+                    let mut any_unpromoted = false;
+                    for txid in cached_data_root.txid_set.iter() {
+                        if let Some(tx_header) = tx_header_by_txid(&tx, txid)?
+                            && tx_header.promoted_height().is_none()
+                        {
+                            any_unpromoted = true;
+                            break;
+                        }
+                    }
+                    if any_unpromoted {
+                        candidates.push((data_root, cached_data_root.data_size));
+                    }
+                }
+                if wrapped || checked >= max_checks {
+                    break;
+                }
+                wrapped = true;
+                walker = cursor.walk(None)?;
+            }
+        }
+
+        let mut attempted = 0_usize;
+        for (data_root, data_size) in candidates {
+            if attempted >= max_restores {
+                break;
+            }
+            let stored = modules.iter().any(|storage_module| {
+                storage_module
+                    .holds_full_persisted_data_root(data_root, data_size)
+                    .unwrap_or_else(|error| {
+                        warn!(
+                            ingress_proof.data_root = ?data_root,
+                            storage_module = %storage_module.id,
+                            ?error,
+                            "Skipping module for ingress proof restore: storage metadata is unreadable"
+                        );
+                        false
+                    })
+            });
+            if !stored {
+                continue;
+            }
+            attempted += 1;
+            match generate_and_store_ingress_proof(
+                &self.block_tree_guard,
+                &self.db,
+                &self.config,
+                data_root,
+                None,
+                &self.gossip_broadcast,
+                &self.ingress_proof_generation_state,
+            ) {
+                Ok(_) => {
+                    metrics::record_ingress_proof_restore("restored");
+                    info!(
+                        ingress_proof.data_root = ?data_root,
+                        "Restored ingress proof for a data root a live Submit module stores"
+                    );
+                }
+                Err(error) if error.is_benign() => {
+                    metrics::record_ingress_proof_restore("skipped");
+                    debug!(ingress_proof.data_root = ?data_root, "Skipped ingress proof restore: {error}");
+                }
+                Err(error) => {
+                    metrics::record_ingress_proof_restore("failed");
+                    warn!(ingress_proof.data_root = ?data_root, "Failed to restore ingress proof: {error}");
+                }
+            }
+        }
+        Ok(attempted)
+    }
+
     /// True when `data_root` still has a cached body that no storage module
     /// reports as persisted `Data`. An unreadable module is not that report:
     /// the proof stays, and a later pass can delete it once the read succeeds
@@ -1744,6 +1983,13 @@ impl InnerCacheTask {
             }
         });
     }
+}
+
+/// `slot_live[i]` is `!is_expired` for Submit slot `i`. An empty list is
+/// live: genesis has no slots, and expiry sets the flag without removing the
+/// slot. An index past a non-empty list is not live.
+fn submit_slot_is_live(slot_live: &[bool], slot_index: usize) -> bool {
+    slot_live.is_empty() || slot_live.get(slot_index).copied().unwrap_or(false)
 }
 
 /// Extract a human-readable message from a `catch_unwind` payload.
@@ -1993,6 +2239,24 @@ mod tests {
         data_size: u64,
         offsets: &[u32],
     ) -> eyre::Result<StorageModulesReadGuard> {
+        storage_modules_guard_with_durable_on(
+            base_directory,
+            data_root,
+            data_size,
+            offsets,
+            DataLedger::Submit,
+        )
+    }
+
+    /// [`storage_modules_guard_with_durable`] with the module assigned to slot
+    /// 0 of `ledger`.
+    fn storage_modules_guard_with_durable_on(
+        base_directory: std::path::PathBuf,
+        data_root: DataRoot,
+        data_size: u64,
+        offsets: &[u32],
+        ledger: DataLedger,
+    ) -> eyre::Result<StorageModulesReadGuard> {
         use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
         use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
         use irys_types::{
@@ -2018,7 +2282,7 @@ mod tests {
         let info = StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
-                ledger_id: Some(DataLedger::Submit.into()),
+                ledger_id: Some(ledger.into()),
                 slot_index: Some(0),
                 miner_address: IrysAddress::random(),
                 partition_hash: H256::random(),
@@ -2532,8 +2796,10 @@ mod tests {
     }
 
     /// Orders the cap must still allow: no cached body, every cached body
-    /// persisted, a remote proof, a fully promoted local proof, and a cache
-    /// that is under the hard cap.
+    /// persisted on an unstaked node, a remote proof, a fully promoted local
+    /// proof, and a cache that is under the hard cap. A staked miner whose
+    /// live Submit module stores the root keeps its proof; see
+    /// `prune_ingress_proofs_at_capacity_keeps_local_proof_for_stored_submit_copy`.
     #[tokio::test]
     async fn capacity_prune_still_drops_proofs_that_do_not_fence_unpersisted_bodies()
     -> eyre::Result<()> {
@@ -2547,7 +2813,7 @@ mod tests {
         let (proofs, chunks) = prune_cache_expired_proof(0, true, false, 1, Some(&[0]))?;
         assert_eq!(
             proofs, 0,
-            "persisted Data: the expired local proof is deleted"
+            "persisted Data on an unstaked node: the expired local proof is deleted"
         );
         assert_eq!(
             chunks, 1,
@@ -4479,6 +4745,355 @@ mod tests {
     /// - sibling (valid anchor) proof is preserved
     #[tokio::test]
     async fn prune_ingress_proofs_at_capacity_deletes_local_proof() -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase::default())?;
+        assert_eq!(
+            pass.remaining,
+            vec![pass.sibling_addr],
+            "only the sibling proof should survive; the local expired proof is deleted at capacity"
+        );
+        Ok(())
+    }
+
+    /// At capacity with no cached body, a live Submit module that durably
+    /// stores the full placement keeps the local proof, and the staked node
+    /// reanchors it to the tip.
+    #[tokio::test]
+    async fn prune_ingress_proofs_at_capacity_keeps_local_proof_for_stored_submit_copy()
+    -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            ..AtCapacityCase::default()
+        })?;
+        let mut expected = vec![pass.author_addr, pass.sibling_addr];
+        expected.sort();
+        assert_eq!(
+            pass.remaining, expected,
+            "the local proof must survive while a live Submit module stores the data root"
+        );
+        assert_eq!(
+            pass.author_anchor,
+            Some(pass.tip_hash),
+            "the kept proof is reanchored to the tip"
+        );
+        Ok(())
+    }
+
+    /// The reanchor checks the leaf count, not the leaves. One missing leaf
+    /// still fails it; the kept row stays as it was, expired, for a later
+    /// pass.
+    #[tokio::test]
+    async fn prune_ingress_proofs_at_capacity_reanchor_needs_every_leaf() -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            missing_leaf: true,
+            ..AtCapacityCase::default()
+        })?;
+        assert!(pass.remaining.contains(&pass.author_addr));
+        let anchor = pass.author_anchor.expect("the local proof is kept");
+        assert_ne!(anchor, pass.tip_hash, "the reanchor did not run");
+        Ok(())
+    }
+
+    /// A stored copy keeps the local proof only when it is a full, durable
+    /// placement of the cached data root on a live Submit slot, and the proof
+    /// is this node's with an unpromoted tx. Every other case is deleted at
+    /// capacity, as before.
+    #[rstest::rstest]
+    #[case::module_on_another_ledger(AtCapacityCase {
+        module: Some(StoredCopy { ledger: DataLedger::OneYear, ..StoredCopy::FULL_SUBMIT }),
+        ..AtCapacityCase::default()
+    })]
+    #[case::partial_placement(AtCapacityCase {
+        module: Some(StoredCopy { offsets: &[0], ..StoredCopy::FULL_SUBMIT }),
+        ..AtCapacityCase::default()
+    })]
+    #[case::placement_size_differs_from_cached_root(AtCapacityCase {
+        module: Some(StoredCopy { placement_size: 96, offsets: &[0, 1, 2], ..StoredCopy::FULL_SUBMIT }),
+        ..AtCapacityCase::default()
+    })]
+    #[case::every_tx_promoted(AtCapacityCase {
+        module: Some(StoredCopy::FULL_SUBMIT),
+        promoted: true,
+        ..AtCapacityCase::default()
+    })]
+    #[case::remote_author(AtCapacityCase {
+        module: Some(StoredCopy::FULL_SUBMIT),
+        remote_author: true,
+        ..AtCapacityCase::default()
+    })]
+    #[case::submit_slot_expired(AtCapacityCase {
+        module: Some(StoredCopy::FULL_SUBMIT),
+        expire_submit_slot_0: true,
+        ..AtCapacityCase::default()
+    })]
+    #[case::node_unstaked(AtCapacityCase {
+        module: Some(StoredCopy::FULL_SUBMIT),
+        unstaked: true,
+        ..AtCapacityCase::default()
+    })]
+    #[tokio::test]
+    async fn prune_ingress_proofs_at_capacity_deletes_proof_without_a_live_full_copy(
+        #[case] case: AtCapacityCase,
+    ) -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(case)?;
+        assert_eq!(
+            pass.remaining,
+            vec![pass.sibling_addr],
+            "the expired proof must be deleted; only the sibling survives"
+        );
+        Ok(())
+    }
+
+    /// The restore sweep tries generation only on a staked node, for a root
+    /// this node has no proof for but every leaf of, with an unpromoted tx,
+    /// that a live Submit module stores as one full persisted placement of
+    /// the cached `data_size`.
+    #[rstest::rstest]
+    #[case::stored_without_a_local_proof(
+        AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), ..AtCapacityCase::RESTORE },
+        1
+    )]
+    #[case::local_proof_present(
+        AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), ..AtCapacityCase::default() },
+        0
+    )]
+    #[case::no_module(AtCapacityCase::RESTORE, 0)]
+    #[case::module_on_another_ledger(
+        AtCapacityCase {
+            module: Some(StoredCopy { ledger: DataLedger::OneYear, ..StoredCopy::FULL_SUBMIT }),
+            ..AtCapacityCase::RESTORE
+        },
+        0
+    )]
+    #[case::partial_placement(
+        AtCapacityCase {
+            module: Some(StoredCopy { offsets: &[0], ..StoredCopy::FULL_SUBMIT }),
+            ..AtCapacityCase::RESTORE
+        },
+        0
+    )]
+    #[case::placement_size_differs_from_cached_root(
+        AtCapacityCase {
+            module: Some(StoredCopy { placement_size: 96, offsets: &[0, 1, 2], ..StoredCopy::FULL_SUBMIT }),
+            ..AtCapacityCase::RESTORE
+        },
+        0
+    )]
+    #[case::every_tx_promoted(
+        AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), promoted: true, ..AtCapacityCase::RESTORE },
+        0
+    )]
+    #[case::submit_slot_expired(
+        AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            expire_submit_slot_0: true,
+            ..AtCapacityCase::RESTORE
+        },
+        0
+    )]
+    #[case::node_unstaked(
+        AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), unstaked: true, ..AtCapacityCase::RESTORE },
+        0
+    )]
+    #[case::missing_leaf(
+        AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), missing_leaf: true, ..AtCapacityCase::RESTORE },
+        0
+    )]
+    #[tokio::test]
+    async fn restore_tries_only_roots_a_live_submit_module_fully_stores(
+        #[case] case: AtCapacityCase,
+        #[case] expected_attempts: usize,
+    ) -> eyre::Result<()> {
+        let fixture = proof_fixture(case)?;
+        let attempts = fixture.task.restore_submit_ingress_proofs_limited(
+            fixture.data_root,
+            MAX_RESTORE_CHECKS_PER_RUN,
+            MAX_RESTORES_PER_RUN,
+        )?;
+        assert_eq!(attempts, expected_attempts);
+        Ok(())
+    }
+
+    /// A staked miner whose live Submit module stores the root, with every
+    /// leaf and no proof row, gets the row back anchored to the tip.
+    #[tokio::test]
+    async fn restore_regenerates_a_missing_local_proof() -> eyre::Result<()> {
+        let fixture = proof_fixture(AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            ..AtCapacityCase::RESTORE
+        })?;
+        let local_address = fixture.task.config.irys_signer().address();
+        let local_anchor = |db: &DatabaseProvider| {
+            db.view_eyre(|rtx| {
+                Ok(irys_database::ingress_proof_by_data_root_address(
+                    rtx,
+                    fixture.data_root,
+                    local_address,
+                )?
+                .map(|compact| compact.0.proof.anchor))
+            })
+        };
+        assert_eq!(local_anchor(&fixture.db)?, None);
+
+        fixture.task.restore_submit_ingress_proofs()?;
+        assert_eq!(local_anchor(&fixture.db)?, Some(fixture.tip_hash));
+        Ok(())
+    }
+
+    /// Both budgets hold. A root that takes a check but is not a candidate
+    /// still uses one; a zero generation budget tries nothing.
+    #[tokio::test]
+    async fn restore_stops_at_its_check_and_generation_budgets() -> eyre::Result<()> {
+        let fixture = proof_fixture(AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            ..AtCapacityCase::RESTORE
+        })?;
+        // A cached root with no txs sorts first: the walk from zero checks it
+        // before the stored root.
+        let first = H256::zero();
+        assert!(first < fixture.data_root);
+        fixture.db.update(|wtx| {
+            wtx.put::<CachedDataRoots>(
+                first,
+                irys_database::db_cache::CachedDataRoot {
+                    data_size: 32,
+                    data_size_confirmed: false,
+                    txid_set: vec![],
+                    block_set: vec![],
+                    expiry_height: None,
+                    cached_at: irys_types::UnixTimestamp::now()?,
+                },
+            )?;
+            eyre::Ok(())
+        })??;
+
+        // A successful try stores the proof, so the root stops being a
+        // candidate: the passes that must try nothing go first.
+        let task = &fixture.task;
+        assert_eq!(task.restore_submit_ingress_proofs_limited(first, 1, 4)?, 0);
+        assert_eq!(task.restore_submit_ingress_proofs_limited(first, 2, 0)?, 0);
+        let last = H256::repeat_byte(0xff);
+        assert!(fixture.data_root < last);
+        assert_eq!(
+            task.restore_submit_ingress_proofs_limited(last, 2, 4)?,
+            1,
+            "a start past every root wraps to both"
+        );
+        assert_eq!(
+            task.restore_submit_ingress_proofs_limited(first, 2, 4)?,
+            0,
+            "the restored root has a proof now"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn submit_slot_is_live_reads_the_expiry_flags() {
+        assert!(submit_slot_is_live(&[], 0), "no slots is live");
+        assert!(submit_slot_is_live(&[true, false], 0));
+        assert!(!submit_slot_is_live(&[true, false], 1), "expired slot");
+        assert!(!submit_slot_is_live(&[true], 3), "index past the slot list");
+    }
+
+    /// A module holding a durable placement of the test data root, on slot 0
+    /// of `ledger`. The cached data root is 64 bytes (two 32-byte chunks).
+    #[derive(Clone, Copy, Debug)]
+    struct StoredCopy {
+        ledger: DataLedger,
+        placement_size: u64,
+        offsets: &'static [u32],
+    }
+
+    impl StoredCopy {
+        const FULL_SUBMIT: Self = Self {
+            ledger: DataLedger::Submit,
+            placement_size: 64,
+            offsets: &[0, 1],
+        };
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct AtCapacityCase {
+        /// `None` installs no storage module.
+        module: Option<StoredCopy>,
+        /// The root's only tx is promoted.
+        promoted: bool,
+        /// The expired proof is signed by another address, not this node.
+        remote_author: bool,
+        /// No expired proof is stored, as on a node that already lost it.
+        no_expired_proof: bool,
+        /// The canonical epoch snapshot has two Submit slots, slot 0 expired.
+        expire_submit_slot_0: bool,
+        /// This node has no active stake in the canonical epoch snapshot.
+        unstaked: bool,
+        /// This node has the leaf for chunk 0 but not chunk 1.
+        missing_leaf: bool,
+    }
+
+    impl AtCapacityCase {
+        /// This node's proof is already gone; only the sibling's remains.
+        const RESTORE: Self = Self {
+            module: None,
+            promoted: false,
+            remote_author: false,
+            no_expired_proof: true,
+            expire_submit_slot_0: false,
+            unstaked: false,
+            missing_leaf: false,
+        };
+    }
+
+    struct AtCapacityProofPass {
+        /// Signer addresses still holding a proof for the root, sorted.
+        remaining: Vec<IrysAddress>,
+        author_addr: IrysAddress,
+        /// Anchor of the author's proof after the pass, if it is still there.
+        author_anchor: Option<H256>,
+        sibling_addr: IrysAddress,
+        /// Canonical tip, the anchor a reanchor or restore signs.
+        tip_hash: H256,
+    }
+
+    /// One `prune_ingress_proofs` pass at capacity with no cached body.
+    fn at_capacity_expired_proof_pass(case: AtCapacityCase) -> eyre::Result<AtCapacityProofPass> {
+        let fixture = proof_fixture(case)?;
+        fixture.task.prune_ingress_proofs()?;
+        let rows = fixture
+            .db
+            .view_eyre(|rtx| irys_database::ingress_proofs_by_data_root(rtx, fixture.data_root))?;
+        let author_anchor = rows
+            .iter()
+            .find(|(_, proof)| proof.address == fixture.author_addr)
+            .map(|(_, proof)| proof.proof.anchor);
+        let mut remaining: Vec<IrysAddress> =
+            rows.into_iter().map(|(_, proof)| proof.address).collect();
+        remaining.sort();
+        Ok(AtCapacityProofPass {
+            remaining,
+            author_addr: fixture.author_addr,
+            author_anchor,
+            sibling_addr: fixture.sibling_addr,
+            tip_hash: fixture.tip_hash,
+        })
+    }
+
+    struct ProofFixture {
+        task: InnerCacheTask,
+        db: DatabaseProvider,
+        data_root: DataRoot,
+        author_addr: IrysAddress,
+        sibling_addr: IrysAddress,
+        tip_hash: H256,
+        _db_dir: irys_testing_utils::utils::tempfile::TempDir,
+        _sm_dir: irys_testing_utils::utils::tempfile::TempDir,
+    }
+
+    /// A cache at capacity with no cached body: one 64-byte cached data root
+    /// with one tx, an expired proof (this node's unless `remote_author`, and
+    /// absent with `no_expired_proof`), and a sibling proof anchored to
+    /// genesis that never expires. This node is staked and holds both leaves
+    /// unless `unstaked` or `missing_leaf` says otherwise.
+    fn proof_fixture(case: AtCapacityCase) -> eyre::Result<ProofFixture> {
         let mut node_config = NodeConfig::testing();
         // Force at_capacity = true: chunk_cache_size (0) >= 0.
         node_config.cache.max_cache_size_bytes = 0;
@@ -4494,8 +5109,14 @@ mod tests {
         let data_root = H256::random();
         let txid = H256::random();
 
-        // Address of the local signer (derived from NodeConfig::testing()'s fixed key).
+        // The local signer (derived from NodeConfig::testing()'s fixed key).
         let local_addr = config.irys_signer().address();
+        // The expired proof's author: this node, or a remote address.
+        let author_addr = if case.remote_author {
+            IrysAddress::random()
+        } else {
+            local_addr
+        };
         // A different address for the sibling proof.
         let sibling_addr = IrysAddress::random();
 
@@ -4528,12 +5149,24 @@ mod tests {
                 metadata: DataTransactionMetadata::new(),
             });
             database::insert_tx_header(wtx, &tx_header)?;
+            if case.promoted {
+                irys_database::set_data_tx_included_height(wtx, &txid, 1)
+                    .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+                irys_database::set_data_tx_promoted_height(wtx, &txid, 2)
+                    .map_err(|e| eyre::eyre!("set_data_tx_promoted_height: {e:?}"))?;
+            }
 
-            // Local proof with expired anchor → at-capacity branch deletes it.
-            let mut local_proof = IngressProof::default();
-            local_proof.data_root = data_root;
-            local_proof.anchor = expired_anchor;
-            irys_database::store_external_ingress_proof_checked(wtx, &local_proof, local_addr)?;
+            // Proof with expired anchor.
+            if !case.no_expired_proof {
+                let mut expired_proof = IngressProof::default();
+                expired_proof.data_root = data_root;
+                expired_proof.anchor = expired_anchor;
+                irys_database::store_external_ingress_proof_checked(
+                    wtx,
+                    &expired_proof,
+                    author_addr,
+                )?;
+            }
 
             // Sibling proof with valid anchor → not expired → survives.
             let mut sibling_proof = IngressProof::default();
@@ -4541,20 +5174,78 @@ mod tests {
             sibling_proof.anchor = valid_anchor;
             irys_database::store_external_ingress_proof_checked(wtx, &sibling_proof, sibling_addr)?;
 
+            // This node's compact leaves for the two chunks.
+            let leaf_count: u32 = if case.missing_leaf { 1 } else { 2 };
+            for offset in 0..leaf_count {
+                irys_database::store_ingress_data_hash(
+                    wtx,
+                    data_root,
+                    local_addr,
+                    TxChunkOffset::from(offset),
+                    H256::random(),
+                )?;
+            }
+
             Ok(())
         })??;
 
         let initial_count = db.view_eyre(|rtx| {
             Ok(irys_database::ingress_proofs_by_data_root(rtx, data_root)?.len())
         })?;
-        assert_eq!(initial_count, 2, "expected 2 proofs before pruning");
+        assert_eq!(
+            initial_count,
+            if case.no_expired_proof { 1 } else { 2 },
+            "proofs before pruning"
+        );
 
-        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let mut block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let mut snapshot = EpochSnapshot::default();
+        if !case.unstaked {
+            snapshot.commitment_state.stake_commitments.insert(
+                local_addr,
+                irys_domain::StakeEntry {
+                    id: H256::random(),
+                    commitment_status: irys_types::CommitmentStatus::Active,
+                    signer: local_addr,
+                    amount: irys_types::U256::from(10_000_u64),
+                    reward_address: local_addr,
+                },
+            );
+        }
+        if case.expire_submit_slot_0 {
+            snapshot.ledgers[DataLedger::Submit].allocate_slots(2, 0);
+            // Pre-Cascade expiry: slot 0 is old enough, the last slot never expires.
+            snapshot.ledgers.expire_partitions(
+                1_000_000,
+                irys_types::hardfork_config::ForBlock::inactive(),
+                |_| 0,
+                config.consensus.num_chunks_in_partition,
+            );
+            let slots = snapshot.ledgers.get_slots(DataLedger::Submit);
+            assert!(slots[0].is_expired && !slots[1].is_expired);
+        }
+        block_tree
+            .blocks
+            .get_mut(&genesis_block.block_hash)
+            .expect("genesis entry")
+            .epoch_snapshot = Arc::new(snapshot);
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let block_index = BlockIndex::new_for_testing(db.clone());
         let block_index_guard =
             irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+
+        let sm_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let storage_modules_guard = match case.module {
+            Some(copy) => storage_modules_guard_with_durable_on(
+                sm_dir.path().to_path_buf(),
+                data_root,
+                copy.placement_size,
+                copy.offsets,
+                copy.ledger,
+            )?,
+            None => test_storage_modules_guard(),
+        };
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {
@@ -4565,34 +5256,21 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
-            storage_modules_guard: test_storage_modules_guard(),
+            storage_modules_guard,
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
-        service_task.prune_ingress_proofs()?;
-
-        db.view(|rtx| -> eyre::Result<()> {
-            let remaining = irys_database::ingress_proofs_by_data_root(rtx, data_root)?;
-            assert_eq!(
-                remaining.len(),
-                1,
-                "only the sibling proof should survive; got {}",
-                remaining.len()
-            );
-            let addr = remaining[0].1.address;
-            assert_eq!(
-                addr, sibling_addr,
-                "surviving proof must be the sibling (valid anchor)"
-            );
-            assert_ne!(
-                addr, local_addr,
-                "local expired proof must have been deleted at capacity"
-            );
-            Ok(())
-        })??;
-
-        Ok(())
+        Ok(ProofFixture {
+            task: service_task,
+            db,
+            data_root,
+            author_addr,
+            sibling_addr,
+            tip_hash: valid_anchor,
+            _db_dir: _temp_dir,
+            _sm_dir: sm_dir,
+        })
     }
 
     /// `prune_ingress_proofs` must handle ≥2 expired signers for the same data_root in

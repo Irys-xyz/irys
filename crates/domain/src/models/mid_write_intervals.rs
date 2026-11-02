@@ -65,6 +65,13 @@ impl MidWriteLog {
                     .any(|(_, span)| span.contains_point(offset)))
     }
 
+    /// `true` when any entry overlaps `span`, trusted or not.
+    pub(super) fn overlaps(&self, span: Interval<PartitionChunkOffset>) -> bool {
+        self.recorded.overlapping(span).next().is_some()
+            || (self.untrusted_through > 0
+                && self.entries.iter().any(|(_, entry)| entry.overlaps(&span)))
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
