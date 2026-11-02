@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793377615153,
+  "lastUpdate": 1793615225881,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20887,6 +20887,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000111,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f4717256551e604c9a2d9e899c8b658f048471cd",
+          "message": "feat(consensus): add the Echo hardfork and gate PoA ownership on it (#1759)\n\n* feat(consensus): add the Echo hardfork\n\nEcho gates one block rule: the PoA partition must belong to the block\nminer. It is active for blocks at or above its activation height. None\nmeans disabled.\n\nMainnet activates it at height 2779313. Testnet and the testing\nconsensus config activate it at genesis.\n\n* feat(consensus): gate the PoA ownership checks on the Echo hardfork\n\nFrom the Echo activation height on, validation requires the PoA\npartition to belong to the block miner, and a data PoA to name the\npartition's ledger. Blocks below that height are validated as before,\nso existing chain history stays valid.\n\nThe producer still skips a solution over a partition that the parent\nepoch snapshot does not assign to it, also before activation.\n\n* feat(consensus): enable Echo from genesis when a config does not set it\n\nMainnet keeps its preset activation at height 2779313. The testing and testnet presets already enable it from genesis; a custom consensus config that omits [hardforks.echo] now gets it from genesis too, instead of leaving it disabled.\n\n* test(chain): pick the Submit ledger's partition in multi_slot_poa_test\n\nThe test looked up a partition assignment by slot index only, so it could pick the Publish ledger's partition for a Submit-ledger PoA. Echo rejects a PoA whose ledger does not match its partition's.\n\n* docs(config): show a later Echo activation height in the testnet template",
+          "timestamp": "2026-11-02T10:12:18Z",
+          "tree_id": "1280cf1a9a741068fd8f7c1c223947ef8cb6ca38",
+          "url": "https://github.com/Irys-xyz/irys/commit/f4717256551e604c9a2d9e899c8b658f048471cd"
+        },
+        "date": 1793615223898,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015714,
+            "range": "± 0.000629",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.15636,
+            "range": "± 0.01319",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.571542,
+            "range": "± 0.081451",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 11.17933,
+            "range": "± 0.870782",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.085469,
+            "range": "± 0.00305",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 833.941014,
+            "range": "± 38.704698",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1022.821035,
+            "range": "± 30.533182",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.145412,
+            "range": "± 0.001274",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1440.475801,
+            "range": "± 46.380667",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1895.077622,
+            "range": "± 108.565286",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035649,
+            "range": "± 0.000984",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 216.763658,
+            "range": "± 7.857412",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 281.077639,
+            "range": "± 14.80592",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000159,
+            "range": "± 0.000016",
             "unit": "ms/iter"
           }
         ]
