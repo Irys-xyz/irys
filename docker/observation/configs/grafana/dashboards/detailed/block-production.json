@@ -480,11 +480,46 @@
     },
     {
       "type": "timeseries",
+      "title": "Dropped production attempts by reason",
+      "description": "Block production attempts dropped, by reason",
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (reason) (rate(irys_block_producer_dropped_total{job=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
       "title": "Reorg Events",
       "description": "Chain reorganization events over time",
       "gridPos": {
         "x": 0,
-        "y": 21,
+        "y": 27,
         "w": 24,
         "h": 6
       },

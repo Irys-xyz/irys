@@ -13,8 +13,8 @@ use irys_domain::{StorageModule, WriteDataChunkError};
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
     ChunkPathHash, DataLedger, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
-    SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256,
-    irys::IrysSigner, validate_path, validate_path_byte_range,
+    SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, has_non_zero_notepad,
+    hash_sha256, irys::IrysSigner, validate_path, validate_path_byte_range,
 };
 use irys_utils::ElapsedMs as _;
 use lru::LruCache;
@@ -117,6 +117,7 @@ fn is_permanent_chunk_reject(err: &ChunkIngressError) -> bool {
                 | AdvisoryChunkIngressError::PreHeaderOversizedDataPath
                 | AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap
                 | AdvisoryChunkIngressError::PreHeaderInvalidOffset(_)
+                | AdvisoryChunkIngressError::UnconfirmedChunkSizeMismatch
         )
     )
 }
@@ -537,6 +538,17 @@ impl ChunkIngressServiceInner {
             "Processing chunk"
         );
 
+        // One canonical encoding per proof: non-zero notepads would give the
+        // same chunk many distinct data_path hashes (dedup and storage keys).
+        // Runs before any cache lookup or parking so no variant is retained.
+        if has_non_zero_notepad(&chunk.data_path.0) {
+            error!(
+                "{:?}: data_path has non-zero notepad bytes",
+                CriticalChunkIngressError::InvalidProof
+            );
+            return Err(CriticalChunkIngressError::InvalidProof.into());
+        }
+
         // Early exit if we've already processed this chunk recently
         let chunk_path_hash = chunk.chunk_path_hash();
 
@@ -788,7 +800,13 @@ impl ChunkIngressServiceInner {
                 "Chunk has wrong size: tx_offset {} chunk_len {} expected {}",
                 chunk.tx_offset, chunk_len, expected_chunk_len
             );
-            return Ok(());
+            // Without a confirmed size the expected length comes from the chunk's own
+            // claim, so the sender is not provably at fault.
+            return Err(if data_size_confirmed {
+                CriticalChunkIngressError::InvalidChunkSize.into()
+            } else {
+                AdvisoryChunkIngressError::UnconfirmedChunkSizeMismatch.into()
+            });
         }
 
         let is_last_chunk = expected_max_byte_range == layout_data_size;
@@ -1289,6 +1307,9 @@ pub enum AdvisoryChunkIngressError {
     PreHeaderOversizedDataPath,
     PreHeaderOffsetExceedsCap,
     PreHeaderInvalidOffset(String),
+    /// The chunk length differs from the length its own size claim implies, and
+    /// the receiver has no confirmed data size for the root.
+    UnconfirmedChunkSizeMismatch,
     /// Service is at capacity and cannot accept the chunk right now. Caller
     /// should retry later. Distinct from a network failure: the peer is fine,
     /// the receiver is just saturated.
@@ -1303,6 +1324,7 @@ impl AdvisoryChunkIngressError {
             Self::PreHeaderOversizedDataPath => "pre_header_oversized_data_path",
             Self::PreHeaderOffsetExceedsCap => "pre_header_offset_exceeds_cap",
             Self::PreHeaderInvalidOffset(_) => "pre_header_invalid_offset",
+            Self::UnconfirmedChunkSizeMismatch => "unconfirmed_chunk_size_mismatch",
             Self::Overloaded => "overloaded",
             Self::Other(_) => "other",
         }
@@ -1427,6 +1449,7 @@ mod tests {
             ChunkIngressError::Advisory(AdvisoryChunkIngressError::PreHeaderInvalidOffset(
                 "offset".into(),
             )),
+            ChunkIngressError::Advisory(AdvisoryChunkIngressError::UnconfirmedChunkSizeMismatch),
         ];
         for err in &validation {
             assert!(
@@ -2091,6 +2114,48 @@ mod tests {
         expect_no_redrain(&mut receivers).await;
     }
 
+    /// A data_path with a non-zero notepad is rejected before any cache or
+    /// parking. The canonical encoding of the same chunk is accepted.
+    #[tokio::test]
+    async fn chunk_with_non_zero_notepad_is_rejected_and_not_cached() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-notepad")
+            .build();
+        let (inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        let honest = valid_single_chunk(vec![5_u8; 32]);
+        let data_root = honest.data_root;
+
+        let mut tampered = honest.clone();
+        // leaf layout: data_hash(32) | notepad(24) | offset(8)
+        tampered.data_path.0[32] = 1;
+        let tampered_hash = tampered.chunk_path_hash();
+        let err = inner
+            .handle_chunk_ingress_message(tampered)
+            .await
+            .expect_err("non-zero notepad must be rejected");
+        assert!(
+            matches!(
+                err,
+                ChunkIngressError::Critical(CriticalChunkIngressError::InvalidProof)
+            ),
+            "{err:?}"
+        );
+        assert!(
+            !inner
+                .recent_valid_chunks
+                .read()
+                .await
+                .contains(&tampered_hash)
+        );
+        assert!(inner.pending_chunks.read().await.get(&data_root).is_none());
+
+        inner
+            .handle_chunk_ingress_message(honest)
+            .await
+            .expect("canonical chunk is accepted");
+        assert!(inner.pending_chunks.read().await.get(&data_root).is_some());
+    }
+
     /// The header can commit while the storage-module scan runs. The second
     /// read must see it and leave the park path.
     #[tokio::test]
@@ -2122,6 +2187,77 @@ mod tests {
             inner.pending_chunks.read().await.get(&data_root).is_none(),
             "the chunk must not be parked once the header is visible"
         );
+    }
+
+    /// A valid path with a byte length that differs from its leaf range is a
+    /// permanent reject, not a silent drop, and the chunk is not marked seen.
+    /// Without a confirmed size the expected length comes from the chunk's own
+    /// claim, so the reject does not penalise the sender.
+    #[tokio::test]
+    async fn chunk_with_wrong_byte_length_is_rejected_without_penalty_when_size_unconfirmed() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-wrong-size")
+            .build();
+        let (inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        let mut chunk = valid_single_chunk(vec![9_u8; 32]);
+        insert_unconfirmed_cdr(&inner.irys_db, chunk.data_root, chunk.data_size);
+        chunk.bytes = vec![9_u8; 31].into();
+        let path_hash = chunk.chunk_path_hash();
+
+        let err = inner
+            .handle_chunk_ingress_message(chunk)
+            .await
+            .expect_err("wrong byte length must be rejected");
+        assert!(
+            matches!(
+                err,
+                ChunkIngressError::Advisory(
+                    AdvisoryChunkIngressError::UnconfirmedChunkSizeMismatch
+                )
+            ),
+            "{err:?}"
+        );
+        assert!(!should_restore_pending_chunk_on_drain_error(&err, false));
+        assert!(!inner.recent_valid_chunks.read().await.contains(&path_hash));
+    }
+
+    /// With a confirmed size the expected length is authoritative, so a wrong
+    /// byte length is the sender's fault.
+    #[tokio::test]
+    async fn chunk_with_wrong_byte_length_is_critical_when_size_confirmed() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-wrong-size-confirmed")
+            .build();
+        let (inner, _receivers) = test_ingress_inner(&tmp, 8, 8);
+        let mut chunk = valid_single_chunk(vec![9_u8; 32]);
+        insert_unconfirmed_cdr(&inner.irys_db, chunk.data_root, chunk.data_size);
+        let (data_root, data_size) = (chunk.data_root, chunk.data_size);
+        {
+            use irys_database::db::IrysDatabaseExt as _;
+            inner
+                .irys_db
+                .update_eyre(|tx| {
+                    irys_database::confirm_data_size_for_data_root(tx, &data_root, data_size)
+                        .map(|_| ())
+                })
+                .expect("confirm data size");
+        }
+        chunk.bytes = vec![9_u8; 31].into();
+        let path_hash = chunk.chunk_path_hash();
+
+        let err = inner
+            .handle_chunk_ingress_message(chunk)
+            .await
+            .expect_err("wrong byte length must be rejected");
+        assert!(
+            matches!(
+                err,
+                ChunkIngressError::Critical(CriticalChunkIngressError::InvalidChunkSize)
+            ),
+            "{err:?}"
+        );
+        assert!(!should_restore_pending_chunk_on_drain_error(&err, false));
+        assert!(!inner.recent_valid_chunks.read().await.contains(&path_hash));
     }
 
     /// The drain can start in the same window. A header that is visible after

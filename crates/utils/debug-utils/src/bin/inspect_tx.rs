@@ -19,7 +19,7 @@ use irys_database::reth_db::{
 use irys_database::tables::{
     IrysBlockHeaders, IrysDataTxHeaders, IrysDataTxMetadata, MigratedBlockHashes,
 };
-use irys_types::H256;
+use irys_types::{H256, ToBase58 as _};
 use reth_node_core::version::default_client_version;
 use std::path::PathBuf;
 
@@ -45,18 +45,8 @@ fn main() -> eyre::Result<()> {
         ));
     }
 
-    let tx_bytes = bs58::decode(&tx_id_b58)
-        .into_vec()
+    let tx_id = H256::from_base58_result(&tx_id_b58)
         .with_context(|| format!("decode base58 tx id {tx_id_b58:?}"))?;
-    if tx_bytes.len() != 32 {
-        return Err(eyre!(
-            "tx_id must decode to 32 bytes, got {}",
-            tx_bytes.len()
-        ));
-    }
-    let mut arr = [0_u8; 32];
-    arr.copy_from_slice(&tx_bytes);
-    let tx_id = H256(arr);
 
     let env = DatabaseEnv::open(
         &db_path,
@@ -112,22 +102,22 @@ fn main() -> eyre::Result<()> {
             Some(hash) => {
                 println!(
                     "[MigratedBlockHashes][{h}] = {} (hex 0x{})",
-                    bs58::encode(hash.as_bytes()).into_string(),
+                    hash.as_bytes().to_base58(),
                     hex::encode(hash.as_bytes())
                 );
                 // Also fetch the block header to confirm it's there
                 match tx.get::<IrysBlockHeaders>(hash) {
                     Ok(Some(_)) => println!(
                         "  ↳ IrysBlockHeaders[{}] EXISTS",
-                        bs58::encode(hash.as_bytes()).into_string()
+                        hash.as_bytes().to_base58()
                     ),
                     Ok(None) => println!(
                         "  ↳ IrysBlockHeaders[{}] MISSING (orphaned?)",
-                        bs58::encode(hash.as_bytes()).into_string()
+                        hash.as_bytes().to_base58()
                     ),
                     Err(e) => println!(
                         "  ↳ IrysBlockHeaders[{}] READ ERROR: {e}",
-                        bs58::encode(hash.as_bytes()).into_string()
+                        hash.as_bytes().to_base58()
                     ),
                 }
             }
@@ -147,7 +137,7 @@ fn main() -> eyre::Result<()> {
             match lca {
                 Some(h) => format!(
                     "{} (hex 0x{})",
-                    bs58::encode(h.as_bytes()).into_string(),
+                    h.as_bytes().to_base58(),
                     hex::encode(h.as_bytes())
                 ),
                 None => "NONE".to_string(),

@@ -84,6 +84,7 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
     assert!(
         block1
             .get_data_ledger_tx_ids()
+            .unwrap()
             .get(&DataLedger::Submit)
             .is_some_and(|s| s.len() == 1 && s[0] == tx1.header.id),
         "tx1 (unpromoted) should be alone in slot 0 at block 1"
@@ -108,6 +109,7 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
     assert!(
         block2
             .get_data_ledger_tx_ids()
+            .unwrap()
             .get(&DataLedger::Submit)
             .is_some_and(|ids| ids.contains(&tx2.header.id)),
         "tx2 (to-be-promoted) must appear in the second Submit block"

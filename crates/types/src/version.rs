@@ -131,6 +131,8 @@ pub struct HandshakeRequestV2 {
     pub address: PeerAddress,
     pub timestamp: u64,
     pub user_agent: Option<String>,
+    /// Advisory fingerprint of the sender's consensus configuration. A mismatch
+    /// is logged by the receiver but does not reject the handshake.
     pub consensus_config_hash: H256,
     pub signature: IrysSignature,
 }
@@ -384,6 +386,8 @@ pub struct HandshakeResponseV2 {
     pub peers: Vec<PeerAddress>,
     pub timestamp: u64,
     pub message: Option<String>,
+    /// Advisory fingerprint of the responder's consensus configuration. A
+    /// mismatch is logged but does not reject the peer.
     pub consensus_config_hash: H256,
 }
 

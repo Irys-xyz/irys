@@ -84,7 +84,9 @@ impl NodeManager {
         if matches!(state.current_menu, MenuSelection::Nodes) {
             let node_urls: Vec<NodeUrl> = state.nodes.keys().cloned().collect();
             if let Some(removed_index) = node_urls.iter().position(|u| u == url) {
-                if removed_index == state.focused_node_index && state.focused_node_index > 0 {
+                if removed_index < state.focused_node_index
+                    || (removed_index == state.focused_node_index && state.focused_node_index > 0)
+                {
                     state.focused_node_index -= 1;
                 } else if state.focused_node_index >= state.nodes.len() - 1 {
                     state.focused_node_index = state.nodes.len().saturating_sub(2);
@@ -101,5 +103,43 @@ impl NodeManager {
         url::Url::parse(url)
             .map(|u| u.scheme() == "http" || u.scheme() == "https")
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_nodes(count: usize) -> AppState {
+        let mut state = AppState::new(NodeUrl::new("http://localhost:1984").unwrap());
+        state.current_menu = MenuSelection::Nodes;
+        for index in 0..count {
+            state.add_node(NodeUrl::new(format!("http://localhost:{}", 2000 + index)).unwrap());
+        }
+        state
+    }
+
+    #[test]
+    fn remove_node_before_focus_keeps_focus_on_same_node() {
+        let mut state = state_with_nodes(4);
+        let node_urls: Vec<NodeUrl> = state.nodes.keys().cloned().collect();
+        state.focused_node_index = 2;
+        let focused_url = node_urls[2].clone();
+
+        NodeManager::remove_node(&node_urls[0], &mut state);
+
+        let remaining: Vec<NodeUrl> = state.nodes.keys().cloned().collect();
+        assert_eq!(remaining[state.focused_node_index], focused_url);
+    }
+
+    #[test]
+    fn remove_last_focused_node_moves_focus_to_new_last() {
+        let mut state = state_with_nodes(3);
+        let node_urls: Vec<NodeUrl> = state.nodes.keys().cloned().collect();
+        state.focused_node_index = 2;
+
+        NodeManager::remove_node(&node_urls[2], &mut state);
+
+        assert_eq!(state.focused_node_index, 1);
     }
 }

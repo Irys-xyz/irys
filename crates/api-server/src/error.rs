@@ -53,7 +53,7 @@ impl ResponseError for ApiError {
         match self {
             Self::ErrNoId { .. } => StatusCode::NOT_FOUND,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::NotImplemented { .. } => StatusCode::FORBIDDEN,
+            Self::NotImplemented { .. } => StatusCode::NOT_IMPLEMENTED,
             Self::MinerNotFound { .. } => StatusCode::NOT_FOUND,
             Self::LedgerNotFound { .. } => StatusCode::NOT_FOUND,
             Self::InvalidAddress(_) => StatusCode::BAD_REQUEST,
@@ -138,7 +138,7 @@ mod tests {
     #[rstest]
     #[case(ApiError::ErrNoId { id: "x".into(), err: "y".into() }, StatusCode::NOT_FOUND)]
     #[case(ApiError::Internal { err: "x".into() }, StatusCode::INTERNAL_SERVER_ERROR)]
-    #[case(ApiError::NotImplemented { feature: "x".into() }, StatusCode::FORBIDDEN)]
+    #[case(ApiError::NotImplemented { feature: "x".into() }, StatusCode::NOT_IMPLEMENTED)]
     #[case(ApiError::MinerNotFound { miner_address: IrysAddress::from([0_u8; 20]) }, StatusCode::NOT_FOUND)]
     #[case(ApiError::LedgerNotFound { miner_address: IrysAddress::from([0_u8; 20]), ledger_type: DataLedger::Publish }, StatusCode::NOT_FOUND)]
     #[case(ApiError::CanonicalChainError("x".into()), StatusCode::INTERNAL_SERVER_ERROR)]

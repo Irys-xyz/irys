@@ -10,8 +10,8 @@ use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 /// is always a node fault: the local commitment snapshot is internally
 /// inconsistent and retry cannot heal it. On the validator side this routes
 /// to `ValidationError::ShadowTxNodeFault` (panic + supervisor restart);
-/// on the producer side this is wrapped through `eyre::Report` and bubbles
-/// as an `Irrecoverable` block production error.
+/// on the producer side it routes through `TxSelectorError::CommitmentRefund`
+/// to an `Irrecoverable` block production error.
 #[derive(Debug, thiserror::Error)]
 pub enum CommitmentRefundError {
     /// Snapshot invariant violation (e.g. `pledge_count_before_executing == 0`).
@@ -20,9 +20,9 @@ pub enum CommitmentRefundError {
     SnapshotInvariant(String),
 }
 
-// Producer-side call sites return `eyre::Result`. `eyre::Report` provides a
-// blanket `From<E: std::error::Error + Send + Sync + 'static>` impl, so `?`
-// lifts `CommitmentRefundError` automatically — no explicit `From` needed.
+// Call sites that return `eyre::Result` need no explicit `From`: `eyre::Report`
+// provides a blanket `From<E: std::error::Error + Send + Sync + 'static>` impl,
+// so `?` lifts `CommitmentRefundError` automatically.
 
 /// Derive epoch unpledge refund events deterministically from a commitment snapshot.
 ///

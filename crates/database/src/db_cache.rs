@@ -1,3 +1,4 @@
+use crate::tables::{CompactRowCheck, require_min_compact_row_len};
 use alloy_primitives::aliases::U232;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
@@ -62,6 +63,12 @@ impl Compact for GlobalChunkOffset {
         (o, buf)
     }
 }
+impl CompactRowCheck for GlobalChunkOffset {
+    fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+        require_min_compact_row_len(buf, GLOBAL_CHUNK_OFFSET_BYTES)
+    }
+}
+
 #[cfg(test)]
 mod global_chunk_offset_tests {
     use super::*;
@@ -272,6 +279,15 @@ impl Compact for CachedIngressLeaf {
     }
 }
 
+impl CompactRowCheck for CachedIngressLeaf {
+    fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+        require_min_compact_row_len(
+            buf,
+            CACHED_INGRESS_LEAF_OFFSET_BYTES + CACHED_INGRESS_DATA_HASH_BYTES,
+        )
+    }
+}
+
 impl From<CachedChunkIndexEntry> for CachedChunkIndexMetadata {
     fn from(value: CachedChunkIndexEntry) -> Self {
         value.meta
@@ -305,6 +321,15 @@ impl Compact for CachedChunkIndexEntry {
         let (meta, out) =
             CachedChunkIndexMetadata::from_compact(&buf[KEY_BYTES..], len - KEY_BYTES);
         (Self { index, meta }, out)
+    }
+}
+
+impl CompactRowCheck for CachedChunkIndexEntry {
+    fn check_compact_row(buf: &[u8]) -> Result<(), String> {
+        require_min_compact_row_len(
+            buf,
+            KEY_BYTES + CachedChunkIndexMetadata::bitflag_encoded_bytes(),
+        )
     }
 }
 

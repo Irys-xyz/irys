@@ -377,6 +377,7 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
     );
     let window_publish_ids: BTreeSet<H256> = window_block
         .get_data_ledger_tx_ids()
+        .unwrap()
         .get(&DataLedger::Publish)
         .cloned()
         .unwrap_or_default()
@@ -443,6 +444,7 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
         let block = genesis_node.mine_block().await?;
         let publish_ids: BTreeSet<H256> = block
             .get_data_ledger_tx_ids()
+            .unwrap()
             .get(&DataLedger::Publish)
             .cloned()
             .unwrap_or_default()

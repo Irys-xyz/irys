@@ -19,6 +19,7 @@ pub mod storage;
 pub mod supply;
 pub mod tip;
 pub mod tx;
+pub mod tx_ingress;
 
 /// Shared parse for `{ledger_id}` path params (numeric [`DataLedger`] ids:
 /// 0 = Publish, 1 = Submit, 10 = OneYear, 20 = ThirtyDay).

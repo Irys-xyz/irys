@@ -946,7 +946,7 @@ impl ChunkOrchestrator {
             // on Submit/Publish peers, so fill from the start of the slot.
             self.scan_cursor = self.scan_cursor.min(max_offset);
             let cursor = self.scan_cursor;
-            let ranges = [(cursor, max_offset), (0, cursor.saturating_sub(1))];
+            let ranges = forward_scan_ranges(cursor, max_offset);
             'scan: for (range_start, range_end) in ranges {
                 if range_start > range_end {
                     continue;
@@ -2900,6 +2900,14 @@ fn resume_scan_cursor(edge: u32, max_offset: u32, reverse: bool) -> u32 {
     } else {
         edge + 1
     }
+}
+
+/// Forward scan windows: `cursor` to the end, then the wrapped prefix below
+/// `cursor`. At cursor 0 the prefix is empty (`start > end`), so offset 0 is
+/// visited once.
+fn forward_scan_ranges(cursor: u32, max_offset: u32) -> [(u32, u32); 2] {
+    let wrapped = if cursor == 0 { (1, 0) } else { (0, cursor - 1) };
+    [(cursor, max_offset), wrapped]
 }
 
 fn clip_entropy_run(

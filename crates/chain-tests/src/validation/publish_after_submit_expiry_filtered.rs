@@ -83,6 +83,7 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
     let num_txs = txs.len();
     let submit_ids: BTreeSet<_> = data_block
         .get_data_ledger_tx_ids()
+        .unwrap()
         .get(&DataLedger::Submit)
         .cloned()
         .unwrap_or_default()
@@ -153,6 +154,7 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
     // --- 7. Core invariant: no tx is both promoted and perm-fee-refunded ---
     let publish_ids: BTreeSet<_> = expiry_block
         .get_data_ledger_tx_ids()
+        .unwrap()
         .get(&DataLedger::Publish)
         .cloned()
         .unwrap_or_default()

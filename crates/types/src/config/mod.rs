@@ -15,6 +15,34 @@ use crate::{H256, IrysPeerId, UnixTimestamp};
 #[derive(Debug, Clone)]
 pub struct Config(Arc<CombinedConfigInner>);
 
+/// Request size limit of the reth engine client. This is the jsonrpsee default
+/// (`TEN_MB_SIZE_BYTES`) of `HttpClientBuilder::default()`.
+pub const ENGINE_CLIENT_MAX_REQUEST_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Allowance for the non-calldata part of the payload JSON (header fields,
+/// withdrawals, tx envelopes).
+const ENGINE_PAYLOAD_OVERHEAD_BYTES: u64 = 1024 * 1024;
+
+/// EIP-7623 floor cost per calldata token. A zero byte is one token, so the
+/// densest calldata a block can hold is `gas_limit / 10` bytes.
+const EIP_7623_FLOOR_GAS_PER_BYTE: u64 = 10;
+
+/// Largest engine payload JSON a block under `gas_limit` can produce: floor-limited
+/// calldata bytes, doubled for hex encoding, plus `ENGINE_PAYLOAD_OVERHEAD_BYTES`.
+fn worst_case_engine_payload_bytes(gas_limit: u64) -> u64 {
+    (gas_limit / EIP_7623_FLOOR_GAS_PER_BYTE)
+        .saturating_mul(2)
+        .saturating_add(ENGINE_PAYLOAD_OVERHEAD_BYTES)
+}
+
+/// Highest `reth.gas_limit` whose worst-case engine payload fits the engine
+/// client request limit.
+fn max_gas_limit_for_engine_request_limit() -> u64 {
+    ((ENGINE_CLIENT_MAX_REQUEST_BYTES - ENGINE_PAYLOAD_OVERHEAD_BYTES) / 2 + 1)
+        * EIP_7623_FLOOR_GAS_PER_BYTE
+        - 1
+}
+
 impl Config {
     pub fn new(node_config: NodeConfig, peer_id: IrysPeerId) -> Self {
         let consensus = node_config.consensus_config();
@@ -99,12 +127,34 @@ impl Config {
             self.node_config.max_peer_response_bytes > 0,
             "max_peer_response_bytes must be > 0: a zero ceiling rejects every peer response body"
         );
+        // The engine client rejects any request above its size limit locally, and
+        // that rejection marks the block invalid. The gas limit must therefore keep
+        // every valid payload under the limit.
+        let worst_case_payload_bytes =
+            worst_case_engine_payload_bytes(self.consensus.reth.gas_limit);
+        ensure!(
+            worst_case_payload_bytes <= ENGINE_CLIENT_MAX_REQUEST_BYTES,
+            "reth.gas_limit ({}) allows an engine payload of up to {} bytes, above the engine \
+              client request limit of {} bytes: valid blocks would be rejected as invalid \
+              (maximum allowed reth.gas_limit: {})",
+            self.consensus.reth.gas_limit,
+            worst_case_payload_bytes,
+            ENGINE_CLIENT_MAX_REQUEST_BYTES,
+            max_gas_limit_for_engine_request_limit()
+        );
         // block_tree_depth must exceed block_migration_depth to prevent premature pruning
         ensure!(
             (self.consensus.block_migration_depth as u64) < self.consensus.block_tree_depth,
             "Block tree depth ({}) must be strictly greater than block migration depth ({}) - cache.prune(depth-1) retains exactly depth blocks, so equal values risk pruning the migration block",
             &self.consensus.block_tree_depth,
             &self.consensus.block_migration_depth
+        );
+        // A tip move by one block keeps the old tip as the fork point, and the cache
+        // window check rejects a fork point that the prune would evict.
+        ensure!(
+            self.consensus.block_tree_depth >= 2,
+            "Block tree depth ({}) must be at least 2: the block-tree cache must keep the old tip when the tip moves by one block",
+            &self.consensus.block_tree_depth
         );
 
         // Zero leaves nothing to confirm a block against: `lookup_via_block_tree`
@@ -192,6 +242,13 @@ impl Config {
         // `filter_transactions_by_chunk_range` bails loud. The `div_ceil` below would
         // also panic on a zero recall range. Reject loudly here. (NC-0042)
         ensure!(self.consensus.chunk_size > 0, "chunk_size must be > 0");
+        if let Some(delta) = &self.consensus.hardforks.delta {
+            ensure!(
+                delta.capacity_chunk_reward_percent.amount
+                    <= crate::storage_pricing::PRECISION_SCALE,
+                "hardforks.delta.capacity_chunk_reward_percent must be <= 1.0 (100%)"
+            );
+        }
         // Entropy packing emits whole SHA-256 hashes, so a chunk size that is
         // not a multiple of the hash size leaves the chunk's tail unpacked.
         ensure!(
@@ -395,6 +452,21 @@ impl Config {
         ensure!(
             self.node_config.sync.min_active_peers > 0,
             "sync.min_active_peers must be > 0 (zero makes startup skip sync immediately on the empty snapshot)"
+        );
+
+        // The sync asks the block index from groups of this many peers.
+        ensure!(
+            self.node_config.sync.block_index_peer_count > 0,
+            "sync.block_index_peer_count must be > 0 (zero asks no peer for the block index)"
+        );
+
+        // The sync asks the block index in batches of this size. The server
+        // rejects a query above its maximum. Zero asks for
+        // `DEFAULT_BLOCK_INDEX_QUERY_LIMIT` entries.
+        ensure!(
+            self.node_config.sync.block_batch_size <= crate::MAX_BLOCK_INDEX_QUERY_LIMIT,
+            "sync.block_batch_size must be <= {} (the server rejects a larger block index query)",
+            crate::MAX_BLOCK_INDEX_QUERY_LIMIT
         );
 
         // For nodes joining an existing network the chain_sync `count == 0`
@@ -970,9 +1042,9 @@ pub mod serde_utils {
         amount_from_float(deserializer, |dec| Amount::<T>::token(dec))
     }
 
-    /// deserialize the percentage amount from a string.
+    /// deserialize the percentage amount from a number (not a string).
     ///
-    /// The string is expected to be:
+    /// The number is expected to be:
     /// - 0.1 (10%)
     /// - 1.0 (100%)
     pub fn percentage_amount<'de, T: std::fmt::Debug, D>(
@@ -1295,6 +1367,9 @@ mod tests {
         one_year_epoch_length = 365
         thirty_day_epoch_length = 30
         annual_cost_per_gb = 0.028
+
+        [hardforks.echo]
+        activation_height = 0
 
         "#;
 
@@ -1883,6 +1958,48 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_gas_limit_exceeding_engine_request_limit() {
+        // Largest gas limit whose worst-case payload still fits.
+        let max_gas_limit = (ENGINE_CLIENT_MAX_REQUEST_BYTES - ENGINE_PAYLOAD_OVERHEAD_BYTES) / 2
+            * EIP_7623_FLOOR_GAS_PER_BYTE;
+
+        for consensus in [
+            ConsensusConfig::testing(),
+            ConsensusConfig::testnet(),
+            ConsensusConfig::mainnet(),
+        ] {
+            assert!(consensus.reth.gas_limit <= max_gas_limit);
+        }
+
+        let mut at_limit = NodeConfig::testing();
+        at_limit.consensus.get_mut().reth.gas_limit = max_gas_limit;
+        Config::new_with_random_peer_id(at_limit)
+            .validate()
+            .expect("a gas limit at the bound is accepted");
+
+        let mut over = NodeConfig::testing();
+        over.consensus.get_mut().reth.gas_limit = max_gas_limit + EIP_7623_FLOOR_GAS_PER_BYTE;
+        let err = Config::new_with_random_peer_id(over)
+            .validate()
+            .expect_err("a gas limit above the bound must be rejected")
+            .to_string();
+        assert!(err.contains("reth.gas_limit"), "got: {err}");
+        assert!(
+            // (10 MiB - 1 MiB) / 2 bytes of calldata at 10 gas per byte, plus the
+            // 9 gas that integer division leaves below the next byte.
+            err.contains("maximum allowed reth.gas_limit: 47185929"),
+            "got: {err}"
+        );
+
+        let mut max = NodeConfig::testing();
+        max.consensus.get_mut().reth.gas_limit = u64::MAX;
+        assert!(
+            Config::new_with_random_peer_id(max).validate().is_err(),
+            "u64::MAX must not overflow the bound"
+        );
+    }
+
+    #[test]
     fn validate_rejects_zero_peer_response_cap() {
         assert_eq!(
             NodeConfig::testing().max_peer_response_bytes,
@@ -1908,6 +2025,43 @@ mod tests {
         Config::new_with_random_peer_id(node_config)
             .validate()
             .expect("any positive cap is accepted");
+    }
+
+    #[test]
+    fn validate_rejects_zero_block_index_peer_count() {
+        let mut node_config = NodeConfig::testing();
+        node_config.sync.block_index_peer_count = 0;
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("zero peers per block index request")
+            .to_string();
+        assert!(err.contains("block_index_peer_count"), "got: {err}");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.sync.block_index_peer_count = 1;
+        Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect("any positive peer count is accepted");
+    }
+
+    #[test]
+    fn validate_rejects_block_batch_size_above_the_block_index_query_maximum() {
+        let mut node_config = NodeConfig::testing();
+        node_config.sync.block_batch_size = crate::MAX_BLOCK_INDEX_QUERY_LIMIT + 1;
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("batch above the server maximum")
+            .to_string();
+        assert!(err.contains("block_batch_size"), "got: {err}");
+
+        // Zero asks for `DEFAULT_BLOCK_INDEX_QUERY_LIMIT` entries.
+        for block_batch_size in [0, crate::MAX_BLOCK_INDEX_QUERY_LIMIT] {
+            let mut node_config = NodeConfig::testing();
+            node_config.sync.block_batch_size = block_batch_size;
+            Config::new_with_random_peer_id(node_config)
+                .validate()
+                .expect("batch within the server maximum is accepted");
+        }
     }
 
     #[test]
@@ -2138,6 +2292,13 @@ mod validate_tests {
             c.block_migration_depth = 2;
         },
         "Block tree depth"
+    )]
+    #[case::tree_depth_below_two(
+        |c: &mut ConsensusConfig| {
+            c.block_migration_depth = 0;
+            c.block_tree_depth = 1;
+        },
+        "must be at least 2"
     )]
     #[case::anchor_expiry_less_than_migration_depth(
         |c: &mut ConsensusConfig| {
@@ -2489,6 +2650,27 @@ mod validate_tests {
         assert!(
             msg.contains(expected_msg),
             "expected error containing {expected_msg:?}, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_capacity_chunk_reward_above_full_reward() {
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.delta = Some(crate::hardfork_config::Delta {
+                activation_timestamp: crate::UnixTimestamp::from_secs(1500),
+                initial_slots_per_new_ledger:
+                    crate::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
+                capacity_chunk_reward_percent: crate::storage_pricing::Amount::percentage(
+                    rust_decimal_macros::dec!(1.01),
+                )
+                .unwrap(),
+            });
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("capacity_chunk_reward_percent must be <= 1.0"),
+            "unexpected validation error: {err}"
         );
     }
 

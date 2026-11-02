@@ -266,6 +266,8 @@ mod tests {
             activation_timestamp: UnixTimestamp::from_secs(0),
             initial_slots_per_new_ledger:
                 crate::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent:
+                crate::hardfork_config::Delta::default_capacity_chunk_reward_percent(),
         });
         let context = crate::consensus_context::EpochConsensusContext::new(&config, None);
         assert!(!context.resize_configured());

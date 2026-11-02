@@ -1,6 +1,7 @@
 use crate::utils::{
     IrysNodeTest, assert_validation_error, read_block_from_state, solution_context,
 };
+use irys_actors::block_reward::BlockRewardSplit;
 use irys_actors::{
     BlockProdStrategy, BlockProducerInner, MempoolServiceMessage, MempoolTxs, ProductionStrategy,
     async_trait,
@@ -55,20 +56,23 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
             reward_address: irys_types::IrysAddress,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
-            let invalid_reward_amount = Amount::new(reward_amount.amount.pow(2_u64.into()));
+            let invalid_block_reward = BlockRewardSplit {
+                miner: Amount::new(block_reward.miner.amount.pow(2_u64.into())),
+                ..block_reward
+            };
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
                     mempool,
                     // NOTE: Point of error - trying to give yourself extra funds in the evm state
-                    invalid_reward_amount,
+                    invalid_block_reward,
                     timestamp_ms,
                     solution_hash,
                     reward_address,
@@ -126,6 +130,114 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
         "block with invalid EVM block reward should be rejected",
+    );
+
+    peer_node.stop().await;
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
+// A producer builds the EVM block on the grandparent block's EVM block, not on the parent
+// block's EVM block. Reth accepts that EVM block, because its own EVM parent exists, so the
+// Irys validation must reject the block.
+#[test_log::test(tokio::test)]
+async fn heavy_block_evm_payload_on_wrong_evm_parent_gets_rejected() -> eyre::Result<()> {
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub wrong_parent_evm_hash: irys_types::EvmBlockHash,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn create_evm_block(
+            &self,
+            prev_block_header: &IrysBlockHeader,
+            perv_evm_block: &reth_ethereum_primitives::Block,
+            mempool: &irys_actors::block_producer::MempoolTxsBundle,
+            block_reward: BlockRewardSplit,
+            timestamp_ms: UnixTimestampMs,
+            solution_hash: H256,
+            reward_address: irys_types::IrysAddress,
+        ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
+        {
+            // NOTE: Point of error - the payload builds on another EVM block
+            let mut prev_with_wrong_evm_parent = prev_block_header.clone();
+            prev_with_wrong_evm_parent.evm_block_hash = self.wrong_parent_evm_hash;
+            self.prod
+                .create_evm_block(
+                    &prev_with_wrong_evm_parent,
+                    perv_evm_block,
+                    mempool,
+                    block_reward,
+                    timestamp_ms,
+                    solution_hash,
+                    reward_address,
+                )
+                .await
+        }
+    }
+
+    let num_blocks_in_epoch = 2;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    // speeds up POA
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let peer_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    let peer_node = genesis_node
+        .testing_peer_with_assignments(&peer_signer)
+        .await?;
+
+    let parent = peer_node.get_max_difficulty_block();
+    let grandparent = peer_node.get_block_by_height(parent.height - 1).await?;
+    assert_ne!(grandparent.evm_block_hash, parent.evm_block_hash);
+
+    let block_prod_strategy = EvilBlockProdStrategy {
+        prod: ProductionStrategy {
+            inner: peer_node.node_ctx.block_producer_inner.clone(),
+        },
+        wrong_parent_evm_hash: grandparent.evm_block_hash,
+    };
+
+    peer_node.gossip_disable();
+    let (block, eth_payload) = block_prod_strategy
+        .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
+        .await?
+        .unwrap();
+    assert_eq!(block.header().previous_block_hash, parent.block_hash);
+    assert_eq!(
+        eth_payload.block().header().parent_hash,
+        grandparent.evm_block_hash
+    );
+    insert_block_header_for_gossip_test(
+        &peer_node,
+        block.header().block_hash,
+        (**block.header()).clone(),
+    )?;
+    peer_node.gossip_enable();
+
+    let event_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
+    peer_node.gossip_block_to_peers(block.header())?;
+    peer_node.gossip_eth_block_to_peers(eth_payload.block())?;
+
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash, event_rx).await;
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(msg) if msg.contains("EVM payload parent")),
+        "block whose EVM payload builds on another EVM block should be rejected",
     );
 
     peer_node.stop().await;
@@ -233,7 +345,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
             reward_address: irys_types::IrysAddress,
@@ -246,7 +358,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
                     prev_block_header,
                     perv_evm_block,
                     &tampered_mempool,
-                    reward_amount,
+                    block_reward,
                     timestamp_ms,
                     solution_hash,
                     reward_address,
@@ -339,7 +451,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
             reward_address: irys_types::IrysAddress,
@@ -356,7 +468,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
                     prev_block_header,
                     perv_evm_block,
                     &tampered_mempool,
-                    reward_amount,
+                    block_reward,
                     timestamp_ms,
                     solution_hash,
                     reward_address,

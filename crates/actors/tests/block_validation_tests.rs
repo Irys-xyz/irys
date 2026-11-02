@@ -8,9 +8,12 @@ use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_testing_utils::new_mock_signed_header;
 use irys_types::{
     Base64, BlockIndexItem, ConsensusConfig, DataLedger, DatabaseProvider, H256, IrysAddress,
-    IrysBlockHeader, LedgerIndexItem, PoaData, compute_solution_hash,
+    IrysBlockHeader, LedgerIndexItem, PoaData, UnixTimestamp, UnixTimestampMs,
+    compute_solution_hash,
+    hardfork_config::{Activation, Delta},
     partition::PartitionAssignment,
 };
+use rstest::rstest;
 use std::sync::{Arc, RwLock};
 
 #[test_log::test(test)]
@@ -146,6 +149,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         &epoch_snapshot,
         &config,
         &IrysAddress::ZERO,
+        0,
     );
 
     assert!(matches!(
@@ -166,6 +170,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         &epoch_snapshot,
         &config,
         &IrysAddress::ZERO,
+        3,
     );
     assert!(matches!(
         res,
@@ -209,6 +214,7 @@ fn poa_chunk_longer_than_chunk_size_is_too_long() {
         &EpochSnapshot::default(),
         &config,
         &IrysAddress::ZERO,
+        0,
     );
 
     assert!(
@@ -238,9 +244,13 @@ fn solution_hash_link_valid_ok() {
         &poa_chunk,
         block.poa.partition_chunk_offset,
         &block.vdf_limiter_info.output,
+        Activation::Inactive,
     );
 
-    assert!(solution_hash_link_is_valid(&block, &poa_chunk).is_ok());
+    assert!(
+        solution_hash_link_is_valid(&block, &poa_chunk, &ConsensusConfig::testing().hardforks)
+            .is_ok()
+    );
 }
 
 #[test_log::test(test)]
@@ -256,13 +266,73 @@ fn solution_hash_link_invalid_when_inputs_tampered() {
         &poa_chunk,
         block.poa.partition_chunk_offset,
         &block.vdf_limiter_info.output,
+        Activation::Inactive,
     );
 
     // now tamper the inputs (e.g., change poa_chunk by one byte) to trigger mismatch
     let mut tampered_chunk = poa_chunk;
     tampered_chunk[0] ^= 0x01;
 
-    assert!(solution_hash_link_is_valid(&block, &tampered_chunk).is_err());
+    assert!(
+        solution_hash_link_is_valid(
+            &block,
+            &tampered_chunk,
+            &ConsensusConfig::testing().hardforks
+        )
+        .is_err()
+    );
+}
+
+/// Delta selects the hash order from the block's own timestamp: the old order
+/// (chunk first) before activation, the new order (seed first) from activation.
+/// A hash in the other order is rejected.
+#[rstest]
+#[case::before_activation(1_499, false)]
+#[case::at_activation(1_500, true)]
+#[case::after_activation(1_501, true)]
+fn solution_hash_link_follows_delta_activation(
+    #[case] block_timestamp_secs: u64,
+    #[case] seed_first: bool,
+) {
+    let mut consensus = ConsensusConfig::testing();
+    let delta = Delta {
+        activation_timestamp: UnixTimestamp::from_secs(1_500),
+        initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+        capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+    };
+    consensus.hardforks.delta = Some(delta);
+
+    let mut block = IrysBlockHeader::new_mock_header();
+    block.timestamp = UnixTimestampMs::from_millis(u128::from(block_timestamp_secs) * 1_000);
+    block.poa.partition_chunk_offset = 7;
+    block.vdf_limiter_info.output = H256::from([1_u8; 32]);
+    let poa_chunk: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD];
+
+    let hash_in_order = |activation| {
+        compute_solution_hash(
+            &poa_chunk,
+            block.poa.partition_chunk_offset,
+            &block.vdf_limiter_info.output,
+            activation,
+        )
+    };
+    let chunk_first = hash_in_order(Activation::Inactive);
+    let seed_first_hash = hash_in_order(Activation::Active(delta));
+    assert_ne!(chunk_first, seed_first_hash);
+    let (required, wrong_order) = if seed_first {
+        (seed_first_hash, chunk_first)
+    } else {
+        (chunk_first, seed_first_hash)
+    };
+
+    block.solution_hash = required;
+    assert!(solution_hash_link_is_valid(&block, &poa_chunk, &consensus.hardforks).is_ok());
+
+    block.solution_hash = wrong_order;
+    assert!(matches!(
+        solution_hash_link_is_valid(&block, &poa_chunk, &consensus.hardforks),
+        Err(PreValidationError::SolutionHashLinkInvalid { .. })
+    ));
 }
 
 fn capacity_assignment(partition_hash: H256, miner_address: IrysAddress) -> PartitionAssignment {
@@ -446,6 +516,7 @@ fn poa_is_valid_rejects_unowned_partition(#[case] kind: UnownedPartition) {
         &epoch_snapshot,
         &config,
         &miner,
+        0,
     );
 
     assert!(
@@ -500,9 +571,69 @@ fn poa_is_valid_accepts_owned_entropy_poa() {
         &epoch_snapshot,
         &config,
         &miner,
+        0,
     );
 
     assert!(matches!(&res, Ok(())), "{res:?}");
+}
+
+/// Before the Echo hardfork activates, `poa_is_valid` does not check partition
+/// ownership, as in 4.1.0: a valid entropy chunk over a partition assigned to
+/// another miner passes. From the activation height on, it is rejected.
+#[test_log::test(test)]
+fn poa_is_valid_checks_ownership_only_from_echo() {
+    let mut config = ConsensusConfig::testing();
+    config.chunk_size = 32;
+    config.entropy_packing_iterations = 1_000;
+    config.hardforks.echo = Some(irys_types::hardfork_config::Echo {
+        activation_height: 1500,
+    });
+    let tmp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+    let (db, block_index_guard, block_tree_guard) = empty_poa_guards(&config, tmp_dir.path());
+    let owner = IrysAddress::random();
+    let miner = IrysAddress::random();
+    let (epoch_snapshot, capacity_hash, _) = ownership_snapshot(owner);
+    let mut chunk = Vec::new();
+    compute_entropy_chunk(
+        miner,
+        0,
+        capacity_hash.into(),
+        config.entropy_packing_iterations,
+        config.chunk_size as usize,
+        &mut chunk,
+        config.chain_id,
+    );
+    let poa = PoaData {
+        partition_chunk_offset: 0,
+        partition_hash: capacity_hash,
+        chunk: Some(Base64(chunk)),
+        ledger_id: None,
+        tx_path: None,
+        data_path: None,
+    };
+    let validate_at = |height: u64| {
+        poa_is_valid(
+            &poa,
+            &block_index_guard,
+            &block_tree_guard,
+            &db,
+            H256::zero(),
+            0,
+            &epoch_snapshot,
+            &config,
+            &miner,
+            height,
+        )
+    };
+
+    let before = validate_at(1499);
+    assert!(matches!(&before, Ok(())), "{before:?}");
+
+    let at = validate_at(1500);
+    assert!(
+        matches!(&at, Err(PreValidationError::PoAPartitionNotOwned { .. })),
+        "{at:?}"
+    );
 }
 
 /// A data PoA must name the ledger its partition is assigned to; the
@@ -533,6 +664,7 @@ fn data_poa_ledger_must_match_partition_assignment() {
         &epoch_snapshot,
         &config,
         &miner,
+        0,
     );
 
     assert!(matches!(

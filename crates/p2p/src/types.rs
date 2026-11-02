@@ -111,6 +111,7 @@ impl From<ChunkIngressError> for GossipError {
                 | AdvisoryChunkIngressError::PreHeaderOversizedDataPath
                 | AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap
                 | AdvisoryChunkIngressError::PreHeaderInvalidOffset(_)
+                | AdvisoryChunkIngressError::UnconfirmedChunkSizeMismatch
                 | AdvisoryChunkIngressError::Other(_)) => {
                     Self::Advisory(AdvisoryGossipError::ChunkIngress(other))
                 }
@@ -261,6 +262,8 @@ pub enum InvalidDataError {
     ExecutionPayloadHashMismatch,
     #[error("Invalid execution payload structure")]
     ExecutionPayloadInvalidStructure,
+    #[error("Execution payload body does not match its header: {0}")]
+    ExecutionPayloadBodyMismatch(String),
     #[error("Invalid ingress proof signature")]
     IngressProofSignature,
     #[error("Invalid ingress proof anchor: {0}")]
@@ -305,6 +308,8 @@ pub enum AdvisoryGossipError {
     ChunkIngress(AdvisoryChunkIngressError),
     #[error("Block pool failed to ingest the block: {0:?}")]
     BlockPoolError(AdvisoryBlockPoolError),
+    #[error("Header fetch for block {0} failed recently, not repeated")]
+    HeaderFetchRecentlyFailed(irys_types::BlockHash),
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;
@@ -860,6 +865,19 @@ mod tests {
             !matches!(mapped, GossipError::InvalidData(_)),
             "unknown anchor is the receiver being behind, not bogus data: {mapped:?}"
         );
+    }
+
+    #[test]
+    fn invalid_version_is_still_rejected_as_invalid_data() {
+        let mapped: GossipError = TxIngressError::InvalidVersion {
+            version: 1,
+            minimum: 2,
+        }
+        .into();
+        assert!(matches!(
+            mapped,
+            GossipError::InvalidData(InvalidDataError::TransactionInvalidVersion { .. })
+        ));
     }
 
     #[test]

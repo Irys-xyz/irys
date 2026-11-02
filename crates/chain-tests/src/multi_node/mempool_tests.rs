@@ -436,13 +436,14 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    genesis_node
-        .wait_until_chunk_accepted(
-            tx.header.data_root,
-            TxChunkOffset::from(preheader_cap.saturating_sub(1)),
-            10,
-        )
-        .await?;
+    // HTTP returns before the worker parks a chunk, and the worker can park
+    // them out of order. Wait for every offset so the cache is full before
+    // the overflow chunk is sent.
+    for offset in 0..preheader_cap {
+        genesis_node
+            .wait_until_chunk_accepted(tx.header.data_root, TxChunkOffset::from(offset), 10)
+            .await?;
+    }
 
     // Now try to add one more chunk - HTTP admits it; the worker rejects the park.
     let overflow_chunk = UnpackedChunk {

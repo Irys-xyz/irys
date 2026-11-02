@@ -53,6 +53,7 @@ use irys_types::{
     CommitmentV2WithMetadata, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
     DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
     NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
+    compute_solution_hash,
 };
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, DataLedger, EvmBlockHash, H256, H256List, IrysAddress,
@@ -73,7 +74,6 @@ use reth::{
     rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
 use reth_db::{Database as _, cursor::*};
-use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
@@ -292,12 +292,15 @@ pub async fn capacity_chunk_solution(
                 config.consensus.chain_id,
             );
 
-            // solution_hash = sha256(poa_chunk || offset_le || vdf_output)
-            let mut hasher_sol = Sha256::new();
-            hasher_sol.update(&entropy_chunk);
-            hasher_sol.update(partition_chunk_offset.to_le_bytes());
-            hasher_sol.update(steps[1].as_bytes());
-            let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
+            // Same order choice as the miner: Delta at the clock now.
+            let delta = config.consensus.hardforks.delta_for_block(
+                irys_types::global_clock()
+                    .now_ms()
+                    .expect("clock")
+                    .to_secs(),
+            );
+            let solution_hash =
+                compute_solution_hash(&entropy_chunk, partition_chunk_offset, &steps[1], delta);
 
             // Check difficulty: interpret hash as little-endian number
             let solution_val = irys_types::u256_from_le_bytes(&solution_hash.0);
@@ -359,11 +362,14 @@ pub async fn capacity_chunk_solution(
         config.consensus.chain_id,
     );
 
-    let mut hasher_sol = Sha256::new();
-    hasher_sol.update(&entropy_chunk);
-    hasher_sol.update(partition_chunk_offset.to_le_bytes());
-    hasher_sol.update(steps[1].as_bytes());
-    let solution_hash = H256::from_slice(hasher_sol.finalize().as_slice());
+    let delta = config.consensus.hardforks.delta_for_block(
+        irys_types::global_clock()
+            .now_ms()
+            .expect("clock")
+            .to_secs(),
+    );
+    let solution_hash =
+        compute_solution_hash(&entropy_chunk, partition_chunk_offset, &steps[1], delta);
 
     SolutionContext {
         partition_hash,
@@ -2513,6 +2519,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .reth_node_adapter
             .get_balance_irys(address, block)
             .await
+            .expect("balance read")
     }
 
     /// Get the price for storing data via the price API endpoint
@@ -3097,7 +3104,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer.node_ctx
             .block_pool
             .add_execution_payload_to_cache(eth_payload.block().clone())
-            .await;
+            .await
+            .expect("payload body matches its header");
 
         let sealed_block = build_sealed_block(irys_block_header.clone(), &block_transactions)?;
 
@@ -4303,6 +4311,27 @@ pub fn assert_reorg_event_lca_contract(reorg_event: &ReorgEvent) {
         first_new.header().height,
         "fork_parent must be one height below new_fork[0]",
     );
+}
+
+/// Waits until the supply state is ready and has counted every block up to
+/// `height`. Migration writes the block index before it updates the supply
+/// state, so a wait on the index height alone can read a stale supply state.
+pub async fn wait_supply_height(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    height: u64,
+) -> eyre::Result<irys_domain::SupplyStateData> {
+    let supply_state = node
+        .node_ctx
+        .supply_state_guard
+        .clone()
+        .ok_or_else(|| eyre::eyre!("supply state not set"))?;
+    let mut waited = 0;
+    while !supply_state.is_ready() || supply_state.get().height < height {
+        eyre::ensure!(waited < 300, "supply state did not reach height {height}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        waited += 1;
+    }
+    Ok(supply_state.get())
 }
 
 #[diag_slow(state = format!("block_hash={}", block_hash))]

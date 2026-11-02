@@ -5,7 +5,7 @@ use crate::{
     serialization::unix_timestamp_string_serde,
     storage_pricing::{
         Amount,
-        phantoms::{CostPerGb, Usd},
+        phantoms::{CostPerGb, Percentage, Usd},
     },
 };
 // Estuary's parameters live beside the partition-resize arithmetic they drive.
@@ -42,13 +42,29 @@ pub struct IrysHardforkConfig {
     pub cascade: Option<Cascade>,
 
     /// Delta hardfork. WIP and not deployed: every preset leaves it unset, and
-    /// it accumulates consensus changes that need a hardfork. The change it
-    /// carries now seeds slots for a data ledger in the epoch it activates.
-    /// Resolved at the epoch block's own timestamp. It only acts during epoch
-    /// processing. None means disabled.
+    /// it accumulates consensus changes that need a hardfork. Resolved at each
+    /// block's own timestamp. It carries two changes:
+    /// - Ledger seeding (slots for a data ledger that activates mid-chain) can
+    ///   only act on an epoch block. It acts at the first epoch block whose
+    ///   timestamp is >= `activation_timestamp`.
+    /// - The capacity PoA reward reduction acts on every block. It applies from
+    ///   the first block whose timestamp is >= `activation_timestamp`. The miner
+    ///   share is `Delta::capacity_chunk_reward_percent`.
+    /// - The solution hash puts the VDF seed before the chunk, from the first
+    ///   block whose timestamp is >= `activation_timestamp`.
+    ///
+    /// None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
 
+    /// Echo hardfork - requires the PoA partition to belong to the block miner.
+    /// Active for blocks at or above `activation_height`. None means disabled.
+    /// A config file that does not set it gets Echo from genesis.
+    #[serde(
+        default = "Echo::from_genesis",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub echo: Option<Echo>,
     /// Estuary hardfork (partition resize) - shrinks partitions and the HDD recall range,
     /// switches slot allocation to a target-based rule, and expands the
     /// partition-ID supply byte-preservingly. Activation block E is the first
@@ -92,6 +108,21 @@ pub struct Aurora {
     #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
     pub minimum_commitment_tx_version: u8,
+}
+
+/// Echo hardfork - see `IrysHardforkConfig::echo`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Echo {
+    pub activation_height: u64,
+}
+
+impl Echo {
+    /// Echo active from genesis: the default for a config file that does not set it.
+    pub fn from_genesis() -> Option<Self> {
+        Some(Self {
+            activation_height: 0,
+        })
+    }
 }
 
 /// Borealis hardfork - enables UpdateRewardAddress commitment transactions.
@@ -149,8 +180,15 @@ impl Cascade {
 /// Delta hardfork. WIP and not deployed. It accumulates consensus changes that
 /// need a hardfork.
 ///
-/// The change it carries now: a data ledger that becomes active mid-chain gets
-/// its first slots in the epoch that activates it.
+/// Changes carried by Delta:
+/// - A data ledger that becomes active mid-chain gets its first slots in the
+///   epoch that activates it.
+/// - A capacity (entropy) PoA, that is, any PoA that is not a data PoA, receives
+///   `capacity_chunk_reward_percent` of the full block reward; the treasury gets
+///   the remainder.
+/// - The solution hash is `sha256(seed || offset_le || poa_chunk)`, not
+///   `sha256(poa_chunk || offset_le || seed)`. See
+///   [`crate::compute_solution_hash`].
 ///
 /// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
 /// but the epoch block's own header cannot list it: the producer derives the
@@ -159,15 +197,16 @@ impl Cascade {
 /// without this fork the ledger stays slotless — and therefore unassigned and
 /// unstorable — until the following epoch.
 ///
-/// Resolved at the epoch block's own timestamp — the first epoch block whose
-/// timestamp meets `activation_timestamp` is the one that seeds. There is no
-/// per-block effect: this fork only acts during epoch processing. None means
-/// disabled.
+/// Resolved at each block's own timestamp. The first epoch block whose timestamp
+/// meets `activation_timestamp` seeds new ledgers; every block from the boundary
+/// onward applies the capacity-PoA reward adjustment and the new solution hash
+/// order. None means disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Delta {
     /// Timestamp (seconds since epoch) at which this hardfork activates.
-    /// The actual activation happens at the first epoch boundary where the
-    /// epoch block's timestamp meets or exceeds this value.
+    /// Ledger changes happen at the first epoch block whose timestamp meets or
+    /// exceeds this value. The reward and solution hash changes happen at the
+    /// first block of any kind whose timestamp meets or exceeds this value.
     #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
     /// Slots allocated to a data ledger in the epoch it becomes active
@@ -175,9 +214,22 @@ pub struct Delta {
     /// Non-zero: seeding zero slots is what this fork exists to prevent.
     #[serde(default = "Delta::default_initial_slots_per_new_ledger")]
     pub initial_slots_per_new_ledger: NonZeroU64,
+    /// Share of the full reward-curve amount that the miner of a non-data
+    /// (capacity/entropy) PoA gets (default: 0.5). The rest goes to the
+    /// treasury and counts as emitted. Must be <= 1.0.
+    #[serde(
+        default = "Delta::default_capacity_chunk_reward_percent",
+        deserialize_with = "crate::serde_utils::percentage_amount",
+        serialize_with = "crate::serde_utils::serializes_percentage_amount"
+    )]
+    pub capacity_chunk_reward_percent: Amount<Percentage>,
 }
 
 impl Delta {
+    pub fn default_capacity_chunk_reward_percent() -> Amount<Percentage> {
+        Amount::percentage(dec!(0.5)).expect("valid percentage")
+    }
+
     pub const fn default_initial_slots_per_new_ledger() -> NonZeroU64 {
         NonZeroU64::MIN
     }
@@ -350,6 +402,14 @@ impl IrysHardforkConfig {
         self.cascade_at(timestamp).is_some()
     }
 
+    /// Check if the Echo hardfork is active at the given block height.
+    #[must_use]
+    pub fn is_echo_active_at_height(&self, height: u64) -> bool {
+        self.echo
+            .as_ref()
+            .is_some_and(|f| height >= f.activation_height)
+    }
+
     /// Cascade's activation state at a block's OWN timestamp (in seconds).
     ///
     /// This is the value epoch processing uses (the epoch block's own timestamp
@@ -364,10 +424,9 @@ impl IrysHardforkConfig {
     /// Delta's activation state at a block's OWN timestamp (in seconds), with
     /// its parameters while active.
     ///
-    /// Named like [`Self::cascade_for_block`] because the scope is the same — the
-    /// epoch block's own timestamp decides the epoch it opens. It carries the
-    /// fork's parameters rather than a [`ForBlock`] tag because its single
-    /// consumer needs them.
+    /// Named like [`Self::cascade_for_block`] because the scope is the same — a
+    /// block's own timestamp decides activation. It carries the fork's parameters
+    /// rather than a [`ForBlock`] tag because epoch processing needs them.
     #[must_use]
     pub fn delta_for_block(&self, timestamp: UnixTimestamp) -> Activation<Delta> {
         self.delta
@@ -442,6 +501,23 @@ impl IrysHardforkConfig {
             .map(|aurora| aurora.minimum_commitment_tx_version)
     }
 
+    /// Check if `timestamp` is within `tolerance_millis` of an activation that changes the
+    /// allowed commitment versions. In this window, nodes with different clocks can apply
+    /// different version rules.
+    #[must_use]
+    pub fn is_near_commitment_version_change(
+        &self,
+        timestamp: UnixTimestamp,
+        tolerance_millis: u128,
+    ) -> bool {
+        self.aurora.as_ref().is_some_and(|aurora| {
+            let distance_secs = timestamp
+                .as_secs()
+                .abs_diff(aurora.activation_timestamp.as_secs());
+            u128::from(distance_secs) * 1000 <= tolerance_millis
+        })
+    }
+
     /// Retain only commitment transactions that meet the minimum version requirement.
     /// Removes transactions that don't meet the minimum version requirement at the given timestamp.
     pub fn retain_valid_commitment_versions<T: VersionDiscriminant>(
@@ -472,6 +548,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
             estuary: None,
         };
 
@@ -506,6 +583,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
             estuary: None,
         };
 
@@ -539,6 +617,7 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
+            echo: None,
             estuary: None,
         };
 
@@ -592,6 +671,7 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
+            echo: None,
             estuary: None,
         };
 
@@ -641,6 +721,7 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
+            echo: None,
             estuary: None,
         };
 
@@ -679,6 +760,7 @@ mod tests {
             }),
             cascade: None,
             delta: None,
+            echo: None,
             estuary: None,
         };
 
@@ -709,6 +791,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
             estuary: None,
         };
 
@@ -759,7 +842,9 @@ mod tests {
             delta: Some(Delta {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
                 initial_slots_per_new_ledger: NonZeroU64::new(2).expect("non-zero"),
+                capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             }),
+            echo: None,
             estuary: None,
         };
 
@@ -787,6 +872,20 @@ mod tests {
             no_delta.delta_for_block(UnixTimestamp::from_secs(u64::MAX)),
             Activation::Inactive
         );
+    }
+
+    #[test]
+    fn is_echo_active_at_height_resolves_at_the_height() {
+        let mut config = crate::ConsensusConfig::testing().hardforks;
+        config.echo = None;
+        assert!(!config.is_echo_active_at_height(u64::MAX));
+
+        config.echo = Some(Echo {
+            activation_height: 2_779_313,
+        });
+        assert!(!config.is_echo_active_at_height(2_779_312));
+        assert!(config.is_echo_active_at_height(2_779_313));
+        assert!(config.is_echo_active_at_height(2_779_314));
     }
 
     #[test]
@@ -845,6 +944,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: Echo::from_genesis(),
             estuary: None,
         };
 
@@ -867,6 +967,27 @@ mod tests {
         assert_eq!(config.frontier.number_of_ingress_proofs_from_assignees, 2);
         assert!(config.next_name_tbd.is_none());
         assert!(config.delta.is_none());
+        // A config file without [echo] gets Echo from genesis.
+        assert_eq!(config.echo, Echo::from_genesis());
+    }
+
+    #[test]
+    fn test_toml_echo_activation_height_is_kept() {
+        let toml_str = "
+            [frontier]
+            number_of_ingress_proofs_total = 5
+            number_of_ingress_proofs_from_assignees = 2
+
+            [echo]
+            activation_height = 2779313
+        ";
+        let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.echo,
+            Some(Echo {
+                activation_height: 2_779_313
+            })
+        );
     }
 
     proptest! {
@@ -894,6 +1015,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
                 estuary: None,
             };
 
@@ -922,6 +1044,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
                 estuary: None,
             };
 
@@ -943,6 +1066,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
                 estuary: None,
             };
 
@@ -977,6 +1101,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
                 estuary: None,
             };
 
@@ -1011,6 +1136,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
                 estuary: None,
             }
         }
@@ -1026,6 +1152,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
                 estuary: None,
             }
         }
@@ -1119,6 +1246,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
                 estuary: None,
             }
         }
@@ -1133,6 +1261,7 @@ mod tests {
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
                 delta: None,
+                echo: Echo::from_genesis(),
                 estuary: None,
                 ..base_config()
             };

@@ -28,7 +28,6 @@ pub async fn get_node_info(
     let latest = chain
         .last()
         .ok_or_else(|| eyre::eyre!("canonical chain is empty"))?;
-    let max_diff = block_tree.read().get_max_cumulative_difficulty_block();
 
     Ok(NodeInfo {
         version: irys_types::get_version().to_string(),
@@ -42,7 +41,9 @@ pub async fn get_node_info(
         is_syncing: sync_state.is_syncing(),
         current_sync_height: u64::try_from(sync_state.sync_target_height())?,
         uptime_secs: started_at.elapsed().as_secs(),
-        cumulative_difficulty: max_diff.0,
+        // The tip's difficulty, so it matches `height` and `block_hash`. The block with
+        // the max cumulative difficulty can still wait for validation.
+        cumulative_difficulty: latest.header().cumulative_diff,
         mining_address,
         git_sha: git_sha(),
         dirty: git_dirty(),
@@ -51,4 +52,87 @@ pub async fn get_node_info(
         db_schema_version: u32::from(DatabaseVersion::CURRENT),
         consensus_config_hash: Some(consensus_config_hash),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_node_info;
+    use crate::{
+        BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, CommitmentSnapshot,
+        EmaSnapshot, EpochSnapshot, PeerList, chain_sync_state::ChainSyncState,
+    };
+    use irys_database::tables::IrysTables;
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{
+        BlockIndexItem, BlockTransactions, ConsensusConfig, DatabaseProvider, H256, IrysAddress,
+        IrysBlockHeader, SealedBlock, U256,
+    };
+    use reth_db::mdbx::DatabaseArguments;
+    use std::sync::{Arc, RwLock};
+
+    /// Node info reports the tip: a heavier block that still waits for validation does
+    /// not change the advertised height, hash or cumulative difficulty.
+    #[tokio::test]
+    async fn node_info_reports_the_tip_not_a_pending_heavier_block() -> eyre::Result<()> {
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.cumulative_diff = U256::from(100);
+        genesis.test_sign();
+        let mut tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+
+        let mut pending = IrysBlockHeader::new_mock_header();
+        pending.height = 1;
+        pending.previous_block_hash = genesis.block_hash;
+        pending.cumulative_diff = U256::from(200);
+        pending.test_sign();
+        let sealed = Arc::new(SealedBlock::new_unchecked(
+            Arc::new(pending.clone()),
+            BlockTransactions::default(),
+        ));
+        tree.add_block(
+            &sealed,
+            Arc::new(CommitmentSnapshot::default()),
+            Arc::new(EpochSnapshot::default()),
+            EmaSnapshot::genesis(sealed.header()),
+        )?;
+        assert_eq!(
+            tree.get_max_cumulative_difficulty_block().1,
+            pending.block_hash
+        );
+
+        let tmp = TempDirBuilder::new().prefix("node-info-tip").build();
+        let db = DatabaseProvider(Arc::new(open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?));
+        let index = BlockIndex::new_for_testing(db);
+        index.push_item(
+            &BlockIndexItem {
+                block_hash: genesis.block_hash,
+                num_ledgers: 0,
+                ledgers: Vec::new(),
+            },
+            0,
+        )?;
+
+        let info = get_node_info(
+            &BlockIndexReadGuard::new(index),
+            &BlockTreeReadGuard::new(Arc::new(RwLock::new(tree))),
+            &PeerList::test_mock()?,
+            &ChainSyncState::new(false, false),
+            std::time::Instant::now(),
+            IrysAddress::random(),
+            1,
+            H256::zero(),
+        )
+        .await?;
+
+        assert_eq!(info.height, 0);
+        assert_eq!(info.block_hash, genesis.block_hash);
+        assert_eq!(info.cumulative_difficulty, genesis.cumulative_diff);
+        Ok(())
+    }
 }

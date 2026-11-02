@@ -3,6 +3,7 @@ use alloy_eips::HashOrNumber;
 use alloy_eips::eip2718::Encodable2718 as _;
 use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
+use irys_actors::block_reward::BlockRewardSplit;
 use irys_actors::tx_selector::TxSelectorError;
 use irys_actors::{
     BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
@@ -17,7 +18,6 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::SystemLedger;
 use irys_types::{
     DataTransactionHeader, H256, IrysBlockHeader, NodeConfig, UnixTimestampMs, irys::IrysSigner,
-    storage_pricing::Amount,
 };
 use reth::payload::EthBuiltPayload;
 use reth::rpc::types::BlockNumberOrTag;
@@ -462,23 +462,57 @@ async fn rewards_get_calculated_correctly() -> eyre::Result<()> {
 
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
-    let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
-    let mut _init_balance = reth_context.get_balance(reward_address, None).await?;
+    let block_time = node
+        .node_ctx
+        .config
+        .consensus
+        .difficulty_adjustment
+        .block_time;
+    let mut prev_evm_block_hash = node.get_max_difficulty_block().evm_block_hash;
 
     for _ in 0..3 {
-        // mine a single block
         let block = node.mine_block().await?;
+        node.wait_for_evm_block(block.evm_block_hash, 10).await?;
 
-        // obtain the EVM timestamp for this block from Reth once indexed
-        let reth_block = node.wait_for_evm_block(block.evm_block_hash, 10).await?;
-        let new_ts = reth_block.header.timestamp as u128;
+        // Empty blocks carry no fees, so the whole balance delta is the block reward.
+        let previous_seconds = (block.height - 1) * block_time;
+        let expected_reward = node
+            .node_ctx
+            .reward_curve
+            .reward_between(
+                u128::from(previous_seconds),
+                u128::from(previous_seconds + block_time),
+            )?
+            .amount;
+        assert!(expected_reward > irys_types::U256::zero());
+        assert_eq!(block.reward_amount, expected_reward);
 
-        prev_ts = Some(new_ts);
-        _init_balance = reth_context.get_balance(reward_address, None).await?;
+        let balance_before = reth_context
+            .get_balance(
+                reward_address,
+                Some(alloy_eips::BlockId::Hash(prev_evm_block_hash.into())),
+            )
+            .await?;
+        let balance_after = reth_context
+            .get_balance(
+                reward_address,
+                Some(alloy_eips::BlockId::Hash(block.evm_block_hash.into())),
+            )
+            .await?;
+        let balance_growth = balance_after
+            .checked_sub(balance_before)
+            .expect("reward address balance must not decrease between consecutive blocks");
+        assert_eq!(
+            balance_growth,
+            U256::from_le_bytes(expected_reward.to_le_bytes()),
+            "reward address balance must grow by exactly the block reward at height {}",
+            block.height
+        );
+
+        prev_evm_block_hash = block.evm_block_hash;
     }
 
-    assert!(prev_ts.is_some());
     node.stop().await;
     Ok(())
 }
@@ -1043,7 +1077,7 @@ async fn block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
             prev_block_header: &IrysBlockHeader,
             prev_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
             reward_address: irys_types::IrysAddress,
@@ -1062,7 +1096,7 @@ async fn block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
                     prev_block_header,
                     prev_evm_block,
                     &tampered_mempool,
-                    reward_amount,
+                    block_reward,
                     timestamp_ms,
                     solution_hash,
                     reward_address,
@@ -1469,7 +1503,7 @@ async fn test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             prev_block_header: &IrysBlockHeader,
             prev_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             timestamp_ms: UnixTimestampMs,
             _solution_hash: H256,
             reward_address: irys_types::IrysAddress,
@@ -1485,7 +1519,7 @@ async fn test_invalid_solution_hash_rejected() -> eyre::Result<()> {
                     prev_block_header,
                     prev_evm_block,
                     mempool,
-                    reward_amount,
+                    block_reward,
                     timestamp_ms,
                     invalid_solution_hash,
                     reward_address,
@@ -1679,5 +1713,120 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
 
     genesis_node.stop().await;
 
+    Ok(())
+}
+
+/// Upper bound for a producer service reply or a mined block in the producer
+/// liveness tests, so a stuck service fails the test with a named cause.
+const PRODUCER_LIVENESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A block that fails its own pre-validation drops that solution only. The
+/// producer service replies with a recoverable error and serves the next
+/// solution; it does not stop the node.
+#[test_log::test(tokio::test)]
+async fn own_block_prevalidation_failure_keeps_producer_running() -> eyre::Result<()> {
+    use irys_actors::{BlockProductionError, block_producer::BlockProducerCommand};
+    use irys_types::SendTraced as _;
+
+    let node = IrysNodeTest::new_genesis(NodeConfig::testing())
+        .start()
+        .await;
+    let start_height = node.get_max_difficulty_block().height;
+
+    // Corrupt one VDF checkpoint of the solution. The producer copies the
+    // checkpoints into the block without checking them, and the solution hash
+    // does not cover them, so the block is built and sealed, but pre-validation
+    // rejects it (`last_step_checkpoints_is_valid`).
+    let mut bad_solution = solution_context(&node.node_ctx).await?;
+    let checkpoint = bad_solution
+        .checkpoints
+        .0
+        .first_mut()
+        .expect("a solution carries the VDF checkpoints of its step");
+    checkpoint.0[0] ^= 0xFF;
+
+    let senders = &node.node_ctx.service_senders;
+    senders
+        .block_producer
+        .send_traced(BlockProducerCommand::SetTestBlocksRemaining(Some(1)))?;
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    senders
+        .block_producer
+        .send_traced(BlockProducerCommand::SolutionFound {
+            solution: bad_solution,
+            response: response_tx,
+        })?;
+
+    // A stopped service would drop the sender instead of replying.
+    let reply = tokio::time::timeout(PRODUCER_LIVENESS_TIMEOUT, response_rx)
+        .await
+        .expect("producer service must reply to the rejected solution within 60s")
+        .expect("producer service must reply to the rejected solution");
+    let err = reply
+        .map(|_| ())
+        .expect_err("a block that fails pre-validation must not be returned");
+    let production_err = err
+        .downcast_ref::<BlockProductionError>()
+        .unwrap_or_else(|| panic!("expected a BlockProductionError, got: {err:#}"));
+    assert!(
+        matches!(
+            production_err,
+            BlockProductionError::Recoverable {
+                reason: "own_block_rejected",
+                ..
+            }
+        ),
+        "expected an own_block_rejected drop, got: {production_err:?}"
+    );
+    assert_eq!(
+        node.get_max_difficulty_block().height,
+        start_height,
+        "the rejected block must not extend the chain"
+    );
+
+    // The same service produces a block from the next solution.
+    let (block, _, _) =
+        tokio::time::timeout(PRODUCER_LIVENESS_TIMEOUT, node.mine_block_with_payload())
+            .await
+            .expect("producer service must produce a block from the next solution within 60s")?;
+    assert_eq!(block.height, start_height + 1);
+
+    node.stop().await;
+    Ok(())
+}
+
+/// A failed balance read is an error, not a zero balance: a zero would leave
+/// funded signers out of the block without any signal.
+#[test_log::test(tokio::test)]
+async fn balance_read_at_unknown_block_is_an_error() -> eyre::Result<()> {
+    use alloy_eips::BlockId;
+
+    let node = IrysNodeTest::new_genesis(NodeConfig::testing())
+        .start()
+        .await;
+    let adapter = &node.node_ctx.reth_node_adapter;
+    let signer = node.node_ctx.config.node_config.miner_address();
+    let unknown_block = Some(BlockId::from(alloy_primitives::B256::repeat_byte(0xAB)));
+
+    assert!(
+        adapter
+            .get_balance_irys(signer, unknown_block)
+            .await
+            .is_err(),
+        "an unknown block must not read as a zero balance"
+    );
+    assert!(
+        adapter
+            .get_balances_irys(&[signer], unknown_block)
+            .await
+            .is_err(),
+        "the batch read must surface the error"
+    );
+    adapter
+        .get_balance_irys(signer, None)
+        .await
+        .expect("a latest-state read succeeds");
+
+    node.stop().await;
     Ok(())
 }

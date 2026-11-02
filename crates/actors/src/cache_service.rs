@@ -1309,7 +1309,7 @@ impl InnerCacheTask {
                 drop(tree);
                 let mut set = HashSet::new();
                 for entry in &canonical {
-                    for tx_ids in entry.header().get_data_ledger_tx_ids().into_values() {
+                    for tx_ids in entry.header().get_data_ledger_tx_ids()?.into_values() {
                         set.extend(tx_ids);
                     }
                 }
@@ -4776,7 +4776,7 @@ mod tests {
             let mut child = new_mock_signed_header();
             child.height = 1;
             child.previous_block_hash = genesis_block.block_hash;
-            // Above genesis' 0, so the canonical chain cache follows the child.
+            // Above genesis' 0, so `mark_tip` accepts the child.
             child.cumulative_diff = 1.into();
             // new_mock_header's data_ledgers layout is not guaranteed; target
             // the Submit ledger by id rather than assuming the index.
@@ -4802,6 +4802,9 @@ mod tests {
                     ChainState::Onchain,
                 )
                 .expect("add canonical child");
+            block_tree
+                .mark_tip(&child.block_hash)
+                .expect("mark canonical child as tip");
         }
 
         let block_tree_guard =
@@ -5069,7 +5072,7 @@ mod tests {
             let mut child = new_mock_signed_header();
             child.height = 1;
             child.previous_block_hash = genesis_hash;
-            // Above genesis' 0, so the canonical chain cache follows the child.
+            // Above genesis' 0, so `mark_tip` accepts the child.
             child.cumulative_diff = 1.into();
             // new_mock_header's data_ledgers layout is not guaranteed; target
             // the Submit ledger by id rather than assuming the index.
@@ -5094,6 +5097,8 @@ mod tests {
                 ChainState::Onchain,
             )
             .expect("add canonical child");
+            tree.mark_tip(&child.block_hash)
+                .expect("mark canonical child as tip");
         }
 
         // Release MDBX then the gate; the scrub proceeds and reads the tree (now

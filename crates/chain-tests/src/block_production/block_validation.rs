@@ -128,7 +128,8 @@ fn mock_commitment_txs(count: usize) -> Vec<CommitmentTransaction> {
 #[tokio::test]
 async fn test_future_block_rejection() -> Result<()> {
     use irys_actors::{
-        BlockProdStrategy, BlockProducerInner, async_trait, reth_ethereum_primitives,
+        BlockProdStrategy, BlockProducerInner, async_trait, block_reward::BlockRewardSplit,
+        reth_ethereum_primitives,
     };
     use irys_types::{AdjustmentStats, block_production::SolutionContext, storage_pricing::Amount};
     use reth::{core::primitives::SealedBlock as RethSealedBlock, payload::EthBuiltPayload};
@@ -156,7 +157,7 @@ async fn test_future_block_rejection() -> Result<()> {
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
-            reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+            block_reward: BlockRewardSplit,
             _timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
             reward_address: irys_types::IrysAddress,
@@ -167,7 +168,7 @@ async fn test_future_block_rejection() -> Result<()> {
                     prev_block_header,
                     perv_evm_block,
                     mempool,
-                    reward_amount,
+                    block_reward,
                     self.invalid_timestamp,
                     solution_hash,
                     reward_address,
@@ -186,7 +187,10 @@ async fn test_future_block_rejection() -> Result<()> {
             prev_block_ema_snapshot: &EmaSnapshot,
             treasury: U256,
             reward_address: irys_types::IrysAddress,
-        ) -> eyre::Result<Option<(Arc<SealedBlock>, Option<AdjustmentStats>)>> {
+        ) -> Result<
+            Option<(Arc<SealedBlock>, Option<AdjustmentStats>)>,
+            irys_actors::block_producer::BlockProductionError,
+        > {
             self.prod
                 .produce_block_without_broadcasting(
                     solution,
@@ -911,20 +915,6 @@ async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
 async fn test_prevalidation_rejects_too_many_commitment_txs() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;
 
-    // Check if block has a commitment ledger (needed for this test)
-    let has_commitment_ledger = ctx
-        .block
-        .header()
-        .system_ledgers
-        .iter()
-        .any(|l| l.ledger_id == SystemLedger::Commitment as u32);
-
-    if !has_commitment_ledger {
-        // Skip if block doesn't have commitment ledger (not at epoch boundary)
-        ctx.stop().await;
-        return Ok(());
-    }
-
     let max = ctx
         .config
         .consensus_config()
@@ -945,11 +935,24 @@ async fn test_prevalidation_rejects_too_many_commitment_txs() -> Result<()> {
             .collect(),
     );
 
+    // An empty mempool yields a block without a Commitment ledger; add one so the cap check runs.
+    if !header
+        .system_ledgers
+        .iter()
+        .any(|l| l.ledger_id == SystemLedger::Commitment as u32)
+    {
+        header
+            .system_ledgers
+            .push(irys_types::SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment as u32,
+                tx_ids: H256List(vec![]),
+            });
+    }
     let ledger = header
         .system_ledgers
         .iter_mut()
         .find(|l| l.ledger_id == SystemLedger::Commitment as u32)
-        .expect("Commitment ledger should exist");
+        .expect("Commitment ledger must exist in the fixture");
     ledger.tx_ids = tx_ids;
 
     // Re-sign the header after modification

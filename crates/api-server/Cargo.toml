@@ -17,7 +17,6 @@ reth.workspace = true
 alloy-eips.workspace = true
 awc.workspace = true
 socket2.workspace = true
-base58.workspace = true
 hex.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 async-stream = "0.3"

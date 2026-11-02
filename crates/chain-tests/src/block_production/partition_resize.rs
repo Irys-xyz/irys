@@ -195,6 +195,7 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
             snapshot,
             &parent.config.consensus,
             &previous.miner_address,
+            previous.height,
         )
     };
     validate(&parent)?;
@@ -358,7 +359,8 @@ async fn heavy_partition_resize_reorg_selects_branch_activation() -> eyre::Resul
             .block_pool
             .execution_payload_provider
             .add_payload_to_cache(payload)
-            .await;
+            .await
+            .expect("payload body matches its header");
         let mut events = genesis
             .node_ctx
             .service_senders

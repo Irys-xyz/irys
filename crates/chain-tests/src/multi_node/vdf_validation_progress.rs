@@ -363,3 +363,198 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
     let _ = genesis.stop().await;
     Ok(())
 }
+
+/// A block removed from the tree while its VDF task waits for steps must
+/// cancel that task through the validation service's block-state arm. The
+/// task then ends with `BlockMissing` long before the stall timeout, and
+/// frees the single VDF slot.
+///
+/// Same stalled-peer setup as above: the head's parent is injected into the
+/// peer's tree without its steps, so the head's VDF task waits. A discard
+/// through the real block tree service then removes the head and broadcasts
+/// `BlockStateUpdated`. The cancelled task reports `BlockMissing` for the
+/// head as a second discard event; without the arm the task would only end at
+/// the stall timeout, which is far beyond the test deadline.
+#[test_log::test(tokio::test)]
+async fn heavy_test_vdf_wait_is_cancelled_when_block_leaves_tree() -> eyre::Result<()> {
+    use irys_actors::block_tree_service::BlockTreeServiceMessage;
+    use irys_actors::block_validation::ValidationCancelReason;
+    use irys_types::SendTraced as _;
+
+    const LONG_PROGRESS_TIMEOUT_SECS: u64 = 120;
+    const CANCEL_DEADLINE: Duration = Duration::from_secs(20);
+
+    let mut genesis_cfg = NodeConfig::testing();
+    genesis_cfg.vdf.progress_timeout_secs = LONG_PROGRESS_TIMEOUT_SECS;
+    let genesis = IrysNodeTest::new_genesis(genesis_cfg.clone())
+        .start_and_wait_for_packing("GENESIS", 30)
+        .await;
+
+    let mut peer_cfg = genesis.testing_peer();
+    peer_cfg.vdf.progress_timeout_secs = LONG_PROGRESS_TIMEOUT_SECS;
+    let peer = IrysNodeTest::new(peer_cfg).start_with_name("PEER").await;
+
+    genesis.mine_block().await?;
+    genesis.mine_block().await?;
+    peer.wait_until_height(2, 30).await?;
+
+    peer.stop_mining();
+    let peer_frozen_step = peer.node_ctx.vdf_steps_guard.current_step();
+
+    // Genesis broadcasts a block after its own validation, which can finish
+    // after `mine_block_without_gossip` returns. The peer must not validate
+    // the parent from that gossip, so genesis gossip stays off: the test
+    // delivers each later block to the peer directly.
+    genesis.gossip_disable();
+
+    // Parent goes straight into the peer's tree, so its steps never reach the
+    // peer's VDF state.
+    let (parent_header, parent_payload, _parent_txs) = genesis.mine_block_without_gossip().await?;
+    let parent_hash = parent_header.block_hash;
+    // The parent is marked valid below, so it becomes the tip once the head
+    // is discarded. The peer's Reth must hold the parent's payload, as it
+    // would after real validation, or the tip's fork-choice update fails.
+    peer.node_ctx
+        .block_pool
+        .add_execution_payload_to_cache(parent_payload.block().clone())
+        .await
+        .map_err(|e| eyre::eyre!("parent payload rejected by cache: {e:?}"))?;
+    let parent_execution_data = peer
+        .node_ctx
+        .block_pool
+        .execution_payload_provider
+        .wait_for_payload(&parent_header.evm_block_hash)
+        .await
+        .map_err(|e| eyre::eyre!("parent payload missing from cache: {e:?}"))?;
+    irys_actors::block_validation::submit_payload_to_reth(
+        &parent_header,
+        &peer.node_ctx.reth_node_adapter,
+        parent_execution_data,
+    )
+    .await
+    .map_err(|e| eyre::eyre!("peer Reth rejected parent payload: {e:?}"))?;
+    {
+        let sealed_parent = std::sync::Arc::new(irys_types::SealedBlock::new(
+            parent_header.as_ref().clone(),
+            irys_types::BlockBody {
+                block_hash: parent_hash,
+                ..Default::default()
+            },
+        )?);
+        let (grandparent_commitment, grandparent_epoch, grandparent_ema, grandparent_header) = {
+            let tree = peer.node_ctx.block_tree_guard.read();
+            let grandparent_hash = parent_header.previous_block_hash;
+            (
+                tree.get_commitment_snapshot(&grandparent_hash)
+                    .map_err(|e| eyre::eyre!("grandparent commitment snapshot missing: {e}"))?,
+                tree.get_epoch_snapshot(&grandparent_hash)
+                    .ok_or_else(|| eyre::eyre!("grandparent epoch snapshot missing"))?,
+                tree.get_ema_snapshot(&grandparent_hash)
+                    .ok_or_else(|| eyre::eyre!("grandparent ema snapshot missing"))?,
+                tree.get_block(&grandparent_hash)
+                    .ok_or_else(|| eyre::eyre!("grandparent header missing"))?
+                    .clone(),
+            )
+        };
+        let next_ema = grandparent_ema.next_snapshot(
+            &parent_header,
+            &grandparent_header,
+            &peer.node_ctx.config.consensus,
+        )?;
+        let mut tree = peer.node_ctx.block_tree_guard.write();
+        tree.add_block(
+            &sealed_parent,
+            grandparent_commitment,
+            grandparent_epoch,
+            next_ema,
+        )?;
+        tree.mark_block_as_validation_scheduled(&parent_hash)?;
+        tree.mark_block_as_valid(&parent_hash)?;
+    }
+
+    let (head_header, head_payload, head_txs) = genesis.mine_block_without_gossip().await?;
+    let head_hash = head_header.block_hash;
+    let head_prev_output_step = head_header
+        .vdf_limiter_info
+        .first_step_number()
+        .saturating_sub(1);
+    assert!(
+        head_prev_output_step > peer_frozen_step,
+        "test invariant: head's prev_output_step ({head_prev_output_step}) must exceed peer's frozen step ({peer_frozen_step})"
+    );
+
+    let mut event_rx = peer
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
+    genesis
+        .send_full_block(&peer, &head_header, head_payload, head_txs)
+        .await?;
+
+    // Let the VDF task reach its wait. The head must still be in the tree and
+    // must not have been finalized.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        peer.node_ctx
+            .block_tree_guard
+            .read()
+            .get_block(&head_hash)
+            .is_some(),
+        "head must be in the peer's tree while its VDF task waits"
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "no block-state event may precede the discard"
+    );
+
+    // Discard the head through the real block tree service. The service
+    // removes it and broadcasts `BlockStateUpdated`.
+    let injected_reason = ValidationCancelReason::HeightDifference;
+    peer.node_ctx.service_senders.block_tree.send_traced(
+        BlockTreeServiceMessage::BlockValidationFinished {
+            block_hash: head_hash,
+            validation_result: ValidationError::ValidationCancelled {
+                reason: injected_reason,
+            }
+            .into(),
+        },
+    )?;
+
+    // First event for the head is the discard above. The second one only
+    // exists when the select arm cancelled the waiting task.
+    let discard_reasons = async {
+        let mut reasons = Vec::new();
+        while reasons.len() < 2 {
+            let event = event_rx.recv().await?;
+            if event.block_hash != head_hash || !event.discarded {
+                continue;
+            }
+            let ValidationResult::InternalFailure(inner) = &event.validation_result else {
+                eyre::bail!("unexpected result for discarded head: {event:?}");
+            };
+            let ValidationError::ValidationCancelled { reason } = inner.err() else {
+                eyre::bail!("unexpected error for discarded head: {inner}");
+            };
+            reasons.push(*reason);
+        }
+        eyre::Ok(reasons)
+    };
+    let reasons = tokio::time::timeout(CANCEL_DEADLINE, discard_reasons)
+        .await
+        .map_err(|_| {
+            eyre::eyre!(
+                "the VDF task of a block removed from the tree was not cancelled within \
+                 {CANCEL_DEADLINE:?}: the validation service did not react to the \
+                 block-state broadcast"
+            )
+        })??;
+    assert_eq!(
+        reasons,
+        vec![injected_reason, ValidationCancelReason::BlockMissing],
+        "the waiting VDF task must end cancelled with BlockMissing"
+    );
+
+    let _ = peer.stop().await;
+    let _ = genesis.stop().await;
+    Ok(())
+}
