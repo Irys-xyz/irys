@@ -254,7 +254,7 @@ number_of_ingress_proofs_from_assignees = 0
 # Echo (the PoA partition must belong to the block miner) is enabled from genesis
 # when this section is absent. To activate it at a later height instead, uncomment:
 # [consensus.Custom.hardforks.echo]
-# activation_height = 0
+# activation_height = 100000   # first block height the rule applies to
 
 # Reth Prometheus endpoint (port 9001). The default 127.0.0.1 restricts the
 # listener to the host loopback; deployments expose it externally only via
