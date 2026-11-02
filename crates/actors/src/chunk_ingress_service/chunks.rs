@@ -2577,7 +2577,11 @@ mod tests {
         tampered.data_path.0[32] = 1;
         let tampered_hash = tampered.chunk_path_hash();
         let err = inner
-            .handle_chunk_ingress_message(tampered)
+            .handle_chunk_ingress_message(
+                tampered,
+                ChunkBroadcastMode::Push,
+                ModuleWritePolicy::Await,
+            )
             .await
             .expect_err("non-zero notepad must be rejected");
         assert!(
@@ -2597,7 +2601,11 @@ mod tests {
         assert!(inner.pending_chunks.read().await.get(&data_root).is_none());
 
         inner
-            .handle_chunk_ingress_message(honest)
+            .handle_chunk_ingress_message(
+                honest,
+                ChunkBroadcastMode::Push,
+                ModuleWritePolicy::Await,
+            )
             .await
             .expect("canonical chunk is accepted");
         assert!(inner.pending_chunks.read().await.get(&data_root).is_some());
