@@ -54,6 +54,15 @@ pub struct IrysHardforkConfig {
     /// None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
+
+    /// Echo hardfork - requires the PoA partition to belong to the block miner.
+    /// Active for blocks at or above `activation_height`. None means disabled.
+    /// A config file that does not set it gets Echo from genesis.
+    #[serde(
+        default = "Echo::from_genesis",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub echo: Option<Echo>,
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
@@ -89,6 +98,21 @@ pub struct Aurora {
     #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
     pub minimum_commitment_tx_version: u8,
+}
+
+/// Echo hardfork - see `IrysHardforkConfig::echo`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Echo {
+    pub activation_height: u64,
+}
+
+impl Echo {
+    /// Echo active from genesis: the default for a config file that does not set it.
+    pub fn from_genesis() -> Option<Self> {
+        Some(Self {
+            activation_height: 0,
+        })
+    }
 }
 
 /// Borealis hardfork - enables UpdateRewardAddress commitment transactions.
@@ -368,6 +392,14 @@ impl IrysHardforkConfig {
         self.cascade_at(timestamp).is_some()
     }
 
+    /// Check if the Echo hardfork is active at the given block height.
+    #[must_use]
+    pub fn is_echo_active_at_height(&self, height: u64) -> bool {
+        self.echo
+            .as_ref()
+            .is_some_and(|f| height >= f.activation_height)
+    }
+
     /// Cascade's activation state at a block's OWN timestamp (in seconds).
     ///
     /// This is the value epoch processing uses (the epoch block's own timestamp
@@ -506,6 +538,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
         };
 
         assert_eq!(
@@ -539,6 +572,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
         };
 
         // Before activation timestamp
@@ -571,6 +605,7 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
+            echo: None,
         };
 
         // Before activation timestamp
@@ -622,6 +657,7 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
+            echo: None,
         };
 
         let before = UnixTimestamp::from_secs(1499);
@@ -669,6 +705,7 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
+            echo: None,
         };
 
         // Cascade active at the block's timestamp.
@@ -706,6 +743,7 @@ mod tests {
             }),
             cascade: None,
             delta: None,
+            echo: None,
         };
 
         assert!(!config.is_borealis_active_at(UnixTimestamp::from_secs(1499)));
@@ -735,6 +773,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
         };
 
         // Before activation timestamp
@@ -786,6 +825,7 @@ mod tests {
                 initial_slots_per_new_ledger: NonZeroU64::new(2).expect("non-zero"),
                 capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             }),
+            echo: None,
         };
 
         assert_eq!(
@@ -811,6 +851,20 @@ mod tests {
             no_delta.delta_for_block(UnixTimestamp::from_secs(u64::MAX)),
             Activation::Inactive
         );
+    }
+
+    #[test]
+    fn is_echo_active_at_height_resolves_at_the_height() {
+        let mut config = crate::ConsensusConfig::testing().hardforks;
+        config.echo = None;
+        assert!(!config.is_echo_active_at_height(u64::MAX));
+
+        config.echo = Some(Echo {
+            activation_height: 2_779_313,
+        });
+        assert!(!config.is_echo_active_at_height(2_779_312));
+        assert!(config.is_echo_active_at_height(2_779_313));
+        assert!(config.is_echo_active_at_height(2_779_314));
     }
 
     #[test]
@@ -844,6 +898,7 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: Echo::from_genesis(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -865,6 +920,27 @@ mod tests {
         assert_eq!(config.frontier.number_of_ingress_proofs_from_assignees, 2);
         assert!(config.next_name_tbd.is_none());
         assert!(config.delta.is_none());
+        // A config file without [echo] gets Echo from genesis.
+        assert_eq!(config.echo, Echo::from_genesis());
+    }
+
+    #[test]
+    fn test_toml_echo_activation_height_is_kept() {
+        let toml_str = "
+            [frontier]
+            number_of_ingress_proofs_total = 5
+            number_of_ingress_proofs_from_assignees = 2
+
+            [echo]
+            activation_height = 2779313
+        ";
+        let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.echo,
+            Some(Echo {
+                activation_height: 2_779_313
+            })
+        );
     }
 
     proptest! {
@@ -892,6 +968,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -919,6 +996,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             };
 
             let result = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -939,6 +1017,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -972,6 +1051,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             };
 
             let aurora = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -1005,6 +1085,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             }
         }
 
@@ -1019,6 +1100,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             }
         }
 
@@ -1111,6 +1193,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             }
         }
 
@@ -1124,6 +1207,7 @@ mod tests {
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
                 delta: None,
+                echo: Echo::from_genesis(),
                 ..base_config()
             };
             let toml_str = toml::to_string_pretty(&config).unwrap();

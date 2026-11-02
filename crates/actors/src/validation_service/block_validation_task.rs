@@ -727,6 +727,7 @@ impl BlockValidationTask {
                         &poa_epoch_snapshot,
                         &consensus_config,
                         &miner_address,
+                        block_height,
                     )
                     .map(|()| ValidationResult::Valid)
                 });

@@ -144,6 +144,8 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
             let partition_assignments =
                 epoch_snapshot.get_partition_assignments(genesis_signer.address());
 
+            // The chunks are in the Submit ledger, so take that ledger's partition for the
+            // slot: a PoA must name the ledger its partition is assigned to.
             let pa = partition_assignments
                 .iter()
                 .find(|pa| {
@@ -204,6 +206,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                 &epoch_snapshot,
                 &node_config.consensus_config(),
                 &genesis_signer.address(),
+                0,
             )?;
 
             // Create a PoA for the data chunks
@@ -229,6 +232,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                 &epoch_snapshot,
                 &node_config.consensus_config(),
                 &genesis_signer.address(),
+                0,
             )?;
         }
     }
@@ -416,6 +420,7 @@ async fn data_poa_at_tip_validates_via_block_tree_fallback() -> eyre::Result<()>
         &epoch_snapshot,
         &node_config.consensus_config(),
         &genesis_signer.address(),
+        0,
     );
 
     result.expect(

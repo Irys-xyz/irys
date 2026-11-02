@@ -1893,19 +1893,26 @@ pub async fn prevalidate_block(
     check_poa_data_expiration(&block.poa, parent_epoch_snapshot.clone())?;
     debug!("poa data not expired");
 
-    // Cheap ownership check before the expensive entropy work in `poa_is_valid`
-    poa_partition_is_owned_by_miner(
-        block.poa.partition_hash,
-        block.miner_address,
-        &parent_epoch_snapshot,
-    )?;
-    // Here as well as in `poa_is_valid`, which trusted sync skips
-    poa_ledger_matches_assignment(&block.poa, &parent_epoch_snapshot)?;
-    debug!(
-        block.hash = ?block.block_hash,
-        block.height = ?block.height,
-        "poa_partition_is_owned_by_miner and poa_ledger_matches_assignment",
-    );
+    // Cheap ownership check before the expensive entropy work in `poa_is_valid`.
+    // Both ownership checks apply from the Echo hardfork on.
+    if config
+        .consensus
+        .hardforks
+        .is_echo_active_at_height(block.height)
+    {
+        poa_partition_is_owned_by_miner(
+            block.poa.partition_hash,
+            block.miner_address,
+            &parent_epoch_snapshot,
+        )?;
+        // Here as well as in `poa_is_valid`, which trusted sync skips
+        poa_ledger_matches_assignment(&block.poa, &parent_epoch_snapshot)?;
+        debug!(
+            block.hash = ?block.block_hash,
+            block.height = ?block.height,
+            "poa_partition_is_owned_by_miner and poa_ledger_matches_assignment",
+        );
+    }
 
     // Check the solution_hash
     solution_hash_is_valid(block, previous_block)?;
@@ -4807,6 +4814,7 @@ pub fn poa_is_valid(
     epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
     miner_address: &IrysAddress,
+    block_height: u64,
 ) -> Result<(), PreValidationError> {
     debug!("PoA validating");
     let poa_chunk_bytes: &[u8] = match &poa.chunk {
@@ -4814,8 +4822,11 @@ pub fn poa_is_valid(
         None => return Err(PreValidationError::PoAChunkMissing),
     };
     poa_chunk_within_configured_len(poa_chunk_bytes, config.chunk_size)?;
-    poa_partition_is_owned_by_miner(poa.partition_hash, *miner_address, epoch_snapshot)?;
-    poa_ledger_matches_assignment(poa, epoch_snapshot)?;
+    // Both ownership checks apply from the Echo hardfork on.
+    if config.hardforks.is_echo_active_at_height(block_height) {
+        poa_partition_is_owned_by_miner(poa.partition_hash, *miner_address, epoch_snapshot)?;
+        poa_ledger_matches_assignment(poa, epoch_snapshot)?;
+    }
     let mut poa_chunk: Vec<u8> = poa_chunk_bytes.to_vec();
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_id)) =
@@ -8197,6 +8208,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             };
 
             let parent_n = hardforks.number_of_ingress_proofs_total_at(parent_ts);
@@ -9370,6 +9382,7 @@ mod tests {
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
+            built.height + 1,
         )
     }
 
@@ -9485,6 +9498,7 @@ mod tests {
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
+            seeded.height + 1,
         )
     }
 
@@ -9651,6 +9665,7 @@ mod tests {
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
+            0,
         )
     }
 
@@ -9917,6 +9932,7 @@ mod tests {
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
+            0,
         );
 
         match poa_valid {
@@ -10647,6 +10663,7 @@ mod commitment_version_tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -10664,6 +10681,7 @@ mod commitment_version_tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                echo: None,
             },
             ..ConsensusConfig::testing()
         }

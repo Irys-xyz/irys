@@ -148,6 +148,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         &epoch_snapshot,
         &config,
         &IrysAddress::ZERO,
+        0,
     );
 
     assert!(matches!(
@@ -192,6 +193,7 @@ fn poa_chunk_longer_than_chunk_size_is_too_long() {
         &EpochSnapshot::default(),
         &config,
         &IrysAddress::ZERO,
+        0,
     );
 
     assert!(
@@ -493,6 +495,7 @@ fn poa_is_valid_rejects_unowned_partition(#[case] kind: UnownedPartition) {
         &epoch_snapshot,
         &config,
         &miner,
+        0,
     );
 
     assert!(
@@ -547,9 +550,69 @@ fn poa_is_valid_accepts_owned_entropy_poa() {
         &epoch_snapshot,
         &config,
         &miner,
+        0,
     );
 
     assert!(matches!(&res, Ok(())), "{res:?}");
+}
+
+/// Before the Echo hardfork activates, `poa_is_valid` does not check partition
+/// ownership, as in 4.1.0: a valid entropy chunk over a partition assigned to
+/// another miner passes. From the activation height on, it is rejected.
+#[test_log::test(test)]
+fn poa_is_valid_checks_ownership_only_from_echo() {
+    let mut config = ConsensusConfig::testing();
+    config.chunk_size = 32;
+    config.entropy_packing_iterations = 1_000;
+    config.hardforks.echo = Some(irys_types::hardfork_config::Echo {
+        activation_height: 1500,
+    });
+    let tmp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+    let (db, block_index_guard, block_tree_guard) = empty_poa_guards(&config, tmp_dir.path());
+    let owner = IrysAddress::random();
+    let miner = IrysAddress::random();
+    let (epoch_snapshot, capacity_hash, _) = ownership_snapshot(owner);
+    let mut chunk = Vec::new();
+    compute_entropy_chunk(
+        miner,
+        0,
+        capacity_hash.into(),
+        config.entropy_packing_iterations,
+        config.chunk_size as usize,
+        &mut chunk,
+        config.chain_id,
+    );
+    let poa = PoaData {
+        partition_chunk_offset: 0,
+        partition_hash: capacity_hash,
+        chunk: Some(Base64(chunk)),
+        ledger_id: None,
+        tx_path: None,
+        data_path: None,
+    };
+    let validate_at = |height: u64| {
+        poa_is_valid(
+            &poa,
+            &block_index_guard,
+            &block_tree_guard,
+            &db,
+            H256::zero(),
+            0,
+            &epoch_snapshot,
+            &config,
+            &miner,
+            height,
+        )
+    };
+
+    let before = validate_at(1499);
+    assert!(matches!(&before, Ok(())), "{before:?}");
+
+    let at = validate_at(1500);
+    assert!(
+        matches!(&at, Err(PreValidationError::PoAPartitionNotOwned { .. })),
+        "{at:?}"
+    );
 }
 
 /// A data PoA must name the ledger its partition is assigned to; the
@@ -580,6 +643,7 @@ fn data_poa_ledger_must_match_partition_assignment() {
         &epoch_snapshot,
         &config,
         &miner,
+        0,
     );
 
     assert!(matches!(
