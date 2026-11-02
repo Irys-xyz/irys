@@ -278,7 +278,7 @@ impl Config {
             self.consensus.num_chunks_in_partition,
             u32::MAX
         );
-        if let Some(resize) = self.consensus.hardforks.estuary {
+        if let Some(resize) = self.consensus.hardforks.fission {
             resize.validate(&self.consensus)?;
         }
         // Zero → genesis capacity math hits log10(0) / NaN during epoch-snapshot build.

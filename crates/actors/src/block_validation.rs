@@ -139,7 +139,7 @@ pub enum PreValidationError {
     #[error("Invalid cumulative_difficulty (expected {expected} got {got})")]
     CumulativeDifficultyMismatch { expected: U256, got: U256 },
     #[error(
-        "data ledgers must stay empty while the Estuary activation is pending: ledger {ledger_id} holds {total_chunks} chunks"
+        "data ledgers must stay empty while the Fission activation is pending: ledger {ledger_id} holds {total_chunks} chunks"
     )]
     DataLedgersNotEmptyWhilePendingResize { ledger_id: u32, total_chunks: u64 },
     #[error("Invalid difficulty (expected {expected} got {got})")]
@@ -2461,7 +2461,7 @@ pub fn check_poa_data_expiration(
     Ok(())
 }
 
-/// While the Estuary activation is pending on this branch the data ledgers
+/// While the Fission activation is pending on this branch the data ledgers
 /// must stay empty: E is validated under this same pending context, so
 /// `PartitionResizeState::activate` can then never fail `NonEmptyLedgers`.
 pub fn data_ledgers_empty_while_pending_resize(
@@ -8257,7 +8257,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
-                estuary: None,
+                fission: None,
             };
 
             let parent_n = hardforks.number_of_ingress_proofs_total_at(parent_ts);
@@ -10719,7 +10719,7 @@ mod commitment_version_tests {
                 cascade: None,
                 delta: None,
                 echo: None,
-                estuary: None,
+                fission: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -10738,7 +10738,7 @@ mod commitment_version_tests {
                 cascade: None,
                 delta: None,
                 echo: None,
-                estuary: None,
+                fission: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -11777,7 +11777,7 @@ mod engine_client_error_tests {
 mod pending_resize_tests {
     use super::*;
     use irys_types::{
-        ConsensusConfig, DataLedger, UnixTimestamp, hardfork_config::Estuary,
+        ConsensusConfig, DataLedger, UnixTimestamp, hardfork_config::Fission,
         partition_resize::PartitionResizeState,
     };
 
@@ -11791,14 +11791,14 @@ mod pending_resize_tests {
         block
     }
 
-    /// Blocks on a branch where Estuary is scheduled but not yet active must
+    /// Blocks on a branch where Fission is scheduled but not yet active must
     /// keep the data ledgers empty; once activated, or never scheduled, the
     /// rule does not apply.
     #[test]
     fn pending_resize_rejects_non_empty_data_ledgers() {
         let mut config = ConsensusConfig::testing();
-        let estuary = Estuary::proposed(UnixTimestamp::from_secs(0));
-        config.hardforks.estuary = Some(estuary);
+        let fission = Fission::proposed(UnixTimestamp::from_secs(0));
+        config.hardforks.fission = Some(fission);
         let pending = EpochConsensusContext::new(&config, None);
         assert!(
             data_ledgers_empty_while_pending_resize(&block_with_submit_chunks(0), &pending).is_ok()
@@ -11814,7 +11814,7 @@ mod pending_resize_tests {
         let activated = EpochConsensusContext::new(
             &config,
             Some(PartitionResizeState {
-                params: estuary,
+                params: fission,
                 activation_height: config.epoch.num_blocks_in_epoch,
                 activation_hash: H256::repeat_byte(7),
                 sampling_origin: 2,

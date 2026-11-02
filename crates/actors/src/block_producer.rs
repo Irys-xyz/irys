@@ -1112,7 +1112,7 @@ pub trait BlockProdStrategy {
             return Ok(None);
         }
 
-        // After Estuary the parent epoch's geometry decides which recall range
+        // After Fission the parent epoch's geometry decides which recall range
         // the solution may come from. Checked before the Reth payload is built.
         if !self
             .solution_fits_partition_geometry(solution, &prev_block_header)
@@ -2178,7 +2178,7 @@ pub trait BlockProdStrategy {
         let (parent_epoch_snapshot, parent_commitment_snapshot) =
             self.fetch_parent_snapshots(prev_block_header)?;
 
-        // While Estuary is scheduled but not yet active on this branch, blocks
+        // While Fission is scheduled but not yet active on this branch, blocks
         // must keep the data ledgers empty (validators enforce the same rule),
         // so activation block E can never fail `NonEmptyLedgers`. The
         // transactions stay in the mempool until activation.

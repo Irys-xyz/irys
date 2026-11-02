@@ -875,8 +875,8 @@ impl ConsensusConfig {
                 echo: Some(Echo {
                     activation_height: 2779313,
                 }),
-                // Estuary hardfork (partition resize) - not scheduled yet
-                estuary: None,
+                // Fission hardfork (partition resize) - not scheduled yet
+                fission: None,
             },
         }
     }
@@ -1025,8 +1025,8 @@ impl ConsensusConfig {
                 echo: Some(Echo {
                     activation_height: 0,
                 }),
-                // Estuary hardfork (partition resize) - not scheduled yet
-                estuary: None,
+                // Fission hardfork (partition resize) - not scheduled yet
+                fission: None,
             },
         }
     }
@@ -1169,8 +1169,8 @@ impl ConsensusConfig {
                 echo: Some(Echo {
                     activation_height: 0,
                 }),
-                // Estuary hardfork (partition resize) - not scheduled yet
-                estuary: None,
+                // Fission hardfork (partition resize) - not scheduled yet
+                fission: None,
             },
         }
     }
@@ -1384,11 +1384,11 @@ mod tests {
             config.hardforks.delta.is_none(),
             "mainnet Delta is unscheduled"
         );
-        // Estuary (partition resize) — unscheduled, like Delta: scheduling it moves the
+        // Fission (partition resize) — unscheduled, like Delta: scheduling it moves the
         // canonical config hash too.
         assert!(
-            config.hardforks.estuary.is_none(),
-            "mainnet Estuary is unscheduled"
+            config.hardforks.fission.is_none(),
+            "mainnet Fission is unscheduled"
         );
     }
 
@@ -1415,11 +1415,11 @@ mod tests {
             config.hardforks.delta.is_none(),
             "testnet Delta is unscheduled"
         );
-        // Estuary (partition resize) — unscheduled, like Delta: scheduling it moves the
+        // Fission (partition resize) — unscheduled, like Delta: scheduling it moves the
         // canonical config hash too.
         assert!(
-            config.hardforks.estuary.is_none(),
-            "testnet Estuary is unscheduled"
+            config.hardforks.fission.is_none(),
+            "testnet Fission is unscheduled"
         );
     }
 

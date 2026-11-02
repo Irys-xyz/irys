@@ -225,7 +225,7 @@ impl PartitionMiningServiceInner {
     }
 
     pub fn with_block_tree(mut self, tree: irys_domain::BlockTreeReadGuard) -> Self {
-        if self.config.consensus.hardforks.estuary.is_some() {
+        if self.config.consensus.hardforks.fission.is_some() {
             self.block_tree = Some(tree);
         }
         self
@@ -239,7 +239,7 @@ impl PartitionMiningServiceInner {
     /// across E and reorgs; the `update_difficulty` broadcast can arrive after
     /// the seed for a step that already mines the resized geometry.
     /// `update_difficulty` remains the only source for miners without a block
-    /// tree (Estuary unconfigured).
+    /// tree (Fission unconfigured).
     fn refresh_mining_context(&mut self) {
         let Some(tree) = &self.block_tree else {
             return;

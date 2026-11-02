@@ -69,7 +69,7 @@ impl RemotePackingStrategy {
         let notify = self.notify.clone();
         let range_end = *current_chunk_range.0.end();
 
-        // `Ok(false)`: the offset is past the logical partition end (Estuary
+        // `Ok(false)`: the offset is past the logical partition end (Fission
         // shrank it mid-stream); stop writing so the tail is not recreated.
         let mut process_chunk = |chunk_bytes: Bytes| -> Result<bool, String> {
             if u64::from(range_start) >= storage_module.partition_chunks() {

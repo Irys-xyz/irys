@@ -1,4 +1,4 @@
-//! Estuary hardfork: partition-resize geometry and deterministic capacity arithmetic.
+//! Fission hardfork: partition-resize geometry and deterministic capacity arithmetic.
 //! These rules are resolved from the parent epoch snapshot, never wall-clock time.
 use crate::{
     ConsensusConfig, H256, IrysBlockHeader, U256, UnixTimestamp,
@@ -52,7 +52,7 @@ impl PartitionGeometry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Estuary {
+pub struct Fission {
     /// Timestamp (seconds since epoch) at which this hardfork activates. Like
     /// Cascade, activation block E is the first positive-height epoch block
     /// whose timestamp meets or exceeds it.
@@ -65,7 +65,7 @@ pub struct Estuary {
     pub minimum_partition_ids: u64,
 }
 
-impl Estuary {
+impl Fission {
     /// The proposed mainnet parameters, activating at `activation_timestamp`.
     /// There is deliberately no `Default`: an implicit activation time would be
     /// a consensus footgun.
@@ -186,7 +186,7 @@ impl Estuary {
 /// Keeping the original inventory floor prevents repeated expansion on later epochs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PartitionResizeState {
-    pub params: Estuary,
+    pub params: Fission,
     pub activation_height: u64,
     pub activation_hash: H256,
     pub sampling_origin: u64,
@@ -196,7 +196,7 @@ pub struct PartitionResizeState {
 
 impl PartitionResizeState {
     pub fn activate(
-        params: Estuary,
+        params: Fission,
         config: &ConsensusConfig,
         block: &IrysBlockHeader,
         inventory: u64,
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn mainnet_partition_resize_arithmetic() -> Result<()> {
         let config = ConsensusConfig::mainnet();
-        let resize = Estuary::proposed(UnixTimestamp::from_secs(0));
+        let resize = Fission::proposed(UnixTimestamp::from_secs(0));
         resize.validate(&config)?;
         assert_eq!(
             resize.partition_chunks * config.chunk_size,
@@ -256,12 +256,12 @@ mod tests {
         Ok(())
     }
 
-    /// Scheduled independently of Delta: Delta alone never activates Estuary.
+    /// Scheduled independently of Delta: Delta alone never activates Fission.
     #[test]
-    fn delta_alone_never_activates_estuary() {
+    fn delta_alone_never_activates_fission() {
         let mut config = ConsensusConfig::testing();
         config.epoch.num_blocks_in_epoch = 6;
-        config.hardforks.estuary = None;
+        config.hardforks.fission = None;
         config.hardforks.delta = Some(crate::hardfork_config::Delta {
             activation_timestamp: UnixTimestamp::from_secs(0),
             initial_slots_per_new_ledger:
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn partition_resize_difficulty_scales_inclusive_winners() {
-        let resize = Estuary::proposed(UnixTimestamp::from_secs(0));
+        let resize = Fission::proposed(UnixTimestamp::from_secs(0));
         for winners in [1_u64, 2, 100, 1_000_000] {
             let diff = U256::MAX - U256::from(winners - 1);
             let new = resize.activation_difficulty(diff, 400);
@@ -291,17 +291,17 @@ mod tests {
     fn partition_resize_rejects_invalid_geometry_and_overflow() {
         let config = ConsensusConfig::mainnet();
         for resize in [
-            Estuary {
+            Fission {
                 recall_chunks: 0,
-                ..Estuary::proposed(UnixTimestamp::from_secs(0))
+                ..Fission::proposed(UnixTimestamp::from_secs(0))
             },
-            Estuary {
+            Fission {
                 partition_chunks: 1,
-                ..Estuary::proposed(UnixTimestamp::from_secs(0))
+                ..Fission::proposed(UnixTimestamp::from_secs(0))
             },
-            Estuary {
+            Fission {
                 target_ingress_bytes_per_second: 0,
-                ..Estuary::proposed(UnixTimestamp::from_secs(0))
+                ..Fission::proposed(UnixTimestamp::from_secs(0))
             },
         ] {
             assert!(resize.validate(&config).is_err());
@@ -310,7 +310,7 @@ mod tests {
         huge.epoch.num_blocks_in_epoch = u64::MAX;
         huge.difficulty_adjustment.block_time = u64::MAX;
         assert!(
-            Estuary::proposed(UnixTimestamp::from_secs(0))
+            Fission::proposed(UnixTimestamp::from_secs(0))
                 .reserve_chunks(&huge)
                 .is_err()
         );

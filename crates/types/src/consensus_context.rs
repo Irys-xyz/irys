@@ -11,7 +11,7 @@
 use crate::{
     AdjustmentStats, ConsensusConfig, DifficultyAdjustmentConfig, IrysBlockHeader, U256,
     UnixTimestamp, UnixTimestampMs, calculate_difficulty,
-    hardfork_config::Estuary,
+    hardfork_config::Fission,
     next_cumulative_diff,
     partition_resize::{PartitionGeometry, PartitionResizeState},
 };
@@ -23,7 +23,7 @@ pub struct EpochConsensusContext {
     resize: Option<PartitionResizeState>,
     /// Fork parameters while configured but not yet activated on this branch:
     /// the next epoch block meeting the timestamp is activation block E.
-    pending: Option<Estuary>,
+    pending: Option<Fission>,
     legacy_geometry: PartitionGeometry,
     num_blocks_in_epoch: u64,
     difficulty: DifficultyAdjustmentConfig,
@@ -35,7 +35,7 @@ impl EpochConsensusContext {
     pub fn new(config: &ConsensusConfig, resize: Option<PartitionResizeState>) -> Self {
         Self {
             resize,
-            pending: config.hardforks.estuary.filter(|_| resize.is_none()),
+            pending: config.hardforks.fission.filter(|_| resize.is_none()),
             legacy_geometry: PartitionGeometry::legacy(config),
             num_blocks_in_epoch: config.epoch.num_blocks_in_epoch,
             difficulty: config.difficulty_adjustment.clone(),
@@ -59,7 +59,7 @@ impl EpochConsensusContext {
         self.resize
     }
 
-    /// Whether the Estuary fork is configured at all (activated on
+    /// Whether the Fission fork is configured at all (activated on
     /// this branch or still pending).
     pub fn resize_configured(&self) -> bool {
         self.resize.is_some() || self.pending.is_some()
@@ -183,12 +183,12 @@ mod tests {
         config.num_chunks_in_partition = 100;
         config.num_chunks_in_recall_range = 10;
         config.epoch.num_blocks_in_epoch = 6;
-        config.hardforks.estuary = Some(Estuary {
+        config.hardforks.fission = Some(Fission {
             partition_chunks: 40,
             recall_chunks: 2,
             target_ingress_bytes_per_second: 32,
             minimum_partition_ids: 0,
-            ..Estuary::proposed(UnixTimestamp::from_secs(10))
+            ..Fission::proposed(UnixTimestamp::from_secs(10))
         });
         config
     }
@@ -219,7 +219,7 @@ mod tests {
     fn activated_context_never_rescales_and_uses_resized_geometry() {
         let config = config();
         let state = PartitionResizeState {
-            params: config.hardforks.estuary.unwrap(),
+            params: config.hardforks.fission.unwrap(),
             activation_height: 6,
             activation_hash: H256::repeat_byte(7),
             sampling_origin: 32,
@@ -283,7 +283,7 @@ mod tests {
         let activated = EpochConsensusContext::new(
             &config,
             Some(PartitionResizeState {
-                params: config.hardforks.estuary.unwrap(),
+                params: config.hardforks.fission.unwrap(),
                 activation_height: 6,
                 activation_hash: H256::repeat_byte(7),
                 sampling_origin: 32,
