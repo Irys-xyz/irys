@@ -273,10 +273,14 @@ impl P2PService {
             started_at,
             consensus_config_hash,
             runtime_handle: self.runtime_handle.clone(),
-            chunk_announce: self
-                .chunk_announce_state
-                .take()
-                .unwrap_or_else(|| Arc::new(crate::chunk_announce::ChunkAnnounceState::new())),
+            chunk_announce: match &self.chunk_announce_state {
+                Some(state) => Arc::clone(state),
+                None => {
+                    let state = Arc::new(crate::chunk_announce::ChunkAnnounceState::new());
+                    self.chunk_announce_state = Some(Arc::clone(&state));
+                    state
+                }
+            },
         });
         let server = GossipServer::new(
             Arc::clone(&gossip_data_handler),
@@ -330,6 +334,9 @@ impl P2PService {
         broadcast_message: GossipBroadcastMessageV2,
         peer_list: &PeerList,
     ) -> GossipResult<()> {
+        if let Some(state) = &self.chunk_announce_state {
+            state.record_broadcast_attempt();
+        }
         // Check if gossip broadcast is enabled
         if !self.sync_state.is_gossip_broadcast_enabled() {
             debug!("Gossip broadcast is disabled, skipping broadcast");

@@ -125,6 +125,8 @@ pub struct ChunkAnnounceState {
     bodies_push: AtomicU64,
     bodies_fetch: AtomicU64,
     announcements_received: AtomicU64,
+    /// `broadcast_data` invocations, including skips when broadcast is off.
+    broadcasts_attempted: AtomicU64,
     pub(crate) fetch_permits: Arc<Semaphore>,
     pub(crate) serve_permits: Arc<Semaphore>,
     /// Fetch tasks for live claims. `None` once `stop_fetches` has run.
@@ -152,6 +154,7 @@ impl ChunkAnnounceState {
             bodies_push: AtomicU64::new(0),
             bodies_fetch: AtomicU64::new(0),
             announcements_received: AtomicU64::new(0),
+            broadcasts_attempted: AtomicU64::new(0),
             fetch_permits: Arc::new(Semaphore::new(limits.max_concurrent_fetches)),
             serve_permits: Arc::new(Semaphore::new(limits.max_concurrent_serves)),
             fetch_tasks: Mutex::new(Some(JoinSet::new())),
@@ -328,6 +331,14 @@ impl ChunkAnnounceState {
 
     pub(crate) fn record_announcement(&self) {
         self.announcements_received.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_broadcast_attempt(&self) {
+        self.broadcasts_attempted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn broadcasts_attempted(&self) -> u64 {
+        self.broadcasts_attempted.load(Ordering::Relaxed)
     }
 
     /// Per-node counters. Tests read these; the OTel counters are shared by

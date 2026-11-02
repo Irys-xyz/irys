@@ -122,7 +122,7 @@ pub const MAX_PERSISTED_QUERY_ENTRIES: usize = 4_096;
 
 /// One chunk a custodian asks an assignee about: a partition-relative offset
 /// in the assignee's slot, and the chunk expected there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedQueryEntry {
     pub offset: u32,

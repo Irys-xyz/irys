@@ -8,6 +8,7 @@ use irys_actors::chunk_fetcher::{
 use irys_domain::{ChunkType, StorageModule};
 use irys_types::{DataLedger, DataRoot, H256, PartitionChunkOffset, TxChunkOffset, ii};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -251,6 +252,16 @@ fn admit_persisted_query(admission: &Arc<Semaphore>) -> Result<OwnedSemaphorePer
     })
 }
 
+/// First-seen exact `(offset, data_root, tx_offset)` triples, in request
+/// order. Same offset with a different identity stays distinct.
+fn unique_persisted_entries(entries: Vec<PersistedQueryEntry>) -> Vec<PersistedQueryEntry> {
+    let mut seen = HashSet::with_capacity(entries.len());
+    entries
+        .into_iter()
+        .filter(|entry| seen.insert(*entry))
+        .collect()
+}
+
 /// Offsets of `entries` that hold a crash-safe placement of exactly the
 /// requested chunk, ascending and unique. `persisted` is
 /// `StorageModule::is_data_chunk_persisted_at`; `indexed` is
@@ -313,7 +324,7 @@ pub async fn post_persisted(
     let assigned = module.is_some();
     let persisted = match module {
         Some(module) => {
-            let entries = entries.into_inner();
+            let entries = unique_persisted_entries(entries.into_inner());
             let permit = admit_persisted_query(&app_state.persisted_query_admission)?;
             // Up to one index point read per entry: keep them off the
             // actix worker. The blocking task owns the permit, because a
@@ -956,6 +967,20 @@ mod tests {
         assert!(
             persisted_offsets(&[asked(0, root, 5)], persisted, indexed).is_empty(),
             "the right root at the wrong tx offset is another chunk"
+        );
+    }
+
+    #[core::prelude::v1::test]
+    fn unique_persisted_entries_keeps_first_seen_identity() {
+        let root = H256::repeat_byte(1);
+        let other = H256::repeat_byte(2);
+        let first = asked(0, root, 0);
+        let same_offset_other_chunk = asked(0, other, 0);
+        let dup = asked(0, root, 0);
+        let later = asked(1, root, 1);
+        assert_eq!(
+            unique_persisted_entries(vec![first, same_offset_other_chunk, dup, later]),
+            vec![first, same_offset_other_chunk, later]
         );
     }
 

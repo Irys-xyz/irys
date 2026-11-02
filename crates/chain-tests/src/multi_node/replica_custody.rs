@@ -33,6 +33,43 @@ fn cached_chunks(node: &IrysNodeTest<IrysNodeCtx>) -> eyre::Result<u64> {
         .0)
 }
 
+/// Wait until `broadcast_data` has run (including skips) and then stayed
+/// idle, so queued chunk messages are not still sitting when broadcast is
+/// turned back on.
+async fn wait_until_broadcasts_idle(
+    peer: &IrysNodeTest<IrysNodeCtx>,
+    idle: Duration,
+    seconds: usize,
+) {
+    let deadline =
+        Instant::now() + Duration::from_secs(u64::try_from(seconds).expect("wait budget fits u64"));
+    let mut last = peer
+        .node_ctx
+        .gossip_data_handler
+        .chunk_announce
+        .broadcasts_attempted();
+    let mut quiet_since = Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let attempted = peer
+            .node_ctx
+            .gossip_data_handler
+            .chunk_announce
+            .broadcasts_attempted();
+        if attempted != last {
+            last = attempted;
+            quiet_since = Instant::now();
+        }
+        if Instant::now().duration_since(quiet_since) >= idle {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "peer broadcast queue did not drain"
+        );
+    }
+}
+
 #[test_log::test(tokio::test)]
 async fn heavy_an_unassigned_uploader_holds_bodies_until_the_assignee_persists_them()
 -> eyre::Result<()> {
@@ -68,7 +105,7 @@ async fn heavy_an_unassigned_uploader_holds_bodies_until_the_assignee_persists_t
         peer.post_chunk_32b(&tx, i, &chunks).await;
     }
     peer.wait_for_chunk_cache_count(3, seconds).await?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_until_broadcasts_idle(&peer, Duration::from_millis(200), seconds).await;
     peer.node_ctx.sync_state.set_gossip_broadcast_enabled(true);
     assert_eq!(data_chunks(&genesis), 0, "genesis has no copy yet");
 
