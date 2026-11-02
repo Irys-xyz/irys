@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793615225881,
+  "lastUpdate": 1793638401758,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20995,6 +20995,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000159,
             "range": "± 0.000016",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7f507228a839114823e74d3a844f51b1b7df8cf2",
+          "message": "fix(validation): require the EVM payload to extend the parent's EVM block (#1760)\n\n* fix(validation): require the EVM payload to build on the parent block's EVM block\n\nReth checks an EVM block only against the EVM parent that its payload\nnames. That parent can be any EVM block that Reth has, also one from\nanother fork. Validation now rejects a block whose EVM payload parent is\nnot the parent block's EVM block.\n\n* fix(validation): check the EVM payload number, hash and parent beacon root\n\nThe EVM block number must equal the block height, and the payload's block\nhash must equal the header's EVM block hash. The payload's parent beacon\nblock root must be the parent block hash, as the producer sets it. Every\nmainnet block since genesis meets all three, so they need no activation\nheight.\n\n* fix(reth-node-bridge): unwind Reth to the tip's EVM block hash\n\nStartup unwound Reth to the block index height, which assumes the EVM\nblock number equals the Irys height. Unwind to the tip's EVM block hash\ninstead, and compare the Reth head with Reth's number for that hash.\n\n* docs(reth-node-bridge): say why the unwind targets the EVM block hash",
+          "timestamp": "2026-11-02T16:34:10Z",
+          "tree_id": "e7b54dfb665074e57d6fe8810ed1d6b21cf6ca25",
+          "url": "https://github.com/Irys-xyz/irys/commit/7f507228a839114823e74d3a844f51b1b7df8cf2"
+        },
+        "date": 1793638398513,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011929,
+            "range": "± 0.000093",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119732,
+            "range": "± 0.001052",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.205004,
+            "range": "± 0.021225",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.875896,
+            "range": "± 0.128921",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074868,
+            "range": "± 0.000621",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 754.691355,
+            "range": "± 6.19189",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 979.653043,
+            "range": "± 11.414828",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.126431,
+            "range": "± 0.004979",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1191.323072,
+            "range": "± 8.688667",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1552.495136,
+            "range": "± 26.255842",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.056064,
+            "range": "± 0.02331",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 241.357787,
+            "range": "± 12.026049",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.272548,
+            "range": "± 1.528544",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
