@@ -5137,6 +5137,57 @@ pub async fn shadow_transactions_are_valid(
         )));
     }
 
+    // The EVM block must build on the parent block's EVM block. Reth checks the
+    // EVM block number and state only against the EVM parent that the payload
+    // names, which can be any EVM block that Reth has, also one from another fork.
+    let parent = crate::block_tree_service::get_block_header(
+        block_tree_guard,
+        db,
+        block.previous_block_hash,
+        false,
+    )
+    .map_err(|e| ValidationError::ShadowTxNodeFault(e.to_string()))?
+    .ok_or(ValidationError::ParentBlockMissing {
+        block_hash: block.previous_block_hash,
+    })?;
+    let payload_parent_hash = payload_v3.payload_inner.payload_inner.parent_hash;
+    if payload_parent_hash != parent.evm_block_hash {
+        return Err(reject(format!(
+            "EVM payload parent {payload_parent_hash} is not the parent block's EVM block {}",
+            parent.evm_block_hash
+        )));
+    }
+
+    // The EVM block number follows the block height. Reth checks only that it is
+    // the EVM parent's number plus one.
+    let payload_block_number = payload_v3.payload_inner.payload_inner.block_number;
+    if payload_block_number != block.height {
+        return Err(reject(format!(
+            "EVM payload number {payload_block_number} is not the block height {}",
+            block.height
+        )));
+    }
+
+    // The payload must be the EVM block that the header names. Reth checks that
+    // the payload's block hash matches its contents.
+    let payload_block_hash = payload_v3.payload_inner.payload_inner.block_hash;
+    if payload_block_hash != block.evm_block_hash {
+        return Err(reject(format!(
+            "EVM payload hash {payload_block_hash} is not the block's EVM block hash {}",
+            block.evm_block_hash
+        )));
+    }
+
+    // The producer sets the parent beacon block root to the parent block hash.
+    // Every mainnet block since genesis does, so this needs no activation height.
+    let expected_root: EvmBlockHash = block.previous_block_hash.into();
+    let payload_root = sidecar.parent_beacon_block_root();
+    if payload_root != Some(expected_root) {
+        return Err(reject(format!(
+            "EVM payload parent beacon block root {payload_root:?} is not the parent block hash {expected_root}"
+        )));
+    }
+
     let evm_block: Block = payload_v3
         .try_into_block()
         .map_err(|e| reject(format!("payload conversion failed: {e}")))?;

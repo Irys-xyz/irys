@@ -1,4 +1,5 @@
 use alloy_evm::EthEvmFactory;
+use alloy_primitives::B256;
 use clap::Parser as _;
 use irys_types::NodeConfig;
 use reth::{beacon_consensus::EthBeaconConsensus, chainspec::EthereumChainSpecParser};
@@ -7,10 +8,16 @@ use reth_cli_commands::stage::unwind::Command;
 use reth_node_ethereum::{EthEvmConfig, EthereumNode};
 use std::sync::Arc;
 
+/// Unwinds reth so that `target` (an EVM block hash) becomes its tip.
+///
+/// Targets by hash, not number. Validation requires an EVM block's number to
+/// equal its Irys block's height, but a database written by an older build can
+/// hold blocks where they differ. Unwinding to the Irys height would then remove
+/// the very EVM block the startup FCU points at.
 pub async fn unwind_to(
     config: &NodeConfig,
     chainspec: Arc<ChainSpec>,
-    height: u64,
+    target: B256,
     runtime: reth::tasks::Runtime,
 ) -> eyre::Result<()> {
     // hack to run unwind - uses standard EthereumNode since unwinding doesn't need Irys-specific logic
@@ -20,7 +27,7 @@ pub async fn unwind_to(
         "--datadir",
         config.reth_data_dir().to_str().unwrap(),
         "to-block",
-        &height.to_string(),
+        &target.to_string(),
     ]);
 
     cmd.env.chain = chainspec.clone();
