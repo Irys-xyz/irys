@@ -2941,13 +2941,17 @@ mod tests {
     /// The stored finalized block can be above the height derived from the index
     /// tip (the tip went down after the fork-choice update that announced it). The
     /// guard must hold at the stored height: a fork parent between the derived and
-    /// the stored height is refused. A stored record that does not match the index
-    /// is refused too, because the guard can then not know which block is final.
+    /// the stored height is refused, and a fork parent at the stored height is
+    /// allowed (the finalized block stays). A stored record that does not match the
+    /// index is refused too, because the guard can then not know which block is final.
     #[rstest::rstest]
-    #[case::fork_parent_below_stored_finalized(true)]
-    #[case::stored_record_not_in_index(false)]
+    #[case::fork_parent_below_stored_finalized(18, true, Some("below the finalized height 20"))]
+    #[case::fork_parent_at_stored_finalized(20, true, None)]
+    #[case::stored_record_not_in_index(18, false, Some("is not in the block index"))]
     fn recover_from_network_partition_holds_at_stored_finalized_block(
+        #[case] fork_parent_height: u64,
         #[case] record_matches_index: bool,
+        #[case] expected_error: Option<&str>,
     ) -> eyre::Result<()> {
         let (db, _db_tmp) = open_db()?;
         let (mut svc, _svc_tmp) = make_service(db.clone());
@@ -2958,7 +2962,6 @@ mod tests {
         // depth_delta = 44, so the derived finalized height is 60 - 44 = 16.
         let latest_indexed = 60_u64;
         let stored_finalized_height = 20_u64;
-        let fork_parent_height = 18_u64;
 
         let mut prev_hash = H256::zero();
         let mut headers = Vec::new();
@@ -3001,14 +3004,17 @@ mod tests {
             }
         }
 
-        let err = svc
-            .recover_from_network_partition(fork_parent_height)
-            .expect_err("the rollback must be refused");
-        let expected = if record_matches_index {
-            "below the finalized height 20"
-        } else {
-            "is not in the block index"
+        let result = svc.recover_from_network_partition(fork_parent_height);
+        let Some(expected) = expected_error else {
+            result.expect("a rollback to the stored finalized block is allowed");
+            assert_eq!(
+                svc.block_index_guard.read().latest_height(),
+                fork_parent_height,
+                "the block index is rolled back to the fork parent"
+            );
+            return Ok(());
         };
+        let err = result.expect_err("the rollback must be refused");
         assert!(
             err.to_string().contains(expected),
             "error must name {expected:?}; got: {err}"

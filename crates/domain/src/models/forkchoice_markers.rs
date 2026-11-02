@@ -4,7 +4,7 @@ use eyre::eyre;
 
 use irys_database::database;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{FinalizedBlock, finalized_block};
+use irys_database::{FinalizedBlock, advance_finalized_block, finalized_block};
 use irys_types::BlockHash;
 use irys_types::BlockHeight;
 use irys_types::DatabaseProvider;
@@ -62,9 +62,14 @@ impl ForkChoiceMarkers {
         let migration_height =
             compute_migration_height(head_height, tree_safe_height, index_safe_height);
         let depth_delta = compute_depth_delta(prune_depth, migration_depth)?;
+        // Never above the index tip: the finalized block is stored before this update
+        // goes to Reth and must be a migrated block when a restart reads it. A tip
+        // jump of more than `block_tree_depth - migration_depth` blocks would
+        // otherwise name a block that migration has not reached yet.
         // Never below the finalized block already sent to Reth: a partition
         // recovery onto a fork that is not taller lowers the index tip.
         let prune_height = compute_prune_height(migration_height, index_safe_height, depth_delta)
+            .min(index_safe_height)
             .max(stored_finalized_height(block_index, database)?);
 
         let head_block = block_at_height(
@@ -141,6 +146,20 @@ impl ForkChoiceMarkers {
             prune_block,
         })
     }
+
+    /// Stores `prune_block` as the [`FinalizedBlock`] record. Call it before these markers
+    /// go to Reth: a restart derives finalized from the block index, whose tip can be
+    /// lower than when the update was sent, and the record keeps the restart from
+    /// announcing, or opening a reorg window below, a lower finalized block.
+    pub fn store_finalized_block(&self, database: &DatabaseProvider) -> Result<()> {
+        let finalized = FinalizedBlock {
+            height: self.prune_block.height,
+            block_hash: self.prune_block.block_hash,
+        };
+        database.update_eyre_at("advance_finalized_block", |tx| {
+            advance_finalized_block(tx, &finalized)
+        })
+    }
 }
 
 /// The stored [`FinalizedBlock`], checked against the block index.
@@ -162,8 +181,9 @@ fn stored_finalized_block(
     if indexed_hash != Some(stored.block_hash) {
         bail!(
             "stored finalized block {}@{} is not in the block index (index has {:?} at that \
-             height, tip {}); the index was rolled back below the finalized block without \
-             `irys-cli rollback-blocks`",
+             height, tip {}); the index was rolled back below the finalized block by \
+             something other than `irys-cli rollback-blocks` (which deletes the record), \
+             or the DB is damaged",
             stored.block_hash,
             stored.height,
             indexed_hash,

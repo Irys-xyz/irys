@@ -2217,6 +2217,9 @@ impl IrysNode {
                 config.consensus.block_tree_depth as usize,
             )?
         };
+        // With no record yet (first start after an upgrade, or after an operator
+        // rollback deleted it), this update is the first finalized block Reth hears of.
+        fcu_markers.store_finalized_block(&irys_db)?;
 
         let (fcu_tx, fcu_rx) = oneshot::channel();
         service_senders

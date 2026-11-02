@@ -695,6 +695,11 @@ where
             let fcu_markers = self.fcu_markers().map_err(|_err| {
                 CriticalBlockPoolError::OtherInternal("FCU marker computation failed".to_string())
             })?;
+            fcu_markers.store_finalized_block(&self.db).map_err(|err| {
+                CriticalBlockPoolError::OtherInternal(format!(
+                    "Failed to store the finalized block before the FCU: {err}"
+                ))
+            })?;
             let head_hash = fcu_markers.head.block_hash;
             let confirmed_hash = fcu_markers.migration_block.block_hash;
             let finalized_hash = fcu_markers.prune_block.block_hash;

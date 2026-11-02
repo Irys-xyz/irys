@@ -1430,16 +1430,8 @@ impl BlockTreeServiceInner {
 
         // Store the finalized block before Reth hears of it. Migration below has not
         // run yet, so a stop before it leaves the block index tip lower than this
-        // update assumes; the restart then derives a lower finalized block. The
-        // stored record keeps the restart from announcing, or reopening a reorg
-        // window below, a lower finalized block.
-        let finalized = irys_database::FinalizedBlock {
-            height: fcu_markers.prune_block.height,
-            block_hash: fcu_markers.prune_block.block_hash,
-        };
-        self.db.update_eyre_at("advance_finalized_block", |tx| {
-            irys_database::advance_finalized_block(tx, &finalized)
-        })?;
+        // update assumes.
+        fcu_markers.store_finalized_block(&self.db)?;
 
         // Emit consensus events
         self.emit_fcu(&fcu_markers).await?;
@@ -2535,6 +2527,37 @@ mod tests {
                 }
             });
             recorded
+        }
+
+        /// Like [`Self::answer_fork_choice_updates`], but while the returned flag is set,
+        /// record each update as accepted and drop its ack, as a node that stops after
+        /// Reth applied the update. The service then returns before `migrate_block`.
+        fn answer_fork_choice_updates_until_stopped(
+            &mut self,
+        ) -> (
+            Arc<Mutex<Vec<ForkChoiceUpdateMessage>>>,
+            Arc<std::sync::atomic::AtomicBool>,
+        ) {
+            let mut reth_service_rx = self
+                .reth_service_rx
+                .take()
+                .expect("Reth service receiver not yet taken");
+            let accepted_updates = Arc::new(Mutex::new(Vec::new()));
+            let stop_before_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let recorder = Arc::clone(&accepted_updates);
+            let stop = Arc::clone(&stop_before_ack);
+            tokio::spawn(async move {
+                while let Some(message) = reth_service_rx.recv().await {
+                    let (message, _span) = message.into_parts();
+                    if let RethServiceMessage::ForkChoice { update, response } = message {
+                        recorder.lock().expect("fork-choice recorder").push(update);
+                        if !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            let _ = response.send(());
+                        }
+                    }
+                }
+            });
+            (accepted_updates, stop_before_ack)
         }
 
         /// The last fork-choice update names the tip as head, and its confirmed and
@@ -4425,6 +4448,89 @@ mod tests {
         );
     }
 
+    /// The tip moves more than `block_tree_depth - migration_depth` blocks in one
+    /// fork-choice update, and the node stops before migration. `head -
+    /// block_tree_depth` is then above the block index tip. The stored finalized
+    /// block must still be a migrated block, so that the restart can start from it.
+    #[tokio::test]
+    async fn finalized_block_is_migrated_after_stop_on_large_tip_jump() {
+        const MIGRATION_DEPTH: u64 = 2;
+        const BLOCK_TREE_DEPTH: u64 = 4;
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let consensus = c.consensus.get_mut();
+            consensus.block_migration_depth = MIGRATION_DEPTH as u32;
+            consensus.block_tree_depth = BLOCK_TREE_DEPTH;
+        });
+        let (accepted_updates, stop_before_ack) = h.answer_fork_choice_updates_until_stopped();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> 1 -> ... -> 8 (canonical tip). The block index holds 0..=6.
+        let old_chain = h
+            .add_validated_chain(
+                &genesis,
+                &[5_100, 5_200, 5_300, 5_400, 5_500, 5_600, 5_700, 5_800],
+            )
+            .await;
+        let old_tip = old_chain.last().expect("old tip").clone();
+        let indexed_height_before_stop = h.inner.block_index_guard.read().latest_height();
+        assert_eq!(indexed_height_before_stop, 6);
+
+        // Each new block above the tip ties a pending block that was added first, so
+        // the tip stays. The third new block is heavier than every block, and the tip
+        // moves three heights at once.
+        let pending_first = h.add_child_block(&old_chain[6], 5_900, false);
+        let tie_first = h.add_child_block(&old_tip, 5_900, true);
+        h.inner
+            .on_block_validation_finished(tie_first.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        let _pending_second = h.add_child_block(&pending_first, 6_000, false);
+        let tie_second = h.add_child_block(&tie_first, 6_000, true);
+        h.inner
+            .on_block_validation_finished(tie_second.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(h.tip(), old_tip.block_hash, "each tie keeps the tip");
+
+        let new_tip = h.add_child_block(&tie_second, 6_100, true);
+        stop_before_ack.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = h
+            .inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect_err("the service returns when the fork-choice ack does not come");
+        assert!(
+            err.to_string().contains("FCU ack"),
+            "the service stops at the fork-choice ack; got: {err}"
+        );
+        assert_eq!(h.tip(), new_tip.block_hash, "the tip moved three heights");
+        assert_eq!(
+            h.inner.block_index_guard.read().latest_height(),
+            indexed_height_before_stop,
+            "migration did not run"
+        );
+
+        let accepted_finalized_hash = accepted_updates
+            .lock()
+            .expect("accepted updates")
+            .last()
+            .expect("Reth accepted the last fork-choice update")
+            .finalized_hash;
+        let block_index = h.inner.block_index_guard.read();
+        let restart_markers = ForkChoiceMarkers::from_index(
+            block_index,
+            &h.inner.db,
+            MIGRATION_DEPTH as usize,
+            BLOCK_TREE_DEPTH as usize,
+        )
+        .expect("the restart starts from the stored finalized block");
+        assert_eq!(
+            restart_markers.prune_block.block_hash, accepted_finalized_hash,
+            "the restart announces the finalized block that Reth accepted"
+        );
+    }
+
     /// A partition recovery onto a heavier fork that is shorter than the old chain
     /// moves the block index tip down. The finalized block sent to Reth before the
     /// reorg must stay final: later fork-choice updates and a restart must not
@@ -4545,30 +4651,7 @@ mod tests {
             consensus.block_tree_depth = BLOCK_TREE_DEPTH;
         });
 
-        // Reth stub: accept each fork-choice update. When `stop_before_ack` is set,
-        // record the update as accepted but drop the ack, as a node that stops after
-        // Reth applied the update. The service then returns before `migrate_block`.
-        let mut reth_service_rx = h.reth_service_rx.take().expect("Reth service receiver");
-        let accepted_updates = Arc::new(Mutex::new(Vec::<ForkChoiceUpdateMessage>::new()));
-        let stop_before_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        {
-            let accepted_updates = Arc::clone(&accepted_updates);
-            let stop_before_ack = Arc::clone(&stop_before_ack);
-            tokio::spawn(async move {
-                while let Some(message) = reth_service_rx.recv().await {
-                    let (message, _span) = message.into_parts();
-                    if let RethServiceMessage::ForkChoice { update, response } = message {
-                        accepted_updates
-                            .lock()
-                            .expect("accepted updates")
-                            .push(update);
-                        if !stop_before_ack.load(std::sync::atomic::Ordering::SeqCst) {
-                            let _ = response.send(());
-                        }
-                    }
-                }
-            });
-        }
+        let (accepted_updates, stop_before_ack) = h.answer_fork_choice_updates_until_stopped();
         h.index_genesis();
         let genesis = h.genesis();
 
