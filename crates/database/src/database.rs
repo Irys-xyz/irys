@@ -2042,6 +2042,78 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
     }
 }
 
+/// The finalized block last sent to the execution layer.
+///
+/// Stored before the fork-choice update that announces it, so a restart can
+/// never announce, or open a reorg window below, a lower finalized block. The
+/// block index derives a finalized height from its tip, but the tip can go down
+/// (a stop between the fork-choice update and migration, or a partition
+/// recovery onto a fork that is not taller). This record cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinalizedBlock {
+    pub height: BlockHeight,
+    pub block_hash: BlockHash,
+}
+
+const FINALIZED_BLOCK_RECORD_LEN: usize = 8 + 32;
+
+/// Reads the [`FinalizedBlock`] record. `None` when no fork-choice update has
+/// stored one yet, or an operator rollback deleted it.
+pub fn finalized_block<T: DbTx>(tx: &T) -> eyre::Result<Option<FinalizedBlock>> {
+    let Some(bytes) = tx.get::<Metadata>(MetadataKey::FinalizedBlock)? else {
+        return Ok(None);
+    };
+    let record: [u8; FINALIZED_BLOCK_RECORD_LEN] = bytes.as_slice().try_into().map_err(|_| {
+        eyre::eyre!(
+            "finalized block record has {} bytes, expected {FINALIZED_BLOCK_RECORD_LEN}",
+            bytes.len()
+        )
+    })?;
+    let (height, block_hash) = record.split_at(8);
+    Ok(Some(FinalizedBlock {
+        height: u64::from_be_bytes(height.try_into().expect("8-byte split")),
+        block_hash: BlockHash::from_slice(block_hash),
+    }))
+}
+
+/// Stores `block` as the [`FinalizedBlock`] record.
+///
+/// The record only advances. The same block again is a no-op. A lower height,
+/// or a different block at the same height, is an error: either means the
+/// caller is about to announce a finalized block that contradicts one it
+/// already announced.
+pub fn advance_finalized_block<T: DbTxMut + DbTx>(
+    tx: &T,
+    block: &FinalizedBlock,
+) -> eyre::Result<()> {
+    if let Some(stored) = finalized_block(tx)? {
+        if stored == *block {
+            return Ok(());
+        }
+        eyre::ensure!(
+            block.height > stored.height,
+            "finalized block would recede or conflict: stored {}@{}, new {}@{}",
+            stored.block_hash,
+            stored.height,
+            block.block_hash,
+            block.height,
+        );
+    }
+    let mut record = Vec::with_capacity(FINALIZED_BLOCK_RECORD_LEN);
+    record.extend_from_slice(&block.height.to_be_bytes());
+    record.extend_from_slice(block.block_hash.as_bytes());
+    tx.put::<Metadata>(MetadataKey::FinalizedBlock, record)?;
+    Ok(())
+}
+
+/// Deletes the [`FinalizedBlock`] record. Only an operator rollback below the
+/// finalized block does this; the node then derives finalized from the block
+/// index again.
+pub fn delete_finalized_block<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
+    tx.delete::<Metadata>(MetadataKey::FinalizedBlock, None)?;
+    Ok(())
+}
+
 /// Resolves the ordered transaction headers of one ledger of a migrated block.
 ///
 /// Fails closed: a tx id with no header row aborts the read rather than yielding a truncated
@@ -2180,6 +2252,64 @@ mod tests {
         tx_header_by_txid,
     };
     use reth_db::mdbx::DatabaseArguments;
+
+    #[test]
+    fn finalized_block_record_only_advances() -> eyre::Result<()> {
+        use super::{
+            FinalizedBlock, advance_finalized_block, delete_finalized_block, finalized_block,
+        };
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(db.view_eyre(finalized_block)?, None);
+
+        let first = FinalizedBlock {
+            height: 5,
+            block_hash: H256::random(),
+        };
+        db.update_eyre(|tx| advance_finalized_block(tx, &first))?;
+        assert_eq!(db.view_eyre(finalized_block)?, Some(first));
+
+        // The same block again is a no-op.
+        db.update_eyre(|tx| advance_finalized_block(tx, &first))?;
+        assert_eq!(db.view_eyre(finalized_block)?, Some(first));
+
+        // A lower height, or another block at the same height, is refused.
+        for refused in [
+            FinalizedBlock {
+                height: 4,
+                block_hash: H256::random(),
+            },
+            FinalizedBlock {
+                height: 5,
+                block_hash: H256::random(),
+            },
+        ] {
+            assert!(
+                db.update_eyre(|tx| advance_finalized_block(tx, &refused))
+                    .is_err(),
+                "{refused:?} must be refused"
+            );
+            assert_eq!(db.view_eyre(finalized_block)?, Some(first));
+        }
+
+        let higher = FinalizedBlock {
+            height: 6,
+            block_hash: H256::random(),
+        };
+        db.update_eyre(|tx| advance_finalized_block(tx, &higher))?;
+        assert_eq!(db.view_eyre(finalized_block)?, Some(higher));
+
+        db.update_eyre(delete_finalized_block)?;
+        assert_eq!(db.view_eyre(finalized_block)?, None);
+        Ok(())
+    }
 
     #[test]
     fn block_stream_log_append_read_prune() -> eyre::Result<()> {
