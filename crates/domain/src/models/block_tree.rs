@@ -18,7 +18,7 @@ use crate::{
     EpochSnapshot, create_ema_snapshot_from_chain_history,
 };
 
-use super::forkchoice_markers::restore_cache_floor;
+use super::forkchoice_markers::{restore_cache_floor, stored_finalized_height};
 
 /// Why a block is being evicted from the block-tree cache.
 ///
@@ -315,6 +315,7 @@ impl BlockTree {
                 block_index.latest_height(),
                 consensus_config.block_tree_depth,
                 u64::from(consensus_config.block_migration_depth),
+                stored_finalized_height(block_index, &db)?,
             );
             let end = block_index.num_blocks();
             let start_block_hash = block_index

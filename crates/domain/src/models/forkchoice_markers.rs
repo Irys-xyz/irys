@@ -4,7 +4,9 @@ use eyre::eyre;
 
 use irys_database::database;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_database::{FinalizedBlock, finalized_block};
 use irys_types::BlockHash;
+use irys_types::BlockHeight;
 use irys_types::DatabaseProvider;
 
 use irys_types::IrysBlockHeader;
@@ -60,7 +62,10 @@ impl ForkChoiceMarkers {
         let migration_height =
             compute_migration_height(head_height, tree_safe_height, index_safe_height);
         let depth_delta = compute_depth_delta(prune_depth, migration_depth)?;
-        let prune_height = compute_prune_height(migration_height, index_safe_height, depth_delta);
+        // Never below the finalized block already sent to Reth: a partition
+        // recovery onto a fork that is not taller lowers the index tip.
+        let prune_height = compute_prune_height(migration_height, index_safe_height, depth_delta)
+            .max(stored_finalized_height(block_index, database)?);
 
         let head_block = block_at_height(
             head_height,
@@ -103,7 +108,9 @@ impl ForkChoiceMarkers {
     /// - `migration_block` mirrors that same entry (the “confirmed” head just before shutdown).
     /// - `prune_block` is `finalized_height(...)` behind that frontier — `block_tree_depth −
     ///   migration_depth` below the tip, equal to `block_tree_depth` below the pre-shutdown head —
-    ///   so the finalized marker aligns with the state before shutdown.
+    ///   or the stored [`FinalizedBlock`] when that is higher. The node can stop after a
+    ///   fork-choice update and before migration moves the index tip, so only the stored record
+    ///   keeps the finalized marker from going down.
     pub fn from_index(
         block_index: &block_index::BlockIndex,
         database: &DatabaseProvider,
@@ -121,7 +128,8 @@ impl ForkChoiceMarkers {
         // finalization. This keeps the finalized we re-announce to reth aligned
         // with the value in effect before shutdown (no recession).
         let prune_height =
-            finalized_height(head_height, prune_depth as u64, migration_depth as u64);
+            finalized_height(head_height, prune_depth as u64, migration_depth as u64)
+                .max(stored_finalized_height(block_index, database)?);
 
         let head_block = marker_from_index_height(block_index, database, head_height)?;
         let migration_block = marker_from_index_height(block_index, database, migration_height)?;
@@ -133,6 +141,44 @@ impl ForkChoiceMarkers {
             prune_block,
         })
     }
+}
+
+/// The stored [`FinalizedBlock`], checked against the block index.
+///
+/// The record must name the indexed block at its height. Partition recovery never truncates
+/// the index below it, and `irys-cli rollback-blocks` deletes it when it rolls back below it.
+/// A mismatch therefore means the index was rolled back some other way, or the DB is damaged;
+/// starting from it could reorg a block that Reth was told is final.
+fn stored_finalized_block(
+    block_index: &block_index::BlockIndex,
+    database: &DatabaseProvider,
+) -> Result<Option<FinalizedBlock>> {
+    let Some(stored) = database.view_eyre(finalized_block)? else {
+        return Ok(None);
+    };
+    let indexed_hash = block_index
+        .get_item(stored.height)
+        .map(|item| item.block_hash);
+    if indexed_hash != Some(stored.block_hash) {
+        bail!(
+            "stored finalized block {}@{} is not in the block index (index has {:?} at that \
+             height, tip {}); the index was rolled back below the finalized block without \
+             `irys-cli rollback-blocks`",
+            stored.block_hash,
+            stored.height,
+            indexed_hash,
+            block_index.latest_height(),
+        );
+    }
+    Ok(Some(stored))
+}
+
+/// Height of [`stored_finalized_block`], or 0 when there is no record.
+pub fn stored_finalized_height(
+    block_index: &block_index::BlockIndex,
+    database: &DatabaseProvider,
+) -> Result<BlockHeight> {
+    Ok(stored_finalized_block(block_index, database)?.map_or(0, |stored| stored.height))
 }
 
 pub(crate) fn block_at_height(
@@ -233,6 +279,10 @@ pub(crate) fn compute_prune_height(
 /// head it is pruned from the tree, and no admissible reorg (whose LCA must live
 /// in the tree) can reach it.
 ///
+/// This is the height derived from the block index. Every caller also takes the
+/// max with [`stored_finalized_height`], because the index tip can go down while
+/// the finalized block already sent to Reth must not.
+///
 /// Anchored to the **confirmed frontier** (the migrated block-index tip), not the
 /// live head: the confirmed frontier persists across a restart, whereas the head
 /// rolls back to it. Because the confirmed frontier sits `migration_depth` behind
@@ -254,9 +304,23 @@ pub fn finalized_height(confirmed_height: u64, block_tree_depth: u64, migration_
 /// same rule a running node's `prune` follows (`head - (block_tree_depth - 1)`).
 /// This equals `finalized_height(..) + 1` once the chain is `block_tree_depth`
 /// deep, and saturates to 0 (keeping genesis) on a young chain.
-pub fn restore_cache_floor(confirmed_tip: u64, block_tree_depth: u64, migration_depth: u64) -> u64 {
+///
+/// The reconstruction is too low when the node stopped between a fork-choice
+/// update and migration: the head was then more than `migration_depth` above the
+/// index tip. So the floor is never below `finalized` (the
+/// [`stored_finalized_height`]). The lowest block in the tree cannot be replaced,
+/// because a fork must branch from a block in the tree, so no fork can replace
+/// the finalized block or any block below it.
+pub fn restore_cache_floor(
+    confirmed_tip: u64,
+    block_tree_depth: u64,
+    migration_depth: u64,
+    finalized: BlockHeight,
+) -> u64 {
     let precrash_head = confirmed_tip.saturating_add(migration_depth);
-    precrash_head.saturating_sub(block_tree_depth.saturating_sub(1))
+    precrash_head
+        .saturating_sub(block_tree_depth.saturating_sub(1))
+        .max(finalized)
 }
 
 #[cfg(test)]
@@ -339,9 +403,9 @@ mod tests {
     /// = 100, so the floor is `100 - (18 - 1)` = 83, matching `finalized_height(94, 18, 6) + 1`.
     #[test]
     fn restore_cache_floor_matches_finalized_height_plus_one_on_deep_chain() {
-        assert_eq!(restore_cache_floor(94, 18, 6), 83);
+        assert_eq!(restore_cache_floor(94, 18, 6, 0), 83);
         assert_eq!(
-            restore_cache_floor(94, 18, 6),
+            restore_cache_floor(94, 18, 6, 0),
             finalized_height(94, 18, 6) + 1
         );
     }
@@ -350,13 +414,35 @@ mod tests {
     /// block_tree_depth, so the floor lands at height 1.
     #[test]
     fn restore_cache_floor_at_exact_boundary() {
-        assert_eq!(restore_cache_floor(12, 18, 6), 1);
+        assert_eq!(restore_cache_floor(12, 18, 6, 0), 1);
     }
 
     /// Young chain: pre-crash head (9 + 6 = 15) is still less than block_tree_depth (18),
     /// so the floor saturates to 0, keeping genesis in the tree.
     #[test]
     fn restore_cache_floor_saturates_to_genesis_on_young_chain() {
-        assert_eq!(restore_cache_floor(9, 18, 6), 0);
+        assert_eq!(restore_cache_floor(9, 18, 6, 0), 0);
+    }
+
+    /// A stop between a fork-choice update and migration leaves the index tip too
+    /// low. The floor then rises to the stored finalized height, so the finalized
+    /// block is the lowest block in the tree and no fork can replace it. A stored
+    /// height at or below the derived floor changes nothing.
+    #[rstest::rstest]
+    #[case::stored_above_derived_floor(7, 4, 1, 6, 6)]
+    #[case::stored_at_index_tip(7, 4, 1, 7, 7)]
+    #[case::stored_below_derived_floor(94, 18, 6, 82, 83)]
+    #[case::no_record(7, 4, 1, 0, 5)]
+    fn restore_cache_floor_never_below_stored_finalized(
+        #[case] confirmed_tip: u64,
+        #[case] block_tree_depth: u64,
+        #[case] migration_depth: u64,
+        #[case] finalized: u64,
+        #[case] expected_floor: u64,
+    ) {
+        assert_eq!(
+            restore_cache_floor(confirmed_tip, block_tree_depth, migration_depth, finalized),
+            expected_floor
+        );
     }
 }

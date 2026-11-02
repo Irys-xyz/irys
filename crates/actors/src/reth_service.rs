@@ -50,6 +50,8 @@ pub enum RethServiceMessage {
 //   block that has left the block tree and is therefore irreversible). On restart the head
 //   rolls back to the confirmed tip, so the startup FCU's `finalized_hash` is
 //   `block_tree_depth - migration_depth` behind `head_hash` (see `ForkChoiceMarkers::from_index`).
+//   It never goes below the stored `irys_database::FinalizedBlock`, which is written before
+//   each FCU, so `finalized_hash` never moves back across a restart or a partition recovery.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ForkChoiceUpdate {
     pub head_hash: B256,
