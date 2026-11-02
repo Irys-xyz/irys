@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793615225881,
+  "lastUpdate": 1793615682853,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -20995,6 +20995,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000159,
             "range": "± 0.000016",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "e3d828a0e0cfec43fee6fd3be6f7f355dc899bab",
+          "message": "fix(validation): require the EVM payload to extend the parent's EVM block",
+          "timestamp": "2026-11-02T10:12:26Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1760/commits/e3d828a0e0cfec43fee6fd3be6f7f355dc899bab"
+        },
+        "date": 1793615681260,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012594,
+            "range": "± 0.000308",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.125366,
+            "range": "± 0.003773",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.270329,
+            "range": "± 0.02138",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.544373,
+            "range": "± 0.458528",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078623,
+            "range": "± 0.001508",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 781.632157,
+            "range": "± 17.254401",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1019.437871,
+            "range": "± 28.635355",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.150848,
+            "range": "± 0.014637",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1548.099557,
+            "range": "± 208.734619",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1531.323276,
+            "range": "± 8.484838",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.03323,
+            "range": "± 0.003058",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.077103,
+            "range": "± 0.886661",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.593353,
+            "range": "± 5.615775",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000118,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
