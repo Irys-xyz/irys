@@ -178,6 +178,7 @@ async fn should_process_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        _cache_dir,
         ..
     } = MockedServices::new(&config);
 
@@ -249,7 +250,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         mempool_stub,
         service_senders,
         vdf_controller,
-        ..
+        _cache_dir,
     } = MockedServices::new(&config);
 
     // Create three blocks in a chain: block1 -> block2 -> block3
@@ -422,7 +423,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         mempool_stub,
         service_senders,
         vdf_controller,
-        ..
+        _cache_dir,
     } = MockedServices::new(&config);
 
     // Create four blocks in a chain: block1 -> block2 -> block3 -> block4
@@ -636,6 +637,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        _cache_dir,
         ..
     } = MockedServices::new(&config);
 
@@ -728,7 +730,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         mempool_stub,
         service_senders,
         vdf_controller,
-        ..
+        _cache_dir,
     } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
@@ -905,6 +907,7 @@ async fn should_not_fast_track_block_already_in_index() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        _cache_dir,
         ..
     } = MockedServices::new(&config);
 

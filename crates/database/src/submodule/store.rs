@@ -901,13 +901,7 @@ fn finish_durable(env: &DatabaseEnv, group: &GroupCommit) -> eyre::Result<()> {
 }
 
 fn sync_env(env: &DatabaseEnv) -> eyre::Result<()> {
-    let tx = env.tx()?;
-    let environment = tx.inner().env().clone();
-    drop(tx);
-    environment
-        .sync(true)
-        .map_err(|err| eyre::eyre!("mdbx env sync: {err}"))?;
-    Ok(())
+    crate::db::sync_mdbx_env(env)
 }
 
 // MDBX-SUBMODULE-INDEX: delete with MdbxSubmoduleStore. This sets MDBX_SAFE_NOSYNC on the submodule index only.

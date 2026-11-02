@@ -12,7 +12,6 @@ use crate::snapshot_output::{
 
 use eyre::{OptionExt as _, bail};
 use irys_chain::utils::load_config;
-use irys_database::DatabaseProvider;
 use irys_database::reth_db::DatabaseEnvKind;
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
@@ -205,8 +204,7 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
         }
         Commands::RollbackBlocks { mode } => {
             let node_config: NodeConfig = load_config()?;
-            let db_env = cli_init_irys_db(DatabaseEnvKind::RW)?;
-            let db = DatabaseProvider::new(db_env.clone(), db_env);
+            let db = cli_init_irys_db(DatabaseEnvKind::RW)?;
 
             let block_index = irys_domain::BlockIndex::new(&node_config, db.clone())?;
 

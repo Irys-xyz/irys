@@ -64,8 +64,8 @@ pub enum DatabaseVersion {
 
     /// Cache DB split migration.
     ///
-    /// Splits the four cache tables (`CachedDataRoots`, `CachedChunksIndex`,
-    /// `CachedChunks`, `IngressProofs`) out of the single MDBX environment at
+    /// Splits the five cache tables (`CachedDataRoots`, `CachedChunksIndex`,
+    /// `CachedChunks`, `CachedIngressLeaves`, `IngressProofs`) out of the single MDBX environment at
     /// `<base>/irys_consensus_data/` into a sibling environment at
     /// `<base>/irys_cache_data/`. The cache environment carries its own
     /// `CacheMetadata` table with an independent `DBSchemaVersion` stamp.

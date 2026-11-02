@@ -205,7 +205,7 @@ impl BackgroundWriter {
                             written += 1;
                         }
                         store_ingress_data_hash(
-                            tx.inner(),
+                            tx,
                             pending.chunk.data_root,
                             self.address,
                             pending.chunk.tx_offset,
@@ -331,13 +331,7 @@ mod tests {
                     ..Default::default()
                 },
             )?;
-            store_ingress_data_hash(
-                tx.inner(),
-                data_root,
-                address,
-                tx_offset,
-                H256::repeat_byte(9),
-            )?;
+            store_ingress_data_hash(tx, data_root, address, tx_offset, H256::repeat_byte(9))?;
             Ok(())
         })?;
 

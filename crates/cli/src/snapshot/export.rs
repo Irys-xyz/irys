@@ -40,17 +40,6 @@ pub(crate) fn run_export(opts: ExportOpts) -> eyre::Result<()> {
     let staging_path = staging.path();
 
     let (effective_schema_version, source_tip) = snapshot_irys_consensus(&opts, staging_path)?;
-    if opts.include_caches && effective_schema_version >= u32::from(irys_types::DatabaseVersion::V4)
-    {
-        let src_path = opts.data_dir.join(IRYS_CACHE_SUBDIR);
-        let cache = open_irys_db_ro(&src_path).context("opening source cache DB")?;
-        copy_mdbx_env(
-            &cache,
-            &staging_path.join(IRYS_CACHE_SUBDIR),
-            opts.copy_flags,
-        )
-        .context("copying Irys cache mdbx")?;
-    }
     copy_block_index(&opts, staging_path)?;
     copy_genesis_files(&opts, staging_path)?;
     let reth_tip = snapshot_reth(&opts, staging_path)?;
@@ -101,6 +90,13 @@ fn snapshot_irys_consensus(opts: &ExportOpts, staging: &Path) -> eyre::Result<(u
 
         let dest = staging.join(IRYS_CONSENSUS_SUBDIR);
         copy_mdbx_env(&src_db, &dest, opts.copy_flags).context("copying Irys consensus mdbx")?;
+
+        if opts.include_caches && schema >= u32::from(irys_types::DatabaseVersion::V4) {
+            let cache_src = opts.data_dir.join(IRYS_CACHE_SUBDIR);
+            let cache = open_irys_db_ro(&cache_src).context("opening source cache DB")?;
+            copy_mdbx_env(&cache, &staging.join(IRYS_CACHE_SUBDIR), opts.copy_flags)
+                .context("copying Irys cache mdbx")?;
+        }
 
         (schema, tip)
     };

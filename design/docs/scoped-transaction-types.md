@@ -73,7 +73,7 @@ See also: [Cache DB Split](cache-db-split.md)
 - `ScopedTxMut<S>` does not deref to `ScopedTx<S>`, so a few helpers that conceptually take a read-only tx (e.g., `cached_data_root_by_data_root` accepting `&ScopedTx<Cache>`) cannot be called directly from inside an `update_cache` closure with `&ScopedTxMut<Cache>`. Affected call sites inline the underlying `tx.get::<T>(...)` rather than synthesize a separate read tx. A `Borrow`-based unification is a possible follow-up.
 - The `.inner()` escape hatch is documented as the only sanctioned cross-scope path. Migration code uses it; runtime code should not.
 - New tables must be tagged with `ConsensusTable` or `CacheTable` in the `impl_*_tables!` invocation. Forgetting either marker yields a compile error at the first scoped call site (no implicit "untagged → no scope" default).
-- `pub fn new` on `ScopedTx` / `ScopedTxMut` is exposed (rather than `pub(crate)`) so that downstream services like `cache_service::prune_data_root_cache` can manually construct a scoped tx when the closure-based `view_cache` / `update_cache` shape does not fit (e.g., async code holding the tx across `.await` points, or code that opens both a cache tx and a consensus tx in the same function).
+- `ScopedTx::new` / `ScopedTxMut::new` are `pub(crate)`. Callers that need a cache read outside an `update_cache` closure use `db.cache().begin_ro()` (as `prune_data_root_cache` does). The `.inner()` escape hatch remains for the V3→V4 migration and the few remaining generic `DbTx` helpers (`cached_ingress_leaf`, `complete_ingress_leaves`, `get_cache_size`, `walk_all`).
 
 ## Source
 

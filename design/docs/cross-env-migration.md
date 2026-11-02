@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-The cache-DB split moves four tables (`CachedDataRoots`, `CachedChunksIndex`, `CachedChunks`, `IngressProofs`) out of the consensus MDBX environment into a sibling cache environment. Existing nodes already have rows in those tables inside their consensus DB; on first startup of the new binary those rows must end up in the cache DB and be removed from the consensus DB.
+The cache-DB split moves five tables (`CachedDataRoots`, `CachedChunksIndex`, `CachedChunks`, `CachedIngressLeaves`, `IngressProofs`) out of the consensus MDBX environment into a sibling cache environment. Existing nodes already have rows in those tables inside their consensus DB; on first startup of the new binary those rows must end up in the cache DB and be removed from the consensus DB.
 
 The existing migration framework (`ensure_db_version_compatible`, sequential `vN_to_vN+1` modules) was built around a single `&DatabaseEnv`. MDBX transactions are env-scoped — there is no native way to commit a write to env A and a write to env B atomically. Naïve single-tx migration was therefore impossible, and any cross-env migration must define crash semantics explicitly.
 
@@ -20,13 +20,14 @@ Extend the migration framework to take both envs:
 pub fn ensure_db_version_compatible(consensus: &DatabaseEnv, cache: &DatabaseEnv) -> eyre::Result<()>;
 ```
 
-Bump `DatabaseVersion::CURRENT` to `V4` and add a `v3_to_v4` migration module that copies each cache table from consensus → cache, then clears the consensus copies. Each table is processed in batches of 10 000 rows in separate per-side transactions:
+Bump `DatabaseVersion::CURRENT` to `V4` and add a `v3_to_v4` migration module that copies each cache table from consensus → cache, then clears the consensus copies. Non-DupSort tables are processed in separate per-side transactions, bounded by 10 000 rows **and** 64 MiB of decoded payload so a full `CachedChunks` cache cannot materialise ~2.5 GiB in one heap batch:
 
-1. **Copy batch** — read up to `BATCH_SIZE` rows from `consensus` starting after the last copied key; write them to `cache`, skipping rows whose key already exists in cache (presence check before `put`).
-2. **Clear consensus** — once a table is fully copied, `tx.clear::<T>` in a single consensus write transaction.
-3. **Stamp** — after all four tables, write `DatabaseVersion::V4` to both `Metadata` (consensus) and `CacheMetadata` (cache).
+1. **Copy batch** — read rows from `consensus` starting after the last copied key until the row or byte cap; write them to `cache`, skipping rows whose key already exists in cache (presence check before `put`). Resume skips use `walker.next().transpose()?` so a cursor error cannot be swallowed.
+2. **Sync cache** — `sync_mdbx_env` on the cache env. Cache defaults to `SafeNoSync`; this fsyncs the copy before consensus is mutated. A sync failure aborts without clearing or stamping.
+3. **Clear consensus** — once a table is fully copied and the cache env has been synced, `tx.clear::<T>` in a single consensus write transaction.
+4. **Stamp** — after all five tables, write `DatabaseVersion::V4` to both `Metadata` (consensus) and `CacheMetadata` (cache).
 
-For DupSort tables (`CachedChunksIndex`, `IngressProofs`), idempotency relies on MDBX `UPSERT` semantics on DupSort sub-tables: `tx.put::<T>(k, v)` is a no-op when the exact `(key, sub_value)` pair already exists. This is verified against the reth-irys fork's MDBX `tx.rs` and removes the need for an explicit per-row "does this (key, sub_value) pair already exist?" cursor lookup.
+For DupSort tables (`CachedChunksIndex`, `CachedIngressLeaves`, `IngressProofs`), the copy still collects the table in one pass (operator cache size bounds it) and idempotency relies on MDBX `UPSERT` semantics: `tx.put::<T>(k, v)` is a no-op when the exact `(key, sub_value)` pair already exists. This is verified against the reth-irys fork's MDBX `tx.rs` and removes the need for an explicit per-row "does this (key, sub_value) pair already exist?" cursor lookup. The same sync-then-clear barrier applies.
 
 The version-stamp matrix on every startup is:
 
@@ -34,6 +35,7 @@ The version-stamp matrix on every startup is:
 |---|---|---|
 | none (fresh) | none | stamp both V4 |
 | V3 | none / V3 | run `v3_to_v4`; stamp both V4 |
+| V3 | V4 | crash between the two stamps: run `v3_to_v4` again (idempotent) and stamp consensus V4 |
 | V4 | V4 | no-op |
 | V4 | none | accept fresh cache (consensus copies already cleared on a prior run, or operator deliberately deleted the cache directory); stamp cache V4 |
 | > V4 | * | error — newer binary required |

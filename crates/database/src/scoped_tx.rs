@@ -196,7 +196,7 @@ pub struct ScopedTxMut<S: DbScope> {
 }
 
 impl<S: DbScope> ScopedTx<S> {
-    pub fn new(inner: <DatabaseEnv as Database>::TX) -> Self {
+    pub(crate) fn new(inner: <DatabaseEnv as Database>::TX) -> Self {
         Self {
             inner,
             _scope: PhantomData,
@@ -225,7 +225,7 @@ impl<S: DbScope> ScopedTx<S> {
 }
 
 impl<S: DbScope> ScopedTxMut<S> {
-    pub fn new(inner: <DatabaseEnv as Database>::TXMut) -> Self {
+    pub(crate) fn new(inner: <DatabaseEnv as Database>::TXMut) -> Self {
         Self {
             inner,
             _scope: PhantomData,

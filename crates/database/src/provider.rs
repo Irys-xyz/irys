@@ -135,6 +135,10 @@ pub struct DatabaseProvider {
 }
 
 impl DatabaseProvider {
+    /// Wrap already-open consensus and cache MDBX environments.
+    ///
+    /// `consensus` and `cache` must be distinct environments. Passing the same
+    /// `Arc` twice makes `cache()` lie (it would be the consensus env).
     pub fn new(consensus: Arc<DatabaseEnv>, cache: Arc<DatabaseEnv>) -> Self {
         Self {
             consensus: Env::new(consensus),

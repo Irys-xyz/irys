@@ -413,14 +413,20 @@ impl InnerCacheTask {
                 }
             }
         }
+        // Unmigrated confirmed CDRs carry a non-empty `block_set` hint and
+        // may still have `expiry_height` if the cache commit lagged. Evicting
+        // on that pre-confirmation TTL would drop roots that persist_metadata
+        // already treated as confirmed.
         let horizon = if all_txs_confirmed {
             match (inclusion_max_height, cached.expiry_height) {
                 (Some(h), _) => Some(h),
                 (None, Some(e)) => Some(e),
                 (None, None) => None,
             }
-        } else {
+        } else if cached.block_set.is_empty() {
             cached.expiry_height
+        } else {
+            None
         };
         let evictable = match (horizon, all_txs_confirmed) {
             (Some(max_height), _) => max_height < prune_height,
@@ -665,7 +671,7 @@ impl InnerCacheTask {
                             "Pruning durably stored cached chunk bodies"
                         );
                         let counts = reclaim_cached_chunks_older_than(
-                            write_tx.inner(),
+                            write_tx,
                             *root,
                             local_address,
                             durable_tx_offsets,
@@ -716,7 +722,7 @@ impl InnerCacheTask {
                             continue;
                         }
                         let pruned = delete_unprotected_cached_chunks_older_than(
-                            write_tx.inner(),
+                            write_tx,
                             *root,
                             offsets,
                             delete_chunks_older_than,
@@ -1193,10 +1199,7 @@ impl InnerCacheTask {
                         batch_chunks = batch_chunks.saturating_add(
                             delete_cached_chunks_by_data_root(write_tx, rec.data_root)?,
                         );
-                        irys_database::delete_ingress_leaves_by_data_root(
-                            write_tx.inner(),
-                            rec.data_root,
-                        )?;
+                        irys_database::delete_ingress_leaves_by_data_root(write_tx, rec.data_root)?;
                         write_tx.delete::<CachedDataRoots>(rec.data_root, None)?;
                         // Fresh values from the write txn, not the scan snapshot,
                         // so post-commit logging reflects what was actually deleted.
@@ -1313,8 +1316,8 @@ impl InnerCacheTask {
     ) -> eyre::Result<TxidScrubAttempt> {
         self.db.update_cache_eyre(|db_tx| {
             // Snapshot canonical tree txids after taking the cache writer lock.
-            // try_read only: blocking
-            // would invert lock order with deep-reorg (tree-write → DB write).
+            // try_read only: blocking would invert lock order with deep-reorg
+            // (tree-write → DB write).
             let tree_set: HashSet<H256> = {
                 let tree = match self.block_tree_guard.try_read() {
                     Ok(tree) => tree,
@@ -2632,7 +2635,7 @@ mod tests {
         if ingress_hash {
             db.update_cache(|wtx| {
                 irys_database::store_ingress_data_hash(
-                    wtx.inner(),
+                    wtx,
                     tx_header.data_root,
                     config.irys_signer().address(),
                     TxChunkOffset::from(0_u32),
@@ -3598,7 +3601,7 @@ mod tests {
             }
             if matches!(label, SlotLabel::OwnData) {
                 irys_database::store_ingress_data_hash(
-                    wtx.inner(),
+                    wtx,
                     data_root,
                     local_address,
                     chunk.tx_offset,
@@ -3809,7 +3812,7 @@ mod tests {
             database::cache_data_root(wtx, &tx_header, None)?;
             database::cache_chunk(wtx, &chunk)?;
             irys_database::store_ingress_data_hash(
-                wtx.inner(),
+                wtx,
                 data_root,
                 local_address,
                 chunk.tx_offset,
@@ -3956,7 +3959,7 @@ mod tests {
                 irys_database::db_cache::CachedChunk::from(&chunk_old),
             )?;
             irys_database::store_ingress_data_hash(
-                wtx.inner(),
+                wtx,
                 tx_header_old.data_root,
                 address,
                 chunk_old.tx_offset,
@@ -4081,14 +4084,14 @@ mod tests {
             database::cache_chunk(wtx, &c0)?;
             database::cache_chunk(wtx, &c1)?;
             database::store_ingress_data_hash(
-                wtx.inner(),
+                wtx,
                 tx_header.data_root,
                 ingress_address,
                 c0.tx_offset,
                 irys_types::generate_ingress_data_hash(&c0.bytes.0, ingress_address),
             )?;
             database::store_ingress_data_hash(
-                wtx.inner(),
+                wtx,
                 tx_header.data_root,
                 ingress_address,
                 c1.tx_offset,
@@ -5648,6 +5651,38 @@ mod tests {
             let consensus_tx = db.tx()?;
             let state = InnerCacheTask::cdr_eviction_state(&consensus_tx, &cached, 100)?;
             assert!(!state.evictable, "revived expiry must veto eviction");
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unmigrated_confirmed_cdr_is_not_evicted_on_expiry_height() -> eyre::Result<()> {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
+
+        let data_root = H256::random();
+        let cdr = CachedDataRoot {
+            data_size: 64,
+            data_size_confirmed: false,
+            txid_set: vec![H256::random()],
+            block_set: vec![H256::random()],
+            expiry_height: Some(1),
+            cached_at: irys_types::UnixTimestamp::now()?,
+        };
+        db.update_cache(|wtx| -> eyre::Result<()> {
+            wtx.put::<CachedDataRoots>(data_root, cdr)?;
+            Ok(())
+        })??;
+
+        db.view_cache_eyre(|tx| {
+            let cached = tx.get::<CachedDataRoots>(data_root)?.expect("cdr");
+            let consensus_tx = db.tx()?;
+            let state = InnerCacheTask::cdr_eviction_state(&consensus_tx, &cached, 100)?;
+            assert!(
+                !state.evictable,
+                "confirmed-but-unmigrated CDR must not evict on expiry_height"
+            );
             Ok(())
         })?;
         Ok(())

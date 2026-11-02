@@ -335,6 +335,8 @@ impl BlockMigrationService {
     /// For reorgs: `blocks_to_clear` contains orphaned fork blocks, `blocks_to_confirm` contains
     /// the new canonical fork blocks. Hint removals and additions share one cache
     /// transaction, after the consensus metadata and stream transaction commits.
+    /// A cache-write failure is logged; the function still returns the committed
+    /// stream frames so live fan-out is not suppressed.
     ///
     /// Invariant established at every cache commit boundary: if a Submit-ledger tx
     /// in `blocks_to_confirm` has a [`CachedDataRoot`] entry, its `block_set`
@@ -542,15 +544,16 @@ impl BlockMigrationService {
 
         // Cache hints may lag consensus across a crash. Canonical metadata and
         // durable stream frames have already committed together; note that commit
-        // before the cache write so a cache failure cannot lose stream dedup state.
-        self.db
+        // before the cache write so a cache failure cannot lose stream dedup
+        // state or skip live stream fan-out. Hint write is best-effort.
+        if let Err(error) = self
+            .db
             .update_cache_eyre_at("persist_metadata", |cache_tx| {
-                let tx = cache_tx.inner();
                 for block in blocks_to_clear {
                     let orphan_block_hash = block.header().block_hash;
                     for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
                         irys_database::remove_data_root_block_set_entry(
-                            tx,
+                            cache_tx,
                             submit_tx.data_root,
                             orphan_block_hash,
                         )?;
@@ -575,14 +578,20 @@ impl BlockMigrationService {
                     let block_hash = block.header().block_hash;
                     for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
                         irys_database::update_data_root_block_set(
-                            tx,
+                            cache_tx,
                             submit_tx.data_root,
                             block_hash,
                         )?;
                     }
                 }
                 Ok(())
-            })?;
+            })
+        {
+            warn!(
+                error = %error,
+                "persist_metadata cache hint write failed; consensus metadata and stream frames already committed"
+            );
+        }
 
         info!(
             cleared_blocks = blocks_to_clear.len(),

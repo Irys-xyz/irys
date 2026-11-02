@@ -714,38 +714,44 @@ pub fn ensure_db_version_compatible(
         None => {
             debug!(
                 "Stamping fresh cache DB as V{}",
-                DatabaseVersion::CURRENT as u32
+                u32::from(DatabaseVersion::CURRENT)
             );
             cache.update_eyre(|tx| {
                 crate::set_cache_database_schema_version(tx, DatabaseVersion::CURRENT)?;
                 Ok(())
             })?;
         }
-        Some(v) if v == DatabaseVersion::CURRENT as u32 => {
-            // Up to date — no-op.
-        }
-        Some(v) if v < DatabaseVersion::CURRENT as u32 => {
-            // The only value < CURRENT that can appear here is one written by
-            // a partial earlier migration. v3_to_v4 above is idempotent and
-            // has just re-run, so stamp CURRENT now.
-            debug!(
-                "Cache DB at V{}, advancing to V{}",
-                v,
-                DatabaseVersion::CURRENT as u32
-            );
-            cache.update_eyre(|tx| {
-                crate::set_cache_database_schema_version(tx, DatabaseVersion::CURRENT)?;
-                Ok(())
-            })?;
-        }
-        Some(v) => {
-            eyre::bail!(
-                "Cache database schema version {} is newer than this binary supports \
-                 (version {}). Use the newer binary or restore from backup.",
-                v,
-                DatabaseVersion::CURRENT as u32
-            );
-        }
+        Some(raw) => match DatabaseVersion::from_u32(raw) {
+            Some(DatabaseVersion::CURRENT) => {}
+            Some(
+                DatabaseVersion::V0
+                | DatabaseVersion::V1
+                | DatabaseVersion::V2
+                | DatabaseVersion::V3,
+            ) => {
+                // Consensus has already reached CURRENT (the loop above returns
+                // only then). An older cache stamp is a partial earlier run or a
+                // cache env that never took a cache-side step; there is none for
+                // these versions, so stamp CURRENT.
+                debug!(
+                    "Cache DB at V{}, advancing to V{}",
+                    raw,
+                    u32::from(DatabaseVersion::CURRENT)
+                );
+                cache.update_eyre(|tx| {
+                    crate::set_cache_database_schema_version(tx, DatabaseVersion::CURRENT)?;
+                    Ok(())
+                })?;
+            }
+            None => {
+                eyre::bail!(
+                    "Cache database schema version {} is newer than this binary supports \
+                     (version {}). Use the newer binary or restore from backup.",
+                    raw,
+                    u32::from(DatabaseVersion::CURRENT)
+                );
+            }
+        },
     }
 
     Ok(())
@@ -758,29 +764,41 @@ pub fn ensure_db_version_compatible(
 /// consensus side. Stamps both envs V4 before returning.
 mod v3_to_v4 {
     use super::*;
+    use crate::db::sync_mdbx_env;
+    use crate::db_cache::CachedChunk;
     use crate::tables::{
         CachedChunks, CachedChunksIndex, CachedDataRoots, CachedIngressLeaves, IngressProofs,
     };
     use reth_db::cursor::DbCursorRO as _;
+    use reth_db::mdbx::Error as MdbxError;
     use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
-    const BATCH_SIZE: usize = 10_000;
+    /// Cap on decoded rows held in one copy batch. Metadata tables hit this
+    /// first; `CachedChunks` is usually stopped earlier by [`BATCH_MAX_BYTES`].
+    const BATCH_MAX_ROWS: usize = 10_000;
+    /// Cap on decoded payload bytes in one copy batch. 10 000 × 256 KiB bodies
+    /// would be ~2.5 GiB; 64 MiB keeps the upgrade path inside operator RAM.
+    const BATCH_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+    fn metadata_row_bytes<V>(_: &V) -> usize {
+        256
+    }
+
+    fn cached_chunk_row_bytes(chunk: &CachedChunk) -> usize {
+        chunk
+            .chunk
+            .as_ref()
+            .map(irys_types::Base64::len)
+            .unwrap_or(0)
+            .saturating_add(chunk.data_path.len())
+    }
 
     pub(super) fn migrate(consensus: &DatabaseEnv, cache: &DatabaseEnv) -> eyre::Result<()> {
-        copy_table::<CachedDataRoots>(consensus, cache)?;
-        clear_consensus::<CachedDataRoots>(consensus)?;
-
-        copy_dup_table::<CachedChunksIndex>(consensus, cache)?;
-        clear_consensus::<CachedChunksIndex>(consensus)?;
-
-        copy_table::<CachedChunks>(consensus, cache)?;
-        clear_consensus::<CachedChunks>(consensus)?;
-
-        copy_dup_table::<CachedIngressLeaves>(consensus, cache)?;
-        clear_consensus::<CachedIngressLeaves>(consensus)?;
-
-        copy_dup_table::<IngressProofs>(consensus, cache)?;
-        clear_consensus::<IngressProofs>(consensus)?;
+        copy_and_clear_table::<CachedDataRoots, _>(consensus, cache, metadata_row_bytes)?;
+        copy_and_clear_dup::<CachedChunksIndex>(consensus, cache)?;
+        copy_and_clear_table::<CachedChunks, _>(consensus, cache, cached_chunk_row_bytes)?;
+        copy_and_clear_dup::<CachedIngressLeaves>(consensus, cache)?;
+        copy_and_clear_dup::<IngressProofs>(consensus, cache)?;
 
         // Stamp both sides V4. The consensus stamp is also written here so that
         // if the process dies between v3_to_v4::migrate and the outer loop
@@ -798,35 +816,100 @@ mod v3_to_v4 {
         Ok(())
     }
 
+    fn copy_and_clear_table<T, F>(
+        consensus: &DatabaseEnv,
+        cache: &DatabaseEnv,
+        payload_bytes: F,
+    ) -> eyre::Result<()>
+    where
+        T: reth_db::table::Table + 'static,
+        T::Key: Clone,
+        F: Fn(&T::Value) -> usize,
+    {
+        copy_table::<T, F>(consensus, cache, payload_bytes)?;
+        sync_mdbx_env(cache)?;
+        clear_consensus::<T>(consensus)
+    }
+
+    fn copy_and_clear_dup<T>(consensus: &DatabaseEnv, cache: &DatabaseEnv) -> eyre::Result<()>
+    where
+        T: reth_db::table::DupSort + 'static,
+        T::Key: Clone,
+        T::Value: Clone,
+    {
+        copy_dup_table::<T>(consensus, cache)?;
+        sync_mdbx_env(cache)?;
+        clear_consensus::<T>(consensus)
+    }
+
     /// Copy a non-dupsort table row-by-row from consensus into cache, skipping
     /// rows already present in cache (idempotent on re-run).
     ///
     /// Returns Ok(0) if the table doesn't exist in the consensus DB (e.g. a
     /// fresh DB that was never opened with the old combined table set).
-    fn copy_table<T>(consensus: &DatabaseEnv, cache: &DatabaseEnv) -> eyre::Result<usize>
+    fn copy_table<T, F>(
+        consensus: &DatabaseEnv,
+        cache: &DatabaseEnv,
+        payload_bytes: F,
+    ) -> eyre::Result<usize>
     where
         T: reth_db::table::Table + 'static,
         T::Key: Clone,
+        F: Fn(&T::Value) -> usize,
+    {
+        copy_table_limited::<T, F>(
+            consensus,
+            cache,
+            BATCH_MAX_ROWS,
+            BATCH_MAX_BYTES,
+            payload_bytes,
+        )
+    }
+
+    pub(super) fn copy_table_limited<T, F>(
+        consensus: &DatabaseEnv,
+        cache: &DatabaseEnv,
+        max_rows: usize,
+        max_bytes: usize,
+        payload_bytes: F,
+    ) -> eyre::Result<usize>
+    where
+        T: reth_db::table::Table + 'static,
+        T::Key: Clone,
+        F: Fn(&T::Value) -> usize,
     {
         let mut total = 0_usize;
         let mut last_key: Option<T::Key> = None;
         loop {
-            // Read up to BATCH_SIZE rows starting after last_key.
             let batch_result: eyre::Result<Vec<(T::Key, T::Value)>> = consensus.view_eyre(|tx| {
                 let mut cursor = tx.cursor_read::<T>()?;
                 let mut walker = match last_key.clone() {
                     Some(ref k) => cursor.walk(Some(k.clone()))?,
                     None => cursor.walk(None)?,
                 };
-                // When resuming, the first element is the resume point itself — skip it.
+                // Inclusive walk: the resume key is the last row of the previous
+                // batch. Propagate cursor errors; a silent skip hid them.
                 if last_key.is_some() {
-                    let _ = walker.next();
+                    walker.next().transpose()?;
                 }
-                let mut out = Vec::with_capacity(BATCH_SIZE);
-                for _ in 0..BATCH_SIZE {
+                let mut out = Vec::new();
+                let mut bytes = 0_usize;
+                loop {
+                    if out.len() >= max_rows {
+                        break;
+                    }
                     match walker.next() {
-                        Some(Ok(row)) => out.push(row),
-                        Some(Err(e)) => return Err(eyre::eyre!(e)),
+                        Some(Ok(row)) => {
+                            let row_bytes = payload_bytes(&row.1);
+                            if !out.is_empty() && bytes.saturating_add(row_bytes) > max_bytes {
+                                // Leave this row for the next batch. The walker is
+                                // dropped; the next read resumes after `last_key`.
+                                break;
+                            }
+                            bytes = bytes.saturating_add(row_bytes);
+                            out.push(row);
+                        }
+                        Some(Err(e)) => return Err(e.into()),
                         None => break,
                     }
                 }
@@ -890,7 +973,7 @@ mod v3_to_v4 {
             let mut cursor = tx.cursor_dup_read::<T>()?;
             let walker = cursor.walk(None)?;
             walker
-                .map(|r| r.map_err(|e| eyre::eyre!(e)))
+                .map(|r| r.map_err(eyre::Error::from))
                 .collect::<eyre::Result<Vec<_>>>()
         });
         let all_rows = match all_rows_result {
@@ -932,11 +1015,15 @@ mod v3_to_v4 {
         }
     }
 
-    /// Returns true if the error indicates a named database doesn't exist in the
-    /// MDBX file (i.e. the table was never created in this environment).
-    fn is_table_open_error(e: &eyre::Error) -> bool {
-        e.downcast_ref::<DatabaseError>()
-            .is_some_and(|db_err| matches!(db_err, DatabaseError::Open(_)))
+    /// True when MDBX reports the named table was never created in this env.
+    /// Other `DatabaseError::Open` causes (corruption, map full, …) must fail
+    /// the migration, not skip the table and stamp V4.
+    pub(super) fn is_table_open_error(e: &eyre::Error) -> bool {
+        e.chain().any(|cause| {
+            cause.downcast_ref::<DatabaseError>().is_some_and(|db_err| {
+                matches!(db_err, DatabaseError::Open(info) if *info == MdbxError::NotFound.into())
+            })
+        })
     }
 }
 
@@ -1856,6 +1943,100 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(kv, DatabaseVersion::V4 as u32);
+        }
+
+        #[test]
+        fn copy_table_resumes_across_small_batches() {
+            use crate::db_cache::CachedDataRoot;
+
+            let (consensus, cache, _c, _k) = open_v3_pair();
+            let keys: Vec<irys_types::H256> = (1_u8..=5)
+                .map(|b| irys_types::H256::from([b; 32]))
+                .collect();
+            consensus
+                .update_eyre(|tx| {
+                    crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
+                    for key in &keys {
+                        tx.put::<CachedDataRoots>(*key, CachedDataRoot::default())?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+
+            let copied = super::super::v3_to_v4::copy_table_limited::<CachedDataRoots, _>(
+                &consensus,
+                &cache,
+                2,
+                usize::MAX,
+                |_| 1,
+            )
+            .unwrap();
+            assert_eq!(copied, 5, "all rows copied across 2-row batches");
+
+            for key in keys {
+                let got = cache
+                    .view(|tx| tx.get::<CachedDataRoots>(key))
+                    .unwrap()
+                    .unwrap();
+                assert!(got.is_some(), "key {key} should be in cache");
+            }
+        }
+
+        #[test]
+        fn dupsort_migration_is_idempotent() {
+            use crate::db_cache::{CachedIngressLeaf, CachedIngressLeafKey};
+            use crate::tables::CachedIngressLeaves;
+
+            let (consensus, cache, _c, _k) = open_v3_pair();
+            let key = CachedIngressLeafKey {
+                data_root: irys_types::H256::from([2_u8; 32]),
+                address: irys_types::IrysAddress::from([3_u8; 20]),
+            };
+            let leaves = [
+                CachedIngressLeaf {
+                    tx_offset: 0.into(),
+                    ingress_data_hash: irys_types::H256::from([4_u8; 32]),
+                },
+                CachedIngressLeaf {
+                    tx_offset: 1.into(),
+                    ingress_data_hash: irys_types::H256::from([5_u8; 32]),
+                },
+            ];
+            consensus
+                .update_eyre(|tx| {
+                    crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
+                    for leaf in leaves {
+                        tx.put::<CachedIngressLeaves>(key, leaf)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+
+            ensure_db_version_compatible(&consensus, &cache).unwrap();
+            ensure_db_version_compatible(&consensus, &cache).unwrap();
+
+            let cache_count = cache
+                .view(|tx| tx.entries::<CachedIngressLeaves>())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                cache_count, 2,
+                "idempotent re-run must not duplicate DupSort rows"
+            );
+        }
+
+        #[test]
+        fn is_table_open_error_matches_mdbx_not_found_only() {
+            use reth_db::mdbx::Error as MdbxError;
+
+            let not_found = eyre::Error::from(DatabaseError::Open(MdbxError::NotFound.into()));
+            assert!(super::super::v3_to_v4::is_table_open_error(&not_found));
+
+            let other_open = eyre::Error::from(DatabaseError::Open(MdbxError::Invalid.into()));
+            assert!(!super::super::v3_to_v4::is_table_open_error(&other_open));
+
+            let decode = eyre::Error::from(DatabaseError::Decode);
+            assert!(!super::super::v3_to_v4::is_table_open_error(&decode));
         }
     }
 }

@@ -47,6 +47,21 @@ fn writer_gate_for(env: &DatabaseEnv) -> &'static Mutex<()> {
         .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
 }
 
+/// Force-sync an MDBX environment to durable storage.
+///
+/// `SafeNoSync` commits do not fsync. Call this after a write that a later
+/// Durable operation on another environment depends on (for example a V3→V4
+/// cache copy that must land before the consensus table is cleared).
+pub fn sync_mdbx_env(env: &DatabaseEnv) -> eyre::Result<()> {
+    let tx = env.tx()?;
+    let environment = tx.inner().env().clone();
+    drop(tx);
+    environment
+        .sync(true)
+        .map_err(|err| eyre::eyre!("mdbx env sync: {err}"))?;
+    Ok(())
+}
+
 /// RAII guard for [`lock_writer_gate`]. Drop to release the gate.
 pub type WriterGateGuard = MutexGuard<'static, ()>;
 
@@ -376,6 +391,11 @@ where
     ))
 }
 
+/// Cache-env accessors on [`crate::DatabaseProvider`].
+///
+/// Import this trait to call `view_cache` / `update_cache` (and the `_eyre`
+/// variants). The methods are an explicit import so cache writes stay a
+/// deliberate choice rather than blending into the consensus `Deref` surface.
 pub trait DatabaseProviderCacheExt {
     fn update_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where

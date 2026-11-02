@@ -18,6 +18,7 @@ use crate::DatabaseProvider;
 use crate::db::{IrysDatabaseExt as _, IrysDupCursorExt};
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
+use crate::scoped_tx::{Cache, ScopedTxMut};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
@@ -86,27 +87,9 @@ mod compact_ingress_leaf_tests {
         // Persist out of order and repeat an offset: exact keys make the
         // duplicate idempotent, but the missing middle position stays incomplete.
         db.update_cache_eyre(|tx| {
-            store_ingress_data_hash(
-                tx.inner(),
-                data_root,
-                address,
-                TxChunkOffset::from(2),
-                hashes[2],
-            )?;
-            store_ingress_data_hash(
-                tx.inner(),
-                data_root,
-                address,
-                TxChunkOffset::from(0),
-                hashes[0],
-            )?;
-            store_ingress_data_hash(
-                tx.inner(),
-                data_root,
-                address,
-                TxChunkOffset::from(0),
-                hashes[0],
-            )?;
+            store_ingress_data_hash(tx, data_root, address, TxChunkOffset::from(2), hashes[2])?;
+            store_ingress_data_hash(tx, data_root, address, TxChunkOffset::from(0), hashes[0])?;
+            store_ingress_data_hash(tx, data_root, address, TxChunkOffset::from(0), hashes[0])?;
             Ok(())
         })?;
         db.view_cache_eyre(|tx| {
@@ -119,13 +102,7 @@ mod compact_ingress_leaf_tests {
         })?;
 
         db.update_cache_eyre(|tx| {
-            store_ingress_data_hash(
-                tx.inner(),
-                data_root,
-                address,
-                TxChunkOffset::from(1),
-                hashes[1],
-            )?;
+            store_ingress_data_hash(tx, data_root, address, TxChunkOffset::from(1), hashes[1])?;
             Ok(())
         })?;
         db.view_cache_eyre(|tx| {
@@ -138,7 +115,7 @@ mod compact_ingress_leaf_tests {
 
         let conflict = db.update_cache_eyre(|tx| {
             store_ingress_data_hash(
-                tx.inner(),
+                tx,
                 data_root,
                 address,
                 TxChunkOffset::from(1),
@@ -209,30 +186,27 @@ mod compact_ingress_leaf_tests {
 
         db.update_cache_eyre(|tx| {
             store_ingress_data_hash(
-                tx.inner(),
+                tx,
                 target_root,
                 first_signer,
                 TxChunkOffset::from(0),
                 H256::random(),
             )?;
             store_ingress_data_hash(
-                tx.inner(),
+                tx,
                 target_root,
                 second_signer,
                 TxChunkOffset::from(1),
                 H256::random(),
             )?;
             store_ingress_data_hash(
-                tx.inner(),
+                tx,
                 other_root,
                 first_signer,
                 TxChunkOffset::from(0),
                 H256::random(),
             )?;
-            assert_eq!(
-                delete_ingress_leaves_by_data_root(tx.inner(), target_root)?,
-                2
-            );
+            assert_eq!(delete_ingress_leaves_by_data_root(tx, target_root)?, 2);
             Ok(())
         })?;
 
@@ -461,7 +435,7 @@ mod compact_ingress_leaf_tests {
             // a legacy cached body.
             assert_eq!(
                 reclaim_cached_chunks_older_than(
-                    tx.inner(),
+                    tx,
                     data_root,
                     address,
                     &BTreeSet::from([tx_offset]),
@@ -487,7 +461,7 @@ mod compact_ingress_leaf_tests {
 
             // A validated hash is not a durability signal either: recording
             // one must never authorize dropping the body by itself.
-            store_ingress_data_hash(tx.inner(), data_root, address, tx_offset, H256::random())?;
+            store_ingress_data_hash(tx, data_root, address, tx_offset, H256::random())?;
             assert_eq!(
                 delete_reclaimable_cached_chunks_older_than(
                     tx,
@@ -516,7 +490,7 @@ mod compact_ingress_leaf_tests {
             // Durable, but not yet older than the age threshold.
             assert_eq!(
                 reclaim_cached_chunks_older_than(
-                    tx.inner(),
+                    tx,
                     data_root,
                     address,
                     &BTreeSet::from([tx_offset]),
@@ -529,7 +503,7 @@ mod compact_ingress_leaf_tests {
             );
             assert_eq!(
                 reclaim_cached_chunks_older_than(
-                    tx.inner(),
+                    tx,
                     data_root,
                     address,
                     &BTreeSet::new(),
@@ -1208,8 +1182,8 @@ pub fn cached_data_root_by_data_root(
 /// the pre-confirmation expiry is dropped.  No warn arm needed.
 ///
 /// Returns `true` if the row was modified.
-pub fn update_data_root_block_set<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn update_data_root_block_set(
+    tx: &ScopedTxMut<Cache>,
     data_root: DataRoot,
     block_hash: H256,
 ) -> eyre::Result<bool> {
@@ -1238,8 +1212,8 @@ pub fn update_data_root_block_set<T: DbTx + DbTxMut>(
 /// re-anchoring of an orphaned tx is handled by the mempool reorg path.
 ///
 /// Returns `true` if the row was modified.
-pub fn remove_data_root_block_set_entry<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn remove_data_root_block_set_entry(
+    tx: &ScopedTxMut<Cache>,
     data_root: DataRoot,
     block_hash: H256,
 ) -> eyre::Result<bool> {
@@ -1478,8 +1452,8 @@ where
 /// includes the signer address, so a key change cannot silently reuse hashes
 /// derived for another miner. Recording a hash never authorizes cached-body eviction; see
 /// [`delete_reclaimable_cached_chunks_older_than`].
-pub fn store_ingress_data_hash<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn store_ingress_data_hash(
+    tx: &ScopedTxMut<Cache>,
     data_root: DataRoot,
     address: IrysAddress,
     tx_offset: TxChunkOffset,
@@ -1630,13 +1604,7 @@ pub fn backfill_cached_ingress_data_hashes(
             {
                 continue;
             }
-            store_ingress_data_hash(
-                tx.inner(),
-                *data_root,
-                address,
-                *tx_offset,
-                *ingress_data_hash,
-            )?;
+            store_ingress_data_hash(tx, *data_root, address, *tx_offset, *ingress_data_hash)?;
             inserted_roots.insert(*data_root);
         }
         Ok(inserted_roots)
@@ -1646,8 +1614,8 @@ pub fn backfill_cached_ingress_data_hashes(
 }
 
 /// Deletes every compact leaf associated with a data root, across signer keys.
-pub fn delete_ingress_leaves_by_data_root<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn delete_ingress_leaves_by_data_root(
+    tx: &ScopedTxMut<Cache>,
     data_root: DataRoot,
 ) -> eyre::Result<u64> {
     let start = CachedIngressLeafKey {
@@ -1704,14 +1672,8 @@ pub fn delete_reclaimable_cached_chunks_older_than(
     durable_tx_offsets: &BTreeSet<TxChunkOffset>,
     older_than: UnixTimestamp,
 ) -> eyre::Result<u64> {
-    reclaim_cached_chunks_older_than(
-        tx.inner(),
-        data_root,
-        address,
-        durable_tx_offsets,
-        older_than,
-    )
-    .map(|counts| counts.deleted)
+    reclaim_cached_chunks_older_than(tx, data_root, address, durable_tx_offsets, older_than)
+        .map(|counts| counts.deleted)
 }
 
 /// What [`reclaim_cached_chunks_older_than`] did with the bodies of one root
@@ -1729,8 +1691,8 @@ pub struct ReclaimCounts {
 
 /// [`delete_reclaimable_cached_chunks_older_than`], reporting why each
 /// durable body was kept or deleted.
-pub fn reclaim_cached_chunks_older_than<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn reclaim_cached_chunks_older_than(
+    tx: &ScopedTxMut<Cache>,
     data_root: DataRoot,
     address: IrysAddress,
     durable_tx_offsets: &BTreeSet<TxChunkOffset>,
@@ -1768,8 +1730,8 @@ pub fn reclaim_cached_chunks_older_than<T: DbTx + DbTxMut>(
 /// Capacity-prunes bodies of `tx_offsets` older than `older_than`, with no
 /// durability or ingress-hash gate. Only for chunks this node is neither
 /// assigned to store nor proving: their only copy is not here.
-pub fn delete_unprotected_cached_chunks_older_than<T: DbTxMut>(
-    tx: &T,
+pub fn delete_unprotected_cached_chunks_older_than(
+    tx: &ScopedTxMut<Cache>,
     data_root: DataRoot,
     tx_offsets: &BTreeSet<TxChunkOffset>,
     older_than: UnixTimestamp,
@@ -2326,7 +2288,7 @@ pub fn set_cache_database_schema_version<T: DbTxMut>(
 ) -> Result<(), DatabaseError> {
     tx.put::<CacheMetadata>(
         MetadataKey::DBSchemaVersion,
-        (version as u32).to_le_bytes().to_vec(),
+        u32::from(version).to_le_bytes().to_vec(),
     )
 }
 
@@ -3458,7 +3420,7 @@ mod tests {
             let (db, _tmp) = open_db();
             let res = db
                 .update_cache_eyre(|tx| {
-                    update_data_root_block_set(tx.inner(), H256::random(), H256::random())
+                    update_data_root_block_set(tx, H256::random(), H256::random())
                 })
                 .unwrap();
             assert!(!res, "missing CDR must be a no-op returning false");
@@ -3473,7 +3435,7 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![], Some(42));
 
             let res = db
-                .update_cache_eyre(|tx| update_data_root_block_set(tx.inner(), data_root, new_hash))
+                .update_cache_eyre(|tx| update_data_root_block_set(tx, data_root, new_hash))
                 .unwrap();
             assert!(res, "append + clear-expiry must report a modification");
 
@@ -3491,9 +3453,7 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![existing_hash], None);
 
             let res = db
-                .update_cache_eyre(|tx| {
-                    update_data_root_block_set(tx.inner(), data_root, existing_hash)
-                })
+                .update_cache_eyre(|tx| update_data_root_block_set(tx, data_root, existing_hash))
                 .unwrap();
             assert!(
                 !res,
@@ -3513,9 +3473,7 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![existing_hash], Some(99));
 
             let res = db
-                .update_cache_eyre(|tx| {
-                    update_data_root_block_set(tx.inner(), data_root, existing_hash)
-                })
+                .update_cache_eyre(|tx| update_data_root_block_set(tx, data_root, existing_hash))
                 .unwrap();
             assert!(res, "modification reported when expiry is cleared");
 
@@ -3529,7 +3487,7 @@ mod tests {
             let (db, _tmp) = open_db();
             let res = db
                 .update_cache_eyre(|tx| {
-                    remove_data_root_block_set_entry(tx.inner(), H256::random(), H256::random())
+                    remove_data_root_block_set_entry(tx, H256::random(), H256::random())
                 })
                 .unwrap();
             assert!(!res, "missing CDR must be a no-op returning false");
@@ -3545,7 +3503,7 @@ mod tests {
 
             let res = db
                 .update_cache_eyre(|tx| {
-                    remove_data_root_block_set_entry(tx.inner(), data_root, H256::random())
+                    remove_data_root_block_set_entry(tx, data_root, H256::random())
                 })
                 .unwrap();
             assert!(!res, "hash not in block_set must be a no-op");
@@ -3572,7 +3530,7 @@ mod tests {
 
             let res = db
                 .update_cache_eyre(|tx| {
-                    remove_data_root_block_set_entry(tx.inner(), data_root, target_hash)
+                    remove_data_root_block_set_entry(tx, data_root, target_hash)
                 })
                 .unwrap();
             assert!(res, "hash present must report a modification");
@@ -3600,9 +3558,7 @@ mod tests {
             seed_cdr(&db, data_root, tx_id, vec![only_hash], None);
 
             let res = db
-                .update_cache_eyre(|tx| {
-                    remove_data_root_block_set_entry(tx.inner(), data_root, only_hash)
-                })
+                .update_cache_eyre(|tx| remove_data_root_block_set_entry(tx, data_root, only_hash))
                 .unwrap();
             assert!(res, "hash present must report a modification");
 
@@ -3626,6 +3582,7 @@ mod tests {
                 CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedIngressLeaf,
                 CachedIngressLeafKey,
             },
+            scoped_tx::{Cache, ScopedTxMut},
             tables::{CachedChunksIndex, CachedIngressLeaves},
         };
         use irys_types::{ChunkPathHash, DataRoot, IrysAddress, TxChunkOffset, UnixTimestamp};
@@ -3756,7 +3713,7 @@ mod tests {
             // Offset 7 is not durable: neither deleted nor counted.
             let durable: BTreeSet<TxChunkOffset> = (0..7).map(offset).collect();
 
-            let tx = db.tx_mut().unwrap();
+            let tx = ScopedTxMut::<Cache>::new(db.tx_mut().unwrap());
             let counts = reclaim_cached_chunks_older_than(
                 &tx,
                 data_root,
@@ -3802,7 +3759,7 @@ mod tests {
             let prune_set: BTreeSet<TxChunkOffset> =
                 [0, 1, 2, 4, 5, 6].into_iter().map(offset).collect();
 
-            let tx = db.tx_mut().unwrap();
+            let tx = ScopedTxMut::<Cache>::new(db.tx_mut().unwrap());
             let pruned = delete_unprotected_cached_chunks_older_than(
                 &tx,
                 data_root,
@@ -3831,7 +3788,7 @@ mod tests {
             seed(&db, data_root, address, &rows);
             let durable: BTreeSet<TxChunkOffset> = (0..MANY).map(offset).collect();
 
-            let tx = db.tx_mut().unwrap();
+            let tx = ScopedTxMut::<Cache>::new(db.tx_mut().unwrap());
             let counts = reclaim_cached_chunks_older_than(
                 &tx,
                 data_root,
@@ -3860,7 +3817,7 @@ mod tests {
             seed(&db, data_root, address, &rows);
             let prune_set: BTreeSet<TxChunkOffset> = (0..MANY).map(offset).collect();
 
-            let tx = db.tx_mut().unwrap();
+            let tx = ScopedTxMut::<Cache>::new(db.tx_mut().unwrap());
             let pruned = delete_unprotected_cached_chunks_older_than(
                 &tx,
                 data_root,
