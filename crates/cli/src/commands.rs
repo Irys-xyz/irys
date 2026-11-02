@@ -274,6 +274,19 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
 
             irys_database::delete_block_index_range(&rw_tx, (target_height + 1)..=latest)?;
 
+            // A rollback below the finalized block rewinds finality. The node refuses
+            // to start with a finalized block that is not in the index, so delete the
+            // record; the node then derives finalized from the index again.
+            if let Some(finalized) = irys_database::finalized_block(&rw_tx)?
+                && finalized.height > target_height
+            {
+                warn!(
+                    "Rolling back below finalized block {}@{}; deleting the finalized block record",
+                    &finalized.block_hash, finalized.height
+                );
+                irys_database::delete_finalized_block(&rw_tx)?;
+            }
+
             use irys_database::reth_db::transaction::DbTx as _;
             rw_tx.commit()?;
 
