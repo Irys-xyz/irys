@@ -335,7 +335,11 @@ impl InnerCacheTask {
         }
 
         // Last: the restore sweep must not delay the reclaim that frees space.
-        self.restore_submit_ingress_proofs()
+        // A failed sweep must not fail the pass: reclaim has already committed.
+        if let Err(error) = self.restore_submit_ingress_proofs() {
+            warn!(?error, "Ingress proof restore sweep failed");
+        }
+        Ok(())
     }
 
     /// True when this node's own ingress proof for `data_root` is present.
