@@ -1223,6 +1223,33 @@ impl BlockTreeServiceInner {
             return Err(e);
         }
 
+        // A reorg orphans migrated blocks when its fork point is below the block index
+        // tip. Compare heights, not the old fork length with `migration_depth`: the
+        // index tip is `migration_depth` below the old tip only in steady state, and is
+        // at the old tip after a restart.
+        //
+        // Roll the index back before `mark_tip`, so a refusal (a fork point below the
+        // finalized block) leaves the tree as it was, and the fork-choice markers and
+        // migration below read the rolled-back index.
+        let indexed_height = self.block_index_guard.read().latest_height();
+        if is_reorg && fork_height < indexed_height {
+            error!(
+                fork_height,
+                indexed_height,
+                old_fork_depth = split.old_divergent.len(),
+                new_fork_depth = split.new_divergent.len(),
+                current_height = new_tip.height,
+                "NETWORK PARTITION RECOVERY: this node was isolated from the network \
+                 and fell behind the canonical chain. Deep reorg rolling back {} \
+                 migrated blocks. Investigate peer connectivity — check firewall \
+                 rules, network routes, and gossip health between this node and \
+                 its peers.",
+                indexed_height - fork_height,
+            );
+            self.block_migration_service
+                .recover_from_network_partition(fork_height)?;
+        }
+
         let changed = cache.mark_tip(&candidate)?;
         debug!(
             block.hash = %candidate,
@@ -1270,31 +1297,6 @@ impl BlockTreeServiceInner {
                 old_fork_blocks.len(),
                 new_fork_blocks.len()
             );
-
-            // Migration for the current tick hasn't run yet (it happens after
-            // this reorg path, in migrate_block()). The highest migrated block is
-            // at old_tip - migration_depth, from the previous tick's migration.
-            // old_fork_blocks excludes the fork point (common ancestor), so a
-            // migrated block is orphaned only when the fork is strictly deeper
-            // than migration_depth.
-            if old_fork_blocks.len() as u32 > self.config.consensus.block_migration_depth {
-                error!(
-                    fork_depth = old_fork_blocks.len(),
-                    new_fork_depth = new_fork_blocks.len(),
-                    fork_height,
-                    current_height = new_tip.height,
-                    "NETWORK PARTITION RECOVERY: this node was isolated from the network \
-                     and fell behind the canonical chain. Deep reorg rolling back {} \
-                     migrated blocks. Investigate peer connectivity — check firewall \
-                     rules, network routes, and gossip health between this node and \
-                     its peers.",
-                    old_fork_blocks.len() as u32 - self.config.consensus.block_migration_depth,
-                );
-                // Roll back blocks migrated on the minority fork before
-                // proceeding with the new canonical chain.
-                self.block_migration_service
-                    .recover_from_network_partition(fork_height)?;
-            }
 
             metrics::record_reorg();
             metrics::record_reorg_depth(u64::try_from(old_fork_blocks.len()).unwrap_or(0));
@@ -4579,7 +4581,8 @@ mod tests {
         );
 
         // A heavier one-block fork from block 6 abandons the migrated blocks 7..=9.
-        // Recovery truncates the block index to 6 and migration moves it to 7.
+        // Recovery truncates the block index to 6, which is `migration_depth` below
+        // the new tip, so migration does not move it.
         let new_tip = h.add_child_block(&old_chain[5], 6_100, true);
         h.inner
             .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
@@ -4588,8 +4591,9 @@ mod tests {
         assert_eq!(h.tip(), new_tip.block_hash);
         let indexed_height = h.inner.block_index_guard.read().latest_height();
         assert_eq!(
-            indexed_height, new_tip.height,
-            "recovery moved the index down"
+            indexed_height,
+            new_tip.height - MIGRATION_DEPTH,
+            "recovery moved the index down to the fork point"
         );
 
         // The next tip move must keep the finalized block.
@@ -4624,6 +4628,127 @@ mod tests {
             restored_tree_floor >= finalized_before_reorg.height,
             "restored tree floor {restored_tree_floor} lets a fork replace finalized block {}",
             finalized_before_reorg.height,
+        );
+    }
+
+    /// After a recovery onto a heavier fork that is shorter than the old chain, a
+    /// one-block reorg of the new tip must migrate the new chain. The recovery must
+    /// leave the block index `migration_depth` below the new tip, not at it.
+    #[tokio::test]
+    async fn shallow_reorg_after_recovery_onto_shorter_fork_migrates_the_new_chain() {
+        const MIGRATION_DEPTH: u64 = 1;
+        const BLOCK_TREE_DEPTH: u64 = 5;
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let consensus = c.consensus.get_mut();
+            consensus.block_migration_depth = MIGRATION_DEPTH as u32;
+            consensus.block_tree_depth = BLOCK_TREE_DEPTH;
+        });
+        // The block index roll back reads the storage modules; this node has none.
+        h.inner
+            .block_migration_service
+            .set_storage_modules_guard(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![]))));
+        let _fork_choice_updates = h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> 1 -> ... -> 10 (canonical tip). The block index holds 0..=9.
+        let old_chain = h
+            .add_validated_chain(
+                &genesis,
+                &[
+                    5_100, 5_200, 5_300, 5_400, 5_500, 5_600, 5_700, 5_800, 5_900, 6_000,
+                ],
+            )
+            .await;
+
+        // A heavier one-block fork from block 6 abandons the migrated blocks 7..=9.
+        let fork_point = &old_chain[5];
+        let recovery_tip = h.add_child_block(fork_point, 6_100, true);
+        h.inner
+            .on_block_validation_finished(recovery_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("the recovery completes");
+
+        // A heavier sibling of the recovery tip replaces it.
+        let sibling = h.add_child_block(fork_point, 6_150, true);
+        h.inner
+            .on_block_validation_finished(sibling.block_hash, ValidationResult::Valid)
+            .await
+            .expect("the one-block reorg completes");
+        assert_eq!(h.tip(), sibling.block_hash);
+
+        // The next block migrates the sibling.
+        let next_tip = h.add_validated_chain(&sibling, &[6_250]).await;
+        assert_eq!(h.tip(), next_tip[0].block_hash);
+        let indexed = h.indexed_block_hashes();
+        assert_eq!(
+            indexed.last(),
+            Some(&sibling.block_hash),
+            "the block index ends at the sibling"
+        );
+        assert_eq!(indexed[fork_point.height as usize], fork_point.block_hash);
+    }
+
+    /// The block index tip is at the tree tip, as after a restart (the head rolls back
+    /// to the index tip). A one-block reorg then orphans a migrated block, although the
+    /// old fork is not longer than `migration_depth`. The reorg must roll the block
+    /// index back to the fork point and migrate the new chain.
+    #[tokio::test]
+    async fn shallow_reorg_of_migrated_tip_rolls_back_the_block_index() {
+        const MIGRATION_DEPTH: u64 = 1;
+        const BLOCK_TREE_DEPTH: u64 = 5;
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let consensus = c.consensus.get_mut();
+            consensus.block_migration_depth = MIGRATION_DEPTH as u32;
+            consensus.block_tree_depth = BLOCK_TREE_DEPTH;
+        });
+        // The block index roll back reads the storage modules; this node has none.
+        h.inner
+            .block_migration_service
+            .set_storage_modules_guard(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![]))));
+        let _fork_choice_updates = h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> 1 -> ... -> 10 (canonical tip), then migrate the tip too.
+        let old_chain = h
+            .add_validated_chain(
+                &genesis,
+                &[
+                    5_100, 5_200, 5_300, 5_400, 5_500, 5_600, 5_700, 5_800, 5_900, 6_000,
+                ],
+            )
+            .await;
+        let old_tip = &old_chain[9];
+        h.inner
+            .migrate_block(&Arc::new(old_tip.clone()))
+            .expect("migrate the tip");
+        assert_eq!(
+            h.inner.block_index_guard.read().latest_height(),
+            old_tip.height
+        );
+
+        // A heavier sibling of the tip orphans the migrated tip.
+        let fork_point = &old_chain[8];
+        let sibling = h.add_child_block(fork_point, 6_100, true);
+        h.inner
+            .on_block_validation_finished(sibling.block_hash, ValidationResult::Valid)
+            .await
+            .expect("the one-block reorg completes");
+        assert_eq!(h.tip(), sibling.block_hash);
+        assert_eq!(
+            h.indexed_block_hashes().last(),
+            Some(&fork_point.block_hash),
+            "the reorg rolled the block index back to the fork point"
+        );
+
+        // The next block migrates the sibling.
+        let next_tip = h.add_validated_chain(&sibling, &[6_200]).await;
+        assert_eq!(h.tip(), next_tip[0].block_hash);
+        assert_eq!(
+            h.indexed_block_hashes().last(),
+            Some(&sibling.block_hash),
+            "the block index ends at the sibling"
         );
     }
 
