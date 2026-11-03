@@ -238,7 +238,9 @@ pub async fn run_node(
                  on disk is {reth_disk_tip_height}. Reth made these blocks canonical but did not \
                  write them to disk before the node stopped (crash, kill or power loss). Roll the \
                  block index back to Reth's disk tip with `irys-cli rollback-blocks to-block \
-                 {reth_disk_tip_height}`, then restart; the node syncs the rest from its peers."
+                 {reth_disk_tip_height}`, then restart; the node syncs the rest from its peers. If \
+                 the next start stops with this error at the same height, the block index holds \
+                 another fork there: roll back further."
             )));
         }
         return Err(e);
