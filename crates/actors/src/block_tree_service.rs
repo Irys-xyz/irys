@@ -1231,8 +1231,12 @@ impl BlockTreeServiceInner {
         // Roll the index back before `mark_tip`, so a refusal (a fork point below the
         // finalized block) leaves the tree as it was, and the fork-choice markers and
         // migration below read the rolled-back index.
-        let indexed_height = self.block_index_guard.read().latest_height();
-        if is_reorg && fork_height < indexed_height {
+        // A read error must not look like an empty index, which would skip the roll back.
+        let indexed_height = self.block_index_guard.read().try_latest_height()?;
+        if let Some(indexed_height) = indexed_height
+            && is_reorg
+            && fork_height < indexed_height
+        {
             error!(
                 fork_height,
                 indexed_height,

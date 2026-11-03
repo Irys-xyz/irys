@@ -4,7 +4,9 @@ use eyre::eyre;
 
 use irys_database::database;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{FinalizedBlock, advance_finalized_block, finalized_block};
+use irys_database::{
+    FinalizedBlock, advance_finalized_block, block_index_hash_by_height, finalized_block,
+};
 use irys_types::BlockHash;
 use irys_types::BlockHeight;
 use irys_types::DatabaseProvider;
@@ -175,9 +177,9 @@ fn stored_finalized_block(
     let Some(stored) = database.view_eyre(finalized_block)? else {
         return Ok(None);
     };
-    let indexed_hash = block_index
-        .get_item(stored.height)
-        .map(|item| item.block_hash);
+    // A read error must not look like a missing entry: that would blame a rollback.
+    let indexed_hash =
+        database.view_eyre(|tx| block_index_hash_by_height(tx, stored.height))?;
     if indexed_hash != Some(stored.block_hash) {
         bail!(
             "stored finalized block {}@{} is not in the block index (index has {:?} at that \
