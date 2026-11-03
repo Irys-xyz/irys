@@ -573,6 +573,9 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
+    /// Sends `markers` to Reth and waits for the ack. RethService acks when Reth applied
+    /// the update and has `migration_block` on disk, so `migrate_block` after this call
+    /// never puts a block into the block index that an unclean stop can take from Reth.
     #[tracing::instrument(level = "trace", skip_all, fields(fcu.head = %markers.head.block_hash, fcu.migration = %markers.migration_block.block_hash))]
     async fn emit_fcu(&self, markers: &ForkChoiceMarkers) -> eyre::Result<()> {
         let tip_block = &markers.head;

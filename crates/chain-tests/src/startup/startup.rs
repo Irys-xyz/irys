@@ -105,3 +105,39 @@ async fn heavy_test_can_resume_from_genesis_startup_no_ctx() -> eyre::Result<()>
     ctx.stop().await;
     Ok(())
 }
+
+/// Invariant: the block index tip is always a block Reth has on disk, so an unclean stop never
+/// leaves the block index ahead of Reth. The block tree migrates a block only after RethService
+/// acks the fork-choice update, and RethService acks only when the confirmed block is on disk.
+#[test_log::test(tokio::test)]
+async fn heavy_block_index_tip_is_always_on_reth_disk() -> eyre::Result<()> {
+    use reth::providers::{BlockNumReader as _, DatabaseProviderFactory as _};
+
+    // Enough blocks for the block index to advance several times past genesis.
+    const BLOCKS_TO_MINE: u64 = 10;
+
+    let node = IrysNodeTest::new_genesis(NodeConfig::testing())
+        .start()
+        .await;
+    for _ in 0..BLOCKS_TO_MINE {
+        node.mine_block().await?;
+        let index_tip_height = node.node_ctx.block_index_guard.read().latest_height();
+        let index_tip_header = node.get_block_by_height_from_index(index_tip_height, false)?;
+        let on_disk = node
+            .node_ctx
+            .reth_node_adapter
+            .reth_node
+            .provider
+            .database_provider_ro()?
+            .block_number(index_tip_header.evm_block_hash)?
+            .is_some();
+        assert!(
+            on_disk,
+            "the block index tip (height {}) must be on Reth's disk",
+            index_tip_header.height
+        );
+    }
+
+    node.stop().await;
+    Ok(())
+}

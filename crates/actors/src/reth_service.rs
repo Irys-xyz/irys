@@ -5,12 +5,19 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{BlockHash, DatabaseProvider, H256, RethPeerInfo, TokioServiceHandle, Traced};
 use reth::{
     network::{NetworkInfo as _, Peers as _},
+    providers::{BlockNumReader as _, DatabaseProviderFactory as _},
     revm::primitives::B256,
     rpc::{eth::EthApiServer as _, types::BlockNumberOrTag},
     tasks::shutdown::Shutdown,
 };
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
-use tracing::{Instrument as _, debug, error, info};
+use tracing::{Instrument as _, debug, error, info, warn};
+
+/// How often a fork-choice ack checks that Reth wrote the confirmed block to disk.
+const ON_DISK_POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// How often a wait for Reth's disk logs a warning.
+const ON_DISK_WAIT_WARN_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub struct RethService {
@@ -30,6 +37,10 @@ pub struct ForkChoiceUpdateMessage {
 
 #[derive(Debug)]
 pub enum RethServiceMessage {
+    /// Apply a fork-choice update. The ack is sent when Reth applied it and has
+    /// `confirmed_hash` on disk: the block tree migrates that block into the block index
+    /// after the ack, and the block index tip must be a block Reth still has after an
+    /// unclean stop. A dropped `response` means the update failed.
     ForkChoice {
         update: ForkChoiceUpdateMessage,
         response: oneshot::Sender<()>,
@@ -77,6 +88,17 @@ async fn evm_block_hash_from_block_hash(
         "Resolved Irys block to EVM block"
     );
     Ok(irys_header.evm_block_hash)
+}
+
+/// Whether Reth's database (not its in-memory canonical state) holds `evm_block_hash`.
+/// This is the lookup Reth's startup unwind uses to find the block index tip.
+fn is_block_on_disk(adapter: &IrysRethNodeAdapter, evm_block_hash: B256) -> eyre::Result<bool> {
+    Ok(adapter
+        .reth_node
+        .provider
+        .database_provider_ro()?
+        .block_number(evm_block_hash)?
+        .is_some())
 }
 
 impl RethService {
@@ -151,7 +173,9 @@ impl RethService {
     async fn handle_command(&mut self, command: RethServiceMessage) -> eyre::Result<()> {
         match command {
             RethServiceMessage::ForkChoice { update, response } => {
-                self.handle_forkchoice(update).await?;
+                let applied = self.handle_forkchoice(update).await?;
+                self.wait_until_block_on_disk(applied.confirmed_hash)
+                    .await?;
                 let _ = response.send(());
             }
             RethServiceMessage::ConnectToPeer { peer, response } => {
@@ -167,11 +191,52 @@ impl RethService {
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
-    async fn handle_forkchoice(&mut self, update: ForkChoiceUpdateMessage) -> eyre::Result<()> {
+    async fn handle_forkchoice(
+        &mut self,
+        update: ForkChoiceUpdateMessage,
+    ) -> eyre::Result<ForkChoiceUpdate> {
         debug!(?update, "Received fork choice update command");
 
         let resolved = self.resolve_new_fcu(update).await?;
-        self.process_fcu(resolved).await?;
+        self.process_fcu(resolved).await
+    }
+
+    /// Waits until Reth has `evm_block_hash` on disk, or the service shuts down.
+    ///
+    /// Reth makes a block canonical in memory when it applies a fork-choice update and
+    /// writes it to disk later, on its own persistence task. Nothing else orders the
+    /// block index after Reth's disk, so without this wait an unclean stop can leave the
+    /// block index tip above Reth's disk tip, and the node then cannot start.
+    async fn wait_until_block_on_disk(&mut self, evm_block_hash: B256) -> eyre::Result<()> {
+        let started = Instant::now();
+        let mut next_warning = started + ON_DISK_WAIT_WARN_INTERVAL;
+        while !is_block_on_disk(&self.handle, evm_block_hash)? {
+            let waited = started.elapsed();
+            if Instant::now() >= next_warning {
+                let reth_disk_tip = self
+                    .handle
+                    .reth_node
+                    .provider
+                    .database_provider_ro()
+                    .and_then(|provider| provider.best_block_number());
+                warn!(
+                    evm_block.hash = %evm_block_hash,
+                    reth.disk_tip = ?reth_disk_tip,
+                    waited_secs = waited.as_secs(),
+                    "Waiting for Reth to write the confirmed block to disk before the block index takes it"
+                );
+                next_warning += ON_DISK_WAIT_WARN_INTERVAL;
+            }
+            tokio::select! {
+                biased;
+                _ = &mut self.shutdown => {
+                    eyre::bail!(
+                        "shut down before Reth wrote block {evm_block_hash} to disk"
+                    );
+                }
+                _ = tokio::time::sleep(ON_DISK_POLL_INTERVAL) => {}
+            }
+        }
         Ok(())
     }
 
