@@ -178,8 +178,7 @@ fn stored_finalized_block(
         return Ok(None);
     };
     // A read error must not look like a missing entry: that would blame a rollback.
-    let indexed_hash =
-        database.view_eyre(|tx| block_index_hash_by_height(tx, stored.height))?;
+    let indexed_hash = database.view_eyre(|tx| block_index_hash_by_height(tx, stored.height))?;
     if indexed_hash != Some(stored.block_hash) {
         bail!(
             "stored finalized block {}@{} is not in the block index (index has {:?} at that \

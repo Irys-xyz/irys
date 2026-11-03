@@ -1269,6 +1269,10 @@ impl BlockTreeServiceInner {
                 .recover_from_network_partition(fork_height)?;
         }
 
+        // The block index tip after any roll back, read before `mark_tip` so a read
+        // error leaves the tree as it was. The prune below keeps the blocks above it.
+        let migrated_height = self.block_index_guard.read().try_latest_height()?;
+
         let changed = cache.mark_tip(&candidate)?;
         debug!(
             block.hash = %candidate,
@@ -1296,7 +1300,20 @@ impl BlockTreeServiceInner {
         // Subtract 1 to ensure we keep exactly `depth` blocks.
         // The cache.prune() implementation does not count `tip` into the depth
         // equation, so it's always tip + `depth` that's kept around
-        cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
+        //
+        // Never prune a block above the block index tip: `migrate_block` walks the tree
+        // from the new migration block down to the index tip. A tip that moves more than
+        // `block_tree_depth - migration_depth` blocks at once would otherwise evict blocks
+        // that are not migrated yet. The tree then holds more than `block_tree_depth`
+        // blocks until migration catches up.
+        let tree_depth = self.config.consensus.block_tree_depth.saturating_sub(1);
+        let prune_depth = match migrated_height {
+            Some(migrated_height) => {
+                tree_depth.max(new_tip.height.saturating_sub(migrated_height + 1))
+            }
+            None => tree_depth,
+        };
+        cache.prune(prune_depth);
 
         let (epoch_block, reorg_event, blocks_to_confirm) = if is_reorg {
             // Handle blockchain reorganization
@@ -4549,6 +4566,64 @@ mod tests {
         assert_eq!(
             restart_markers.prune_block.block_hash, accepted_finalized_hash,
             "the restart announces the finalized block that Reth accepted"
+        );
+    }
+
+    /// The tip moves more than `block_tree_depth - migration_depth` blocks (and fewer
+    /// than `block_tree_depth`) in one fork-choice update, and Reth acks it. The cache
+    /// prune after the tip move must keep every block that migration then reads, so
+    /// the move completes and the block index reaches `new tip - migration_depth`.
+    #[tokio::test]
+    async fn large_tip_jump_inside_cache_window_migrates_every_new_block() {
+        const MIGRATION_DEPTH: u64 = 2;
+        const BLOCK_TREE_DEPTH: u64 = 4;
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let consensus = c.consensus.get_mut();
+            consensus.block_migration_depth = MIGRATION_DEPTH as u32;
+            consensus.block_tree_depth = BLOCK_TREE_DEPTH;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> 1 -> ... -> 8 (canonical tip). The block index holds 0..=6.
+        let old_chain = h
+            .add_validated_chain(
+                &genesis,
+                &[5_100, 5_200, 5_300, 5_400, 5_500, 5_600, 5_700, 5_800],
+            )
+            .await;
+        let old_tip = old_chain.last().expect("old tip").clone();
+        assert_eq!(h.inner.block_index_guard.read().latest_height(), 6);
+
+        // Same tie stalls as `finalized_block_is_migrated_after_stop_on_large_tip_jump`:
+        // each new block above the tip ties a pending block that was added first.
+        let pending_first = h.add_child_block(&old_chain[6], 5_900, false);
+        let tie_first = h.add_child_block(&old_tip, 5_900, true);
+        h.inner
+            .on_block_validation_finished(tie_first.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        let _pending_second = h.add_child_block(&pending_first, 6_000, false);
+        let tie_second = h.add_child_block(&tie_first, 6_000, true);
+        h.inner
+            .on_block_validation_finished(tie_second.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(h.tip(), old_tip.block_hash, "each tie keeps the tip");
+
+        // The tip moves from height 8 to 11: 3 blocks, above
+        // BLOCK_TREE_DEPTH - MIGRATION_DEPTH = 2 and below BLOCK_TREE_DEPTH.
+        let new_tip = h.add_child_block(&tie_second, 6_100, true);
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("a tip move inside the cache window must complete, including migration");
+        assert_eq!(h.tip(), new_tip.block_hash);
+        assert_eq!(
+            h.inner.block_index_guard.read().latest_height(),
+            new_tip.height - MIGRATION_DEPTH,
+            "migration indexes every block up to new tip - migration_depth"
         );
     }
 
