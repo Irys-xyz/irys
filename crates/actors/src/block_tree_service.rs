@@ -17,7 +17,7 @@ use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::StorageModulesReadGuard;
 use irys_domain::{
-    BlockState, BlockTree, BlockTreeReadGuard, ChainState, ReorgSplit, ReorgTips,
+    BlockState, BlockTree, BlockTreeReadGuard, ChainState, EpochSnapshot, ReorgSplit, ReorgTips,
     block_index_guard::BlockIndexReadGuard, chain_sync_state::ChainSyncState,
     create_commitment_snapshot_for_block, create_epoch_snapshot_for_block,
     forkchoice_markers::ForkChoiceMarkers,
@@ -213,6 +213,11 @@ struct TipMove {
     reorg_event: Option<ReorgEvent>,
     /// The first epoch block among the new canonical blocks.
     epoch_block: Option<Arc<IrysBlockHeader>>,
+    /// Set on a reorg whose old fork has an epoch block and whose new fork has
+    /// none: the highest epoch height on the old fork. The storage modules
+    /// applied that epoch's assignments, so the new tip's assignments are sent
+    /// with this height to supersede them.
+    orphaned_epoch_height: Option<u64>,
     /// The new canonical blocks after the fork point, oldest first.
     blocks_to_confirm: Vec<Arc<SealedBlock>>,
     /// The old tip's difficulty, which the difficulty broadcast compares against.
@@ -1264,7 +1269,7 @@ impl BlockTreeServiceInner {
         // equation, so it's always tip + `depth` that's kept around
         cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
 
-        let (epoch_block, reorg_event, blocks_to_confirm) = if is_reorg {
+        let (epoch_block, orphaned_epoch_height, reorg_event, blocks_to_confirm) = if is_reorg {
             // Handle blockchain reorganization
             let fork_block: Arc<IrysBlockHeader> = split.lca.header().clone();
             let fork_hash: BlockHash = fork_block.block_hash;
@@ -1328,8 +1333,26 @@ impl BlockTreeServiceInner {
                 .iter()
                 .find(|sb| self.is_epoch_block(sb.header()))
                 .map(|sb| Arc::clone(sb.header()));
+            // A new fork epoch block sends its own events. Without one, an
+            // orphaned epoch block's assignments must be replaced.
+            let orphaned_epoch_height = if new_epoch_block.is_none() {
+                event
+                    .old_fork
+                    .iter()
+                    .map(|sb| sb.header())
+                    .filter(|header| self.is_epoch_block(header))
+                    .map(|header| header.height)
+                    .max()
+            } else {
+                None
+            };
 
-            (new_epoch_block, Some(event), blocks_to_confirm)
+            (
+                new_epoch_block,
+                orphaned_epoch_height,
+                Some(event),
+                blocks_to_confirm,
+            )
         } else {
             // Handle normal chain extension
             debug!(
@@ -1349,7 +1372,7 @@ impl BlockTreeServiceInner {
                 .find(|sb| self.is_epoch_block(sb.header()))
                 .map(|sb| Arc::clone(sb.header()));
 
-            (new_epoch_block, None, blocks_to_confirm)
+            (new_epoch_block, None, None, blocks_to_confirm)
         };
 
         Ok(Some(TipMove {
@@ -1357,6 +1380,7 @@ impl BlockTreeServiceInner {
             fcu_markers,
             reorg_event,
             epoch_block,
+            orphaned_epoch_height,
             blocks_to_confirm,
             old_tip_diff,
             new_tip_epoch_snapshot,
@@ -1373,6 +1397,7 @@ impl BlockTreeServiceInner {
             fcu_markers,
             reorg_event,
             epoch_block,
+            orphaned_epoch_height,
             blocks_to_confirm,
             old_tip_diff,
             new_tip_epoch_snapshot,
@@ -1382,6 +1407,23 @@ impl BlockTreeServiceInner {
         if let Some(epoch_block) = epoch_block {
             // Send the epoch events
             self.send_epoch_events(&epoch_block)?;
+        } else if let Some(orphaned_epoch_height) = orphaned_epoch_height {
+            // Only the assignments: the canonical chain has no epoch block to
+            // expire partitions or prune the cache for.
+            let epoch_snapshot = self
+                .cache
+                .read()
+                .map_err(|_| {
+                    eyre::eyre!("block tree cache read lock poisoned in publish_tip_move")
+                })?
+                .get_epoch_snapshot(&new_tip.block_hash)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "new tip should have an epoch snapshot in cache {:?}",
+                        new_tip.block_hash
+                    )
+                })?;
+            self.send_partition_assignments(&epoch_snapshot, orphaned_epoch_height)?;
         }
 
         // Persist metadata atomically (same code path for both normal blocks and reorgs);
@@ -1884,12 +1926,22 @@ impl BlockTreeServiceInner {
             );
         }
 
-        // Let the node know about any newly assigned partition hashes to local storage modules
+        self.send_partition_assignments(&epoch_snapshot, epoch_block.height)
+    }
+
+    /// Let the node know about any newly assigned partition hashes to local storage
+    /// modules. `update_height` is the highest epoch height whose local writes this
+    /// update supersedes.
+    fn send_partition_assignments(
+        &self,
+        epoch_snapshot: &EpochSnapshot,
+        update_height: u64,
+    ) -> eyre::Result<()> {
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
         self.service_senders.storage_modules.send_traced(
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos: storage_module_infos.into(),
-                update_height: epoch_block.height,
+                update_height,
             },
         )?;
         Ok(())
@@ -4011,6 +4063,99 @@ mod tests {
             "the epoch block among the new canonical blocks is detected"
         );
         h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
+    }
+
+    /// Partition assignment updates the storage modules received, by update height.
+    fn drain_assignment_update_heights(h: &mut DiscardHarness) -> Vec<u64> {
+        let mut heights = vec![];
+        while let Ok(message) = h.storage_modules_rx.try_recv() {
+            let (
+                StorageModuleServiceMessage::PartitionAssignmentsUpdated { update_height, .. },
+                _span,
+            ) = message.into_parts()
+            else {
+                panic!("block tree sends only partition assignment updates");
+            };
+            heights.push(update_height);
+        }
+        heights
+    }
+
+    /// Give a cached block an epoch snapshot that can map storage modules: the
+    /// mapping needs a storage submodule config.
+    fn set_mappable_epoch_snapshot(h: &mut DiscardHarness, block_hash: BlockHash) {
+        h.inner
+            .cache
+            .write()
+            .expect("cache lock for epoch snapshot")
+            .blocks
+            .get_mut(&block_hash)
+            .expect("block in cache")
+            .epoch_snapshot = Arc::new(irys_domain::EpochSnapshot {
+            storage_submodules_config: Some(irys_config::StorageSubmodulesConfig {
+                is_using_hardcoded_paths: false,
+                submodule_paths: vec![],
+            }),
+            ..Default::default()
+        });
+    }
+
+    /// A reorg orphans the only epoch block on the old fork. The new fork is heavier
+    /// but does not reach the epoch height (a difficulty adjustment inside the fork
+    /// can make a shorter fork heavier). The storage modules applied the orphaned
+    /// epoch block's assignments, so the tip move must send the new tip's
+    /// assignments at the orphaned epoch height, which supersedes those writes.
+    #[tokio::test]
+    async fn reorg_orphaning_the_only_epoch_block_resends_canonical_assignments() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            c.consensus.get_mut().epoch.num_blocks_in_epoch = 2;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> old_tip (canonical tip) -> old_epoch_block (epoch block, height 2)
+        //         -> new_tip (height 1, heavier than old_epoch_block)
+        let old_tip = make_cache_tip(&mut h, IrysBlockHeader::new_mock_header(), 5_100);
+        let old_epoch_block = h.add_child_block(&old_tip, 5_200, true);
+        set_mappable_epoch_snapshot(&mut h, old_epoch_block.block_hash);
+        h.inner
+            .on_block_validation_finished(old_epoch_block.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(h.tip(), old_epoch_block.block_hash);
+        assert_eq!(
+            drain_assignment_update_heights(&mut h),
+            vec![old_epoch_block.height],
+            "the storage modules apply the old fork's epoch block"
+        );
+
+        let new_tip = h.add_child_block(&genesis, 5_300, true);
+        set_mappable_epoch_snapshot(&mut h, new_tip.block_hash);
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(
+            h.tip(),
+            new_tip.block_hash,
+            "the tip moves to the heavier fork"
+        );
+        let event = h
+            .reorg_rx
+            .try_recv()
+            .expect("the tip move abandons the old fork");
+        assert_eq!(
+            block_hashes(&event.old_fork),
+            vec![old_tip.block_hash, old_epoch_block.block_hash]
+        );
+
+        assert_eq!(
+            drain_assignment_update_heights(&mut h),
+            vec![old_epoch_block.height],
+            "a reorg that orphans the only epoch block must send the new tip's \
+             assignments once, at the orphaned epoch height"
+        );
     }
 
     /// A tip extension whose fork point is below the post-prune cache window aborts
