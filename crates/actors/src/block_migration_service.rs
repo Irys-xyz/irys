@@ -735,10 +735,13 @@ impl BlockMigrationService {
         // per-submodule DBs, the block index, and in-memory supply state — so a
         // failure partway leaves them inconsistent. Once mutation begins we abort
         // the node rather than return an error and keep running on a
-        // partially-rolled-back state; a clean restart re-runs the (idempotent)
-        // rollback. Crash-safe journaled recovery is the proper fix, tracked for
-        // the storage-module rework. Everything above this point is read-only, so
-        // its failures propagate normally.
+        // partially-rolled-back state. Nothing re-runs this roll back on restart:
+        // the next start keeps the block index as it is, re-packs the cleared module
+        // ranges, re-indexes them from the block index and syncs their data from
+        // peers. If the heavier fork arrives again, its reorg runs the roll back
+        // again (each step is idempotent). Crash-safe journaled recovery is the
+        // proper fix, tracked for the storage-module rework. Everything above this
+        // point is read-only, so its failures propagate normally.
         /// Holds every module's data writes paused for the rollback; resumes on
         /// drop, including on the abort path.
         struct PausedDataWrites(Vec<Arc<StorageModule>>);
@@ -932,8 +935,8 @@ impl BlockMigrationService {
             panic!(
                 "network-partition rollback failed after mutation began; aborting the \
                  node to avoid running on partially-rolled-back state (storage modules \
-                 and the block index may be left inconsistent until a restart re-runs \
-                 recovery): {err:#}"
+                 and the block index may be left inconsistent; the next start keeps the \
+                 block index and re-syncs the cleared storage ranges): {err:#}"
             );
         }
 

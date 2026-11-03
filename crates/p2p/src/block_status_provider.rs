@@ -589,14 +589,13 @@ mod tests {
     //
     // - `NotOnchain(Unknown)`: default state after `BlockTree::add_block` —
     //   the canonical "in tree pending validation" state.
-    // - `Validated(Unknown)`: locally-produced blocks are inserted directly as
-    //   `ChainState::Validated(BlockState::Unknown)` (see `BlockTree::add_common`
-    //   call sites). `block_status` must still treat this as
-    //   `InTreePendingValidation` so children of a not-yet-fully-validated local
+    // - `Validated(Unknown)`: production does not create this state; only tests
+    //   insert it, through `BlockTree::add_common`. `block_status` must still treat
+    //   it as `InTreePendingValidation` so children of a not-yet-fully-validated
     //   block don't enter the orphan re-pull path.
-    // - `Validated(ValidationScheduled)`: the state a locally produced block
-    //   transitions to once `mark_block_as_validation_scheduled` fires but
-    //   before validation completes.
+    // - `Validated(ValidationScheduled)`: the state a `Validated(Unknown)` block
+    //   transitions to once `mark_block_as_validation_scheduled` fires but before
+    //   validation completes.
     #[rstest]
     #[case(ChainState::NotOnchain(BlockState::Unknown))]
     #[case(ChainState::NotOnchain(BlockState::ValidationScheduled))]

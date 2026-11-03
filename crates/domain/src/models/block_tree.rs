@@ -1100,9 +1100,9 @@ impl BlockTree {
                     self.update_longest_chain_cache();
                     Ok(())
                 }
-                // When we add blocks to the block tree that we produced locally, they are added
-                // as ChainState::Validated but we can still schedule them for full validation
-                // with their BlockState.
+                // Only tests add a block as `ChainState::Validated(BlockState::Unknown)`
+                // (through `add_common`). Such a block can still be scheduled for full
+                // validation with its BlockState.
                 ChainState::Validated(BlockState::ValidationScheduled) => {
                     entry.chain_state = ChainState::Validated(BlockState::ValidBlock);
                     self.update_longest_chain_cache();
