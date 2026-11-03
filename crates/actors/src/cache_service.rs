@@ -1429,8 +1429,16 @@ impl InnerCacheTask {
         let mut to_reanchor: Vec<IngressProof> = Vec::new();
         let mut to_regen: Vec<IngressProof> = Vec::new();
         let mut processed = 0_usize;
-        // Filled on the first at-capacity local proof that needs it.
-        let mut proof_modules: Option<Vec<Arc<StorageModule>>> = None;
+        // Local unpromoted proofs whose cached bodies are already persisted
+        // (or gone). Stored-copy IO runs after `tx` is dropped so a module
+        // scan cannot pin MDBX free-page reclamation.
+        let mut stored_copy_candidates: Vec<(
+            DataRoot,
+            CompactCachedIngressProof,
+            IngressProof,
+            RegenAction,
+            u64,
+        )> = Vec::new();
         let max_cache_size_bytes = &self.config.node_config.cache.max_cache_size_bytes;
 
         // Determine if cache is at capacity based on the CachedChunks table
@@ -1493,44 +1501,34 @@ impl InnerCacheTask {
                     // a full durable copy and this node is staked: that miner
                     // can still serve the chunks and re-signs from the
                     // compact leaves.
-                    let keep_reason = if !(is_locally_produced && any_unpromoted) {
-                        None
+                    if !(is_locally_produced && any_unpromoted) {
+                        to_delete.push((data_root, compact, false));
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
                     } else if self.cached_body_still_unpersisted(&tx, data_root)? {
-                        Some("cached bodies are unpersisted")
-                    } else if self.live_submit_module_holds_full_copy(
-                        proof_modules.get_or_insert_with(|| self.proof_submit_modules()),
-                        data_root,
-                        cached_data_root.data_size,
-                    ) {
-                        info!(
-                            ingress_proof.data_root = ?data_root,
-                            "Keeping expired local ingress proof at cache capacity: a live Submit module stores the full data root"
-                        );
-                        metrics::record_ingress_proof_kept_stored_copy();
-                        Some("a live Submit module stores the full data root")
-                    } else {
-                        None
-                    };
-                    if let Some(reason) = keep_reason {
                         match check_result.regeneration_action {
                             RegenAction::Reanchor => {
                                 to_reanchor.push(proof);
-                                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for reanchoring; {reason}");
+                                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for reanchoring; cached bodies are unpersisted");
                             }
                             RegenAction::Regenerate => {
                                 to_regen.push(proof);
-                                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for full regeneration; {reason}");
+                                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for full regeneration; cached bodies are unpersisted");
                             }
                             RegenAction::DoNotRegenerate => {
                                 error!(
-                                    "Cache is at capacity and the local proof for data root {} is expired with unpromoted txs ({reason}), but it does not meet reanchoring or regeneration criteria. Leaving the proof in place.",
+                                    "Cache is at capacity and the local proof for data root {} is expired with unpromoted txs (cached bodies are unpersisted), but it does not meet reanchoring or regeneration criteria. Leaving the proof in place.",
                                     &data_root
                                 );
                             }
                         }
                     } else {
-                        to_delete.push((data_root, compact, false));
-                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+                        stored_copy_candidates.push((
+                            data_root,
+                            compact,
+                            proof,
+                            check_result.regeneration_action,
+                            cached_data_root.data_size,
+                        ));
                     }
                 } else if is_locally_produced && any_unpromoted {
                     match check_result.regeneration_action {
@@ -1566,10 +1564,43 @@ impl InnerCacheTask {
         // per-proof write-tx loop below. Holding a long-lived reader open across
         // up to MAX_PROOF_CHECKS_PER_RUN short write txns would pin the MVCC
         // snapshot and hold back MDBX free-page reclamation; nothing past the scan
-        // reads from `tx` (the delete/reanchor/regen loops open their own txns).
+        // reads from `tx` (stored-copy module IO and the delete/reanchor/regen
+        // loops open their own txns).
         drop(walker);
         drop(cursor);
         drop(tx);
+
+        if !stored_copy_candidates.is_empty() {
+            let modules = self.proof_submit_modules();
+            for (data_root, compact, proof, regen, data_size) in stored_copy_candidates {
+                if self.live_submit_module_holds_full_copy(&modules, data_root, data_size) {
+                    info!(
+                        ingress_proof.data_root = ?data_root,
+                        "Keeping expired local ingress proof at cache capacity: a live Submit module stores the full data root"
+                    );
+                    metrics::record_ingress_proof_kept_stored_copy();
+                    match regen {
+                        RegenAction::Reanchor => {
+                            to_reanchor.push(proof);
+                            debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for reanchoring; a live Submit module stores the full data root");
+                        }
+                        RegenAction::Regenerate => {
+                            to_regen.push(proof);
+                            debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for full regeneration; a live Submit module stores the full data root");
+                        }
+                        RegenAction::DoNotRegenerate => {
+                            error!(
+                                "Cache is at capacity and the local proof for data root {} is expired with unpromoted txs (a live Submit module stores the full data root), but it does not meet reanchoring or regeneration criteria. Leaving the proof in place.",
+                                &data_root
+                            );
+                        }
+                    }
+                } else {
+                    to_delete.push((data_root, compact, false));
+                    debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+                }
+            }
+        }
 
         // Delete expired proofs — per-signer to avoid wiping other signers' rows on the same
         // data_root. Content-aware delete closes the TOCTOU window: a fresh proof stored
@@ -1738,8 +1769,10 @@ impl InnerCacheTask {
     /// Returns the number of generations tried.
     ///
     /// A root is tried when this node is staked, has no proof for the root
-    /// but has a leaf for every chunk, a tx is still unpromoted, and a live
-    /// Submit module holds a full persisted placement of the cached
+    /// but has a leaf for every chunk, the cached data root has a confirmed
+    /// `data_size` and a non-empty `block_set` (the same pair ordinary
+    /// generation and compact-leaf backfill require), a tx is still unpromoted,
+    /// and a live Submit module holds a full persisted placement of the cached
     /// `data_size`: the same copy that keeps a proof at capacity. Placement
     /// reads run only for roots the database filter passes, after the read
     /// transaction is closed.
@@ -1785,6 +1818,14 @@ impl InnerCacheTask {
                         cached_data_root.data_size,
                         self.config.consensus.chunk_size,
                     )? {
+                        continue;
+                    }
+                    // Same CDR gate as ordinary generation
+                    // (`should_skip_ingress_proof_generation`) and compact-leaf
+                    // backfill. A live Submit copy does not replace it.
+                    if !cached_data_root.data_size_confirmed
+                        || cached_data_root.block_set.is_empty()
+                    {
                         continue;
                     }
                     let mut any_unpromoted = false;
@@ -4845,9 +4886,10 @@ mod tests {
     }
 
     /// The restore sweep tries generation only on a staked node, for a root
-    /// this node has no proof for but every leaf of, with an unpromoted tx,
-    /// that a live Submit module stores as one full persisted placement of
-    /// the cached `data_size`.
+    /// this node has no proof for but every leaf of, with confirmed
+    /// `data_size` and a non-empty `block_set`, an unpromoted tx, that a live
+    /// Submit module stores as one full persisted placement of the cached
+    /// `data_size`.
     #[rstest::rstest]
     #[case::stored_without_a_local_proof(
         AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), ..AtCapacityCase::RESTORE },
@@ -4897,6 +4939,22 @@ mod tests {
     )]
     #[case::missing_leaf(
         AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), missing_leaf: true, ..AtCapacityCase::RESTORE },
+        0
+    )]
+    #[case::unconfirmed_data_size(
+        AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            unconfirmed_size: true,
+            ..AtCapacityCase::RESTORE
+        },
+        0
+    )]
+    #[case::empty_block_set(
+        AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            empty_block_set: true,
+            ..AtCapacityCase::RESTORE
+        },
         0
     )]
     #[tokio::test]
@@ -5028,6 +5086,10 @@ mod tests {
         unstaked: bool,
         /// This node has the leaf for chunk 0 but not chunk 1.
         missing_leaf: bool,
+        /// CDR `data_size_confirmed` is false (restore skip).
+        unconfirmed_size: bool,
+        /// CDR `block_set` is empty (restore skip).
+        empty_block_set: bool,
     }
 
     impl AtCapacityCase {
@@ -5040,6 +5102,8 @@ mod tests {
             expire_submit_slot_0: false,
             unstaked: false,
             missing_leaf: false,
+            unconfirmed_size: false,
+            empty_block_set: false,
         };
     }
 
@@ -5130,9 +5194,13 @@ mod tests {
             // CachedDataRoot with one pending (unpromoted) txid.
             let cdr = irys_database::db_cache::CachedDataRoot {
                 data_size: 64,
-                data_size_confirmed: false,
+                data_size_confirmed: !case.unconfirmed_size,
                 txid_set: vec![txid],
-                block_set: vec![],
+                block_set: if case.empty_block_set {
+                    vec![]
+                } else {
+                    vec![valid_anchor]
+                },
                 expiry_height: None,
                 cached_at: irys_types::UnixTimestamp::now()?,
             };
@@ -5223,6 +5291,13 @@ mod tests {
             );
             let slots = snapshot.ledgers.get_slots(DataLedger::Submit);
             assert!(slots[0].is_expired && !slots[1].is_expired);
+        } else {
+            snapshot.ledgers[DataLedger::Submit].allocate_slots(1, 0);
+            let slots = snapshot.ledgers.get_slots(DataLedger::Submit);
+            assert!(
+                !slots.is_empty() && !slots[0].is_expired,
+                "keep/restore happy path uses a live Submit slot"
+            );
         }
         block_tree
             .blocks
