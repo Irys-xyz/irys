@@ -178,6 +178,14 @@ pub enum PreValidationError {
     PoAChunkMissing,
     #[error("block miner {miner} is not an allowed mainnet miner")]
     MinerNotAllowed { miner: IrysAddress },
+    #[error(
+        "commitment tx {tx_id} at position {position} is signed by {signer}, which is not an allowed mainnet staker"
+    )]
+    CommitmentSignerNotAllowed {
+        tx_id: H256,
+        position: usize,
+        signer: IrysAddress,
+    },
     #[error("PoA chunk offset out of tx's data chunks bounds")]
     PoAChunkOffsetOutOfDataChunksBounds,
     #[error("PoA chunk offset out of block bounds")]
@@ -629,6 +637,7 @@ impl PreValidationError {
             | Self::PoAChunkHashMismatch { .. }
             | Self::PoAChunkMissing
             | Self::MinerNotAllowed { .. }
+            | Self::CommitmentSignerNotAllowed { .. }
             | Self::PoAChunkOffsetOutOfBlockBounds
             | Self::PoAChunkOffsetOutOfDataChunksBounds
             | Self::PoAChunkOffsetOutOfTxBounds
@@ -710,6 +719,7 @@ impl PreValidationError {
             Self::PoAChunkHashMismatch { .. } => "poa_chunk_hash_mismatch",
             Self::PoAChunkMissing => "poa_chunk_missing",
             Self::MinerNotAllowed { .. } => "miner_not_allowed",
+            Self::CommitmentSignerNotAllowed { .. } => "commitment_signer_not_allowed",
             Self::PoAChunkOffsetOutOfDataChunksBounds => "poa_chunk_offset_out_of_data_bounds",
             Self::PoAChunkOffsetOutOfBlockBounds => "poa_chunk_offset_out_of_block_bounds",
             Self::PoALedgerInactive { .. } => "poa_ledger_inactive",
@@ -1642,7 +1652,11 @@ const MAINNET_CHAIN_ID: u64 = 3282;
 /// From this height, a mainnet block must be mined by one of `MAINNET_ALLOWED_MINERS`.
 /// Lower blocks are validated as before, so the chain history stays valid.
 const MAINNET_ALLOWED_MINERS_FROM_HEIGHT: u64 = 2779313;
-/// The mainnet miner addresses.
+/// From this height, every commitment tx in a mainnet block must be signed by one
+/// of `MAINNET_ALLOWED_MINERS`. Lower blocks are validated as before.
+const MAINNET_ALLOWED_COMMITMENT_SIGNERS_FROM_HEIGHT: u64 = 2779313;
+/// The mainnet miner addresses. They are also the only addresses allowed to sign
+/// commitment txs (stake, pledge, unpledge, unstake, update reward address).
 const MAINNET_ALLOWED_MINERS: [[u8; 20]; 4] = [
     // 0xfaf11d0e472d0b2dc4dab8d4817d0854e3f9e03e
     [
@@ -1683,6 +1697,40 @@ pub fn mainnet_miner_is_allowed(
         return Ok(());
     }
     Err(PreValidationError::MinerNotAllowed { miner })
+}
+
+/// Returns true if `signer` may sign commitment txs on the chain `chain_id`.
+/// On mainnet only `MAINNET_ALLOWED_MINERS` may; other chains are unrestricted.
+/// The mempool rejects commitment txs from any other signer.
+pub fn mainnet_commitment_signer_is_allowed(chain_id: u64, signer: IrysAddress) -> bool {
+    chain_id != MAINNET_CHAIN_ID
+        || MAINNET_ALLOWED_MINERS
+            .iter()
+            .any(|allowed| IrysAddress::from(*allowed) == signer)
+}
+
+/// On mainnet, from `MAINNET_ALLOWED_COMMITMENT_SIGNERS_FROM_HEIGHT`, every commitment
+/// tx in the block must be signed by one of `MAINNET_ALLOWED_MINERS`.
+fn mainnet_commitment_signers_are_allowed(
+    chain_id: u64,
+    height: u64,
+    commitment_txs: &[CommitmentTransaction],
+) -> Result<(), PreValidationError> {
+    if chain_id != MAINNET_CHAIN_ID || height < MAINNET_ALLOWED_COMMITMENT_SIGNERS_FROM_HEIGHT {
+        return Ok(());
+    }
+    match commitment_txs
+        .iter()
+        .enumerate()
+        .find(|(_, tx)| !mainnet_commitment_signer_is_allowed(chain_id, tx.signer()))
+    {
+        Some((position, tx)) => Err(PreValidationError::CommitmentSignerNotAllowed {
+            tx_id: tx.id(),
+            position,
+            signer: tx.signer(),
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Full pre-validation steps for a block
@@ -2168,6 +2216,13 @@ pub async fn prevalidate_block(
                 actual,
             });
         }
+        // On mainnet only the allowed miners may stake, pledge, unpledge, unstake or
+        // update their reward address (applies to epoch + non-epoch blocks).
+        mainnet_commitment_signers_are_allowed(
+            config.consensus.chain_id,
+            block.height,
+            commitment_txs,
+        )?;
         // Check commitment tx count limit (skip for epoch blocks which contain rollup of all epoch txs)
         let is_epoch_block = block.height.is_multiple_of(
             config
@@ -9529,5 +9584,66 @@ mod mainnet_miner_allowlist_tests {
             Err(PreValidationError::MinerNotAllowed { miner: other })
         );
         assert!(mainnet_miner_is_allowed(MAINNET_CHAIN_ID, from + 1, other).is_err());
+    }
+}
+
+#[cfg(test)]
+mod mainnet_commitment_signer_allowlist_tests {
+    use super::*;
+
+    fn stake_signed_by(signer: IrysAddress, anchor: u64) -> CommitmentTransaction {
+        let mut tx = CommitmentTransaction::new_stake(
+            &ConsensusConfig::mainnet(),
+            H256::from_low_u64_be(anchor),
+        );
+        tx.set_signer(signer);
+        tx
+    }
+
+    #[test]
+    fn only_allowed_miners_may_sign_commitments_on_mainnet() {
+        for allowed in MAINNET_ALLOWED_MINERS {
+            assert!(mainnet_commitment_signer_is_allowed(
+                MAINNET_CHAIN_ID,
+                IrysAddress::from(allowed)
+            ));
+        }
+        let other = IrysAddress::from([7_u8; 20]);
+        assert!(!mainnet_commitment_signer_is_allowed(
+            MAINNET_CHAIN_ID,
+            other
+        ));
+        assert!(mainnet_commitment_signer_is_allowed(1270, other));
+    }
+
+    #[test]
+    fn blocks_from_the_activation_height_reject_commitments_from_other_signers() {
+        let allowed = stake_signed_by(IrysAddress::from(MAINNET_ALLOWED_MINERS[1]), 1);
+        let other_signer = IrysAddress::from([7_u8; 20]);
+        let other = stake_signed_by(other_signer, 2);
+        let from = MAINNET_ALLOWED_COMMITMENT_SIGNERS_FROM_HEIGHT;
+        let txs = [allowed.clone(), other.clone()];
+
+        assert!(mainnet_commitment_signers_are_allowed(MAINNET_CHAIN_ID, from, &[]).is_ok());
+        assert!(
+            mainnet_commitment_signers_are_allowed(
+                MAINNET_CHAIN_ID,
+                from,
+                std::slice::from_ref(&allowed)
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            mainnet_commitment_signers_are_allowed(MAINNET_CHAIN_ID, from, &txs),
+            Err(PreValidationError::CommitmentSignerNotAllowed {
+                tx_id: other.id(),
+                position: 1,
+                signer: other_signer,
+            })
+        );
+        assert!(mainnet_commitment_signers_are_allowed(MAINNET_CHAIN_ID, from + 1, &txs).is_err());
+        // Lower blocks and other chains are validated as before.
+        assert!(mainnet_commitment_signers_are_allowed(MAINNET_CHAIN_ID, from - 1, &txs).is_ok());
+        assert!(mainnet_commitment_signers_are_allowed(1270, from, &txs).is_ok());
     }
 }
