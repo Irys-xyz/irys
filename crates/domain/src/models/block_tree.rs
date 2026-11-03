@@ -1203,6 +1203,12 @@ impl BlockTree {
         self.height_index.get(&height)
     }
 
+    /// The lowest block height in the tree, or `None` for an empty tree. A new block
+    /// can attach only above it, because its parent must be in the tree.
+    pub fn lowest_height(&self) -> Option<u64> {
+        self.height_index.keys().next().copied()
+    }
+
     /// Get the block with maximum cumulative difficulty
     pub fn get_max_cumulative_difficulty_block(&self) -> (U256, BlockHash) {
         self.max_cumulative_difficulty

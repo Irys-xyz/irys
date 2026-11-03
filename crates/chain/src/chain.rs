@@ -2092,7 +2092,6 @@ impl IrysNode {
         let block_status_provider = BlockStatusProvider::new(
             block_index_guard.clone(),
             block_tree_guard.clone(),
-            config.consensus.block_tree_depth,
             u64::from(config.consensus.block_migration_depth),
         );
 

@@ -1242,21 +1242,27 @@ fn setup_part_of_a_pruned_fork(
     config: &Config,
 ) -> (irys_types::BlockHash, u64) {
     let genesis = services.block_status_provider_mock.genesis_header();
-    // The canonical chain must be deeper than `max_reorg_depth`
-    // (= `block_tree_depth`) so a competing block at a low height lands
-    // *beyond* reorg range. Within reorg range `block_status` deliberately
-    // returns `NotProcessed` (not `PartOfAPrunedFork`) so deep-reorg
-    // candidates can re-enter `process_block` via gossip; only a fork tip too
-    // old to be a valid reorg candidate classifies as `PartOfAPrunedFork`.
+    // The canonical chain must be deeper than `block_tree_depth`, so the tree
+    // prune removes the low heights and a competing block there cannot attach.
+    // Above the lowest tree height `block_status` deliberately returns
+    // `NotProcessed` (not `PartOfAPrunedFork`) so deep-reorg candidates can
+    // re-enter `process_block` via gossip.
     let depth = config.consensus.block_tree_depth + 2;
     let chain = BlockStatusProvider::produce_mock_chain(depth, Some(&genesis), &config.consensus);
-    // Push the whole canonical chain into both index and tree so the latest
-    // indexed height is `depth`, well past `max_reorg_depth` above height 1.
+    // Push the whole canonical chain into both index and tree, then prune the
+    // tree as the block tree service does: it keeps `block_tree_depth` blocks.
     for block in &chain {
         services
             .block_status_provider_mock
             .add_block_to_index_and_tree_for_testing(block);
     }
+    let head = chain.last().expect("canonical head");
+    services
+        .block_status_provider_mock
+        .set_tip_for_testing(&head.block_hash);
+    services
+        .block_status_provider_mock
+        .delete_mocked_blocks_older_than(head.height - (config.consensus.block_tree_depth - 1));
     let canonical_low = &chain[0];
     // A *different* hash at the low (now-pruned) height represents a side-fork
     // tip whose canonical-position block has been migrated and is too old to
