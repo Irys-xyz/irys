@@ -4354,29 +4354,8 @@ pub async fn read_block_from_state(
         loop {
             match event_receiver.try_recv() {
                 Ok(event) => {
-                    if event.block_hash == *block_hash && event.discarded {
-                        // Block was discarded; extract the underlying
-                        // ValidationError from either dispatch arm.
-                        // `Invalid` carries consensus rejections (peer's
-                        // block is bad); `InternalFailure` carries
-                        // local/runtime issues including cancel reasons
-                        // like ParentMissing that route as internal. Both
-                        // surface to tests via
-                        // `BlockValidationOutcome::Discarded(error)` so
-                        // `assert_validation_error` works on either.
-                        match event.validation_result {
-                            irys_actors::block_tree_service::ValidationResult::Invalid(
-                                rejection,
-                            ) => {
-                                return BlockValidationOutcome::Discarded(rejection.err().clone());
-                            }
-                            irys_actors::block_tree_service::ValidationResult::InternalFailure(
-                                internal,
-                            ) => {
-                                return BlockValidationOutcome::Discarded(internal.err().clone());
-                            }
-                            irys_actors::block_tree_service::ValidationResult::Valid => {}
-                        }
+                    if let Some(outcome) = discard_outcome_for(&event, block_hash) {
+                        return outcome;
                     }
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -4415,10 +4394,10 @@ pub async fn read_block_from_state(
                         }
                         // Block missing AND we'd previously seen it
                         // scheduled — same recovery shape as the outer
-                        // poll's `NoDiscardEventObserved` path: we know it
-                        // was discarded, just can't recover the error.
+                        // poll: it was discarded, and its event may still
+                        // be in flight.
                         None if was_validation_scheduled => {
-                            return BlockValidationOutcome::NoDiscardEventObserved;
+                            return wait_for_discard_event(&mut event_receiver, block_hash).await;
                         }
                         // Re-poll is non-definitive (still scheduled, or
                         // unknown without prior scheduled sighting). The
@@ -4443,13 +4422,13 @@ pub async fn read_block_from_state(
 
         let Some(chain_state) = result else {
             // If we previously saw "validation scheduled" and now block status
-            // is None, the block was discarded — but without the matching
-            // event the harness can't surface the underlying ValidationError.
-            // Tests that need to assert on a specific error must observe via
-            // `assert_validation_error`, which will treat this synthetic
-            // outcome as a panic (correct: no event = no assertion possible).
+            // is None, the block was discarded. Its event can trail the
+            // removal, so wait for it; without it the harness can't surface
+            // the underlying ValidationError and `assert_validation_error`
+            // treats the synthetic outcome as a panic (correct: no event = no
+            // assertion possible).
             if was_validation_scheduled {
-                return BlockValidationOutcome::NoDiscardEventObserved;
+                return wait_for_discard_event(&mut event_receiver, block_hash).await;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             continue;
@@ -4464,6 +4443,51 @@ pub async fn read_block_from_state(
         }
     }
     BlockValidationOutcome::HarnessTimeout
+}
+
+/// Returns the outcome if `event` is the discard of `block_hash`.
+///
+/// `Invalid` carries consensus rejections (peer's block is bad);
+/// `InternalFailure` carries local/runtime issues including cancel reasons
+/// like ParentMissing that route as internal. Both surface to tests via
+/// `BlockValidationOutcome::Discarded(error)` so `assert_validation_error`
+/// works on either.
+fn discard_outcome_for(
+    event: &BlockStateUpdated,
+    block_hash: &H256,
+) -> Option<BlockValidationOutcome> {
+    if event.block_hash != *block_hash || !event.discarded {
+        return None;
+    }
+    match &event.validation_result {
+        irys_actors::block_tree_service::ValidationResult::Invalid(rejection) => {
+            Some(BlockValidationOutcome::Discarded(rejection.err().clone()))
+        }
+        irys_actors::block_tree_service::ValidationResult::InternalFailure(internal) => {
+            Some(BlockValidationOutcome::Discarded(internal.err().clone()))
+        }
+        irys_actors::block_tree_service::ValidationResult::Valid => None,
+    }
+}
+
+/// Waits for the discard event of a block that has left the block tree.
+///
+/// The block tree removes a discarded block from its cache before it
+/// broadcasts the matching `BlockStateUpdated`, so the block can be gone
+/// while its event is still in flight. Returns `NoDiscardEventObserved` only
+/// if no such event arrives (e.g. the block was removed by a parent's
+/// discard, which emits no event for the child).
+async fn wait_for_discard_event(
+    event_receiver: &mut tokio::sync::broadcast::Receiver<BlockStateUpdated>,
+    block_hash: &H256,
+) -> BlockValidationOutcome {
+    wait_for_block_event(event_receiver, 5, |event| {
+        discard_outcome_for(event, block_hash).is_some()
+    })
+    .await
+    .ok()
+    .and_then(|event| discard_outcome_for(&event, block_hash))
+    .unwrap_or(BlockValidationOutcome::NoDiscardEventObserved)
 }
 
 /// Wait for a [`BlockStateUpdated`] event matching `predicate`, with a timeout.
