@@ -4475,19 +4475,33 @@ fn discard_outcome_for(
 /// The block tree removes a discarded block from its cache before it
 /// broadcasts the matching `BlockStateUpdated`, so the block can be gone
 /// while its event is still in flight. Returns `NoDiscardEventObserved` only
-/// if no such event arrives (e.g. the block was removed by a parent's
-/// discard, which emits no event for the child).
+/// if no such event arrives before the timeout (e.g. the block was removed by
+/// a parent's discard, which emits no event for the child), and
+/// `ReceiverLagged` if the receiver dropped events, which can include it.
 async fn wait_for_discard_event(
     event_receiver: &mut tokio::sync::broadcast::Receiver<BlockStateUpdated>,
     block_hash: &H256,
 ) -> BlockValidationOutcome {
-    wait_for_block_event(event_receiver, 5, |event| {
-        discard_outcome_for(event, block_hash).is_some()
-    })
-    .await
-    .ok()
-    .and_then(|event| discard_outcome_for(&event, block_hash))
-    .unwrap_or(BlockValidationOutcome::NoDiscardEventObserved)
+    use tokio::sync::broadcast::error::RecvError;
+
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(coverage_adjusted_timeout(5));
+    loop {
+        match tokio::time::timeout_at(deadline, event_receiver.recv()).await {
+            Ok(Ok(event)) => {
+                if let Some(outcome) = discard_outcome_for(&event, block_hash) {
+                    return outcome;
+                }
+            }
+            Ok(Err(RecvError::Lagged(missed))) => {
+                return BlockValidationOutcome::ReceiverLagged { missed };
+            }
+            Ok(Err(RecvError::Closed)) => {
+                panic!("block event channel closed while waiting for the discard of {block_hash}")
+            }
+            Err(_) => return BlockValidationOutcome::NoDiscardEventObserved,
+        }
+    }
 }
 
 /// Wait for a [`BlockStateUpdated`] event matching `predicate`, with a timeout.
