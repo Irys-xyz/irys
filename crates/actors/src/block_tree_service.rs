@@ -59,6 +59,13 @@ pub enum BlockTreeServiceMessage {
         validation_result: ValidationResult,
     },
     SetStorageModulesGuard(StorageModulesReadGuard),
+    /// Send Reth a fork-choice update for the current block tree, and answer when Reth
+    /// applied it. Other services ask for an update with this message and do not send
+    /// one themselves: this service then sends every update, in tree order, so a stale
+    /// update cannot reach Reth after a newer one. A dropped `response` means it failed.
+    ForkChoiceUpdate {
+        response: oneshot::Sender<()>,
+    },
 }
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -479,6 +486,11 @@ impl BlockTreeService {
                     }
                     debug!("Skipping BlockValidationFinished during shutdown drain");
                 }
+                // Skip: talks to Reth, which may already be stopped. Dropping the
+                // response tells the requester that no update was sent.
+                BlockTreeServiceMessage::ForkChoiceUpdate { .. } => {
+                    debug!("Skipping ForkChoiceUpdate during shutdown drain");
+                }
                 msg @ (BlockTreeServiceMessage::GetBlockTreeReadGuard { .. }
                 | BlockTreeServiceMessage::BlockPreValidated { .. }
                 | BlockTreeServiceMessage::SetStorageModulesGuard(_)) => {
@@ -536,6 +548,26 @@ impl BlockTreeServiceInner {
             BlockTreeServiceMessage::SetStorageModulesGuard(guard) => {
                 self.block_migration_service
                     .set_storage_modules_guard(guard);
+            }
+            BlockTreeServiceMessage::ForkChoiceUpdate { response } => {
+                let markers = {
+                    let cache = self
+                        .cache
+                        .read()
+                        .map_err(|_| eyre::eyre!("block tree cache read lock poisoned"))?;
+                    ForkChoiceMarkers::from_block_tree(
+                        &cache,
+                        self.block_index_guard.read(),
+                        &self.db,
+                        self.config.consensus.block_migration_depth as usize,
+                        self.config.consensus.block_tree_depth as usize,
+                    )?
+                };
+                markers.store_finalized_block(&self.db)?;
+                self.emit_fcu(&markers).await?;
+                if response.send(()).is_err() {
+                    tracing::warn!("fork-choice update requester dropped the response channel");
+                }
             }
         }
         Ok(())
@@ -4844,6 +4876,47 @@ mod tests {
             Some(&sibling.block_hash),
             "the block index ends at the sibling"
         );
+    }
+
+    /// Another service asks for a fork-choice update instead of sending one. The block
+    /// tree service sends the markers of its current tree, stores the finalized block
+    /// before the send, and answers after Reth applied the update.
+    #[tokio::test]
+    async fn fork_choice_update_request_sends_the_current_tree_markers() {
+        let mut h = DiscardHarness::new();
+        let fork_choice_updates = h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+        h.add_validated_chain(&genesis, &[5_100, 5_200, 5_300, 5_400, 5_500])
+            .await;
+        let updates_before = fork_choice_updates.lock().expect("recorder").len();
+
+        let (response, applied) = oneshot::channel();
+        h.inner
+            .handle_message(
+                BlockTreeServiceMessage::ForkChoiceUpdate { response },
+                tracing::Span::current(),
+            )
+            .await
+            .expect("the fork-choice update request is handled");
+        applied
+            .await
+            .expect("the requester gets an answer after Reth applied the update");
+
+        let updates = fork_choice_updates.lock().expect("recorder").clone();
+        assert_eq!(updates.len(), updates_before + 1, "one update is sent");
+        let sent = updates.last().expect("the requested update");
+        let stored_finalized = h
+            .inner
+            .db
+            .view_eyre(irys_database::finalized_block)
+            .expect("read the finalized block record")
+            .expect("a finalized block record");
+        assert_eq!(
+            stored_finalized.block_hash, sent.finalized_hash,
+            "the finalized block is stored before the update is sent"
+        );
+        h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
     }
 
     /// The node stops after Reth accepts a fork-choice update and before migration

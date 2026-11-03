@@ -1115,7 +1115,6 @@ pub(crate) fn data_handler_stub_with_sync(
         ),
         // Reth service as a second argument
         execution_payload_cache.clone(),
-        config.clone(),
         service_senders,
         MempoolReadGuard::stub(),
         tokio::runtime::Handle::current(),
