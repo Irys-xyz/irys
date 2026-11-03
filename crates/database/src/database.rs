@@ -133,6 +133,52 @@ mod compact_ingress_leaf_tests {
         Ok(())
     }
 
+    /// The count is per signer and per root, and an invalid `data_size` is
+    /// `false`, not an error.
+    #[test]
+    fn ingress_leaf_count_complete_needs_one_leaf_per_chunk() -> eyre::Result<()> {
+        let (_dir, db) = open_test_db()?;
+        let data_root = H256::random();
+        let signer = IrysAddress::random();
+        let other_signer = IrysAddress::random();
+        // Two 32-byte chunks.
+        let complete =
+            |tx: &_, address| ingress_leaf_count_complete(tx, data_root, address, 64, 32);
+
+        db.update_eyre(|tx| {
+            assert!(!complete(tx, signer)?);
+            store_ingress_data_hash(
+                tx,
+                data_root,
+                signer,
+                TxChunkOffset::from(0),
+                H256::random(),
+            )?;
+            store_ingress_data_hash(
+                tx,
+                data_root,
+                other_signer,
+                TxChunkOffset::from(1),
+                H256::random(),
+            )?;
+            assert!(
+                !complete(tx, signer)?,
+                "the other signer's leaf does not count"
+            );
+            store_ingress_data_hash(
+                tx,
+                data_root,
+                signer,
+                TxChunkOffset::from(1),
+                H256::random(),
+            )?;
+            assert!(complete(tx, signer)?);
+            assert!(!ingress_leaf_count_complete(tx, data_root, signer, 96, 32)?);
+            assert!(!ingress_leaf_count_complete(tx, data_root, signer, 0, 32)?);
+            Ok(())
+        })
+    }
+
     #[test]
     fn deleting_ingress_leaves_is_scoped_to_one_data_root() -> eyre::Result<()> {
         let (_dir, db) = open_test_db()?;
@@ -1304,6 +1350,30 @@ pub fn cached_ingress_leaf<T: DbTx>(
     Ok(cursor
         .seek_by_key_subkey(key, *tx_offset)?
         .filter(|leaf| leaf.tx_offset == tx_offset))
+}
+
+/// `true` when `address` has one compact leaf per chunk of `data_size`.
+///
+/// A count check only, for a cheap filter: [`complete_ingress_leaves`] still
+/// checks every offset. A `data_size` with no valid chunk count is `false`.
+pub fn ingress_leaf_count_complete<T>(
+    tx: &T,
+    data_root: DataRoot,
+    address: IrysAddress,
+    data_size: u64,
+    chunk_size: u64,
+) -> eyre::Result<bool>
+where
+    T: DbTx,
+    T::DupCursor<CachedIngressLeaves>: IrysDupCursorExt<CachedIngressLeaves>,
+{
+    let Ok(expected_count) = crate::db_cache::data_size_to_chunk_count(data_size, chunk_size)
+    else {
+        return Ok(false);
+    };
+    let key = CachedIngressLeafKey { data_root, address };
+    let mut cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
+    Ok(cursor.dup_count(key)?.unwrap_or(0) == expected_count)
 }
 
 /// Loads a complete, gap-free compact ingress-leaf sequence.

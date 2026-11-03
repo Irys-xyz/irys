@@ -6039,6 +6039,38 @@ impl Rows<'_> {
             })
             .collect())
     }
+
+    /// `true` when `[start, end]` has a hole or a stored row fails `present`.
+    ///
+    /// Streams: a partition holds tens of millions of rows. The exclusive
+    /// end keeps a key past the span out of the iterator. A key that is
+    /// not 4 bytes and still sorts inside the span fails the scan.
+    fn offset_span_has_hole(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+        present: impl Fn(&OffsetMeta) -> bool,
+    ) -> eyre::Result<bool> {
+        if start > end {
+            return Ok(false);
+        }
+        let start_key = encode_key(start);
+        let end_key = exclusive_end_key(end);
+        let mut cursor = self.cursor_bounded(Cf::OffsetMeta, Some(&start_key), Some(&end_key))?;
+        let mut expect = u64::from(start.0);
+        let last = u64::from(end.0);
+        while let Some((key, bytes)) = cursor.next_kv()? {
+            if offset_key_ends_span(&key, end)? {
+                break;
+            }
+            let offset = u64::from(PartitionChunkOffset::decode(&key)?.0);
+            if offset != expect || !present(&stored_offset_meta(&bytes)?) {
+                return Ok(true);
+            }
+            expect = expect.saturating_add(1);
+        }
+        Ok(expect != last.saturating_add(1))
+    }
 }
 
 fn overlay_pairs(
@@ -6215,28 +6247,15 @@ impl SubmoduleRead for Rows<'_> {
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) -> eyre::Result<bool> {
-        if start > end {
-            return Ok(false);
-        }
-        // Streams: a partition holds tens of millions of rows. The exclusive
-        // end keeps a key past the span out of the iterator. A key that is
-        // not 4 bytes and still sorts inside the span fails the scan.
-        let start_key = encode_key(start);
-        let end_key = exclusive_end_key(end);
-        let mut cursor = self.cursor_bounded(Cf::OffsetMeta, Some(&start_key), Some(&end_key))?;
-        let mut expect = u64::from(start.0);
-        let last = u64::from(end.0);
-        while let Some((key, bytes)) = cursor.next_kv()? {
-            if offset_key_ends_span(&key, end)? {
-                break;
-            }
-            let offset = u64::from(PartitionChunkOffset::decode(&key)?.0);
-            if offset != expect || stored_offset_meta(&bytes)?.crc.is_none() {
-                return Ok(true);
-            }
-            expect = expect.saturating_add(1);
-        }
-        Ok(expect != last.saturating_add(1))
+        self.offset_span_has_hole(start, end, |meta| meta.crc.is_some())
+    }
+
+    fn offset_row_missing(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        self.offset_span_has_hole(start, end, |_| true)
     }
 
     fn get_tx_path_by_offset(&self, _offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>> {
@@ -6487,6 +6506,7 @@ impl_batch_read! {
     get_offset_meta(offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>>;
     offset_metas_in_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, OffsetMeta)>>;
     offset_crc_missing(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
+    offset_row_missing(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
     get_tx_path_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>>;
     get_path_hashes_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<ChunkPathHashes>>;
     path_hashes_in_inclusive_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>>;
