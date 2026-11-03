@@ -354,11 +354,11 @@ Each time and each change has three significant figures. A change is the ratio o
 | Hash one chunk (build or verify) | 0.144 ms: one 262,144-byte hash | 0.159 ms: 64 hashes of 4,097 bytes + 63 nodes | +10.6% |
 | Verify one chunk proof at 5 TiB (depth 25) | 0.159 ms: chunk hash + 25 × 4 small hashes | 0.163 ms: chunk hashes + the chunk leaf + 25 nodes + the size witness | +2.70% |
 | Build the tree of a 1 GiB upload, one core | 0.590 s: 4,096 × the unrounded chunk time | 0.652 s: 4,096 × the unrounded chunk time | +0.0625 s |
-| Verify one segment proof at 5 TiB | — | 7.44 µs: one 4,097-byte leaf + 34 small hashes | new |
+| Verify one segment proof at 5 TiB | — | 7.44 µs: one 4,097-byte leaf + 34 small hashes, the size witness hashed once (§5) | new |
 | Builder memory, 1 GiB | every proof up front: 4.98 MB | chunk leaves and nodes: 256 KiB | lower |
 | Builder memory, 5 TiB | every proof up front: 50.9 GB | chunk leaves and nodes: 1.34 GB, proofs on demand | lower |
 
-The 34 small hashes are 6 in-chunk nodes, the chunk leaf, 25 climb nodes, the size witness, and `node(r, w)`. A chunk-verify sum that stops after the 25 climb nodes also rounds to 0.163 ms. Adding `node(r, w)` still rounds that time to 0.163 ms. §5 hashes the size witness once. `data_commitment` hashes that witness again before `node(r, w)`, so a measurement of `verify_segment` is 7.59 µs under the same rate.
+The 34 small hashes are 6 in-chunk nodes, the chunk leaf, 25 climb nodes, the size witness, and `node(r, w)`. A chunk-verify sum that stops after the 25 climb nodes also rounds to 0.163 ms. Adding `node(r, w)` still rounds that time to 0.163 ms. §5 hashes the size witness once, and the verify rows count it once. The crate's `verify_chunk` and `verify_segment` hash that witness again in `data_commitment`, before `node(r, w)`. Under the same rate, a measurement of `verify_chunk` is then 0.164 ms (+2.89%), and one of `verify_segment` is 7.59 µs (35 small hashes).
 
 The build row counts the chunk hashing only. The chunk leaf adds one small hash per chunk: 4,096 × 0.15 µs = 0.614 ms per GiB, about 0.1% of that row. At 5 TiB that is 20,971,520 hashes, about 3.15 s of one core.
 
