@@ -8,7 +8,8 @@ use irys_database::{
 };
 use irys_domain::{
     BlockIndex, BlockTree, StorageModule, StorageModulesReadGuard, SupplyState,
-    block_index_guard::BlockIndexReadGuard, forkchoice_markers::finalized_height,
+    block_index_guard::BlockIndexReadGuard,
+    forkchoice_markers::{finalized_height, stored_finalized_height},
     get_overlapped_storage_modules,
 };
 use irys_reward_curve::HalvingCurve;
@@ -647,7 +648,11 @@ impl BlockMigrationService {
             return Ok(());
         }
 
-        let finalized = finalized_height(latest, self.block_tree_depth, self.block_migration_depth);
+        // The stored finalized block can be above the height derived from the index
+        // tip: the tip goes down when a stop falls between a fork-choice update and
+        // migration, or after an earlier recovery onto a fork that was not taller.
+        let finalized = finalized_height(latest, self.block_tree_depth, self.block_migration_depth)
+            .max(stored_finalized_height(block_index, &self.db)?);
         if fork_parent_height < finalized {
             return Err(eyre::eyre!(
                 "network-partition recovery would roll back to height {fork_parent_height}, below the \
@@ -730,10 +735,13 @@ impl BlockMigrationService {
         // per-submodule DBs, the block index, and in-memory supply state — so a
         // failure partway leaves them inconsistent. Once mutation begins we abort
         // the node rather than return an error and keep running on a
-        // partially-rolled-back state; a clean restart re-runs the (idempotent)
-        // rollback. Crash-safe journaled recovery is the proper fix, tracked for
-        // the storage-module rework. Everything above this point is read-only, so
-        // its failures propagate normally.
+        // partially-rolled-back state. Nothing re-runs this roll back on restart:
+        // the next start keeps the block index as it is, re-packs the cleared module
+        // ranges, re-indexes them from the block index and syncs their data from
+        // peers. If the heavier fork arrives again, its reorg runs the roll back
+        // again (each step is idempotent). Crash-safe journaled recovery is the
+        // proper fix, tracked for the storage-module rework. Everything above this
+        // point is read-only, so its failures propagate normally.
         /// Holds every module's data writes paused for the rollback; resumes on
         /// drop, including on the abort path.
         struct PausedDataWrites(Vec<Arc<StorageModule>>);
@@ -927,8 +935,8 @@ impl BlockMigrationService {
             panic!(
                 "network-partition rollback failed after mutation began; aborting the \
                  node to avoid running on partially-rolled-back state (storage modules \
-                 and the block index may be left inconsistent until a restart re-runs \
-                 recovery): {err:#}"
+                 and the block index may be left inconsistent; the next start keeps the \
+                 block index and re-syncs the cleared storage ranges): {err:#}"
             );
         }
 
@@ -2930,6 +2938,95 @@ mod tests {
             "the finalized block at height {finalized_height} must survive the rejected reorg",
         );
 
+        Ok(())
+    }
+
+    /// The stored finalized block can be above the height derived from the index
+    /// tip (the tip went down after the fork-choice update that announced it). The
+    /// guard must hold at the stored height: a fork parent between the derived and
+    /// the stored height is refused, and a fork parent at the stored height is
+    /// allowed (the finalized block stays). A stored record that does not match the
+    /// index is refused too, because the guard can then not know which block is final.
+    #[rstest::rstest]
+    #[case::fork_parent_below_stored_finalized(18, true, Some("below the finalized height 20"))]
+    #[case::fork_parent_at_stored_finalized(20, true, None)]
+    #[case::stored_record_not_in_index(18, false, Some("is not in the block index"))]
+    fn recover_from_network_partition_holds_at_stored_finalized_block(
+        #[case] fork_parent_height: u64,
+        #[case] record_matches_index: bool,
+        #[case] expected_error: Option<&str>,
+    ) -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (mut svc, _svc_tmp) = make_service(db.clone());
+        svc.set_storage_modules_guard(StorageModulesReadGuard::new(Arc::new(RwLock::new(
+            Vec::new(),
+        ))));
+
+        // depth_delta = 44, so the derived finalized height is 60 - 44 = 16.
+        let latest_indexed = 60_u64;
+        let stored_finalized_height = 20_u64;
+
+        let mut prev_hash = H256::zero();
+        let mut headers = Vec::new();
+        for height in 0..=latest_indexed {
+            let header = make_block_header(height, prev_hash, 1, vec![]);
+            prev_hash = header.block_hash;
+            headers.push(header);
+        }
+        db.update_eyre(|tx| {
+            for header in &headers {
+                irys_database::insert_block_header(tx, header)?;
+            }
+            irys_database::advance_finalized_block(
+                tx,
+                &irys_database::FinalizedBlock {
+                    height: stored_finalized_height,
+                    block_hash: if record_matches_index {
+                        headers[stored_finalized_height as usize].block_hash
+                    } else {
+                        H256::random()
+                    },
+                },
+            )
+        })?;
+        {
+            let index = svc.block_index_guard.read();
+            for (height, header) in headers.iter().enumerate() {
+                index.push_item(
+                    &BlockIndexItem {
+                        block_hash: header.block_hash,
+                        num_ledgers: 1,
+                        ledgers: vec![LedgerIndexItem {
+                            total_chunks: 1,
+                            tx_root: H256::zero(),
+                            ledger: DataLedger::Submit,
+                        }],
+                    },
+                    height as u64,
+                )?;
+            }
+        }
+
+        let result = svc.recover_from_network_partition(fork_parent_height);
+        let Some(expected) = expected_error else {
+            result.expect("a rollback to the stored finalized block is allowed");
+            assert_eq!(
+                svc.block_index_guard.read().latest_height(),
+                fork_parent_height,
+                "the block index is rolled back to the fork parent"
+            );
+            return Ok(());
+        };
+        let err = result.expect_err("the rollback must be refused");
+        assert!(
+            err.to_string().contains(expected),
+            "error must name {expected:?}; got: {err}"
+        );
+        assert_eq!(
+            svc.block_index_guard.read().latest_height(),
+            latest_indexed,
+            "the block index must not be truncated when the rollback is refused",
+        );
         Ok(())
     }
 

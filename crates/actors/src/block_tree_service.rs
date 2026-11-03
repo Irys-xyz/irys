@@ -59,6 +59,13 @@ pub enum BlockTreeServiceMessage {
         validation_result: ValidationResult,
     },
     SetStorageModulesGuard(StorageModulesReadGuard),
+    /// Send Reth a fork-choice update for the current block tree, and answer when Reth
+    /// applied it. Other services ask for an update with this message and do not send
+    /// one themselves: this service then sends every update, in tree order, so a stale
+    /// update cannot reach Reth after a newer one. A dropped `response` means it failed.
+    ForkChoiceUpdate {
+        response: oneshot::Sender<()>,
+    },
 }
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -479,6 +486,11 @@ impl BlockTreeService {
                     }
                     debug!("Skipping BlockValidationFinished during shutdown drain");
                 }
+                // Skip: talks to Reth, which may already be stopped. Dropping the
+                // response tells the requester that no update was sent.
+                BlockTreeServiceMessage::ForkChoiceUpdate { .. } => {
+                    debug!("Skipping ForkChoiceUpdate during shutdown drain");
+                }
                 msg @ (BlockTreeServiceMessage::GetBlockTreeReadGuard { .. }
                 | BlockTreeServiceMessage::BlockPreValidated { .. }
                 | BlockTreeServiceMessage::SetStorageModulesGuard(_)) => {
@@ -537,10 +549,33 @@ impl BlockTreeServiceInner {
                 self.block_migration_service
                     .set_storage_modules_guard(guard);
             }
+            BlockTreeServiceMessage::ForkChoiceUpdate { response } => {
+                let markers = {
+                    let cache = self
+                        .cache
+                        .read()
+                        .map_err(|_| eyre::eyre!("block tree cache read lock poisoned"))?;
+                    ForkChoiceMarkers::from_block_tree(
+                        &cache,
+                        self.block_index_guard.read(),
+                        &self.db,
+                        self.config.consensus.block_migration_depth as usize,
+                        self.config.consensus.block_tree_depth as usize,
+                    )?
+                };
+                markers.store_finalized_block(&self.db)?;
+                self.emit_fcu(&markers).await?;
+                if response.send(()).is_err() {
+                    tracing::warn!("fork-choice update requester dropped the response channel");
+                }
+            }
         }
         Ok(())
     }
 
+    /// Sends `markers` to Reth and waits for the ack. RethService acks when Reth applied
+    /// the update and has `migration_block` on disk, so `migrate_block` after this call
+    /// never puts a block into the block index that an unclean stop can take from Reth.
     #[tracing::instrument(level = "trace", skip_all, fields(fcu.head = %markers.head.block_hash, fcu.migration = %markers.migration_block.block_hash))]
     async fn emit_fcu(&self, markers: &ForkChoiceMarkers) -> eyre::Result<()> {
         let tip_block = &markers.head;
@@ -1223,6 +1258,56 @@ impl BlockTreeServiceInner {
             return Err(e);
         }
 
+        // A reorg orphans migrated blocks when its fork point is below the block index
+        // tip. Compare heights, not the old fork length with `migration_depth`: the
+        // index tip is `migration_depth` below the old tip only in steady state, and is
+        // at the old tip after a restart.
+        //
+        // Roll the index back before `mark_tip`, so a refusal (a fork point below the
+        // finalized block) leaves the tree as it was, and the fork-choice markers and
+        // migration below read the rolled-back index.
+        // A read error must not look like an empty index, which would skip the roll back.
+        let indexed_height = self.block_index_guard.read().try_latest_height()?;
+        if let Some(indexed_height) = indexed_height
+            && is_reorg
+            && fork_height < indexed_height
+        {
+            let rollback_count = indexed_height - fork_height;
+            // Up to `migration_depth` blocks is a normal reorg of a node whose index is
+            // at its head, as after a restart. More is a reorg deeper than steady-state
+            // migration allows.
+            if rollback_count <= u64::from(self.config.consensus.block_migration_depth) {
+                warn!(
+                    fork_height,
+                    indexed_height,
+                    old_fork_depth = split.old_divergent.len(),
+                    new_fork_depth = split.new_divergent.len(),
+                    current_height = new_tip.height,
+                    "reorg rolling back {rollback_count} migrated blocks",
+                );
+            } else {
+                error!(
+                    fork_height,
+                    indexed_height,
+                    old_fork_depth = split.old_divergent.len(),
+                    new_fork_depth = split.new_divergent.len(),
+                    current_height = new_tip.height,
+                    "NETWORK PARTITION RECOVERY: this node was isolated from the network \
+                     and fell behind the canonical chain. Deep reorg rolling back {} \
+                     migrated blocks. Investigate peer connectivity — check firewall \
+                     rules, network routes, and gossip health between this node and \
+                     its peers.",
+                    rollback_count,
+                );
+            }
+            self.block_migration_service
+                .recover_from_network_partition(fork_height)?;
+        }
+
+        // The block index tip after any roll back, read before `mark_tip` so a read
+        // error leaves the tree as it was. The prune below keeps the blocks above it.
+        let migrated_height = self.block_index_guard.read().try_latest_height()?;
+
         let changed = cache.mark_tip(&candidate)?;
         debug!(
             block.hash = %candidate,
@@ -1250,7 +1335,20 @@ impl BlockTreeServiceInner {
         // Subtract 1 to ensure we keep exactly `depth` blocks.
         // The cache.prune() implementation does not count `tip` into the depth
         // equation, so it's always tip + `depth` that's kept around
-        cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
+        //
+        // Never prune a block above the block index tip: `migrate_block` walks the tree
+        // from the new migration block down to the index tip. A tip that moves more than
+        // `block_tree_depth - migration_depth` blocks at once would otherwise evict blocks
+        // that are not migrated yet. The tree then holds more than `block_tree_depth`
+        // blocks until migration catches up.
+        let tree_depth = self.config.consensus.block_tree_depth.saturating_sub(1);
+        let prune_depth = match migrated_height {
+            Some(migrated_height) => {
+                tree_depth.max(new_tip.height.saturating_sub(migrated_height + 1))
+            }
+            None => tree_depth,
+        };
+        cache.prune(prune_depth);
 
         let (epoch_block, reorg_event, blocks_to_confirm) = if is_reorg {
             // Handle blockchain reorganization
@@ -1270,31 +1368,6 @@ impl BlockTreeServiceInner {
                 old_fork_blocks.len(),
                 new_fork_blocks.len()
             );
-
-            // Migration for the current tick hasn't run yet (it happens after
-            // this reorg path, in migrate_block()). The highest migrated block is
-            // at old_tip - migration_depth, from the previous tick's migration.
-            // old_fork_blocks excludes the fork point (common ancestor), so a
-            // migrated block is orphaned only when the fork is strictly deeper
-            // than migration_depth.
-            if old_fork_blocks.len() as u32 > self.config.consensus.block_migration_depth {
-                error!(
-                    fork_depth = old_fork_blocks.len(),
-                    new_fork_depth = new_fork_blocks.len(),
-                    fork_height,
-                    current_height = new_tip.height,
-                    "NETWORK PARTITION RECOVERY: this node was isolated from the network \
-                     and fell behind the canonical chain. Deep reorg rolling back {} \
-                     migrated blocks. Investigate peer connectivity — check firewall \
-                     rules, network routes, and gossip health between this node and \
-                     its peers.",
-                    old_fork_blocks.len() as u32 - self.config.consensus.block_migration_depth,
-                );
-                // Roll back blocks migrated on the minority fork before
-                // proceeding with the new canonical chain.
-                self.block_migration_service
-                    .recover_from_network_partition(fork_height)?;
-            }
 
             metrics::record_reorg();
             metrics::record_reorg_depth(u64::try_from(old_fork_blocks.len()).unwrap_or(0));
@@ -1427,6 +1500,11 @@ impl BlockTreeServiceInner {
         {
             self.send_reanchor_request(&new_tip);
         }
+
+        // Store the finalized block before Reth hears of it. Migration below has not
+        // run yet, so a stop before it leaves the block index tip lower than this
+        // update assumes.
+        fcu_markers.store_finalized_block(&self.db)?;
 
         // Emit consensus events
         self.emit_fcu(&fcu_markers).await?;
@@ -2522,6 +2600,37 @@ mod tests {
                 }
             });
             recorded
+        }
+
+        /// Like [`Self::answer_fork_choice_updates`], but while the returned flag is set,
+        /// record each update as accepted and drop its ack, as a node that stops after
+        /// Reth applied the update. The service then returns before `migrate_block`.
+        fn answer_fork_choice_updates_until_stopped(
+            &mut self,
+        ) -> (
+            Arc<Mutex<Vec<ForkChoiceUpdateMessage>>>,
+            Arc<std::sync::atomic::AtomicBool>,
+        ) {
+            let mut reth_service_rx = self
+                .reth_service_rx
+                .take()
+                .expect("Reth service receiver not yet taken");
+            let accepted_updates = Arc::new(Mutex::new(Vec::new()));
+            let stop_before_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let recorder = Arc::clone(&accepted_updates);
+            let stop = Arc::clone(&stop_before_ack);
+            tokio::spawn(async move {
+                while let Some(message) = reth_service_rx.recv().await {
+                    let (message, _span) = message.into_parts();
+                    if let RethServiceMessage::ForkChoice { update, response } = message {
+                        recorder.lock().expect("fork-choice recorder").push(update);
+                        if !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            let _ = response.send(());
+                        }
+                    }
+                }
+            });
+            (accepted_updates, stop_before_ack)
         }
 
         /// The last fork-choice update names the tip as head, and its confirmed and
@@ -4409,6 +4518,561 @@ mod tests {
             h.indexed_block_hashes(),
             canonical[..=new_migration_height],
             "the block index holds only blocks of the new canonical chain"
+        );
+    }
+
+    /// The tip moves more than `block_tree_depth - migration_depth` blocks in one
+    /// fork-choice update, and the node stops before migration. `head -
+    /// block_tree_depth` is then above the block index tip. The stored finalized
+    /// block must still be a migrated block, so that the restart can start from it.
+    #[tokio::test]
+    async fn finalized_block_is_migrated_after_stop_on_large_tip_jump() {
+        const MIGRATION_DEPTH: u64 = 2;
+        const BLOCK_TREE_DEPTH: u64 = 4;
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let consensus = c.consensus.get_mut();
+            consensus.block_migration_depth = MIGRATION_DEPTH as u32;
+            consensus.block_tree_depth = BLOCK_TREE_DEPTH;
+        });
+        let (accepted_updates, stop_before_ack) = h.answer_fork_choice_updates_until_stopped();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> 1 -> ... -> 8 (canonical tip). The block index holds 0..=6.
+        let old_chain = h
+            .add_validated_chain(
+                &genesis,
+                &[5_100, 5_200, 5_300, 5_400, 5_500, 5_600, 5_700, 5_800],
+            )
+            .await;
+        let old_tip = old_chain.last().expect("old tip").clone();
+        let indexed_height_before_stop = h.inner.block_index_guard.read().latest_height();
+        assert_eq!(indexed_height_before_stop, 6);
+
+        // Each new block above the tip ties a pending block that was added first, so
+        // the tip stays. The third new block is heavier than every block, and the tip
+        // moves three heights at once.
+        let pending_first = h.add_child_block(&old_chain[6], 5_900, false);
+        let tie_first = h.add_child_block(&old_tip, 5_900, true);
+        h.inner
+            .on_block_validation_finished(tie_first.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        let _pending_second = h.add_child_block(&pending_first, 6_000, false);
+        let tie_second = h.add_child_block(&tie_first, 6_000, true);
+        h.inner
+            .on_block_validation_finished(tie_second.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(h.tip(), old_tip.block_hash, "each tie keeps the tip");
+
+        let new_tip = h.add_child_block(&tie_second, 6_100, true);
+        stop_before_ack.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = h
+            .inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect_err("the service returns when the fork-choice ack does not come");
+        assert!(
+            err.to_string().contains("FCU ack"),
+            "the service stops at the fork-choice ack; got: {err}"
+        );
+        assert_eq!(h.tip(), new_tip.block_hash, "the tip moved three heights");
+        assert_eq!(
+            h.inner.block_index_guard.read().latest_height(),
+            indexed_height_before_stop,
+            "migration did not run"
+        );
+
+        let accepted_finalized_hash = accepted_updates
+            .lock()
+            .expect("accepted updates")
+            .last()
+            .expect("Reth accepted the last fork-choice update")
+            .finalized_hash;
+        let block_index = h.inner.block_index_guard.read();
+        let restart_markers = ForkChoiceMarkers::from_index(
+            block_index,
+            &h.inner.db,
+            MIGRATION_DEPTH as usize,
+            BLOCK_TREE_DEPTH as usize,
+        )
+        .expect("the restart starts from the stored finalized block");
+        assert_eq!(
+            restart_markers.prune_block.block_hash, accepted_finalized_hash,
+            "the restart announces the finalized block that Reth accepted"
+        );
+    }
+
+    /// The tip moves more than `block_tree_depth - migration_depth` blocks (and fewer
+    /// than `block_tree_depth`) in one fork-choice update, and Reth acks it. The cache
+    /// prune after the tip move must keep every block that migration then reads, so
+    /// the move completes and the block index reaches `new tip - migration_depth`.
+    #[tokio::test]
+    async fn large_tip_jump_inside_cache_window_migrates_every_new_block() {
+        const MIGRATION_DEPTH: u64 = 2;
+        const BLOCK_TREE_DEPTH: u64 = 4;
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let consensus = c.consensus.get_mut();
+            consensus.block_migration_depth = MIGRATION_DEPTH as u32;
+            consensus.block_tree_depth = BLOCK_TREE_DEPTH;
+        });
+        h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> 1 -> ... -> 8 (canonical tip). The block index holds 0..=6.
+        let old_chain = h
+            .add_validated_chain(
+                &genesis,
+                &[5_100, 5_200, 5_300, 5_400, 5_500, 5_600, 5_700, 5_800],
+            )
+            .await;
+        let old_tip = old_chain.last().expect("old tip").clone();
+        assert_eq!(h.inner.block_index_guard.read().latest_height(), 6);
+
+        // Same tie stalls as `finalized_block_is_migrated_after_stop_on_large_tip_jump`:
+        // each new block above the tip ties a pending block that was added first.
+        let pending_first = h.add_child_block(&old_chain[6], 5_900, false);
+        let tie_first = h.add_child_block(&old_tip, 5_900, true);
+        h.inner
+            .on_block_validation_finished(tie_first.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        let _pending_second = h.add_child_block(&pending_first, 6_000, false);
+        let tie_second = h.add_child_block(&tie_first, 6_000, true);
+        h.inner
+            .on_block_validation_finished(tie_second.block_hash, ValidationResult::Valid)
+            .await
+            .expect("validation result handled");
+        assert_eq!(h.tip(), old_tip.block_hash, "each tie keeps the tip");
+
+        // The tip moves from height 8 to 11: 3 blocks, above
+        // BLOCK_TREE_DEPTH - MIGRATION_DEPTH = 2 and below BLOCK_TREE_DEPTH.
+        let new_tip = h.add_child_block(&tie_second, 6_100, true);
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("a tip move inside the cache window must complete, including migration");
+        assert_eq!(h.tip(), new_tip.block_hash);
+        assert_eq!(
+            h.inner.block_index_guard.read().latest_height(),
+            new_tip.height - MIGRATION_DEPTH,
+            "migration indexes every block up to new tip - migration_depth"
+        );
+    }
+
+    /// A partition recovery onto a heavier fork that is shorter than the old chain
+    /// moves the block index tip down. The finalized block sent to Reth before the
+    /// reorg must stay final: later fork-choice updates and a restart must not
+    /// announce a lower one, and the restored block tree must not hold a block
+    /// below it.
+    #[tokio::test]
+    async fn finalized_block_stays_final_after_recovery_onto_shorter_fork() {
+        use irys_domain::forkchoice_markers::{restore_cache_floor, stored_finalized_height};
+
+        const MIGRATION_DEPTH: u64 = 1;
+        const BLOCK_TREE_DEPTH: u64 = 5;
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let consensus = c.consensus.get_mut();
+            consensus.block_migration_depth = MIGRATION_DEPTH as u32;
+            consensus.block_tree_depth = BLOCK_TREE_DEPTH;
+        });
+        // The block index roll back reads the storage modules; this node has none.
+        h.inner
+            .block_migration_service
+            .set_storage_modules_guard(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![]))));
+        let fork_choice_updates = h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> 1 -> ... -> 10 (canonical tip). Finalized is 10 - 5 = 5.
+        let old_chain = h
+            .add_validated_chain(
+                &genesis,
+                &[
+                    5_100, 5_200, 5_300, 5_400, 5_500, 5_600, 5_700, 5_800, 5_900, 6_000,
+                ],
+            )
+            .await;
+        let finalized_before_reorg = &old_chain[4];
+        let last_finalized_hash = |updates: &Arc<Mutex<Vec<ForkChoiceUpdateMessage>>>| {
+            updates
+                .lock()
+                .expect("fork-choice recorder")
+                .last()
+                .expect("a fork-choice update")
+                .finalized_hash
+        };
+        assert_eq!(
+            last_finalized_hash(&fork_choice_updates),
+            finalized_before_reorg.block_hash
+        );
+
+        // A heavier one-block fork from block 6 abandons the migrated blocks 7..=9.
+        // Recovery truncates the block index to 6, which is `migration_depth` below
+        // the new tip, so migration does not move it.
+        let new_tip = h.add_child_block(&old_chain[5], 6_100, true);
+        h.inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("the reorg completes");
+        assert_eq!(h.tip(), new_tip.block_hash);
+        let indexed_height = h.inner.block_index_guard.read().latest_height();
+        assert_eq!(
+            indexed_height,
+            new_tip.height - MIGRATION_DEPTH,
+            "recovery moved the index down to the fork point"
+        );
+
+        // The next tip move must keep the finalized block.
+        let next_tip = h.add_validated_chain(&new_tip, &[6_200]).await;
+        assert_eq!(h.tip(), next_tip[0].block_hash);
+        assert_eq!(
+            last_finalized_hash(&fork_choice_updates),
+            finalized_before_reorg.block_hash,
+            "a fork-choice update after the recovery announces a lower finalized block"
+        );
+
+        // Restart from the block index.
+        let block_index = h.inner.block_index_guard.read();
+        let restart_markers = ForkChoiceMarkers::from_index(
+            block_index,
+            &h.inner.db,
+            MIGRATION_DEPTH as usize,
+            BLOCK_TREE_DEPTH as usize,
+        )
+        .expect("fork-choice markers from the block index");
+        assert_eq!(
+            restart_markers.prune_block.block_hash, finalized_before_reorg.block_hash,
+            "the restart announces a lower finalized block"
+        );
+        let restored_tree_floor = restore_cache_floor(
+            block_index.latest_height(),
+            BLOCK_TREE_DEPTH,
+            MIGRATION_DEPTH,
+            stored_finalized_height(block_index, &h.inner.db).expect("stored finalized height"),
+        );
+        assert!(
+            restored_tree_floor >= finalized_before_reorg.height,
+            "restored tree floor {restored_tree_floor} lets a fork replace finalized block {}",
+            finalized_before_reorg.height,
+        );
+    }
+
+    /// After a recovery onto a heavier fork that is shorter than the old chain, a
+    /// one-block reorg of the new tip must migrate the new chain. The recovery must
+    /// leave the block index `migration_depth` below the new tip, not at it.
+    #[tokio::test]
+    async fn shallow_reorg_after_recovery_onto_shorter_fork_migrates_the_new_chain() {
+        const MIGRATION_DEPTH: u64 = 1;
+        const BLOCK_TREE_DEPTH: u64 = 5;
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let consensus = c.consensus.get_mut();
+            consensus.block_migration_depth = MIGRATION_DEPTH as u32;
+            consensus.block_tree_depth = BLOCK_TREE_DEPTH;
+        });
+        // The block index roll back reads the storage modules; this node has none.
+        h.inner
+            .block_migration_service
+            .set_storage_modules_guard(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![]))));
+        let _fork_choice_updates = h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> 1 -> ... -> 10 (canonical tip). The block index holds 0..=9.
+        let old_chain = h
+            .add_validated_chain(
+                &genesis,
+                &[
+                    5_100, 5_200, 5_300, 5_400, 5_500, 5_600, 5_700, 5_800, 5_900, 6_000,
+                ],
+            )
+            .await;
+
+        // A heavier one-block fork from block 6 abandons the migrated blocks 7..=9.
+        let fork_point = &old_chain[5];
+        let recovery_tip = h.add_child_block(fork_point, 6_100, true);
+        h.inner
+            .on_block_validation_finished(recovery_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect("the recovery completes");
+
+        // A heavier sibling of the recovery tip replaces it.
+        let sibling = h.add_child_block(fork_point, 6_150, true);
+        h.inner
+            .on_block_validation_finished(sibling.block_hash, ValidationResult::Valid)
+            .await
+            .expect("the one-block reorg completes");
+        assert_eq!(h.tip(), sibling.block_hash);
+
+        // The next block migrates the sibling.
+        let next_tip = h.add_validated_chain(&sibling, &[6_250]).await;
+        assert_eq!(h.tip(), next_tip[0].block_hash);
+        let indexed = h.indexed_block_hashes();
+        assert_eq!(
+            indexed.last(),
+            Some(&sibling.block_hash),
+            "the block index ends at the sibling"
+        );
+        assert_eq!(indexed[fork_point.height as usize], fork_point.block_hash);
+    }
+
+    /// The block index tip is at the tree tip, as after a restart (the head rolls back
+    /// to the index tip). A one-block reorg then orphans a migrated block, although the
+    /// old fork is not longer than `migration_depth`. The reorg must roll the block
+    /// index back to the fork point and migrate the new chain.
+    #[tokio::test]
+    async fn shallow_reorg_of_migrated_tip_rolls_back_the_block_index() {
+        const MIGRATION_DEPTH: u64 = 1;
+        const BLOCK_TREE_DEPTH: u64 = 5;
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let consensus = c.consensus.get_mut();
+            consensus.block_migration_depth = MIGRATION_DEPTH as u32;
+            consensus.block_tree_depth = BLOCK_TREE_DEPTH;
+        });
+        // The block index roll back reads the storage modules; this node has none.
+        h.inner
+            .block_migration_service
+            .set_storage_modules_guard(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![]))));
+        let _fork_choice_updates = h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> 1 -> ... -> 10 (canonical tip), then migrate the tip too.
+        let old_chain = h
+            .add_validated_chain(
+                &genesis,
+                &[
+                    5_100, 5_200, 5_300, 5_400, 5_500, 5_600, 5_700, 5_800, 5_900, 6_000,
+                ],
+            )
+            .await;
+        let old_tip = &old_chain[9];
+        h.inner
+            .migrate_block(&Arc::new(old_tip.clone()))
+            .expect("migrate the tip");
+        assert_eq!(
+            h.inner.block_index_guard.read().latest_height(),
+            old_tip.height
+        );
+
+        // A heavier sibling of the tip orphans the migrated tip.
+        let fork_point = &old_chain[8];
+        let sibling = h.add_child_block(fork_point, 6_100, true);
+        h.inner
+            .on_block_validation_finished(sibling.block_hash, ValidationResult::Valid)
+            .await
+            .expect("the one-block reorg completes");
+        assert_eq!(h.tip(), sibling.block_hash);
+        assert_eq!(
+            h.indexed_block_hashes().last(),
+            Some(&fork_point.block_hash),
+            "the reorg rolled the block index back to the fork point"
+        );
+
+        // The next block migrates the sibling.
+        let next_tip = h.add_validated_chain(&sibling, &[6_200]).await;
+        assert_eq!(h.tip(), next_tip[0].block_hash);
+        assert_eq!(
+            h.indexed_block_hashes().last(),
+            Some(&sibling.block_hash),
+            "the block index ends at the sibling"
+        );
+    }
+
+    /// Another service asks for a fork-choice update instead of sending one. The block
+    /// tree service sends the markers of its current tree, stores the finalized block
+    /// before the send, and answers after Reth applied the update.
+    #[tokio::test]
+    async fn fork_choice_update_request_sends_the_current_tree_markers() {
+        let mut h = DiscardHarness::new();
+        let fork_choice_updates = h.answer_fork_choice_updates();
+        h.index_genesis();
+        let genesis = h.genesis();
+        h.add_validated_chain(&genesis, &[5_100, 5_200, 5_300, 5_400, 5_500])
+            .await;
+        let updates_before = fork_choice_updates.lock().expect("recorder").len();
+
+        let (response, applied) = oneshot::channel();
+        h.inner
+            .handle_message(
+                BlockTreeServiceMessage::ForkChoiceUpdate { response },
+                tracing::Span::current(),
+            )
+            .await
+            .expect("the fork-choice update request is handled");
+        applied
+            .await
+            .expect("the requester gets an answer after Reth applied the update");
+
+        let updates = fork_choice_updates.lock().expect("recorder").clone();
+        assert_eq!(updates.len(), updates_before + 1, "one update is sent");
+        let sent = updates.last().expect("the requested update");
+        let stored_finalized = h
+            .inner
+            .db
+            .view_eyre(irys_database::finalized_block)
+            .expect("read the finalized block record")
+            .expect("a finalized block record");
+        assert_eq!(
+            stored_finalized.block_hash, sent.finalized_hash,
+            "the finalized block is stored before the update is sent"
+        );
+        h.assert_last_fork_choice_follows_tip(&fork_choice_updates);
+    }
+
+    /// The node stops after Reth accepts a fork-choice update and before migration
+    /// moves the block index forward. The tip moved `tip_jump` blocks in that update.
+    /// After the restart, the finalized block that Reth accepted must stay final:
+    /// 1. no fork can replace it, because its parent is not in the restored block tree;
+    /// 2. the finalized height sent to Reth does not go down.
+    #[rstest]
+    #[case::tip_jump_one(1)]
+    #[case::tip_jump_two(2)]
+    #[tokio::test]
+    async fn finalized_block_stays_final_after_stop_between_fcu_and_migration(
+        #[case] tip_jump: u64,
+    ) {
+        use irys_domain::forkchoice_markers::{restore_cache_floor, stored_finalized_height};
+        use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+
+        const MIGRATION_DEPTH: u64 = 1;
+        const BLOCK_TREE_DEPTH: u64 = 4;
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let consensus = c.consensus.get_mut();
+            consensus.block_migration_depth = MIGRATION_DEPTH as u32;
+            consensus.block_tree_depth = BLOCK_TREE_DEPTH;
+        });
+
+        let (accepted_updates, stop_before_ack) = h.answer_fork_choice_updates_until_stopped();
+        h.index_genesis();
+        let genesis = h.genesis();
+
+        // genesis -> 1 -> ... -> 8 (canonical tip). The block index holds 0..=7.
+        let old_chain = h
+            .add_validated_chain(
+                &genesis,
+                &[5_100, 5_200, 5_300, 5_400, 5_500, 5_600, 5_700, 5_800],
+            )
+            .await;
+        let indexed_height_before_stop = h.inner.block_index_guard.read().latest_height();
+        assert_eq!(indexed_height_before_stop, 7);
+
+        // A fork from block 7, `tip_jump + 1` blocks long. Each fork block is lighter
+        // than the old tip except the last one, so the tip moves `tip_jump` heights
+        // in one fork-choice update.
+        let fork_point = &old_chain[6];
+        let fork = h
+            .add_validated_chain(fork_point, &vec![5_750; tip_jump as usize])
+            .await;
+        let new_tip = h.add_child_block(fork.last().expect("fork block"), 5_900, true);
+        stop_before_ack.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = h
+            .inner
+            .on_block_validation_finished(new_tip.block_hash, ValidationResult::Valid)
+            .await
+            .expect_err("the service returns when the fork-choice ack does not come");
+        assert!(
+            err.to_string().contains("FCU ack"),
+            "the service stops at the fork-choice ack; got: {err}"
+        );
+        assert_eq!(h.tip(), new_tip.block_hash, "the tip moved before the stop");
+        assert_eq!(
+            h.inner.block_index_guard.read().latest_height(),
+            indexed_height_before_stop,
+            "migration did not run, so the block index did not move"
+        );
+
+        let accepted_finalized_hash = accepted_updates
+            .lock()
+            .expect("accepted updates")
+            .last()
+            .expect("Reth accepted the last fork-choice update")
+            .finalized_hash;
+        let header_from_db = |hash: BlockHash| {
+            h.inner
+                .db
+                .view_eyre(|tx| irys_database::block_header_by_hash(tx, &hash, true))
+                .expect("DB read")
+                .expect("header in DB")
+        };
+        let accepted_finalized = header_from_db(accepted_finalized_hash);
+
+        // Restart: the fork-choice markers and the block tree come from the block index.
+        let restart_markers = ForkChoiceMarkers::from_index(
+            h.inner.block_index_guard.read(),
+            &h.inner.db,
+            MIGRATION_DEPTH as usize,
+            BLOCK_TREE_DEPTH as usize,
+        )
+        .expect("fork-choice markers from the block index");
+        // `BlockTree::restore_from_db` roots the restored tree at this height and adds
+        // each indexed block above it.
+        let restored_tree_floor = restore_cache_floor(
+            indexed_height_before_stop,
+            BLOCK_TREE_DEPTH,
+            MIGRATION_DEPTH,
+            stored_finalized_height(h.inner.block_index_guard.read(), &h.inner.db)
+                .expect("stored finalized height"),
+        );
+        let indexed_header = |height: u64| {
+            let indexed_hash = h
+                .inner
+                .block_index_guard
+                .read()
+                .get_item(height)
+                .expect("block index item")
+                .block_hash;
+            header_from_db(indexed_hash)
+        };
+        let mut restored_tree = BlockTree::new(
+            &indexed_header(restored_tree_floor),
+            h.inner.config.consensus.clone(),
+        );
+        let add_to_restored_tree = |tree: &mut BlockTree, header: &IrysBlockHeader| {
+            let sealed = Arc::new(SealedBlock::new_unchecked(
+                Arc::new(header.clone()),
+                BlockTransactions::default(),
+            ));
+            tree.add_block(
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                EmaSnapshot::genesis(sealed.header()),
+            )
+        };
+        for height in restored_tree_floor + 1..=indexed_height_before_stop {
+            add_to_restored_tree(&mut restored_tree, &indexed_header(height))
+                .expect("add indexed block to restored tree");
+        }
+
+        // A heavier sibling of the finalized block that Reth accepted.
+        let mut finalized_sibling = IrysBlockHeader::new_mock_header();
+        finalized_sibling.height = accepted_finalized.height;
+        finalized_sibling.previous_block_hash = accepted_finalized.previous_block_hash;
+        finalized_sibling.cumulative_diff = irys_types::U256::from(10_000);
+        finalized_sibling.test_sign();
+
+        tracing::info!(
+            tip_jump,
+            accepted_finalized_height = accepted_finalized.height,
+            restart_finalized_height = restart_markers.prune_block.height,
+            restored_tree_floor,
+            "state after restart"
+        );
+        assert!(
+            add_to_restored_tree(&mut restored_tree, &finalized_sibling).is_err(),
+            "a fork must not replace finalized block {} that Reth accepted; restored tree \
+             floor {restored_tree_floor} holds its parent",
+            accepted_finalized.height,
+        );
+        assert!(
+            restart_markers.prune_block.height >= accepted_finalized.height,
+            "finalized height went down across the restart: Reth accepted {}, restart sends {}",
+            accepted_finalized.height,
+            restart_markers.prune_block.height,
         );
     }
 

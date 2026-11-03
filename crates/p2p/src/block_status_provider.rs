@@ -65,10 +65,6 @@ impl BlockStatus {
 pub struct BlockStatusProvider {
     block_index_read_guard: BlockIndexReadGuard,
     block_tree_read_guard: BlockTreeReadGuard,
-    /// Maximum depth from the latest indexed height at which a competing block
-    /// (same height, different hash) is still treated as a potential reorg
-    /// candidate rather than a pruned fork. Derived from `block_tree_depth`.
-    max_reorg_depth: u64,
     /// Confirmation depth (in blocks) past which a reset seed is treated as final by
     /// the VDF reset-boundary gate. Equals `block_migration_depth`.
     block_migration_depth: u64,
@@ -84,13 +80,11 @@ impl BlockStatusProvider {
     pub fn new(
         block_index_read_guard: BlockIndexReadGuard,
         block_tree_read_guard: BlockTreeReadGuard,
-        block_tree_depth: u64,
         block_migration_depth: u64,
     ) -> Self {
         Self {
             block_tree_read_guard,
             block_index_read_guard,
-            max_reorg_depth: block_tree_depth,
             block_migration_depth,
         }
     }
@@ -109,8 +103,8 @@ impl BlockStatusProvider {
     /// - `ProcessedButCanBeReorganized`: The block is in the tree and has been validated; it
     ///   may or may not be in the block index.
     /// - `Finalized`: The block is in the index, but the tree has already pruned it.
-    /// - `PartOfAPrunedFork`: The block is at an indexed height with a different hash and is
-    ///   too old to be a valid reorg candidate.
+    /// - `PartOfAPrunedFork`: The block is at an indexed height with a different hash, at or
+    ///   below the lowest block tree height, so it cannot attach to the tree.
     /// NOTE: block height is UNTRUSTED here, we haven't validated it yet
     pub fn block_status(&self, block_height: u64, block_hash: &BlockHash) -> BlockStatus {
         let binding = self.block_index_read_guard.read();
@@ -132,8 +126,12 @@ impl BlockStatusProvider {
             if self.is_block_in_the_tree(block_hash) {
                 return BlockStatus::ProcessedButCanBeReorganized;
             }
-            let latest_indexed = binding.latest_height();
-            if latest_indexed.saturating_sub(block_height) <= self.max_reorg_depth {
+            // A block can attach only to a parent in the tree, so a competing block at
+            // or below the lowest tree height can never be accepted. The tree floor
+            // is not a fixed distance from the index tip: the tree keeps unmigrated
+            // blocks while migration lags.
+            let tree_lowest_height = self.block_tree_read_guard.read().lowest_height();
+            if tree_lowest_height.is_some_and(|lowest| block_height > lowest) {
                 // Within reorg range — let the block tree decide via
                 // recover_from_network_partition if needed.
                 return BlockStatus::NotProcessed;
@@ -249,7 +247,6 @@ impl BlockStatusProvider {
                 node_config.consensus_config(),
             )))),
             block_index_read_guard: BlockIndexReadGuard::new(BlockIndex::new_for_testing(db)),
-            max_reorg_depth: node_config.consensus_config().block_tree_depth,
             block_migration_depth: u64::from(node_config.consensus_config().block_migration_depth),
         }
     }
@@ -589,14 +586,13 @@ mod tests {
     //
     // - `NotOnchain(Unknown)`: default state after `BlockTree::add_block` —
     //   the canonical "in tree pending validation" state.
-    // - `Validated(Unknown)`: locally-produced blocks are inserted directly as
-    //   `ChainState::Validated(BlockState::Unknown)` (see `BlockTree::add_common`
-    //   call sites). `block_status` must still treat this as
-    //   `InTreePendingValidation` so children of a not-yet-fully-validated local
+    // - `Validated(Unknown)`: production does not create this state; only tests
+    //   insert it, through `BlockTree::add_common`. `block_status` must still treat
+    //   it as `InTreePendingValidation` so children of a not-yet-fully-validated
     //   block don't enter the orphan re-pull path.
-    // - `Validated(ValidationScheduled)`: the state a locally produced block
-    //   transitions to once `mark_block_as_validation_scheduled` fires but
-    //   before validation completes.
+    // - `Validated(ValidationScheduled)`: the state a `Validated(Unknown)` block
+    //   transitions to once `mark_block_as_validation_scheduled` fires but before
+    //   validation completes.
     #[rstest]
     #[case(ChainState::NotOnchain(BlockState::Unknown))]
     #[case(ChainState::NotOnchain(BlockState::ValidationScheduled))]
@@ -640,6 +636,89 @@ mod tests {
         assert_eq!(status, BlockStatus::ProcessedButCanBeReorganized);
         assert!(status.is_in_tree());
         assert!(status.is_processed());
+    }
+
+    /// The block tree keeps `block_tree_depth` blocks up to the head: `mark_tip` calls
+    /// `BlockTree::prune(block_tree_depth - 1)`, which removes canonical blocks below
+    /// `head - (block_tree_depth - 1)`. The block index tip is `block_migration_depth` below
+    /// the head. A competing block can only attach to a parent that is still in the tree
+    /// (`on_block_prevalidated` returns `ParentNotInCache` otherwise), so a competing block at
+    /// the tree floor or below can never be accepted.
+    #[test]
+    fn block_status_marks_competing_block_below_tree_floor_as_pruned_fork() {
+        // Production depths (`ConsensusConfig` mainnet/testnet).
+        const BLOCK_TREE_DEPTH: u64 = 50;
+        const BLOCK_MIGRATION_DEPTH: u32 = 6;
+        const HEAD_HEIGHT: u64 = 100;
+
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("block-status-provider-test-")
+            .build();
+        let db_env =
+            open_or_create_irys_consensus_data_db(tmp_dir.path(), DbSyncMode::UtterlyNoSync)
+                .expect("to open consensus db");
+        let db = DatabaseProvider(Arc::new(db_env));
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().block_tree_depth = BLOCK_TREE_DEPTH;
+        node_config.consensus.get_mut().block_migration_depth = BLOCK_MIGRATION_DEPTH;
+        let provider = BlockStatusProvider::mock(&node_config, db);
+
+        // The tree holds the canonical chain from the tree floor up to the head, and the
+        // block index holds it up to `head - block_migration_depth`.
+        let genesis = provider.genesis_header();
+        let chain = BlockStatusProvider::produce_mock_chain(
+            HEAD_HEIGHT,
+            Some(&genesis),
+            &node_config.consensus_config(),
+        );
+        for block in &chain {
+            provider.add_block_mock_to_the_tree(block);
+        }
+        provider.set_tip_for_testing(&chain.last().expect("head block").block_hash);
+        let tree_floor_height = HEAD_HEIGHT - (BLOCK_TREE_DEPTH - 1);
+        provider.delete_mocked_blocks_older_than(tree_floor_height);
+        let index_tip_height = HEAD_HEIGHT - u64::from(BLOCK_MIGRATION_DEPTH);
+        {
+            let block_index = provider.block_index_read_guard.read();
+            for block in std::iter::once(&genesis).chain(&chain) {
+                if block.height > index_tip_height {
+                    break;
+                }
+                block_index
+                    .push_item(
+                        &BlockIndexItem {
+                            block_hash: block.block_hash,
+                            num_ledgers: 0,
+                            ledgers: vec![],
+                        },
+                        block.height,
+                    )
+                    .expect("to push index item");
+            }
+        }
+        assert_eq!(provider.index_height(), index_tip_height);
+        assert_eq!(provider.oldest_tree_height(), tree_floor_height);
+
+        let lowest_attachable_height = tree_floor_height + 1;
+
+        let competing_hash = BlockHash::repeat_byte(0xC0);
+        assert_eq!(
+            provider.block_status(lowest_attachable_height, &competing_hash),
+            BlockStatus::NotProcessed,
+            "a competing block whose parent is in the tree is a reorg candidate"
+        );
+        let mut not_rejected = vec![];
+        for height in index_tip_height.saturating_sub(BLOCK_TREE_DEPTH)..lowest_attachable_height {
+            let status = provider.block_status(height, &competing_hash);
+            if status != BlockStatus::PartOfAPrunedFork {
+                not_rejected.push((height, status));
+            }
+        }
+        assert!(
+            not_rejected.is_empty(),
+            "a competing block at or below the tree floor (height {tree_floor_height}) cannot \
+             attach, so it must be PartOfAPrunedFork; got {not_rejected:?}"
+        );
     }
 
     #[test]

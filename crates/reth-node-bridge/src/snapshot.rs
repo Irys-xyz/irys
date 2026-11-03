@@ -105,7 +105,7 @@ pub fn snapshot_reth_state(
     Ok(tip)
 }
 
-fn read_finish_checkpoint(db: &DatabaseEnv) -> eyre::Result<Option<u64>> {
+pub(crate) fn read_finish_checkpoint(db: &DatabaseEnv) -> eyre::Result<Option<u64>> {
     let tx = db.tx().context("opening RO tx for stage checkpoint")?;
     match tx.get::<StageCheckpoints>(RETH_FINISH_STAGE.to_owned()) {
         Ok(cp) => Ok(cp.map(|c| c.block_number)),
@@ -114,7 +114,7 @@ fn read_finish_checkpoint(db: &DatabaseEnv) -> eyre::Result<Option<u64>> {
     }
 }
 
-fn open_reth_db_read_only(db_path: &Path) -> eyre::Result<DatabaseEnv> {
+pub(crate) fn open_reth_db_read_only(db_path: &Path) -> eyre::Result<DatabaseEnv> {
     DatabaseEnv::open(
         db_path,
         DatabaseEnvKind::RO,

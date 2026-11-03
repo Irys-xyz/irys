@@ -3,9 +3,10 @@ use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
+use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::block_validation::{ErrorClass, PreValidationError};
 use irys_actors::mempool_guard::MempoolReadGuard;
-use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
+use irys_actors::reth_service::RethServiceMessage;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{MempoolFacade, TxIngressError};
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -15,12 +16,10 @@ use irys_domain::execution_payload_cache::RethBlockProvider;
 
 use irys_domain::ExecutionPayloadCache;
 use irys_domain::execution_payload_cache::PayloadBodyMismatchError;
-use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    BlockBody, BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, H256,
-    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, SealedBlock, SendTraced as _,
-    SystemLedger, Traced,
+    BlockBody, BlockHash, DataLedger, DatabaseProvider, EvmBlockHash, H256, IrysBlockHeader,
+    IrysTransactionResponse, PeerNetworkError, SealedBlock, SendTraced as _, SystemLedger, Traced,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -201,7 +200,6 @@ where
     block_status_provider: BlockStatusProvider,
     pub execution_payload_provider: ExecutionPayloadCache,
 
-    config: Config,
     service_senders: ServiceSenders,
     pub mempool_guard: MempoolReadGuard,
     runtime_handle: tokio::runtime::Handle,
@@ -565,15 +563,6 @@ where
     B: BlockDiscoveryFacade,
     M: MempoolFacade,
 {
-    #[tracing::instrument(level = "trace", skip_all, err)]
-    fn fcu_markers(&self) -> eyre::Result<ForkChoiceMarkers> {
-        let migration_depth = self.config.consensus.block_migration_depth as usize;
-        let prune_depth = self.config.consensus.block_tree_depth as usize;
-        let tree = self.block_status_provider.block_tree_read_guard().read();
-        let index = self.block_status_provider.block_index_read_guard().read();
-        ForkChoiceMarkers::from_block_tree(&tree, index, &self.db, migration_depth, prune_depth)
-    }
-
     pub(crate) fn new(
         db: DatabaseProvider,
         block_discovery: B,
@@ -582,7 +571,6 @@ where
         sync_state: ChainSyncState,
         block_status_provider: BlockStatusProvider,
         execution_payload_provider: ExecutionPayloadCache,
-        config: Config,
         service_senders: ServiceSenders,
         mempool_guard: MempoolReadGuard,
         runtime_handle: tokio::runtime::Handle,
@@ -596,7 +584,6 @@ where
             sync_state,
             block_status_provider,
             execution_payload_provider,
-            config,
             service_senders,
             mempool_guard,
             runtime_handle,
@@ -606,7 +593,6 @@ where
     async fn validate_and_submit_reth_payload(
         &self,
         block_header: &IrysBlockHeader,
-        reth_service: Option<mpsc::UnboundedSender<Traced<RethServiceMessage>>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B>>,
     ) -> Result<(), BlockPoolError> {
         // This function repairs missing execution payloads for already-validated blocks.
@@ -691,45 +677,6 @@ where
             block_header.block_hash
         );
 
-        if let Some(reth_service) = reth_service {
-            let fcu_markers = self.fcu_markers().map_err(|_err| {
-                CriticalBlockPoolError::OtherInternal("FCU marker computation failed".to_string())
-            })?;
-            let head_hash = fcu_markers.head.block_hash;
-            let confirmed_hash = fcu_markers.migration_block.block_hash;
-            let finalized_hash = fcu_markers.prune_block.block_hash;
-            debug!(
-                fcu.head = %head_hash,
-                fcu.confirmed = %confirmed_hash,
-                fcu.finalized = %finalized_hash,
-                "Sending ForkChoiceUpdateMessage to Reth service"
-            );
-            let (tx, rx) = oneshot::channel();
-
-            reth_service
-                .send_traced(RethServiceMessage::ForkChoice {
-                    update: ForkChoiceUpdateMessage {
-                        head_hash,
-                        confirmed_hash,
-                        finalized_hash,
-                    },
-                    response: tx,
-                })
-                .map_err(|err| {
-                    CriticalBlockPoolError::OtherInternal(format!(
-                        "Failed to send ForkChoiceUpdateMessage to Reth service: {:?}",
-                        err
-                    ))
-                })?;
-
-            rx.await.map_err(|err| {
-                CriticalBlockPoolError::ForkChoiceFailed(format!(
-                    "Reth service dropped FCU acknowledgment: {:?}",
-                    err
-                ))
-            })?;
-        }
-
         // Remove the payload from the cache after it has been processed to prevent excessive memory usage
         // during the fast track process (The cache is LRU, but its upper limit is more for unexpected situations)
         self.execution_payload_provider
@@ -793,13 +740,27 @@ where
                 "Repairing a missing payload for the block {:?}",
                 block.block_hash
             );
-            self.validate_and_submit_reth_payload(
-                &block,
-                reth_service.clone(),
-                Arc::clone(&gossip_data_handler),
-            )
-            .await?;
+            self.validate_and_submit_reth_payload(&block, Arc::clone(&gossip_data_handler))
+                .await?;
         }
+
+        // Reth now holds the repaired payloads. The block tree service sends the
+        // fork-choice update for its current tree: an update computed here could reach
+        // Reth after a newer one from the block tree service, and Reth would not apply it.
+        let (response, applied) = oneshot::channel();
+        self.service_senders
+            .block_tree
+            .send_traced(BlockTreeServiceMessage::ForkChoiceUpdate { response })
+            .map_err(|err| {
+                CriticalBlockPoolError::OtherInternal(format!(
+                    "Failed to ask the block tree service for a fork-choice update: {err:?}"
+                ))
+            })?;
+        applied.await.map_err(|err| {
+            CriticalBlockPoolError::ForkChoiceFailed(format!(
+                "Block tree service dropped the fork-choice update response: {err:?}"
+            ))
+        })?;
 
         Ok(())
     }

@@ -18,7 +18,7 @@ use crate::{
     EpochSnapshot, create_ema_snapshot_from_chain_history,
 };
 
-use super::forkchoice_markers::restore_cache_floor;
+use super::forkchoice_markers::{restore_cache_floor, stored_finalized_height};
 
 /// Why a block is being evicted from the block-tree cache.
 ///
@@ -315,6 +315,7 @@ impl BlockTree {
                 block_index.latest_height(),
                 consensus_config.block_tree_depth,
                 u64::from(consensus_config.block_migration_depth),
+                stored_finalized_height(block_index, &db)?,
             );
             let end = block_index.num_blocks();
             let start_block_hash = block_index
@@ -1099,9 +1100,9 @@ impl BlockTree {
                     self.update_longest_chain_cache();
                     Ok(())
                 }
-                // When we add blocks to the block tree that we produced locally, they are added
-                // as ChainState::Validated but we can still schedule them for full validation
-                // with their BlockState.
+                // Only tests add a block as `ChainState::Validated(BlockState::Unknown)`
+                // (through `add_common`). Such a block can still be scheduled for full
+                // validation with its BlockState.
                 ChainState::Validated(BlockState::ValidationScheduled) => {
                     entry.chain_state = ChainState::Validated(BlockState::ValidBlock);
                     self.update_longest_chain_cache();
@@ -1200,6 +1201,12 @@ impl BlockTree {
     /// Returns the current possible set of candidate hashes for a given height.
     pub fn get_hashes_for_height(&self, height: u64) -> Option<&HashSet<BlockHash>> {
         self.height_index.get(&height)
+    }
+
+    /// The lowest block height in the tree, or `None` for an empty tree. A new block
+    /// can attach only above it, because its parent must be in the tree.
+    pub fn lowest_height(&self) -> Option<u64> {
+        self.height_index.keys().next().copied()
     }
 
     /// Get the block with maximum cumulative difficulty

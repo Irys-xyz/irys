@@ -30,6 +30,11 @@ pub enum MetadataKey {
     /// `ro_compat` bit refuses a writable open. An unknown `compat` bit is
     /// ignored.
     FeatureFlags = 6,
+    /// The finalized block last sent to the execution layer, in the consensus
+    /// DB. Raw 40 bytes: height `u64` big-endian, then the 32-byte block hash.
+    /// Absent until the first fork-choice update. Its height only increases,
+    /// except when an operator rollback deletes it.
+    FinalizedBlock = 7,
 }
 
 impl Encode for MetadataKey {
@@ -55,6 +60,7 @@ impl Decode for MetadataKey {
             4 => Ok(Self::PackingRecord),
             5 => Ok(Self::ChunkCrcComplete),
             6 => Ok(Self::FeatureFlags),
+            7 => Ok(Self::FinalizedBlock),
             _ => Err(DatabaseError::Decode),
         }
     }
@@ -94,7 +100,7 @@ mod tests {
         #[test]
         fn metadata_key_decode_rejects_invalid_discriminants(val in any::<u32>()) {
             prop_assume!(
-                val != 1 && val != 2 && val != 3 && val != 4 && val != 5 && val != 6
+                val != 1 && val != 2 && val != 3 && val != 4 && val != 5 && val != 6 && val != 7
             );
             let bytes = val.to_le_bytes();
             prop_assert!(MetadataKey::decode(&bytes).is_err());

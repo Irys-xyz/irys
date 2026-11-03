@@ -229,7 +229,6 @@ impl P2PService {
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),
-            config.clone(),
             service_senders,
             mempool_guard,
             self.runtime_handle.clone(),

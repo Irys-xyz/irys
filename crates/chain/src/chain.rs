@@ -411,6 +411,7 @@ async fn start_reth_node(
     chainspec: Arc<ChainSpec>,
     config: Config,
     latest_evm_block_hash: irys_types::EvmBlockHash,
+    index_tip_height: u64,
 ) -> eyre::Result<(RethNodeHandle, RethNode)> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
@@ -418,6 +419,7 @@ async fn start_reth_node(
         task_executor.clone(),
         config.node_config.clone(),
         latest_evm_block_hash,
+        index_tip_height,
         random_ports,
     )
     .in_current_span()
@@ -1436,6 +1438,7 @@ impl IrysNode {
             reth_chainspec,
             config.clone(),
             latest_block.evm_block_hash,
+            latest_block_height,
         )
         .in_current_span()
         .await
@@ -2092,7 +2095,6 @@ impl IrysNode {
         let block_status_provider = BlockStatusProvider::new(
             block_index_guard.clone(),
             block_tree_guard.clone(),
-            config.consensus.block_tree_depth,
             u64::from(config.consensus.block_migration_depth),
         );
 
@@ -2217,6 +2219,9 @@ impl IrysNode {
                 config.consensus.block_tree_depth as usize,
             )?
         };
+        // With no record yet (first start after an upgrade, or after an operator
+        // rollback deleted it), this update is the first finalized block Reth hears of.
+        fcu_markers.store_finalized_block(&irys_db)?;
 
         let (fcu_tx, fcu_rx) = oneshot::channel();
         service_senders
