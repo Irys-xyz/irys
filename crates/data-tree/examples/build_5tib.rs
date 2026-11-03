@@ -32,7 +32,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     let (vm_rss_kib, vm_hwm_kib) = resident_kib();
 
-    // Layer `l` stores `ceil(C / 2^l)` hashes, from the chunk roots through the
+    // Layer `l` stores `ceil(C / 2^l)` hashes, from the chunk leaves through the
     // root. A carried node is copied into each layer it passes through, so the
     // stored count is that sum and a proof lookup is a plain index (spec §4).
     // The loop is that rule; it is not a closed form. At 5 TiB the sum is

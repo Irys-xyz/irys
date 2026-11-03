@@ -107,22 +107,28 @@ hash_id!(
     /// size (smaller or larger) and the claimed index, and writes
     /// `size_witness(G, claimed n)` as the proof's last hash.
     ///
-    /// The bytes that pass are always honest bytes of that tree. They are never
-    /// bytes from outside it. The rules below are for that same geometry.
+    /// The bytes that pass are always honest bytes of that tree, at their honest
+    /// chunk index. They are never bytes from outside it. The rules below are for that
+    /// same geometry.
     ///
     /// A chunk proof for `(c, C)` passes as `(c', C')` against the re-derived
-    /// commitment when, and only when, the left/right step sequence of `(c', C')`
-    /// equals that of `(c, C)` at every level and `chunk_len(n', c')` equals
-    /// `chunk_len(n, c)`.
+    /// commitment when, and only when, `c' = c`, the left/right step sequence of
+    /// `(c, C')` equals that of `(c, C)` at every level, and `chunk_len(n', c)`
+    /// equals `chunk_len(n, c)`. The chunk leaf hashes the index, so another
+    /// index fails at the leaf. A proof of the rightmost chunk passes for no
+    /// other size (spec §6, §9).
     ///
     /// A segment proof passes as `(c', j)` against the re-derived commitment when
-    /// the chunk-level left/right steps of `(c', C')` equal those of `(c, C)`,
-    /// `segment_len(n', c', j)` equals `segment_len(n, c, j)`, and every in-chunk
-    /// sibling at or past the claimed data-segment count is already `empty(ℓ)`.
-    /// That count is `s' = ceil(chunk_len(n', c') / segment_size)`. At level `ℓ`
-    /// the sibling subtree starts at `start = ((j >> ℓ) ^ 1) << ℓ`. That sibling
-    /// is at or past the claimed data when `start ≥ s'`. `chunk_len(n', c')` need
-    /// not equal `chunk_len(n, c)`.
+    /// `c' = c`, the chunk-level left/right steps of `(c, C')` equal those of
+    /// `(c, C)`, `segment_len(n', c, j)` equals `segment_len(n, c, j)`, and every
+    /// in-chunk sibling at or past the claimed data-segment count is already
+    /// `empty(ℓ)`. That count is `s' = ceil(chunk_len(n', c) / segment_size)`. At
+    /// level `ℓ` the sibling subtree starts at `start = ((j >> ℓ) ^ 1) << ℓ`. That
+    /// sibling is at or past the claimed data when `start ≥ s'`.
+    /// `chunk_len(n', c)` need not equal `chunk_len(n, c)` when `j` is not the
+    /// last data segment of the claim. As a size proof, with the chunk and
+    /// segment indexes computed from the claimed size, a proof of the rightmost
+    /// data segment passes for no other size (spec §6, §9).
     ///
     /// `node(data_tree_root, size_witness(G, claimed n))` equals the re-derived
     /// commitment, so the proof passes against it and fails against the anchored
@@ -134,11 +140,12 @@ hash_id!(
     /// is not the commitment under `G`. Equal steps and an equal `chunk_len` are
     /// not the accept rule under `G'`.
     ///
-    /// Test geometry, same geometry. Chunk proofs: `n = 96`, chunk 2, passes as
-    /// chunk 1 of `n' = 64`; `n = 128`, chunk 0, passes as chunk 0 of `C' = 3`
-    /// after the last hash is `size_witness(G, 96)`. Segment proof: `n = 56`,
-    /// chunk 1, segment 0 (`chunk_len = 24`) passes as that segment for every
-    /// `n'` in `49..=64` (`chunk_len` 17 to 32). `n'` in `33..=48` does not pass.
+    /// Test geometry, same geometry. Chunk proofs: `n = 128`, chunk 0, passes as
+    /// chunk 0 of `C' = 3` after the last hash is `size_witness(G, 96)`; `n = 96`,
+    /// chunk 2, passes as nothing else (as chunk 1 of `n' = 64` it fails at the
+    /// chunk leaf). Segment proof: `n = 56`, chunk 1, segment 0
+    /// (`chunk_len = 24`) passes as that segment for every `n'` in `49..=64`
+    /// (`chunk_len` 17 to 32). `n'` in `33..=48` does not pass.
     DataCommitment
 );
 

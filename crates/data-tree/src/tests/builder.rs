@@ -131,7 +131,7 @@ fn synthetic(chunk_index: u32) -> NodeHash {
 
 /// Final length of each cache layer (spec §4 `build_layer`).
 ///
-/// Layer 0 is the chunk roots. Each next layer is `ceil(previous / 2)`, which
+/// Layer 0 is the chunk leaves. Each next layer is `ceil(previous / 2)`, which
 /// counts the carried unpaired node. Stop at one node. This is the spec rule,
 /// not the builder's cache.
 fn spec_layer_lengths(chunk_count: u32) -> Vec<usize> {

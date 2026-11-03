@@ -8,4 +8,5 @@ fn domain_tags_match_the_spec_bytes() {
     assert_eq!(TreeDomainTag::Size.as_byte(), 0x02);
     assert_eq!(TreeDomainTag::ChunkKey.as_byte(), 0x03);
     assert_eq!(TreeDomainTag::Ticket.as_byte(), 0x04);
+    assert_eq!(TreeDomainTag::ChunkIndex.as_byte(), 0x08);
 }

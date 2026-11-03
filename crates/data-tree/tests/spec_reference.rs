@@ -142,6 +142,11 @@ enum PrimitiveCase {
         commitment: String,
         hash: String,
     },
+    ChunkLeaf {
+        chunk_index: u32,
+        chunk_root: String,
+        hash: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -150,6 +155,7 @@ struct RootCase {
     data_size: u64,
     chunk_count: u32,
     chunk_roots: Vec<String>,
+    chunk_leaves: Vec<String>,
     data_tree_root: String,
     size_witness: String,
     data_commitment: String,
@@ -165,6 +171,7 @@ struct ChunkProofCase {
     depth: u32,
     data_commitment: String,
     proof: String,
+    size_proof: bool,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +185,7 @@ struct SegmentProofCase {
     chunk_count: u32,
     data_commitment: String,
     proof: String,
+    size_proof: bool,
     /// Set when one empty leaf is replaced by a stand-in hash (spec §5).
     #[serde(default)]
     replaced_leaf: Option<serde_json::Value>,
@@ -266,12 +274,13 @@ impl ChunkRootMemo {
     }
 }
 
-/// An upload of `data_size` pattern bytes, kept as its reference chunk roots.
+/// An upload of `data_size` pattern bytes, kept as its reference chunk roots and chunk leaves.
 struct PatternUpload {
     geometry: Geometry,
     pattern: String,
     data_size: u64,
     chunk_roots: Vec<Hash>,
+    chunk_leaves: Vec<Hash>,
 }
 
 impl PatternUpload {
@@ -288,12 +297,14 @@ impl PatternUpload {
                     usize::try_from(chunk_length).expect("chunk length fits"),
                 )
             })
-            .collect();
+            .collect::<Vec<Hash>>();
+        let chunk_leaves = reference::chunk_leaves(&chunk_roots);
         Self {
             geometry,
             pattern: pattern.to_string(),
             data_size,
             chunk_roots,
+            chunk_leaves,
         }
     }
 
@@ -302,7 +313,7 @@ impl PatternUpload {
     }
 
     fn data_tree_root(&self) -> Hash {
-        reference::data_tree_root(&self.chunk_roots)
+        reference::data_tree_root(&self.chunk_leaves)
     }
 
     fn size_witness(&self) -> Hash {
@@ -340,7 +351,7 @@ impl PatternUpload {
         reference::chunk_proof(
             &self.geometry,
             self.data_size,
-            &self.chunk_roots,
+            &self.chunk_leaves,
             chunk_index,
         )
     }
@@ -349,7 +360,7 @@ impl PatternUpload {
         reference::segment_proof(
             &self.geometry,
             self.data_size,
-            &self.chunk_roots,
+            &self.chunk_leaves,
             chunk_index,
             segment_index,
             &self.chunk_bytes(chunk_index),
@@ -470,6 +481,14 @@ fn reference_matches_primitive_vectors() {
                 let key = reference::chunk_key(&upload.commitment(), *chunk_index);
                 assert_eq!(hex_of(&key), *hash, "chunk_key {chunk_index}");
             }
+            PrimitiveCase::ChunkLeaf {
+                chunk_index,
+                chunk_root,
+                hash,
+            } => {
+                let leaf = reference::chunk_leaf(*chunk_index, &hash_of(chunk_root));
+                assert_eq!(hex_of(&leaf), *hash, "chunk_leaf {chunk_index}");
+            }
         }
     }
 }
@@ -484,6 +503,12 @@ fn check_root_file(file_name: &str) {
         assert_eq!(upload.chunk_count(), case.chunk_count, "{label}");
         let chunk_roots: Vec<String> = upload.chunk_roots.iter().map(|root| hex_of(root)).collect();
         assert_eq!(chunk_roots, case.chunk_roots, "{label} chunk roots");
+        let chunk_leaves: Vec<String> = upload
+            .chunk_leaves
+            .iter()
+            .map(|leaf| hex_of(leaf))
+            .collect();
+        assert_eq!(chunk_leaves, case.chunk_leaves, "{label} chunk leaves");
         assert_eq!(
             hex_of(&upload.data_tree_root()),
             case.data_tree_root,
@@ -527,6 +552,11 @@ fn reference_matches_chunk_proof_vectors() {
         );
         let commitment = upload.commitment();
         assert_eq!(hex_of(&commitment), case.data_commitment, "{label}");
+        assert_eq!(
+            case.size_proof,
+            case.chunk_index == reference::rightmost_chunk(&upload.geometry, case.data_size),
+            "{label} size_proof"
+        );
         let proof = upload.chunk_proof(case.chunk_index);
         assert_eq!(hex_of(&proof), case.proof, "{label}");
         reference::verify_chunk(
@@ -558,6 +588,12 @@ fn reference_matches_segment_proof_vectors() {
                 .geometry
                 .segment_len(case.data_size, case.chunk_index, case.segment_index);
         assert_eq!(segment_length, case.segment_length, "{label}");
+        assert_eq!(
+            case.size_proof,
+            (case.chunk_index, case.segment_index)
+                == reference::rightmost_segment(&upload.geometry, case.data_size),
+            "{label} size_proof"
+        );
         let segment = upload.segment_bytes(case.chunk_index, case.segment_index);
         if case.replaced_leaf.is_some() {
             // spec §5: a bad hash in an empty leaf of a mixed sibling does not
@@ -642,7 +678,117 @@ fn commitment_is_honest(mutation: &str) -> bool {
             | "data_size_above_max"
             | "index_out_of_range"
             | "data_size_zero"
+            | "chunk_proof_at_moved_index"
+            | "rightmost_proof_of_claimed_size"
+            | "commitment_over_chunk_root"
+            | "padding_slot_as_rightmost_segment"
     )
+}
+
+/// Replace the last hash of a proof (the size witness) with `witness`.
+fn replace_last_hash(proof: &mut [u8], witness: &Hash) {
+    let witness_start = proof.len() - reference::HASH_SIZE;
+    proof[witness_start..].copy_from_slice(witness);
+}
+
+/// Inputs of the cases that claim another size, another index, or another
+/// commitment (spec §6, §9). The reference rebuilds the file's proof and
+/// commitment and returns the verifier bytes. `None` for every other mutation.
+fn claimed_inputs(
+    uploads: &mut UploadSet,
+    geometry: GeometryJson,
+    case: &NegativeCase,
+) -> Option<Vec<u8>> {
+    let name = case.name.as_str();
+    let pattern = case.pattern.as_deref().unwrap_or(MOD251);
+    let (bytes, proof, commitment) = match case.mutation.as_str() {
+        "chunk_proof_at_moved_index" => {
+            // The honest bytes and siblings of another chunk, the claimed size's witness.
+            let source = uploads.get(geometry, pattern, case.source_data_size);
+            let proof_chunk_index = case.proof_chunk_index.expect("proof chunk index");
+            let mut proof = source.chunk_proof(proof_chunk_index);
+            replace_last_hash(
+                &mut proof,
+                &reference::size_witness(&source.geometry, case.data_size),
+            );
+            let commitment = reference::data_commitment(
+                &source.geometry,
+                &source.data_tree_root(),
+                case.data_size,
+            );
+            (source.chunk_bytes(proof_chunk_index), proof, commitment)
+        }
+        "rightmost_proof_of_claimed_size" => {
+            // The claimed upload's own rightmost proof against the source root.
+            let source_root = uploads
+                .get(geometry, pattern, case.source_data_size)
+                .data_tree_root();
+            let claimed = uploads.get(geometry, pattern, case.data_size);
+            let (chunk_index, segment_index) =
+                reference::rightmost_segment(&claimed.geometry, case.data_size);
+            assert_eq!(case.chunk_index, chunk_index, "{name}: rightmost chunk");
+            let (bytes, proof) = match case.segment_index {
+                None => (
+                    claimed.chunk_bytes(chunk_index),
+                    claimed.chunk_proof(chunk_index),
+                ),
+                Some(claimed_segment_index) => {
+                    assert_eq!(
+                        claimed_segment_index, segment_index,
+                        "{name}: rightmost segment"
+                    );
+                    (
+                        claimed.segment_bytes(chunk_index, segment_index),
+                        claimed.segment_proof(chunk_index, segment_index),
+                    )
+                }
+            };
+            let commitment =
+                reference::data_commitment(&claimed.geometry, &source_root, case.data_size);
+            (bytes, proof, commitment)
+        }
+        "commitment_over_chunk_root" => {
+            // A commitment whose root is the chunk root, not the chunk leaf.
+            let source = uploads.get(geometry, pattern, case.source_data_size);
+            assert_eq!(source.chunk_count(), 1, "{name}: one chunk");
+            let bytes = source.chunk_bytes(case.chunk_index);
+            let commitment = reference::node(
+                &reference::chunk_root(&source.geometry, &bytes),
+                &source.size_witness(),
+            );
+            (bytes, source.chunk_proof(case.chunk_index), commitment)
+        }
+        "padding_slot_as_rightmost_segment" => {
+            // The source siblings of a padding slot, the claimed upload's bytes there.
+            let segment_index = case.segment_index.expect("segment index");
+            let source = uploads.get(geometry, pattern, case.source_data_size);
+            let mut proof = source.segment_proof(case.chunk_index, segment_index);
+            replace_last_hash(
+                &mut proof,
+                &reference::size_witness(&source.geometry, case.data_size),
+            );
+            let commitment = reference::data_commitment(
+                &source.geometry,
+                &source.data_tree_root(),
+                case.data_size,
+            );
+            let claimed = uploads.get(geometry, pattern, case.data_size);
+            assert_eq!(
+                (case.chunk_index, segment_index),
+                reference::rightmost_segment(&claimed.geometry, case.data_size),
+                "{name}: rightmost segment of the claimed size"
+            );
+            (
+                claimed.segment_bytes(case.chunk_index, segment_index),
+                proof,
+                commitment,
+            )
+        }
+        _ => return None,
+    };
+    assert_eq!(hex_of(&proof), case.proof, "{name} proof");
+    assert_eq!(hex_of(&commitment), case.commitment, "{name} commitment");
+    Some(bytes)
 }
 
 #[test]
@@ -666,6 +812,8 @@ fn reference_matches_negative_vectors() {
         if case.mutation == "segment_equals_left_and_right" {
             bytes.extend_from_slice(&hash_of(case.left.as_deref().expect("left")));
             bytes.extend_from_slice(&hash_of(case.right.as_deref().expect("right")));
+        } else if let Some(claimed_bytes) = claimed_inputs(&mut uploads, geometry_json, case) {
+            bytes = claimed_bytes;
         } else if !matches!(
             case.mutation.as_str(),
             "index_out_of_range" | "data_size_zero" | "data_size_above_max"
@@ -1120,7 +1268,8 @@ mod differential {
         let chunk_roots: Vec<Hash> = (0..chunk_count)
             .map(|chunk_index| reference::chunk_root(geometry, chunk_slice(chunk_index)))
             .collect();
-        let root = reference::data_tree_root(&chunk_roots);
+        let chunk_leaves = reference::chunk_leaves(&chunk_roots);
+        let root = reference::data_tree_root(&chunk_leaves);
         let witness = reference::size_witness(geometry, data_size);
         let commitment = reference::data_commitment(geometry, &root, data_size);
 
@@ -1147,7 +1296,14 @@ mod differential {
         for chunk_index in 0..chunk_count {
             let chunk_bytes = chunk_slice(chunk_index);
             assert_eq!(
-                tree.chunk_root(chunk_index).unwrap().as_bytes(),
+                tree.chunk_leaf(chunk_index).unwrap().as_bytes(),
+                &chunk_leaves[chunk_index as usize],
+                "n {data_size} c {chunk_index} chunk leaf"
+            );
+            assert_eq!(
+                irys_data_tree::chunk_root(&pair.crate_geometry, chunk_bytes)
+                    .unwrap()
+                    .as_bytes(),
                 &chunk_roots[chunk_index as usize],
                 "n {data_size} c {chunk_index} chunk root"
             );
@@ -1162,7 +1318,7 @@ mod differential {
                 "n {data_size} c {chunk_index} depth"
             );
             let chunk_proof =
-                reference::chunk_proof(geometry, data_size, &chunk_roots, chunk_index);
+                reference::chunk_proof(geometry, data_size, &chunk_leaves, chunk_index);
             assert_eq!(
                 tree.chunk_proof(chunk_index).unwrap(),
                 chunk_proof,
@@ -1199,7 +1355,7 @@ mod differential {
                 let segment_proof = reference::segment_proof(
                     geometry,
                     data_size,
-                    &chunk_roots,
+                    &chunk_leaves,
                     chunk_index,
                     segment_index,
                     chunk_bytes,
