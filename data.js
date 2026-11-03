@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793638401758,
+  "lastUpdate": 1793709309662,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -21103,6 +21103,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "81d60c8451bb5b6ae3adc8e8a070789ce8bf9793",
+          "message": "feat(data-tree): bind the chunk index into the chunk-level leaf (#1724)\n\n* feat(data-tree): bind the chunk index into the chunk-level leaf\n\nThe chunk-level leaf is now chunk_leaf(c, R_c) = H(0x08 ‖ be32(c) ‖ R_c),\ntag 0x08 (TreeDomainTag::ChunkIndex). The chunk root keeps its meaning and\nthe chunk level keeps its RFC 6962 shape over the chunk leaves. Proof\nlengths and layout do not change; the chunk-level sibling hashes do. The\nbuilder stores chunk_leaf(c, R_c) in layer 0, with c the push index;\nDataTree::chunk_root becomes DataTree::chunk_leaf. verify_chunk and\nverify_segment hash the chunk root with its index before the chunk-level\nclimb.\n\nWhy: a chunk root shown at another index now fails at the leaf. A verified\nproof of the rightmost chunk, or of the rightmost data segment, with the\nindexes computed from n, against node(data_tree_root, size_witness(G, n)),\nis a size proof: no other n passes against that root. chunk_key stays over\nthe commitment and the index.\n\nSpec: §1 to §10 and a decision-log row. §6 states the aliasing that stays\n(same chunk index, a non-rightmost chunk or data segment) and §9 adds the\nsize-proof property.\n\nThe spec reference adds chunk_leaf from its own preimage and re-derives\nevery vector file. All seven vector files are regenerated; two generator\nruns are byte-identical. New vectors: chunk_leaf primitives, chunk_leaves in\nthe root files, a size_proof flag on proof cases, and negative cases for a\nmoved index, wrong-size rightmost proofs, a commitment over the chunk root,\nand a padding slot as the rightmost segment. New tests sweep size proofs\nover test geometry (n 1..=199, n' 1..=224) and segments_per_chunk 1, 2, 8.\n\n* docs(data-tree): state that the verify cost rows count the size witness once",
+          "timestamp": "2026-11-03T12:19:50Z",
+          "tree_id": "0cf9792013441f698b16921bd68303692f829fdf",
+          "url": "https://github.com/Irys-xyz/irys/commit/81d60c8451bb5b6ae3adc8e8a070789ce8bf9793"
+        },
+        "date": 1793709307687,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015872,
+            "range": "± 0.000859",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.155965,
+            "range": "± 0.00424",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.597989,
+            "range": "± 0.066164",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.758319,
+            "range": "± 0.346389",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.102739,
+            "range": "± 0.000553",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 840.883473,
+            "range": "± 18.421228",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1022.167991,
+            "range": "± 31.483072",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.129043,
+            "range": "± 0.004174",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1286.110596,
+            "range": "± 130.79099",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1759.74639,
+            "range": "± 160.742057",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.124881,
+            "range": "± 0.033865",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 274.035844,
+            "range": "± 10.840321",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 305.471688,
+            "range": "± 50.331361",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00015,
+            "range": "± 0.000012",
             "unit": "ms/iter"
           }
         ]
