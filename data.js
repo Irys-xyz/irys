@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793709309662,
+  "lastUpdate": 1793711692376,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -21211,6 +21211,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00015,
             "range": "± 0.000012",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "647f7c5be1b46f63afe32b0506f96e5871a3098a",
+          "message": "fix(cache): keep and restore ingress proofs a live Submit module stores (#1762)\n\n* fix(cache): keep and restore ingress proofs a live Submit module stores\n\nAt chunk-cache capacity, an expired local ingress proof was deleted unless a\ncached body for its root was still unpersisted. Once an assigned Submit miner\nhad persisted the body and the cache had reclaimed it, the next anchor expiry\ndeleted the proof while the tx was unpromoted and the slot live, and nothing\ngenerated it again.\n\nKeep: at capacity, a staked node re-signs an expired local unpromoted proof\nwhen a module assigned to a live Submit slot holds one full placement of the\nroot's data_size inside its partition, persisted as Data. Slot expiry and\npromotion still stop the proof; an unstaked node deletes it as before.\n\nRestore: after chunk reclamation, prune_cache walks cached data roots from a\nrandom start (at most 1000 checks, 4 generations per pass) and regenerates a\nmissing local proof for a root this node has every leaf of, with an\nunpromoted tx, that a live Submit module fully stores.\n\nStorageModule::is_data_span_persisted checks a span the way\nis_data_chunk_persisted_at checks one offset, reading per run instead of per\noffset. A reanchor now confirms its leaves with one count read instead of\nrebuilding them. Metrics count stored-copy keeps and restore outcomes.\n\n* fix: address review findings\n\n* fix: address review findings\n\n---------\n\nCo-authored-by: jason <jason@ridgway-taylor.co.uk>",
+          "timestamp": "2026-11-03T12:54:48Z",
+          "tree_id": "b34cfc6a2180a9c74219743de1cd1d73b23ca477",
+          "url": "https://github.com/Irys-xyz/irys/commit/647f7c5be1b46f63afe32b0506f96e5871a3098a"
+        },
+        "date": 1793711690945,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012778,
+            "range": "± 0.001401",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.126833,
+            "range": "± 0.001224",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.215553,
+            "range": "± 0.04109",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.523602,
+            "range": "± 0.892489",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.076505,
+            "range": "± 0.001548",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 766.497337,
+            "range": "± 12.216428",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 977.196748,
+            "range": "± 9.823768",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.12205,
+            "range": "± 0.002461",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1191.822125,
+            "range": "± 9.664091",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1646.286643,
+            "range": "± 177.863292",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034665,
+            "range": "± 0.000939",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.430659,
+            "range": "± 0.708575",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.28513,
+            "range": "± 0.830783",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
