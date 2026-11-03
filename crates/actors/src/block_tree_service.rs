@@ -1237,19 +1237,34 @@ impl BlockTreeServiceInner {
             && is_reorg
             && fork_height < indexed_height
         {
-            error!(
-                fork_height,
-                indexed_height,
-                old_fork_depth = split.old_divergent.len(),
-                new_fork_depth = split.new_divergent.len(),
-                current_height = new_tip.height,
-                "NETWORK PARTITION RECOVERY: this node was isolated from the network \
-                 and fell behind the canonical chain. Deep reorg rolling back {} \
-                 migrated blocks. Investigate peer connectivity — check firewall \
-                 rules, network routes, and gossip health between this node and \
-                 its peers.",
-                indexed_height - fork_height,
-            );
+            let rollback_count = indexed_height - fork_height;
+            // Up to `migration_depth` blocks is a normal reorg of a node whose index is
+            // at its head, as after a restart. More is a reorg deeper than steady-state
+            // migration allows.
+            if rollback_count <= u64::from(self.config.consensus.block_migration_depth) {
+                warn!(
+                    fork_height,
+                    indexed_height,
+                    old_fork_depth = split.old_divergent.len(),
+                    new_fork_depth = split.new_divergent.len(),
+                    current_height = new_tip.height,
+                    "reorg rolling back {rollback_count} migrated blocks",
+                );
+            } else {
+                error!(
+                    fork_height,
+                    indexed_height,
+                    old_fork_depth = split.old_divergent.len(),
+                    new_fork_depth = split.new_divergent.len(),
+                    current_height = new_tip.height,
+                    "NETWORK PARTITION RECOVERY: this node was isolated from the network \
+                     and fell behind the canonical chain. Deep reorg rolling back {} \
+                     migrated blocks. Investigate peer connectivity — check firewall \
+                     rules, network routes, and gossip health between this node and \
+                     its peers.",
+                    rollback_count,
+                );
+            }
             self.block_migration_service
                 .recover_from_network_partition(fork_height)?;
         }
