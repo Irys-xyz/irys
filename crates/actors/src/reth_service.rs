@@ -18,6 +18,9 @@ use tracing::{Instrument as _, debug, error, info, warn};
 const ON_DISK_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// How often a wait for Reth's disk logs a warning.
 const ON_DISK_WAIT_WARN_INTERVAL: Duration = Duration::from_secs(10);
+/// How long a fork-choice ack waits for Reth's disk before RethService stops the node.
+/// A wait this long means Reth's persistence is stuck, not only slow.
+const ON_DISK_WAIT_LIMIT: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub struct RethService {
@@ -201,7 +204,8 @@ impl RethService {
         self.process_fcu(resolved).await
     }
 
-    /// Waits until Reth has `evm_block_hash` on disk, or the service shuts down.
+    /// Waits until Reth has `evm_block_hash` on disk, or the service shuts down. Fails
+    /// after `ON_DISK_WAIT_LIMIT`, which stops the node.
     ///
     /// Reth makes a block canonical in memory when it applies a fork-choice update and
     /// writes it to disk later, on its own persistence task. Nothing else orders the
@@ -212,6 +216,12 @@ impl RethService {
         let mut next_warning = started + ON_DISK_WAIT_WARN_INTERVAL;
         while !is_block_on_disk(&self.handle, evm_block_hash)? {
             let waited = started.elapsed();
+            eyre::ensure!(
+                waited < ON_DISK_WAIT_LIMIT,
+                "Reth did not write block {evm_block_hash} to disk within {}s; its persistence \
+                 is stuck",
+                ON_DISK_WAIT_LIMIT.as_secs(),
+            );
             if Instant::now() >= next_warning {
                 let reth_disk_tip = self
                     .handle
