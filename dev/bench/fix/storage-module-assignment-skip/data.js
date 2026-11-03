@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793638401758,
+  "lastUpdate": 1793706196360,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -21103,6 +21103,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "d5a72e89442e80cffde5217f0c000516f2a0a1c1",
+          "message": "fix(epoch): keep held partitions mapped and resend assignments after an orphaned epoch block",
+          "timestamp": "2026-11-02T16:34:17Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1763/commits/d5a72e89442e80cffde5217f0c000516f2a0a1c1"
+        },
+        "date": 1793706194965,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012006,
+            "range": "± 0.000114",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120179,
+            "range": "± 0.000735",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.268456,
+            "range": "± 0.021843",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.391263,
+            "range": "± 0.255727",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074781,
+            "range": "± 0.00311",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 751.135324,
+            "range": "± 20.909071",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 969.422639,
+            "range": "± 1.803029",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.118276,
+            "range": "± 0.001072",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1174.767451,
+            "range": "± 18.470146",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1806.454981,
+            "range": "± 115.993526",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.134716,
+            "range": "± 0.039633",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 219.471809,
+            "range": "± 6.830438",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 276.880498,
+            "range": "± 3.58637",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
