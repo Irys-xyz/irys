@@ -142,8 +142,8 @@ mod compact_ingress_leaf_tests {
         let complete =
             |tx: &_, address| ingress_leaf_count_complete(tx, data_root, address, 64, 32);
 
-        db.update_eyre(|tx| {
-            assert!(!complete(tx, signer)?);
+        db.update_cache_eyre(|tx| {
+            assert!(!complete(tx.inner(), signer)?);
             store_ingress_data_hash(
                 tx,
                 data_root,
@@ -159,7 +159,7 @@ mod compact_ingress_leaf_tests {
                 H256::random(),
             )?;
             assert!(
-                !complete(tx, signer)?,
+                !complete(tx.inner(), signer)?,
                 "the other signer's leaf does not count"
             );
             store_ingress_data_hash(
@@ -169,9 +169,21 @@ mod compact_ingress_leaf_tests {
                 TxChunkOffset::from(1),
                 H256::random(),
             )?;
-            assert!(complete(tx, signer)?);
-            assert!(!ingress_leaf_count_complete(tx, data_root, signer, 96, 32)?);
-            assert!(!ingress_leaf_count_complete(tx, data_root, signer, 0, 32)?);
+            assert!(complete(tx.inner(), signer)?);
+            assert!(!ingress_leaf_count_complete(
+                tx.inner(),
+                data_root,
+                signer,
+                96,
+                32
+            )?);
+            assert!(!ingress_leaf_count_complete(
+                tx.inner(),
+                data_root,
+                signer,
+                0,
+                32
+            )?);
             Ok(())
         })
     }

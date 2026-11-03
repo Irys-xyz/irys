@@ -1820,7 +1820,7 @@ impl InnerCacheTask {
         let local_address = self.config.irys_signer().address();
         let mut candidates: Vec<(DataRoot, u64)> = Vec::new();
         {
-            let tx = ScopedTx::<Cache>::new(self.db.cache().tx()?);
+            let tx = self.db.cache().begin_ro()?;
             let consensus_tx = self.db.tx()?;
             let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
             let mut walker = cursor.walk(Some(seek_key))?;
@@ -5219,7 +5219,7 @@ mod tests {
                 let leaf_count: u32 = if case.missing_leaf { 1 } else { 2 };
                 for offset in 0..leaf_count {
                     irys_database::store_ingress_data_hash(
-                        cache_tx.inner(),
+                        cache_tx,
                         data_root,
                         local_addr,
                         TxChunkOffset::from(offset),
