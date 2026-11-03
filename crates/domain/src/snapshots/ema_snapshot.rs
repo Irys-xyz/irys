@@ -271,6 +271,27 @@ impl EmaSnapshot {
         self.ema_price_2_intervals_ago
     }
 
+    /// Get the EMA price for a public fee quote made on top of the block that
+    /// holds this snapshot (the tip at `tip_height`).
+    ///
+    /// Intent: a quote must stay valid if its tx is validated after the next
+    /// interval roll. After the roll, public pricing uses the current
+    /// `ema_price_1_interval_ago`. Near the roll the quote uses the lower of the
+    /// two EMAs: a lower USD price gives a higher IRYS fee, which satisfies the
+    /// requirement both before and after the roll.
+    pub fn ema_for_public_quote(
+        &self,
+        tip_height: u64,
+        price_adjustment_interval: u64,
+    ) -> IrysTokenPrice {
+        if tip_in_last_quarter_of_ema_interval(tip_height, price_adjustment_interval) {
+            self.ema_price_1_interval_ago
+                .min(self.ema_price_2_intervals_ago)
+        } else {
+            self.ema_for_public_pricing()
+        }
+    }
+
     // NON CANONICAL HASH
     // SHOULD BE USED FOR DEBUGGING ONLY
     pub fn get_hash(&self) -> String {
@@ -281,6 +302,20 @@ impl EmaSnapshot {
         use irys_types::ToBase58 as _;
         res.to_le_bytes().to_base58()
     }
+}
+
+/// True when the tip at `tip_height` is in the last quarter of its EMA interval.
+///
+/// The EMA snapshot rolls at the block whose height is a multiple of the
+/// interval, so the window is keyed on the tip, not on the next block: the tip
+/// just below a roll (`tip_height % interval == interval - 1`) is the most
+/// exposed, and the window always contains it.
+pub fn tip_in_last_quarter_of_ema_interval(
+    tip_height: u64,
+    price_adjustment_interval: u64,
+) -> bool {
+    let last_quarter_start = price_adjustment_interval - price_adjustment_interval.div_ceil(4);
+    tip_height % price_adjustment_interval >= last_quarter_start
 }
 
 /// Cap the provided price value to fit within the max/min acceptable range.
@@ -845,6 +880,48 @@ mod test {
                 test_height
             );
         }
+    }
+
+    #[rstest]
+    #[case(10, &[7, 8, 9])]
+    #[case(4, &[3])]
+    #[case(2, &[1])]
+    #[case(1, &[0])]
+    fn last_quarter_window_ends_on_tip_below_roll(
+        #[case] interval: u64,
+        #[case] expected_positions: &[u64],
+    ) {
+        let in_window: Vec<u64> = (0..interval)
+            .filter(|&position| {
+                // Offset by two intervals so the position is not the height itself.
+                tip_in_last_quarter_of_ema_interval(2 * interval + position, interval)
+            })
+            .collect();
+        assert_eq!(in_window, expected_positions);
+    }
+
+    #[test]
+    fn public_quote_uses_lower_ema_on_tip_below_roll() {
+        let interval = 10;
+        let lower = IrysTokenPrice::token(dec!(0.9)).unwrap();
+        let higher = IrysTokenPrice::token(dec!(1.1)).unwrap();
+        let falling = EmaSnapshot {
+            ema_price_2_intervals_ago: higher,
+            ema_price_1_interval_ago: lower,
+            ..Default::default()
+        };
+        let rising = EmaSnapshot {
+            ema_price_2_intervals_ago: lower,
+            ema_price_1_interval_ago: higher,
+            ..Default::default()
+        };
+
+        // The next block (height 30) rolls the snapshot.
+        assert_eq!(falling.ema_for_public_quote(29, interval), lower);
+        assert_eq!(rising.ema_for_public_quote(29, interval), lower);
+        // The roll is 5 blocks ahead: the standard public price applies.
+        assert_eq!(falling.ema_for_public_quote(25, interval), higher);
+        assert_eq!(rising.ema_for_public_quote(25, interval), lower);
     }
 
     mod bound_in_min_max_range_tests {

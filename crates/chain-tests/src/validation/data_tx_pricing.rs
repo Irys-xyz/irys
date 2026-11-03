@@ -540,7 +540,7 @@ async fn block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result
         .await;
     genesis_node.mine_two_ema_intervals(2).await?;
     let block = genesis_node
-        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_tip_in_last_quarter(price_adjustment_interval)
         .await?;
 
     // Create a data transaction with pricing at current height (height 6)
@@ -667,7 +667,7 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         .await;
     genesis_node.mine_two_ema_intervals(2).await?;
     let block = genesis_node
-        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_tip_in_last_quarter(price_adjustment_interval)
         .await?;
 
     // Create a data transaction with pricing at current height (height 6)

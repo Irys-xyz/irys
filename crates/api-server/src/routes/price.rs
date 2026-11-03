@@ -101,21 +101,10 @@ pub async fn get_price(
             // - Not in last quarter: use stable public pricing (2 intervals ago)
             // - In last quarter: use the LOWER of the last two EMAs (more conservative in IRYS)
             //   Note: lower USD price -> higher IRYS required
-            let price_adjustment_interval = state.config.consensus.ema.price_adjustment_interval;
-            let position_in_interval = next_block_height % price_adjustment_interval;
-            let last_quarter_start =
-                price_adjustment_interval - price_adjustment_interval.div_ceil(4);
-            let in_last_quarter = position_in_interval >= last_quarter_start;
-
-            let pricing_ema = if in_last_quarter {
-                if ema.ema_price_1_interval_ago.amount < ema.ema_price_2_intervals_ago.amount {
-                    ema.ema_price_1_interval_ago
-                } else {
-                    ema.ema_price_2_intervals_ago
-                }
-            } else {
-                ema.ema_for_public_pricing()
-            };
+            let pricing_ema = ema.ema_for_public_quote(
+                tip_height,
+                state.config.consensus.ema.price_adjustment_interval,
+            );
 
             // Get hardfork params using the latest block's timestamp
             let number_of_ingress_proofs_total = state
@@ -225,21 +214,10 @@ pub async fn get_price(
                 epoch_length,
             );
 
-            let price_adjustment_interval = state.config.consensus.ema.price_adjustment_interval;
-            let position_in_interval = next_block_height % price_adjustment_interval;
-            let last_quarter_start =
-                price_adjustment_interval - price_adjustment_interval.div_ceil(4);
-            let in_last_quarter = position_in_interval >= last_quarter_start;
-
-            let pricing_ema = if in_last_quarter {
-                if ema.ema_price_1_interval_ago.amount < ema.ema_price_2_intervals_ago.amount {
-                    ema.ema_price_1_interval_ago
-                } else {
-                    ema.ema_price_2_intervals_ago
-                }
-            } else {
-                ema.ema_for_public_pricing()
-            };
+            let pricing_ema = ema.ema_for_public_quote(
+                tip_height,
+                state.config.consensus.ema.price_adjustment_interval,
+            );
 
             let replica_count = state.config.consensus.num_partitions_per_term_ledger_slot;
 
