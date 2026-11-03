@@ -5326,6 +5326,14 @@ mod tests {
         );
     }
 
+    /// The lane can pwrite and durable-point the packed bytes before this
+    /// thread reads the pending map. Force the durable point, then check the
+    /// file.
+    fn assert_lane_packed_fresh_pad(module: &super::super::StorageModule) -> eyre::Result<()> {
+        module.force_sync_pending_chunks()?;
+        assert_data_byte_durable(module, 0, 0x10)
+    }
+
     /// The cache still holds the pread pad after the epoch moves. The file
     /// already has the replacement bytes: the bump is published before the
     /// cache invalidate. Occupy must not pack the old pad.
@@ -5489,7 +5497,7 @@ mod tests {
             module.disk.entropy_readahead_hits.load(Ordering::SeqCst) > hits,
             "the lane pack did not use the cached pad"
         );
-        assert_fresh_pad_packed(&module);
+        assert_lane_packed_fresh_pad(&module)?;
         drop(lane);
         Ok(())
     }
@@ -5670,7 +5678,7 @@ mod tests {
         } else {
             first?;
         }
-        assert_fresh_pad_packed(&module);
+        assert_lane_packed_fresh_pad(&module)?;
         drop(lane);
         Ok(())
     }
