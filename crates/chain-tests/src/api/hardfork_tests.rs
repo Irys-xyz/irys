@@ -110,6 +110,7 @@ fn create_test_config(aurora: Option<Aurora>) -> NodeConfig {
         borealis: None,
         cascade: None,
         delta: None,
+        echo: None,
     };
     config
 }
@@ -605,6 +606,7 @@ mod epoch_block_filtering {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
         };
         config
     }
@@ -716,6 +718,7 @@ mod epoch_block_filtering {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
         };
         let [signer1, signer2] = create_funded_signers(&mut config);
         let node = IrysNodeTest::new_genesis(config)
@@ -791,6 +794,7 @@ mod borealis_hardfork {
             borealis,
             cascade: None,
             delta: None,
+            echo: None,
         };
         config
     }
@@ -888,6 +892,7 @@ mod borealis_hardfork {
             }),
             cascade: None,
             delta: None,
+            echo: None,
         };
 
         let signer = create_funded_signer(&mut config);
@@ -1010,6 +1015,7 @@ mod peer_sync_recovery {
             borealis: None,
             cascade: None,
             delta: None,
+            echo: None,
         };
 
         // Fund signers: 9 for V1 (3 epochs * 3 blocks), 9 for V2 (3 epochs * 3 blocks), 1 for peer
@@ -1107,7 +1113,7 @@ mod peer_sync_recovery {
                 height
             );
             // Verify all data txs in this block are in the database
-            for tx_ids in block.get_data_ledger_tx_ids().values() {
+            for tx_ids in block.get_data_ledger_tx_ids().unwrap().values() {
                 for tx_id in tx_ids {
                     let tx_header = genesis_node.get_tx_header(tx_id)?;
                     assert_eq!(
@@ -1215,7 +1221,7 @@ mod peer_sync_recovery {
             );
             // Verify all data txs in this block are in the database
             let mut block_tx_count = 0;
-            for tx_ids in block.get_data_ledger_tx_ids().values() {
+            for tx_ids in block.get_data_ledger_tx_ids().unwrap().values() {
                 for tx_id in tx_ids {
                     let tx_header = genesis_node.get_tx_header(tx_id)?;
                     assert_eq!(
@@ -1295,7 +1301,7 @@ mod peer_sync_recovery {
                 height
             );
             // Verify all data txs in this block are in the peer's database (direct DB read, not mempool)
-            for tx_ids in peer_block.get_data_ledger_tx_ids().values() {
+            for tx_ids in peer_block.get_data_ledger_tx_ids().unwrap().values() {
                 for tx_id in tx_ids {
                     let tx_header = peer_node
                         .node_ctx

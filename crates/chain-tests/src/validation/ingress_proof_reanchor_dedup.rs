@@ -94,7 +94,8 @@ async fn spiky_heavy3_reanchor_duplicate_ingress_proof_signers() -> eyre::Result
             .node_ctx
             .block_pool
             .add_execution_payload_to_cache(eth_block.block().clone())
-            .await;
+            .await
+            .expect("payload body matches its header");
         let sealed_block = build_sealed_block(header.as_ref().clone(), block_txs)?;
         send_block_to_block_tree(&peer_node.node_ctx, sealed_block, false).await?;
     }

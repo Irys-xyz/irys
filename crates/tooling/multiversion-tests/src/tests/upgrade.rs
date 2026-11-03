@@ -33,7 +33,10 @@ async fn submit_and_assert_full_history(
     let urls = cluster
         .checked_api_urls()
         .unwrap_or_else(|e| panic!("nodes unhealthy after {label}: {e}"));
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(crate::cluster::DATA_CLIENT_TIMEOUT)
+        .build()
+        .expect("build data client");
     for tx in history.iter() {
         let tx_id = tx.header.id;
         for url in &urls {

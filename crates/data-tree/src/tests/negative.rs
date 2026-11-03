@@ -838,13 +838,11 @@ fn an_unanchored_rightmost_segment_proof_passes_only_where_it_is_not_rightmost()
             "n' = {claimed}: segment 2 is not the rightmost data segment"
         );
     }
-    // spec §6: `n'` ≤ 32 has no chunk 1; `n'` in `65..=96` fails on length or at the leaf.
-    let three_full_chunks = 3 * chunk_size;
-    for claimed in (1..smallest_two_chunk_data_size).chain(two_full_chunks + 1..=three_full_chunks)
-    {
+    // spec §6: `n'` ≤ 32 has no chunk 1.
+    for claimed in 1..smallest_two_chunk_data_size {
         let proof = proof_ending_with_size_witness(&geometry, honest.clone(), claimed);
         let rederived = hash::data_commitment(&geometry, &root, claimed);
-        assert!(
+        assert_eq!(
             verify_segment(
                 &geometry,
                 &rederived,
@@ -853,8 +851,34 @@ fn an_unanchored_rightmost_segment_proof_passes_only_where_it_is_not_rightmost()
                 segment_index,
                 segment,
                 &proof,
-            )
-            .is_err(),
+            ),
+            Err(VerifyError::Size(SizeError::ChunkIndexOutOfRange {
+                chunk_index,
+                chunk_count: 1,
+            })),
+            "n' = {claimed}"
+        );
+    }
+    // spec §6: `n'` in `65..=96` gives `C' = 3`, so chunk 1 needs one more
+    // chunk-level sibling than the honest proof carries.
+    let three_full_chunks = 3 * chunk_size;
+    for claimed in two_full_chunks + 1..=three_full_chunks {
+        let proof = proof_ending_with_size_witness(&geometry, honest.clone(), claimed);
+        let rederived = hash::data_commitment(&geometry, &root, claimed);
+        assert_eq!(
+            verify_segment(
+                &geometry,
+                &rederived,
+                claimed,
+                chunk_index,
+                segment_index,
+                segment,
+                &proof,
+            ),
+            Err(VerifyError::InvalidProofLength {
+                expected: 5 * HASH_SIZE,
+                actual: 4 * HASH_SIZE,
+            }),
             "n' = {claimed}"
         );
     }

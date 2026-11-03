@@ -20,6 +20,120 @@ pub enum PriceOracleError {
     NoOraclesConfigured,
 }
 
+/// Maximum seconds an oracle-reported `last_updated_at` may lead the local wall clock.
+/// A price that is further in the future than this bound is rejected. The startup fetch
+/// then fails, so the node does not start when the local clock or the oracle clock is
+/// skewed by more than this bound. A larger bound accepts more skew but also accepts
+/// prices that are stamped further ahead of real time.
+pub(crate) const MAX_ORACLE_CLOCK_SKEW_SECS: u64 = 60;
+
+/// Fails when `reported` is more than `MAX_ORACLE_CLOCK_SKEW_SECS` ahead of the local wall clock.
+/// A clock set before the UNIX epoch is treated as time zero.
+pub(crate) fn reject_future_timestamp(reported: UnixTimestamp) -> eyre::Result<()> {
+    let now_secs = UnixTimestamp::now().map_or(0, UnixTimestamp::as_secs);
+    reject_future_timestamp_at(reported, now_secs)
+}
+
+fn reject_future_timestamp_at(reported: UnixTimestamp, now_secs: u64) -> eyre::Result<()> {
+    let latest_accepted = now_secs.saturating_add(MAX_ORACLE_CLOCK_SKEW_SECS);
+    if reported.as_secs() > latest_accepted {
+        eyre::bail!(
+            "oracle timestamp {} is {}s ahead of the local clock (max skew {}s); check the system clock",
+            reported.as_secs(),
+            reported.as_secs() - now_secs,
+            MAX_ORACLE_CLOCK_SKEW_SECS
+        );
+    }
+    Ok(())
+}
+
+/// Fails when the feed reports a zero price. Block validation rejects a zero oracle price.
+/// The producer bounds the price to `token_price_safe_range` around the parent price. Only
+/// when that range is 100% or more does the lower bound reach zero. A zero price then passes
+/// the bound and the produced block is invalid. With a smaller range, the bound raises a zero
+/// price to a non-zero minimum.
+pub(crate) fn reject_zero_price(amount: Amount<(IrysPrice, Usd)>) -> eyre::Result<()> {
+    eyre::ensure!(!amount.amount.is_zero(), "oracle reported a zero price");
+    Ok(())
+}
+
+/// Total time allowed for one oracle HTTP request, so a hung endpoint cannot wedge the poller.
+pub(crate) const ORACLE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Largest oracle response body accepted; real quote responses are a few hundred bytes.
+pub(crate) const MAX_ORACLE_RESPONSE_BYTES: u64 = 1024 * 1024;
+
+pub(crate) fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(ORACLE_HTTP_TIMEOUT)
+        .read_timeout(ORACLE_HTTP_TIMEOUT)
+        .build()
+        .expect("reqwest client builds with a fixed timeout")
+}
+
+/// Reads the body, failing once it exceeds `MAX_ORACLE_RESPONSE_BYTES`.
+pub(crate) async fn read_capped_body(mut response: reqwest::Response) -> eyre::Result<Vec<u8>> {
+    let cap = MAX_ORACLE_RESPONSE_BYTES;
+    if let Some(len) = response.content_length() {
+        eyre::ensure!(
+            len <= cap,
+            "oracle response Content-Length {len} exceeds cap of {cap} bytes"
+        );
+    }
+    let mut buf = Vec::new();
+    let mut total = 0_u64;
+    while let Some(chunk) = response.chunk().await? {
+        let chunk_len = u64::try_from(chunk.len())?;
+        total = irys_types::accumulate_response_bytes(total, chunk_len, cap)
+            .map_err(|_| eyre::eyre!("oracle response exceeds cap of {cap} bytes"))?;
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// Attempts for the startup price fetch before the node reports an error.
+pub(crate) const INITIAL_FETCH_ATTEMPTS: u32 = 5;
+
+/// Delay before the second startup fetch attempt; doubles after each further failure.
+pub(crate) const INITIAL_FETCH_BASE_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Runs `fetch` up to `attempts` times, doubling the delay between failures.
+/// Returns the last error, with the attempt count, once all attempts fail.
+async fn fetch_with_backoff<T, F, Fut>(
+    what: &str,
+    attempts: u32,
+    base_backoff: Duration,
+    mut fetch: F,
+) -> eyre::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = eyre::Result<T>>,
+{
+    let mut backoff = base_backoff;
+    let mut attempt = 1_u32;
+    loop {
+        match fetch().await {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt >= attempts => {
+                return Err(err.wrap_err(format!(
+                    "{what}: initial price fetch failed after {attempts} attempts"
+                )));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    attempt,
+                    ?backoff,
+                    "{what}: initial price fetch failed, retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = backoff.saturating_mul(2);
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
 pub mod coingecko;
 pub mod coinmarketcap;
 pub mod mock_oracle;
@@ -84,7 +198,13 @@ impl SingleOracle {
         let coinmarketcap::CoinMarketCapQuote {
             amount: initial_amount,
             last_updated: initial_last_updated,
-        } = client.current_price().await?;
+        } = fetch_with_backoff(
+            "CoinMarketCap",
+            INITIAL_FETCH_ATTEMPTS,
+            INITIAL_FETCH_BASE_BACKOFF,
+            || client.current_price(),
+        )
+        .await?;
         let poll_interval = Duration::from_millis(poll_interval_ms.max(1));
         Ok(Arc::new(Self {
             source: OracleSource::CoinMarketCap(client),
@@ -107,7 +227,13 @@ impl SingleOracle {
         let coingecko::CoinGeckoQuote {
             amount: initial_amount,
             last_updated: initial_last_updated,
-        } = client.current_price().await?;
+        } = fetch_with_backoff(
+            "CoinGecko",
+            INITIAL_FETCH_ATTEMPTS,
+            INITIAL_FETCH_BASE_BACKOFF,
+            || client.current_price(),
+        )
+        .await?;
         let poll_interval = Duration::from_millis(poll_interval_ms.max(1));
         Ok(Arc::new(Self {
             source: OracleSource::CoinGecko(client),
@@ -280,5 +406,139 @@ mod tests {
             aggregator.current_snapshot(),
             Err(PriceOracleError::NoOraclesConfigured)
         ));
+    }
+}
+
+#[cfg(test)]
+mod future_timestamp_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_timestamp_beyond_skew() {
+        let reported = UnixTimestamp::from_secs(1_000 + MAX_ORACLE_CLOCK_SKEW_SECS + 1);
+        let err = reject_future_timestamp_at(reported, 1_000).unwrap_err();
+        assert!(err.to_string().contains("check the system clock"));
+        assert!(reject_future_timestamp_at(UnixTimestamp::from_secs(u64::MAX), 1_000).is_err());
+    }
+
+    #[test]
+    fn accepts_timestamp_within_skew() {
+        let at_limit = UnixTimestamp::from_secs(1_000 + MAX_ORACLE_CLOCK_SKEW_SECS);
+        assert!(reject_future_timestamp_at(at_limit, 1_000).is_ok());
+        assert!(reject_future_timestamp_at(UnixTimestamp::from_secs(500), 1_000).is_ok());
+    }
+
+    #[test]
+    fn live_clock_check() {
+        let now = UnixTimestamp::now().unwrap();
+        assert!(reject_future_timestamp(now).is_ok());
+        let future = UnixTimestamp::from_secs(now.as_secs() + MAX_ORACLE_CLOCK_SKEW_SECS + 10);
+        assert!(reject_future_timestamp(future).is_err());
+    }
+}
+
+#[cfg(test)]
+mod zero_price_tests {
+    use super::*;
+    use irys_types::U256;
+
+    #[test]
+    fn rejects_zero_price() {
+        assert!(reject_zero_price(Amount::new(U256::from(0_u64))).is_err());
+    }
+
+    #[test]
+    fn accepts_nonzero_price() {
+        assert!(reject_zero_price(Amount::new(U256::from(1_u64))).is_ok());
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "simpler tests")]
+mod http_limit_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt as _;
+    use tokio::net::TcpListener;
+
+    /// Serves one canned HTTP response, then closes; returns the URL.
+    async fn serve_once(head: &'static str, body: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut scratch = [0_u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut scratch).await;
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(&body).await;
+            let _ = sock.shutdown().await;
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn reads_body_within_cap() {
+        let url = serve_once(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
+            b"{}".to_vec(),
+        )
+        .await;
+        let resp = build_http_client().get(url).send().await.unwrap();
+        assert_eq!(read_capped_body(resp).await.unwrap(), b"{}");
+    }
+
+    #[tokio::test]
+    async fn rejects_streamed_body_over_cap() {
+        let oversized = vec![b'x'; usize::try_from(MAX_ORACLE_RESPONSE_BYTES).unwrap() + 1];
+        let url = serve_once("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", oversized).await;
+        let resp = build_http_client().get(url).send().await.unwrap();
+        assert!(read_capped_body(resp).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_declared_length_over_cap() {
+        let url = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\n",
+            Vec::new(),
+        )
+        .await;
+        let resp = build_http_client().get(url).send().await.unwrap();
+        assert!(read_capped_body(resp).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod initial_fetch_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[tokio::test]
+    async fn retries_until_success() {
+        let calls = AtomicU32::new(0);
+        let result = fetch_with_backoff("test", 5, Duration::from_millis(1), || async {
+            if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                eyre::bail!("transient")
+            }
+            Ok(7_u32)
+        })
+        .await;
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn fails_after_all_attempts() {
+        let calls = AtomicU32::new(0);
+        let result: eyre::Result<u32> =
+            fetch_with_backoff("test", 3, Duration::from_millis(1), || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                eyre::bail!("down")
+            })
+            .await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("after 3 attempts") && err.contains("down"),
+            "{err}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 }

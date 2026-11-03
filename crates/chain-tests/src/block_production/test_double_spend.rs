@@ -1,6 +1,32 @@
-use crate::utils::IrysNodeTest;
+use crate::utils::{AddTxError, IrysNodeTest};
+use irys_actors::mempool_service::TxIngressError;
+use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{DataLedger, NodeConfig, irys::IrysSigner};
+use irys_types::{
+    CommitmentTransaction, CommitmentValidationError, DataLedger, H256, NodeConfig,
+    irys::IrysSigner,
+};
+
+/// A signer has at most one stake, so mempool ingress rejects a new stake from
+/// the node's already-staked signer.
+async fn assert_new_stake_rejected_at_ingress(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    anchor: H256,
+) -> eyre::Result<()> {
+    let mut stake = CommitmentTransaction::new_stake(&node.node_ctx.config.consensus, anchor);
+    node.cfg.signer().sign_commitment(&mut stake)?;
+    let result = node.ingest_commitment_tx(stake).await;
+    assert!(
+        matches!(
+            result,
+            Err(AddTxError::TxIngress(
+                TxIngressError::CommitmentValidationError(CommitmentValidationError::AlreadyStaked)
+            ))
+        ),
+        "expected AlreadyStaked ingress rejection, got {result:?}"
+    );
+    Ok(())
+}
 
 #[tokio::test]
 /// demonstrate that duplicate txs are allowed into mempool, to allow for forks, but not returned by handle_get_best_mempool_txs()
@@ -39,6 +65,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     assert!(
         block1
             .get_data_ledger_tx_ids()
+            .unwrap()
             .get(&DataLedger::Submit)
             .unwrap()
             .contains(&txid)
@@ -57,16 +84,13 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // check the shape of the mempool equates to empty
     node.wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait_u32)
         .await?;
-    // create commitment tx that will be allowed into mempool, but not included in a block as this node is already staked
-    let stake_for_mempool = node.post_stake_commitment(Some(anchor)).await?;
+    // a new stake is rejected at ingress as this node is already staked
+    assert_new_stake_rejected_at_ingress(&node, anchor).await?;
 
     // create commitment tx that will remain in the mempool
     let pledge_for_mempool = node.post_pledge_commitment(Some(anchor)).await?;
-    node.wait_for_mempool_commitment_txs(
-        vec![stake_for_mempool.id(), pledge_for_mempool.id()],
-        seconds_to_wait,
-    )
-    .await?;
+    node.wait_for_mempool_commitment_txs(vec![pledge_for_mempool.id()], seconds_to_wait)
+        .await?;
 
     // check the shape of the mempool now contains one commitment txs
     node.wait_for_mempool_best_txs_shape(0, 0, 1, seconds_to_wait_u32)
@@ -102,14 +126,13 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // mempool should not provide the submit as part of best txs
     node.wait_for_mempool_best_txs_shape(0, 0, 1, seconds_to_wait_u32)
         .await?;
-    // resubmit commitment transactions that were already seen
-    node.post_commitment_tx(&stake_for_mempool).await?;
+    // resubmit commitment transaction that was already seen
     node.post_commitment_tx(&pledge_for_mempool).await?;
     node.wait_for_mempool_best_txs_shape(0, 0, 1, seconds_to_wait_u32)
         .await?;
 
     // ensure mempool does not accept any duplicate tx
-    // mempool will have skipped new stake and the duplicate pledge
+    // mempool will have skipped the duplicate pledge
     node.wait_for_mempool_best_txs_shape(0, 0, 1, seconds_to_wait_u32)
         .await?;
 
@@ -123,6 +146,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     assert!(
         !block2
             .get_data_ledger_tx_ids()
+            .unwrap()
             .get(&DataLedger::Submit)
             .unwrap()
             .contains(&txid)
@@ -157,13 +181,13 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     node.wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait_u32)
         .await?;
 
-    // re post existing stake commitment, that also uses the same anchor as the previous stake tx
+    // post a new stake that uses the same anchor as the previous stake tx
     // this should be rejected by the mempool and not ingress the mempool
-    let _duplicate_stake_for_mempool = node.post_stake_commitment(Some(anchor)).await?;
+    assert_new_stake_rejected_at_ingress(&node, anchor).await?;
 
-    // re post existing stake commitment tx that will be skipped by mempool ingress as this node is already staked
+    // post a new stake that will be rejected by mempool ingress as this node is already staked
     // use a recent anchor, or we will hit an invalid anchor error due to anchor timeout
-    let _new_anchor_stake_for_mempool = node.post_stake_commitment(None).await?;
+    assert_new_stake_rejected_at_ingress(&node, node.get_anchor().await?).await?;
     // ensure mempool does not accept either of the above two txs
     // i.e. mempool should have rejected both stakes as the node has been staked since epoch
     node.wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait_u32)

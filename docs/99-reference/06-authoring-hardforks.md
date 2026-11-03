@@ -91,4 +91,7 @@ Update [ethereum_hardfork_mapping()](https://github.com/Irys-xyz/irys/blob/3fd82
 
 ## Delta
 
-`delta` (`Option<Delta>` on `IrysHardforkConfig`) is a consensus-only fork. It does not change the EVM, so it has no `IrysHardfork` chainspec entry. It is a WIP hardfork and is not deployed: every preset leaves it `None`. It accumulates changes that need a hardfork activation. Epoch processing reads the current change with `delta_for_block` on the epoch block. That change gives a data ledger its first slots in the epoch that activates it.
+`delta` (`Option<Delta>` on `IrysHardforkConfig`) is a consensus-only fork. It does not change the EVM, so it has no `IrysHardfork` chainspec entry. It is a WIP hardfork and is not deployed: every preset leaves it `None`. It accumulates changes that need a hardfork activation. It carries two changes, and `delta_for_block` resolves both at the block's own timestamp:
+
+- Ledger seeding gives a data ledger its first slots. It can only act on an epoch block, so it acts at the first epoch block at or after `activation_timestamp`.
+- The capacity reward change acts on every block. From the first block at or after `activation_timestamp`, a capacity (entropy) PoA, that is, a PoA that is not a data PoA, earns `hardforks.delta.capacity_chunk_reward_percent` of the reward-curve amount, and the remainder goes to the treasury and counts as emitted. A data PoA earns 100%. The kind belongs to the PoA, not to the partition.

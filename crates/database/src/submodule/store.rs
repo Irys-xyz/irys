@@ -255,6 +255,19 @@ pub trait SubmoduleRead {
     ) -> eyre::Result<bool> {
         Ok(true)
     }
+
+    /// `true` when any offset in the inclusive span has no stored row.
+    ///
+    /// A row with `crc: None` still counts as present. The default is `true`:
+    /// an engine that does not scan offset rows never reports a complete span.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX reports every span incomplete. RocksDB v1 scans stored rows.
+    fn offset_row_missing(
+        &self,
+        _start: PartitionChunkOffset,
+        _end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        Ok(true)
+    }
 }
 
 /// Exclusive write batch. Reads inside the batch see its own writes.

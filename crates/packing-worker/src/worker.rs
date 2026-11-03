@@ -74,7 +74,8 @@ mod tests {
             bind_port: 0,
             bind_addr: "127.0.0.1".to_string(),
             cpu_packing_concurrency: 2,
-            gpu_packing_batch_size: 0,
+            // smaller than the request, so the CUDA path packs several batches in order
+            gpu_packing_batch_size: 50,
             max_pending: NonZero::new(1).unwrap(),
         };
 
@@ -140,18 +141,28 @@ mod tests {
 
         // while we're doing that, manually pack to make sure the returned values are correct
 
-        let packed_bytes = client
+        let response = client
             .post(format!("{}pack", base_url))
             .json(&request)
             .send()
-            .await?
-            .bytes()
             .await?;
+        let status = response.status();
+        let packed_bytes = response.bytes().await?;
+        assert!(
+            status.is_success(),
+            "pack request failed with {status}: {}",
+            String::from_utf8_lossy(&packed_bytes)
+        );
 
         let remote_packed = packed_bytes.to_vec();
         let local_packed = handle.await?;
 
-        assert_eq!(remote_packed, local_packed);
+        // compare without printing the buffers on failure; each is ~26 MB
+        assert_eq!(remote_packed.len(), local_packed.len());
+        assert!(
+            remote_packed == local_packed,
+            "remote packed bytes differ from local packing"
+        );
 
         tx.send(irys_types::ShutdownReason::ServiceCompleted("test".into()))
             .await?;

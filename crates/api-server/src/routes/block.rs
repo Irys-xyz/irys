@@ -4,8 +4,8 @@ use actix_web::{
     Result,
     web::{self, Json},
 };
-use base58::{FromBase58 as _, ToBase58 as _};
 use irys_actors::block_tree_service;
+use irys_types::ToBase58 as _;
 use irys_types::{CombinedBlockHeader, ExecutionHeader, H256};
 use reth::{providers::BlockReader as _, revm::primitives::alloy_primitives::TxHash};
 use serde::{Deserialize, Serialize};
@@ -151,21 +151,9 @@ impl FromStr for BlockParam {
                 if let Ok(block_height) = s.parse::<u64>() {
                     return Ok(Self::BlockHeight(block_height));
                 }
-                match s.from_base58() {
-                    Ok(v) => {
-                        let arr: [u8; 32] = match v.as_slice().try_into() {
-                            Ok(arr) => arr,
-                            Err(_) => {
-                                return Err(format!(
-                                    "Invalid block tag parameter: expected 32 bytes, got {}",
-                                    v.len()
-                                ));
-                            }
-                        };
-                        Ok(Self::Hash(H256(arr)))
-                    }
-                    Err(_) => Err("Invalid block tag parameter".to_string()),
-                }
+                irys_types::decode_base58_exact(s)
+                    .map(|bytes| Self::Hash(H256(bytes)))
+                    .map_err(|e| format!("Invalid block tag parameter: {e}"))
             }
         }
     }

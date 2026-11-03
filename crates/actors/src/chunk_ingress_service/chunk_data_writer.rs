@@ -1,6 +1,6 @@
 use dashmap::DashSet;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{cache_chunk_verified, store_ingress_data_hash};
+use irys_database::{CacheChunkOutcome, cache_chunk_verified, store_ingress_data_hash};
 use irys_types::data_tree::Geometry;
 use irys_types::{
     ChunkKey, DatabaseProvider, H256, IrysAddress, UnpackedChunk, generate_ingress_data_hash,
@@ -204,8 +204,14 @@ impl BackgroundWriter {
                 batch.iter().zip(&chunk_key_ingress_hashes)
             {
                 match cache_chunk_verified(tx, &pending.chunk, &self.geometry) {
-                    Ok(is_duplicate) => {
-                        if is_duplicate {
+                    Ok(CacheChunkOutcome::DataRootGone) => {
+                        warn!(
+                            "Dropping chunk {} of {} in write-behind batch: data commitment no longer cached",
+                            chunk_key, pending.chunk.data_tree_root
+                        );
+                    }
+                    Ok(outcome) => {
+                        if outcome == CacheChunkOutcome::Duplicate {
                             warn!(
                                 "Duplicate chunk {} of {} in write-behind batch",
                                 chunk_key, pending.chunk.data_tree_root

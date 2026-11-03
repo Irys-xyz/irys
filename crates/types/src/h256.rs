@@ -13,7 +13,7 @@
 // with some tweaks to de-expand assert_eq! and override Debug & Display
 // ===================================================
 
-use base58::ToBase58 as _;
+use crate::ToBase58 as _;
 
 #[repr(C)]
 #[doc = r" A 256-bit hash type (32 bytes)."]

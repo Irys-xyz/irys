@@ -71,7 +71,6 @@ fn link_cuda() {
         }
 
         println!("cargo:rustc-link-lib=cudart");
-        println!("cargo:rerun-if-changed=build.rs");
         println!("cargo:rerun-if-env-changed=CUDA_PATH");
     }
 }

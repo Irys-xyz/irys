@@ -1,6 +1,8 @@
+use crate::block_reward::block_emission;
 use eyre::Result;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndexReadGuard, SupplyState};
+use irys_reward_curve::HalvingCurve;
 use irys_types::{DatabaseProvider, U256};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -35,11 +37,14 @@ pub async fn backfill_supply_state(
     supply_state: Arc<SupplyState>,
     block_index: BlockIndexReadGuard,
     db: DatabaseProvider,
+    reward_curve: Arc<HalvingCurve>,
+    block_time_secs: u64,
     cancel: CancellationToken,
 ) -> Result<()> {
     info!("Starting supply state backfill");
 
-    match do_backfill(&supply_state, &block_index, &db, &cancel).await {
+    let emission = |height| block_emission(&reward_curve, block_time_secs, height);
+    match do_backfill(&supply_state, &block_index, &db, &emission, &cancel).await {
         Ok(true) => {
             let state = supply_state.get();
             info!(
@@ -64,6 +69,7 @@ async fn do_backfill(
     supply_state: &SupplyState,
     block_index: &BlockIndexReadGuard,
     db: &DatabaseProvider,
+    emission: &impl Fn(u64) -> Result<U256>,
     cancel: &CancellationToken,
 ) -> Result<bool> {
     let Some(first_migration_height) = wait_for_first_migration(supply_state, cancel).await else {
@@ -123,21 +129,22 @@ async fn do_backfill(
         let batch_end = height
             .saturating_add(BATCH_SIZE.saturating_sub(1))
             .min(backfill_end);
-        let batch_rewards = get_block_rewards_batch(block_index, db, height, batch_end)?;
+        let batch_emissions =
+            get_block_emissions_batch(block_index, db, emission, height, batch_end)?;
 
         let expected_count = (batch_end - height + 1) as usize;
         assert_eq!(
-            batch_rewards.len(),
+            batch_emissions.len(),
             expected_count,
             "Batch returned {} rewards but expected {} for heights {}-{}",
-            batch_rewards.len(),
+            batch_emissions.len(),
             expected_count,
             height,
             batch_end
         );
 
-        for reward in batch_rewards {
-            historical_sum = historical_sum.saturating_add(reward);
+        for emission in batch_emissions {
+            historical_sum = historical_sum.saturating_add(emission);
         }
 
         if batch_end >= last_log_height.saturating_add(LOG_INTERVAL) {
@@ -157,9 +164,12 @@ async fn do_backfill(
     Ok(true)
 }
 
-fn get_block_rewards_batch(
+/// Emission of each block in the range. Reads each header so a block missing
+/// from the index or the DB stops the backfill.
+fn get_block_emissions_batch(
     block_index: &BlockIndexReadGuard,
     db: &DatabaseProvider,
+    emission: &impl Fn(u64) -> Result<U256>,
     start_height: u64,
     end_height: u64,
 ) -> Result<Vec<U256>> {
@@ -184,9 +194,9 @@ fn get_block_rewards_batch(
         block_hashes
             .iter()
             .map(|hash| {
-                block_header_by_hash(tx, hash, false)?
-                    .ok_or_else(|| eyre::eyre!("Block header not found for hash {}", hash))
-                    .map(|h| h.reward_amount)
+                let header = block_header_by_hash(tx, hash, false)?
+                    .ok_or_else(|| eyre::eyre!("Block header not found for hash {}", hash))?;
+                emission(header.height)
             })
             .collect()
     })

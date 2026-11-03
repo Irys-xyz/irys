@@ -13,13 +13,15 @@ use irys_actors::{
     BlockProdStrategy, BlockProducerInner, BlockProductionError, ProductionStrategy, async_trait,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     block_producer::current_timestamp,
+    block_reward::split_block_reward,
     block_validation::{PreValidationError, prevalidate_block},
 };
 use irys_chain::IrysNodeCtx;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
 use irys_types::{
     AdjustmentStats, Base64, CommitmentTransaction, DataLedger, H256, IrysAddress, IrysBlockHeader,
-    NodeConfig, SealedBlock, block_production::SolutionContext, partition::PartitionAssignment,
+    NodeConfig, SealedBlock, block_production::SolutionContext, hardfork_config::Echo,
+    partition::PartitionAssignment,
 };
 use reth::payload::EthBuiltPayload;
 
@@ -403,7 +405,6 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let timestamp = current_timestamp(&prev_block_header, irys_types::global_clock()).await;
         let mempool_bundle = self.get_mempool_txs(&prev_block_header, timestamp).await?;
-        let block_reward = self.block_reward(&prev_block_header)?;
         let reward_address = self
             .inner()
             .block_tree_guard
@@ -412,9 +413,21 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
             .expect("parent epoch snapshot")
             .resolve_reward_address(solution.mining_address);
 
-        if self.create_poa_data(solution, None).await?.is_none() {
+        let Some((poa, _)) = self
+            .create_poa_data(solution, None)
+            .await
+            .map_err(BlockProductionError::recoverable("poa_data"))?
+        else {
             return Ok(None);
-        }
+        };
+        let block_reward = split_block_reward(
+            self.block_reward(&prev_block_header)
+                .map_err(BlockProductionError::irrecoverable)?,
+            &self.inner().config.consensus,
+            timestamp.to_secs(),
+            !poa.is_data_poa(),
+        )
+        .map_err(BlockProductionError::irrecoverable)?;
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
                 &prev_block_header,
@@ -432,7 +445,7 @@ impl BlockProdStrategy for UnownedPartitionStrategy {
                 &prev_block_header,
                 mempool_bundle,
                 timestamp,
-                block_reward,
+                block_reward.miner,
                 eth_built_payload.block(),
                 &prev_block_ema_snapshot,
                 final_treasury,
@@ -541,6 +554,41 @@ async fn ownership_is_the_only_rule_rejecting_unstaked_miner_over_invented_parti
     let result = discovery(&node).handle_block(block, false).await;
     assert_not_owned(&result, partition_hash, unstaked.address(), None);
     assert_eq!(node.get_max_difficulty_block().block_hash, tip.block_hash);
+
+    node.stop().await;
+    Ok(())
+}
+
+/// Before Echo activates, prevalidation does not check ownership: the block that
+/// only ownership rejects passes with the real parent snapshot.
+#[test_log::test(tokio::test)]
+async fn before_echo_unstaked_miner_over_invented_partition_passes_prevalidation()
+-> eyre::Result<()> {
+    let mut config = start_config(4);
+    config.consensus.get_mut().hardforks.echo = Some(Echo {
+        activation_height: u64::MAX,
+    });
+    let unstaked = config.new_random_signer();
+    let node = start_node(config).await;
+    node.mine_block().await?;
+
+    let partition_hash = H256::random();
+    let solution =
+        solution_context_for_miner_partition(&node.node_ctx, unstaked.address(), partition_hash)
+            .await?;
+    let (block, _stats, _payload) = unowned_strategy(&node)
+        .fully_produce_new_block_without_gossip(&solution)
+        .await
+        .map_err(|err| eyre::eyre!("block production failed: {err:?}"))?
+        .ok_or_else(|| eyre::eyre!("evil producer must build the block"))?;
+    let mut header = (**block.header()).clone();
+    unstaked.sign_block_header(&mut header)?;
+    let block = reseal(&block, header)?;
+
+    let (parent, parent_snapshot, parent_ema) =
+        parent_snapshots(&node, &block.header().previous_block_hash);
+    let result = prevalidate(&node, &block, &parent, parent_snapshot, &parent_ema).await;
+    assert!(matches!(&result, Ok(())), "{result:?}");
 
     node.stop().await;
     Ok(())

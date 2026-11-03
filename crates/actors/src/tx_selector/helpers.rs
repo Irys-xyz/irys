@@ -56,7 +56,7 @@ pub(crate) async fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
     reth_adapter: &IrysRethNodeAdapter,
     block_id: Option<BlockId>,
     txs: &[T],
-) -> HashMap<IrysAddress, U256> {
+) -> eyre::Result<HashMap<IrysAddress, U256>> {
     let signers: Vec<IrysAddress> = txs
         .iter()
         .map(irys_types::IrysTransactionCommon::signer)

@@ -84,7 +84,8 @@ pub fn unpack_with_entropy(
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
 /// returns the computed entropy chunk by overwriting the out_entropy_chunk parameter.
-/// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (defined in capacity.h file) capacity
+/// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (defined in capacity.h file) capacity (asserted)
+/// Panics if the C implementation reports an error
 /// Uses C 2D Packing implementation
 pub fn capacity_pack_range_c(
     mining_address: IrysAddress,
@@ -98,12 +99,20 @@ pub fn capacity_pack_range_c(
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
-    let entropy_chunk_ptr = out_entropy_chunk.as_ptr() as *mut u8;
+    let entropy_chunk_ptr = out_entropy_chunk.as_mut_ptr();
 
     let iterations: u32 = entropy_packing_iterations;
 
+    let chunk_size = irys_types::ConsensusConfig::CHUNK_SIZE as usize;
+    assert!(
+        out_entropy_chunk.capacity() >= chunk_size,
+        "entropy buffer capacity must be at least CHUNK_SIZE ({}), got {}",
+        chunk_size,
+        out_entropy_chunk.capacity()
+    );
+
     unsafe {
-        capacity::compute_entropy_chunk(
+        let result = capacity::compute_entropy_chunk(
             mining_addr,
             mining_addr_len,
             chunk_offset,
@@ -113,8 +122,13 @@ pub fn capacity_pack_range_c(
             entropy_chunk_ptr,
             iterations,
         );
+        assert_eq!(
+            result,
+            capacity::entropy_chunk_errors_NO_ERROR,
+            "C entropy chunk computation failed"
+        );
         // we need to move the `len` ptr so rust picks up on the data the C fn wrote to the vec
-        out_entropy_chunk.set_len(out_entropy_chunk.capacity());
+        out_entropy_chunk.set_len(chunk_size);
     }
 }
 
@@ -135,7 +149,7 @@ pub fn capacity_pack_range_cuda_c(
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
 
-    let entropy_ptr = entropy.as_ptr() as *mut u8;
+    let entropy_ptr = entropy.as_mut_ptr();
 
     // Sanity check: enforce capacity matches CUDA C implementation expectations
     let expected_entropy_capacity =
@@ -151,7 +165,6 @@ pub fn capacity_pack_range_cuda_c(
 
     let blocks = config.blocks;
     let threads_per_block = config.threads_per_block;
-    println!("blocks: {}, threads: {}", blocks, threads_per_block);
 
     unsafe {
         result = capacity_cuda::compute_entropy_chunks_cuda(
@@ -167,12 +180,14 @@ pub fn capacity_pack_range_cuda_c(
             blocks,
             threads_per_block,
         );
-
-        entropy.set_len(entropy.capacity());
     }
     use capacity_cuda::entropy_chunk_errors::*;
     match result {
-        NO_ERROR => Ok(()),
+        NO_ERROR => {
+            // SAFETY: the kernel wrote all `capacity` bytes of the buffer
+            unsafe { entropy.set_len(entropy.capacity()) };
+            Ok(())
+        }
         _ => Err(eyre::eyre!("GPU kernel error: {:?}", &result)),
     }
 }
@@ -512,6 +527,20 @@ mod tests {
         assert_eq!(unpacked.bytes.0.len(), 10);
     }
 
+    #[test]
+    #[should_panic(expected = "entropy buffer capacity must be at least CHUNK_SIZE")]
+    fn capacity_pack_range_c_rejects_undersized_buffer() {
+        let mut undersized = Vec::<u8>::with_capacity(1024);
+        capacity_pack_range_c(
+            IrysAddress::random(),
+            0,
+            PartitionHash::zero(),
+            &mut undersized,
+            1,
+            1,
+        );
+    }
+
     // Enable with CUDA hardware
     #[cfg(feature = "nvidia")]
     #[test]
@@ -707,18 +736,20 @@ mod tests {
         rng.fill(&mut partition_hash);
 
         let num_chunks: usize = 8000;
-        let mut chunks: Vec<u8> =
-            Vec::with_capacity(num_chunks * ConsensusConfig::CHUNK_SIZE as usize); // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
-        let mut chunks_rust: Vec<ChunkBytes> = Vec::with_capacity(num_chunks);
+        let chunk_size = ConsensusConfig::CHUNK_SIZE as usize; // do not change it for CONFIG.chunk_size this is hardcoded in C implementation
+        // The setup and the Rust packer below are single-threaded, so each CPU thread works
+        // on one contiguous range of chunks.
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let chunks_per_thread = num_chunks.div_ceil(threads);
 
-        for _i in 0..num_chunks {
-            let mut chunk = [0_u8; ConsensusConfig::CHUNK_SIZE as usize];
-            rng.fill_bytes(&mut chunk);
-            chunks_rust.push(chunk.to_vec());
-            for j in 0..ConsensusConfig::CHUNK_SIZE as usize {
-                chunks.push(chunk[j]);
+        let mut chunks: Vec<u8> = vec![0; num_chunks * chunk_size];
+        std::thread::scope(|scope| {
+            for range in chunks.chunks_mut(chunks_per_thread * chunk_size) {
+                scope.spawn(move || rand::thread_rng().fill_bytes(range));
             }
-        }
+        });
+        let mut chunks_rust: Vec<ChunkBytes> =
+            chunks.chunks(chunk_size).map(<[u8]>::to_vec).collect();
 
         let now = Instant::now();
 
@@ -736,27 +767,37 @@ mod tests {
         println!("C CUDA implementation: {:.2?}", elapsed);
 
         let now = Instant::now();
-        capacity_pack_range_with_data(
-            &mut chunks_rust,
-            mining_address,
-            chunk_offset,
-            partition_hash.into(),
-            ConsensusConfig::CHUNK_SIZE as usize,
-            testing_config.entropy_packing_iterations,
-            testing_config.chain_id,
-        );
+        std::thread::scope(|scope| {
+            for (range_idx, range) in chunks_rust.chunks_mut(chunks_per_thread).enumerate() {
+                let range_offset =
+                    chunk_offset + (range_idx * chunks_per_thread) as std::ffi::c_ulong;
+                let testing_config = &testing_config;
+                scope.spawn(move || {
+                    capacity_pack_range_with_data(
+                        range,
+                        mining_address,
+                        range_offset,
+                        partition_hash.into(),
+                        chunk_size,
+                        testing_config.entropy_packing_iterations,
+                        testing_config.chain_id,
+                    );
+                });
+            }
+        });
 
         let elapsed = now.elapsed();
         println!("Rust implementation: {:.2?}", elapsed);
 
-        for i in 0..num_chunks {
-            for j in 0..ConsensusConfig::CHUNK_SIZE as usize {
-                //println!("chunk {} pos {}", i, j);
-                assert_eq!(
-                    chunks_rust[i][j],
-                    chunks[i * ConsensusConfig::CHUNK_SIZE as usize + j]
-                );
-            }
+        for (i, (rust_chunk, cuda_chunk)) in chunks_rust
+            .iter()
+            .zip(chunks.chunks(chunk_size))
+            .enumerate()
+        {
+            assert!(
+                rust_chunk.as_slice() == cuda_chunk,
+                "CUDA and Rust packing differ for chunk {i}"
+            );
         }
     }
 
@@ -803,6 +844,7 @@ mod tests {
             packing_address: mining_address,
             partition_offset: PartitionChunkOffset::from(chunk_offset as u32),
             partition_hash: H256::from(partition_hash),
+            packing_iterations: iterations,
         };
 
         let unpacked_chunk = unpack(
@@ -921,6 +963,7 @@ mod tests {
                     packing_address: mining_address,
                     partition_offset: PartitionChunkOffset::from(u32::try_from(chunk_offset).unwrap()),
                     partition_hash: H256::from(partition_hash),
+                    packing_iterations: iterations,
                 };
 
                 let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id)
@@ -969,6 +1012,7 @@ mod tests {
                     packing_address: mining_address,
                     partition_offset: PartitionChunkOffset::from(u32::try_from(chunk_offset).unwrap()),
                     partition_hash: H256::from(partition_hash),
+                    packing_iterations: iterations,
                 };
 
                 let unpacked = unpack(&packed_chunk, iterations, chunk_size, chain_id)

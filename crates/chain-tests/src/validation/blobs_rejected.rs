@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use super::send_block_and_read_state;
 use crate::utils::{IrysNodeTest, assert_validation_error, solution_context};
+use alloy_consensus::proofs::{calculate_transaction_root, calculate_withdrawals_root};
 use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
 use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use alloy_primitives::Signature as AlloySignature;
@@ -40,12 +41,20 @@ async fn produce_block(
 }
 
 // Mutates the sealed block's header in-place via unseal/modify/seal, returns the new sealed block.
+// The header's transactions and withdrawals roots are recomputed from the mutated body: the
+// payload cache only accepts a body that matches its header, so the payload reaches validation.
 fn mutate_header<F>(sealed: &SealedBlock<Block>, mutator: F) -> SealedBlock<Block>
 where
     F: FnOnce(&mut Block),
 {
     let mut block = sealed.clone().unseal();
     mutator(&mut block);
+    block.header.transactions_root = calculate_transaction_root(&block.body.transactions);
+    block.header.withdrawals_root = block
+        .body
+        .withdrawals
+        .as_ref()
+        .map(|withdrawals| calculate_withdrawals_root(withdrawals));
     block.seal_slow()
 }
 
@@ -55,7 +64,8 @@ async fn inject_payload_into_cache(node_ctx: &IrysNodeCtx, sealed: SealedBlock<B
     node_ctx
         .block_pool
         .add_execution_payload_to_cache(sealed)
-        .await;
+        .await
+        .expect("payload body matches its header");
 }
 
 #[test_log::test(tokio::test)]

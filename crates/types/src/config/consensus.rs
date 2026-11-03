@@ -1,4 +1,4 @@
-use crate::hardfork_config::{Aurora, Borealis, Cascade, FrontierParams, IrysHardforkConfig};
+use crate::hardfork_config::{Aurora, Borealis, Cascade, Echo, FrontierParams, IrysHardforkConfig};
 use crate::{
     H256, IrysAddress,
     storage_pricing::{
@@ -376,8 +376,8 @@ pub struct GenesisConfig {
     /// Set this explicitly for custom networks or tests requiring exact genesis difficulty.
     /// If unset, the builder falls back to other consensus values.
     ///
-    /// `skip_serializing_if` ensures `None` is omitted from canonical JSON,
-    /// keeping the consensus config hash unchanged for nodes that don't set this field.
+    /// `skip_serializing_if` preserves the legacy canonical representation when
+    /// this optional value is unset. See [`ConsensusConfig::keccak256_hash`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_packed_partitions: Option<f64>,
 }
@@ -432,8 +432,9 @@ pub struct EpochConfig {
 
     /// Number of epochs before a publish ledger partition expires.
     /// `None` = never expire (mainnet). `Some(n)` = expire after n epochs (testnet).
-    /// `skip_serializing_if` ensures `None` is omitted from canonical JSON,
-    /// keeping the consensus hash unchanged for mainnet nodes.
+    /// `skip_serializing_if` preserves the legacy canonical representation for
+    /// mainnet when this optional value is unset. See
+    /// [`ConsensusConfig::keccak256_hash`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_ledger_epoch_length: Option<u64>,
 }
@@ -585,6 +586,20 @@ impl ConsensusConfig {
     ///
     /// Uses canonical JSON serialization with alphabetically sorted keys.
     /// This ensures platform-independent and deterministic hashing across the network.
+    ///
+    /// The hash is advisory, a debugging aid. V2 peers exchange it during the
+    /// handshake, and a mismatch only logs. It does not reject the peer. Both
+    /// sides compare it:
+    /// - outbound: `PeerNetworkService::announce_yourself_to_address` in
+    ///   `crates/p2p/src/peer_network_service.rs`
+    /// - inbound: the V2 handshake handler in `crates/p2p/src/server.rs`
+    ///
+    /// Every set value is serialized, so the hash shows every config
+    /// difference. An unset optional field (`skip_serializing_if =
+    /// "Option::is_none"`) is left out, and setting it changes the hash. Do not
+    /// skip a set value (e.g. skip-if-default) to keep the hash stable. A
+    /// change to what is serialized changes the hash snapshots in the tests
+    /// below.
     pub fn keccak256_hash(&self) -> H256 {
         // Serialize to canonical JSON value (camelCase keys, u64/i64 as strings)
         let json_value = crate::canonical::to_canonical(self)
@@ -877,6 +892,10 @@ impl ConsensusConfig {
                 }),
                 // Delta hardfork - not scheduled yet
                 delta: None,
+                // Echo hardfork - PoA ownership from the first block after height 2779312
+                echo: Some(Echo {
+                    activation_height: 2779313,
+                }),
             },
         }
     }
@@ -1023,6 +1042,10 @@ impl ConsensusConfig {
                 // Delta hardfork - not active by default in testing;
                 // tests that need it should override via with_consensus()
                 delta: None,
+                // Echo hardfork - enabled from genesis for testing
+                echo: Some(Echo {
+                    activation_height: 0,
+                }),
             },
         }
     }
@@ -1163,6 +1186,10 @@ impl ConsensusConfig {
                 }),
                 // Delta hardfork - not scheduled yet
                 delta: None,
+                // Echo hardfork - enabled from genesis
+                echo: Some(Echo {
+                    activation_height: 0,
+                }),
             },
         }
     }
@@ -1171,6 +1198,7 @@ impl ConsensusConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hardfork_config::Delta;
 
     #[test]
     fn test_consensus_hash_differs_on_change() {
@@ -1182,6 +1210,35 @@ mod tests {
             config_b.keccak256_hash(),
             "configs differing by one field should produce different hashes"
         );
+    }
+
+    #[test]
+    fn non_default_capacity_reward_changes_consensus_hash() {
+        let delta = |percent| {
+            Some(Delta {
+                activation_timestamp: UnixTimestamp::from_secs(1500),
+                initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+                capacity_chunk_reward_percent: Amount::percentage(percent).unwrap(),
+            })
+        };
+        let mut config_a = ConsensusConfig::testing();
+        let mut config_b = ConsensusConfig::testing();
+        config_a.hardforks.delta = delta(dec!(0.5));
+        config_b.hardforks.delta = delta(dec!(0.25));
+        assert_ne!(config_a.keccak256_hash(), config_b.keccak256_hash());
+    }
+
+    #[test]
+    fn setting_delta_changes_consensus_hash() {
+        let without_delta = ConsensusConfig::testing();
+        let mut with_delta = ConsensusConfig::testing();
+        with_delta.hardforks.delta = Some(Delta {
+            activation_timestamp: UnixTimestamp::from_secs(1500),
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        });
+        assert_eq!(without_delta.hardforks.delta, None);
+        assert_ne!(without_delta.keccak256_hash(), with_delta.keccak256_hash());
     }
 
     #[test]
@@ -1215,7 +1272,7 @@ mod tests {
         );
     }
 
-    /// Pins mainnet genesis inputs + wire-level `keccak256_hash` (signing key
+    /// Pins mainnet genesis inputs and snapshots `keccak256_hash` (signing key
     /// is private, so a full rebuild golden is impossible).
     #[test]
     fn test_mainnet_genesis_constants_are_frozen() {
@@ -1245,15 +1302,16 @@ mod tests {
         );
         assert_eq!(config.genesis.vdf_next_seed, None);
 
-        // P2P handshake hash — any mainnet() field or canonical encoding change fails CI.
+        // Intentional consensus config or canonical encoding changes must
+        // update this snapshot.
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("ESaJAFCwGJicJGjfJncic1SCmgnHCFB6FjoYMsGKJyZB"), // spellchecker:disable-line
-            "mainnet consensus-config hash is consensus-frozen"
+            H256::from_base58("AMF9ngfwXWudnVHhJrXbR1yHsC1CtijiqJfJYgTGMmMf"), // spellchecker:disable-line
+            "mainnet consensus-config hash snapshot changed"
         );
     }
 
-    /// Pins testnet genesis hash + wire-level `keccak256_hash`.
+    /// Pins the testnet genesis hash and snapshots `keccak256_hash`.
     #[test]
     fn test_testnet_genesis_constants_are_frozen() {
         let config = ConsensusConfig::testnet();
@@ -1266,8 +1324,8 @@ mod tests {
         );
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("5TpL2Ykgss9ghBUBZSfbSmEa4eiGau8DN4aNQSC9DgC9"), // spellchecker:disable-line
-            "testnet consensus-config hash is consensus-frozen"
+            H256::from_base58("56LYi5SnMa5w6uhdafWeUwMdCQzUJLevpsKDAH92wMUT"), // spellchecker:disable-line
+            "testnet consensus-config hash snapshot changed"
         );
     }
 
@@ -1484,11 +1542,21 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("6ZZfWWQdLdWANfMLiBNf9cQeAFA6N4Z1ZhbWhUWgFNqT");
+        let expected_hash = H256::from_base58("2J9DToYDRNSr3wQVexPvz74Z8CrZSE1L1fG5iMK8YFrK");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,
-            "Hash changed—this may indicate a breaking change in the consensus config or its dependencies"
+            "consensus-config hash snapshot changed; update it for intentional config changes"
+        );
+    }
+
+    #[test]
+    fn delta_defaults_capacity_reward_to_half() {
+        let delta: Delta =
+            toml::from_str("activation_timestamp = \"2026-09-01T00:00:00+00:00\"").unwrap();
+        assert_eq!(
+            delta.capacity_chunk_reward_percent,
+            Amount::percentage(dec!(0.5)).unwrap()
         );
     }
 

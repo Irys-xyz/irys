@@ -23,9 +23,10 @@ use irys_domain::{PeerList, ScoreDecreaseReason, get_node_info};
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
-    BlockBody, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
-    GossipRequest, GossipRequestV2, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId,
-    NodeInfo, PeerAddress, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
+    BlockBody, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, ConsensusConfig,
+    DEFAULT_BLOCK_INDEX_QUERY_LIMIT, DataTransactionHeader, GossipRequest, GossipRequestV2,
+    IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, MAX_BLOCK_INDEX_QUERY_LIMIT, NodeInfo,
+    PeerAddress, PeerListItem, PeerScore, ProtocolVersion, UnixTimestamp, UnpackedChunk,
     parse_user_agent,
 };
 use rand::prelude::SliceRandom as _;
@@ -355,6 +356,7 @@ where
                         &server.peer_list,
                         is_syncing,
                         &server.shutdown_token,
+                        &server.data_handler.config.consensus,
                     );
                     if !error.is_advisory() {
                         error!(
@@ -433,6 +435,7 @@ where
                         &server.peer_list,
                         is_syncing,
                         &server.shutdown_token,
+                        &server.data_handler.config.consensus,
                     );
                     error!(
                         "Node {:?}: Failed to process the block body {}: {:?}",
@@ -495,6 +498,7 @@ where
                 is_syncing,
                 "send execution payload",
                 &server.shutdown_token,
+                &server.data_handler.config.consensus,
             );
         }
 
@@ -541,6 +545,7 @@ where
                 is_syncing,
                 "send transaction",
                 &server.shutdown_token,
+                &server.data_handler.config.consensus,
             );
         }
 
@@ -586,6 +591,7 @@ where
                 is_syncing,
                 "send commitment transaction",
                 &server.shutdown_token,
+                &server.data_handler.config.consensus,
             );
         }
 
@@ -629,6 +635,7 @@ where
                 is_syncing,
                 "send ingress proof",
                 &server.shutdown_token,
+                &server.data_handler.config.consensus,
             );
         }
 
@@ -713,6 +720,7 @@ where
                 is_syncing,
                 "send chunk",
                 &shutdown_token,
+                &server.data_handler.config.consensus,
             ),
             Ok(Err(join_error)) => {
                 let error =
@@ -724,6 +732,7 @@ where
                     is_syncing,
                     "send chunk",
                     &shutdown_token,
+                    &server.data_handler.config.consensus,
                 )
             }
             Err(_) => {
@@ -799,6 +808,7 @@ where
                         &server.peer_list,
                         is_syncing,
                         &server.shutdown_token,
+                        &server.data_handler.config.consensus,
                     );
                     if !error.is_advisory() {
                         error!(
@@ -871,6 +881,7 @@ where
                         &server.peer_list,
                         is_syncing,
                         &server.shutdown_token,
+                        &server.data_handler.config.consensus,
                     );
                     if !error.is_advisory() {
                         error!(
@@ -930,6 +941,7 @@ where
                 is_syncing,
                 "send execution payload",
                 &server.shutdown_token,
+                &server.data_handler.config.consensus,
             );
         }
 
@@ -980,6 +992,7 @@ where
                 is_syncing,
                 "send data transaction header",
                 &server.shutdown_token,
+                &server.data_handler.config.consensus,
             );
         }
 
@@ -1029,6 +1042,7 @@ where
                 is_syncing,
                 "send commitment transaction",
                 &server.shutdown_token,
+                &server.data_handler.config.consensus,
             );
         }
 
@@ -1076,6 +1090,7 @@ where
                 is_syncing,
                 "send ingress proof",
                 &server.shutdown_token,
+                &server.data_handler.config.consensus,
             );
         }
 
@@ -1492,9 +1507,6 @@ where
         server: &Data<Self>,
         query: &BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>, HttpResponse> {
-        const MAX_BLOCK_INDEX_QUERY_LIMIT: usize = 1_000;
-        const DEFAULT_BLOCK_INDEX_QUERY_LIMIT: usize = 100;
-
         let limit = if query.limit == 0 {
             DEFAULT_BLOCK_INDEX_QUERY_LIMIT
         } else {
@@ -1571,6 +1583,7 @@ where
         is_syncing: bool,
         context: &str,
         shutdown_token: &CancellationToken,
+        consensus_config: &ConsensusConfig,
     ) -> HttpResponse {
         if matches!(error, GossipError::RateLimited) {
             debug!(%error, context, "Gossip rate-limited");
@@ -1583,6 +1596,7 @@ where
             peer_list,
             is_syncing,
             shutdown_token,
+            consensus_config,
         );
         if error.is_advisory() {
             debug!(%error, context, "Gossip advisory error");
@@ -1598,9 +1612,32 @@ where
         peer_list: &PeerList,
         is_syncing: bool,
         shutdown_token: &CancellationToken,
+        consensus_config: &ConsensusConfig,
     ) {
         match error {
             GossipError::InvalidData(invalid_data_error) => {
+                // The version rule depends on the local wall clock. Near a hardfork
+                // activation a clock difference makes an honest peer's tx look invalid,
+                // so the sender is not penalised in that window. Outside the window
+                // all honest nodes apply the same rule.
+                if matches!(
+                    invalid_data_error,
+                    InvalidDataError::TransactionInvalidVersion { .. }
+                ) && UnixTimestamp::now().map_or(true, |now| {
+                    consensus_config
+                        .hardforks
+                        .is_near_commitment_version_change(
+                            now,
+                            consensus_config.max_future_timestamp_drift_millis,
+                        )
+                }) {
+                    debug!(
+                        ?peer_miner_address,
+                        ?invalid_data_error,
+                        "Skipping penalty for a version rejected near a hardfork activation",
+                    );
+                    return;
+                }
                 // Anchor errors during sync are caused by the receiver being behind,
                 // not by sender misbehavior — suppress the penalty in that window.
                 if is_syncing
@@ -2175,6 +2212,7 @@ mod tests {
             &peer_list,
             false,
             &shutdown_token,
+            &ConsensusConfig::testing(),
         );
 
         let peer = peer_list.peer_by_mining_address(&miner).unwrap();
@@ -2208,6 +2246,7 @@ mod tests {
             &peer_list,
             false,
             &shutdown_token,
+            &ConsensusConfig::testing(),
         );
 
         let peer = peer_list.peer_by_mining_address(&miner).unwrap();
@@ -2244,6 +2283,7 @@ mod tests {
             &peer_list,
             false,
             &shutdown_token,
+            &ConsensusConfig::testing(),
         );
 
         let peer = peer_list.peer_by_mining_address(&miner).unwrap();
@@ -2300,6 +2340,45 @@ mod tests {
             &peer_list,
             is_syncing,
             &shutdown_token,
+            &ConsensusConfig::testing(),
+        );
+        let peer = peer_list.peer_by_mining_address(&miner).unwrap();
+        assert_eq!(peer.reputation_score.get(), expected_score);
+    }
+
+    /// A wrong-version tx is penalised, except near an activation that changes the
+    /// allowed versions, where clock differences can make an honest peer look wrong.
+    #[rstest::rstest]
+    #[case::far_from_activation_penalises(-86_400, PeerScore::INITIAL - 5)]
+    #[case::outside_window_penalises(-60, PeerScore::INITIAL - 5)]
+    #[case::inside_window_skips(-10, PeerScore::INITIAL)]
+    #[case::at_activation_skips(0, PeerScore::INITIAL)]
+    fn handle_invalid_data_version_penalty_near_activation(
+        #[case] activation_offset_secs: i64,
+        #[case] expected_score: u16,
+    ) {
+        let (miner, peer_list, _dir) = setup_peer_list();
+        let mut consensus_config = ConsensusConfig::testing();
+        let now = UnixTimestamp::now().unwrap().as_secs();
+        consensus_config
+            .hardforks
+            .aurora
+            .as_mut()
+            .expect("testing config enables aurora")
+            .activation_timestamp =
+            UnixTimestamp::from_secs(now.saturating_add_signed(activation_offset_secs));
+        let error =
+            GossipError::InvalidData(crate::types::InvalidDataError::TransactionInvalidVersion {
+                version: 1,
+                minimum: 2,
+            });
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
+            &miner,
+            &error,
+            &peer_list,
+            false,
+            &CancellationToken::new(),
+            &consensus_config,
         );
         let peer = peer_list.peer_by_mining_address(&miner).unwrap();
         assert_eq!(peer.reputation_score.get(), expected_score);

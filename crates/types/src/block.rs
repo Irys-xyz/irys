@@ -3,6 +3,7 @@
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
 use crate::block_production::SolutionContext;
+use crate::hardfork_config::{Activation, Delta};
 use crate::storage_pricing::{Amount, phantoms::IrysPrice, phantoms::Usd};
 use crate::versioning::{
     Signable, VersionDiscriminant, Versioned, VersioningError, compact_with_discriminant,
@@ -573,15 +574,27 @@ impl IrysBlockHeaderV1 {
 
     /// Retrieves a map of the data transaction ids by ledger type, uses a Vec
     /// to ensure the txids are ordered identically to their order in the block.
-    pub fn get_data_ledger_tx_ids(&self) -> HashMap<DataLedger, Vec<H256>> {
+    /// Errors on an unknown ledger id or a ledger listed more than once.
+    pub fn get_data_ledger_tx_ids(&self) -> eyre::Result<HashMap<DataLedger, Vec<H256>>> {
         let mut data_txids: HashMap<DataLedger, Vec<H256>> = HashMap::new();
         for data_ledger in self.data_ledgers.iter() {
-            data_txids.insert(
-                DataLedger::from_u32(data_ledger.ledger_id).unwrap(),
-                data_ledger.tx_ids.0.clone().into_iter().collect(),
+            let ledger = DataLedger::try_from(data_ledger.ledger_id).map_err(|_| {
+                eyre::eyre!(
+                    "Malformed block {:?}: unknown data ledger id {}",
+                    self.block_hash,
+                    data_ledger.ledger_id
+                )
+            })?;
+            eyre::ensure!(
+                data_txids
+                    .insert(ledger, data_ledger.tx_ids.0.clone())
+                    .is_none(),
+                "Malformed block {:?}: duplicate {:?} data ledger",
+                self.block_hash,
+                ledger,
             );
         }
-        data_txids
+        Ok(data_txids)
     }
 
     /// Returns the transaction IDs for a specific data ledger in their original order
@@ -893,28 +906,47 @@ impl fmt::Display for IrysBlockHeaderV1 {
     }
 }
 
-/// Compute the solution hash as sha256(poa_chunk || offset_le || seed)
+/// Compute the solution hash.
+///
+/// - Delta inactive: sha256(poa_chunk || offset_le || seed)
+/// - Delta active: sha256(seed || offset_le || poa_chunk)
+///
+/// `delta` is Delta resolved at the block's own timestamp.
 ///
 /// This is the canonical utility used across the codebase to avoid duplicate
 /// implementations of the hashing logic.
 ///
 /// # Examples
 /// ```
-/// use irys_types::{compute_solution_hash, H256};
+/// use irys_types::{compute_solution_hash, hardfork_config::Activation, H256};
 ///
 /// let poa_chunk = b"example chunk data";
 /// let offset = 42u32;
 /// let seed = H256::from([7u8; 32]);
 ///
 /// // This should compile and produce a 32-byte hash.
-/// let _hash = compute_solution_hash(poa_chunk, offset, &seed);
+/// let _hash = compute_solution_hash(poa_chunk, offset, &seed, Activation::Inactive);
 /// ```
-pub fn compute_solution_hash(poa_chunk: &[u8], offset_le: u32, seed: &H256) -> H256 {
+pub fn compute_solution_hash(
+    poa_chunk: &[u8],
+    offset_le: u32,
+    seed: &H256,
+    delta: Activation<Delta>,
+) -> H256 {
     use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(poa_chunk);
-    hasher.update(offset_le.to_le_bytes());
-    hasher.update(seed.as_bytes());
+    match delta {
+        Activation::Inactive => {
+            hasher.update(poa_chunk);
+            hasher.update(offset_le.to_le_bytes());
+            hasher.update(seed.as_bytes());
+        }
+        Activation::Active(_) => {
+            hasher.update(seed.as_bytes());
+            hasher.update(offset_le.to_le_bytes());
+            hasher.update(poa_chunk);
+        }
+    }
     H256::from(<[u8; 32]>::from(hasher.finalize()))
 }
 
@@ -927,6 +959,7 @@ impl IrysBlockHeaderV1 {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
         // Compute default PoA chunk, chunk_hash, and solution_hash so mock headers satisfy solution_hash_link_is_valid
+        // while Delta is inactive (pre-Delta hash order)
         let default_poa_chunk: Vec<u8> = Vec::new();
         let default_partition_chunk_offset: u32 = 0;
         let default_vdf_output = H256::zero();
@@ -935,6 +968,7 @@ impl IrysBlockHeaderV1 {
             &default_poa_chunk,
             default_partition_chunk_offset,
             &default_vdf_output,
+            Activation::Inactive,
         );
 
         // Create a sample IrysBlockHeader object with mock data
@@ -1185,6 +1219,14 @@ impl std::fmt::Display for DataLedger {
         }
     }
 }
+
+/// The highest `limit` of a block index query that the gossip server accepts.
+/// The server rejects a query with a higher limit.
+pub const MAX_BLOCK_INDEX_QUERY_LIMIT: usize = 1_000;
+
+/// The number of entries the gossip server returns for a block index query
+/// with a `limit` of 0.
+pub const DEFAULT_BLOCK_INDEX_QUERY_LIMIT: usize = 100;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -2210,6 +2252,32 @@ mod tests {
             err.to_string().contains("duplicate Publish data ledger"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_get_data_ledger_tx_ids_rejects_unknown_and_duplicate_ledger_ids() {
+        let mut header = IrysBlockHeader::default();
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers = vec![DataTransactionLedger {
+            ledger_id: DataLedger::Publish.into(),
+            tx_ids: H256List(vec![H256::random()]),
+            ..Default::default()
+        }];
+        let ids = header.get_data_ledger_tx_ids().expect("valid ledgers");
+        assert_eq!(ids.len(), 1);
+
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers.push(DataTransactionLedger {
+            ledger_id: 99,
+            ..Default::default()
+        });
+        let err = header.get_data_ledger_tx_ids().expect_err("unknown id");
+        assert!(err.to_string().contains("unknown data ledger id 99"));
+
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers[1].ledger_id = DataLedger::Publish.into();
+        let err = header.get_data_ledger_tx_ids().expect_err("duplicate id");
+        assert!(err.to_string().contains("duplicate Publish data ledger"));
     }
 
     #[test]

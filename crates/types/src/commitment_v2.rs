@@ -466,36 +466,55 @@ impl Decodable for CommitmentTypeV2 {
             return Err(RlpError::UnexpectedString);
         }
 
-        let type_id = buf[0];
-        buf.advance(1);
+        // Decode the fields only from the declared list payload.
+        // `Header::decode` makes sure that `buf` holds `payload_length` bytes.
+        let (mut payload, rest) = buf.split_at(header.payload_length);
+        *buf = rest;
 
-        match type_id {
+        if payload.is_empty() {
+            return Err(RlpError::InputTooShort);
+        }
+
+        let type_id = payload[0];
+        payload.advance(1);
+
+        let commitment_type = match type_id {
             COMMITMENT_TYPE_PLEDGE => {
-                let count = u64::decode(buf)?;
-                Ok(Self::Pledge {
+                let count = u64::decode(&mut payload)?;
+                Self::Pledge {
                     pledge_count_before_executing: count,
-                })
+                }
             }
             COMMITMENT_TYPE_UNPLEDGE => {
-                let count = u64::decode(buf)?;
-                if buf.len() < PARTITION_HASH_SIZE {
+                let count = u64::decode(&mut payload)?;
+                if payload.len() < PARTITION_HASH_SIZE {
                     return Err(RlpError::InputTooShort);
                 }
 
                 // let mut ph = [0_u8; 32];
                 // ph.copy_from_slice(&buf[..PARTITION_HASH_SIZE]);
                 // buf.advance(PARTITION_HASH_SIZE);
-                Ok(Self::Unpledge {
+                Self::Unpledge {
                     pledge_count_before_executing: count,
-                    partition_hash: H256::decode(buf)?,
-                })
+                    partition_hash: H256::decode(&mut payload)?,
+                }
             }
             COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS => {
-                let new_reward_address = IrysAddress::decode(buf)?;
-                Ok(Self::UpdateRewardAddress { new_reward_address })
+                let new_reward_address = IrysAddress::decode(&mut payload)?;
+                Self::UpdateRewardAddress { new_reward_address }
             }
-            _ => Err(RlpError::Custom("unknown commitment type in header")),
+            _ => return Err(RlpError::Custom("unknown commitment type in header")),
+        };
+
+        // The fields must use all of the declared payload.
+        if !payload.is_empty() {
+            return Err(RlpError::ListLengthMismatch {
+                expected: header.payload_length,
+                got: header.payload_length - payload.len(),
+            });
         }
+
+        Ok(commitment_type)
     }
 }
 
@@ -655,16 +674,21 @@ mod tests {
     #[case::update_reward_address(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([1_u8; 20]) })]
     #[case::update_reward_address_alt(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([0xff_u8; 20]) })]
     fn test_commitment_type_rlp_roundtrip(#[case] original: CommitmentTypeV2) {
-        // Encode
+        // Encode, then add a byte that is not part of the commitment type
         let mut buf = BytesMut::new();
         original.encode(&mut buf);
+        buf.extend_from_slice(&[0xAA]);
 
         // Decode
         let mut slice = buf.as_ref();
         let decoded = CommitmentTypeV2::decode(&mut slice).unwrap();
 
         assert_eq!(original, decoded);
-        assert!(slice.is_empty(), "Buffer should be fully consumed");
+        assert_eq!(
+            slice,
+            &[0xAA],
+            "Decode must consume only the commitment type"
+        );
     }
 
     #[rstest]
@@ -703,6 +727,63 @@ mod tests {
     fn test_commitment_type_rlp_decode_errors(#[case] buf: &[u8]) {
         let mut slice = buf;
         assert!(CommitmentTypeV2::decode(&mut slice).is_err());
+    }
+
+    #[test]
+    fn test_commitment_type_rlp_decode_empty_list_returns_error() {
+        // 0xC0 is an RLP list header with an empty payload
+        let mut slice: &[u8] = &[0xC0];
+        assert_eq!(
+            CommitmentTypeV2::decode(&mut slice),
+            Err(RlpError::InputTooShort)
+        );
+    }
+
+    #[rstest]
+    // The list header declares an empty payload; the pledge count is outside it
+    #[case::pledge_count_after_empty_list(&[0xC0, COMMITMENT_TYPE_PLEDGE, 0x80])]
+    // The list header declares only the type id; the pledge count is outside it
+    #[case::pledge_count_after_list(&[0xC1, COMMITMENT_TYPE_PLEDGE, 0x80])]
+    // The list header declares only the type id; the address is outside it
+    #[case::reward_address_after_list(&[
+        0xC1, COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS,
+        0x94, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    ])]
+    fn test_commitment_type_rlp_decode_rejects_fields_outside_list(#[case] buf: &[u8]) {
+        let mut slice = buf;
+        assert!(CommitmentTypeV2::decode(&mut slice).is_err());
+    }
+
+    #[rstest]
+    #[case::pledge(CommitmentTypeV2::Pledge { pledge_count_before_executing: 100 })]
+    #[case::unpledge(CommitmentTypeV2::Unpledge { pledge_count_before_executing: 5, partition_hash: [9_u8; 32].into() })]
+    #[case::update_reward_address(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([1_u8; 20]) })]
+    fn test_commitment_type_rlp_decode_rejects_trailing_bytes_in_list(
+        #[case] original: CommitmentTypeV2,
+    ) {
+        let mut canonical = BytesMut::new();
+        original.encode(&mut canonical);
+        let mut canonical_slice = canonical.as_ref();
+        let header = alloy_rlp::Header::decode(&mut canonical_slice).unwrap();
+
+        // Put one more byte inside the list and make the header length include it
+        let mut buf = BytesMut::new();
+        alloy_rlp::Header {
+            list: true,
+            payload_length: header.payload_length + 1,
+        }
+        .encode(&mut buf);
+        buf.extend_from_slice(canonical_slice);
+        buf.extend_from_slice(&[0x00]);
+
+        let mut slice = buf.as_ref();
+        assert_eq!(
+            CommitmentTypeV2::decode(&mut slice),
+            Err(RlpError::ListLengthMismatch {
+                expected: header.payload_length + 1,
+                got: header.payload_length,
+            })
+        );
     }
 
     #[test]

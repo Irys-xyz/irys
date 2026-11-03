@@ -1648,6 +1648,7 @@ mod tests {
             bytes: nine_bytes.into(),
             tx_offset: TxChunkOffset::from(1),
         };
+        let chunk_key = chunk.chunk_key(&irys_types::data_tree::Geometry::TESTING);
 
         let error = inner
             .handle_chunk_ingress_message(chunk, ChunkIngressSource::Sent)
@@ -1664,6 +1665,8 @@ mod tests {
             crate::data_sync_service::ingress_error_is_invalid_peer_data(&error),
             "a wrong chunk length is the sender's fault"
         );
+        assert!(!should_restore_pending_chunk_on_drain_error(&error, false));
+        assert!(!inner.recent_valid_chunks.read().await.contains(&chunk_key));
         Ok(())
     }
 

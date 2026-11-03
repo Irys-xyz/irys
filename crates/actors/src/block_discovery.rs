@@ -440,12 +440,18 @@ impl BlockDiscoveryServiceInner {
             }
         }
 
+        let binding = new_block_header.get_data_ledger_tx_ids().map_err(|e| {
+            BlockDiscoveryError::BlockValidationError(
+                PreValidationError::DataLedgerExtractionFailed(e.to_string()),
+            )
+        })?;
+
         info!(
             "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",
             new_block_header.block_hash,
             new_block_header.height,
             new_block_header.commitment_tx_ids(),
-            new_block_header.get_data_ledger_tx_ids()
+            binding
         );
 
         //====================================
@@ -494,7 +500,6 @@ impl BlockDiscoveryServiceInner {
         let reorg_floor = block_height.saturating_sub(config.consensus.block_tree_depth);
         let map_floor = reorg_floor.min(min_tx_anchor_height);
 
-        let binding = new_block_header.get_data_ledger_tx_ids();
         let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
 
         // TODO: we can remove cloning (here and in the loop)
@@ -522,7 +527,12 @@ impl BlockDiscoveryServiceInner {
             let block_tree = block_tree_guard.read();
             while parent_block.height >= min_tx_anchor_height {
                 if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
-                    let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
+                    let parent_data_tx_ids =
+                        parent_block.get_data_ledger_tx_ids().map_err(|e| {
+                            BlockDiscoveryError::InternalError(
+                                BlockDiscoveryInternalError::BlockIndexInconsistency(e.to_string()),
+                            )
+                        })?;
                     if let Some(parent_txids) = parent_data_tx_ids.get(&DataLedger::Submit) {
                         for txid in incoming_data_tx_ids {
                             if parent_txids.contains(txid) {
@@ -887,6 +897,15 @@ impl BlockDiscoveryServiceInner {
                                     "Unstake not allowed while pledges are active".to_string(),
                                 ));
                             }
+                            CommitmentSnapshotStatus::AlreadyStaked => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    format!(
+                                        "Stake tx {} from signer {} that already has an active or pending stake",
+                                        commitment_tx.id(),
+                                        commitment_tx.signer()
+                                    ),
+                                ));
+                            }
                             CommitmentSnapshotStatus::Unknown => {} // Success case
                         }
 
@@ -1161,19 +1180,23 @@ where
         }
     };
 
-    // Set up a function to query the database for commitment transactions
+    // Set up a function to query the database for data transactions
     let db_future = {
         let tx_ids = data_tx_ids.clone();
         let db_ref = db.clone();
         async move {
-            let db_tx = db_ref.tx()?;
-            let mut results = HashMap::new();
-            for tx_id in &tx_ids {
-                if let Some(header) = tx_header_by_txid(&db_tx, tx_id)? {
-                    results.insert(*tx_id, header);
+            tokio::task::spawn_blocking(move || {
+                let db_tx = db_ref.tx()?;
+                let mut results = HashMap::new();
+                for tx_id in &tx_ids {
+                    if let Some(header) = tx_header_by_txid(&db_tx, tx_id)? {
+                        results.insert(*tx_id, header);
+                    }
                 }
-            }
-            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(results)
+                Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(results)
+            })
+            .await
+            .map_err(|e| eyre::eyre!("Database task join error: {}", e))?
         }
     };
 
@@ -1214,4 +1237,45 @@ where
         found: headers,
         missing,
     })
+}
+
+#[cfg(test)]
+mod data_tx_lookup_tests {
+    use super::*;
+    use irys_database::insert_tx_header;
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{ConsensusConfig, H256};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn db_lookup_finds_stored_txs_and_reports_missing() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new().prefix("data_tx_lookup").build();
+        let db = DatabaseProvider(Arc::new(
+            irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+                tmp_dir.path(),
+                irys_types::DbSyncMode::UtterlyNoSync,
+            )?,
+        ));
+        let mut stored = DataTransactionHeader::new(&ConsensusConfig::testing());
+        stored.id = H256::repeat_byte(1);
+        db.update_eyre(|tx| insert_tx_header(tx, &stored))?;
+        let absent = H256::repeat_byte(2);
+
+        let result = get_data_tx_in_parallel_inner(
+            vec![stored.id, absent],
+            |ids| Box::pin(async move { Ok(vec![None; ids.len()]) }),
+            &db,
+        )
+        .await?;
+
+        assert_eq!(
+            result
+                .found
+                .iter()
+                .map(|header| header.id)
+                .collect::<Vec<_>>(),
+            vec![stored.id]
+        );
+        assert_eq!(result.missing, vec![absent]);
+        Ok(())
+    }
 }

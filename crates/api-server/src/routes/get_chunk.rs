@@ -6,7 +6,6 @@ use actix_web::{
 };
 
 use awc::http::StatusCode;
-use base58::FromBase58 as _;
 use irys_types::{ChunkFormat, DataCommitment, H256};
 use serde::Deserialize;
 use tracing::debug;
@@ -62,13 +61,7 @@ fn parse_data_commitment(text: &str) -> Result<DataCommitment, ApiError> {
         )
             .into()
     };
-    let bytes = text
-        .from_base58()
-        .map_err(|_| invalid("not base58".to_owned()))?;
-    let hash: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| invalid(format!("expected 32 bytes, got {}", bytes.len())))?;
+    let hash = irys_types::decode_base58_exact::<32>(text).map_err(|e| invalid(e.to_string()))?;
     Ok(DataCommitment(H256(hash)))
 }
 
@@ -112,7 +105,7 @@ fn data_commitment_chunk_response(
 mod tests {
     use super::*;
     use actix_web::{App, ResponseError as _, test};
-    use base58::ToBase58 as _;
+    use irys_types::ToBase58 as _;
 
     async fn commitment_status(uri: &str) -> StatusCode {
         async fn handler(

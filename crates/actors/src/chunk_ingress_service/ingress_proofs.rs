@@ -2,7 +2,9 @@ use super::ChunkIngressServiceInner;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::store_ingress_proof;
-use irys_database::{cached_data_root_by_commitment, complete_ingress_leaves};
+use irys_database::{
+    cached_data_root_by_commitment, complete_ingress_leaves, ingress_leaf_count_complete,
+};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
@@ -556,7 +558,9 @@ pub fn reanchor_and_store_ingress_proof(
         return Err(IngressProofGenerationError::NodeNotStaked);
     }
 
-    load_complete_ingress_leaves(
+    // The proof root does not change on a reanchor, so the leaves are not
+    // rebuilt; a count confirms they are all still here.
+    require_complete_ingress_leaf_count(
         db,
         proof.data_commitment,
         signer.address(),
@@ -621,19 +625,46 @@ pub fn load_complete_ingress_leaves(
     address: irys_types::IrysAddress,
     chunk_size: u64,
 ) -> Result<Vec<IngressMerkleLeaf>, IngressProofGenerationError> {
+    let data_size = cached_data_size(db, data_commitment, chunk_size)?;
+    db.view_eyre(|tx| complete_ingress_leaves(tx, data_commitment, address, data_size, chunk_size))
+        .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
+        .ok_or(IngressProofGenerationError::IncompleteLeaves)
+}
+
+/// [`load_complete_ingress_leaves`] without rebuilding the leaves: the same
+/// errors, from one count read instead of a walk and a hash per leaf.
+fn require_complete_ingress_leaf_count(
+    db: &DatabaseProvider,
+    data_commitment: DataCommitment,
+    address: irys_types::IrysAddress,
+    chunk_size: u64,
+) -> Result<(), IngressProofGenerationError> {
+    let data_size = cached_data_size(db, data_commitment, chunk_size)?;
+    let complete = db
+        .view_eyre(|tx| {
+            ingress_leaf_count_complete(tx, data_commitment, address, data_size, chunk_size)
+        })
+        .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
+    if complete {
+        Ok(())
+    } else {
+        Err(IngressProofGenerationError::IncompleteLeaves)
+    }
+}
+
+/// The cached commitment's `data_size`, checked for a valid chunk count.
+fn cached_data_size(
+    db: &DatabaseProvider,
+    data_commitment: DataCommitment,
+    chunk_size: u64,
+) -> Result<u64, IngressProofGenerationError> {
     let cdr = db
         .view_eyre(|tx| cached_data_root_by_commitment(tx, data_commitment))
         .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
         .ok_or(IngressProofGenerationError::DataRootUnavailable)?;
-
     data_size_to_chunk_count(cdr.data_size, chunk_size)
         .map_err(|error| IngressProofGenerationError::InvalidDataSize(error.to_string()))?;
-
-    db.view_eyre(|tx| {
-        complete_ingress_leaves(tx, data_commitment, address, cdr.data_size, chunk_size)
-    })
-    .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
-    .ok_or(IngressProofGenerationError::IncompleteLeaves)
+    Ok(cdr.data_size)
 }
 
 #[cfg(test)]

@@ -167,10 +167,8 @@ fn parse_block_parameter(block: &str) -> Result<BlockParameter, ApiError> {
                 }
             }
 
-            if let Ok(decoded) = base58::FromBase58::from_base58(block)
-                && decoded.len() == 32
-            {
-                let irys_block_hash = BlockHash::from_slice(&decoded);
+            if let Ok(decoded) = irys_types::decode_base58_exact::<32>(block) {
+                let irys_block_hash = BlockHash::from(decoded);
                 return Ok(BlockParameter::IrysBlockHash(irys_block_hash));
             }
 
@@ -241,7 +239,7 @@ mod tests {
     #[test]
     fn test_parse_irys_block_hash_base58() {
         let test_hash = BlockHash::from([42_u8; 32]);
-        let base58_encoded = base58::ToBase58::to_base58(test_hash.as_bytes());
+        let base58_encoded = irys_types::ToBase58::to_base58(test_hash.as_bytes());
 
         let result = parse_block_parameter(&base58_encoded);
         assert!(

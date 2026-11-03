@@ -11,6 +11,10 @@ entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char *mining_add
 
 int get_registers();
 
+// Writes the name of CUDA device `device` into `name` as a NUL-terminated string.
+// Returns 0 on success, otherwise a cudaError_t value.
+int irys_cuda_device_name(int device, char *name, size_t name_len);
+
 #if defined(__cplusplus)
 }
 #endif

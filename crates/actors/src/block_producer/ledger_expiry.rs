@@ -69,7 +69,7 @@ use irys_database::{
 use irys_domain::{BlockIndex, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{
     BlockHeight, BlockIndexItem, Config, DataLedger, DataTransactionHeader, H256, IrysAddress,
-    IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, U256,
+    IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, SealedBlock, U256,
     app_state::DatabaseProvider,
     fee_distribution::TermFeeCharges,
     hardfork_config::{Cascade, ForBlock, ForEpoch},
@@ -79,6 +79,18 @@ use nodit::{InclusiveInterval as _, interval::ii};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 use std::sync::Arc;
+
+/// Errors from the ledger-expiry fee calculation.
+#[derive(Debug, thiserror::Error)]
+pub enum LedgerExpiryError {
+    /// The txs attributed to miners and the tx headers come from the same block
+    /// reads, so a difference is a local bug: every attempt computes it again.
+    #[error("the expired {ledger:?} txs attributed to miners do not match the tx headers read")]
+    AttributedTxHeadersMismatch { ledger: DataLedger },
+    /// Any other failure.
+    #[error(transparent)]
+    Other(#[from] eyre::Report),
+}
 
 /// Calculates the aggregated fees owed to miners when data ledgers expire.
 ///
@@ -114,7 +126,7 @@ pub async fn calculate_expired_ledger_fees(
     // unconditional, so for such a slot the settled set differs from pre-Cascade
     // master.
     cascade_for_block: ForBlock<Cascade>,
-) -> eyre::Result<LedgerExpiryBalanceDelta> {
+) -> Result<LedgerExpiryBalanceDelta, LedgerExpiryError> {
     // Fee distribution is only implemented for Submit ledger. Publish expiry
     // simply resets partitions without fee redistribution.
     assert_ne!(
@@ -168,7 +180,7 @@ pub async fn calculate_expired_ledger_fees(
     };
 
     // Steps 3-5: Process boundary + middle blocks → tx → miners
-    let tx_to_miners = collect_tx_to_miners_from_range(
+    let (tx_to_miners, tx_headers) = collect_tx_to_miners_from_range(
         block_range,
         ledger_type,
         config,
@@ -178,14 +190,15 @@ pub async fn calculate_expired_ledger_fees(
     )
     .await?;
 
-    // Step 6: Fetch transactions
+    // Step 6: Transactions (read with steps 3-5)
     let all_tx_ids: Vec<_> = tx_to_miners.keys().copied().collect();
 
     // NC-0042 P0: resolve which of these txs were promoted **on this block's own
     // branch** before computing refunds. The refund-suppression decision must
     // never read `DataTransactionHeader::promoted_height` from the fetched header
-    // — `get_data_tx_in_parallel` prefers the node-local mempool copy, where
-    // `promoted_height` is set at block confirmation within the reorg window
+    // — the header can be the node-local mempool copy (for a migrated block,
+    // `get_data_tx_in_parallel` prefers it), where `promoted_height` is set at
+    // block confirmation within the reorg window
     // (`mempool_service::apply_block_confirmed_updates`) and is therefore
     // branch-variant: two forks contesting the slot-expiry boundary would
     // disagree about whether a tx was promoted → divergent refund sets →
@@ -206,10 +219,12 @@ pub async fn calculate_expired_ledger_fees(
         BTreeSet::new()
     };
 
+    // The headers come from the same block reads as steps 3-5, so a block that is
+    // still in the block tree is not read from the mempool here either.
     // No sort here: `aggregate_balance_deltas` sorts by `compare_tx` (it owns the
     // "refunds sorted by tx_id" determinism invariant), so a sort at this site is
     // redundant.
-    let transactions = get_data_tx_in_parallel(all_tx_ids, mempool_guard, db).await?;
+    let transactions: Vec<DataTransactionHeader> = tx_headers.into_values().collect();
 
     // Step 7: Calculate fees
     tracing::debug!(
@@ -273,7 +288,7 @@ pub async fn calculate_all_expired_ledger_fees(
     cascade_for_block: ForBlock<Cascade>,
     cascade_for_epoch: ForEpoch<Cascade>,
     new_total_chunks: impl Fn(DataLedger) -> u64,
-) -> eyre::Result<LedgerExpiryBalanceDelta> {
+) -> Result<LedgerExpiryBalanceDelta, LedgerExpiryError> {
     let mut result = calculate_expired_ledger_fees(
         parent_epoch_snapshot,
         parent_block_header,
@@ -322,6 +337,9 @@ pub async fn calculate_all_expired_ledger_fees(
 /// [`expired_submit_tx_ids`] (NC-0042 non-promotability set) so the two cannot
 /// disagree about which txs an expired slot contains — the structural flaw the
 /// cycle-math approximation introduced (see NC-0042 §4b).
+///
+/// Also returns the header of each attributed tx (same keys as the miner map),
+/// read once from its block by [`ledger_tx_headers_of_block`].
 async fn collect_tx_to_miners_from_range(
     block_range: BlockRange,
     ledger_type: DataLedger,
@@ -329,7 +347,13 @@ async fn collect_tx_to_miners_from_range(
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
-) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>> {
+) -> Result<
+    (
+        BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>,
+        BTreeMap<IrysTransactionId, DataTransactionHeader>,
+    ),
+    LedgerExpiryError,
+> {
     let same_block = block_range.min_block.block_hash == block_range.max_block.block_hash;
     tracing::info!(
         "Processing boundary blocks: min_block height={}, max_block height={}, same_block={}",
@@ -347,7 +371,7 @@ async fn collect_tx_to_miners_from_range(
     // it as BOTH earliest and latest so both ends of the expired range are trimmed.
     // (Trimming only the start — the old behavior — over-included the next slot's
     // txs, which diverged from the exact per-candidate promotion filter; NC-0042 §4b.)
-    let earliest_miners = process_boundary_block(
+    let (earliest_miners, earliest_headers) = process_boundary_block(
         &block_range.min_block,
         true,       // is_earliest
         same_block, // is_latest only when this is also the sole (max) block
@@ -364,7 +388,7 @@ async fn collect_tx_to_miners_from_range(
     // expired range), but still attributed per-slot by tx start offset — a middle
     // block can straddle a slot boundary too. The boundary blocks share the same
     // global range, so reuse it for the (unused) trim arguments.
-    let middle_miners = process_middle_blocks(
+    let (middle_miners, middle_headers) = process_middle_blocks(
         &block_range.middle_blocks,
         block_range.min_block.chunk_range,
         ledger_type,
@@ -377,11 +401,13 @@ async fn collect_tx_to_miners_from_range(
     .await?;
 
     let mut tx_to_miners = BTreeMap::new();
+    let mut tx_headers = BTreeMap::new();
     tx_to_miners.extend(earliest_miners);
+    tx_headers.extend(earliest_headers.into_iter().map(|tx| (tx.id, tx)));
 
     // Different blocks: process the latest boundary separately and extend.
     if !same_block {
-        let latest_miners = process_boundary_block(
+        let (latest_miners, latest_headers) = process_boundary_block(
             &block_range.max_block,
             false, // is_earliest
             true,  // is_latest — max block trims only the end
@@ -400,6 +426,7 @@ async fn collect_tx_to_miners_from_range(
             middle_miners.len(),
         );
         tx_to_miners.extend(latest_miners);
+        tx_headers.extend(latest_headers.into_iter().map(|tx| (tx.id, tx)));
     } else {
         tracing::info!(
             "Collected transactions: earliest={}, middle={}",
@@ -409,8 +436,17 @@ async fn collect_tx_to_miners_from_range(
     }
 
     tx_to_miners.extend(middle_miners);
+    tx_headers.extend(middle_headers.into_iter().map(|tx| (tx.id, tx)));
 
-    Ok(tx_to_miners)
+    // The fee step pays each header's tx from the miner map, so a tx in the miner
+    // map with no header would get no fee and no error.
+    if !tx_to_miners.keys().eq(tx_headers.keys()) {
+        return Err(LedgerExpiryError::AttributedTxHeadersMismatch {
+            ledger: ledger_type,
+        });
+    }
+
+    Ok((tx_to_miners, tx_headers))
 }
 
 /// NC-0042 §4b/§4c: the set of Submit-ledger transaction ids whose storage has
@@ -496,7 +532,7 @@ pub async fn expired_submit_tx_ids(
         None => return Ok(std::collections::BTreeSet::new()),
     };
 
-    let tx_to_miners = collect_tx_to_miners_from_range(
+    let (tx_to_miners, _) = collect_tx_to_miners_from_range(
         block_range,
         DataLedger::Submit,
         config,
@@ -687,11 +723,23 @@ pub async fn submit_tx_expired(
     match submit_span_verdict(inc.base, inc.total, range.range_end) {
         Some(verdict) => Ok(verdict),
         None => {
-            let block = get_block_by_hash(inc.block_hash, block_tree_guard, db).await?;
-            let ordered_ids = block
-                .get_data_ledger_tx_ids_ordered(DataLedger::Submit)
-                .ok_or_eyre("Submit ledger required for the expiry inclusion block")?;
-            let headers = get_data_tx_in_parallel(ordered_ids.to_vec(), mempool_guard, db).await?;
+            // An un-migrated inclusion block was found in the block tree by the
+            // walk; use the sealed block taken under that same tree lock.
+            let headers = match &inc.sealed_block {
+                Some(sealed_block) => {
+                    ledger_tx_headers_of_sealed_block(sealed_block, DataLedger::Submit)?
+                }
+                None => {
+                    ledger_tx_headers_of_block(
+                        inc.block_hash,
+                        DataLedger::Submit,
+                        block_tree_guard,
+                        mempool_guard,
+                        db,
+                    )
+                    .await?
+                }
+            };
             let ordered: Vec<(IrysTransactionId, u64)> =
                 headers.iter().map(|h| (h.id, h.data_size)).collect();
             let start_offset =
@@ -726,6 +774,10 @@ struct SubmitInclusion {
     base: u64,
     /// Cumulative Submit chunks *through* the inclusion block.
     total: u64,
+    /// The inclusion block as stored in the block tree, taken under the tree
+    /// lock of the ancestry walk. `None` when the canonical index resolved the
+    /// inclusion (migrated block).
+    sealed_block: Option<Arc<SealedBlock>>,
 }
 
 /// Resolves `txid`'s Submit inclusion along the **block's own parent ancestry**
@@ -782,6 +834,7 @@ fn resolve_submit_inclusion(
             block_hash: item.block_hash,
             base,
             total,
+            sealed_block: None,
         }));
     }
 
@@ -816,6 +869,7 @@ fn resolve_submit_inclusion(
         block_hash,
         base,
         total,
+        sealed_block: tree.get_sealed_block(&block_hash),
     }))
 }
 
@@ -1176,13 +1230,75 @@ fn submit_tx_start_offset(
 /// for a single lookup. For walks that hold the guard across many lookups, call
 /// [`block_header_from_tree_then_db`] directly with the held guard.
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
-async fn get_block_by_hash(
+fn get_block_by_hash(
     block_hash: H256,
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<IrysBlockHeader> {
     block_header_from_tree_then_db(&block_tree_guard.read(), db, &block_hash)?
         .ok_or_eyre("block not found in db")
+}
+
+/// `ledger`'s tx headers of block `block_hash`, in the block's ledger order.
+///
+/// A block in the block tree is read from its stored [`SealedBlock`]. The DB has
+/// a block's tx headers only after migration, and the mempool copy can be
+/// evicted, so neither is a reliable source for an un-migrated block. A block
+/// that is not in the tree is migrated; its txs are read from the mempool and
+/// DB, and an id absent from both is an error.
+async fn ledger_tx_headers_of_block(
+    block_hash: H256,
+    ledger: DataLedger,
+    block_tree_guard: &BlockTreeReadGuard,
+    mempool_guard: &MempoolReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<Vec<DataTransactionHeader>> {
+    // The tree lock is released at the end of this statement, before any await.
+    let sealed_block = block_tree_guard.read().get_sealed_block(&block_hash);
+    if let Some(sealed_block) = sealed_block {
+        return ledger_tx_headers_of_sealed_block(&sealed_block, ledger);
+    }
+    let block = get_block_by_hash(block_hash, block_tree_guard, db)?;
+    let tx_ids = block
+        .get_data_ledger_tx_ids_ordered(ledger)
+        .ok_or_else(|| eyre!("{ledger:?} ledger is required in block {block_hash}"))?;
+    // `get_data_tx_in_parallel` returns the headers in the order of the input ids.
+    // Boxed: the validation and production futures nest this call deeply, and
+    // without the box their type layout exceeds the compiler's recursion limit.
+    Box::pin(get_data_tx_in_parallel(tx_ids.to_vec(), mempool_guard, db)).await
+}
+
+/// `ledger`'s tx headers of a sealed block, in the header's ledger order.
+///
+/// These are the same txs that the mempool or DB holds for these ids:
+/// `SealedBlock::new` pairs each body tx with the header's tx id list, in header
+/// order, and checks each tx signature. A data tx id is the hash of its
+/// signature, and the signature covers every consensus field (`data_size`, fees,
+/// signer), so one id has one set of these fields. Only the node-local metadata
+/// (`included_height`, `promoted_height`) can differ, and the expiry paths do
+/// not read it.
+fn ledger_tx_headers_of_sealed_block(
+    sealed_block: &SealedBlock,
+    ledger: DataLedger,
+) -> eyre::Result<Vec<DataTransactionHeader>> {
+    let header = sealed_block.header();
+    let tx_ids = header
+        .get_data_ledger_tx_ids_ordered(ledger)
+        .ok_or_else(|| {
+            eyre!(
+                "{ledger:?} ledger is required in block {}",
+                header.block_hash
+            )
+        })?;
+    let txs = sealed_block.transactions().get_ledger_txs(ledger);
+    // `SealedBlock::new` makes this hold; check it, because the offsets computed
+    // from this list are consensus values.
+    ensure!(
+        txs.iter().map(|tx| tx.id).eq(tx_ids.iter().copied()),
+        "block {} body {ledger:?} txs do not match the header tx ids",
+        header.block_hash,
+    );
+    Ok(txs.to_vec())
 }
 
 /// Collects all expired partitions for the specified ledger type and their miners
@@ -1417,6 +1533,8 @@ fn find_block_range(
 /// 1. Fetches the block's transactions
 /// 2. Sorts them to match their on-chain order
 /// 3. Applies filtering based on whether it's the earliest or latest block
+///
+/// Returns the attributed txs' miners and their headers.
 async fn process_boundary_block(
     boundary: &BoundaryBlock,
     is_earliest: bool,
@@ -1427,20 +1545,19 @@ async fn process_boundary_block(
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
-) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>> {
-    // Get the block and its transactions
-    let block = get_block_by_hash(boundary.block_hash, block_tree_guard, db).await?;
-    let ledger_tx_ids = block
-        .get_data_ledger_tx_ids_ordered(ledger_type)
-        .ok_or_eyre(format!(
-            "{:?} ledger is required for expired blocks",
-            ledger_type
-        ))?;
-
-    // Fetch the actual transactions
-    // Note: get_data_tx_in_parallel preserves the order of input IDs
-    let ledger_data_txs =
-        get_data_tx_in_parallel(ledger_tx_ids.to_vec(), mempool_guard, db).await?;
+) -> eyre::Result<(
+    BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>,
+    Vec<DataTransactionHeader>,
+)> {
+    // The block's transactions, in on-chain order
+    let ledger_data_txs = ledger_tx_headers_of_block(
+        boundary.block_hash,
+        ledger_type,
+        block_tree_guard,
+        mempool_guard,
+        db,
+    )
+    .await?;
 
     // The boundary block's branch-correct start offset, carried from
     // `find_block_range`'s parent-ancestry resolution. NOT re-derived from the
@@ -1452,7 +1569,7 @@ async fn process_boundary_block(
 
     // Filter transactions based on chunk positions
     let filtered_txs = filter_transactions_by_chunk_range(
-        ledger_data_txs,
+        &ledger_data_txs,
         prev_max_offset,
         boundary.chunk_range,
         is_earliest,
@@ -1461,8 +1578,12 @@ async fn process_boundary_block(
         config.consensus.num_chunks_in_partition,
         slot_miners,
     )?;
+    let filtered_headers = ledger_data_txs
+        .into_iter()
+        .filter(|tx| filtered_txs.contains_key(&tx.id))
+        .collect();
 
-    Ok(filtered_txs)
+    Ok((filtered_txs, filtered_headers))
 }
 
 /// Filters transactions based on their chunk positions relative to partition boundaries.
@@ -1498,7 +1619,7 @@ async fn process_boundary_block(
     boundary.is_latest = is_latest
 ))]
 fn filter_transactions_by_chunk_range(
-    transactions: Vec<DataTransactionHeader>,
+    transactions: &[DataTransactionHeader],
     prev_max_offset: LedgerChunkOffset,
     partition_range: LedgerChunkRange,
     is_earliest: bool,
@@ -1603,6 +1724,8 @@ fn filter_transactions_by_chunk_range(
 /// the miners of the slot containing its start offset, computed from the block's
 /// branch-correct base offset (NC-0042 R4 — previously every middle-block tx was
 /// paid to the per-block miner union).
+///
+/// Returns the attributed txs' miners and their headers.
 async fn process_middle_blocks(
     middle_blocks: &BTreeMap<H256, u64>,
     global_range: LedgerChunkRange,
@@ -1612,22 +1735,28 @@ async fn process_middle_blocks(
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
-) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>> {
+) -> eyre::Result<(
+    BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>,
+    Vec<DataTransactionHeader>,
+)> {
     let mut tx_to_miners = BTreeMap::new();
+    let mut tx_headers = Vec::new();
 
     for (block_hash, base) in middle_blocks {
-        let block = get_block_by_hash(*block_hash, block_tree_guard, db).await?;
-        let ledger_tx_ids = block
-            .get_data_ledger_tx_ids_ordered(ledger_type)
-            .ok_or_eyre(format!("{:?} ledger is required", ledger_type))?;
-        let ledger_data_txs =
-            get_data_tx_in_parallel(ledger_tx_ids.to_vec(), mempool_guard, db).await?;
+        let ledger_data_txs = ledger_tx_headers_of_block(
+            *block_hash,
+            ledger_type,
+            block_tree_guard,
+            mempool_guard,
+            db,
+        )
+        .await?;
 
         // No trim (`is_earliest = is_latest = false`): a middle block lies entirely
         // within the expired range. `global_range` is passed only for logging
         // parity. Each tx is attributed by the slot containing its start offset.
         let filtered = filter_transactions_by_chunk_range(
-            ledger_data_txs,
+            &ledger_data_txs,
             LedgerChunkOffset::from(*base),
             global_range,
             false,
@@ -1636,10 +1765,15 @@ async fn process_middle_blocks(
             config.consensus.num_chunks_in_partition,
             slot_miners,
         )?;
+        tx_headers.extend(
+            ledger_data_txs
+                .into_iter()
+                .filter(|tx| filtered.contains_key(&tx.id)),
+        );
         tx_to_miners.extend(filtered);
     }
 
-    Ok(tx_to_miners)
+    Ok((tx_to_miners, tx_headers))
 }
 
 /// Represents balance changes resulting from ledger expiry at epoch boundaries.
@@ -2828,7 +2962,7 @@ mod tests {
         // exist" because the boundary base was read from the migrated-only index.
         // (Fixture blocks carry no Submit tx_ids, so the result is empty — the
         // point is that resolution completes without error.)
-        let tx_to_miners = collect_tx_to_miners_from_range(
+        let (tx_to_miners, _) = collect_tx_to_miners_from_range(
             range,
             DataLedger::Submit,
             &config,
@@ -2922,7 +3056,10 @@ mod tests {
             tree.mark_tip(&genesis.block_hash).unwrap();
             let sealed = Arc::new(SealedBlock::new_unchecked(
                 Arc::new(block1.clone()),
-                BlockTransactions::default(),
+                BlockTransactions {
+                    data_txs: [(DataLedger::Submit, txs.to_vec())].into(),
+                    ..Default::default()
+                },
             ));
             tree.add_block(
                 &sealed,
@@ -2992,7 +3129,7 @@ mod tests {
         )?
         .expect("expired slots hold data");
 
-        let tx_to_miners = collect_tx_to_miners_from_range(
+        let (tx_to_miners, _) = collect_tx_to_miners_from_range(
             range,
             DataLedger::Submit,
             &config,
@@ -3148,6 +3285,241 @@ mod tests {
         assert_eq!(submit_span_verdict(inc.base, inc.total, 12), Some(true));
         assert_eq!(submit_span_verdict(inc.base, inc.total, 5), Some(false));
 
+        Ok(())
+    }
+
+    /// Block tree for the Submit-expiry slow sub-path. h0 (Submit total 5) → h1
+    /// (Submit txs `[first, second]` of 3 and 4 chunks, total 12) → h2 (total 12,
+    /// the parent of the block under test at height 3). h1 is sealed with
+    /// `SealedBlock::new` from a body in reverse order, so its stored tx order
+    /// comes from the header. No block is migrated, and the DB is empty.
+    /// `chunk_size` is 1, so `data_size` is the chunk count.
+    struct UnmigratedInclusionFixture {
+        config: Config,
+        guard: BlockTreeReadGuard,
+        db: DatabaseProvider,
+        _db_dir: irys_testing_utils::utils::tempfile::TempDir,
+        sealed_inclusion_block: Arc<SealedBlock>,
+        parent_hash: H256,
+        first: DataTransactionHeader,
+        second: DataTransactionHeader,
+    }
+
+    fn unmigrated_inclusion_fixture() -> eyre::Result<UnmigratedInclusionFixture> {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use irys_domain::{BlockTree, CommitmentSnapshot, dummy_ema_snapshot};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_types::{BlockBody, IrysTransactionCommon as _, irys::IrysSigner};
+        use reth_db::mdbx::DatabaseArguments;
+        use std::sync::RwLock;
+
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().chunk_size = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let consensus = irys_types::ConsensusConfig::testing();
+        let signer = IrysSigner::random_signer(&consensus);
+        let signed_tx = |data_size: u64| -> eyre::Result<DataTransactionHeader> {
+            let mut tx = DataTransactionHeader::new(&consensus);
+            tx.data_size = data_size;
+            tx.sign(&signer)
+        };
+        let first = signed_tx(3)?;
+        let second = signed_tx(4)?;
+
+        let with_submit = |height: u64, total_chunks: u64, tx_ids: Vec<H256>| {
+            let mut h = IrysBlockHeader::new_mock_header();
+            h.height = height;
+            h.data_ledgers = vec![irys_types::DataTransactionLedger {
+                ledger_id: DataLedger::Submit as u32,
+                tx_root: H256::zero(),
+                tx_ids: H256List(tx_ids),
+                total_chunks,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            }];
+            h
+        };
+
+        let mut genesis = with_submit(0, 5, vec![]);
+        genesis.cumulative_diff = 0.into();
+        genesis.test_sign();
+        let mut inclusion = with_submit(1, 12, vec![first.id, second.id]);
+        inclusion.previous_block_hash = genesis.block_hash;
+        inclusion.cumulative_diff = 1.into();
+        inclusion.test_sign();
+        let mut parent = with_submit(2, 12, vec![]);
+        parent.previous_block_hash = inclusion.block_hash;
+        parent.cumulative_diff = 2.into();
+        parent.test_sign();
+
+        let sealed_inclusion_block = Arc::new(SealedBlock::new(
+            inclusion.clone(),
+            BlockBody {
+                block_hash: inclusion.block_hash,
+                data_transactions: vec![second.clone(), first.clone()],
+                commitment_transactions: vec![],
+            },
+        )?);
+        let sealed_parent = Arc::new(SealedBlock::new(
+            parent.clone(),
+            BlockBody {
+                block_hash: parent.block_hash,
+                ..Default::default()
+            },
+        )?);
+        let mut tree = BlockTree::new(&genesis, irys_types::ConsensusConfig::testing());
+        tree.mark_tip(&genesis.block_hash)?;
+        for sealed in [&sealed_inclusion_block, &sealed_parent] {
+            tree.add_block(
+                sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                dummy_ema_snapshot(),
+            )?;
+        }
+
+        let db_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env =
+            open_or_create_db(&db_dir, IrysTables::ALL, DatabaseArguments::irys_testing()?)?;
+
+        Ok(UnmigratedInclusionFixture {
+            config,
+            guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(tree))),
+            db: DatabaseProvider(Arc::new(db_env)),
+            _db_dir: db_dir,
+            sealed_inclusion_block,
+            parent_hash: parent.block_hash,
+            first,
+            second,
+        })
+    }
+
+    /// When `range_end` falls inside an un-migrated inclusion block, the
+    /// candidate's start offset comes from that block's Submit txs. Here the txs
+    /// are in neither the mempool nor the DB (as after a mempool eviction), and
+    /// the verdict must still come from the block tree, without an error.
+    #[tokio::test]
+    async fn submit_tx_expired_reads_unmigrated_inclusion_block_from_tree() -> eyre::Result<()> {
+        let fixture = unmigrated_inclusion_fixture()?;
+        let block_index = BlockIndex::new_for_testing(fixture.db.clone());
+        let empty_mempool = MempoolReadGuard::stub();
+
+        // h1 holds Submit chunks [5, 12): `first` starts at 5, `second` at 8.
+        // Each `range_end` is strictly inside h1, so each check reads h1's txs.
+        for (range_end, first_expired, second_expired) in
+            [(6, true, false), (8, true, false), (9, true, true)]
+        {
+            let range = ExpiredSubmitRange {
+                block_height: 3,
+                range_end,
+                parent_block_hash: fixture.parent_hash,
+            };
+            for (tx, expected) in [
+                (&fixture.first, first_expired),
+                (&fixture.second, second_expired),
+            ] {
+                let expired = submit_tx_expired(
+                    tx.id,
+                    &range,
+                    &fixture.config,
+                    &block_index,
+                    &fixture.guard,
+                    &empty_mempool,
+                    &fixture.db,
+                )
+                .await?;
+                assert_eq!(expired, expected, "tx {} at range_end {range_end}", tx.id);
+            }
+        }
+        Ok(())
+    }
+
+    /// The block tree gives the same ordered `(id, data_size)` list, and the same
+    /// signed tx fields, as the mempool and DB lookup that it replaces for
+    /// un-migrated blocks. Only the node-local metadata can differ.
+    #[tokio::test]
+    async fn tree_tx_headers_equal_mempool_and_db_tx_headers() -> eyre::Result<()> {
+        use crate::mempool_service::{AtomicMempoolState, create_state};
+        use irys_database::insert_tx_header;
+        use irys_types::{DataTransactionMetadata, MempoolConfig};
+
+        let fixture = unmigrated_inclusion_fixture()?;
+        let ordered_ids = vec![fixture.first.id, fixture.second.id];
+
+        // DB copy, as migration writes it.
+        fixture.db.update_eyre(|wtx| {
+            insert_tx_header(wtx, &fixture.first)?;
+            insert_tx_header(wtx, &fixture.second)?;
+            Ok(())
+        })?;
+        // Mempool copy, with node-local metadata set.
+        let mut state = create_state(&MempoolConfig::testing(), &[]);
+        for tx in [&fixture.first, &fixture.second] {
+            let mut copy = tx.clone();
+            copy.set_metadata(DataTransactionMetadata::with_included_height(1));
+            state
+                .bounded_insert_data_tx(copy)
+                .map_err(|e| eyre!("mempool insert: {e:?}"))?;
+        }
+        let mempool = MempoolReadGuard::new(AtomicMempoolState::new(state));
+
+        let from_sealed_block =
+            ledger_tx_headers_of_sealed_block(&fixture.sealed_inclusion_block, DataLedger::Submit)?;
+        let from_tree = ledger_tx_headers_of_block(
+            fixture.sealed_inclusion_block.header().block_hash,
+            DataLedger::Submit,
+            &fixture.guard,
+            &MempoolReadGuard::stub(),
+            &fixture.db,
+        )
+        .await?;
+        let from_mempool =
+            get_data_tx_in_parallel(ordered_ids.clone(), &mempool, &fixture.db).await?;
+        let from_db =
+            get_data_tx_in_parallel(ordered_ids, &MempoolReadGuard::stub(), &fixture.db).await?;
+
+        let id_and_size = |txs: &[DataTransactionHeader]| -> Vec<(H256, u64)> {
+            txs.iter().map(|tx| (tx.id, tx.data_size)).collect()
+        };
+        assert_eq!(
+            id_and_size(&from_sealed_block),
+            vec![(fixture.first.id, 3), (fixture.second.id, 4)],
+            "header order, not body order"
+        );
+        for other in [&from_tree, &from_mempool, &from_db] {
+            assert_eq!(id_and_size(&from_sealed_block), id_and_size(other));
+            assert!(
+                from_sealed_block
+                    .iter()
+                    .zip(other.iter())
+                    .all(|(a, b)| a.eq_tx(b)),
+                "signed tx fields must be equal"
+            );
+        }
+        Ok(())
+    }
+
+    /// A sealed block whose body order differs from its header is an error, not
+    /// a silently different chunk offset.
+    #[test]
+    fn sealed_block_tx_headers_reject_body_not_in_header_order() -> eyre::Result<()> {
+        use irys_types::BlockTransactions;
+
+        let fixture = unmigrated_inclusion_fixture()?;
+        let reordered = SealedBlock::new_unchecked(
+            Arc::clone(fixture.sealed_inclusion_block.header()),
+            BlockTransactions {
+                data_txs: [(
+                    DataLedger::Submit,
+                    vec![fixture.second.clone(), fixture.first.clone()],
+                )]
+                .into(),
+                ..Default::default()
+            },
+        );
+        assert!(ledger_tx_headers_of_sealed_block(&reordered, DataLedger::Submit).is_err());
         Ok(())
     }
 
@@ -3722,7 +4094,7 @@ mod tests {
         // slot covers it. Middle-block flags (no trim) so it is not skipped first.
         let slot_miners: BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>> = BTreeMap::new();
         let err = filter_transactions_by_chunk_range(
-            vec![tx],
+            &[tx],
             LedgerChunkOffset::from(0_u64),
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 100)),
             false, // is_earliest — no start trim
@@ -3755,7 +4127,7 @@ mod tests {
         let mut slot_miners: BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>> = BTreeMap::new();
         slot_miners.insert(SlotIndex::new(0), Arc::new(vec![IrysAddress::ZERO]));
         let err = filter_transactions_by_chunk_range(
-            vec![tx],
+            &[tx],
             LedgerChunkOffset::from(0_u64),
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 100)),
             false, // is_earliest

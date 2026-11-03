@@ -787,9 +787,6 @@ mod cap_tests {
             let mut sink = [0_u8; 64];
             let _ = stream.read(&mut sink);
         });
-        // The accept thread needs the socket before the client connects.
-        // The gossip client's existing mock server waits the same 50ms.
-        std::thread::sleep(Duration::from_millis(50));
         port
     }
 

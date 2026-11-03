@@ -45,7 +45,7 @@ mod tests {
 
         #[test]
         fn prop_packing_worker_config_serde_roundtrip(
-            bind_port in any::<u8>(),
+            bind_port in any::<u16>(),
             bind_addr in "[a-z0-9.]{1,20}",
             cpu_packing_concurrency in any::<u16>(),
             gpu_packing_batch_size in any::<u32>(),

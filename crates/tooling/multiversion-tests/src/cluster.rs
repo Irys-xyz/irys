@@ -23,7 +23,7 @@ const BLOCK_INDEX_LIMIT: u64 = 500;
 /// `timeout`. Bounding each request keeps the loop honest. Kept generous so a
 /// slow-but-progressing request against a busy local node isn't aborted —
 /// well under the ~120s loop budgets.
-const DATA_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const DATA_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 pub enum ClusterError {

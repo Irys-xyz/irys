@@ -741,10 +741,27 @@ pub struct StorageSyncConfig {
     /// (XFS and ext4 iomap).
     #[serde(default = "default_recall_direct_io")]
     pub recall_direct_io: bool,
+    /// When true, a mining recall holds the module disk while it reads:
+    /// the disk lane submits no packed write or entropy read, and non-lane
+    /// reads, writes, and durable points wait for the recall to finish.
+    ///
+    /// Set false when other IO should take priority: packing, data sync,
+    /// and serving then share the disk with the recall read instead of
+    /// waiting for it. The in-flight service-time budget still bounds the
+    /// lane's submitted writes and entropy reads; recall preads are not
+    /// counted against it and may run alongside a full admitted budget.
+    /// Read at module open; a change needs a restart.
+    #[serde(default = "default_recall_io_priority")]
+    pub recall_io_priority: bool,
 }
 
 /// Mining recall reads `chunks.dat` with `O_DIRECT` unless a config says otherwise.
 pub const fn default_recall_direct_io() -> bool {
+    true
+}
+
+/// A mining recall holds the module disk for other IO unless a config says otherwise.
+pub const fn default_recall_io_priority() -> bool {
     true
 }
 
@@ -762,6 +779,7 @@ impl Default for StorageSyncConfig {
             entropy_readahead_cache_bytes: default_entropy_readahead_cache_bytes(),
             drop_recall_page_cache: false,
             recall_direct_io: default_recall_direct_io(),
+            recall_io_priority: default_recall_io_priority(),
             intervals_persist_secs: default_intervals_persist_secs(),
             index_wal_backstop_ms: default_index_wal_backstop_ms(),
             tx_path_derive_threads: default_tx_path_derive_threads(),
@@ -1040,6 +1058,34 @@ pub struct RethConfig {
     /// Number of additional transaction validation tasks.
     #[serde(default = "default_additional_validation_tasks")]
     pub additional_validation_tasks: usize,
+
+    /// Reth RPC server flags, the same syntax as `reth node` RPC flags,
+    /// e.g. `["--http.api=eth,debug", "--rpc.max-tracing-requests=4"]`.
+    /// Empty by default: the HTTP RPC then serves only the `eth` namespace.
+    ///
+    /// Irys uses `--http.api`, `--ws.api` and `--ipc*` exactly as given.
+    /// The HTTP RPC binds to the Reth network `bind_ip` (`0.0.0.0` in the
+    /// mainnet and testnet templates). The Irys API proxies it at
+    /// `/v1/execution-rpc`. It has no authentication.
+    ///
+    /// Read-only namespaces do not change node state: `debug` (Irys removes
+    /// every `debug_*` method except a fixed set of reads and traces),
+    /// `trace`, `txpool`, `net`, `web3` and `rpc`. Some of their methods
+    /// (traces, `debug_stateRootWithUpdates`) can use much CPU, memory or I/O.
+    /// `/v1/execution-rpc` forwards every method. Before you add these
+    /// namespaces, restrict access to and rate-limit both the Reth port and
+    /// `/v1/execution-rpc`.
+    ///
+    /// Do not add namespaces that change node state to a reachable port.
+    /// Anyone who reaches the port can call them:
+    /// - `admin`: controls peers and clears the transaction pool.
+    /// - `miner`: changes block-building settings.
+    /// - `testing`: builds blocks from caller-supplied transactions.
+    /// - `flashbots` and `mev`: bundle submission methods.
+    ///
+    /// `all` includes every namespace above. Do not use it.
+    #[serde(default)]
+    pub rpc_args: Vec<String>,
 }
 
 fn default_reth_db_sync_mode() -> DbSyncMode {
@@ -1263,6 +1309,9 @@ impl Default for P2PPullConfig {
 pub struct SyncConfig {
     /// How many blocks to fetch in parallel per batch during the sync
     pub block_batch_size: usize,
+    /// How many peers to ask for the block index at the same time during the
+    /// sync. The sync uses the longest valid answer.
+    pub block_index_peer_count: usize,
     /// How often to check if we're behind and need to sync
     pub periodic_sync_check_interval_secs: u64,
     /// Timeout for retry block pull/process
@@ -1297,6 +1346,7 @@ impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             block_batch_size: 50,
+            block_index_peer_count: 3,
             // Check every 30 seconds if we're behind
             periodic_sync_check_interval_secs: 30,
             retry_block_request_timeout_secs: 30,
@@ -1737,6 +1787,8 @@ impl NodeConfig {
                 entropy_readahead_cache_bytes: 0,
                 drop_recall_page_cache: false,
                 recall_direct_io: false,
+                // Tests rely on the recall holding the disk for other IO.
+                recall_io_priority: true,
                 // Tests read `intervals.json` as soon as `sync` returns.
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
@@ -1784,6 +1836,7 @@ impl NodeConfig {
                 db_sync_mode: DbSyncMode::UtterlyNoSync,
                 cross_block_cache_size_megabytes: Some(10),
                 additional_validation_tasks: 0,
+                rpc_args: Vec::new(),
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
@@ -1953,6 +2006,7 @@ impl NodeConfig {
                 entropy_readahead_cache_bytes: DEFAULT_ENTROPY_READAHEAD_CACHE_BYTES,
                 drop_recall_page_cache: false,
                 recall_direct_io: default_recall_direct_io(),
+                recall_io_priority: default_recall_io_priority(),
                 intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 tx_path_derive_threads: DEFAULT_TX_PATH_DERIVE_THREADS,
@@ -1999,6 +2053,7 @@ impl NodeConfig {
                 db_sync_mode: DbSyncMode::Durable,
                 cross_block_cache_size_megabytes: None,
                 additional_validation_tasks: 2,
+                rpc_args: Vec::new(),
             },
             packing: PackingConfig {
                 local: LocalPackingConfig {
@@ -2209,6 +2264,13 @@ mod run_mode_tests {
         assert!(StorageSyncConfig::default().recall_direct_io);
         assert!(NodeConfig::testnet().storage.recall_direct_io);
         assert!(!NodeConfig::testing().storage.recall_direct_io);
+        // Absent key: the recall keeps the disk hold.
+        assert!(parsed.recall_io_priority);
+        let shared: StorageSyncConfig = toml::from_str("recall_io_priority = false").unwrap();
+        assert!(!shared.recall_io_priority);
+        assert!(StorageSyncConfig::default().recall_io_priority);
+        assert!(NodeConfig::testnet().storage.recall_io_priority);
+        assert!(NodeConfig::testing().storage.recall_io_priority);
     }
 
     #[test]

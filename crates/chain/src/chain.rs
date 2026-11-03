@@ -3,7 +3,6 @@ use crate::metrics;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use crate::vdf_seed_source::DbVdfSeedSource;
 use actix_web::dev::Server;
-use base58::ToBase58 as _;
 use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_actors::{
@@ -55,6 +54,7 @@ pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reward_curve::HalvingCurve;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db_with_args;
 use irys_types::BlockHash;
+use irys_types::ToBase58 as _;
 use irys_types::chainspec::irys_chain_spec;
 use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
@@ -149,6 +149,7 @@ pub struct IrysNodeCtx {
     pub chunk_ingress_state: irys_actors::ChunkIngressState,
     pub http_chunk_admission: Arc<Semaphore>,
     pub http_chunk_waiters: Arc<Semaphore>,
+    pub tx_ingress_admission: Arc<Semaphore>,
     /// Atomic timestamps tracking the last canonical advance / last reorg
     /// observed by [`BlockTreeService`]; same `Arc` is shared with the
     /// service worker and with [`ApiState`] so `/v1/tip` does not have to
@@ -177,6 +178,7 @@ impl IrysNodeCtx {
             chunk_ingress_state: self.chunk_ingress_state.clone(),
             http_chunk_admission: Arc::clone(&self.http_chunk_admission),
             http_chunk_waiters: Arc::clone(&self.http_chunk_waiters),
+            tx_ingress_admission: Arc::clone(&self.tx_ingress_admission),
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
             block_tree_lifecycle: self.block_tree_lifecycle.clone(),
@@ -408,14 +410,14 @@ async fn start_reth_node(
     task_executor: TaskExecutor,
     chainspec: Arc<ChainSpec>,
     config: Config,
-    latest_block: u64,
+    latest_evm_block_hash: irys_types::EvmBlockHash,
 ) -> eyre::Result<(RethNodeHandle, RethNode)> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
         chainspec.clone(),
         task_executor.clone(),
         config.node_config.clone(),
-        latest_block,
+        latest_evm_block_hash,
         random_ports,
     )
     .in_current_span()
@@ -1415,24 +1417,40 @@ impl IrysNode {
         runtime_handle: Handle,
         shutdown_token: CancellationToken,
     ) -> ShutdownReason {
+        // Phase 0: Fetch initial oracle prices. A failure here must return
+        // before reth or any service starts, so nothing needs shutdown.
+        let price_oracle_instances = match Self::fetch_initial_oracle_prices(&config).await {
+            Ok(instances) => instances,
+            Err(err) => {
+                let reason = format!("{err:?}");
+                error!(error = ?err, "Failed to fetch initial oracle prices");
+                let _ = irys_node_ctx_tx.send(Err(err));
+                return ShutdownReason::FatalError(reason);
+            }
+        };
+
         // Phase 1: Start reth (sequential)
         let exec = reth_runtime.clone();
-        let (node_handle, reth_node) =
-            match start_reth_node(exec, reth_chainspec, config.clone(), latest_block_height)
-                .in_current_span()
-                .await
-            {
-                Ok(result) => result,
-                Err(e) => {
-                    let err = e.wrap_err(format!(
-                        "start_reth_node failed at block height {latest_block_height}"
-                    ));
-                    let reason = format!("{err:?}");
-                    error!(error = ?err, "Failed to start reth node");
-                    let _ = irys_node_ctx_tx.send(Err(err));
-                    return ShutdownReason::FatalError(reason);
-                }
-            };
+        let (node_handle, reth_node) = match start_reth_node(
+            exec,
+            reth_chainspec,
+            config.clone(),
+            latest_block.evm_block_hash,
+        )
+        .in_current_span()
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                let err = e.wrap_err(format!(
+                    "start_reth_node failed at block height {latest_block_height}"
+                ));
+                let reason = format!("{err:?}");
+                error!(error = ?err, "Failed to start reth node");
+                let _ = irys_node_ctx_tx.send(Err(err));
+                return ShutdownReason::FatalError(reason);
+            }
+        };
 
         // Phase 2: Init services (sequential, receives reth_node directly)
         let (irys_node_ctx, actix_server, vdf_exit_token, gossip_service_handle, service_set) =
@@ -1447,6 +1465,7 @@ impl IrysNode {
                 http_listener,
                 irys_db,
                 gossip_listener,
+                price_oracle_instances,
                 runtime_handle.clone(),
                 shutdown_token.clone(),
             )
@@ -1648,6 +1667,7 @@ impl IrysNode {
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
         gossip_listener: TcpListener,
+        price_oracle_instances: Vec<Arc<SingleOracle>>,
         runtime_handle: tokio::runtime::Handle,
         shutdown_token: CancellationToken,
     ) -> eyre::Result<(
@@ -1674,6 +1694,11 @@ impl IrysNode {
             service_senders.packing_sender.clone(),
         );
 
+        // create the block reward curve
+        let reward_curve = Arc::new(irys_actors::block_reward::reward_curve_from_config(
+            &config.consensus,
+        ));
+
         // Initialize supply state for tracking cumulative emissions
         let supply_state = Arc::new(SupplyState::new(&config.node_config)?);
         let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
@@ -1691,6 +1716,8 @@ impl IrysNode {
             let supply_state_for_backfill = supply_state.clone();
             let block_index_for_backfill = block_index_guard.clone();
             let db_for_backfill = irys_db.clone();
+            let reward_curve_for_backfill = Arc::clone(&reward_curve);
+            let block_time_secs = config.consensus.difficulty_adjustment.block_time;
             let cancel_for_task = backfill_cancel.clone();
             let backfill_complete_signal = backfill_complete.clone();
             let backfill_handle = runtime_handle.spawn(async move {
@@ -1698,6 +1725,8 @@ impl IrysNode {
                     supply_state_for_backfill,
                     block_index_for_backfill,
                     db_for_backfill,
+                    reward_curve_for_backfill,
+                    block_time_secs,
                     cancel_for_task,
                 )
                 .await
@@ -1814,6 +1843,8 @@ impl IrysNode {
             irys_db.clone(),
             block_index_guard.clone(),
             Some(supply_state.clone()),
+            Arc::clone(&reward_curve),
+            config.consensus.difficulty_adjustment.block_time,
             config.data_tree_geometry(),
             config.consensus.epoch.num_blocks_in_epoch,
             config.consensus.block_tree_depth,
@@ -2038,14 +2069,8 @@ impl IrysNode {
             receivers.validation_service,
             runtime_handle.clone(),
             sync_state.clone(),
+            Arc::clone(&reward_curve),
         );
-
-        // create the block reward curve
-        let reward_curve = irys_reward_curve::HalvingCurve {
-            inflation_cap: config.consensus.block_reward_config.inflation_cap,
-            half_life_secs: config.consensus.block_reward_config.half_life_secs.into(),
-        };
-        let reward_curve = Arc::new(reward_curve);
 
         // spawn block discovery
         let block_discovery_handle = Self::init_block_discovery_service(
@@ -2102,9 +2127,9 @@ impl IrysNode {
             shutdown_token.clone(),
         )?;
 
-        // set up the price oracles (initial price(s) fetched during construction)
+        // set up the price oracles (initial price(s) fetched before startup)
         let (price_oracle, price_oracle_handles) =
-            Self::init_price_oracle(&config, &runtime_handle).await;
+            Self::init_price_oracle(price_oracle_instances, &runtime_handle);
 
         // set up the block producer
         let (block_producer_inner, block_producer_handle) = Self::init_block_producer(
@@ -2258,6 +2283,9 @@ impl IrysNode {
             chunk_ingress_state,
             http_chunk_admission: Arc::new(Semaphore::new(config.mempool.max_http_chunk_admission)),
             http_chunk_waiters: Arc::new(Semaphore::new(config.mempool.max_http_chunk_waiters)),
+            tx_ingress_admission: Arc::new(Semaphore::new(
+                irys_api_server::routes::tx_ingress::MAX_IN_FLIGHT_TX_INGRESS,
+            )),
             block_tree_lifecycle: block_tree_lifecycle.clone(),
             backfill_complete,
         };
@@ -2359,6 +2387,7 @@ impl IrysNode {
                 chunk_ingress_state: irys_node_ctx.chunk_ingress_state.clone(),
                 http_chunk_admission: Arc::clone(&irys_node_ctx.http_chunk_admission),
                 http_chunk_waiters: Arc::clone(&irys_node_ctx.http_chunk_waiters),
+                tx_ingress_admission: Arc::clone(&irys_node_ctx.tx_ingress_admission),
                 started_at: irys_node_ctx.started_at,
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
                 block_tree_lifecycle: irys_node_ctx.block_tree_lifecycle.clone(),
@@ -2637,10 +2666,9 @@ impl IrysNode {
         (block_producer_inner, tokio_service_handle)
     }
 
-    async fn init_price_oracle(
-        config: &Config,
-        runtime_handle: &tokio::runtime::Handle,
-    ) -> (Arc<IrysPriceOracle>, Vec<irys_types::TokioServiceHandle>) {
+    /// Builds every configured oracle and fetches its initial price.
+    /// This is the part that can fail, so it runs before any service starts.
+    async fn fetch_initial_oracle_prices(config: &Config) -> eyre::Result<Vec<Arc<SingleOracle>>> {
         let oracle_cfgs: Vec<OracleConfig> = if config.node_config.oracles.is_empty() {
             tracing::info!(
                 "No oracles configured — block production will reuse the \
@@ -2652,7 +2680,6 @@ impl IrysNode {
         };
 
         let mut instances: Vec<Arc<SingleOracle>> = Vec::new();
-        let mut handles: Vec<irys_types::TokioServiceHandle> = Vec::new();
 
         for oc in oracle_cfgs {
             let oracle = match oc {
@@ -2675,7 +2702,7 @@ impl IrysNode {
                     poll_interval_ms,
                 } => SingleOracle::new_coinmarketcap(api_key, id, poll_interval_ms)
                     .await
-                    .expect("coinmarketcap initial price"),
+                    .wrap_err("coinmarketcap initial price")?,
                 OracleConfig::CoinGecko {
                     api_key,
                     coin_id,
@@ -2683,12 +2710,22 @@ impl IrysNode {
                     poll_interval_ms,
                 } => SingleOracle::new_coingecko(api_key, coin_id, demo_api_key, poll_interval_ms)
                     .await
-                    .expect("coingecko initial price"),
+                    .wrap_err("coingecko initial price")?,
             };
-            let handle = Arc::clone(&oracle).spawn_poller(runtime_handle);
-            handles.push(handle);
             instances.push(oracle);
         }
+
+        Ok(instances)
+    }
+
+    fn init_price_oracle(
+        instances: Vec<Arc<SingleOracle>>,
+        runtime_handle: &tokio::runtime::Handle,
+    ) -> (Arc<IrysPriceOracle>, Vec<irys_types::TokioServiceHandle>) {
+        let handles = instances
+            .iter()
+            .map(|oracle| Arc::clone(oracle).spawn_poller(runtime_handle))
+            .collect();
 
         (IrysPriceOracle::new(instances), handles)
     }

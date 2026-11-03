@@ -35,7 +35,7 @@ use irys_types::{
     ChunkDataPath, ChunkPathHash, DataCommitment, DataTreeRoot, DatabaseConfig, H256,
     PartitionChunkOffset, TxPath, TxPathHash,
 };
-use reth_db::table::{Decode, Decompress, Encode, Table};
+use reth_db::table::{Decode, Encode, Table};
 use rocksdb::{
     BlockBasedIndexType, BlockBasedOptions, DB, DBCompactionStyle, DBCompressionType, Direction,
     IteratorMode, Options, ReadOptions, WriteBatch, WriteOptions,
@@ -1857,61 +1857,6 @@ impl RocksSubmoduleStore {
         }
     }
 
-    /// Next rows after `after`, in key order. A single oversized value is
-    /// still returned so the caller moves forward.
-    pub(super) fn read_cf_batch<K, V, F>(
-        &self,
-        cf: &str,
-        after: Option<K>,
-        limit_rows: usize,
-        limit_bytes: usize,
-        value_len: F,
-    ) -> eyre::Result<Vec<(K, V)>>
-    where
-        K: Decode + Encode + Ord + Copy,
-        V: Decompress,
-        F: Fn(&V) -> usize,
-    {
-        let limit_rows = limit_rows.max(1);
-        let limit_bytes = limit_bytes.max(1);
-        let handle = self
-            .db
-            .cf_handle(cf)
-            .ok_or_else(|| eyre::eyre!("missing column family {cf}"))?;
-        let mut opts = ReadOptions::default();
-        opts.fill_cache(false);
-        // A prefix extractor stops `Next` unless the seek is total order.
-        opts.set_total_order_seek(true);
-        let encoded = after.map(encode_key);
-        let mode = match &encoded {
-            None => IteratorMode::Start,
-            Some(bytes) => IteratorMode::From(bytes.as_slice(), Direction::Forward),
-        };
-        let snap = self.db.snapshot();
-        let mut out = Vec::new();
-        let mut bytes_used = 0_usize;
-        for item in snap.iterator_cf_opt(handle, opts, mode) {
-            let (key, value) = item.wrap_err("scan rocksdb row")?;
-            let key =
-                K::decode(key.as_ref()).map_err(|err| eyre::eyre!("decode key in {cf}: {err}"))?;
-            if after.is_some_and(|prev| key <= prev) {
-                continue;
-            }
-            let value = V::decompress(value.as_ref())
-                .map_err(|err| eyre::eyre!("decode value in {cf}: {err}"))?;
-            let next_bytes = bytes_used.saturating_add(value_len(&value));
-            if !out.is_empty() && (out.len() >= limit_rows || next_bytes > limit_bytes) {
-                break;
-            }
-            bytes_used = next_bytes;
-            out.push((key, value));
-            if out.len() >= limit_rows || bytes_used >= limit_bytes {
-                break;
-            }
-        }
-        Ok(out)
-    }
-
     /// Next keys after `after`. Values are not read.
     pub(super) fn read_cf_keys<K>(
         &self,
@@ -2046,10 +1991,9 @@ impl RocksSubmoduleStore {
         let mut out = Vec::new();
         for item in snap.iterator_cf_opt(&handle, opts, mode) {
             let (key, value) = item.wrap_err("scan placement interval")?;
-            if key.len() != 4 {
-                continue;
-            }
-            let start = u32::from_be_bytes(key.as_ref().try_into().expect("length checked"));
+            let start = PartitionChunkOffset::decode(key.as_ref())
+                .wrap_err("placement interval key is not an offset")?
+                .0;
             if after.is_some_and(|prev| start <= prev.0) {
                 continue;
             }
@@ -2082,7 +2026,9 @@ impl RocksSubmoduleStore {
         let Some(item) = iter.next() else {
             return Ok(None);
         };
-        let (_key, value) = item.wrap_err("read the last placement")?;
+        let (key, value) = item.wrap_err("read the last placement")?;
+        PartitionChunkOffset::decode(key.as_ref())
+            .wrap_err("placement interval key is not an offset")?;
         let end = records::decode_placement(value.as_ref())?.end;
         Ok(Some(PartitionChunkOffset(end)))
     }
@@ -5918,6 +5864,38 @@ impl Rows<'_> {
             })
             .collect())
     }
+
+    /// `true` when `[start, end]` has a hole or a stored row fails `present`.
+    ///
+    /// Streams: a partition holds tens of millions of rows. The exclusive
+    /// end keeps a key past the span out of the iterator. A key that is
+    /// not 4 bytes and still sorts inside the span fails the scan.
+    fn offset_span_has_hole(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+        present: impl Fn(&OffsetMeta) -> bool,
+    ) -> eyre::Result<bool> {
+        if start > end {
+            return Ok(false);
+        }
+        let start_key = encode_key(start);
+        let end_key = exclusive_end_key(end);
+        let mut cursor = self.cursor_bounded(Cf::OffsetMeta, Some(&start_key), Some(&end_key))?;
+        let mut expect = u64::from(start.0);
+        let last = u64::from(end.0);
+        while let Some((key, bytes)) = cursor.next_kv()? {
+            if offset_key_ends_span(&key, end)? {
+                break;
+            }
+            let offset = u64::from(PartitionChunkOffset::decode(&key)?.0);
+            if offset != expect || !present(&stored_offset_meta(&bytes)?) {
+                return Ok(true);
+            }
+            expect = expect.saturating_add(1);
+        }
+        Ok(expect != last.saturating_add(1))
+    }
 }
 
 fn overlay_pairs(
@@ -6094,28 +6072,15 @@ impl SubmoduleRead for Rows<'_> {
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) -> eyre::Result<bool> {
-        if start > end {
-            return Ok(false);
-        }
-        // Streams: a partition holds tens of millions of rows. The exclusive
-        // end keeps a key past the span out of the iterator. A key that is
-        // not 4 bytes and still sorts inside the span fails the scan.
-        let start_key = encode_key(start);
-        let end_key = exclusive_end_key(end);
-        let mut cursor = self.cursor_bounded(Cf::OffsetMeta, Some(&start_key), Some(&end_key))?;
-        let mut expect = u64::from(start.0);
-        let last = u64::from(end.0);
-        while let Some((key, bytes)) = cursor.next_kv()? {
-            if offset_key_ends_span(&key, end)? {
-                break;
-            }
-            let offset = u64::from(PartitionChunkOffset::decode(&key)?.0);
-            if offset != expect || stored_offset_meta(&bytes)?.crc.is_none() {
-                return Ok(true);
-            }
-            expect = expect.saturating_add(1);
-        }
-        Ok(expect != last.saturating_add(1))
+        self.offset_span_has_hole(start, end, |meta| meta.crc.is_some())
+    }
+
+    fn offset_row_missing(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        self.offset_span_has_hole(start, end, |_| true)
     }
 
     fn get_tx_path_by_offset(&self, _offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>> {
@@ -6305,6 +6270,7 @@ impl_batch_read! {
     get_offset_meta(offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>>;
     offset_metas_in_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, OffsetMeta)>>;
     offset_crc_missing(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
+    offset_row_missing(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
     get_tx_path_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>>;
     get_path_hashes_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<ChunkPathHashes>>;
     path_hashes_in_inclusive_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>>;
@@ -8041,6 +8007,23 @@ mod tests {
                 .is_some()
         );
         assert_retired_content_family_is_empty(&store)?;
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_interval_key_fails_the_placement_scans() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_malformed_interval_key");
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        place_span(&store, 0, 7, H256::repeat_byte(4), 0, 1, 0, &[], None)?;
+        assert_eq!(store.read_placements(None, 10)?.len(), 1);
+        let handle = cf_handle(&store.db, Cf::Interval)?;
+        store.db.put_cf(&handle, [0_u8, 0, 0, 9, 0], [])?;
+        store.db.flush_cf(&handle)?;
+
+        let scan_err = store.read_placements(None, 10).unwrap_err();
+        assert!(scan_err.to_string().contains("not an offset"), "{scan_err}");
+        let end_err = store.highest_placement_end().unwrap_err();
+        assert!(end_err.to_string().contains("not an offset"), "{end_err}");
         Ok(())
     }
 
@@ -10266,7 +10249,7 @@ mod tests {
             put_offset(&store, offset, offset as u8)?;
             flush_every_family(&store)?;
         }
-        let settled = wait_until_manifest_settles(&rocks)?;
+        let settled = wait_until_manifest_settles(&store, &rocks)?;
         let names = dir_names(&rocks)?;
         let moved = root.path().join("rocks-moved");
         fs::rename(&rocks, &moved)?;
@@ -10303,24 +10286,39 @@ mod tests {
         Ok(())
     }
 
-    fn wait_until_manifest_settles(path: &Path) -> eyre::Result<Vec<u8>> {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut previous = manifest_bytes(path)?;
-        while Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(100));
-            let now = manifest_bytes(path)?;
-            if now != previous {
-                previous = now;
-                continue;
+    fn background_work_is_idle(store: &RocksSubmoduleStore) -> eyre::Result<bool> {
+        let mut busy = property_u64(&store.db, "rocksdb.num-running-compactions")?
+            .saturating_add(property_u64(&store.db, "rocksdb.num-running-flushes")?);
+        for cf in families() {
+            let handle = cf_handle(&store.db, cf)?;
+            for name in [
+                "rocksdb.compaction-pending",
+                "rocksdb.mem-table-flush-pending",
+            ] {
+                busy = busy.saturating_add(int_property_cf(&store.db, handle, name)?);
             }
-            std::thread::sleep(Duration::from_millis(200));
-            let again = manifest_bytes(path)?;
-            if again == now {
-                return Ok(again);
-            }
-            previous = again;
         }
-        eyre::bail!("manifest still moving before the swap")
+        Ok(busy == 0)
+    }
+
+    /// Returns the manifest once no flush or compaction is running or queued
+    /// and the manifest bytes are unchanged across a quiet interval.
+    fn wait_until_manifest_settles(
+        store: &RocksSubmoduleStore,
+        path: &Path,
+    ) -> eyre::Result<Vec<u8>> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if background_work_is_idle(store)? {
+                let before = manifest_bytes(path)?;
+                std::thread::sleep(Duration::from_millis(200));
+                if background_work_is_idle(store)? && manifest_bytes(path)? == before {
+                    return Ok(before);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        eyre::bail!("background work still running before the swap")
     }
 
     /// Proofs at the start of each of three sub-spans, plus one just past the span.

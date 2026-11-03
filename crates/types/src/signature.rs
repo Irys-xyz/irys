@@ -1,6 +1,6 @@
+use crate::ToBase58 as _;
 use crate::{Arbitrary, IrysAddress, Signature};
 use alloy_primitives::{U256 as RethU256, bytes};
-use base58::{FromBase58 as _, ToBase58 as _};
 use bytes::Buf as _;
 use reth_codecs::Compact;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -13,19 +13,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 pub struct IrysSignature(Signature);
 
 // TODO: eventually implement ERC-2098 to save a byte
-
-/// As base58 is rather expensive, we want to make sure that input is well formed as soon as possible
-/// this constant is computed using the below `compute_max_str_len` function (to_base58() is not a const fn)
-const MAX_BS58_SIG_STRING_LENGTH: usize = 89;
-
-// #[test]
-// fn compute_max_str_len() {
-//     dbg!(
-//         IrysSignature::new(Signature::from_bytes_and_parity(&[u8::MAX; 64], true))
-//             .to_base58()
-//             .len()
-//     );
-// }
 
 impl IrysSignature {
     pub fn new(signature: Signature) -> Self {
@@ -49,24 +36,20 @@ impl IrysSignature {
             .is_ok_and(|recovered_address| expected_address == recovered_address)
     }
 
+    /// Requires the canonical low-s form (EIP-2). alloy's
+    /// `recover_address_from_prehash` normalizes s before it verifies, so it
+    /// accepts both forms.
     pub fn recover_signer(&self, prehash: [u8; 32]) -> eyre::Result<IrysAddress> {
+        eyre::ensure!(
+            self.0.normalize_s().is_none(),
+            "signature s value is above secp256k1n / 2"
+        );
         Ok(self.0.recover_address_from_prehash(&prehash.into())?.into())
     }
 
     pub fn from_base58(str: &str) -> eyre::Result<Self> {
-        if str.len() > MAX_BS58_SIG_STRING_LENGTH {
-            eyre::bail!(
-                "Invalid signature length, max is {}, got {}",
-                MAX_BS58_SIG_STRING_LENGTH,
-                &str.len()
-            )
-        }
-        // Decode the base58 string into bytes
-        let decoded = str
-            .from_base58()
-            .map_err(|e| eyre::eyre!("Invalid base58 string: {:?}", &e))?;
-        // from_raw does the 65 len check
-        let sig = Signature::from_raw(&decoded)?;
+        let decoded = crate::decode_base58_exact::<65>(str)?;
+        let sig = Signature::from_raw_array(&decoded)?;
         Ok(Self(sig))
     }
 
@@ -283,6 +266,44 @@ mod tests {
         Ok(())
     }
 
+    /// The high-s form `(r, n - s, !v)` of a valid signature must be rejected.
+    #[test]
+    fn high_s_signature_is_rejected() -> eyre::Result<()> {
+        use crate::IrysTransactionCommon as _;
+        use alloy_primitives::{U256, keccak256};
+
+        const SECP256K1N: U256 = alloy_primitives::uint!(
+            0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141_U256
+        );
+
+        let testing_config = ConsensusConfig::testing();
+        let irys_signer = IrysSigner::random_signer(&testing_config);
+        let tx = irys_signer.create_transaction(vec![7_u8; 1024], H256::zero())?;
+        let original = irys_signer.sign_transaction(tx)?.header;
+        assert!(original.is_signature_valid());
+
+        let low_s = original.signature.reth_signature();
+        let high_s = Signature::new(low_s.r(), SECP256K1N - low_s.s(), !low_s.v());
+        let mut high_s_tx = original.clone();
+        high_s_tx.signature = IrysSignature::new(high_s);
+        high_s_tx.id = H256::from(keccak256(high_s.as_bytes()).0);
+
+        // alloy's recovery normalizes s, so it accepts the high-s form
+        let alloy_signer: IrysAddress = high_s
+            .recover_address_from_prehash(&high_s_tx.signature_hash().into())?
+            .into();
+        assert_eq!(alloy_signer, original.signer);
+
+        assert!(
+            high_s_tx
+                .signature
+                .recover_signer(high_s_tx.signature_hash())
+                .is_err()
+        );
+        assert!(!high_s_tx.is_signature_valid());
+        Ok(())
+    }
+
     #[test]
     fn data_tx_signature_signing_serialization() -> eyre::Result<()> {
         // spellchecker:off
@@ -492,25 +513,26 @@ mod tests {
 
     #[test]
     fn from_base58_rejects_oversized_input() {
-        let long_string = "A".repeat(MAX_BS58_SIG_STRING_LENGTH + 1);
+        // 89 is the base58 length of [0xFF; 65], the longest 65-byte encoding
+        let long_string = "A".repeat(90);
         let err_msg = IrysSignature::from_base58(&long_string)
             .unwrap_err()
             .to_string();
         assert!(
-            err_msg.contains("Invalid signature length"),
+            err_msg.contains("max for 65 bytes is 89"),
             "expected length-guard error, got: {err_msg}"
         );
     }
 
     #[test]
     fn from_base58_accepts_max_length_input() {
-        // Passes length check but fails on invalid base58 decode
-        let max_length_string = "1".repeat(MAX_BS58_SIG_STRING_LENGTH);
+        // Passes length check but decodes to 89 bytes, not 65
+        let max_length_string = "1".repeat(89);
         let result = IrysSignature::from_base58(&max_length_string);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            !err_msg.contains("Invalid signature length"),
+            !err_msg.contains("max for 65 bytes"),
             "should not fail on length check at boundary, got: {err_msg}"
         );
     }
