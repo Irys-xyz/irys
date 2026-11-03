@@ -23,7 +23,7 @@ use std::future::IntoFuture as _;
 use std::net::SocketAddr;
 use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
-use tracing::{Instrument as _, warn};
+use tracing::Instrument as _;
 
 use crate::{IrysRethNodeAdapter, unwind::unwind_to};
 
@@ -199,6 +199,7 @@ pub async fn run_node(
     task_executor: TaskExecutor,
     node_config: irys_types::NodeConfig,
     latest_evm_block_hash: B256,
+    index_tip_height: u64,
     random_ports: bool,
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
@@ -217,15 +218,30 @@ pub async fn run_node(
     )
     .await
     {
-        // hack to ignore trying to unwind future blocks
-        // (this can happen sometimes, but should be resolved by the payload repair process - erroring here won't help.)
-        // Reth not having the Irys tip's EVM block at all is the same situation, seen by hash.
+        // Reth does not hold the block index tip: an unclean stop lost blocks Reth had made
+        // canonical but not yet written to disk. Payload repair runs after the startup
+        // fork-choice update and cannot fill this gap, so stop here with the operator fix.
         let msg = e.to_string();
         if msg.starts_with("Target block number") || msg.starts_with("Block hash not found") {
-            warn!("Error unwinding - Reth/Irys head block mismatch {}", &e)
-        } else {
-            return Err(e);
+            let reth_disk_tip_height = crate::snapshot::open_reth_db_read_only(
+                &node_config
+                    .reth_data_dir()
+                    .join(crate::snapshot::RETH_DB_DIR),
+            )
+            .and_then(|db| crate::snapshot::read_finish_checkpoint(&db))
+            .ok()
+            .flatten()
+            .map_or_else(|| "unknown".to_owned(), |height| height.to_string());
+            return Err(e.wrap_err(format!(
+                "Reth's database does not hold the Irys block index tip (height \
+                 {index_tip_height}, EVM block {latest_evm_block_hash}); Reth's highest block \
+                 on disk is {reth_disk_tip_height}. Reth made these blocks canonical but did not \
+                 write them to disk before the node stopped (crash, kill or power loss). Roll the \
+                 block index back to Reth's disk tip with `irys-cli rollback-blocks to-block \
+                 {reth_disk_tip_height}`, then restart; the node syncs the rest from its peers."
+            )));
         }
+        return Err(e);
     }
 
     reth_config.network.discovery.disable_discovery = true;
