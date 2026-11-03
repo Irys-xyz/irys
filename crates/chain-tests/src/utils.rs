@@ -2438,8 +2438,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut prev = (0, 0, 0);
         let expected = (submit_txs, publish_txs, commitment_txs);
         for _ in 0..max_retries {
-            let canonical_tip = self.get_canonical_chain().last().unwrap().block_hash();
-            let txs: MempoolTxs = self.get_best_mempool_tx(canonical_tip).await?;
+            let canonical_tip = self.get_canonical_chain().last().unwrap().header().clone();
+            // The block tree moves its tip before Reth applies the fork-choice update, and
+            // tx selection reads balances at the tip's EVM block. Until Reth has made that
+            // block canonical, the mempool view is not ready.
+            if self
+                .get_evm_block_by_hash(canonical_tip.evm_block_hash)
+                .is_err()
+            {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                retries += 1;
+                continue;
+            }
+            let txs: MempoolTxs = self.get_best_mempool_tx(canonical_tip.block_hash).await?;
             let MempoolTxs {
                 commitment_tx,
                 submit_tx,
