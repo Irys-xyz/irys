@@ -1,7 +1,11 @@
 use crate::{ApiClient, IrysApiClient, Method};
 use eyre::OptionExt as _;
 pub use irys_api_server::routes::block::BlockParam;
-use irys_api_server::routes::{anchor::AnchorResponse, price::PriceInfo, tx::PromotionStatus};
+use irys_api_server::routes::{
+    anchor::AnchorResponse,
+    price::PriceInfo,
+    tx::{IngressStatus, PromotionStatus},
+};
 pub use irys_types::CombinedBlockHeader;
 use irys_types::{
     Base64, BlockHash, ChunkFormat, DataLedger, DataRoot, DataTransaction, H256, TxChunkOffset,
@@ -38,6 +42,13 @@ pub trait ApiClientExt: ApiClient {
         tx_id: H256,
         attempts: u64,
     ) -> eyre::Result<()>;
+
+    /// `Ok(None)` when the peer responds 404.
+    async fn get_ingress_status(
+        &self,
+        peer: SocketAddr,
+        tx_id: H256,
+    ) -> eyre::Result<Option<IngressStatus>>;
 
     async fn get_data_price(
         &self,
@@ -140,6 +151,20 @@ impl ApiClientExt for IrysApiClient {
             &tx_id,
             &attempts
         ))
+    }
+
+    async fn get_ingress_status(
+        &self,
+        peer: SocketAddr,
+        tx_id: H256,
+    ) -> eyre::Result<Option<IngressStatus>> {
+        self.make_request(
+            peer,
+            Method::GET,
+            &format!("/tx/{tx_id}/ingress-status"),
+            None::<&()>,
+        )
+        .await
     }
 
     async fn get_data_price(

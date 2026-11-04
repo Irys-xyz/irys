@@ -7931,6 +7931,48 @@ fn merge_same_block_historical_ledgers(
     }
 }
 
+/// Lowest-index Submit slot of `address` that intersects `block_range`, and
+/// the number of miners assigned to that slot.
+///
+/// `BTreeMap` (not `HashMap`) so the slot walk is deterministic across nodes.
+/// When `block_range` intersects multiple Submit slots, the first intersection
+/// picks `assigned_miners`; HashMap order would let two honest nodes pick
+/// different counts and diverge on ingress-proof acceptance. Currently vacuous
+/// because `Config::validate` pins `number_of_ingress_proofs_from_assignees == 0`
+/// (see `crates/types/src/config/mod.rs`), but the ordered container removes the
+/// fork landmine that guard masks.
+pub(crate) fn first_intersecting_submit_slot_miners(
+    address: &IrysAddress,
+    block_range: &LedgerChunkRange,
+    config: &Config,
+    epoch_snapshot: &EpochSnapshot,
+) -> Option<usize> {
+    let slot_indexes = get_submit_ledger_slot_assignments(address, epoch_snapshot);
+    let slot_ranges: BTreeMap<usize, LedgerChunkRange> = slot_indexes
+        .iter()
+        .map(|index| {
+            let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
+            let start = *index as u64 * num_chunks_in_partition;
+            let end = start + num_chunks_in_partition;
+            let range = LedgerChunkRange(ie(
+                LedgerChunkOffset::from(start),
+                LedgerChunkOffset::from(end),
+            ));
+            (*index, range)
+        })
+        .collect();
+    let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, epoch_snapshot);
+
+    for (slot_index, slot_range) in &slot_ranges {
+        if block_range.intersection(slot_range).is_some() {
+            return Some(*slot_address_counts.get(slot_index).expect(
+                "slot address count missing for an assigned Submit slot — invariant from get_submit_ledger_slot_addresses",
+            ));
+        }
+    }
+    None
+}
+
 /// Resolves the canonical Submit-ledger range a tx contributed to at or
 /// before `parent_height` via `tx_inclusion::find_canonical_ledger_range`
 /// (parent-anchored + `ChainState::Onchain`-filtered), then intersects it
@@ -7991,46 +8033,16 @@ pub fn get_assigned_ingress_proofs(
                 reason: e.to_string(),
             })?;
 
-        // 1.) is the proof from a miner assigned to store the data in the submit ledger?
-
-        //  c) Get the slots the proof address is assigned to store
-        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, epoch_snapshot);
-
-        // d) Get the ledger ranges of the slot indexes.
-        //
-        // `BTreeMap` (not `HashMap`) so iteration order in (f) is deterministic
-        // across nodes.  When `block_range` intersects multiple Submit slots,
-        // the `break`-on-first-intersection picks `assigned_miners` from
-        // whichever slot iterates first; HashMap order would let two honest
-        // nodes pick different `assigned_miners` and produce divergent
-        // ingress-proof acceptance decisions.  Currently vacuous because
-        // `Config::validate` pins `number_of_ingress_proofs_from_assignees == 0`
-        // (see `crates/types/src/config/mod.rs`), but switching the container
-        // here removes the fork landmine the guard masks.
-        let slot_ranges: BTreeMap<usize, LedgerChunkRange> = slot_indexes
-            .iter()
-            .map(|index| {
-                let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
-                let start = *index as u64 * num_chunks_in_partition;
-                let end = start + num_chunks_in_partition;
-                let range = LedgerChunkRange(ie(
-                    LedgerChunkOffset::from(start),
-                    LedgerChunkOffset::from(end),
-                ));
-                (*index, range)
-            })
-            .collect();
-
-        // e) Get the number of unique addresses assigned to each slot
-        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, epoch_snapshot);
-
-        //  f) are there any intersections of block and slot ranges?
-        for (slot_index, slot_range) in &slot_ranges {
-            if block_range.intersection(slot_range).is_some() {
-                assigned_miners = *slot_address_counts.get(slot_index).unwrap();
-                assigned_proofs.push(ingress_proof.clone());
-                break;
-            }
+        // The first intersecting Submit slot, in ascending slot-index order,
+        // supplies `assigned_miners`. A later assigned proof overwrites it.
+        if let Some(miners) = first_intersecting_submit_slot_miners(
+            &proof_address,
+            &block_range,
+            config,
+            epoch_snapshot,
+        ) {
+            assigned_miners = miners;
+            assigned_proofs.push(ingress_proof.clone());
         }
     }
 

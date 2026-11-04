@@ -3,13 +3,17 @@ pub(crate) mod helpers;
 use crate::block_discovery::{TxLookupResult, get_data_tx_in_parallel_inner};
 use crate::block_producer::ledger_expiry::LedgerExpiryError;
 use crate::block_validation::get_assigned_ingress_proofs;
-use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
+use crate::chunk_ingress_service::ChunkIngressState;
 use crate::data_tx_validation::data_tx_structural_defect;
 use crate::mempool_guard::MempoolReadGuard;
 use crate::mempool_service::{AtomicMempoolState, MempoolTxs, validate_commitment_transaction};
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{OptionExt as _, eyre};
 use futures::FutureExt as _;
+use helpers::{
+    anchor_valid_ingress_proofs, dedup_ingress_proofs_by_signer, min_ingress_proof_anchor_height,
+    unexpired_ingress_proofs,
+};
 use irys_database::DatabaseProvider;
 use irys_database::db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _};
 use irys_database::db_cache::CachedDataRoot;
@@ -23,7 +27,7 @@ use irys_domain::{
     HardforkConfigExt as _,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::ingress::{CachedIngressProof, IngressProof};
+use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     BlockHash, BoundedFee, CommitmentTypeV2, DataLedger, DataTransactionHeader, IngressProofsList,
@@ -920,12 +924,8 @@ async fn get_publish_txs_and_proofs(
         .header();
 
     // only max anchor age is constrained for ingress proofs
-    let min_ingress_proof_anchor_height = next_block_height.saturating_sub(
-        ctx.config
-            .consensus
-            .mempool
-            .ingress_proof_anchor_expiry_depth as u64,
-    );
+    let min_ingress_proof_anchor_height =
+        min_ingress_proof_anchor_height(next_block_height, ctx.config);
 
     {
         let (publish_txids, cached_data_roots) = ctx
@@ -1183,33 +1183,23 @@ async fn get_publish_txs_and_proofs(
             // If it's not promoted, validate the proofs
 
             // Get all the proofs for this tx
-            let mut all_proofs = ctx
+            let stored_proofs = ctx
                 .db
                 .view_cache_eyre(|read_tx| {
                     ingress_proofs_by_data_root(read_tx, tx_header.data_root)
                 })?
                 .into_iter()
-                .filter(|(_root, cached_proof)| {
-                    let expired = ChunkIngressServiceInner::is_ingress_proof_expired_static(
-                        ctx.block_tree,
-                        ctx.db,
-                        ctx.config,
-                        &cached_proof.proof,
-                    )
-                    .expired_or_invalid;
-                    !expired
-                })
+                .map(|(_root, cached_proof)| cached_proof)
                 .collect::<Vec<_>>();
-
-            // Dedup by signer address in-place, keeping first proof per address
-            let pre_dedup_len = all_proofs.len();
-            let mut seen_addresses = HashSet::new();
-            all_proofs.retain(|(_, cached_proof)| seen_addresses.insert(cached_proof.0.address));
-            if all_proofs.len() < pre_dedup_len {
+            let non_expired =
+                unexpired_ingress_proofs(stored_proofs, ctx.block_tree, ctx.db, ctx.config);
+            // Dedup by signer address, keeping the first proof per address.
+            let (all_proofs, dropped) = dedup_ingress_proofs_by_signer(non_expired);
+            if dropped > 0 {
                 warn!(
                     tx.id = ?tx_header.id,
                     tx.data_root = ?tx_header.data_root,
-                    before = pre_dedup_len,
+                    before = all_proofs.len() + dropped,
                     after = all_proofs.len(),
                     "Duplicate ingress proof signers detected for data root, deduplicating"
                 );
@@ -1231,24 +1221,14 @@ async fn get_publish_txs_and_proofs(
                 continue;
             }
 
-            let mut all_tx_proofs: Vec<CachedIngressProof> = Vec::with_capacity(all_proofs.len());
-
-            //filter all these ingress proofs by their anchor validity
-            for (_hash, cached) in all_proofs {
-                let cached_proof = cached.0;
-                // validate the anchor is still valid
-                let anchor_is_valid =
-                    crate::anchor_validation::validate_ingress_proof_anchor_for_inclusion(
-                        ctx.block_tree,
-                        ctx.db,
-                        min_ingress_proof_anchor_height,
-                        &cached_proof.proof,
-                    )?;
-                if anchor_is_valid {
-                    all_tx_proofs.push(cached_proof)
-                }
-                // note: data root lifecycle work includes code to handle ingress proofs we find as invalid
-            }
+            // Filter these ingress proofs by anchor validity.
+            // note: data root lifecycle work includes code to handle ingress proofs we find as invalid
+            let all_tx_proofs = anchor_valid_ingress_proofs(
+                all_proofs,
+                ctx.block_tree,
+                ctx.db,
+                min_ingress_proof_anchor_height,
+            )?;
 
             // Extract IngressProofs for get_assigned_ingress_proofs API
             let proofs_only: Vec<IngressProof> =
