@@ -324,7 +324,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
 #[test_log::test(tokio::test)]
 async fn heavy_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<()> {
     // Setup: Configure with interval of 4 blocks
-    // Last 25% = 1 block (position_in_interval == 3)
+    // Last 25% = 1 block (tip height % interval == 3)
     let price_adjustment_interval = 4;
     let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;
     config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
@@ -362,7 +362,7 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<(
 
     // Stage 1: NOT in last quarter (interval=4)
     let mut last_block = ctx
-        .ema_mine_until_next_not_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_tip_not_in_last_quarter(price_adjustment_interval)
         .await?;
 
     let ema_stage1 = ctx
@@ -388,7 +388,7 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<(
 
     // Stage 2: First block of last quarter (interval=4)
     last_block = ctx
-        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_tip_in_last_quarter(price_adjustment_interval)
         .await?;
 
     let ema_stage2 = ctx
@@ -625,7 +625,7 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary_decreasing() -> eyr
 
     // Stage 1: NOT in last quarter (interval=4)
     let mut last_block = ctx
-        .ema_mine_until_next_not_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_tip_not_in_last_quarter(price_adjustment_interval)
         .await?;
 
     let ema_stage1 = ctx
@@ -646,7 +646,7 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary_decreasing() -> eyr
 
     // Stage 2: First block of last quarter (interval=4)
     last_block = ctx
-        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_tip_in_last_quarter(price_adjustment_interval)
         .await?;
     let ema_stage2 = ctx
         .node_ctx
@@ -675,6 +675,107 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary_decreasing() -> eyr
     ctx.post_publish_data_tx(&signer, data)
         .await
         .expect("Tx using API price in decreasing last-quarter scenario was not accepted");
+    ctx.stop().await;
+    Ok(())
+}
+
+// A quote made on the last tip before an EMA interval roll must stay valid after
+// the roll. The next block (height a multiple of the interval) shifts the public
+// pricing EMA, so a tx ingested after it is priced against the rolled snapshot.
+// With a falling price the rolled EMA is lower, which raises the required fee.
+#[test_log::test(tokio::test)]
+async fn heavy_pricing_quote_on_last_tip_before_roll_survives_roll() -> eyre::Result<()> {
+    let price_adjustment_interval = 4;
+    let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;
+    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    config.oracles = vec![irys_types::OracleConfig::Mock {
+        initial_price: irys_types::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0))
+            .unwrap(),
+        incremental_change: irys_types::storage_pricing::Amount::token(rust_decimal_macros::dec!(
+            0.05
+        ))
+        .unwrap(),
+        smoothing_interval: 999999,
+        initial_direction_up: false,
+        poll_interval_ms: 500,
+    }];
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let ctx = crate::utils::IrysNodeTest::new_genesis(config)
+        .start()
+        .await;
+    let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
+
+    ctx.mine_two_ema_intervals(price_adjustment_interval)
+        .await?;
+    while ctx.get_canonical_chain_height().await % price_adjustment_interval
+        != price_adjustment_interval - 1
+    {
+        ctx.mine_block().await?;
+    }
+    let tip_height = ctx.get_canonical_chain_height().await;
+    let tip = ctx.get_block_by_height(tip_height).await?;
+    let ema_before_roll = ctx
+        .get_ema_snapshot(&tip.block_hash)
+        .expect("EMA snapshot should exist");
+    assert!(
+        ema_before_roll.ema_price_1_interval_ago.amount
+            < ema_before_roll.ema_price_2_intervals_ago.amount,
+        "Expected newer EMA to be lower (decreasing trend)"
+    );
+
+    let quote = ctx
+        .get_data_price(DataLedger::Publish, data_size_bytes)
+        .await?;
+
+    let roll_block = ctx.mine_block().await?;
+    assert_eq!(roll_block.height, tip_height + 1);
+    assert!(roll_block.height.is_multiple_of(price_adjustment_interval));
+    let ema_after_roll = ctx
+        .get_ema_snapshot(&roll_block.block_hash)
+        .expect("EMA snapshot should exist");
+    assert_eq!(
+        ema_after_roll.ema_for_public_pricing(),
+        ema_before_roll.ema_price_1_interval_ago,
+        "The roll should move ema_price_1_interval_ago into public pricing"
+    );
+
+    let tx = signer.create_publish_transaction(
+        vec![3_u8; data_size_bytes as usize],
+        ctx.get_anchor().await?,
+        quote.perm_fee.into(),
+        quote.term_fee.into(),
+    )?;
+    let tx = signer.sign_transaction(tx)?;
+    // Panics with the response body if the mempool rejects the quoted fees.
+    ctx.post_data_tx_raw(&tx.header).await;
+
+    let number_of_ingress_proofs_total = ctx
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+    let expected_term_fee = calculate_term_fee_from_config(
+        data_size_bytes,
+        &ctx.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
+        ema_before_roll.ema_price_1_interval_ago,
+        UnixTimestamp::from_secs(0),
+    )?;
+    let expected_perm_fee = calculate_perm_fee_from_config(
+        data_size_bytes,
+        &ctx.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
+        ema_before_roll.ema_price_1_interval_ago,
+        expected_term_fee,
+        UnixTimestamp::from_secs(0),
+    )?;
+    assert_eq!(
+        (quote.term_fee, quote.perm_fee),
+        (expected_term_fee, expected_perm_fee.amount),
+        "Last tip before roll: quote should use lower-of-two (ema_price_1_interval_ago)"
+    );
+
     ctx.stop().await;
     Ok(())
 }
