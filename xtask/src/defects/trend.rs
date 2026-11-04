@@ -42,7 +42,7 @@ pub fn trend(catalogue: &Catalogue, window: Option<&Window>) -> Vec<TrendRow> {
         Some(Window::LastReleases(count)) => {
             let versions: BTreeSet<Version> =
                 catalogue.instances.iter().filter_map(version).collect();
-            versions.into_iter().rev().take(*count).last()
+            versions.into_iter().rev().take(*count).min()
         }
         _ => None,
     };
