@@ -438,7 +438,7 @@ impl SubmoduleDrain {
                 if self.budget == 0 {
                     break;
                 }
-                if !seen.insert((job.data_root, job.block_height, job.start_offset.0)) {
+                if !seen.insert((job.data_commitment, job.block_height, job.start_offset.0)) {
                     continue;
                 }
                 stats.rows += 1;
@@ -463,7 +463,7 @@ impl SubmoduleDrain {
                                 debug!(
                                     storage_module.id = self.sm.id,
                                     partition.offset = %key,
-                                    data_root = %job.data_root,
+                                    data_commitment = %job.data_commitment,
                                     unwritable,
                                     "body migration job is waiting for entropy at its offsets; no penalty"
                                 );
@@ -472,7 +472,7 @@ impl SubmoduleDrain {
                                 debug!(
                                     storage_module.id = self.sm.id,
                                     partition.offset = %key,
-                                    data_root = %job.data_root,
+                                    data_commitment = %job.data_commitment,
                                     "body migration could not read a Submit replica; not counting the pass"
                                 );
                             }
@@ -485,7 +485,7 @@ impl SubmoduleDrain {
                                 debug!(
                                     storage_module.id = self.sm.id,
                                     partition.offset = %key,
-                                    data_root = %job.data_root,
+                                    data_commitment = %job.data_commitment,
                                     unavailable,
                                     failed,
                                     ?last_error,
@@ -499,7 +499,7 @@ impl SubmoduleDrain {
                         warn!(
                             storage_module.id = self.sm.id,
                             partition.offset = %key,
-                            data_root = %job.data_root,
+                            data_commitment = %job.data_commitment,
                             ?error,
                             "body migration job failed; counting as a stalled pass"
                         );
@@ -608,15 +608,16 @@ impl SubmoduleDrain {
         job: &PendingBodyMigration,
         stats: &mut PassStats,
     ) {
-        match self
-            .sm
-            .bump_pending_body_migration_attempts(key, job.data_root, job.block_height)
-        {
+        match self.sm.bump_pending_body_migration_attempts(
+            key,
+            job.data_commitment,
+            job.block_height,
+        ) {
             Ok(Some(attempts)) if attempts >= MAX_BODY_MIGRATION_ATTEMPTS => {
                 warn!(
                     storage_module.id = self.sm.id,
                     partition.offset = %key,
-                    data_root = %job.data_root,
+                    data_commitment = %job.data_commitment,
                     attempts,
                     "retiring body migration job after repeated passes without progress; \
                      remaining holes left to data sync"
@@ -819,7 +820,7 @@ impl SubmoduleDrain {
     fn settle(&self, key: PartitionChunkOffset, job: &PendingBodyMigration) -> bool {
         match self
             .sm
-            .settle_pending_body_migration(key, job.data_root, job.block_height)
+            .settle_pending_body_migration(key, job.data_commitment, job.block_height)
         {
             Ok(removed) => removed,
             Err(error) => {
@@ -1017,7 +1018,8 @@ impl SubmoduleDrain {
                 &self.storage_modules_guard,
                 &self.db,
                 self.ledger,
-                job.data_root,
+                job.data_commitment,
+                job.data_tree_root,
                 job.data_size,
                 tx_offset,
                 count,

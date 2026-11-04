@@ -182,7 +182,6 @@ Guards outside those plays:
 
 - L53: collapse this trait onto RocksSubmoduleStore when MDBX is gone. Do not delete behavior RocksDB v1 implements. The default methods below are the MDBX behavior.
 - L91: delete this default. MDBX stores tx-path bytes. RocksDB v1 returns false and derives them.
-- L212: delete this default. MDBX has no content-hash index and returns an error. RocksDB v1 seeks ChunkOffsetsByContentHash.
 - L223: delete this default. MDBX stores no checksum. RocksDB v1 returns true.
 - L232: delete this default. It is the MDBX proof with no checksum. RocksDB v1 reads the offset row.
 - L246: delete this default. MDBX does not scan checksum rows. RocksDB v1 returns them.

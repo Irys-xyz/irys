@@ -15,7 +15,9 @@ use eyre::{WrapErr as _, eyre};
 use irys_database::submodule::tables::{DataRootInfo, TxLeafBinding};
 use irys_database::submodule::{SubmoduleStore as _, SubmoduleWrite};
 use irys_domain::StorageModule;
-use irys_types::{H256, PartitionChunkOffset, RelativeChunkOffset, hash_sha256};
+use irys_types::{
+    DataCommitment, DataTreeRoot, H256, PartitionChunkOffset, RelativeChunkOffset, hash_sha256,
+};
 use serde::{Deserialize, Serialize};
 
 const VERSION: u32 = 1;
@@ -114,6 +116,7 @@ fn write_batch(tx: &mut dyn SubmoduleWrite, from: u64, to: u64) -> eyre::Result<
             &TxLeafBinding {
                 data_root,
                 prefix_hash: H256::zero(),
+                data_commitment: DataCommitment(data_root),
             },
         )?;
         let start_i32 = i32::try_from(tx_start).map_err(|_| eyre!("prepop offset exceeds i32"))?;
@@ -127,16 +130,19 @@ fn write_batch(tx: &mut dyn SubmoduleWrite, from: u64, to: u64) -> eyre::Result<
         // The interval creates the unfilled placement. Rocks fills that
         // placement in this batch, so the data size follows the interval.
         tx.add_tx_path_hash_to_offset_range(start, end, Some(tx_path_hash))?;
+        // Prepopulated rows are synthetic: the bench keys them by the root bytes.
         tx.add_data_root_info(
-            data_root,
+            DataCommitment(data_root),
             &DataRootInfo {
                 start_offset: RelativeChunkOffset(start_i32),
                 data_size: chunk_count.saturating_mul(crate::guard::CHUNK_SIZE),
+                data_tree_root: DataTreeRoot(data_root),
             },
         )?;
         let mut chunk = tx_start.max(from);
         while chunk <= tx_end {
             let path_hash_bytes = keyed(b"chunk", chunk);
+            // Two 32-byte hashes: the shape of a v2 chunk proof with one sibling.
             let mut data_path = Vec::with_capacity(64);
             data_path.extend_from_slice(&path_hash_bytes);
             data_path.extend_from_slice(&path_hash_bytes);
@@ -212,7 +218,7 @@ fn stored_size_conflict(module: &StorageModule, from: u64, to: u64) -> eyre::Res
         let tx_end = tx_start.saturating_add(TX_CHUNKS - 1).min(to - 1);
         let written = (tx_end - tx_start + 1).saturating_mul(crate::guard::CHUNK_SIZE);
         let root = H256::from(keyed(b"tx", tx_index));
-        let infos = module.collect_data_root_infos(root)?;
+        let infos = module.collect_data_root_infos(DataCommitment(root))?;
         let start = i32::try_from(tx_start).map_err(|_| eyre!("prepop offset exceeds i32"))?;
         for info in &infos.0 {
             if info.start_offset.0 == start && info.data_size != written {
@@ -233,7 +239,7 @@ mod tests {
     use irys_database::submodule::RocksTuning;
     use irys_domain::{BenchIndex, StorageModule};
     use irys_testing_utils::TempDirBuilder;
-    use irys_types::H256;
+    use irys_types::{DataCommitment, H256};
 
     use super::{TX_CHUNKS, prepopulate};
     use crate::guard::CHUNK_SIZE;
@@ -294,7 +300,7 @@ mod tests {
     fn sizes(module: &StorageModule, tx_index: u64) -> Vec<(i32, u64)> {
         let root = H256::from(super::keyed(b"tx", tx_index));
         let infos = module
-            .collect_data_root_infos(root)
+            .collect_data_root_infos(DataCommitment(root))
             .unwrap_or_else(|error| panic!("infos for tx {tx_index}: {error:#}"));
         let mut pairs: Vec<(i32, u64)> = infos
             .0

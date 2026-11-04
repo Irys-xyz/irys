@@ -151,7 +151,7 @@ mod round_trip_tests {
             data_dir: target_dir.clone(),
             force: false,
             expected_chain_id: 7777,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: u32::from(irys_types::DatabaseVersion::CURRENT),
         })
         .expect("import");
 
@@ -271,7 +271,7 @@ mod round_trip_tests {
             data_dir: target_dir.clone(),
             force: false,
             expected_chain_id: 4242,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: u32::from(irys_types::DatabaseVersion::CURRENT),
         })
         .expect_err("smuggled archive must be rejected");
         assert!(
@@ -310,7 +310,7 @@ mod round_trip_tests {
             data_dir: target_dir.clone(),
             force: true,
             expected_chain_id: 4243,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: u32::from(irys_types::DatabaseVersion::CURRENT),
         })
         .expect("force import succeeds");
 
@@ -385,7 +385,7 @@ mod round_trip_tests {
             data_dir: target_dir.clone(),
             force: true,
             expected_chain_id: 4244,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: u32::from(irys_types::DatabaseVersion::CURRENT),
         })
         .unwrap_err();
         assert!(
@@ -429,7 +429,7 @@ mod round_trip_tests {
             data_dir: target_dir,
             force: false,
             expected_chain_id: 11,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: u32::from(irys_types::DatabaseVersion::CURRENT),
         })
         .unwrap_err();
         assert!(err.to_string().contains("not empty"), "got: {err}");

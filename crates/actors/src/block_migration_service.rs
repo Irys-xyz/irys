@@ -14,10 +14,11 @@ use irys_domain::{
 use irys_reward_curve::HalvingCurve;
 use irys_storage::ii;
 use irys_types::block_stream::{BlockEvent, BlockRef, StreamEvent, StreamFrame};
+use irys_types::data_tree::Geometry;
 use irys_types::{
-    DataLedger, DataTransactionHeader, H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange,
-    PartitionChunkOffset, PartitionChunkRange, SealedBlock, SendTraced as _, SystemLedger, Traced,
-    U256, app_state::DatabaseProvider,
+    DataCommitment, DataLedger, DataTransactionHeader, H256, IrysBlockHeader, LedgerChunkOffset,
+    LedgerChunkRange, PartitionChunkOffset, PartitionChunkRange, SealedBlock, SendTraced as _,
+    SystemLedger, Traced, U256, app_state::DatabaseProvider,
 };
 use lru::LruCache;
 use std::{
@@ -92,6 +93,9 @@ pub struct BlockMigrationService {
     reward_curve: Arc<HalvingCurve>,
     block_time_secs: u64,
     chunk_size: u64,
+    /// Derives each tx's `data_commitment`, the key of its cache row and
+    /// storage-module placements.
+    data_tree_geometry: Geometry,
     /// Epoch length, used to identify non-genesis epoch blocks: those APPLY
     /// (re-list) every commitment of the epoch but never first-INCLUDE one, so
     /// they must not write commitment dedup metadata.
@@ -206,7 +210,7 @@ impl BlockMigrationService {
         supply_state: Option<Arc<SupplyState>>,
         reward_curve: Arc<HalvingCurve>,
         block_time_secs: u64,
-        chunk_size: u64,
+        data_tree_geometry: Geometry,
         num_blocks_in_epoch: u64,
         block_tree_depth: u64,
         block_migration_depth: u64,
@@ -247,7 +251,8 @@ impl BlockMigrationService {
             supply_state,
             reward_curve,
             block_time_secs,
-            chunk_size,
+            chunk_size: data_tree_geometry.chunk_size(),
+            data_tree_geometry,
             num_blocks_in_epoch,
             block_tree_depth,
             block_migration_depth,
@@ -523,7 +528,7 @@ impl BlockMigrationService {
                     for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
                         irys_database::remove_data_root_block_set_entry(
                             tx,
-                            submit_tx.data_root,
+                            submit_tx.data_commitment(&self.data_tree_geometry),
                             orphan_block_hash,
                         )?;
                     }
@@ -553,7 +558,7 @@ impl BlockMigrationService {
                     for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
                         irys_database::update_data_root_block_set(
                             tx,
-                            submit_tx.data_root,
+                            submit_tx.data_commitment(&self.data_tree_geometry),
                             block_hash,
                         )?;
                     }
@@ -668,7 +673,7 @@ impl BlockMigrationService {
         // while the block index is still intact.
         struct BlockRollbackInfo {
             ledger_ranges: Vec<(DataLedger, LedgerChunkRange)>,
-            data_roots: Vec<H256>,
+            data_roots: Vec<DataCommitment>,
             emission: U256,
         }
 
@@ -714,7 +719,7 @@ impl BlockMigrationService {
             for tx_ids in tx_id_map.values() {
                 for txid in tx_ids {
                     if let Some(tx_header) = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))? {
-                        data_roots.push(tx_header.data_root);
+                        data_roots.push(tx_header.data_commitment(&self.data_tree_geometry));
                     }
                 }
             }
@@ -1292,6 +1297,7 @@ mod tests {
     };
     use irys_domain::{BlockTree, ChunkType, StorageModuleInfo};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_types::DataTreeRoot;
     use irys_types::partition::PartitionAssignment;
     use irys_types::{
         BlockIndexItem, BlockTransactions, ConsensusConfig, DataTransactionHeader,
@@ -1355,7 +1361,9 @@ mod tests {
             None, // supply_state — unused by persist_metadata
             Arc::new(reward_curve_from_config(&ConsensusConfig::testing())),
             ConsensusConfig::testing().difficulty_adjustment.block_time,
-            ConsensusConfig::testing().chunk_size,
+            ConsensusConfig::testing()
+                .data_tree_geometry()
+                .expect("testing geometry is valid"),
             num_blocks_in_epoch,
             ConsensusConfig::testing().block_tree_depth,
             ConsensusConfig::testing().block_migration_depth as u64,
@@ -1413,7 +1421,7 @@ mod tests {
                 DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
                     tx: DataTransactionHeaderV1 {
                         id: *tx_id,
-                        data_root: *data_root,
+                        data_tree_root: DataTreeRoot(*data_root),
                         ledger_id: DataLedger::Submit as u32,
                         ..Default::default()
                     },
@@ -1430,6 +1438,15 @@ mod tests {
         Arc::new(SealedBlock::new_unchecked(Arc::new(header), body))
     }
 
+    /// Cache key of a seeded header: `data_root` with the default size 0.
+    fn commitment_of(data_root: H256) -> DataCommitment {
+        irys_types::data_tree::data_commitment(
+            &irys_types::data_tree::Geometry::TESTING,
+            DataTreeRoot(data_root),
+            0,
+        )
+    }
+
     /// Seed a CachedDataRoot via the normal `cache_data_root` path, then
     /// stamp specific `block_set` / `expiry_height` values.
     fn seed_cdr(
@@ -1442,20 +1459,25 @@ mod tests {
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
             metadata: DataTransactionMetadata::new(),
         });
         db.update(|tx| -> eyre::Result<()> {
-            cache_data_root(tx, &tx_header, None)?;
+            cache_data_root(
+                tx,
+                &tx_header,
+                None,
+                &irys_types::data_tree::Geometry::TESTING,
+            )?;
             let mut cdr = tx
-                .get::<CachedDataRoots>(data_root)?
+                .get::<CachedDataRoots>(commitment_of(data_root))?
                 .expect("seed_cdr: cache_data_root must produce an entry");
             cdr.block_set = block_set;
             cdr.expiry_height = expiry;
-            tx.put::<CachedDataRoots>(data_root, cdr)?;
+            tx.put::<CachedDataRoots>(commitment_of(data_root), cdr)?;
             Ok(())
         })
         .unwrap()
@@ -1466,7 +1488,7 @@ mod tests {
         db: &DatabaseProvider,
         data_root: H256,
     ) -> Option<irys_database::db_cache::CachedDataRoot> {
-        db.view(|tx| tx.get::<CachedDataRoots>(data_root))
+        db.view(|tx| tx.get::<CachedDataRoots>(commitment_of(data_root)))
             .unwrap()
             .unwrap()
     }
@@ -1627,7 +1649,7 @@ mod tests {
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root: H256::random(),
+                data_tree_root: DataTreeRoot(H256::random()),
                 ledger_id: ledger as u32,
                 ..Default::default()
             },
@@ -1655,7 +1677,7 @@ mod tests {
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 // Submit-ledger entries already carry Publish-targeting txs.
                 ledger_id: DataLedger::Publish as u32,
                 ..Default::default()
@@ -2778,7 +2800,7 @@ mod tests {
         let body_job_tx = |data_size: u64| {
             irys_types::DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
                 tx: irys_types::DataTransactionHeaderV1 {
-                    data_root: H256::random(),
+                    data_tree_root: DataTreeRoot(H256::random()),
                     data_size,
                     ..Default::default()
                 },
@@ -2977,37 +2999,40 @@ mod tests {
         // offset 3 (inside it).
         let shared_data_root = H256::random();
         let orphan_txid = H256::random();
-        {
-            let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(3))?;
-            submodule.db.update(|tx| {
-                tx.add_data_root_info(
-                    shared_data_root,
-                    &DataRootInfo {
-                        start_offset: RelativeChunkOffset(0),
-                        data_size: 32,
-                    },
-                )?;
-                tx.add_data_root_info(
-                    shared_data_root,
-                    &DataRootInfo {
-                        start_offset: RelativeChunkOffset(3),
-                        data_size: 32,
-                    },
-                )
-            })?;
-        }
-
         // The orphaned block carries the tx whose data_root is shared; its
         // header must be resolvable so recovery adds it to the clear set.
         let orphan_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: orphan_txid,
-                data_root: shared_data_root,
+                data_tree_root: DataTreeRoot(shared_data_root),
                 ledger_id: DataLedger::Submit as u32,
                 ..Default::default()
             },
             metadata: DataTransactionMetadata::new(),
         });
+
+        let shared_commitment = orphan_tx.data_commitment(&config.data_tree_geometry());
+        {
+            let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(3))?;
+            submodule.db.update(|tx| {
+                tx.add_data_root_info(
+                    shared_commitment,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(0),
+                        data_size: 32,
+                        data_tree_root: DataTreeRoot(shared_data_root),
+                    },
+                )?;
+                tx.add_data_root_info(
+                    shared_commitment,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(3),
+                        data_size: 32,
+                        data_tree_root: DataTreeRoot(shared_data_root),
+                    },
+                )
+            })?;
+        }
 
         // Genesis leaves Submit at 3 chunks; the orphan takes it to 6, so the
         // orphaned range is ledger/partition [3, 5].
@@ -3035,12 +3060,13 @@ mod tests {
 
         svc.recover_from_network_partition(0)?;
 
-        let infos = module.collect_data_root_infos(shared_data_root)?;
+        let infos = module.collect_data_root_infos(shared_commitment)?;
         assert_eq!(
             infos.0,
             vec![DataRootInfo {
                 start_offset: RelativeChunkOffset(0),
                 data_size: 32,
+                data_tree_root: DataTreeRoot(shared_data_root),
             }],
             "canonical placement (start_offset 0, below the orphaned range) survives; \
              orphaned placement (start_offset 3, inside it) is removed"
@@ -3117,7 +3143,7 @@ mod tests {
             None,
             Arc::new(reward_curve_from_config(&config.consensus)),
             config.consensus.difficulty_adjustment.block_time,
-            config.consensus.chunk_size,
+            config.data_tree_geometry(),
             ConsensusConfig::testing().epoch.num_blocks_in_epoch,
             ConsensusConfig::testing().block_tree_depth,
             ConsensusConfig::testing().block_migration_depth as u64,

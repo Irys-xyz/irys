@@ -566,13 +566,13 @@ pub(crate) fn generate_test_tx() -> DataTransaction {
 #[must_use]
 pub(crate) fn create_test_chunks(tx: &DataTransaction) -> Vec<UnpackedChunk> {
     let mut chunks = Vec::new();
-    for _chunk_node in &tx.chunks {
-        let data_root = tx.header.data_root;
+    for _chunk in tx.data_chunks().unwrap() {
+        let data_root = tx.header.data_tree_root;
         let data_size = tx.header.data_size;
         let data_path = Base64(vec![1, 2, 3]);
 
         let chunk = UnpackedChunk {
-            data_root,
+            data_tree_root: data_root,
             data_size,
             data_path,
             bytes: Base64(vec![1, 2, 3]),
@@ -817,8 +817,8 @@ async fn handle_get_data_v2(
                     .content_type("application/json")
                     .json(GossipResponse::Accepted(true))
             }
-            GossipDataRequestV2::Chunk(chunk_hash) => {
-                warn!("Chunk request for hash {:?}", chunk_hash);
+            GossipDataRequestV2::Chunk(chunk_key) => {
+                warn!("Chunk request for key {:?}", chunk_key);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(GossipResponse::Accepted(false))
@@ -996,7 +996,7 @@ fn spawn_test_chunk_ingress_consumer(
         while let Some(traced) = rx.recv().await {
             let (message, _parent_span) = traced.into_parts();
             match message {
-                ChunkIngressMessage::IngestChunk(chunk, reply, _) => {
+                ChunkIngressMessage::IngestChunk(chunk, reply, ..) => {
                     if let Some(ref store) = chunk_store {
                         store.write().expect("to unlock chunk store").push(chunk);
                     }

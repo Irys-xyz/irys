@@ -196,7 +196,10 @@ async fn heavy3_should_broadcast_chunk_data() -> eyre::Result<()> {
     // Create and send chunk data
     let chunks = create_test_chunks(&generate_test_tx());
     #[expect(clippy::indexing_slicing, reason = "just a test")]
-    let data = GossipBroadcastMessageV2::from(chunks[0].clone());
+    let data = GossipBroadcastMessageV2::chunk(
+        Arc::new(chunks[0].clone()),
+        &fixture1.config.data_tree_geometry(),
+    );
 
     gossip_service1_message_bus
         .send_traced(data)

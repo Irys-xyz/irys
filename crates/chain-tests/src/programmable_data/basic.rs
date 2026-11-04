@@ -17,7 +17,7 @@ use irys_api_server::routes::tx::TxOffset;
 use irys_types::precompile::IrysPrecompileOffsets;
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use irys_types::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
-use irys_types::{Base64, DataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
+use irys_types::{DataTransactionHeader, NodeConfig};
 use irys_types::{IrysAddress, irys::IrysSigner};
 
 use crate::utils::IrysNodeTest;
@@ -191,23 +191,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         .await?;
 
     // upload chunk(s)
-    for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
-        let data_root = tx.header.data_root;
-        let data_size = tx.header.data_size;
-        let min = chunk_node.min_byte_range;
-        let max = chunk_node.max_byte_range;
-        let data_path = Base64(tx.proofs[tx_chunk_offset].proof.clone());
-
-        let chunk = UnpackedChunk {
-            data_root,
-            data_size,
-            data_path,
-            bytes: Base64(data_bytes[min..max].to_vec()),
-            tx_offset: TxChunkOffset::from(
-                TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
-            ),
-        };
-
+    for chunk in tx.data_chunks()? {
         // Make a POST request with JSON payload
 
         let resp = client

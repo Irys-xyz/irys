@@ -21,7 +21,7 @@ impl TestSigner {
         let irys_signer = IrysSigner {
             signer: signing_key,
             chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
+            data_tree_geometry: config.data_tree_geometry()?,
         };
 
         let address = irys_signer.address();

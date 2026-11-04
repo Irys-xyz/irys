@@ -4,7 +4,7 @@ use std::time::Duration;
 use irys_types::{SendTraced as _, Traced, chunk::UnpackedChunk};
 use tokio::sync::{Semaphore, mpsc::UnboundedSender};
 
-use super::{ChunkIngressMessage, HttpAdmissionGuard};
+use super::{ChunkIngressMessage, ChunkIngressSource, HttpAdmissionGuard};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum HttpChunkEnqueueError {
@@ -64,7 +64,12 @@ pub async fn enqueue_http_chunk(
             return Err(HttpChunkEnqueueError::ChannelClosed);
         }
         sender
-            .send_traced(ChunkIngressMessage::IngestChunk(chunk, None, Some(guard)))
+            .send_traced(ChunkIngressMessage::IngestChunk(
+                chunk,
+                None,
+                Some(guard),
+                ChunkIngressSource::Sent,
+            ))
             .map_err(|_| HttpChunkEnqueueError::ChannelClosed)?;
     }
     Ok(())
@@ -73,11 +78,11 @@ pub async fn enqueue_http_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::DataRoot;
+    use irys_types::{DataTreeRoot, H256};
 
     fn dummy_chunk() -> UnpackedChunk {
         UnpackedChunk {
-            data_root: DataRoot::from([0_u8; 32]),
+            data_tree_root: DataTreeRoot(H256::from([0_u8; 32])),
             data_size: 0,
             tx_offset: 0_u32.into(),
             data_path: Default::default(),
@@ -107,7 +112,7 @@ mod tests {
         assert_eq!(admission.available_permits(), 0);
         let traced = rx.try_recv().expect("queued");
         match traced.inner {
-            ChunkIngressMessage::IngestChunk(_, None, Some(_)) => {}
+            ChunkIngressMessage::IngestChunk(_, None, Some(_), ChunkIngressSource::Sent) => {}
             other => panic!("expected fire-and-forget with guard, got {other:?}"),
         }
     }

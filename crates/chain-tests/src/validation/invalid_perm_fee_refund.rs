@@ -8,6 +8,7 @@ use irys_actors::{
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     shadow_tx_generator::PublishLedgerWithTxs,
 };
+use irys_types::DataTreeRoot;
 use irys_types::IrysAddress;
 use irys_types::{DataLedger, DataTransactionHeader, H256, IrysBlockHeader, NodeConfig, U256};
 use std::collections::BTreeMap;
@@ -81,7 +82,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     // Create a properly signed data transaction that appears promoted
     use irys_types::IrysTransactionCommon as _;
     let mut data_tx = DataTransactionHeader::new(&genesis_config.consensus_config());
-    data_tx.data_root = H256::random();
+    data_tx.data_tree_root = DataTreeRoot(H256::random());
     data_tx.data_size = 1024;
     data_tx.term_fee = U256::from(1000).into();
     data_tx.perm_fee = Some(U256::from(2000).into());

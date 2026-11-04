@@ -15,6 +15,10 @@
 //!
 //! `--verify-against` compares node reads against a pristine v1 copy that has
 //! no schema row. That copy is not written. A mismatch exits 1.
+//!
+//! The copy stops at the schema v2 layout, which keys data by the data root.
+//! Open then refuses a copy that has data rows: this build keys data by the
+//! data commitment, so the network must reset that data.
 
 use std::path::{Path, PathBuf};
 
@@ -241,6 +245,8 @@ mod tests {
         Ok(())
     }
 
+    /// The copy migrates to the schema v2 layout, then open refuses its data
+    /// rows: they are keyed by the data root. The pristine copy is not written.
     #[test]
     fn verify_against_pristine_v1_migrates_only_the_positional_copy() -> eyre::Result<()> {
         let parent = TempDirBuilder::new().prefix("sm-migrate-order").build();
@@ -251,13 +257,16 @@ mod tests {
         write_unmigrated(&pristine)?;
         write_unmigrated(&migrated)?;
 
-        execute(
+        let err = execute(
             &super::ToolArgs {
                 copy: migrated.clone(),
                 verify_against: Some(pristine.clone()),
             },
             testing_args()?,
-        )?;
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("network must reset"), "{text}");
 
         let (schema, row) = schema_and_row(&pristine)?;
         assert_eq!(schema, None);

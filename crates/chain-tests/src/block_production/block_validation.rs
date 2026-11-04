@@ -6,6 +6,7 @@ use irys_actors::test_helpers::build_test_service_senders;
 use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_chain::IrysNodeCtx;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
+use irys_types::DataTreeRoot;
 use irys_types::{
     Base64, BoundedFee, CommitmentTransaction, Config, ConsensusOptions, DataLedger,
     DataTransactionHeader, H256, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig,
@@ -96,7 +97,7 @@ fn mock_data_txs(count: usize) -> Vec<DataTransactionHeader> {
         .map(|i| {
             let mut tx = DataTransactionHeader::new(&consensus);
             // Make each transaction unique by setting different data_root
-            tx.data_root = H256::from_low_u64_be(i as u64);
+            tx.data_tree_root = DataTreeRoot(H256::from_low_u64_be(i as u64));
             tx.sign(&signer).expect("Failed to sign test transaction")
         })
         .collect()
@@ -512,7 +513,7 @@ async fn test_prevalidation_rejects_mismatched_ingress_proof_count() -> Result<(
     // A structurally-valid Publish data tx (data_size = 1 → contributes exactly
     // one chunk; well-funded so it clears structural validation).
     let mut tx = DataTransactionHeader::new(&consensus);
-    tx.data_root = H256::from_low_u64_be(0x0CE_CAFE_u64);
+    tx.data_tree_root = DataTreeRoot(H256::from_low_u64_be(0x0CE_CAFE_u64));
     tx.data_size = 1;
     tx.term_fee = BoundedFee::from_u64(1_000_000_000_000_000_000);
     tx.perm_fee = Some(BoundedFee::from_u64(1_000_000_000_000_000_000));
@@ -791,7 +792,7 @@ async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
 
     // Create a tx that incorrectly targets Submit (otherwise valid + well-funded)
     let mut bad_tx = DataTransactionHeader::new(&ctx.config.consensus_config());
-    bad_tx.data_root = H256::from_low_u64_be(42);
+    bad_tx.data_tree_root = DataTreeRoot(H256::from_low_u64_be(42));
     bad_tx.data_size = 0;
     bad_tx.term_fee = BoundedFee::from_u64(1_000_000_000_000_000_000);
     bad_tx.perm_fee = Some(BoundedFee::from_u64(1_000_000_000_000_000_000));
@@ -1028,7 +1029,7 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
     // A Publish-ledger tx that will impersonate "already canonically
     // promoted" via the fabricated finalized prior seeded below.
     let mut tx = DataTransactionHeader::new(&ctx.config.consensus_config());
-    tx.data_root = H256::from_low_u64_be(0x517A_1EBA_DD15);
+    tx.data_tree_root = DataTreeRoot(H256::from_low_u64_be(0x517A_1EBA_DD15));
     tx.data_size = 0;
     tx.term_fee = BoundedFee::from_u64(1_000_000_000_000_000_000);
     tx.perm_fee = Some(BoundedFee::from_u64(1_000_000_000_000_000_000));
@@ -1240,7 +1241,7 @@ async fn test_prevalidation_accepts_publish_when_promoted_height_hint_stripped()
     // A Publish-ledger tx whose `IrysDataTxMetadata` will carry a
     // `promoted_height` the canonical helper must strip.
     let mut tx = DataTransactionHeader::new(&ctx.config.consensus_config());
-    tx.data_root = H256::from_low_u64_be(0xDEAD_BEEF_C0DE);
+    tx.data_tree_root = DataTreeRoot(H256::from_low_u64_be(0xDEAD_BEEF_C0DE));
     tx.data_size = 0;
     tx.term_fee = BoundedFee::from_u64(1_000_000_000_000_000_000);
     tx.perm_fee = Some(BoundedFee::from_u64(1_000_000_000_000_000_000));
@@ -1484,7 +1485,7 @@ async fn test_prevalidation_ignores_content_verified_row_inside_walk_window() ->
     // A Publish-ledger tx that will impersonate "already canonically
     // included/promoted" via the fabricated in-window prior seeded below.
     let mut tx = DataTransactionHeader::new(&ctx.config.consensus_config());
-    tx.data_root = H256::from_low_u64_be(0x011D_E1DE_5EED);
+    tx.data_tree_root = DataTreeRoot(H256::from_low_u64_be(0x011D_E1DE_5EED));
     tx.data_size = 0;
     tx.term_fee = BoundedFee::from_u64(1_000_000_000_000_000_000);
     tx.perm_fee = Some(BoundedFee::from_u64(1_000_000_000_000_000_000));

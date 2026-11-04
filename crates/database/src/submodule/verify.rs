@@ -167,7 +167,7 @@ where
         v2,
         "DataRootInfosByDataRoot",
         &mut report,
-        |key| format!("{key:x}"),
+        |key| format!("{:x}", key.0),
     )?;
     report.data_root_infos_checked = checked;
     report.data_root_infos_mismatches = mismatches;

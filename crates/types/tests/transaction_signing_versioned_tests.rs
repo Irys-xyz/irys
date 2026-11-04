@@ -22,10 +22,8 @@ fn data_tx_signing_uses_discriminant() {
     assert_eq!(buf[0], 1);
 
     // Actually test signing works with the versioned structure
-    let tx = DataTransaction {
-        header,
-        ..Default::default()
-    };
+    let mut tx = DataTransaction::default();
+    tx.header = header;
     let signed_tx = signer.sign_transaction(tx).expect("signing should succeed");
 
     // Verify the signature is valid

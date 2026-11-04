@@ -35,8 +35,8 @@ use irys_database::{
     set_database_schema_version,
 };
 use irys_types::{
-    DataLedger, DataTransactionHeader, DataTransactionLedger, DatabaseVersion, DbSyncMode, H256,
-    H256List, IrysBlockHeader, PartitionChunkOffset, hash_sha256,
+    DataLedger, DataTransactionHeader, DataTransactionLedger, DataTreeRoot, DatabaseVersion,
+    DbSyncMode, H256, H256List, IrysBlockHeader, PartitionChunkOffset, hash_sha256,
 };
 
 const USAGE: &str = "\
@@ -1451,7 +1451,7 @@ fn make_txs(next_id: &mut u64, count: usize) -> Vec<DataTransactionHeader> {
 fn fixture_tx(id: u64, size: u64) -> DataTransactionHeader {
     let mut header = DataTransactionHeader::default();
     header.id = hid(id);
-    header.data_root = hid(id.saturating_add(100_000));
+    header.data_tree_root = DataTreeRoot(hid(id.saturating_add(100_000)));
     header.prefix_hash = hid(id.saturating_add(200_000));
     header.data_size = size;
     header

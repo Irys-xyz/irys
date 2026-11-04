@@ -91,7 +91,7 @@ mod tests {
         r_s[32] = (sig_seed >> 8) as u8;
         IngressProof::V1(IngressProofV1 {
             signature: IrysSignature::new(Signature::from_bytes_and_parity(&r_s, false)),
-            data_root: H256::zero(),
+            data_commitment: irys_types::DataCommitment(H256::zero()),
             proof: H256::zero(),
             chain_id: 0,
             anchor,

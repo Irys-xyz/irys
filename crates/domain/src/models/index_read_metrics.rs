@@ -16,11 +16,6 @@ pub(crate) const SERVE_DATA_ROOT: &str = "serve_data_root";
 pub(crate) const SERVE_SPAN: &str = "serve_span";
 pub(crate) const RECALL: &str = "recall";
 pub const MIGRATION: &str = "migration";
-pub(crate) const METADATA: &str = "metadata";
-/// Ingress chunk whose data root is missing from the node cache.
-pub const INGRESS_SIZE: &str = "ingress_size";
-/// Ingress check of the rightmost chunk proof for a claimed data size.
-pub const INGRESS_VERIFY: &str = "ingress_verify";
 /// Placement of a chunk body onto entropy offsets.
 pub const PLACEMENT: &str = "placement";
 /// Cache reclamation asking which bodies are durable.
@@ -142,32 +137,6 @@ pub(crate) fn note_uncovered_data_path(rows: u64) {
     {
         UNCOVERED_DATA_PATH_TEST.fetch_add(rows, Ordering::Relaxed);
     }
-}
-
-static BAD_LEAF_OFFSET: LazyLock<Counter<u64>> = LazyLock::new(|| {
-    global::meter("irys-domain")
-        .u64_counter("irys.storage.bad_leaf_offset_total")
-        .with_description(
-            "Stored data paths skipped because the leaf offset is not a u32 chunk index",
-        )
-        .build()
-});
-
-#[cfg(test)]
-static BAD_LEAF_OFFSET_TEST: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn note_bad_leaf_offset() {
-    BAD_LEAF_OFFSET.add(1, &[]);
-    #[cfg(test)]
-    {
-        BAD_LEAF_OFFSET_TEST.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-/// Bad leaf offsets skipped since process start. Tests assert a delta.
-#[cfg(test)]
-pub(crate) fn bad_leaf_offset_for_test() -> u64 {
-    BAD_LEAF_OFFSET_TEST.load(Ordering::Relaxed)
 }
 
 /// Proofs dropped since process start. Tests assert a delta. Parallel tests
@@ -410,15 +379,15 @@ pub(super) fn note_ingest_stage(stage: &'static str, elapsed: std::time::Duratio
 
 #[cfg(test)]
 mod tests {
-    use super::{DATA_SYNC, INGRESS_SIZE, PLACEMENT, current, with_caller};
+    use super::{CACHE_RECLAIM, DATA_SYNC, PLACEMENT, current, with_caller};
 
     #[test]
     fn caller_restores_after_nesting() {
         assert_eq!(current(), "unknown");
-        with_caller(INGRESS_SIZE, || {
-            assert_eq!(current(), INGRESS_SIZE);
+        with_caller(CACHE_RECLAIM, || {
+            assert_eq!(current(), CACHE_RECLAIM);
             with_caller(DATA_SYNC, || assert_eq!(current(), DATA_SYNC));
-            assert_eq!(current(), INGRESS_SIZE);
+            assert_eq!(current(), CACHE_RECLAIM);
         });
         assert_eq!(current(), "unknown");
     }

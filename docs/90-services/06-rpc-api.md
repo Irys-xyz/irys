@@ -122,7 +122,8 @@ acquires extents through the same route.
     "ledger_id": 1,
     "offset": 42,            // absolute ledger chunk offset
     "bytes": [7, 0, 255],    // unpacked chunk data, plain integer array (not Base64)
-    "proof": [1, 2, 3]       // the chunk's data_path; validates against the tx's data_root
+    "proof": [1, 2, 3]       // the chunk's data_path: a data tree v2 chunk proof; verify_chunk
+                             // checks it against the commitment of the tx's dataRoot and data_size
   }
 ]
 ```
@@ -134,6 +135,28 @@ gateway decodes them as raw byte vectors.
 The response is still `200`: the gateway reads a shortfall as "this node lacks the range" and fails over
 to another node, so absence must stay distinguishable from a malformed request. Consumers must therefore
 size requests within `MAX_CHUNK_SPAN`, or a conforming node would answer with a permanently short page.
+
+## Public chunk read: `GET /v1/chunk/data-commitment/{ledger_id}/{data_commitment}/{offset}`
+
+This route is public (not under `/internal`). It returns one chunk of one tx's data as a `ChunkFormat`
+JSON object (packed or unpacked), or `404` when the node does not hold it.
+
+- `ledger_id` — the data ledger id: Publish is `0`, Submit is `1`.
+- `data_commitment` — base58, 32 bytes. A malformed value is `400`.
+- `offset` — the chunk index in the tx's data, from `0`.
+
+The node keys data by the data commitment, not by the data tree root: two txs with the same `dataRoot`
+and a different `dataSize` are different data. A client computes the commitment from the tx header's
+`dataRoot` and `dataSize` and the chain's geometry:
+
+```text
+size_witness    = SHA-256(0x02 ‖ be64(data_size) ‖ be64(chunk_size) ‖ be16(segments_per_chunk))
+data_commitment = SHA-256(0x01 ‖ data_tree_root ‖ size_witness)
+```
+
+`‖` is concatenation, `be64` / `be16` are big-endian integers, and `data_tree_root` is the 32 bytes of
+`dataRoot`. `chunk_size` and `segments_per_chunk` come from `GET /v1/network/config` (the consensus
+config): `chunkSize` is a JSON string (a `u64`), `segmentsPerChunk` is a JSON number.
 
 ## Error and probe conventions
 

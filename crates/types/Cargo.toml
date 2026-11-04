@@ -71,6 +71,7 @@ futures.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 irys-macros-integer-tagged.workspace = true
+irys-data-tree.workspace = true
 proptest.workspace = true
 chrono.workspace = true
 

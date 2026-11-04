@@ -260,7 +260,9 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
     ];
     let proof = generate_ingress_proof(
         &genesis_signer,
-        target.header.data_root,
+        target
+            .header
+            .data_commitment(&genesis_config.consensus_config().data_tree_geometry()?),
         target_chunks.iter().map(|c| Ok(c.as_slice())),
         chain_id,
         proof_anchor,
