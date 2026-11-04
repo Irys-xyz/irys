@@ -14,6 +14,8 @@ private security advisories until the fix is released.
 
 | Id | Title | Severity | Applies when |
 |----|-------|----------|--------------|
+| [hash-iteration-order-in-consensus](classes/hash-iteration-order-in-consensus.md) | Hash iteration order in consensus code | fork | adds or changes a HashMap or HashSet whose iteration order can reach a consensus result |
+| [uncapped-peer-response-body](classes/uncapped-peer-response-body.md) | Uncapped peer response body | dos | adds or changes code that reads an HTTP response body from a peer |
 
 ## Process
 
