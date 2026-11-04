@@ -6,7 +6,7 @@
 
 use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
-use irys_database::{db::IrysDatabaseExt as _, get_cache_size, tables::CachedChunks};
+use irys_database::{db::DatabaseProviderCacheExt as _, get_cache_size, tables::CachedChunks};
 use irys_domain::ChunkType;
 use irys_types::{DataLedger, NodeConfig};
 use rand::Rng as _;
@@ -29,7 +29,7 @@ fn cached_chunks(node: &IrysNodeTest<IrysNodeCtx>) -> eyre::Result<u64> {
     Ok(node
         .node_ctx
         .db
-        .view_eyre(|tx| get_cache_size::<CachedChunks, _>(tx, chunk_size))?
+        .view_cache_eyre(|tx| get_cache_size::<CachedChunks, _>(tx.inner(), chunk_size))?
         .0)
 }
 
