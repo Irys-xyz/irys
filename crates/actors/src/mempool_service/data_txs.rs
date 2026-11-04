@@ -390,14 +390,14 @@ impl Inner {
         );
 
         // Publish uses the full ingress proof replica count (part of perm pipeline).
-        // OneYear/ThirtyDay use the independently configurable term ledger partition count.
+        // OneYear/ThirtyDay pay for the partitions that store each slot.
         // Submit is already rejected above.
         let replica_count = match ledger {
             DataLedger::Publish => self
                 .config
                 .number_of_ingress_proofs_total_at(latest_block_timestamp_secs),
             DataLedger::OneYear | DataLedger::ThirtyDay => {
-                self.config.consensus.num_partitions_per_term_ledger_slot
+                self.config.consensus.num_partitions_per_slot
             }
             DataLedger::Submit => {
                 return Err(TxIngressError::InvalidLedger(tx.ledger_id));

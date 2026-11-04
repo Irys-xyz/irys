@@ -6592,7 +6592,7 @@ fn validate_term_only_price(
         epochs_for_storage,
         block_ema,
         config,
-        config.consensus.num_partitions_per_term_ledger_slot,
+        config.consensus.num_partitions_per_slot,
         timestamp_secs,
     )
     .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
@@ -8105,6 +8105,55 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tracing::{debug, info};
+
+    /// Term ledgers (OneYear/ThirtyDay) store `num_partitions_per_slot` replicas, so
+    /// their term fee must cover that many replicas.
+    #[rstest::rstest]
+    #[case::one_year(DataLedger::OneYear)]
+    #[case::thirty_day(DataLedger::ThirtyDay)]
+    fn term_only_price_requires_fee_for_slot_replica_count(#[case] ledger: DataLedger) {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().num_partitions_per_slot = 2;
+        let config = Config::new_with_random_peer_id(node_config);
+        let header = IrysBlockHeader::new_mock_header();
+        let ema = EmaSnapshot::genesis(&header);
+        let timestamp = header.timestamp_secs();
+        let cascade = config.consensus.hardforks.cascade.as_ref().unwrap();
+        let epoch_length = match ledger {
+            DataLedger::OneYear => cascade.one_year_epoch_length,
+            _ => cascade.thirty_day_epoch_length,
+        };
+        let epochs = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            header.height,
+            config.consensus.epoch.num_blocks_in_epoch,
+            epoch_length,
+        );
+        // Large enough that the fee is above the minimum term fee and scales with replicas.
+        let data_size = 1 << 50;
+        let fee_for_replicas = |replicas| {
+            calculate_term_storage_base_network_fee(
+                data_size, epochs, &ema, &config, replicas, timestamp,
+            )
+            .unwrap()
+        };
+
+        assert!(fee_for_replicas(2) > fee_for_replicas(1));
+
+        let mut tx = DataTransactionHeader::new(&config.consensus);
+        tx.ledger_id = ledger as u32;
+        tx.data_size = data_size;
+        tx.perm_fee = None;
+
+        tx.term_fee = BoundedFee::new(fee_for_replicas(1));
+        assert!(matches!(
+            validate_term_only_price(&tx, ledger, header.height, timestamp, &ema, &config),
+            Err(PreValidationError::InsufficientTermFee { .. })
+        ));
+
+        tx.term_fee = BoundedFee::new(fee_for_replicas(2));
+        validate_term_only_price(&tx, ledger, header.height, timestamp, &ema, &config)
+            .expect("fee for num_partitions_per_slot replicas is sufficient");
+    }
 
     /// Build a minimal `BlockTreeReadGuard` for tests that exercise the
     /// `block_index` fast path of `poa_is_valid` — the helper's fallback is

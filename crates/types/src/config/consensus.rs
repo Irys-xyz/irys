@@ -93,12 +93,8 @@ pub struct ConsensusConfig {
     /// Number of chunks that can be recalled in each partition by a mining step
     pub num_chunks_in_recall_range: u64,
 
-    /// Number of replica partitions in each storage slot (Publish/Submit ledgers)
+    /// Number of replica partitions in each storage slot (all data ledgers)
     pub num_partitions_per_slot: u64,
-
-    /// Number of replica partitions in each term ledger slot (OneYear/ThirtyDay).
-    /// Independently configurable from `num_partitions_per_slot`.
-    pub num_partitions_per_term_ledger_slot: u64,
 
     /// Number of iterations for entropy packing algorithm
     pub entropy_packing_iterations: u32,
@@ -810,7 +806,6 @@ impl ConsensusConfig {
             num_chunks_in_recall_range: 400,
             // Number of replica partitions in each storage slot
             num_partitions_per_slot: 10,
-            num_partitions_per_term_ledger_slot: 10,
             // Number of iterations for Matrix (entropy) packing algorithm
             entropy_packing_iterations: 1_000_000,
             // Toggles full ingress proof validation on or off
@@ -911,7 +906,6 @@ impl ConsensusConfig {
             num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
             num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
             num_partitions_per_slot: 1,
-            num_partitions_per_term_ledger_slot: 1,
             block_migration_depth: 6,
             block_tree_depth: 50,
             entropy_packing_iterations: 1000,
@@ -1047,7 +1041,6 @@ impl ConsensusConfig {
             num_chunks_in_partition: Self::CHUNKS_PER_PARTITION_20TB,
             num_chunks_in_recall_range: 400,
             num_partitions_per_slot: 10,
-            num_partitions_per_term_ledger_slot: 10,
             block_migration_depth: 6,
             block_tree_depth: 50,
             entropy_packing_iterations: 1000,
@@ -1281,7 +1274,7 @@ mod tests {
         // update this snapshot.
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("NrcKdsugNBhC5UFZopY5QcU3jKknN1VQ7UgbyVJakAJ"), // spellchecker:disable-line
+            H256::from_base58("FD3ZgRdpP9N9khmjZUdpUqbn1sPWDTh4WVqHV5MzZBhF"), // spellchecker:disable-line
             "mainnet consensus-config hash snapshot changed"
         );
     }
@@ -1299,7 +1292,7 @@ mod tests {
         );
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("7ezpvzP5jjArqbEgQYYbKEHFaS5Rgnim7HhtTKCp4bez"), // spellchecker:disable-line
+            H256::from_base58("HesM2TzMJWstq3hWQ4yZcSxEnrMC1pDVi8ft7Msb2vsq"), // spellchecker:disable-line
             "testnet consensus-config hash snapshot changed"
         );
     }
@@ -1517,7 +1510,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("6C4dY4hxb739SMMqa4FpkLABykUidRLeak1FvsBqQfd2");
+        let expected_hash = H256::from_base58("ASCrGKHTgu7C6ea5UC2NFDSSxZp23MVUi2Pf7PmLCiZi");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,

@@ -742,7 +742,7 @@ pub async fn select_best_txs(
                     consensus.epoch.num_blocks_in_epoch,
                     epoch_length,
                 );
-                let replica_count = consensus.num_partitions_per_term_ledger_slot;
+                let replica_count = consensus.num_partitions_per_slot;
                 let Ok(expected_term_fee) = irys_types::storage_pricing::calculate_term_fee(
                     tx.data_size,
                     epochs_for_storage,

@@ -219,7 +219,7 @@ pub async fn get_price(
                 state.config.consensus.ema.price_adjustment_interval,
             );
 
-            let replica_count = state.config.consensus.num_partitions_per_term_ledger_slot;
+            let replica_count = state.config.consensus.num_partitions_per_slot;
 
             let term_fee = calculate_term_fee(
                 bytes_to_store,

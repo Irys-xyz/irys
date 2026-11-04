@@ -57,7 +57,6 @@ async fn heavy_multi_replica_slot_expiry_splits_reward_and_refunds_once() -> eyr
         c.epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
         // The property under test: every slot holds TWO replicas.
         c.num_partitions_per_slot = 2;
-        c.num_partitions_per_term_ledger_slot = 2;
     }
 
     let user_signer = IrysSigner::random_signer(&config.consensus_config());
