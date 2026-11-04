@@ -283,20 +283,33 @@ impl Config {
             self.consensus.num_partitions_per_slot > 0,
             "num_partitions_per_slot must be > 0"
         );
-        // Assignee proofs come from the miners assigned to a Submit slot, and a slot has
-        // `num_partitions_per_slot` of them. A larger requirement can never be met.
+        let ingress_proofs_total = self
+            .consensus
+            .hardforks
+            .frontier
+            .number_of_ingress_proofs_total;
+        let assignee_proofs = self
+            .consensus
+            .hardforks
+            .frontier
+            .number_of_ingress_proofs_from_assignees;
+        // Zero promotes Publish txs without any ingress proof.
         ensure!(
-            self.consensus
-                .hardforks
-                .frontier
-                .number_of_ingress_proofs_from_assignees
-                <= self.consensus.num_partitions_per_slot,
-            "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({}) \
+            ingress_proofs_total > 0,
+            "consensus.hardforks.frontier.number_of_ingress_proofs_total must be > 0"
+        );
+        // Assignee proofs are a subset of the total proofs.
+        ensure!(
+            assignee_proofs <= ingress_proofs_total,
+            "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({assignee_proofs}) \
+             must be <= number_of_ingress_proofs_total ({ingress_proofs_total})",
+        );
+        // Validation clamps the assignee requirement to the miners assigned to the Submit
+        // slot, at most `num_partitions_per_slot`. A larger value is never applied.
+        ensure!(
+            assignee_proofs <= self.consensus.num_partitions_per_slot,
+            "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({assignee_proofs}) \
              must be <= num_partitions_per_slot ({})",
-            self.consensus
-                .hardforks
-                .frontier
-                .number_of_ingress_proofs_from_assignees,
             self.consensus.num_partitions_per_slot,
         );
 
@@ -2331,9 +2344,24 @@ mod validate_tests {
         },
         "num_partitions_per_slot"
     )]
+    #[case::zero_frontier_ingress_proofs_total(
+        |c: &mut ConsensusConfig| {
+            c.hardforks.frontier.number_of_ingress_proofs_total = 0;
+        },
+        "number_of_ingress_proofs_total must be > 0"
+    )]
+    #[case::frontier_assignee_proofs_exceed_total(
+        |c: &mut ConsensusConfig| {
+            c.num_partitions_per_slot = 3;
+            c.hardforks.frontier.number_of_ingress_proofs_total = 2;
+            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 3;
+        },
+        "must be <= number_of_ingress_proofs_total"
+    )]
     #[case::frontier_assignee_proofs_exceed_slot_replicas(
         |c: &mut ConsensusConfig| {
             c.num_partitions_per_slot = 2;
+            c.hardforks.frontier.number_of_ingress_proofs_total = 3;
             c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 3;
         },
         "must be <= num_partitions_per_slot"
@@ -2587,7 +2615,6 @@ mod validate_tests {
     /// Until that fix is gated behind a hardfork activation, the value MUST
     /// stay `0` everywhere (no nondeterministic path is exercised because
     /// the caller's clamp zeroes the requirement when the input is 0).
-    /// These tests pin both ensure! arms.
     #[test]
     fn validate_rejects_nonzero_assignee_proofs_on_frontier() {
         let cfg = config_with_consensus(|c| {
