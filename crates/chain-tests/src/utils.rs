@@ -2429,6 +2429,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         PublishLedgerWithTxs,
         Vec<CommitmentTransaction>,
     )> {
+        use reth::providers::BlockReader as _;
+
         let mut retries = 0;
         let max_retries = coverage_adjusted_timeout(seconds_to_wait);
         debug!(
@@ -2443,8 +2445,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             // tx selection reads balances at the tip's EVM block. Until Reth has made that
             // block canonical, the mempool view is not ready.
             if self
-                .get_evm_block_by_hash(canonical_tip.evm_block_hash)
-                .is_err()
+                .node_ctx
+                .reth_handle
+                .provider
+                .block_by_hash(canonical_tip.evm_block_hash)?
+                .is_none()
             {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 retries += 1;
