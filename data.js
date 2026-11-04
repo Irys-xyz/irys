@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793810455965,
+  "lastUpdate": 1793823362113,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -21535,6 +21535,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1c5293173ffb01c28a733166119bc6cf6375512d",
+          "message": "feat: announce chunks instead of re-pushing bodies (#1688)\n\n* feat(p2p): announce chunks instead of re-pushing bodies\n\n* fix(p2p): announce and serve chunks at the cached root size\n\n* fix(p2p): do not score an empty pull as a delivery\n\n* fix(p2p): retry a rate-limited chunk announcement\n\n* fix(p2p): do not treat a bad push or a fetch error as success\n\n* fix(p2p): check for a held chunk after the fetch permit wait\n\n* fix(p2p): spawn the chunk fetch task before recording the announcer\n\n* test(p2p): confirm admission and the missing tx in two tests\n\n* test(p2p): accept an in-flight duplicate chunk push once\n\n* fix: probe open breakers on chunk fetch and retry failed placements\n\n* test(ingress): assert one cache-commit duration per ingest\n\n* test(ingress): remove the unobservable cache-commit smoke test\n\n* test(ingress): remove the unobservable cache-commit smoke test\n\n* fix(data-sync): break tracing ancestry at the refill boundary\n\n* fix(p2p): retain chunk claims through local ingress pressure\n\n* fix(cache): retain chunk bodies until all local copies are durable\n\n* fix(startup): stop the node before returning a startup error\n\n* fix(vdf): requeue validation when the VDF thread stops for shutdown\n\n* fix(ingress): release HTTP admission before the storage-module sweep\n\n* fix(cache): keep unplaced chunk bodies until a replica persists them\n\n* fix(p2p): abort chunk fetch tasks when gossip stops\n\n* fix: address review findings\n\n* fix: address review findings\n\n* fix: address review findings\n\n* fix: address review findings\n\n* test(cache): size the cache-cap proof test to the HTTP watermark\n\n* fix(cache): use the cache env for prune and ingress lookups\n\n* fix: address review findings\n\n* fix: address review findings",
+          "timestamp": "2026-11-04T19:57:26Z",
+          "tree_id": "098bbebc83e06a04cb54133510db845ac684400d",
+          "url": "https://github.com/Irys-xyz/irys/commit/1c5293173ffb01c28a733166119bc6cf6375512d"
+        },
+        "date": 1793823360615,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011968,
+            "range": "± 0.000161",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120004,
+            "range": "± 0.001975",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.225271,
+            "range": "± 0.033063",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.921725,
+            "range": "± 0.112304",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074635,
+            "range": "± 0.000939",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 748.981019,
+            "range": "± 3.84059",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 984.384143,
+            "range": "± 35.428593",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.158729,
+            "range": "± 0.013157",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1445.086094,
+            "range": "± 176.307178",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1558.379263,
+            "range": "± 6.237581",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034654,
+            "range": "± 0.001001",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.63779,
+            "range": "± 0.595117",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.335538,
+            "range": "± 0.658458",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
