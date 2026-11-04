@@ -4483,8 +4483,9 @@ fn discard_outcome_for(
 /// if no such event arrives before the timeout (e.g. the block was removed by
 /// a parent's discard, which emits no event for the child), and
 /// `ReceiverLagged` if the receiver dropped events, which can include it.
-/// `missed_before_wait` is a lag the caller already consumed: if no event
-/// arrives, that lag can hold it, so the timeout reports `ReceiverLagged`.
+/// `missed_before_wait` is a lag the caller already consumed. A lag during
+/// the wait does not end it: the event can still be in the retained
+/// messages. The timeout reports the total missed count.
 async fn wait_for_discard_event(
     event_receiver: &mut tokio::sync::broadcast::Receiver<BlockStateUpdated>,
     block_hash: &H256,
@@ -4492,6 +4493,7 @@ async fn wait_for_discard_event(
 ) -> BlockValidationOutcome {
     use tokio::sync::broadcast::error::RecvError;
 
+    let mut missed_total = missed_before_wait;
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_secs(coverage_adjusted_timeout(5));
     loop {
@@ -4502,13 +4504,13 @@ async fn wait_for_discard_event(
                 }
             }
             Ok(Err(RecvError::Lagged(missed))) => {
-                return BlockValidationOutcome::ReceiverLagged { missed };
+                missed_total = Some(missed_total.unwrap_or(0) + missed);
             }
             Ok(Err(RecvError::Closed)) => {
                 panic!("block event channel closed while waiting for the discard of {block_hash}")
             }
             Err(_) => {
-                return missed_before_wait
+                return missed_total
                     .map_or(BlockValidationOutcome::NoDiscardEventObserved, |missed| {
                         BlockValidationOutcome::ReceiverLagged { missed }
                     });
