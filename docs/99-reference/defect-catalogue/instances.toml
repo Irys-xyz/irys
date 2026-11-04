@@ -6,7 +6,7 @@
 [[instance]]
 class = "hash-iteration-order-in-consensus"
 site = "crates/domain/src/models/block_tree.rs::BlockTree::get_by_solution_hash"
-found = "2026-05-26"
+found = "2026-05-19"
 found_by = "audit"
 fix = "#1425"
 released_in = "testnet-3.0.0"
@@ -16,10 +16,10 @@ note = "solutions map changed to BTreeMap<H256, BTreeSet<BlockHash>>; smallest b
 class = "hash-iteration-order-in-consensus"
 site = "crates/actors/src/block_validation.rs::get_assigned_ingress_proofs"
 found = "2026-05-19"
-found_by = "review"
+found_by = "audit"
 fix = "#1425"
 released_in = "testnet-3.0.0"
-note = "slot_ranges changed to BTreeMap so the last intersecting slot is the same on all nodes"
+note = "slot_ranges changed to BTreeMap so the first intersecting slot is the lowest slot index on all nodes"
 
 [[instance]]
 class = "uncapped-peer-response-body"
@@ -45,7 +45,7 @@ found = "2026-10-13"
 found_by = "other"
 fix = "#1574"
 released_in = "testnet-4.1.0"
-note = "also fetch_genesis_commitments; both now read through IrysApiClient"
+note = "also fetch_block; both now read through IrysApiClient"
 
 [[instance]]
 class = "uncapped-peer-response-body"

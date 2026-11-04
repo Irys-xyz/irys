@@ -18,7 +18,8 @@ transaction, or a value that a later entry overwrites.
 let slot_ranges: HashMap<usize, LedgerChunkRange> = ...;
 for (slot_index, slot_range) in &slot_ranges {
     if block_range.intersection(slot_range).is_some() {
-        assigned_miners = slot_address_counts[slot_index]; // last match wins
+        assigned_miners = slot_address_counts[slot_index]; // first match in hash order wins
+        break;
     }
 }
 ```
