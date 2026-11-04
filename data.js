@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793823362113,
+  "lastUpdate": 1793829218151,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -21643,6 +21643,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0ddb8b1ef39b2846bd79cdffcd1ed57ca196d47c",
+          "message": "test(storage): remove thread-order assumptions from disk-lane tests (#1768)\n\n* test(storage): check the durable file in the fresh-pad lane tests\n\nThe two lane tests read the pending map after write_data_chunk returns.\nThat call returns when the packed bytes are in the pending map. The lane\nthread does not stop there: with an idle disk and a zero durable\ninterval, it writes the bytes and makes them durable at once. When the\ntest thread runs late, the pending entry is already gone, and the check\nsees None. The production code is correct.\n\nForce the durable point and check that the file holds the packed byte.\nThis check is correct in each order and does not wait on time.\n\n* test(storage): start the lane after occupy copies pending entropy\n\nTwo lane tests queue entropy 0x11, start the lane, and then run ingress\nwith a pause after occupy copies the pad. With an idle disk the lane can\nmake 0x11 durable before occupy. Occupy then copies no pad and queues a\ndisk read. That read waits for the newer write and packs it, so ingress\nreturns Ok with the new pad. That result is correct, but the tests\nexpect backpressure on the copied pad. Thus they failed, and on those\nruns they did not test the copied pad.\n\nStart the lane in the pause, after occupy copies 0x11. The copied-pad\ncase then occurs on each run, and a pack of the old pad still fails the\ntests.",
+          "timestamp": "2026-11-04T21:37:22Z",
+          "tree_id": "2f08d9d341d3c395ea93100ebb8499cc3eeabd40",
+          "url": "https://github.com/Irys-xyz/irys/commit/0ddb8b1ef39b2846bd79cdffcd1ed57ca196d47c"
+        },
+        "date": 1793829216029,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015312,
+            "range": "± 0.000633",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.154872,
+            "range": "± 0.005045",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.569424,
+            "range": "± 0.067825",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.488349,
+            "range": "± 0.26473",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083172,
+            "range": "± 0.001533",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 848.20038,
+            "range": "± 47.258482",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 978.057057,
+            "range": "± 5.762099",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119997,
+            "range": "± 0.001786",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1206.873981,
+            "range": "± 3.506722",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1573.154187,
+            "range": "± 12.44119",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.032896,
+            "range": "± 0.004327",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 218.790554,
+            "range": "± 10.342358",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 283.01547,
+            "range": "± 28.994936",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000146,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
