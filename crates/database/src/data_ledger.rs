@@ -108,7 +108,7 @@ impl PermanentLedger {
         Self {
             slots: Vec::new(),
             ledger_id: DataLedger::Publish as u32,
-            num_partitions_per_slot: config.num_partitions_per_slot,
+            num_partitions_per_slot: config.num_partitions_per_slot.get(),
         }
     }
 }
@@ -121,7 +121,7 @@ impl TermLedger {
             ledger_id: ledger as u32,
             epoch_length,
             num_blocks_in_epoch: config.epoch.num_blocks_in_epoch,
-            num_partitions_per_slot: config.num_partitions_per_slot,
+            num_partitions_per_slot: config.num_partitions_per_slot.get(),
         }
     }
 

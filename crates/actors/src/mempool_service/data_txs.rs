@@ -389,13 +389,12 @@ impl Inner {
             epoch_length,
         );
 
-        // Publish uses the full ingress proof replica count (part of perm pipeline).
         // OneYear/ThirtyDay pay for the partitions that store each slot.
         // Submit is already rejected above.
         let replica_count = match ledger {
             DataLedger::Publish => self
                 .config
-                .number_of_ingress_proofs_total_at(latest_block_timestamp_secs),
+                .publish_replica_count_at(latest_block_timestamp_secs),
             DataLedger::OneYear | DataLedger::ThirtyDay => {
                 self.config.consensus.num_partitions_per_slot
             }
@@ -440,7 +439,10 @@ impl Inner {
             let expected_perm_fee = calculate_perm_fee_from_config(
                 tx.data_size,
                 &self.config.consensus,
-                replica_count,
+                self.config
+                    .publish_replica_count_at(latest_block_timestamp_secs),
+                self.config
+                    .number_of_ingress_proofs_total_at(latest_block_timestamp_secs),
                 pricing_ema,
                 expected_term_fee,
                 latest_block_timestamp_secs,

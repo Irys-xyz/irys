@@ -110,13 +110,16 @@ pub async fn get_price(
             let number_of_ingress_proofs_total = state
                 .config
                 .number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
+            let replica_count = state
+                .config
+                .publish_replica_count_at(latest_block_timestamp_secs);
 
             // Calculate term fee using the dynamic epoch count
             let term_fee = calculate_term_fee(
                 bytes_to_store,
                 epochs_for_storage,
                 &state.config.consensus,
-                number_of_ingress_proofs_total,
+                replica_count,
                 pricing_ema,
                 latest_block_timestamp_secs,
             )
@@ -143,6 +146,7 @@ pub async fn get_price(
             let total_perm_cost = calculate_perm_fee_from_config(
                 bytes_to_store,
                 &state.config.consensus,
+                replica_count,
                 number_of_ingress_proofs_total,
                 pricing_ema,
                 term_fee,

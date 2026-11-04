@@ -8,7 +8,9 @@ pub mod node;
 pub use consensus::*;
 pub use node::*;
 
+use crate::hardfork_config::Activation;
 use crate::irys::IrysSigner;
+use crate::storage_pricing::ReplicaCount;
 use crate::{H256, IrysPeerId, UnixTimestamp};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
@@ -104,6 +106,18 @@ impl Config {
             .consensus
             .hardforks
             .number_of_ingress_proofs_from_assignees_at(timestamp)
+    }
+
+    /// Replica count that Publish storage fees (term and perm) pay for at a given timestamp.
+    /// Before Delta the fees use the ingress proof total. From Delta they use the replica
+    /// partitions in a slot, which is what the network stores.
+    pub fn publish_replica_count_at(&self, timestamp: UnixTimestamp) -> ReplicaCount {
+        match self.0.consensus.hardforks.delta_for_block(timestamp) {
+            Activation::Active(_) => self.0.consensus.num_partitions_per_slot,
+            Activation::Inactive => {
+                ReplicaCount::new(self.number_of_ingress_proofs_total_at(timestamp))
+            }
+        }
     }
 
     // validate configuration invariants
@@ -280,7 +294,7 @@ impl Config {
         );
         // Zero → genesis capacity math hits log10(0) / NaN during epoch-snapshot build.
         ensure!(
-            self.consensus.num_partitions_per_slot > 0,
+            self.consensus.num_partitions_per_slot.get() > 0,
             "num_partitions_per_slot must be > 0"
         );
         let ingress_proofs_total = self
@@ -307,7 +321,7 @@ impl Config {
         // Validation clamps the assignee requirement to the miners assigned to the Submit
         // slot, at most `num_partitions_per_slot`. A larger value is never applied.
         ensure!(
-            assignee_proofs <= self.consensus.num_partitions_per_slot,
+            assignee_proofs <= self.consensus.num_partitions_per_slot.get(),
             "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({assignee_proofs}) \
              must be <= num_partitions_per_slot ({})",
             self.consensus.num_partitions_per_slot,
@@ -1236,6 +1250,36 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use toml;
+
+    /// Publish storage fees pay for the ingress proof total before Delta and for the
+    /// slot replica count from Delta.
+    #[test]
+    fn publish_replica_count_switches_at_delta() {
+        use crate::hardfork_config::Delta;
+        use crate::storage_pricing::{Amount, ReplicaCount};
+
+        let activation = UnixTimestamp::from_secs(1_000);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.num_partitions_per_slot = ReplicaCount::new(10);
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 3;
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Amount::percentage(rust_decimal_macros::dec!(0.5))
+                .unwrap(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+
+        assert_eq!(
+            config.publish_replica_count_at(UnixTimestamp::from_secs(999)),
+            ReplicaCount::new(3)
+        );
+        assert_eq!(
+            config.publish_replica_count_at(activation),
+            ReplicaCount::new(10)
+        );
+    }
 
     /// The derived default (cores - 2) exceeds this on any wide host.
     #[test]
@@ -2340,7 +2384,7 @@ mod validate_tests {
     #[rstest]
     #[case::zero_num_partitions_per_slot(
         |c: &mut ConsensusConfig| {
-            c.num_partitions_per_slot = 0;
+            c.num_partitions_per_slot = crate::storage_pricing::ReplicaCount::new(0);
         },
         "num_partitions_per_slot"
     )]
@@ -2352,7 +2396,7 @@ mod validate_tests {
     )]
     #[case::frontier_assignee_proofs_exceed_total(
         |c: &mut ConsensusConfig| {
-            c.num_partitions_per_slot = 3;
+            c.num_partitions_per_slot = crate::storage_pricing::ReplicaCount::new(3);
             c.hardforks.frontier.number_of_ingress_proofs_total = 2;
             c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 3;
         },
@@ -2360,7 +2404,7 @@ mod validate_tests {
     )]
     #[case::frontier_assignee_proofs_exceed_slot_replicas(
         |c: &mut ConsensusConfig| {
-            c.num_partitions_per_slot = 2;
+            c.num_partitions_per_slot = crate::storage_pricing::ReplicaCount::new(2);
             c.hardforks.frontier.number_of_ingress_proofs_total = 3;
             c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 3;
         },

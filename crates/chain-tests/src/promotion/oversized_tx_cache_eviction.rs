@@ -55,7 +55,7 @@ async fn heavy_test_oversized_tx_cache_eviction_allows_promotion() -> eyre::Resu
         c.chunk_size = 32;
         c.num_chunks_in_partition = 10;
         c.num_chunks_in_recall_range = 2;
-        c.num_partitions_per_slot = 1;
+        c.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
         c.block_migration_depth = 1;
         // Single node self-promotes with a single proof.
         c.hardforks.frontier.number_of_ingress_proofs_total = 1;

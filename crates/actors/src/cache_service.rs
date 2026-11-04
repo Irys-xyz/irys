@@ -2695,7 +2695,7 @@ mod tests {
                 chunk_size: 32,
                 num_chunks_in_partition: num_chunks,
                 num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
+                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
                 entropy_packing_iterations: 1,
                 chain_id: 1,
                 ..ConsensusConfig::testing()
@@ -3129,7 +3129,7 @@ mod tests {
                 chunk_size: 32,
                 num_chunks_in_partition: 8,
                 num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
+                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
                 entropy_packing_iterations: 1,
                 ..ConsensusConfig::testing()
             }),
@@ -4242,7 +4242,7 @@ mod tests {
                 chunk_size: 32,
                 num_chunks_in_partition: num_chunks,
                 num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
+                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
                 entropy_packing_iterations: 1,
                 chain_id: 1,
                 ..ConsensusConfig::testing()

@@ -46,12 +46,11 @@ pub(crate) fn calculate_term_storage_fee(
         config.consensus.epoch.num_blocks_in_epoch,
         config.consensus.epoch.submit_ledger_epoch_length,
     );
-    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp);
     calculate_term_fee(
         bytes_to_store,
         epochs_for_storage,
         &config.consensus,
-        number_of_ingress_proofs_total,
+        config.publish_replica_count_at(timestamp),
         ema.ema_for_public_pricing(),
         timestamp,
     )

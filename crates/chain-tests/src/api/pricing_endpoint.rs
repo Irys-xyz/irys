@@ -23,10 +23,14 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         .node_ctx
         .config
         .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+    let replica_count = ctx
+        .node_ctx
+        .config
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
         UnixTimestamp::from_secs(0),
     )?;
@@ -35,6 +39,7 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
+        replica_count,
         number_of_ingress_proofs_total,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
         expected_term_fee,
@@ -102,10 +107,8 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             .replica_count(
                 ctx.node_ctx
                     .config
-                    .consensus
-                    .hardforks
-                    .frontier
-                    .number_of_ingress_proofs_total,
+                    .publish_replica_count_at(UnixTimestamp::from_secs(0))
+                    .get(),
             )?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
@@ -122,10 +125,14 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
         .node_ctx
         .config
         .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+    let replica_count = ctx
+        .node_ctx
+        .config
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         ctx.node_ctx.config.consensus.chunk_size, // small data rounds up to chunk_size
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
         UnixTimestamp::from_secs(0),
     )?;
@@ -252,10 +259,8 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             .replica_count(
                 ctx.node_ctx
                     .config
-                    .consensus
-                    .hardforks
-                    .frontier
-                    .number_of_ingress_proofs_total,
+                    .publish_replica_count_at(UnixTimestamp::from_secs(0))
+                    .get(),
             )?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
@@ -272,10 +277,14 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
         .node_ctx
         .config
         .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+    let replica_count = ctx
+        .node_ctx
+        .config
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         ctx.node_ctx.config.consensus.chunk_size * 2, // data rounds up to 2 chunks
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
         UnixTimestamp::from_secs(0),
     )?;
@@ -594,16 +603,21 @@ async fn heavy_pricing_quote_on_last_tip_before_roll_survives_roll() -> eyre::Re
         .node_ctx
         .config
         .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+    let replica_count = ctx
+        .node_ctx
+        .config
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         ema_before_roll.ema_price_1_interval_ago,
         UnixTimestamp::from_secs(0),
     )?;
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
+        replica_count,
         number_of_ingress_proofs_total,
         ema_before_roll.ema_price_1_interval_ago,
         expected_term_fee,
@@ -632,10 +646,14 @@ async fn verify_pricing_uses_ema(
         .node_ctx
         .config
         .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+    let replica_count = ctx
+        .node_ctx
+        .config
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         expected_ema,
         UnixTimestamp::from_secs(0),
     )?;
@@ -643,6 +661,7 @@ async fn verify_pricing_uses_ema(
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
+        replica_count,
         number_of_ingress_proofs_total,
         expected_ema,
         expected_term_fee,
@@ -773,10 +792,10 @@ async fn heavy_cascade_pricing_endpoint_uses_higher_annual_cost() -> eyre::Resul
     // Verify post-Cascade term_fee matches manual calculation using the same
     // formula as the API route (calculate_submit_ledger_expiry + calculate_term_fee)
     let next_height = ctx.get_canonical_chain_height().await + 1;
-    let number_of_ingress_proofs_total = ctx
+    let replica_count = ctx
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let epochs_for_storage = calculate_submit_ledger_expiry(
         next_height,
         consensus.epoch.num_blocks_in_epoch,
@@ -786,7 +805,7 @@ async fn heavy_cascade_pricing_endpoint_uses_higher_annual_cost() -> eyre::Resul
         data_size_bytes,
         epochs_for_storage,
         consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         consensus.genesis.genesis_price,
         UnixTimestamp::from_secs(0),
     )?;
@@ -835,10 +854,10 @@ async fn heavy_cascade_pricing_transition_at_exact_activation_height() -> eyre::
     let consensus = &ctx.node_ctx.config.consensus;
     let data_size_bytes = consensus.chunk_size * 100;
 
-    let number_of_ingress_proofs_total = ctx
+    let replica_count = ctx
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
 
     // Cascade activates from genesis (timestamp 0). Verify the fee at height 1
     // uses the Cascade annual_cost_per_gb rate.
@@ -852,7 +871,7 @@ async fn heavy_cascade_pricing_transition_at_exact_activation_height() -> eyre::
             data_size_bytes,
             epochs,
             consensus,
-            number_of_ingress_proofs_total,
+            replica_count,
             consensus.genesis.genesis_price,
             UnixTimestamp::from_secs(0),
         )

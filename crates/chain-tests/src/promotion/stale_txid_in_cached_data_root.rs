@@ -24,7 +24,7 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
     let config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             consensus.block_migration_depth = 1;
             consensus.mempool.tx_anchor_expiry_depth = 3;
             consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;
@@ -197,7 +197,7 @@ async fn slow_heavy_stale_txid_in_cached_data_root_does_not_block_after_fix() ->
     let config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             consensus.block_migration_depth = 1;
             consensus.mempool.tx_anchor_expiry_depth = 3;
             consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;

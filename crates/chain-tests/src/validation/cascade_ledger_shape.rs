@@ -213,7 +213,7 @@ async fn heavy_cascade_midchain_activation_seeds_term_ledger_slots() -> eyre::Re
         );
         assert_eq!(
             slots[0].partitions.len() as u64,
-            node.node_ctx.config.consensus.num_partitions_per_slot,
+            node.node_ctx.config.consensus.num_partitions_per_slot.get(),
             "{ledger:?} slot 0 must have its partitions assigned in the same epoch"
         );
     }

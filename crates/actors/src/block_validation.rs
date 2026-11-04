@@ -30,7 +30,7 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
-use irys_types::storage_pricing::{Amount, calculate_perm_fee_from_config};
+use irys_types::storage_pricing::{Amount, ReplicaCount, calculate_perm_fee_from_config};
 use irys_types::{BlockHash, EvmBlockHash, H256List, LedgerChunkRange};
 use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
@@ -6434,25 +6434,25 @@ pub fn calculate_perm_storage_total_fee(
     config: &Config,
     timestamp_secs: UnixTimestamp,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
-    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
     calculate_perm_fee_from_config(
         bytes_to_store,
         &config.consensus,
-        number_of_ingress_proofs_total,
+        config.publish_replica_count_at(timestamp_secs),
+        config.number_of_ingress_proofs_total_at(timestamp_secs),
         ema_snapshot.ema_for_public_pricing(),
         term_fee,
         timestamp_secs,
     )
 }
 
-/// Helper function to calculate term storage fee using a specific EMA snapshot
-/// Uses the same replica count as permanent storage but for the specified number of epochs
+/// Helper function to calculate term storage fee using a specific EMA snapshot.
+/// The caller supplies the replica count for the ledger.
 pub fn calculate_term_storage_base_network_fee(
     bytes_to_store: u64,
     epochs_for_storage: u64,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
-    replica_count: u64,
+    replica_count: ReplicaCount,
     timestamp_secs: UnixTimestamp,
 ) -> eyre::Result<U256> {
     irys_types::storage_pricing::calculate_term_fee(
@@ -6508,7 +6508,7 @@ fn validate_publish_price(
         epochs_for_storage,
         block_ema,
         config,
-        number_of_ingress_proofs_total,
+        config.publish_replica_count_at(timestamp_secs),
         timestamp_secs,
     )
     .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
@@ -8113,7 +8113,7 @@ mod tests {
     #[case::thirty_day(DataLedger::ThirtyDay)]
     fn term_only_price_requires_fee_for_slot_replica_count(#[case] ledger: DataLedger) {
         let mut node_config = NodeConfig::testing();
-        node_config.consensus.get_mut().num_partitions_per_slot = 2;
+        node_config.consensus.get_mut().num_partitions_per_slot = ReplicaCount::new(2);
         let config = Config::new_with_random_peer_id(node_config);
         let header = IrysBlockHeader::new_mock_header();
         let ema = EmaSnapshot::genesis(&header);
@@ -8132,7 +8132,12 @@ mod tests {
         let data_size = 1 << 50;
         let fee_for_replicas = |replicas| {
             calculate_term_storage_base_network_fee(
-                data_size, epochs, &ema, &config, replicas, timestamp,
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                ReplicaCount::new(replicas),
+                timestamp,
             )
             .unwrap()
         };
@@ -8153,6 +8158,74 @@ mod tests {
         tx.term_fee = BoundedFee::new(fee_for_replicas(2));
         validate_term_only_price(&tx, ledger, header.height, timestamp, &ema, &config)
             .expect("fee for num_partitions_per_slot replicas is sufficient");
+    }
+
+    /// Publish fees pay for the ingress proof total before Delta and for
+    /// `num_partitions_per_slot` replicas from Delta.
+    #[test]
+    fn publish_price_requires_fee_for_slot_replica_count_from_delta() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.num_partitions_per_slot = ReplicaCount::new(2);
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        let epochs = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            header.height,
+            config.consensus.epoch.num_blocks_in_epoch,
+            config.consensus.epoch.submit_ledger_epoch_length,
+        );
+        // Large enough that both fees are above the minimum term fee and scale with replicas.
+        let data_size = 1 << 50;
+        let tx_priced_for = |replicas, timestamp| {
+            let term_fee = calculate_term_storage_base_network_fee(
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                ReplicaCount::new(replicas),
+                timestamp,
+            )
+            .unwrap();
+            let perm_fee = calculate_perm_fee_from_config(
+                data_size,
+                &config.consensus,
+                ReplicaCount::new(replicas),
+                1,
+                ema.ema_for_public_pricing(),
+                term_fee,
+                timestamp,
+            )
+            .unwrap();
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = data_size;
+            tx.term_fee = BoundedFee::new(term_fee);
+            tx.perm_fee = Some(BoundedFee::new(perm_fee.amount));
+            tx
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        validate(&tx_priced_for(1, before_delta), before_delta)
+            .expect("before Delta, a fee for the ingress proof total is sufficient");
+        assert!(matches!(
+            validate(&tx_priced_for(1, activation), activation),
+            Err(PreValidationError::InsufficientPermFee { .. })
+        ));
+        validate(&tx_priced_for(2, activation), activation)
+            .expect("from Delta, a fee for num_partitions_per_slot replicas is sufficient");
     }
 
     /// Build a minimal `BlockTreeReadGuard` for tests that exercise the
@@ -8558,7 +8631,7 @@ mod tests {
             chunk_size,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
-            num_partitions_per_slot: 1,
+            num_partitions_per_slot: irys_types::ReplicaCount::new(1),
             entropy_packing_iterations: 1_000,
             block_migration_depth: 1,
             ..node_config.consensus_config()
@@ -11187,7 +11260,7 @@ mod ingress_proof_local_bytes_tests {
             epochs,
             &parent_ema,
             &config,
-            config.number_of_ingress_proofs_total_at(timestamp),
+            config.publish_replica_count_at(timestamp),
             timestamp,
         )
         .expect("term fee");

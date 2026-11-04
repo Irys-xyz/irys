@@ -20,7 +20,7 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
     config.consensus.get_mut().num_chunks_in_recall_range = 2;
-    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.consensus.get_mut().num_partitions_per_slot = irys_types::ReplicaCount::new(1);
     config.storage.num_writes_before_sync = 1;
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
     config.consensus.get_mut().block_migration_depth = 1; // Testnet / single node config
@@ -301,7 +301,7 @@ async fn promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
     let config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;
         })
@@ -424,7 +424,7 @@ async fn promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
     let config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;
             consensus.mempool.tx_anchor_expiry_depth = 3;
@@ -563,7 +563,7 @@ async fn test_ingress_proof_anchor_edge_case(
     let config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;
             consensus.mempool.tx_anchor_expiry_depth = 3;

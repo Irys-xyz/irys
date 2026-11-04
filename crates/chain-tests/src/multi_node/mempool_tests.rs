@@ -1804,7 +1804,7 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .num_chunks_in_recall_range = 2;
-    genesis_config.consensus.get_mut().num_partitions_per_slot = 1;
+    genesis_config.consensus.get_mut().num_partitions_per_slot = irys_types::ReplicaCount::new(1);
     genesis_config.storage.num_writes_before_sync = 1;
     genesis_config
         .consensus
@@ -2139,7 +2139,7 @@ async fn heavy_test_evm_gossip() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .num_chunks_in_recall_range = 2;
-    genesis_config.consensus.get_mut().num_partitions_per_slot = 1;
+    genesis_config.consensus.get_mut().num_partitions_per_slot = irys_types::ReplicaCount::new(1);
     genesis_config.storage.num_writes_before_sync = 1;
     genesis_config
         .consensus

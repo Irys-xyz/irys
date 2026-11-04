@@ -1,4 +1,5 @@
 use crate::hardfork_config::{Aurora, Borealis, Cascade, Echo, FrontierParams, IrysHardforkConfig};
+use crate::storage_pricing::ReplicaCount;
 use crate::{
     H256, IrysAddress,
     storage_pricing::{
@@ -94,7 +95,7 @@ pub struct ConsensusConfig {
     pub num_chunks_in_recall_range: u64,
 
     /// Number of replica partitions in each storage slot (all data ledgers)
-    pub num_partitions_per_slot: u64,
+    pub num_partitions_per_slot: ReplicaCount,
 
     /// Number of iterations for entropy packing algorithm
     pub entropy_packing_iterations: u32,
@@ -805,7 +806,7 @@ impl ConsensusConfig {
             // Number of chunks that can be recalled in each partition by a mining step
             num_chunks_in_recall_range: 400,
             // Number of replica partitions in each storage slot
-            num_partitions_per_slot: 10,
+            num_partitions_per_slot: ReplicaCount::new(10),
             // Number of iterations for Matrix (entropy) packing algorithm
             entropy_packing_iterations: 1_000_000,
             // Toggles full ingress proof validation on or off
@@ -904,7 +905,7 @@ impl ConsensusConfig {
             chunk_size: CHUNK_SIZE,
             num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
             num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
-            num_partitions_per_slot: 1,
+            num_partitions_per_slot: ReplicaCount::new(1),
             block_migration_depth: 6,
             block_tree_depth: 50,
             entropy_packing_iterations: 1000,
@@ -1038,7 +1039,7 @@ impl ConsensusConfig {
             chunk_size: Self::CHUNK_SIZE,
             num_chunks_in_partition: Self::CHUNKS_PER_PARTITION_20TB,
             num_chunks_in_recall_range: 400,
-            num_partitions_per_slot: 10,
+            num_partitions_per_slot: ReplicaCount::new(10),
             block_migration_depth: 6,
             block_tree_depth: 50,
             entropy_packing_iterations: 1000,

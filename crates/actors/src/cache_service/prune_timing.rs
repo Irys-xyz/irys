@@ -227,7 +227,7 @@ fn slow_timed_capacity_prune() -> eyre::Result<()> {
             chunk_size,
             num_chunks_in_partition: u64::try_from(transactions)?,
             num_chunks_in_recall_range: 1,
-            num_partitions_per_slot: 1,
+            num_partitions_per_slot: irys_types::ReplicaCount::new(1),
             entropy_packing_iterations: 1,
             block_tree_depth: u64::try_from(tree_blocks)?.max(testing.block_tree_depth),
             ..testing

@@ -111,7 +111,7 @@ async fn slow_heavy_per_miner_expiry_reward_attribution_two_miners() -> eyre::Re
     config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
     // Pin to 1 so each expired slot maps to exactly one miner — required for the
     // per-miner attribution assertions below (one partition = one owner per slot).
-    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.consensus.get_mut().num_partitions_per_slot = irys_types::ReplicaCount::new(1);
     // Activate Cascade from genesis so the Submit-ledger last-write "touch" runs:
     // every slot WRITTEN in the data epoch (including the genesis-owned slot 0) gets
     // its `last_height` refreshed to that epoch, so all the data slots expire

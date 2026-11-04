@@ -23,7 +23,7 @@ async fn peer_discovery() -> eyre::Result<()> {
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
     config.consensus.get_mut().num_chunks_in_recall_range = 2;
-    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.consensus.get_mut().num_partitions_per_slot = irys_types::ReplicaCount::new(1);
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
     config.consensus.get_mut().block_migration_depth = 1;
     config.storage.num_writes_before_sync = 1;

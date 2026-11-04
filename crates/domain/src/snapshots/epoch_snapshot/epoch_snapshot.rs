@@ -769,7 +769,7 @@ impl EpochSnapshot {
         use num_bigfloat::BigFloat;
 
         // Every active ledger needs at least one slot filled with data partitions
-        let min_count = num_active_ledgers * config.num_partitions_per_slot;
+        let min_count = num_active_ledgers * config.num_partitions_per_slot.get();
         let base_count = std::cmp::max(num_data_partitions, min_count);
 
         // Deterministic computation using num-bigfloat (pure Rust, ~40 decimal digits)
@@ -1744,7 +1744,7 @@ mod tests {
         // slot can hold two partitions
         let mut node_config = NodeConfig::testing();
         node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
-            num_partitions_per_slot: 2,
+            num_partitions_per_slot: irys_types::ReplicaCount::new(2),
             ..node_config.consensus_config()
         });
         let config = Config::new_with_random_peer_id(node_config);
