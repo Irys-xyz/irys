@@ -58,15 +58,17 @@ async fn mine_until(
 /// Regression: an assigned Submit miner keeps re-signing its ingress proof
 /// after its chunk bodies have left the capped chunk cache.
 ///
-/// The cache is always at capacity (`max_cache_size_bytes = 0`) and promotion
-/// needs two proofs, so this single node's tx stays unpromoted. Once the
-/// bodies are persisted to the Submit module and reclaimed from the cache, the
-/// proof anchor expires. Before the fix the at-capacity prune deleted that
-/// proof, because no cached body was left to fence, and nothing generated it
-/// again.
+/// HTTP admission rejects when `cached_bytes >= max_cache_size_bytes`. A max
+/// of 0 503s the three POSTs (empty cache is `0 >= 0`). The cap is the
+/// 3-chunk body so those POSTs land, then the cache sits at the mark and
+/// capacity prune reclaims the bodies once they are durable. Promotion needs
+/// two proofs, so this single node's tx stays unpromoted.
 ///
-/// Then the row is deleted by hand, as a node that already lost it would be.
-/// The restore sweep regenerates it from the persisted compact leaves.
+/// Once the bodies are persisted to the Submit module and reclaimed, the
+/// proof anchor expires. A live Submit copy must keep that proof (reanchor,
+/// not delete). Then the row is deleted by hand, as a node that already lost
+/// it would be. The restore sweep regenerates it from the persisted compact
+/// leaves.
 #[test_log::test(tokio::test)]
 async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()> {
     initialize_tracing();
@@ -87,8 +89,9 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
         c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 0;
     }
     config.storage.num_writes_before_sync = 2;
-    // 0 >= 0: every prune pass runs the at-capacity arm.
-    config.cache.max_cache_size_bytes = 0;
+    // HTTP watermark is `cached_bytes >= max`. Zero makes an empty cache
+    // look full. Three bodies fill this cap, then capacity prune reclaims.
+    config.cache.max_cache_size_bytes = 3 * config.consensus_config().chunk_size;
     config.cache.cache_clean_lag = 0;
 
     let signer = IrysSigner::random_signer(&config.consensus_config());
