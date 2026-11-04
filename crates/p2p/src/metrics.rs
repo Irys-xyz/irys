@@ -11,6 +11,42 @@ irys_utils::define_metrics! {
     counter PULL_FAILURES("irys.gossip.pull.failures_total", "Gossip pull failures by request kind and reason");
     counter BLOCK_POOL_REJECTIONS("irys.block_pool.rejections_total", "Block pool rejections by reason");
     counter BLOCK_POOL_ORPHAN_RETRIES("irys.block_pool.orphan_retries_total", "Orphan-block reprocessing attempts dispatched by block pool");
+    counter CHUNK_ANNOUNCEMENTS_RECEIVED("irys.gossip.chunk_announcements.received_total", "Chunk announcements received, by decision");
+    counter CHUNK_BODIES_RECEIVED("irys.gossip.chunk_bodies.received_total", "Chunk bodies received, by push or fetch");
+    counter CHUNK_ANNOUNCEMENT_CAPACITY("irys.gossip.chunk_announcements.capacity_rejections_total", "New chunk claims rejected by global or peer reservation cap");
+    counter CHUNK_LOCAL_RETRIES("irys.gossip.chunk_fetch.local_retries_total", "Accepted claims retained after local pressure, by reason");
+    histogram CHUNK_FETCH_PHASE_SECONDS("irys.gossip.chunk_fetch.phase_duration_seconds", "Time in each chunk fetch phase, including cancelled phases", vec![0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]);
+}
+
+pub(crate) fn record_chunk_announcement_capacity(limit: &'static str) {
+    CHUNK_ANNOUNCEMENT_CAPACITY.add(1, &[KeyValue::new("limit", limit)]);
+}
+
+pub(crate) fn record_chunk_local_retry(reason: &'static str) {
+    CHUNK_LOCAL_RETRIES.add(1, &[KeyValue::new("reason", reason)]);
+}
+
+pub(crate) struct ChunkFetchPhase {
+    phase: &'static str,
+    started: tokio::time::Instant,
+}
+
+impl ChunkFetchPhase {
+    pub(crate) fn start(phase: &'static str) -> Self {
+        Self {
+            phase,
+            started: tokio::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for ChunkFetchPhase {
+    fn drop(&mut self) {
+        CHUNK_FETCH_PHASE_SECONDS.record(
+            self.started.elapsed().as_secs_f64(),
+            &[KeyValue::new("phase", self.phase)],
+        );
+    }
 }
 
 pub(crate) fn record_gossip_chunk_received(bytes: u64) {
@@ -55,6 +91,14 @@ pub(crate) fn record_block_pool_rejection(reason: &'static str) {
 /// parent has just arrived.
 pub(crate) fn record_block_pool_orphan_retry() {
     BLOCK_POOL_ORPHAN_RETRIES.add(1, &[]);
+}
+
+pub(crate) fn record_chunk_announcement_received(decision: &'static str) {
+    CHUNK_ANNOUNCEMENTS_RECEIVED.add(1, &[KeyValue::new("decision", decision)]);
+}
+
+pub(crate) fn record_chunk_body_received(via: &'static str) {
+    CHUNK_BODIES_RECEIVED.add(1, &[KeyValue::new("via", via)]);
 }
 
 #[cfg(test)]

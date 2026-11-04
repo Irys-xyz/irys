@@ -190,19 +190,59 @@ pub mod v2 {
     use std::fmt::Debug;
     use std::sync::Arc;
 
+    /// How a chunk re-broadcast reaches peers. Only chunk data reads it.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum ChunkBroadcastMode {
+        /// Send the full body (origin ingest, and every non-chunk type).
+        #[default]
+        Push,
+        /// Send a `ChunkAnnouncement`; peers fetch the body if they lack it.
+        Announce,
+        /// Send only a `ChunkAnnouncement`, to V2 peers that accept one.
+        /// Never pushes a body: not to V1 peers, not to peers remembered as
+        /// lacking the route, and not after a 404. Used to re-announce
+        /// cached bodies that no replica has confirmed yet.
+        AnnounceOnly,
+    }
+
     #[derive(Clone, Debug)]
     pub struct GossipBroadcastMessageV2 {
         pub key: GossipCacheKey,
         pub data: GossipDataV2,
+        pub chunk_mode: ChunkBroadcastMode,
     }
 
     impl GossipBroadcastMessageV2 {
         pub fn new(key: GossipCacheKey, data: GossipDataV2) -> Self {
-            Self { key, data }
+            Self {
+                key,
+                data,
+                chunk_mode: ChunkBroadcastMode::Push,
+            }
+        }
+
+        #[must_use]
+        pub fn with_chunk_mode(mut self, chunk_mode: ChunkBroadcastMode) -> Self {
+            self.chunk_mode = chunk_mode;
+            self
         }
 
         pub fn data_type_and_id(&self) -> String {
             self.data.data_type_and_id()
+        }
+    }
+
+    #[cfg(test)]
+    mod chunk_mode_tests {
+        use super::*;
+
+        #[test]
+        fn broadcast_message_defaults_to_push_and_can_announce() {
+            let chunk = crate::UnpackedChunk::default();
+            let msg = GossipBroadcastMessageV2::from(chunk);
+            assert_eq!(msg.chunk_mode, ChunkBroadcastMode::Push);
+            let msg = msg.with_chunk_mode(ChunkBroadcastMode::Announce);
+            assert_eq!(msg.chunk_mode, ChunkBroadcastMode::Announce);
         }
     }
 
