@@ -5,7 +5,7 @@ use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::tables::IngressProofs;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_testing_utils::initialize_tracing;
@@ -20,8 +20,6 @@ use reth::rpc::{
     api::EthApiClient,
     types::{Block, Header, TransactionRequest},
 };
-use reth_db::Database as _;
-use reth_db::transaction::DbTx as _;
 use reth_e2e_test_utils::transaction::TransactionTestContext;
 use reth_ethereum_primitives::{Receipt, Transaction};
 use std::{sync::Arc, time::Duration};
@@ -473,7 +471,7 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
             .await,
         "overflow pre-header chunk must not remain parked"
     );
-    let overflow_cached = genesis_node.node_ctx.db.view_eyre(|db_tx| {
+    let overflow_cached = genesis_node.node_ctx.db.view_cache_eyre(|db_tx| {
         irys_database::cached_chunk_by_chunk_offset(
             db_tx,
             tx.header.data_root,
@@ -1347,12 +1345,11 @@ async fn heavy3_mempool_publish_fork_recovery_test(
         a_blk1_tx1.header.id
     );
 
-    let a_blk1_tx1_proof1 = {
-        let tx = a_node.node_ctx.db.tx()?;
-        // Get the ingress proof from the database
-        tx.get::<IngressProofs>(a_blk1_tx1.header.data_root)?
-            .expect("Able to get a_blk1_tx1’s ingress proof from DB")
-    };
+    let a_blk1_tx1_proof1 = a_node.node_ctx.db.view_cache_eyre(|tx| {
+        Ok(tx
+            .get::<IngressProofs>(a_blk1_tx1.header.data_root)?
+            .expect("Able to get a_blk1_tx1’s ingress proof from DB"))
+    })?;
 
     let a_blk1_tx1_mempool = {
         // Use mempool-only lookup (no DB fallback) to verify the tx was orphaned back into mempool state

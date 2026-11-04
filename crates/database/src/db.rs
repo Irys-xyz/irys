@@ -1,5 +1,8 @@
 use crate::reth_db::DatabaseError;
-use metrics::{Histogram, Label};
+use crate::scoped_tx::{
+    Cache, Consensus, Reth, ScopedTx, ScopedTxMut, begin_scoped_rw, enter_rw_tx_span,
+};
+use metrics::Label;
 use reth_db::mdbx::TransactionKind;
 use reth_db::mdbx::cursor::Cursor;
 use reth_db::table::{Decode, Decompress, DupSort, Table, TableRow};
@@ -10,12 +13,9 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
 use std::time::Instant;
-use tracing::{info, info_span};
+use tracing::info;
 
-use irys_utils::{
-    DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM, DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
-    DB_WRITER_GATE_WAIT_SECONDS, MDBX_RW_TX_SPAN,
-};
+use irys_utils::DB_WRITER_GATE_WAIT_SECONDS;
 
 /// Per-environment writer gates for `DatabaseEnv` MDBX environments.
 ///
@@ -45,6 +45,21 @@ fn writer_gate_for(env: &DatabaseEnv) -> &'static Mutex<()> {
         .unwrap_or_else(PoisonError::into_inner)
         .entry(key)
         .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
+}
+
+/// Force-sync an MDBX environment to durable storage.
+///
+/// `SafeNoSync` commits do not fsync. Call this after a write that a later
+/// Durable operation on another environment depends on (for example a V3→V4
+/// cache copy that must land before the consensus table is cleared).
+pub fn sync_mdbx_env(env: &DatabaseEnv) -> eyre::Result<()> {
+    let tx = env.tx()?;
+    let environment = tx.inner().env().clone();
+    drop(tx);
+    environment
+        .sync(true)
+        .map_err(|err| eyre::eyre!("mdbx env sync: {err}"))?;
+    Ok(())
 }
 
 /// RAII guard for [`lock_writer_gate`]. Drop to release the gate.
@@ -93,27 +108,6 @@ pub fn lock_writer_gate(env: &DatabaseEnv, call_site: &'static str) -> WriterGat
     .record(start.elapsed().as_secs_f64());
     guard
 }
-
-// Cache the per-scope histogram handles so the hot rw-tx path doesn't re-resolve
-// the recorder + per-call Key allocation on every `update_eyre`. Handles bind to
-// the global recorder at first access, so `install_metrics_recorder()` must have
-// run by the time any update_eyre is called — which is enforced by the call in
-// chain/src/main.rs that runs before the DB is opened. Thread-local recorders
-// (e.g. `metrics::with_local_recorder` in tests) are not visible to these
-// statics; tests needing per-thread recorder isolation must not exercise this
-// path.
-static IRYS_CONSENSUS_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
-    metrics::histogram!(
-        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
-        "scope" => DB_SCOPE_IRYS_CONSENSUS,
-    )
-});
-static RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
-    metrics::histogram!(
-        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
-        "scope" => DB_SCOPE_RETH_EVM,
-    )
-});
 
 /// In the reth library, there's a nested circular Arc reference. This circular dependency prevents
 /// the DB connection from being dropped even when external references are removed, thereby making
@@ -169,10 +163,7 @@ impl reth_db::Database for RethDbWrapper {
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
-        // Active span carries the EVM scope so any libmdbx writer-lock stall
-        // warning fired during begin_rw_txn lands under
-        // libmdbx_rw_tx_lock_stalls_total{scope="reth-evm"}.
-        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_RETH_EVM).entered();
+        let _span = enter_rw_tx_span::<Reth>();
         let guard = self.db.read().map_err(db_read_error)?;
         guard
             .as_ref()
@@ -195,8 +186,7 @@ impl reth_db::Database for RethDbWrapper {
     where
         F: FnOnce(&Self::TXMut) -> T,
     {
-        // See tx_mut() above — same scope attribution for Database::update.
-        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_RETH_EVM).entered();
+        let _span = enter_rw_tx_span::<Reth>();
         let guard = self.db.read().map_err(db_read_error)?;
         guard
             .as_ref()
@@ -259,20 +249,13 @@ impl IrysDatabaseExt for RethDbWrapper {
     where
         F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
     {
-        // Inline the body rather than delegating to DatabaseEnv::update_eyre so
-        // libmdbx writer-lock stall warnings and the tx_mut acquire histogram
-        // are attributed to scope="reth-evm" instead of the consensus scope.
+        // Inline rather than delegating to `DatabaseEnv::update_eyre` so the
+        // stall span and acquire histogram are attributed to `Reth` instead of
+        // the `Consensus` scope the inner helper bakes in.
         // No consensus writer gate: this is a separate MDBX environment.
-        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_RETH_EVM).entered();
-
         let guard = self.db.read().map_err(db_read_error)?;
         let db = guard.as_ref().ok_or_else(db_connection_closed_error)?;
-
-        let start = Instant::now();
-        let tx_result = db.tx_mut();
-        RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM.record(start.elapsed().as_secs_f64());
-        let tx = tx_result?;
-
+        let tx = begin_scoped_rw::<Reth>(db)?;
         let res = f(&tx)?;
         tx.commit()?;
         Ok(res)
@@ -314,20 +297,10 @@ impl IrysDatabaseExt for DatabaseEnv {
     where
         F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
     {
-        // Active span carries the consensus scope so any libmdbx writer-lock
-        // stall warning fired during begin_rw_txn lands under
-        // libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}.
-        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_IRYS_CONSENSUS).entered();
         // Take this env's gate before begin_rw_txn so concurrent writers park
         // here instead of Busy-sleeping 250 ms in libmdbx.
         let _gate = lock_writer_gate(self, call_site);
-
-        // Time tx_mut() acquisition (should be near-zero when all writers use the gate).
-        let start = Instant::now();
-        let tx_result = self.tx_mut();
-        IRYS_CONSENSUS_TX_MUT_ACQUIRE_HISTOGRAM.record(start.elapsed().as_secs_f64());
-        let tx = tx_result?;
-
+        let tx = crate::scoped_tx::begin_scoped_rw::<Consensus>(self)?;
         let res = f(&tx)?;
         tx.commit()?;
         Ok(res)
@@ -350,12 +323,8 @@ impl IrysDatabaseExt for DatabaseEnv {
     where
         F: FnOnce(&Self::TXMut) -> T,
     {
-        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_IRYS_CONSENSUS).entered();
         let _gate = lock_writer_gate(self, "update_scoped");
-        let start = Instant::now();
-        let tx_result = self.tx_mut();
-        IRYS_CONSENSUS_TX_MUT_ACQUIRE_HISTOGRAM.record(start.elapsed().as_secs_f64());
-        let tx = tx_result?;
+        let tx = crate::scoped_tx::begin_scoped_rw::<Consensus>(self)?;
         let res = f(&tx);
         tx.commit()?;
         Ok(res)
@@ -422,6 +391,120 @@ where
     ))
 }
 
+/// Cache-env accessors on [`crate::DatabaseProvider`].
+///
+/// Import this trait to call `view_cache` / `update_cache` (and the `_eyre`
+/// variants). The methods are an explicit import so cache writes stay a
+/// deliberate choice rather than blending into the consensus `Deref` surface.
+pub trait DatabaseProviderCacheExt {
+    fn update_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&ScopedTxMut<Cache>) -> eyre::Result<T>;
+
+    /// Runs a cache write while attributing its writer-gate wait to `call_site`.
+    fn update_cache_eyre_at<T, F>(&self, call_site: &'static str, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&ScopedTxMut<Cache>) -> eyre::Result<T>;
+
+    fn view_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&ScopedTx<Cache>) -> eyre::Result<T>;
+
+    fn update_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&ScopedTxMut<Cache>) -> T;
+
+    fn view_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&ScopedTx<Cache>) -> T;
+}
+
+impl DatabaseProviderCacheExt for crate::DatabaseProvider {
+    fn update_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&ScopedTxMut<Cache>) -> eyre::Result<T>,
+    {
+        self.update_cache_eyre_at("update_cache_eyre", f)
+    }
+
+    fn update_cache_eyre_at<T, F>(&self, call_site: &'static str, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&ScopedTxMut<Cache>) -> eyre::Result<T>,
+    {
+        let _gate = lock_writer_gate(self.cache(), call_site);
+        let tx = self.cache().begin_rw()?;
+        let res = f(&tx)?;
+        tx.commit()?;
+        Ok(res)
+    }
+
+    fn view_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&ScopedTx<Cache>) -> eyre::Result<T>,
+    {
+        let tx = self.cache().begin_ro()?;
+        let res = f(&tx)?;
+        tx.commit()?;
+        Ok(res)
+    }
+
+    fn update_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&ScopedTxMut<Cache>) -> T,
+    {
+        let _gate = lock_writer_gate(self.cache(), "update_cache");
+        let tx = self.cache().begin_rw()?;
+        let res = f(&tx);
+        tx.commit()?;
+        Ok(res)
+    }
+
+    fn view_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&ScopedTx<Cache>) -> T,
+    {
+        let tx = self.cache().begin_ro()?;
+        let res = f(&tx);
+        tx.commit()?;
+        Ok(res)
+    }
+}
+
+pub trait DatabaseProviderTestExt {
+    fn for_testing(
+        consensus_path: &std::path::Path,
+        cache_path: &std::path::Path,
+    ) -> eyre::Result<Self>
+    where
+        Self: Sized;
+}
+
+impl DatabaseProviderTestExt for crate::DatabaseProvider {
+    fn for_testing(
+        consensus_path: &std::path::Path,
+        cache_path: &std::path::Path,
+    ) -> eyre::Result<Self> {
+        use crate::IrysDatabaseArgs as _;
+        use crate::tables::{CacheTables, ConsensusTables};
+        use reth_db::mdbx::DatabaseArguments;
+        let consensus = crate::open_or_create_db(
+            consensus_path,
+            ConsensusTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let cache = crate::open_or_create_db(
+            cache_path,
+            CacheTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        crate::migration::ensure_db_version_compatible(&consensus, &cache)?;
+        Ok(Self::new(
+            std::sync::Arc::new(consensus),
+            std::sync::Arc::new(cache),
+        ))
+    }
+}
+
 use reth_db::cursor::DbCursorRO as _;
 
 impl<K: TransactionKind, T: DupSort> IrysDupCursorExt<T> for Cursor<K, T> {
@@ -444,13 +527,108 @@ impl<K: TransactionKind, T: DupSort> IrysDupCursorExt<T> for Cursor<K, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tables::IrysTables;
+    use crate::tables::ConsensusTables;
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
     use reth_db::mdbx::DatabaseArguments;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
+
+    #[derive(Clone, Copy)]
+    enum CacheWriteMethod {
+        Plain,
+        Eyre,
+        EyreAt,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum EnvWriteMethod {
+        Scoped,
+        Eyre,
+        Rollback,
+    }
+
+    #[rstest::rstest]
+    #[case::scoped(EnvWriteMethod::Scoped)]
+    #[case::eyre(EnvWriteMethod::Eyre)]
+    #[case::rollback(EnvWriteMethod::Rollback)]
+    fn scoped_env_updates_hold_and_release_writer_gate(
+        #[case] method: EnvWriteMethod,
+    ) -> eyre::Result<()> {
+        use crate::submodule::db::{put_reset_marker, read_reset_marker};
+
+        let tmp = irys_testing_utils::TempDirBuilder::new().build();
+        let env = crate::Env::<crate::Submodule>::new(Arc::new(
+            crate::submodule::create_or_open_submodule_db(
+                tmp.path(),
+                DatabaseArguments::irys_testing()?,
+            )?,
+        ));
+        let gate = writer_gate_for(&env);
+        let write = |tx: &<DatabaseEnv as Database>::TXMut| {
+            assert!(matches!(
+                gate.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            put_reset_marker(tx)
+        };
+        match method {
+            EnvWriteMethod::Scoped => env.update_scoped(write)??,
+            EnvWriteMethod::Eyre => env.update_eyre(write)?,
+            EnvWriteMethod::Rollback => {
+                let result: eyre::Result<()> = env.update_eyre(|tx| {
+                    write(tx)?;
+                    eyre::bail!("abort scoped write");
+                });
+                assert!(result.is_err());
+            }
+        }
+        assert!(gate.try_lock().is_ok(), "writer gate was not released");
+        assert_eq!(
+            env.view_eyre(read_reset_marker)?,
+            method != EnvWriteMethod::Rollback
+        );
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::plain(CacheWriteMethod::Plain)]
+    #[case::eyre(CacheWriteMethod::Eyre)]
+    #[case::eyre_at(CacheWriteMethod::EyreAt)]
+    fn cache_writers_wait_for_the_cache_gate(#[case] method: CacheWriteMethod) -> eyre::Result<()> {
+        let tmp = irys_testing_utils::TempDirBuilder::new().build();
+        let db = crate::DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
+        let writer_spawned = Barrier::new(2);
+        let entered_closure = AtomicBool::new(false);
+
+        thread::scope(|scope| -> eyre::Result<()> {
+            let gate = lock_writer_gate(db.cache(), "test.hold_cache_gate");
+            let writer = scope.spawn(|| -> eyre::Result<()> {
+                writer_spawned.wait();
+                let write = || {
+                    entered_closure.store(true, Ordering::SeqCst);
+                    Ok(())
+                };
+                match method {
+                    CacheWriteMethod::Plain => db.update_cache(|_| write())?,
+                    CacheWriteMethod::Eyre => db.update_cache_eyre(|_| write()),
+                    CacheWriteMethod::EyreAt => {
+                        db.update_cache_eyre_at("test.gated_cache_writer", |_| write())
+                    }
+                }
+            });
+
+            writer_spawned.wait();
+            thread::sleep(Duration::from_millis(50));
+            let entered_while_locked = entered_closure.load(Ordering::SeqCst);
+            drop(gate);
+            writer.join().expect("cache writer thread panicked")?;
+            assert!(!entered_while_locked, "cache writer bypassed its gate");
+            assert!(entered_closure.load(Ordering::SeqCst));
+            Ok(())
+        })
+    }
 
     /// Two overlapping `update_eyre` writers must be mutually exclusive.
     ///
@@ -468,7 +646,7 @@ mod tests {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             tmp.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -537,7 +715,7 @@ mod tests {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             tmp.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();

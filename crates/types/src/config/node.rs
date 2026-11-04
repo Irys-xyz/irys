@@ -112,11 +112,11 @@ pub struct DatabaseConfig {
 
     /// Optional override for the MDBX geometry upper bound — the max DB size
     /// *and* the virtual address-space reservation made at open — of irys-owned
-    /// databases (consensus + storage submodules). `None` = production defaults
-    /// (consensus inherits reth's 8 TiB; submodules use 2 TiB), harmless as sparse
-    /// reservations on real disks. Test configs set a small value so many
-    /// concurrent node databases don't exhaust the process's ~128 TiB user
-    /// address space. See `TEST_DB_GEOMETRY_MAX_SIZE`.
+    /// databases (consensus, cache and storage submodules). `None` = production
+    /// defaults (consensus and cache inherit reth's 8 TiB; submodules use 2 TiB),
+    /// harmless as sparse reservations on real disks. Test configs set a small
+    /// value so many concurrent node databases don't exhaust the process's
+    /// ~128 TiB user address space. See `TEST_DB_GEOMETRY_MAX_SIZE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_max_size: Option<usize>,
 
@@ -2126,6 +2126,10 @@ impl NodeConfig {
     /// get the irys consensus data directory path
     pub fn irys_consensus_data_dir(&self) -> PathBuf {
         self.base_directory.join("irys_consensus_data")
+    }
+    /// Get the irys cache DB directory path
+    pub fn irys_cache_data_dir(&self) -> PathBuf {
+        self.base_directory.join("irys_cache_data")
     }
 
     /// get the irys mempool persistence path

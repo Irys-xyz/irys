@@ -13,6 +13,7 @@ use crate::{
     validation_service::ValidationServiceMessage,
 };
 use eyre::OptionExt as _;
+use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::StorageModulesReadGuard;
 use irys_domain::{
@@ -22,8 +23,8 @@ use irys_domain::{
     forkchoice_markers::ForkChoiceMarkers,
 };
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
-    SendTraced as _, SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
+    BlockHash, Config, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock, SendTraced as _,
+    SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
 };
 use irys_vdf::{
     ReanchorRequest, first_divergent_boundary, reorg_crossed_divergent_boundary,
@@ -2082,6 +2083,7 @@ pub fn get_block_header(
 mod tests {
     use super::*;
     use crate::block_validation::PreValidationError;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_types::BlockTransactions;
     use rstest::rstest;
     use std::sync::Mutex;
@@ -2340,20 +2342,13 @@ mod tests {
             configure: impl FnOnce(&mut irys_types::NodeConfig),
             live_step: u64,
         ) -> Self {
-            use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
             use irys_domain::BlockIndex;
             use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
             use irys_types::{ConsensusConfig, NodeConfig};
-            use reth_db::mdbx::DatabaseArguments;
 
             let tmp = TempDirBuilder::new().build();
-            let db_env = open_or_create_db(
-                tmp.path(),
-                IrysTables::ALL,
-                DatabaseArguments::irys_testing().expect("irys_testing db args"),
-            )
-            .expect("open temp MDBX env");
-            let db = DatabaseProvider(Arc::new(db_env));
+            let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))
+                .expect("open temp MDBX env");
 
             let block_index = BlockIndex::new_for_testing(db.clone());
             let block_index_guard = BlockIndexReadGuard::new(block_index);

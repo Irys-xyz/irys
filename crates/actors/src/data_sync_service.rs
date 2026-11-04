@@ -16,13 +16,14 @@ use crate::{
 use chunk_fetcher::ChunkFetchFailureKind;
 use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator, ChunkRequestState};
 use futures::FutureExt as _;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::DatabaseProvider;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::ingress_proofs_by_data_root;
 use irys_domain::{BatchEnqueueItem, BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
 use irys_packing::unpack;
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, IrysAddress, PartitionChunkOffset, SendTraced as _,
-    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
+    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk,
 };
 use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
@@ -1872,7 +1873,7 @@ impl DataSyncServiceInner {
         for data_root in data_roots {
             let proofs = match self
                 .db
-                .view_eyre(|tx| ingress_proofs_by_data_root(tx, data_root))
+                .view_cache_eyre(|tx| ingress_proofs_by_data_root(tx, data_root))
             {
                 Ok(p) => p,
                 Err(e) => {
@@ -2365,10 +2366,11 @@ mod peer_event_channel_tests {
     };
     use crate::chunk_fetcher::MockChunkFetcher;
     use crate::services::ServiceSenders;
-    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{BlockTree, PeerList};
     use irys_testing_utils::TempDirBuilder;
-    use irys_types::{Config, NodeConfig, app_state::DatabaseProvider};
+    use irys_types::{Config, NodeConfig};
     use std::sync::{Arc, RwLock};
     use std::time::{Duration, Instant};
 
@@ -2378,10 +2380,9 @@ mod peer_event_channel_tests {
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = tmp.path().to_path_buf();
         let config = Config::new_with_random_peer_id(node_config);
-        let env = open_or_create_db(
-            tmp.path().join("db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        let env = DatabaseProvider::for_testing(
+            &(tmp.path().join("db")),
+            &(tmp.path().join("db")).join("cache"),
         )
         .expect("db");
         let (service_senders, _receivers) = ServiceSenders::new();
@@ -2393,7 +2394,7 @@ mod peer_event_channel_tests {
             block_tree_guard,
             Arc::new(RwLock::new(Vec::new())),
             PeerList::test_mock().expect("peer list"),
-            DatabaseProvider(Arc::new(env)),
+            env,
             Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize))),
             service_senders,
             config,
@@ -2714,19 +2715,18 @@ mod ingress_proof_peer_tests {
     use super::DataSyncServiceInner;
     use crate::chunk_fetcher::MockChunkFetcher;
     use crate::services::ServiceSenders;
-    use irys_database::db::IrysDatabaseExt as _;
+    use irys_database::DatabaseProvider;
+    use irys_database::db::DatabaseProviderCacheExt as _;
     use irys_database::{
-        IrysDatabaseArgs as _, cache_data_root, open_or_create_db,
-        store_external_ingress_proof_checked, tables::IrysTables,
+        DatabaseProviderTestExt as _, cache_data_root, store_external_ingress_proof_checked,
     };
     use irys_domain::{BlockTree, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         Config, DataLedger, DataTransactionLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId,
         LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset, PeerAddress, PeerListItem,
-        PeerScore, ProtocolVersion, app_state::DatabaseProvider, ingress::IngressProof,
-        irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-        partition_chunk_offset_ie,
+        PeerScore, ProtocolVersion, ingress::IngressProof, irys::IrysSigner,
+        ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use nodit::interval::ii;
     use std::{
@@ -2783,16 +2783,12 @@ mod ingress_proof_peer_tests {
         .expect("index");
 
         // Main DB: CDR + ingress proof from prover (non-assignee).
-        let db = {
-            let env = open_or_create_db(
-                tmp.path().join("irys_db"),
-                IrysTables::ALL,
-                reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-            )
-            .unwrap();
-            DatabaseProvider(Arc::new(env))
-        };
-        db.update_eyre(|wtx| {
+        let db = DatabaseProvider::for_testing(
+            &tmp.path().join("irys_db"),
+            &tmp.path().join("irys_db").join("cache"),
+        )
+        .unwrap();
+        db.update_cache_eyre(|wtx| {
             cache_data_root(wtx, &tx.header, None)?;
             let proof = IngressProof::V1(irys_types::ingress::IngressProofV1 {
                 signature: Default::default(),
@@ -3053,12 +3049,13 @@ mod body_migration_holes_routing_tests {
     use super::{DataSyncServiceInner, DataSyncServiceMessage};
     use crate::chunk_fetcher::MockChunkFetcher;
     use crate::services::ServiceSenders;
-    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{BlockTree, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         Config, DataLedger, H256, IrysAddress, IrysBlockHeader, PartitionChunkOffset,
-        app_state::DatabaseProvider, partition::PartitionAssignment, partition_chunk_offset_ie,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::sync::{Arc, RwLock};
 
@@ -3086,13 +3083,11 @@ mod body_migration_holes_routing_tests {
         );
         sm.pack_with_zeros();
 
-        let env = open_or_create_db(
-            tmp.path().join("db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        let db = DatabaseProvider::for_testing(
+            &(tmp.path().join("db")),
+            &(tmp.path().join("db")).join("cache"),
         )
         .expect("db");
-        let db = DatabaseProvider(Arc::new(env));
         let (service_senders, _receivers) = ServiceSenders::new();
         let mut genesis = IrysBlockHeader::new_mock_header();
         {
@@ -3164,15 +3159,16 @@ mod peer_chunk_validation_tests {
     use crate::chunk_fetcher::MockChunkFetcher;
     use crate::chunk_ingress_service::ChunkIngressMessage;
     use crate::services::ServiceSenders;
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
-    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
     use irys_domain::{BlockTree, ChunkType, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         Base64, ChunkFormat, Config, DataLedger, H256, IrysAddress, IrysBlockHeader,
         LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset, RelativeChunkOffset, Traced,
-        TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider, irys::IrysSigner,
-        ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
+        TxChunkOffset, UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ii,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use nodit::interval::ii;
     use std::{
@@ -3286,13 +3282,11 @@ mod peer_chunk_validation_tests {
             })
             .expect("index data root");
 
-        let env = open_or_create_db(
-            tmp.path().join("db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        let db = DatabaseProvider::for_testing(
+            &(tmp.path().join("db")),
+            &(tmp.path().join("db")).join("cache"),
         )
         .expect("db");
-        let db = DatabaseProvider(Arc::new(env));
         let (service_senders, receivers) = ServiceSenders::new();
         let mut ingress_rx = receivers.chunk_ingress;
         let mut data_sync_rx = receivers.data_sync;
@@ -3471,13 +3465,11 @@ mod peer_chunk_validation_tests {
         assert_eq!(sm.get_chunk_type(&requested), Some(ChunkType::Entropy));
         assert_eq!(sm.get_chunk_type(&foreign_offset), Some(ChunkType::Entropy));
 
-        let env = open_or_create_db(
-            tmp.path().join("db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        let db = DatabaseProvider::for_testing(
+            &(tmp.path().join("db")),
+            &(tmp.path().join("db")).join("cache"),
         )
         .expect("db");
-        let db = DatabaseProvider(Arc::new(env));
         let (service_senders, receivers) = ServiceSenders::new();
         let mut ingress_rx = receivers.chunk_ingress;
         let mut data_sync_rx = receivers.data_sync;
@@ -3618,10 +3610,9 @@ mod peer_chunk_validation_tests {
                 .expect("index data root");
         }
 
-        let env = open_or_create_db(
-            tmp.path().join("db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        let env = DatabaseProvider::for_testing(
+            &(tmp.path().join("db")),
+            &(tmp.path().join("db")).join("cache"),
         )
         .expect("db");
         let (service_senders, receivers) = ServiceSenders::new();
@@ -3656,7 +3647,7 @@ mod peer_chunk_validation_tests {
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree))),
             Arc::new(RwLock::new(vec![sm.clone()])),
             peer_list,
-            DatabaseProvider(Arc::new(env)),
+            env,
             factory,
             service_senders,
             config,
@@ -3850,13 +3841,14 @@ mod entropy_peer_sync_tests {
     use super::DataSyncServiceInner;
     use crate::chunk_fetcher::MockChunkFetcher;
     use crate::services::ServiceSenders;
-    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{BlockTree, ChunkType, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         Config, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId, PartitionChunkOffset,
-        PeerAddress, PeerListItem, PeerScore, ProtocolVersion, app_state::DatabaseProvider,
-        partition::PartitionAssignment, partition_chunk_offset_ie,
+        PeerAddress, PeerListItem, PeerScore, ProtocolVersion, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -3895,13 +3887,11 @@ mod entropy_peer_sync_tests {
             "the module starts with no entropy, so peer sync must skip it"
         );
 
-        let env = open_or_create_db(
-            tmp.path().join("db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        let db = DatabaseProvider::for_testing(
+            &(tmp.path().join("db")),
+            &(tmp.path().join("db")).join("cache"),
         )
         .expect("db");
-        let db = DatabaseProvider(Arc::new(env));
         let (service_senders, _receivers) = ServiceSenders::new();
         let api = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 19091);
         let peers = vec![PeerListItem {
@@ -4096,13 +4086,14 @@ mod assignment_follow_tests {
     use crate::chunk_fetcher::{ChunkFetcher, ChunkFetcherFactory, MockChunkFetcher};
     use crate::data_sync_service::chunk_orchestrator::{ChunkRequest, ChunkRequestState};
     use crate::services::ServiceSenders;
-    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{BlockTree, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         Config, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId, PartitionChunkOffset,
         PeerAddress, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
-        app_state::DatabaseProvider, partition::PartitionAssignment, partition_chunk_offset_ie,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::sync::{Arc, Mutex, RwLock};
     use std::time::Instant;
@@ -4119,13 +4110,7 @@ mod assignment_follow_tests {
     }
 
     fn open_db(base: &std::path::Path) -> DatabaseProvider {
-        let env = open_or_create_db(
-            base.join("db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
-        )
-        .expect("db");
-        DatabaseProvider(Arc::new(env))
+        DatabaseProvider::for_testing(&base.join("db"), &base.join("db").join("cache")).expect("db")
     }
 
     fn module(

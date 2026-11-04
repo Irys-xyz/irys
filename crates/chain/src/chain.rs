@@ -31,6 +31,7 @@ use irys_actors::{
 };
 use irys_api_server::{API_VERSION, ApiState, create_listener, run_server};
 use irys_config::submodules::StorageSubmodulesConfig;
+use irys_database::DatabaseProvider;
 use irys_database::database;
 use irys_database::db::{IrysDatabaseExt as _, RethDbWrapper};
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -52,7 +53,9 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reward_curve::HalvingCurve;
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db_with_args;
+use irys_storage::irys_consensus_data_db::{
+    open_or_create_irys_cache_data_db_with_args, open_or_create_irys_consensus_data_db_with_args,
+};
 use irys_types::BlockHash;
 use irys_types::ToBase58 as _;
 use irys_types::chainspec::irys_chain_spec;
@@ -60,7 +63,7 @@ use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
     IrysPeerId, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
     PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
-    SystemLedger, TokioServiceHandle, Traced, U256, VdfFreeRun, app_state::DatabaseProvider,
+    SystemLedger, TokioServiceHandle, Traced, U256, VdfFreeRun,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
@@ -1330,10 +1333,12 @@ impl IrysNode {
                     // report_metrics() — that hook only covers Reth's DB.
                     // Surfaces freelist, table sizes, and timed-out-reader
                     // gauges so MDBX contention shows up alongside the per-tx
-                    // commit-latency histograms.
-                    irys_database::db_metrics::report_irys_consensus_db_gauges(
-                        irys_db_for_metrics.0.as_ref(),
-                    );
+                    // commit-latency histograms. Run for both Irys envs so the
+                    // cache DB (added in V4) gets the same observability.
+                    use irys_database::db_metrics::report_db_gauges;
+                    use irys_database::scoped_tx::{Cache, Consensus};
+                    report_db_gauges::<Consensus>(irys_db_for_metrics.consensus().as_ref());
+                    report_db_gauges::<Cache>(irys_db_for_metrics.cache().as_ref());
                 }
             });
         }
@@ -2921,15 +2926,20 @@ fn init_reth_db(
 
 #[tracing::instrument(level = "trace", skip_all)]
 fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Error> {
-    let irys_db_env = open_or_create_irys_consensus_data_db_with_args(
+    let consensus = open_or_create_irys_consensus_data_db_with_args(
         node_config.irys_consensus_data_dir(),
         // Args (incl. the test geometry cap) derived from the node's DatabaseConfig.
         irys_database::consensus_db_args(&node_config.database)?,
     )?;
-    irys_database::migration::ensure_db_version_compatible(&irys_db_env)?;
-    let irys_db = DatabaseProvider(Arc::new(irys_db_env));
-    debug!("Irys DB initialized");
-    Ok(irys_db)
+    let cache = open_or_create_irys_cache_data_db_with_args(
+        node_config.irys_cache_data_dir(),
+        // Cache env: `cache_sync_mode` plus the same geometry cap.
+        irys_database::cache_db_args(&node_config.database)?,
+    )?;
+    irys_database::migration::ensure_db_version_compatible(&consensus, &cache)?;
+    let db = DatabaseProvider::new(Arc::new(consensus), Arc::new(cache));
+    debug!("Irys DB initialized (consensus + cache)");
+    Ok(db)
 }
 
 /// Gets the peer_id from the peer key file, or generates a new keypair and stores it.

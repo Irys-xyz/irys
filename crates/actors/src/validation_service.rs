@@ -17,6 +17,7 @@ use crate::{
     metrics,
     services::ServiceSenders,
 };
+use irys_database::DatabaseProvider;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, StorageModulesReadGuard,
     chain_sync_state::ChainSyncState,
@@ -25,7 +26,6 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     BlockHash, Config, IrysBlockHeader, SealedBlock, SendTraced as _, TokioServiceHandle, Traced,
-    app_state::DatabaseProvider,
 };
 use irys_vdf::ReanchorSignals;
 use irys_vdf::state::{VdfStateReadonly, vdf_step_batch_is_valid};

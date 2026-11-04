@@ -56,7 +56,7 @@ use crate::validation::{
 };
 use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_database::{db::IrysDatabaseExt as _, store_external_ingress_proof_checked};
+use irys_database::{db::DatabaseProviderCacheExt as _, store_external_ingress_proof_checked};
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{
@@ -265,7 +265,7 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
         chain_id,
         proof_anchor,
     )?;
-    genesis_node.node_ctx.db.update_eyre(|rw_tx| {
+    genesis_node.node_ctx.db.update_cache_eyre(|rw_tx| {
         store_external_ingress_proof_checked(rw_tx, &proof, genesis_signer.address())?;
         Ok(())
     })?;

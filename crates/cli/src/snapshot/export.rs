@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use irys_database::reth_db::mdbx::DatabaseArguments;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_database::snapshot::{CopyFlags, copy_dir_recursive, copy_mdbx_env, strip_node_local};
-use irys_database::tables::IrysTables;
+use irys_database::tables::ConsensusTables;
 use irys_database::{
     IrysDatabaseArgs as _, block_index_latest_height, database_schema_version, open_or_create_db,
 };
@@ -15,7 +15,8 @@ use reth_node_core::version::default_client_version;
 use super::archive;
 use super::manifest::{MANIFEST_FILENAME, SNAPSHOT_FORMAT_VERSION, SnapshotManifest};
 use super::{
-    BLOCK_INDEX_SUBDIR, GENESIS_COMMITMENTS_FILE, GENESIS_FILE, IRYS_CONSENSUS_SUBDIR, RETH_SUBDIR,
+    BLOCK_INDEX_SUBDIR, GENESIS_COMMITMENTS_FILE, GENESIS_FILE, IRYS_CACHE_SUBDIR,
+    IRYS_CONSENSUS_SUBDIR, RETH_SUBDIR,
 };
 
 #[derive(Debug, Clone)]
@@ -74,7 +75,7 @@ fn snapshot_irys_consensus(opts: &ExportOpts, staging: &Path) -> eyre::Result<(u
     }
 
     let (schema_version, tip_height) = {
-        let src_db = open_consensus_ro(&src_path)?;
+        let src_db = open_irys_db_ro(&src_path)?;
         let mut tx = src_db.tx().context("begin source consensus RO tx")?;
         let schema = database_schema_version(&mut tx)
             .context("reading source schema version")?
@@ -90,13 +91,20 @@ fn snapshot_irys_consensus(opts: &ExportOpts, staging: &Path) -> eyre::Result<(u
         let dest = staging.join(IRYS_CONSENSUS_SUBDIR);
         copy_mdbx_env(&src_db, &dest, opts.copy_flags).context("copying Irys consensus mdbx")?;
 
+        if opts.include_caches && schema >= u32::from(irys_types::DatabaseVersion::V4) {
+            let cache_src = opts.data_dir.join(IRYS_CACHE_SUBDIR);
+            let cache = open_irys_db_ro(&cache_src).context("opening source cache DB")?;
+            copy_mdbx_env(&cache, &staging.join(IRYS_CACHE_SUBDIR), opts.copy_flags)
+                .context("copying Irys cache mdbx")?;
+        }
+
         (schema, tip)
     };
 
     let dest_path = staging.join(IRYS_CONSENSUS_SUBDIR);
     let copy_db = open_or_create_db(
         &dest_path,
-        IrysTables::ALL,
+        ConsensusTables::ALL,
         DatabaseArguments::irys_default(irys_types::DbSyncMode::SafeNoSync)
             .context("default db args for copy")?,
     )
@@ -145,7 +153,7 @@ fn snapshot_reth(opts: &ExportOpts, staging: &Path) -> eyre::Result<Option<u64>>
     snapshot_reth_state(&src, &dest, opts.copy_flags).context("snapshotting Reth state")
 }
 
-fn open_consensus_ro(path: &Path) -> eyre::Result<DatabaseEnv> {
+fn open_irys_db_ro(path: &Path) -> eyre::Result<DatabaseEnv> {
     DatabaseEnv::open(
         path,
         DatabaseEnvKind::RO,
@@ -153,7 +161,7 @@ fn open_consensus_ro(path: &Path) -> eyre::Result<DatabaseEnv> {
             .with_log_level(None)
             .with_exclusive(Some(false)),
     )
-    .with_context(|| format!("opening Irys consensus RO at {}", path.display()))
+    .with_context(|| format!("opening Irys DB RO at {}", path.display()))
 }
 
 fn write_manifest(staging: &Path, manifest: &SnapshotManifest) -> eyre::Result<()> {
@@ -254,7 +262,7 @@ mod tests {
         let irys_path = data_dir.join(IRYS_CONSENSUS_SUBDIR);
         let irys_db = open_or_create_db(
             &irys_path,
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open irys db");
@@ -354,7 +362,7 @@ mod tests {
         // but the specific block header survives.
         let copy_db = open_or_create_db(
             &extracted_irys,
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open extracted irys db");
@@ -395,7 +403,7 @@ mod tests {
         let irys_path = data_dir.join(IRYS_CONSENSUS_SUBDIR);
         let db = open_or_create_db(
             &irys_path,
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open irys db");

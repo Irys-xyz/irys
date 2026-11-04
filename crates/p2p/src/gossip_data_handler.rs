@@ -1510,13 +1510,14 @@ mod fetch_body_retries_tests {
 mod block_body_serve_cap_tests {
     use super::*;
     use crate::tests::util::data_handler_stub;
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        BlockHash, Config, DatabaseProvider, DbSyncMode, H256, IrysAddress, IrysPeerId, NodeConfig,
-        PeerAddress, PeerListItem, PeerScore,
+        BlockHash, Config, H256, IrysAddress, IrysPeerId, NodeConfig, PeerAddress, PeerListItem,
+        PeerScore,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -1539,13 +1540,11 @@ mod block_body_serve_cap_tests {
         node_config.base_directory = dir.path().to_path_buf();
         node_config.p2p_gossip.max_concurrent_block_body_serves = limit;
         let config = Config::new_with_random_peer_id(node_config);
-        let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(
-                &config.node_config.base_directory,
-                DbSyncMode::UtterlyNoSync,
-            )
-            .expect("open test db"),
-        ));
+        let db = DatabaseProvider::for_testing(
+            &config.node_config.base_directory,
+            &config.node_config.irys_cache_data_dir(),
+        )
+        .expect("open test db");
         let peer_list = PeerList::test_mock().expect("peer list");
         let sync_state = ChainSyncState::new(false, false);
         let handler = data_handler_stub(&config, &peer_list, db, sync_state);
@@ -1777,17 +1776,15 @@ mod body_fetch_recovery_tests {
     use crate::block_pool::BlockRemovalReason;
     use crate::tests::util::{FakeGossipServer, data_handler_stub_with_sync, peer_list_item};
     use crate::types::GossipResponse;
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::SealedBlock;
     use irys_types::v2::GossipDataV2;
-    use irys_types::{
-        BlockBody, Config, DatabaseProvider, DbSyncMode, H256, IrysAddress, IrysPeerId, NodeConfig,
-        PeerScore,
-    };
+    use irys_types::{BlockBody, Config, H256, IrysAddress, IrysPeerId, NodeConfig, PeerScore};
     use irys_utils::circuit_breaker::CircuitBreakerConfig;
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -1817,13 +1814,11 @@ mod body_fetch_recovery_tests {
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = dir.path().to_path_buf();
         let config = Config::new_with_random_peer_id(node_config);
-        let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(
-                &config.node_config.base_directory,
-                DbSyncMode::UtterlyNoSync,
-            )
-            .expect("open test db"),
-        ));
+        let db = DatabaseProvider::for_testing(
+            &config.node_config.base_directory,
+            &config.node_config.irys_cache_data_dir(),
+        )
+        .expect("open test db");
         let peer_list = PeerList::test_mock().expect("peer list");
         let (handler, sync_rx) =
             data_handler_stub_with_sync(&config, &peer_list, db, ChainSyncState::new(false, false));
@@ -2822,12 +2817,13 @@ mod execution_payload_tests {
     use super::*;
     use crate::tests::util::{FakeGossipServer, data_handler_stub, peer_list_item};
     use crate::types::GossipResponse;
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::v2::GossipDataV2;
-    use irys_types::{DatabaseProvider, DbSyncMode, NodeConfig, PeerScore};
+    use irys_types::{NodeConfig, PeerScore};
     use reth::primitives::Header;
     use reth::primitives::proofs::calculate_ommers_root;
     use reth_ethereum_primitives::BlockBody as EvmBlockBody;
@@ -2840,13 +2836,11 @@ mod execution_payload_tests {
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = dir.path().to_path_buf();
         let config = Config::new_with_random_peer_id(node_config);
-        let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(
-                &config.node_config.base_directory,
-                DbSyncMode::UtterlyNoSync,
-            )
-            .expect("open test db"),
-        ));
+        let db = DatabaseProvider::for_testing(
+            &config.node_config.base_directory,
+            &config.node_config.irys_cache_data_dir(),
+        )
+        .expect("open test db");
         let peer_list = PeerList::test_mock().expect("peer list");
         let handler = data_handler_stub(&config, &peer_list, db, ChainSyncState::new(false, false));
         (dir, handler)

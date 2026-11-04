@@ -1,7 +1,8 @@
 use crate::block_ancestry::walk_ancestors_tree_then_db;
+use irys_database::DatabaseProvider;
 use irys_database::{canonical_commitment_included_height, db::IrysDatabaseExt as _};
 use irys_domain::BlockTreeReadGuard;
-use irys_types::{CommitmentTransaction, DatabaseProvider, H256, IrysBlockHeader};
+use irys_types::{CommitmentTransaction, H256, IrysBlockHeader};
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 
@@ -143,6 +144,7 @@ pub(crate) fn ancestor_commitment_tx_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::BlockTree;
     use irys_testing_utils::{IrysBlockHeaderTestExt as _, mock_header_with_commitments};
     use irys_types::ConsensusConfig;
@@ -166,16 +168,9 @@ mod tests {
     }
 
     fn test_db() -> (irys_testing_utils::tempfile::TempDir, DatabaseProvider) {
-        use irys_database::IrysDatabaseArgs as _;
-
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db = irys_database::open_or_create_db(
-            tmp.path(),
-            irys_database::tables::IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-        )
-        .unwrap();
-        (tmp, DatabaseProvider(Arc::new(db)))
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache")).unwrap();
+        (tmp, db)
     }
 
     // Full behavioral coverage is in the integration tests (Tasks A3, A5); this

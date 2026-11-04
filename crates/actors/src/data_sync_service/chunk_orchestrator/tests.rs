@@ -4,17 +4,16 @@ use crate::{
     metrics,
     test_helpers::build_test_service_senders,
 };
-use irys_database::{
-    IrysDatabaseArgs as _, cache_chunk, cache_data_root, open_or_create_db, tables::IrysTables,
-};
+use irys_database::DatabaseProvider;
+use irys_database::{DatabaseProviderTestExt as _, cache_chunk, cache_data_root};
 use irys_domain::ChunkType;
 use irys_domain::{BlockTree, StorageModuleInfo};
 use irys_testing_utils::TempDirBuilder;
 use irys_types::{
     Base64, Config, ConsensusConfig, DataLedger, DataTransaction, DataTransactionLedger, H256,
     IrysAddress, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PeerAddress, PeerListItem,
-    TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider, irys::IrysSigner,
-    ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
+    TxChunkOffset, UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ii,
+    partition::PartitionAssignment, partition_chunk_offset_ie,
 };
 use nodit::interval::ii;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -115,13 +114,7 @@ fn open_test_db(config: &Config) -> DatabaseProvider {
         .node_config
         .base_directory
         .join(format!("orchestrator-db-{n}"));
-    let env = open_or_create_db(
-        path,
-        IrysTables::ALL,
-        reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
-    )
-    .expect("open orchestrator test db");
-    DatabaseProvider(Arc::new(env))
+    DatabaseProvider::for_testing(&path, &path.join("cache")).expect("open orchestrator test db")
 }
 
 fn make_orchestrator(sm: Arc<StorageModule>, config: &Config) -> ChunkOrchestrator {
@@ -1869,7 +1862,7 @@ fn index_and_settle(sm: &StorageModule, tx: &DataTransaction, last_inclusive: u6
 }
 
 fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8], offsets: &[usize]) {
-    db.update_eyre(|wtx| {
+    db.update_cache_eyre(|wtx| {
         cache_data_root(wtx, &tx.header, None)?;
         for &i in offsets {
             let node = &tx.chunks[i];
@@ -1890,10 +1883,9 @@ fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8], off
 fn strip_cached_body(db: &DatabaseProvider, tx: &DataTransaction) {
     use irys_database::db_cache::CachedChunk;
     use irys_database::tables::CachedChunks;
-    use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
     let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
-    db.update_eyre(|wtx| {
+    db.update_cache_eyre(|wtx| {
         let existing = wtx
             .get::<CachedChunks>(path_hash)?
             .expect("cached chunk row");

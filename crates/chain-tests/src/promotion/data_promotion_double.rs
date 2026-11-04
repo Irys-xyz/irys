@@ -5,10 +5,10 @@ use actix_web::test::{self, TestRequest, call_service};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::{tables::IngressProofs, walk_all};
 use irys_types::{DataLedger, NodeConfig};
 use irys_types::{DataTransaction, DataTransactionHeader, LedgerChunkOffset, irys::IrysSigner};
-use reth_db::Database as _;
 use std::time::Duration;
 use tracing::debug;
 
@@ -236,7 +236,7 @@ async fn spiky_slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> 
 
     // ensure the ingress proof still exists
     let ingress_proofs = db
-        .view(|read_tx| walk_all::<IngressProofs, _>(read_tx))
+        .view_cache(|read_tx| walk_all::<IngressProofs, _>(read_tx.inner()))
         .unwrap()
         .unwrap();
     assert_eq!(ingress_proofs.len(), 1);

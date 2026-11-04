@@ -6,15 +6,16 @@ use super::metrics::{
     record_flush_failure, record_validation_duration,
 };
 
+use irys_database::DatabaseProvider;
 use irys_database::{
-    complete_ingress_leaves, confirm_data_size_for_data_root, db::IrysDatabaseExt as _,
+    complete_ingress_leaves, confirm_data_size_for_data_root, db::DatabaseProviderCacheExt as _,
 };
 use irys_domain::{StorageModule, WriteDataChunkError};
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    ChunkPathHash, DataLedger, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
-    SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, has_non_zero_notepad,
-    hash_sha256, irys::IrysSigner, validate_path, validate_path_byte_range,
+    ChunkPathHash, DataLedger, DataRoot, H256, IngressMerkleLeaf, IngressProof, SendTraced as _,
+    chunk::UnpackedChunk, expected_chunk_byte_range, has_non_zero_notepad, hash_sha256,
+    irys::IrysSigner, validate_path, validate_path_byte_range,
 };
 use irys_utils::ElapsedMs as _;
 use lru::LruCache;
@@ -242,7 +243,9 @@ impl ChunkIngressServiceInner {
     fn maybe_rescue_after_park(&self, data_root: DataRoot, required_min_data_size: Option<u64>) {
         let cdr_lookup = self
             .irys_db
-            .view_eyre(|read_tx| irys_database::cached_data_root_by_data_root(read_tx, data_root))
+            .view_cache_eyre(|read_tx| {
+                irys_database::cached_data_root_by_data_root(read_tx, data_root)
+            })
             .map(|opt| opt.map(|cdr| cdr.data_size))
             .map_err(|e| {
                 warn!(
@@ -570,7 +573,7 @@ impl ChunkIngressServiceInner {
         let _fetch_size_span = info_span!("chunk.fetch_data_size").entered();
         let cached_data_root = self
             .irys_db
-            .view_eyre(|read_tx| {
+            .view_cache_eyre(|read_tx| {
                 irys_database::cached_data_root_by_data_root(read_tx, chunk.data_root)
             })
             .map_err(|e| {
@@ -843,7 +846,7 @@ impl ChunkIngressServiceInner {
         // range and body have both been validated.
         if path_result.is_rightmost_chunk {
             self.irys_db
-                .update_eyre(|db_tx| {
+                .update_cache_eyre(|db_tx| {
                     confirm_data_size_for_data_root(
                         db_tx,
                         &chunk.data_root,
@@ -968,7 +971,9 @@ impl ChunkIngressServiceInner {
     ) -> Result<(), ChunkIngressError> {
         let cached_data_root = self
             .irys_db
-            .view_eyre(|read_tx| irys_database::cached_data_root_by_data_root(read_tx, data_root))
+            .view_cache_eyre(|read_tx| {
+                irys_database::cached_data_root_by_data_root(read_tx, data_root)
+            })
             .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
         // Early out: only generate ingress proofs for confirmed data sizes
@@ -986,7 +991,7 @@ impl ChunkIngressServiceInner {
         let local_address = self.config.irys_signer().address();
         let existing_local_proof = self
             .irys_db
-            .view_eyre(|tx| {
+            .view_cache_eyre(|tx| {
                 irys_database::ingress_proof_by_data_root_address(tx, data_root, local_address)
             })
             .map_err(|e| {
@@ -1011,8 +1016,8 @@ impl ChunkIngressServiceInner {
         // then verifies every exact offset and byte boundary before returning.
         let leaves = self
             .irys_db
-            .view_eyre(|tx| {
-                complete_ingress_leaves(tx, data_root, local_address, data_size, chunk_size)
+            .view_cache_eyre(|tx| {
+                complete_ingress_leaves(tx.inner(), data_root, local_address, data_size, chunk_size)
             })
             .map_err(|error| {
                 error!(
@@ -1096,7 +1101,7 @@ impl ChunkIngressServiceInner {
         }
         let reread = self
             .irys_db
-            .view_eyre(|read_tx| {
+            .view_cache_eyre(|read_tx| {
                 irys_database::cached_data_root_by_data_root(read_tx, chunk.data_root)
             })
             .map_err(|error| {
@@ -1174,10 +1179,9 @@ impl ChunkIngressServiceInner {
                     size, data_root
                 );
                 // Cache the confirmed data_size so subsequent chunks skip verification
-                if let Err(e) = self
-                    .irys_db
-                    .update_eyre(|db_tx| confirm_data_size_for_data_root(db_tx, &data_root, size))
-                {
+                if let Err(e) = self.irys_db.update_cache_eyre(|db_tx| {
+                    confirm_data_size_for_data_root(db_tx, &data_root, size)
+                }) {
                     warn!(
                         "Failed to cache confirmed data_size for {:?}: {:?}",
                         data_root, e
@@ -1350,7 +1354,9 @@ pub fn generate_ingress_proof(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root
     );
-    db.update_scoped(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
+    db.update_cache_eyre(|rw_tx| {
+        irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer)
+    })?;
 
     Ok(proof)
 }
@@ -1391,6 +1397,7 @@ enum PendingDrainRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_database::db_cache::CachedDataRoot;
     use irys_types::TxChunkOffset;
     use irys_types::UnixTimestamp;
@@ -2233,10 +2240,9 @@ mod tests {
         insert_unconfirmed_cdr(&inner.irys_db, chunk.data_root, chunk.data_size);
         let (data_root, data_size) = (chunk.data_root, chunk.data_size);
         {
-            use irys_database::db::IrysDatabaseExt as _;
             inner
                 .irys_db
-                .update_eyre(|tx| {
+                .update_cache_eyre(|tx| {
                     irys_database::confirm_data_size_for_data_root(tx, &data_root, data_size)
                         .map(|_| ())
                 })
@@ -3128,12 +3134,10 @@ mod tests {
         max_chunks_per_item: usize,
         preheader_cap: usize,
     ) -> (ChunkIngressServiceInner, crate::services::ServiceReceivers) {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{BlockTree, BlockTreeReadGuard, StorageModulesReadGuard};
         use irys_testing_utils::new_mock_signed_header;
         use irys_types::{Config, NodeConfig};
         use reth::tasks::TaskExecutor;
-        use reth_db::mdbx::DatabaseArguments;
         use std::num::NonZeroUsize;
 
         let mut node_config = NodeConfig::testing();
@@ -3147,13 +3151,11 @@ mod tests {
         node_config.mempool.max_preheader_chunks_per_item = preheader_cap;
         let config = Config::new_with_random_peer_id(node_config);
 
-        let db_env = open_or_create_db(
-            tmp.as_ref().join("db"),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().expect("testing database arguments"),
+        let irys_db = DatabaseProvider::for_testing(
+            &(tmp.as_ref().join("db")),
+            &(tmp.as_ref().join("db")).join("cache"),
         )
         .expect("open test database");
-        let irys_db = DatabaseProvider(std::sync::Arc::new(db_env));
 
         let (service_senders, receivers) = crate::test_helpers::build_test_service_senders();
         let block_tree_read_guard =
@@ -3191,7 +3193,6 @@ mod tests {
 
     fn insert_unconfirmed_cdr(db: &DatabaseProvider, data_root: H256, data_size: u64) {
         use irys_database::cache_data_root;
-        use irys_database::db::IrysDatabaseExt as _;
         use irys_types::{
             DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
             DataTransactionMetadata,
@@ -3205,7 +3206,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update_eyre(|tx| cache_data_root(tx, &header, None).map(|_| ()))
+        db.update_cache_eyre(|tx| cache_data_root(tx, &header, None).map(|_| ()))
             .expect("insert cached data root");
     }
 

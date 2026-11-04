@@ -2,18 +2,17 @@ use crate::utils::IrysNodeTest;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use irys_chain::IrysNodeCtx;
-use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
+use irys_database::DatabaseProvider;
+use irys_database::db::{DatabaseProviderCacheExt as _, IrysDupCursorExt as _};
 use irys_database::tables::{CachedChunksIndex, CompactCachedIngressProof};
 use irys_testing_utils::initialize_tracing;
-use irys_types::{
-    DataLedger, DataRoot, DatabaseProvider, H256, IrysAddress, NodeConfig, irys::IrysSigner,
-};
+use irys_types::{DataLedger, DataRoot, H256, IrysAddress, NodeConfig, irys::IrysSigner};
 use reth_db::transaction::DbTx as _;
 use std::time::Duration;
 
 fn cached_chunk_count(db: &DatabaseProvider, data_root: DataRoot) -> eyre::Result<u32> {
-    db.view_eyre(|tx| {
-        let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+    db.view_cache_eyre(|tx| {
+        let mut cursor = tx.inner().cursor_dup_read::<CachedChunksIndex>()?;
         Ok(cursor.dup_count(data_root)?.unwrap_or(0))
     })
 }
@@ -23,7 +22,9 @@ fn local_proof(
     data_root: DataRoot,
     address: IrysAddress,
 ) -> eyre::Result<Option<CompactCachedIngressProof>> {
-    db.view_eyre(|tx| irys_database::ingress_proof_by_data_root_address(tx, data_root, address))
+    db.view_cache_eyre(|tx| {
+        irys_database::ingress_proof_by_data_root_address(tx, data_root, address)
+    })
 }
 
 fn local_anchor(
@@ -173,7 +174,7 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
 
     // A node that already lost the row gets it back from the restore sweep.
     let current = local_proof(&db, data_root, local_address)?.expect("reanchored proof");
-    let deleted = db.update_eyre(|tx| {
+    let deleted = db.update_cache_eyre(|tx| {
         irys_database::delete_ingress_proof_if_unchanged(tx, data_root, current)
     })?;
     assert!(deleted);
