@@ -17,4 +17,27 @@ private security advisories until the fix is released.
 
 ## Process
 
+- A fix for a new defect class adds a class file, its index row, and an instance row in the same PR.
+  Use the `defect-catalogue-add` skill (`.agents/skills/defect-catalogue-add/`).
+- A fix for a known class adds an instance row.
+- The sibling sweep for a new class is optional. It can run as a separate step.
+- Reviews use the `defect-catalogue-review` skill (`.agents/skills/defect-catalogue-review/`): the
+  final review before a PR merges, and the version-bump review.
+- Tools (no model use):
+  - `cargo xtask defects check`: validates the catalogue. CI runs it.
+  - `cargo xtask defects trend [--since YYYY-MM-DD | --last-releases N]`: instance counts per
+    class, most frequent first.
+  - `cargo xtask defects scan [--base <ref>] [--head <ref>]`: matches class patterns against the
+    lines a diff adds. Hits are leads, not findings.
+
 ## Known non-issues
+
+Patterns that look like defects but are correct by design. Do not raise them in a review.
+
+### Reth/Irys state mismatch is fatal
+
+**Pattern:** `RethService` (`crates/actors/src/reth_service.rs`) stops with an error, and does not
+retry, when a fork-choice update to Reth fails: the Reth (EVM) state and the Irys state do not match.
+
+**Why it is correct:** to continue on a mismatched state risks a fork or a wrong state. The node must
+stop so that an operator can repair it.
