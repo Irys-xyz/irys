@@ -83,6 +83,21 @@ enum DefectsAction {
         #[clap(long)]
         last_releases: Option<usize>,
     },
+    /// Match class patterns against the lines a diff adds. Hits are leads to verify, not findings.
+    ///
+    /// With `--head`, scans `<base>...<head>`. Without it, scans the working tree against `<base>`
+    /// (tracked files only: untracked files are not scanned). Always exits 0 on hits.
+    Scan {
+        /// Catalogue directory (default: the one in this checkout).
+        #[clap(long)]
+        dir: Option<PathBuf>,
+        /// Base ref (default: the merge-base of `master` and `HEAD`).
+        #[clap(long)]
+        base: Option<String>,
+        /// Head ref (default: the working tree).
+        #[clap(long)]
+        head: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1305,6 +1320,41 @@ fn run_defects(action: DefectsAction) -> eyre::Result<()> {
             };
             let rows = defects::trend::trend(&catalogue, window.as_ref());
             print!("{}", defects::trend::render_trend(&rows, window.is_some()));
+        }
+        DefectsAction::Scan { dir, base, head } => {
+            let classes = defects::scan::compile(&load_valid_catalogue(dir)?)?;
+            let sh = Shell::new()?;
+            let base = match base {
+                Some(base) => base,
+                None => cmd!(sh, "git merge-base master HEAD").read()?,
+            };
+            // Fixed prefixes: a user's `diff.mnemonicPrefix` or `diff.noprefix` must not change
+            // the `+++ b/<path>` lines that the parser reads.
+            let diff_args = [
+                "-U0",
+                "--find-renames",
+                "--no-color",
+                "--no-ext-diff",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+            ];
+            let range = match head {
+                Some(head) => format!("{base}...{head}"),
+                None => base,
+            };
+            let diff = cmd!(sh, "git diff {diff_args...} {range}").read()?;
+            let added = defects::scan::parse_added_lines(&diff);
+            let hits = defects::scan::scan(&classes, &added);
+            for hit in &hits {
+                println!(
+                    "{}  {}:{}  {}",
+                    hit.class,
+                    hit.path,
+                    hit.line,
+                    hit.text.trim()
+                );
+            }
+            println!("{} lead(s); verify each before you report it.", hits.len());
         }
     }
     Ok(())
