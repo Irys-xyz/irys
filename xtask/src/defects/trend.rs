@@ -127,9 +127,9 @@ mod tests {
             slug: id.to_owned(),
             meta: ClassMeta {
                 id: id.to_owned(),
-                title: id.to_owned(),
                 severity,
-                applies_when: "always".to_owned(),
+                scope: "always".to_owned(),
+                flag: "always".to_owned(),
                 paths: vec![],
                 patterns: vec![],
             },
@@ -162,7 +162,7 @@ mod tests {
                 instance("a", "2026-10-20", "testnet-4.1.1"),
                 instance("b", "2026-10-25", "mainnet-4.1.1"),
             ],
-            index: vec![],
+            ..Catalogue::default()
         }
     }
 

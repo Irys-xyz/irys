@@ -11,6 +11,12 @@ use std::path::Path;
 /// Catalogue location, relative to the workspace root.
 pub const CATALOGUE_DIR: &str = "docs/99-reference/defect-catalogue";
 
+/// The detection list: one line per class, read first in a review.
+pub const DETECT_FILE: &str = "detect.md";
+
+/// The section of the detection list that holds the class lines.
+const DETECT_CLASSES_HEADING: &str = "## Classes";
+
 /// Body sections every class file must have, in this order.
 pub const REQUIRED_SECTIONS: [&str; 4] =
     ["Pattern", "Why it is a defect", "Correct form", "Detection"];
@@ -41,9 +47,11 @@ impl fmt::Display for Severity {
 #[serde(deny_unknown_fields)]
 pub struct ClassMeta {
     pub id: String,
-    pub title: String,
     pub severity: Severity,
-    pub applies_when: String,
+    /// The code this class can occur in.
+    pub scope: String,
+    /// What to flag: the defect signal, in code terms.
+    pub flag: String,
     #[serde(default)]
     pub paths: Vec<String>,
     #[serde(default)]
@@ -88,20 +96,12 @@ struct InstanceLog {
     instance: Vec<Instance>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndexRow {
-    pub id: String,
-    pub link: String,
-    pub title: String,
-    pub severity: String,
-    pub applies_when: String,
-}
-
 #[derive(Debug, Default)]
 pub struct Catalogue {
     pub classes: Vec<ClassFile>,
     pub instances: Vec<Instance>,
-    pub index: Vec<IndexRow>,
+    /// The class lines of the detection list, in file order.
+    pub detect_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,46 +147,32 @@ pub fn split_front_matter(text: &str) -> eyre::Result<(&str, &str)> {
     bail!("front matter has no closing `+++` line")
 }
 
-/// Parses the index table: the first table whose header starts with `| Id |`.
-pub fn parse_index(readme: &str) -> eyre::Result<Vec<IndexRow>> {
-    let mut lines = readme
-        .lines()
-        .skip_while(|l| !l.trim_start().starts_with("| Id |"));
-    if lines.next().is_none() {
-        bail!("README has no index table (a header row that starts with `| Id |`)");
-    }
-    match lines.next() {
-        Some(separator) if separator.trim_start().starts_with("|-") => {}
-        _ => bail!("index table header has no `|---` separator row"),
-    }
-    lines
-        .take_while(|l| l.trim_start().starts_with('|'))
-        .map(parse_index_row)
-        .collect()
+/// The detection-list line for a class. `check` requires `detect.md` to hold exactly this line.
+pub fn detect_line(meta: &ClassMeta) -> String {
+    format!(
+        "- `{}` ({}). Scope: {}. Flag: {}.",
+        meta.id, meta.severity, meta.scope, meta.flag
+    )
 }
 
-fn parse_index_row(line: &str) -> eyre::Result<IndexRow> {
-    let inner = line
-        .trim()
-        .strip_prefix('|')
-        .and_then(|l| l.strip_suffix('|'))
-        .ok_or_else(|| eyre!("malformed index row: {line}"))?;
-    let cells: Vec<&str> = inner.split('|').map(str::trim).collect();
-    let [id_cell, title, severity, applies_when] = cells[..] else {
-        bail!("index row must have 4 cells, got {}: {line}", cells.len());
-    };
-    let (id, link) = id_cell
-        .strip_prefix('[')
-        .and_then(|c| c.strip_suffix(')'))
-        .and_then(|c| c.split_once("]("))
-        .ok_or_else(|| eyre!("index row id cell must be `[<id>](classes/<id>.md)`: {line}"))?;
-    Ok(IndexRow {
-        id: id.to_owned(),
-        link: link.to_owned(),
-        title: title.to_owned(),
-        severity: severity.to_owned(),
-        applies_when: applies_when.to_owned(),
-    })
+/// The class lines of a detection list: the `- ` lines under its `## Classes` heading.
+pub fn parse_detect(text: &str) -> eyre::Result<Vec<String>> {
+    let mut lines = text
+        .lines()
+        .skip_while(|l| l.trim_end() != DETECT_CLASSES_HEADING);
+    if lines.next().is_none() {
+        bail!("no `{DETECT_CLASSES_HEADING}` heading");
+    }
+    Ok(lines
+        .take_while(|l| !l.starts_with("## "))
+        .filter(|l| l.starts_with("- "))
+        .map(|l| l.trim_end().to_owned())
+        .collect())
+}
+
+/// The class id of a detection line: the text in its first pair of backticks.
+fn detect_line_id(line: &str) -> Option<&str> {
+    line.strip_prefix("- `")?.split_once('`').map(|(id, _)| id)
 }
 
 /// Loads every catalogue file that parses. Each file that fails to read or parse becomes a
@@ -195,13 +181,13 @@ pub fn load(dir: &Path) -> (Catalogue, Vec<String>) {
     let mut catalogue = Catalogue::default();
     let mut problems = Vec::new();
 
-    let readme_path = dir.join("README.md");
-    match fs::read_to_string(&readme_path)
+    let detect_path = dir.join(DETECT_FILE);
+    match fs::read_to_string(&detect_path)
         .wrap_err("cannot read")
-        .and_then(|text| parse_index(&text))
+        .and_then(|text| parse_detect(&text))
     {
-        Ok(index) => catalogue.index = index,
-        Err(err) => problems.push(format!("{}: {err:#}", readme_path.display())),
+        Ok(lines) => catalogue.detect_lines = lines,
+        Err(err) => problems.push(format!("{}: {err:#}", detect_path.display())),
     }
 
     let log_path = dir.join("instances.toml");
@@ -280,11 +266,12 @@ fn validate_class(class: &ClassFile, problems: &mut Vec<String>) {
             meta.id
         ));
     }
-    if meta.title.trim().is_empty() {
-        problems.push(format!("class {id}: title is empty"));
-    }
-    if meta.applies_when.trim().is_empty() {
-        problems.push(format!("class {id}: applies_when is empty"));
+    for (field, text) in [("scope", &meta.scope), ("flag", &meta.flag)] {
+        if text.trim().is_empty() || text.contains('\n') || text.trim_end().ends_with('.') {
+            problems.push(format!(
+                "class {id}: {field} must be one non-empty line with no final `.`"
+            ));
+        }
     }
     let headings = section_headings(&class.body);
     let mut remaining = headings.iter();
@@ -339,41 +326,34 @@ fn validate_instance(
     }
 }
 
-fn validate_index(catalogue: &Catalogue, problems: &mut Vec<String>) {
-    let mut rows: BTreeMap<&str, &IndexRow> = BTreeMap::new();
-    for row in &catalogue.index {
-        if rows.insert(row.id.as_str(), row).is_some() {
-            problems.push(format!("README index: duplicate row for {}", row.id));
+fn validate_detect(catalogue: &Catalogue, problems: &mut Vec<String>) {
+    let mut lines: BTreeMap<&str, &str> = BTreeMap::new();
+    for line in &catalogue.detect_lines {
+        let Some(id) = detect_line_id(line) else {
+            problems.push(format!(
+                "{DETECT_FILE}: line must start with \"- `<id>`\": {line}"
+            ));
+            continue;
+        };
+        if lines.insert(id, line).is_some() {
+            problems.push(format!("{DETECT_FILE}: duplicate line for {id}"));
         }
     }
     for class in &catalogue.classes {
         let id = class.slug.as_str();
-        let Some(row) = rows.remove(id) else {
-            problems.push(format!("README index: no row for class {id}"));
-            continue;
-        };
-        let expected_link = format!("classes/{id}.md");
-        let severity = class.meta.severity.to_string();
-        let columns = [
-            ("link", row.link.as_str(), expected_link.as_str()),
-            ("title", row.title.as_str(), class.meta.title.as_str()),
-            ("severity", row.severity.as_str(), severity.as_str()),
-            (
-                "applies_when",
-                row.applies_when.as_str(),
-                class.meta.applies_when.as_str(),
-            ),
-        ];
-        for (column, found, expected) in columns {
-            if found != expected {
-                problems.push(format!(
-                    "README index: {id} {column} is {found:?}, class file has {expected:?}"
-                ));
-            }
+        let expected = detect_line(&class.meta);
+        match lines.remove(id) {
+            None => problems.push(format!(
+                "{DETECT_FILE}: no line for class {id}; add: {expected}"
+            )),
+            Some(line) if line != expected => problems.push(format!(
+                "{DETECT_FILE}: line for {id} differs from its class file; expected: {expected}"
+            )),
+            Some(_) => {}
         }
     }
-    for id in rows.keys() {
-        problems.push(format!("README index: row {id} has no class file"));
+    for id in lines.keys() {
+        problems.push(format!("{DETECT_FILE}: line {id} has no class file"));
     }
 }
 
@@ -387,7 +367,7 @@ pub fn validate(catalogue: &Catalogue) -> Vec<String> {
     for (position, instance) in catalogue.instances.iter().enumerate() {
         validate_instance(position, instance, &class_ids, &mut problems);
     }
-    validate_index(catalogue, &mut problems);
+    validate_detect(catalogue, &mut problems);
     problems
 }
 
@@ -406,9 +386,9 @@ mod tests {
 
     const VALID_CLASS: &str = r#"+++
 id = "uncapped-x"
-title = "Uncapped X"
 severity = "dos"
-applies_when = "adds a peer HTTP read"
+scope = "code that reads a peer HTTP body"
+flag = "`.json()` with no byte cap"
 paths = ["crates/p2p/**"]
 patterns = ['\.json\(\)']
 +++
@@ -430,22 +410,14 @@ Good code.
 Scan.
 "#;
 
-    const VALID_README: &str = "# Defect catalogue
+    const VALID_LINE: &str = "- `uncapped-x` (dos). Scope: code that reads a peer HTTP body. Flag: `.json()` with no byte cap.";
 
-| Id | Title | Severity | Applies when |
-|----|-------|----------|--------------|
-| [uncapped-x](classes/uncapped-x.md) | Uncapped X | dos | adds a peer HTTP read |
-
-## Process
-";
-
-    const EMPTY_README: &str = "# Defect catalogue
-
-| Id | Title | Severity | Applies when |
-|----|-------|----------|--------------|
-
-## Process
-";
+    fn detect_with(lines: &[&str]) -> String {
+        format!(
+            "# Detection list\n\nIntro.\n\n## Classes\n\n{}\n\n## Do not flag\n\n- `RethService` exits on a mismatch: intended.\n",
+            lines.join("\n")
+        )
+    }
 
     const VALID_INSTANCE: &str = r##"[[instance]]
 class = "uncapped-x"
@@ -456,18 +428,18 @@ fix = "#1574"
 released_in = "testnet-4.1.0"
 "##;
 
-    fn write_catalogue(dir: &Path, readme: &str, classes: &[(&str, &str)], instances: &str) {
+    fn write_catalogue(dir: &Path, detect: &str, classes: &[(&str, &str)], instances: &str) {
         fs::create_dir_all(dir.join("classes")).unwrap();
-        fs::write(dir.join("README.md"), readme).unwrap();
+        fs::write(dir.join(DETECT_FILE), detect).unwrap();
         fs::write(dir.join("instances.toml"), instances).unwrap();
         for (slug, text) in classes {
             fs::write(dir.join("classes").join(format!("{slug}.md")), text).unwrap();
         }
     }
 
-    fn problems_for(readme: &str, classes: &[(&str, &str)], instances: &str) -> Vec<String> {
+    fn problems_for(detect: &str, classes: &[(&str, &str)], instances: &str) -> Vec<String> {
         let tmp = TempDirBuilder::new().build();
-        write_catalogue(tmp.path(), readme, classes, instances);
+        write_catalogue(tmp.path(), detect, classes, instances);
         check(tmp.path())
     }
 
@@ -480,80 +452,120 @@ released_in = "testnet-4.1.0"
 
     #[test]
     fn check_passes_on_valid_catalogue() {
-        let problems = problems_for(VALID_README, &[("uncapped-x", VALID_CLASS)], VALID_INSTANCE);
+        let problems = problems_for(
+            &detect_with(&[VALID_LINE]),
+            &[("uncapped-x", VALID_CLASS)],
+            VALID_INSTANCE,
+        );
         assert!(problems.is_empty(), "{problems:?}");
     }
 
     #[test]
     fn check_passes_on_empty_catalogue() {
-        let problems = problems_for(EMPTY_README, &[], "");
+        let problems = problems_for(&detect_with(&[]), &[], "");
         assert!(problems.is_empty(), "{problems:?}");
     }
 
     #[test]
     fn check_reports_bad_front_matter() {
-        let problems = problems_for(VALID_README, &[("uncapped-x", "id = 1\n")], "");
+        let problems = problems_for(&detect_with(&[]), &[("uncapped-x", "id = 1\n")], "");
         assert_one_problem_contains(&problems, "uncapped-x.md");
     }
 
     #[test]
     fn check_reports_id_slug_mismatch() {
-        let readme = VALID_README.replace(
-            "[uncapped-x](classes/uncapped-x.md)",
-            "[other](classes/other.md)",
-        );
-        let problems = problems_for(&readme, &[("other", VALID_CLASS)], "");
-        assert_one_problem_contains(&problems, "other");
+        let line = VALID_LINE.replace("`uncapped-x`", "`other`");
+        let problems = problems_for(&detect_with(&[&line]), &[("other", VALID_CLASS)], "");
+        assert_one_problem_contains(&problems, "must equal the file name");
     }
 
     #[test]
     fn check_reports_missing_section() {
         let class = VALID_CLASS.replace("## Correct form\n\nGood code.\n\n", "");
-        let problems = problems_for(VALID_README, &[("uncapped-x", &class)], "");
+        let problems = problems_for(&detect_with(&[VALID_LINE]), &[("uncapped-x", &class)], "");
         assert_one_problem_contains(&problems, "Correct form");
     }
 
     #[test]
     fn check_reports_bad_regex() {
         let class = VALID_CLASS.replace(r"patterns = ['\.json\(\)']", "patterns = ['(']");
-        let problems = problems_for(VALID_README, &[("uncapped-x", &class)], "");
+        let problems = problems_for(&detect_with(&[VALID_LINE]), &[("uncapped-x", &class)], "");
         assert_one_problem_contains(&problems, "regex");
     }
 
     #[test]
     fn check_reports_unknown_class_in_log() {
         let instances = VALID_INSTANCE.replace(r#"class = "uncapped-x""#, r#"class = "nope""#);
-        let problems = problems_for(VALID_README, &[("uncapped-x", VALID_CLASS)], &instances);
+        let problems = problems_for(
+            &detect_with(&[VALID_LINE]),
+            &[("uncapped-x", VALID_CLASS)],
+            &instances,
+        );
         assert_one_problem_contains(&problems, "nope");
     }
 
     #[test]
     fn check_reports_bad_release_tag() {
         let instances = VALID_INSTANCE.replace("testnet-4.1.0", "mainnet-latest");
-        let problems = problems_for(VALID_README, &[("uncapped-x", VALID_CLASS)], &instances);
+        let problems = problems_for(
+            &detect_with(&[VALID_LINE]),
+            &[("uncapped-x", VALID_CLASS)],
+            &instances,
+        );
         assert_one_problem_contains(&problems, "mainnet-latest");
     }
 
     #[test]
-    fn check_reports_index_drift() {
-        let readme = VALID_README.replace("| Uncapped X |", "| Different |");
-        let problems = problems_for(&readme, &[("uncapped-x", VALID_CLASS)], "");
-        assert_one_problem_contains(&problems, "title");
+    fn check_reports_detect_line_drift_once_with_expected_text() {
+        let line = VALID_LINE.replace("no byte cap", "no cap");
+        let problems = problems_for(&detect_with(&[&line]), &[("uncapped-x", VALID_CLASS)], "");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_one_problem_contains(&problems, "differs");
+        assert_one_problem_contains(&problems, VALID_LINE);
     }
 
     #[test]
-    fn check_reports_missing_index_row() {
-        let problems = problems_for(EMPTY_README, &[("uncapped-x", VALID_CLASS)], "");
-        assert_one_problem_contains(&problems, "uncapped-x");
+    fn check_reports_missing_detect_line_with_expected_text() {
+        let problems = problems_for(&detect_with(&[]), &[("uncapped-x", VALID_CLASS)], "");
+        assert_one_problem_contains(&problems, "no line for class uncapped-x");
+        assert_one_problem_contains(&problems, VALID_LINE);
     }
 
     #[test]
-    fn index_row_with_backticks_parses() {
-        let readme =
-            VALID_README.replace("adds a peer HTTP read |", "adds `reqwest` `.json()` call |");
-        let rows = parse_index(&readme).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].applies_when, "adds `reqwest` `.json()` call");
+    fn check_reports_detect_line_with_no_class() {
+        let problems = problems_for(&detect_with(&[VALID_LINE]), &[], "");
+        assert_one_problem_contains(&problems, "no class file");
+    }
+
+    #[test]
+    fn check_reports_duplicate_detect_line() {
+        let problems = problems_for(
+            &detect_with(&[VALID_LINE, VALID_LINE]),
+            &[("uncapped-x", VALID_CLASS)],
+            "",
+        );
+        assert_one_problem_contains(&problems, "duplicate");
+    }
+
+    #[test]
+    fn check_reports_detect_file_without_classes_section() {
+        let problems = problems_for("# Detection list\n", &[], "");
+        assert_one_problem_contains(&problems, "## Classes");
+    }
+
+    #[test]
+    fn check_rejects_flag_that_ends_with_period_or_spans_lines() {
+        for bad in ["`.json()` with no byte cap.", "two\\nlines"] {
+            let class = VALID_CLASS.replace("`.json()` with no byte cap", bad);
+            let problems = problems_for(&detect_with(&[]), &[("uncapped-x", &class)], "");
+            assert_one_problem_contains(&problems, "flag");
+        }
+    }
+
+    #[test]
+    fn detect_line_ignores_do_not_flag_section() {
+        let lines = parse_detect(&detect_with(&[VALID_LINE])).unwrap();
+        assert_eq!(lines, vec![VALID_LINE.to_owned()]);
     }
 
     #[test]

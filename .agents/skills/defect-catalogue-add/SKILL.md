@@ -5,9 +5,9 @@ description: Use to turn a PR, a commit, or a range of them into defect catalogu
 
 # Add defect catalogue entries from a PR or commit
 
-The catalogue is in `docs/99-reference/defect-catalogue/`: `README.md` (index, process, known
-non-issues), `classes/<id>.md` (one file per class), `instances.toml` (instance log, rows are only
-added).
+The catalogue is in `docs/99-reference/defect-catalogue/`: `detect.md` (one detection line per
+class, read first in a review), `README.md` (process, known non-issues), `classes/<id>.md` (one
+file per class), `instances.toml` (instance log, rows are only added).
 
 Input: a PR number, a commit, or a range of either. Optional: `--sweep` (or ask the user) to search
 for sibling sites of a new class.
@@ -30,9 +30,13 @@ For each fix, do these steps in order.
    commit in the same PR reverted. Read the current code at the site and confirm the correct form is
    there. Do not log a reverted change.
 
-4. **Write the entries.** Read the README index.
+4. **Write the entries.** Read `detect.md`.
    - The class exists: append an `[[instance]]` row to `instances.toml`.
-   - The class is new: write `classes/<id>.md`, add its README index row, then append the row.
+   - The class is new: write `classes/<id>.md`, add its `detect.md` line, then append the row.
+
+   `scope` and `flag` are what a reviewer reads before anything else, for every class, so keep them
+   short and concrete. `flag` names the code shape to look for (calls, types, control flow), not
+   the effect. The rationale goes in the class file body.
 
    Write in ASD-STE100 Simplified Technical English. No dates or issue numbers in the class prose;
    the log rows hold that data.
@@ -49,16 +53,17 @@ the reason), and sweep leads.
 ## Class file template
 
 `id` must equal the file name (kebab-case). `severity` is the worst typical effect: `fork`,
-`data-loss`, `dos`, `stall` or `other`. `paths` (globs relative to the repo root) and `patterns`
+`data-loss`, `dos`, `stall` or `other`. `scope` (the code this class can occur in) and `flag` (what
+to flag) are each one line with no final `.`. `paths` (globs relative to the repo root) and `patterns`
 (Rust `regex` syntax) are optional and feed `cargo xtask defects scan`; set `paths` to keep the scan
 output small.
 
 ```markdown
 +++
 id = "short-class-name"
-title = "Short class name"
 severity = "dos"
-applies_when = "One line: what kind of change makes this class relevant"
+scope = "code that reads an HTTP response body from a peer"
+flag = "`.json()` on a peer response with no byte cap"
 paths = ["crates/p2p/**"]
 patterns = ['\.json\(\)']
 +++
@@ -80,11 +85,15 @@ The helper or idiom to use.
 Lint, test, CI grep, scan pattern, or manual check. Say what the scan pattern misses.
 ```
 
-README index row (all four columns must match the class file):
+`detect.md` line, under `## Classes` (`cargo xtask defects check` prints the expected line if it
+is missing or differs):
 
 ```markdown
-| [short-class-name](classes/short-class-name.md) | Short class name | dos | One line: what kind of change makes this class relevant |
+- `short-class-name` (dos). Scope: code that reads an HTTP response body from a peer. Flag: `.json()` on a peer response with no byte cap.
 ```
+
+A new known non-issue gets a full entry in the README and one line under `## Do not flag` in
+`detect.md`.
 
 ## Instance row template
 

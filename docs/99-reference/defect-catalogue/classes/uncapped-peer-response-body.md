@@ -1,8 +1,8 @@
 +++
 id = "uncapped-peer-response-body"
-title = "Uncapped peer response body"
 severity = "dos"
-applies_when = "adds or changes code that reads an HTTP response body from a peer"
+scope = "code that reads an HTTP response body from a peer, error paths included"
+flag = "`.json()`, `.text()` or `.bytes()` on a peer response, with no byte cap before the full body is read"
 paths = ["crates/p2p/**", "crates/actors/**", "crates/api-client/**", "crates/chain/**"]
 patterns = ['\.(json(::<.+>)?|text|bytes)\(\)(\s*\.await|\s*$)']
 +++

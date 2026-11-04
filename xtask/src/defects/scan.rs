@@ -165,9 +165,9 @@ mod tests {
                 slug: "uncapped-x".to_owned(),
                 meta: ClassMeta {
                     id: "uncapped-x".to_owned(),
-                    title: "Uncapped X".to_owned(),
                     severity: Severity::Dos,
-                    applies_when: "always".to_owned(),
+                    scope: "always".to_owned(),
+                    flag: "always".to_owned(),
                     paths: paths.iter().map(|p| (*p).to_owned()).collect(),
                     patterns: patterns.iter().map(|p| (*p).to_owned()).collect(),
                 },

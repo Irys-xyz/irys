@@ -59,7 +59,8 @@ anything, and stops on a defect that an open advisory still covers.
 
 ```
 docs/99-reference/defect-catalogue/
-  README.md            index of classes + process + known non-issues
+  detect.md            one detection line per class + one line per known non-issue
+  README.md            process + known non-issues
   classes/<slug>.md    one file per class: TOML front matter + prose
   instances.toml       append-only instance log
 .agents/skills/defect-catalogue-review/SKILL.md
@@ -79,9 +80,9 @@ dependency). Fields:
 | Field          | Type            | Purpose                                                                 |
 |----------------|-----------------|-------------------------------------------------------------------------|
 | `id`           | string          | Must equal the file slug.                                               |
-| `title`        | string          | Short class name, e.g. "Uncapped peer response body".                   |
 | `severity`     | string          | Worst typical effect: `fork`, `data-loss`, `dos`, `stall`, `other`.     |
-| `applies_when` | string          | One line: what kind of change makes this class relevant. Used in index. |
+| `scope`        | string          | One line: the code this class can occur in. Used in `detect.md`.        |
+| `flag`         | string          | One line: what to flag, in code terms. Used in `detect.md`.             |
 | `paths`        | list of globs   | Optional. Limits the scan to these paths.                               |
 | `patterns`     | list of regex   | Optional. Matched against added diff lines by `xtask defects scan`.     |
 
@@ -116,8 +117,6 @@ the change. These are data fields, not comments, so the "no comments of record" 
 ## README.md
 
 - One paragraph: what the catalogue is and the disclosure rule.
-- Index table: id (link), title, severity, applies_when. The review skill reads this table first.
-  `xtask defects check` fails if the table and the class files differ (ids and titles).
 - Process:
   - A fix for a new defect class adds a class file and a log row in the same PR (use the add skill).
   - A fix for a known class adds a log row.
@@ -131,7 +130,7 @@ New xtask subcommand with three actions. No model use.
 
 - `check` — validates the catalogue: front matter parses; `id` equals the slug; required fields and
   body sections exist; every regex compiles; every log row names an existing class; every log row
-  has the required fields; the README index matches the class files. Exit non-zero on any error.
+  has the required fields; `detect.md` has exactly one line per class, equal to the line its front matter gives. Exit non-zero on any error.
   Added to `cargo xtask local-checks` and to CI next to the existing checks.
 - `trend [--since <YYYY-MM-DD> | --last-releases <N>]` — prints one row per class: id, severity,
   total instances, instances in the window, last `found` date, last `released_in`. Sorted by
@@ -148,14 +147,13 @@ New xtask subcommand with three actions. No model use.
 Used by both review passes. Steps:
 
 1. Run `cargo xtask defects scan` for the target range.
-2. Read the README index only. Pick classes whose `applies_when` matches the diff, plus every class
-   with a scan hit.
-3. Open only those class files. Check the diff against each.
-4. Verify each scan hit; report true hits with file:line, class id, and the correct form.
-5. Check the known non-issues before reporting; do not raise them.
-6. Question the tests and the design as they are, not only the diff. Tests can encode bad
+2. Read `detect.md` only. Check the diff against each "Flag" whose scope it touches; a match is a
+   lead. Drop leads that match a "Do not flag" line.
+3. Verify each scan hit and lead in the code. Open the class file of a lead's class only, to
+   confirm it. Do not open class files of classes with no lead.
+4. Question the tests and the design as they are, not only the diff. Tests can encode bad
    behaviour.
-7. For each confirmed new instance, say so and suggest a log row. For a defect that fits no class,
+5. Report true instances with file:line, class id, and the correct form, and suggest a log row. For a defect that fits no class,
    say "candidate new class".
 
 The skill does not write to the catalogue. The add skill does that.
@@ -170,8 +168,8 @@ For each fix:
    say why.
 2. Disclosure check: is the fix in a released tag (`git tag --contains`)? Is it under an open
    private advisory? If not released, or under an advisory, stop for that fix and report it.
-3. Read the README index. If the class exists, append a log row. If not, draft a new class file and
-   a README index row, then append the log row.
+3. Read `detect.md`. If the class exists, append a log row. If not, draft a new class file and
+   its `detect.md` line, then append the log row.
 4. Squash-merged PRs can contain fixes that were later reverted inside the same PR. Confirm the fix
    is present in the final tree before you log it.
 5. Sibling sweep: optional (`--sweep`, or ask). When on, search the codebase for other sites of the
@@ -220,12 +218,16 @@ already covers the guidance.
   the `fix` or the tag exists; the add skill does that when it writes a row. This keeps CI simple.
   (CI checkouts already use `fetch-depth: 0`, but `check` does not need it.)
 - `scan` is a local and review tool. CI does not run it.
-- README index format, one row per class:
-  `| [<id>](classes/<id>.md) | <title> | <severity> | <applies_when> |`.
-  `check` compares the set of rows with the class files, all four columns. Row order does not
-  matter; keep rows sorted by id by convention.
-- Known non-issues format in the README: one `###` heading per item, then **Pattern** and **Why it
-  is correct** lines. `check` does not parse this section.
+- `detect.md` is the one file a review reads in full, so it holds only what a model needs to flag
+  a lead. The rationale stays in the class files, which a review opens only to confirm a lead.
+  Class lines are the `- ` lines under `## Classes`, one per class:
+  `` - `<id>` (<severity>). Scope: <scope>. Flag: <flag>. ``
+  `check` requires each line to equal the line the class front matter gives, reports a missing,
+  changed, duplicate or orphan line, and prints the expected line. Line order does not matter;
+  keep lines sorted by id by convention. `scope` and `flag` are one line each with no final `.`.
+- Known non-issues: a full entry in the README (one `###` heading per item, then **Pattern** and
+  **Why it is correct**), and one line under `## Do not flag` in `detect.md`. `check` does not
+  parse either.
 - `scan` diff source: with `--head`, `git diff -U0 --find-renames <base>...<head>`; without
   `--head`, `git diff -U0 --find-renames <merge-base>` (working tree, tracked files only; untracked
   files are not scanned, and `--help` says so). Added lines in a renamed file count under the new

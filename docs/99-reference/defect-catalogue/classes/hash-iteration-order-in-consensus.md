@@ -1,8 +1,8 @@
 +++
 id = "hash-iteration-order-in-consensus"
-title = "Hash iteration order in consensus code"
 severity = "fork"
-applies_when = "adds or changes a HashMap or HashSet whose iteration order can reach a consensus result"
+scope = "consensus code: block validation, block production, shadow transactions, epoch and ledger state"
+flag = "a result that must be the same on every node depends on HashMap or HashSet iteration order (first match or `break`, last write wins, a tie-break, collect into a Vec, hash or serialize)"
 paths = ["crates/actors/src/block_validation.rs", "crates/actors/src/block_producer.rs", "crates/actors/src/block_producer/**", "crates/actors/src/shadow_tx_generator.rs", "crates/domain/src/models/**", "crates/domain/src/snapshots/**"]
 patterns = ['\bHash(Map|Set)\s*<', '\bHash(Map|Set)::(new|with_capacity|default)\b']
 +++
