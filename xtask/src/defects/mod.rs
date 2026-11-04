@@ -2,6 +2,7 @@
 //! instance. See `docs/99-reference/defect-catalogue/README.md`.
 
 pub mod catalogue;
+pub mod trend;
 
 use std::path::PathBuf;
 

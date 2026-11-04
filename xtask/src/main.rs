@@ -68,6 +68,21 @@ enum DefectsAction {
         #[clap(long)]
         dir: Option<PathBuf>,
     },
+    /// Print instance counts per class, most frequent first.
+    ///
+    /// `--last-releases N` takes the N highest versions among all `released_in` tags. Testnet and
+    /// mainnet tags count as one stream: a version is released when either stream first ships it.
+    Trend {
+        /// Catalogue directory (default: the one in this checkout).
+        #[clap(long)]
+        dir: Option<PathBuf>,
+        /// Count instances found on or after this date (YYYY-MM-DD).
+        #[clap(long, conflicts_with = "last_releases")]
+        since: Option<chrono::NaiveDate>,
+        /// Count instances whose fix shipped in the last N released versions.
+        #[clap(long)]
+        last_releases: Option<usize>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1277,8 +1292,40 @@ fn run_defects(action: DefectsAction) -> eyre::Result<()> {
                 eyre::bail!("defect catalogue: {} problem(s)", problems.len());
             }
         }
+        DefectsAction::Trend {
+            dir,
+            since,
+            last_releases,
+        } => {
+            let catalogue = load_valid_catalogue(dir)?;
+            let window = match (since, last_releases) {
+                (Some(date), _) => Some(defects::trend::Window::Since(date)),
+                (None, Some(count)) => Some(defects::trend::Window::LastReleases(count)),
+                (None, None) => None,
+            };
+            let rows = defects::trend::trend(&catalogue, window.as_ref());
+            print!("{}", defects::trend::render_trend(&rows, window.is_some()));
+        }
     }
     Ok(())
+}
+
+/// Loads the catalogue and refuses to continue if it has problems, so that `trend` and `scan`
+/// never work from a partial catalogue.
+fn load_valid_catalogue(dir: Option<PathBuf>) -> eyre::Result<defects::catalogue::Catalogue> {
+    let dir = dir.unwrap_or_else(defects::default_dir);
+    let (catalogue, mut problems) = defects::catalogue::load(&dir);
+    problems.extend(defects::catalogue::validate(&catalogue));
+    for problem in &problems {
+        eprintln!("{problem}");
+    }
+    if !problems.is_empty() {
+        eyre::bail!(
+            "defect catalogue: {} problem(s); run `cargo xtask defects check`",
+            problems.len()
+        );
+    }
+    Ok(catalogue)
 }
 
 fn main() -> eyre::Result<()> {
