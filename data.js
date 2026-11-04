@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793711692376,
+  "lastUpdate": 1793793183401,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -21319,6 +21319,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000111,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "65cefed2778542ca8c8847b56f802f228ba786c1",
+          "message": "fix(api): key the price quote EMA guard on the tip height (#1769)\n\n/v1/price quotes with the lower of ema_price_1_interval_ago and\nema_price_2_intervals_ago near an EMA interval roll, so a quote stays\nvalid after the roll moves ema_price_1_interval_ago into public pricing.\nThe guard keyed the window on the next block height. On the tip just\nbelow a roll (tip % interval == interval - 1) the next height wraps to\nposition 0, so the guard was off exactly where the next block rolls the\nsnapshot. With a falling price the quote then underpays: the mempool at\nthe new tip, and block inclusion on any later parent, price against the\nrolled EMA and reject the tx with \"Insufficient term fee\".\n\nKey the window on the tip height, so it always holds the tip just below\nthe roll. For interval 10 the guard now covers tips 7, 8, 9 instead of\n6, 7, 8. The predicate and the EMA choice move to irys-domain\n(tip_in_last_quarter_of_ema_interval, EmaSnapshot::ema_for_public_quote).\nThe Publish and term-ledger branches of the route and the chain-test\nhelpers call them, so they cannot drift apart.\n\nAPI quote change only: consensus, mempool and block validation pricing\nare unchanged.",
+          "timestamp": "2026-11-04T11:37:04Z",
+          "tree_id": "cc12947c82e06fe0c5202782cba317a303aef3a2",
+          "url": "https://github.com/Irys-xyz/irys/commit/65cefed2778542ca8c8847b56f802f228ba786c1"
+        },
+        "date": 1793793178309,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015244,
+            "range": "± 0.000173",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153293,
+            "range": "± 0.013849",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.567102,
+            "range": "± 0.115236",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 11.552307,
+            "range": "± 1.210454",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082653,
+            "range": "± 0.002983",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 840.516729,
+            "range": "± 37.990791",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 972.389243,
+            "range": "± 11.866642",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120892,
+            "range": "± 0.003281",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1181.417444,
+            "range": "± 7.065569",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1535.116775,
+            "range": "± 8.615938",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033962,
+            "range": "± 0.00148",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.696475,
+            "range": "± 0.688591",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.863188,
+            "range": "± 7.435074",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000147,
+            "range": "± 0.000009",
             "unit": "ms/iter"
           }
         ]
