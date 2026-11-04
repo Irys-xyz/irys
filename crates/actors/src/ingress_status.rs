@@ -24,7 +24,7 @@ use tracing::debug;
 ///
 /// `parent_height` is the canonical block the next produced block would extend.
 /// `requirement_timestamp` is the timestamp that block would carry. Hardfork
-/// proof counts switch on that wall-clock timestamp.
+/// rules switch on that wall-clock timestamp.
 pub struct IngressStatusQuery<'a> {
     pub parent_height: u64,
     pub requirement_timestamp: UnixTimestamp,
@@ -283,7 +283,6 @@ mod tests {
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_testing_utils::tempfile::TempDir;
     use irys_testing_utils::utils::TempDirBuilder;
-    use irys_types::hardfork_config::NextNameTBD;
     use irys_types::ingress::{CachedIngressProof, generate_ingress_proof};
     use irys_types::irys::IrysSigner;
     use irys_types::partition::PartitionAssignment;
@@ -430,14 +429,13 @@ mod tests {
         }
     }
 
-    fn config_with(total: u64, assigned: u64, fork: Option<NextNameTBD>) -> Config {
+    fn config_with(total: u64, assigned: u64) -> Config {
         let node = NodeConfig::testing().with_consensus(|consensus| {
             consensus.hardforks.frontier.number_of_ingress_proofs_total = total;
             consensus
                 .hardforks
                 .frontier
                 .number_of_ingress_proofs_from_assignees = assigned;
-            consensus.hardforks.next_name_tbd = fork;
         });
         Config::new_with_random_peer_id(node)
     }
@@ -556,7 +554,7 @@ mod tests {
 
     #[test]
     fn ingress_status_partial_eligible_proofs() -> eyre::Result<()> {
-        let mut harness = Harness::open(config_with(6, 2, None), 0, 5)?;
+        let mut harness = Harness::open(config_with(6, 2), 0, 5)?;
         let data_root = H256::random();
         let header = data_header(H256::random(), data_root);
         write_submit_range(&harness.db, &header, 10, 25)?;
@@ -724,7 +722,7 @@ mod tests {
 
     #[test]
     fn ingress_status_dedup_keeps_the_invalid_anchor_over_a_later_valid_one() -> eyre::Result<()> {
-        let mut harness = Harness::open(config_with(1, 0, None), 201, 201)?;
+        let mut harness = Harness::open(config_with(1, 0), 201, 201)?;
         let data_root = H256::random();
         let header = data_header(H256::random(), data_root);
         let signer = harness.signer();
@@ -762,7 +760,7 @@ mod tests {
 
     #[test]
     fn ingress_status_expired_assigned_signer_does_not_raise_the_clamp() -> eyre::Result<()> {
-        let mut harness = Harness::open(config_with(1, 2, None), 201, 201)?;
+        let mut harness = Harness::open(config_with(1, 2), 201, 201)?;
         let data_root = H256::random();
         let header = data_header(H256::random(), data_root);
         write_submit_range(&harness.db, &header, 10, 25)?;
@@ -791,7 +789,7 @@ mod tests {
 
     #[test]
     fn ingress_status_assigned_deficit_with_enough_total_proofs() -> eyre::Result<()> {
-        let mut harness = Harness::open(config_with(6, 2, None), 0, 5)?;
+        let mut harness = Harness::open(config_with(6, 2), 0, 5)?;
         let data_root = H256::random();
         let header = data_header(H256::random(), data_root);
         write_submit_range(&harness.db, &header, 10, 25)?;
@@ -827,7 +825,7 @@ mod tests {
 
     #[test]
     fn ingress_status_multi_slot_assignment_and_clamp() -> eyre::Result<()> {
-        let mut harness = Harness::open(config_with(2, 2, None), 0, 5)?;
+        let mut harness = Harness::open(config_with(2, 2), 0, 5)?;
         let data_root = H256::random();
         let header = data_header(H256::random(), data_root);
         // [5, 24] intersects slots 0, 1, and 2 when a partition is 10 chunks.
@@ -871,7 +869,7 @@ mod tests {
 
     #[test]
     fn ingress_status_no_canonical_range_clamps_assignees_to_zero() -> eyre::Result<()> {
-        let mut harness = Harness::open(config_with(1, 2, None), 0, 5)?;
+        let mut harness = Harness::open(config_with(1, 2), 0, 5)?;
         let data_root = H256::random();
         let header = data_header(H256::random(), data_root);
         let signer = harness.signer();
@@ -889,7 +887,7 @@ mod tests {
 
     #[test]
     fn ingress_status_reorg_drops_assignment() -> eyre::Result<()> {
-        let mut harness = Harness::open(config_with(1, 2, None), 0, 5)?;
+        let mut harness = Harness::open(config_with(1, 2), 0, 5)?;
         let data_root = H256::random();
         let header = data_header(H256::random(), data_root);
         let inclusion = write_submit_range(&harness.db, &header, 10, 25)?;
@@ -932,52 +930,6 @@ mod tests {
         let with_proof = harness.assess(&header, &[proof], TS);
         let with_proof_err = with_proof.expect_err("a stored proof does not hide corruption");
         assert!(with_proof_err.to_string().contains("total_chunks"));
-        Ok(())
-    }
-
-    #[test]
-    fn ingress_status_hardfork_requirements_follow_the_timestamp() -> eyre::Result<()> {
-        let activation = 1_800_000_000_u64;
-        let mut harness = Harness::open(
-            config_with(
-                1,
-                0,
-                Some(NextNameTBD {
-                    activation_timestamp: UnixTimestamp::from_secs(activation),
-                    number_of_ingress_proofs_total: 6,
-                    number_of_ingress_proofs_from_assignees: 2,
-                }),
-            ),
-            0,
-            5,
-        )?;
-        let data_root = H256::random();
-        let header = data_header(H256::random(), data_root);
-        write_submit_range(&harness.db, &header, 10, 25)?;
-        let signer = harness.signer();
-        harness.stake(signer.address());
-        harness.assign_slot(signer.address(), 1);
-        for _ in 0..2 {
-            let extra = harness.signer();
-            harness.assign_slot(extra.address(), 1);
-        }
-        let proof = harness.proof(&signer, data_root, harness.anchor_at(0), 1)?;
-
-        let before = harness.assess(&header, std::slice::from_ref(&proof), activation - 1)?;
-        assert_eq!(before.required_total, 1);
-        assert_eq!(before.required_assigned, 0);
-        assert!(before.proof_requirements_met());
-
-        let after = harness.assess(&header, &[proof], activation)?;
-        assert_eq!(after.required_total, 6);
-        assert_eq!(
-            after.required_assigned, 2,
-            "three slot miners, so 2 is not clamped"
-        );
-        assert_eq!(after.eligible_assigned(), 1);
-        assert_eq!(after.remaining_total(), 5);
-        assert_eq!(after.remaining_assigned(), 1);
-        assert!(!after.proof_requirements_met());
         Ok(())
     }
 

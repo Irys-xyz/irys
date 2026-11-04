@@ -225,12 +225,6 @@ price_adjustment_interval = 10
 number_of_ingress_proofs_total = 1
 number_of_ingress_proofs_from_assignees = 0
 
-# To enable the next hardfork at a specific block, uncomment:
-# [consensus.Custom.hardforks.next_name_tbd]
-# activation_block = 1000000
-# number_of_ingress_proofs_total = 4
-# number_of_ingress_proofs_from_assignees = 2
-
 # To enable Cascade (OneYear/ThirtyDay term ledgers), uncomment:
 # [consensus.Custom.hardforks.cascade]
 # activation_timestamp = "2026-07-01T00:00:00+00:00"

@@ -19,10 +19,6 @@ pub struct IrysHardforkConfig {
     /// Frontier parameters (always active from genesis)
     pub frontier: FrontierParams,
 
-    /// NextNameTBD hardfork - None means disabled
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_name_tbd: Option<NextNameTBD>,
-
     /// Aurora hardfork - enables canonical RLP encoding on Commitment tx. None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aurora: Option<Aurora>,
@@ -74,22 +70,6 @@ pub struct FrontierParams {
     pub number_of_ingress_proofs_total: u64,
 
     /// Number of ingress proofs required from assignees
-    pub number_of_ingress_proofs_from_assignees: u64,
-}
-
-/// A hardfork activation with its parameters.
-///
-/// When this fork activates, the contained parameters take effect.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NextNameTBD {
-    /// Times (seconds since epoch) at which this hardfork activates
-    #[serde(with = "unix_timestamp_string_serde")]
-    pub activation_timestamp: UnixTimestamp,
-
-    /// Number of total ingress proofs required
-    pub number_of_ingress_proofs_total: u64,
-
-    /// Number of ingress proofs from assignees
     pub number_of_ingress_proofs_from_assignees: u64,
 }
 
@@ -337,35 +317,15 @@ pub enum DataLedgerLookup<'a> {
 }
 
 impl IrysHardforkConfig {
-    /// Check if the NextNameTBD hardfork is active at a given timestamp (in seconds).
-    pub fn is_next_name_tbd_active(&self, timestamp: UnixTimestamp) -> bool {
-        self.next_name_tbd
-            .as_ref()
-            .is_some_and(|f| timestamp >= f.activation_timestamp)
-    }
-
-    /// Get the activation timestamp for NextNameTBD hardfork, if configured.
-    pub fn next_name_tbd_activation_timestamp(&self) -> Option<UnixTimestamp> {
-        self.next_name_tbd.as_ref().map(|f| f.activation_timestamp)
-    }
-
     /// Get the number of ingress proofs required at a specific timestamp (in seconds).
-    pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u64 {
-        if let Some(ref fork) = self.next_name_tbd
-            && timestamp >= fork.activation_timestamp
-        {
-            return fork.number_of_ingress_proofs_total;
-        }
+    /// Only Frontier sets this value, so the timestamp does not change the result.
+    pub fn number_of_ingress_proofs_total_at(&self, _timestamp: UnixTimestamp) -> u64 {
         self.frontier.number_of_ingress_proofs_total
     }
 
     /// Get the number of ingress proofs from assignees required at a specific timestamp (in seconds).
-    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u64 {
-        if let Some(ref fork) = self.next_name_tbd
-            && timestamp >= fork.activation_timestamp
-        {
-            return fork.number_of_ingress_proofs_from_assignees;
-        }
+    /// Only Frontier sets this value, so the timestamp does not change the result.
+    pub fn number_of_ingress_proofs_from_assignees_at(&self, _timestamp: UnixTimestamp) -> u64 {
         self.frontier.number_of_ingress_proofs_from_assignees
     }
 
@@ -533,7 +493,6 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: None,
             cascade: None,
@@ -564,7 +523,6 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: Some(Aurora {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
                 minimum_commitment_tx_version: 2,
@@ -595,7 +553,6 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: None,
             cascade: Some(Cascade {
@@ -647,7 +604,6 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: None,
             cascade: Some(Cascade {
@@ -695,7 +651,6 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: None,
             cascade: Some(Cascade {
@@ -736,7 +691,6 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: Some(Borealis {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
@@ -758,65 +712,12 @@ mod tests {
     }
 
     #[test]
-    fn test_fork_activation() {
-        let config = IrysHardforkConfig {
-            frontier: FrontierParams {
-                number_of_ingress_proofs_total: 10,
-                number_of_ingress_proofs_from_assignees: 0,
-            },
-            next_name_tbd: Some(NextNameTBD {
-                activation_timestamp: UnixTimestamp::from_secs(1000),
-                number_of_ingress_proofs_total: 4,
-                number_of_ingress_proofs_from_assignees: 2,
-            }),
-            aurora: None,
-            borealis: None,
-            cascade: None,
-            delta: None,
-            echo: None,
-        };
-
-        // Before activation timestamp
-        assert_eq!(
-            config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(999)),
-            10
-        );
-        assert_eq!(
-            config.number_of_ingress_proofs_from_assignees_at(UnixTimestamp::from_secs(999)),
-            0
-        );
-        assert!(!config.is_next_name_tbd_active(UnixTimestamp::from_secs(999)));
-
-        // At activation timestamp
-        assert_eq!(
-            config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(1000)),
-            4
-        );
-        assert_eq!(
-            config.number_of_ingress_proofs_from_assignees_at(UnixTimestamp::from_secs(1000)),
-            2
-        );
-        assert!(config.is_next_name_tbd_active(UnixTimestamp::from_secs(1000)));
-
-        // After activation timestamp
-        assert_eq!(
-            config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(1001)),
-            4
-        );
-        assert_eq!(
-            config.number_of_ingress_proofs_from_assignees_at(UnixTimestamp::from_secs(1001)),
-            2
-        );
-    }
-
-    #[test]
     fn test_delta_for_block_activation_boundary() {
         let config = IrysHardforkConfig {
             frontier: FrontierParams {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 0,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: None,
             cascade: None,
@@ -889,11 +790,6 @@ mod tests {
                 number_of_ingress_proofs_total: 1,
                 number_of_ingress_proofs_from_assignees: 0,
             },
-            next_name_tbd: Some(NextNameTBD {
-                activation_timestamp: UnixTimestamp::from_secs(5000),
-                number_of_ingress_proofs_total: 4,
-                number_of_ingress_proofs_from_assignees: 2,
-            }),
             aurora: None,
             borealis: None,
             cascade: None,
@@ -918,7 +814,6 @@ mod tests {
 
         assert_eq!(config.frontier.number_of_ingress_proofs_total, 5);
         assert_eq!(config.frontier.number_of_ingress_proofs_from_assignees, 2);
-        assert!(config.next_name_tbd.is_none());
         assert!(config.delta.is_none());
         // A config file without [echo] gets Echo from genesis.
         assert_eq!(config.echo, Echo::from_genesis());
@@ -960,7 +855,6 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
@@ -988,7 +882,6 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
@@ -1012,7 +905,6 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: None,
                 borealis: None,
                 cascade: None,
@@ -1043,7 +935,6 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
@@ -1077,7 +968,6 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(activation_secs),
                     minimum_commitment_tx_version: min_version,
@@ -1095,7 +985,6 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: None,
                 borealis: None,
                 cascade: None,
@@ -1188,7 +1077,6 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: None,
                 borealis: None,
                 cascade: None,

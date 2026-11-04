@@ -833,7 +833,6 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_total: 10,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 // Aurora hardfork - deprecates V1 commitment transactions
                 aurora: Some(Aurora {
                     activation_timestamp: unix_timestamp_string_serde::deserialize(
@@ -998,7 +997,6 @@ impl ConsensusConfig {
                     activation_timestamp: UnixTimestamp::from_secs(1768476600),
                     minimum_commitment_tx_version: 2,
                 }),
-                next_name_tbd: None,
                 // Borealis hardfork - enabled from genesis for testing
                 borealis: Some(Borealis {
                     activation_timestamp: UnixTimestamp::from_secs(0),
@@ -1130,7 +1128,6 @@ impl ConsensusConfig {
                     .unwrap(),
                     minimum_commitment_tx_version: 2,
                 }),
-                next_name_tbd: None,
                 // Borealis hardfork - controlled activation on testnet
                 borealis: Some(Borealis {
                     activation_timestamp: unix_timestamp_string_serde::deserialize(

@@ -22,11 +22,7 @@ use crate::hardfork_config::IrysHardforkConfig;
 
 hardfork!(
     #[derive(serde::Serialize, serde::Deserialize)]
-    IrysHardfork {
-        Frontier,
-        NextNameTBD,
-        Aurora
-    }
+    IrysHardfork { Frontier, Aurora }
 );
 
 /// Hardfork schedule wrapper used across Irys components.
@@ -43,14 +39,6 @@ impl IrysChainHardforks {
             // frontier always enabled from timestamp 0
             (IrysHardfork::Frontier, ForkCondition::ZERO_TIMESTAMP),
         ];
-
-        // Conditionally add NextNameTBD hardfork if configured
-        if let Some(ref fork) = config.next_name_tbd {
-            forks.push((
-                IrysHardfork::NextNameTBD,
-                ForkCondition::Timestamp(fork.activation_timestamp.as_secs()),
-            ));
-        }
 
         // Conditionally add Aurora hardfork if configured
         if let Some(ref fork) = config.aurora {
@@ -117,7 +105,6 @@ impl IrysHardfork {
                 (EthereumHardfork::Cancun, ForkCondition::ZERO_TIMESTAMP),
                 (EthereumHardfork::Prague, ForkCondition::ZERO_TIMESTAMP),
             ],
-            Self::NextNameTBD => &[],
             Self::Aurora => &[],
         }
     }

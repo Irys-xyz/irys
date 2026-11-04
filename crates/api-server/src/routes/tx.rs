@@ -506,7 +506,7 @@ fn read_canonical_tip(state: &ApiState) -> Result<CanonicalTip, ApiError> {
 
 /// Timestamp the next block would carry if it were produced now.
 ///
-/// Hardfork proof counts switch on wall-clock time. This does not sleep: when
+/// Hardfork rules switch on wall-clock time. This does not sleep: when
 /// the clock is already past the parent second, that reading is used.
 /// Otherwise the parent second plus one, including when the two seconds match.
 fn child_requirement_timestamp(parent: UnixTimestamp) -> Result<UnixTimestamp, ApiError> {
