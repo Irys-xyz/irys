@@ -2435,6 +2435,19 @@ fn choose_oracle_price(
         (parent_price, "parent_fallback")
     };
 
+    // `oracle_price_is_valid` rejects zero. A 100% safe range would otherwise
+    // bound 0 to 0 and the producer would include a price it then rejects.
+    let (chosen, source) = if chosen.amount.is_zero() {
+        tracing::warn!(
+            parent_price = %parent_price,
+            oracle_price = %oracle_price,
+            "oracle price is zero; using parent price so the block passes prevalidation"
+        );
+        (parent_price, "parent_zero_oracle")
+    } else {
+        (chosen, source)
+    };
+
     tracing::debug!(
         parent_secs = parent_ts.as_secs(),
         oracle_secs = oracle_updated_at.as_secs(),
@@ -2638,6 +2651,22 @@ mod oracle_choice_tests {
             oracle_price
         };
         assert_eq!(chosen, expected);
+    }
+
+    #[test]
+    fn fresh_zero_oracle_price_uses_parent() {
+        let parent_price = Amount::token(dec!(0.05)).unwrap();
+        let oracle_price = Amount::token(dec!(0.0)).unwrap();
+
+        let chosen = choose_oracle_price(
+            UnixTimestamp::from_secs(1000),
+            parent_price,
+            oracle_price,
+            UnixTimestamp::from_secs(1000),
+        );
+
+        assert_eq!(chosen, parent_price);
+        assert!(!chosen.amount.is_zero());
     }
 }
 
