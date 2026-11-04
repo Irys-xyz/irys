@@ -1707,7 +1707,7 @@ fn expected_ledger_total_chunks(
 fn publish_ingress_proof_count_is_valid(
     publish_ledger: &DataTransactionLedger,
     publish_tx_count: usize,
-    number_of_ingress_proofs_total: u64,
+    number_of_ingress_proofs_total: u8,
 ) -> Result<(), PreValidationError> {
     let Some(proofs) = &publish_ledger.proofs else {
         return Ok(());
@@ -1717,12 +1717,9 @@ fn publish_ingress_proof_count_is_valid(
         proof_count,
         tx_count: publish_tx_count,
     };
-    // Convert N to usize once and multiply with checked arithmetic. Overflow is
-    // unreachable for a valid block (tx count and N are bounded), so fail closed
-    // as a mismatch rather than relying on an `as` cast that could wrap.
-    let Ok(n) = usize::try_from(number_of_ingress_proofs_total) else {
-        return Err(mismatch());
-    };
+    // Multiply with checked arithmetic. Overflow is unreachable for a valid block
+    // (tx count and N are bounded), so fail closed as a mismatch.
+    let n = usize::from(number_of_ingress_proofs_total);
     let Some(expected) = publish_tx_count.checked_mul(n) else {
         return Err(mismatch());
     };

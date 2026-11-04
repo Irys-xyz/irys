@@ -67,10 +67,10 @@ pub struct IrysHardforkConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FrontierParams {
     /// Number of ingress proofs required for promotion
-    pub number_of_ingress_proofs_total: u64,
+    pub number_of_ingress_proofs_total: u8,
 
     /// Number of ingress proofs required from assignees
-    pub number_of_ingress_proofs_from_assignees: u64,
+    pub number_of_ingress_proofs_from_assignees: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -319,13 +319,13 @@ pub enum DataLedgerLookup<'a> {
 impl IrysHardforkConfig {
     /// Get the number of ingress proofs required at a specific timestamp (in seconds).
     /// Only Frontier sets this value, so the timestamp does not change the result.
-    pub fn number_of_ingress_proofs_total_at(&self, _timestamp: UnixTimestamp) -> u64 {
+    pub fn number_of_ingress_proofs_total_at(&self, _timestamp: UnixTimestamp) -> u8 {
         self.frontier.number_of_ingress_proofs_total
     }
 
     /// Get the number of ingress proofs from assignees required at a specific timestamp (in seconds).
     /// Only Frontier sets this value, so the timestamp does not change the result.
-    pub fn number_of_ingress_proofs_from_assignees_at(&self, _timestamp: UnixTimestamp) -> u64 {
+    pub fn number_of_ingress_proofs_from_assignees_at(&self, _timestamp: UnixTimestamp) -> u8 {
         self.frontier.number_of_ingress_proofs_from_assignees
     }
 

@@ -201,14 +201,17 @@ pub(crate) fn assess_submit_ingress_proofs(
         })
         .collect();
 
-    let configured_assigned = query
-        .config
-        .number_of_ingress_proofs_from_assignees_at(query.requirement_timestamp)
-        as usize;
-    Ok(IngressProofAssessment {
-        required_total: query
+    let configured_assigned = usize::from(
+        query
             .config
-            .number_of_ingress_proofs_total_at(query.requirement_timestamp),
+            .number_of_ingress_proofs_from_assignees_at(query.requirement_timestamp),
+    );
+    Ok(IngressProofAssessment {
+        required_total: u64::from(
+            query
+                .config
+                .number_of_ingress_proofs_total_at(query.requirement_timestamp),
+        ),
         required_assigned: configured_assigned.min(assigned_miners) as u64,
         signers,
     })
@@ -429,7 +432,7 @@ mod tests {
         }
     }
 
-    fn config_with(total: u64, assigned: u64) -> Config {
+    fn config_with(total: u8, assigned: u8) -> Config {
         let node = NodeConfig::testing().with_consensus(|consensus| {
             consensus.hardforks.frontier.number_of_ingress_proofs_total = total;
             consensus

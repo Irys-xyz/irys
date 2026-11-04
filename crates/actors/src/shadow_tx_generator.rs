@@ -116,7 +116,7 @@ pub struct ShadowTxGenerator<'a> {
     /// Required ingress proofs per publish tx (N), taken at the block's own
     /// timestamp. Block production and validation size the block's proof list
     /// by this same N, so the generator must slice and price with it too.
-    number_of_ingress_proofs_total: u64,
+    number_of_ingress_proofs_total: u8,
 
     // Transaction slices
     commitment_txs: &'a [CommitmentTransaction],
@@ -438,7 +438,7 @@ impl<'a> ShadowTxGenerator<'a> {
     fn accumulate_ingress_rewards_for_init(
         publish_ledger: &PublishLedgerWithTxs,
         config: &ConsensusConfig,
-        number_of_ingress_proofs_total: u64,
+        number_of_ingress_proofs_total: u8,
         epoch_snapshot: &EpochSnapshot,
     ) -> Result<BTreeMap<IrysAddress, (RewardAmount, RollingHash)>> {
         let mut rewards_map: BTreeMap<IrysAddress, (RewardAmount, RollingHash)> = BTreeMap::new();
@@ -484,14 +484,11 @@ impl<'a> ShadowTxGenerator<'a> {
             // every honest validator; classify as `Structural` instead.
             // Compute the slice bounds with checked arithmetic. Overflow is
             // unreachable for a valid block (index and N are bounded), so classify
-            // it as Structural rather than letting an `as` cast wrap.
-            let (start_index, end_index) = usize::try_from(number_of_ingress_proofs_total)
-                .ok()
-                .and_then(|n| {
-                    let start = index.checked_mul(n)?;
-                    let end = start.checked_add(n)?;
-                    Some((start, end))
-                })
+            // it as Structural.
+            let n = usize::from(number_of_ingress_proofs_total);
+            let (start_index, end_index) = index
+                .checked_mul(n)
+                .and_then(|start| Some((start, start.checked_add(n)?)))
                 .ok_or_else(|| {
                     ShadowTxGenError::Structural(format!(
                         "publish ledger tx {} ingress-proof slice offset overflowed for N={}",

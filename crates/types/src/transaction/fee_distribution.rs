@@ -162,7 +162,7 @@ impl PublishFeeCharges {
         perm_fee: BoundedFee,
         term_fee: BoundedFee,
         config: &ConsensusConfig,
-        num_ingress_proofs: u64,
+        num_ingress_proofs: u8,
     ) -> eyre::Result<Self> {
         // Extract U256 for calculations - BoundedFee ensures inputs are validated
         let perm_fee_amount = perm_fee.get();

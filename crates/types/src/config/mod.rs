@@ -93,7 +93,7 @@ impl Config {
     }
 
     /// Get the number of ingress proofs required at a given timestamp (in seconds).
-    pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u64 {
+    pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u8 {
         self.0
             .consensus
             .hardforks
@@ -101,7 +101,7 @@ impl Config {
     }
 
     /// Get the number of ingress proofs from assignees required at a given timestamp (in seconds).
-    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u64 {
+    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u8 {
         self.0
             .consensus
             .hardforks
@@ -115,7 +115,7 @@ impl Config {
         match self.0.consensus.hardforks.delta_for_block(timestamp) {
             Activation::Active(_) => self.0.consensus.num_partitions_per_slot,
             Activation::Inactive => {
-                ReplicaCount::new(self.number_of_ingress_proofs_total_at(timestamp))
+                ReplicaCount::new(u64::from(self.number_of_ingress_proofs_total_at(timestamp)))
             }
         }
     }
@@ -321,7 +321,7 @@ impl Config {
         // Validation clamps the assignee requirement to the miners assigned to the Submit
         // slot, at most `num_partitions_per_slot`. A larger value is never applied.
         ensure!(
-            assignee_proofs <= self.consensus.num_partitions_per_slot.get(),
+            u64::from(assignee_proofs) <= self.consensus.num_partitions_per_slot.get(),
             "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({assignee_proofs}) \
              must be <= num_partitions_per_slot ({})",
             self.consensus.num_partitions_per_slot,

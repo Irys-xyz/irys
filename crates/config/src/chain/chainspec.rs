@@ -14,16 +14,9 @@ use irys_types::{
 pub fn build_unsigned_irys_genesis_block(
     config: &GenesisConfig,
     evm_block_hash: B256,
-    number_of_ingress_proofs_total: u64,
+    number_of_ingress_proofs_total: u8,
     cascade: Option<&Cascade>,
 ) -> eyre::Result<IrysBlockHeader> {
-    let proof_count = u8::try_from(number_of_ingress_proofs_total).map_err(|_| {
-        eyre::eyre!(
-            "number_of_ingress_proofs_total ({}) exceeds u8::MAX (255)",
-            number_of_ingress_proofs_total
-        )
-    })?;
-
     let mut data_ledgers = vec![
         DataTransactionLedger {
             ledger_id: DataLedger::Publish.into(),
@@ -32,7 +25,7 @@ pub fn build_unsigned_irys_genesis_block(
             total_chunks: 0,
             expires: None,
             proofs: None,
-            required_proof_count: Some(proof_count),
+            required_proof_count: Some(number_of_ingress_proofs_total),
         },
         DataTransactionLedger {
             ledger_id: DataLedger::Submit.into(),
@@ -133,7 +126,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn ingress_proof_count_preserved_for_valid_values(count in 0_u64..=255) {
+        fn ingress_proof_count_preserved_for_valid_values(count in any::<u8>()) {
             let config = test_genesis_config();
             let block = build_unsigned_irys_genesis_block(
                 &config,
@@ -148,22 +141,9 @@ mod tests {
                 .expect("publish ledger should exist");
             prop_assert_eq!(
                 publish_ledger.required_proof_count,
-                Some(u8::try_from(count).unwrap())
+                Some(count)
             );
         }
-    }
-
-    #[test]
-    fn rejects_ingress_proof_count_over_255() {
-        let config = test_genesis_config();
-        let result = build_unsigned_irys_genesis_block(&config, B256::ZERO, 256, None);
-        let err_msg = result
-            .expect_err("expected overflow for ingress proof count > 255")
-            .to_string();
-        assert!(
-            err_msg.contains("exceeds u8::MAX"),
-            "expected 'exceeds u8::MAX' in error, got: {err_msg}"
-        );
     }
 
     #[test]

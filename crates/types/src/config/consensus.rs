@@ -1272,7 +1272,7 @@ mod tests {
         // update this snapshot.
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("FD3ZgRdpP9N9khmjZUdpUqbn1sPWDTh4WVqHV5MzZBhF"), // spellchecker:disable-line
+            H256::from_base58("F8D8UpXGJC3mUvTh7rS2xLTjiX6eErcVxfi8cbvYQGVx"), // spellchecker:disable-line
             "mainnet consensus-config hash snapshot changed"
         );
     }
@@ -1290,7 +1290,7 @@ mod tests {
         );
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("HesM2TzMJWstq3hWQ4yZcSxEnrMC1pDVi8ft7Msb2vsq"), // spellchecker:disable-line
+            H256::from_base58("7ShUw2VECgbqSB36dSYvsdZXiY2fiPaLeH8X3AvZnX2j"), // spellchecker:disable-line
             "testnet consensus-config hash snapshot changed"
         );
     }
@@ -1508,7 +1508,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("ASCrGKHTgu7C6ea5UC2NFDSSxZp23MVUi2Pf7PmLCiZi");
+        let expected_hash = H256::from_base58("Av64zPuqYbAM3DYqrgMJX4uVtKdXnZw59MyYdvDdNaF4");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,

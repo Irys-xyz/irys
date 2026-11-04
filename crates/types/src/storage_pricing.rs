@@ -398,7 +398,7 @@ impl Amount<(NetworkFee, Irys)> {
     pub fn add_ingress_proof_rewards(
         self,
         term_fee: U256,
-        num_ingress_proofs: u64,
+        num_ingress_proofs: u8,
         fee_percentage: Amount<Percentage>,
     ) -> Result<Self> {
         // Calculate reward per ingress proof (fee_percentage × term_fee)
@@ -592,7 +592,7 @@ pub fn calculate_perm_fee_from_config(
     bytes_to_store: u64,
     config: &ConsensusConfig,
     replica_count: ReplicaCount,
-    number_of_ingress_proofs_total: u64,
+    number_of_ingress_proofs_total: u8,
     ema_price: Amount<(IrysPrice, Usd)>,
     term_fee: U256,
     timestamp: UnixTimestamp,
@@ -1356,7 +1356,7 @@ mod tests {
             let term_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -1399,7 +1399,7 @@ mod tests {
             let term_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -1454,7 +1454,7 @@ mod tests {
             let term_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -1498,7 +1498,7 @@ mod tests {
                 let term_fee = calculate_term_fee_from_config(
                     bytes_to_store,
                     &config,
-                    ReplicaCount::new(number_of_ingress_proofs_total),
+                    ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                     irys_price,
                     UnixTimestamp::from_secs(0),
                 )?;
@@ -1538,7 +1538,7 @@ mod tests {
             let term_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -1585,7 +1585,7 @@ mod tests {
             let term_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -1636,7 +1636,7 @@ mod tests {
             let fee_10m = calculate_term_fee_from_config(
                 bytes_10m_chunks,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -1647,7 +1647,7 @@ mod tests {
             let fee_10m_plus = calculate_term_fee_from_config(
                 bytes_10m_plus_1,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -1694,7 +1694,7 @@ mod tests {
             let cheap_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 cheap_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -1705,7 +1705,7 @@ mod tests {
             let expensive_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 expensive_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -1782,7 +1782,7 @@ mod tests {
 
             let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate)?
-                .replica_count(number_of_ingress_proofs_total)?;
+                .replica_count(u64::from(number_of_ingress_proofs_total))?;
 
             let term_fee = cost_per_chunk_adjusted.base_network_fee(
                 U256::from(bytes_to_store),
@@ -1842,7 +1842,7 @@ mod tests {
             let term_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -1897,7 +1897,7 @@ mod tests {
 
             let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate)?
-                .replica_count(number_of_ingress_proofs_total)?;
+                .replica_count(u64::from(number_of_ingress_proofs_total))?;
 
             let term_fee = cost_per_chunk_adjusted.base_network_fee(
                 U256::from(bytes_to_store),
@@ -2018,7 +2018,7 @@ mod tests {
                     bytes_to_store,
                     epochs,
                     &config,
-                    ReplicaCount::new(number_of_ingress_proofs_total),
+                    ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                     irys_price,
                     UnixTimestamp::from_secs(0),
                 )?;
@@ -2039,7 +2039,7 @@ mod tests {
                         bytes_to_store,
                         5,
                         &config,
-                        ReplicaCount::new(number_of_ingress_proofs_total),
+                        ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                         irys_price,
                         UnixTimestamp::from_secs(0),
                     )?;
@@ -2047,7 +2047,7 @@ mod tests {
                         bytes_to_store,
                         10,
                         &config,
-                        ReplicaCount::new(number_of_ingress_proofs_total),
+                        ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                         irys_price,
                         UnixTimestamp::from_secs(0),
                     )?;
@@ -2095,7 +2095,7 @@ mod tests {
             let fee_from_config = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -2105,7 +2105,7 @@ mod tests {
                 bytes_to_store,
                 config.epoch.submit_ledger_epoch_length,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -2139,7 +2139,7 @@ mod tests {
                 bytes_to_store,
                 0,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -2177,7 +2177,7 @@ mod tests {
                 bytes_to_store,
                 epochs_per_year,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -2263,7 +2263,7 @@ mod tests {
             let term_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -2272,7 +2272,7 @@ mod tests {
             let perm_fee = calculate_perm_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 number_of_ingress_proofs_total,
                 irys_price,
                 term_fee,
@@ -2324,7 +2324,7 @@ mod tests {
             let term_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 irys_price,
                 UnixTimestamp::from_secs(0),
             )?;
@@ -2333,7 +2333,7 @@ mod tests {
             let perm_fee = calculate_perm_fee_from_config(
                 bytes_to_store,
                 &config,
-                ReplicaCount::new(number_of_ingress_proofs_total),
+                ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
                 number_of_ingress_proofs_total,
                 irys_price,
                 term_fee,
@@ -2388,14 +2388,14 @@ mod tests {
             let term_pre = calculate_term_fee_from_config(
                 bytes,
                 &config,
-                ReplicaCount::new(proofs),
+                ReplicaCount::new(u64::from(proofs)),
                 irys_price,
                 pre_ts,
             )?;
             let perm_pre = calculate_perm_fee_from_config(
                 bytes,
                 &config,
-                ReplicaCount::new(proofs),
+                ReplicaCount::new(u64::from(proofs)),
                 proofs,
                 irys_price,
                 term_pre,
@@ -2405,14 +2405,14 @@ mod tests {
             let term_post = calculate_term_fee_from_config(
                 bytes,
                 &config,
-                ReplicaCount::new(proofs),
+                ReplicaCount::new(u64::from(proofs)),
                 irys_price,
                 post_ts,
             )?;
             let perm_post = calculate_perm_fee_from_config(
                 bytes,
                 &config,
-                ReplicaCount::new(proofs),
+                ReplicaCount::new(u64::from(proofs)),
                 proofs,
                 irys_price,
                 term_post,
@@ -2452,7 +2452,7 @@ mod tests {
                 Amount::new(safe_div(config.decay_rate.amount, epochs_per_year)?);
             let cost_with_decay = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-                .replica_count(number_of_ingress_proofs_total)?;
+                .replica_count(u64::from(number_of_ingress_proofs_total))?;
             let base_fee_with_decay = cost_with_decay.base_network_fee(
                 U256::from(bytes_to_store),
                 config.chunk_size,
@@ -2462,7 +2462,7 @@ mod tests {
             // Calculate without decay (decay_rate_per_year =  0)
             let cost_no_decay = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, Amount::percentage(dec!(0))?)?
-                .replica_count(number_of_ingress_proofs_total)?;
+                .replica_count(u64::from(number_of_ingress_proofs_total))?;
             let base_fee_no_decay = cost_no_decay.base_network_fee(
                 U256::from(bytes_to_store),
                 config.chunk_size,
