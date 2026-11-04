@@ -986,16 +986,38 @@ pub(crate) fn resolve_promoted_on_branch(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeSet<IrysTransactionId>> {
+    Ok(resolve_promotion_heights_on_branch(
+        candidate_txids,
+        parent_block_hash,
+        block_height,
+        config,
+        block_tree_guard,
+        db,
+    )?
+    .into_keys()
+    .collect())
+}
+
+/// [`resolve_promoted_on_branch`], keeping the height of the Publish block
+/// that promoted each tx.
+pub(crate) fn resolve_promotion_heights_on_branch(
+    candidate_txids: &[IrysTransactionId],
+    parent_block_hash: H256,
+    block_height: u64,
+    config: &Config,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<BTreeMap<IrysTransactionId, u64>> {
     // No candidates → nothing to resolve; skip the tree/DB ancestry walk entirely.
     if candidate_txids.is_empty() {
-        return Ok(BTreeSet::new());
+        return Ok(BTreeMap::new());
     }
 
     let walk_depth = crate::block_validation::prior_inclusion_walk_depth(config);
     let walk_min_height = block_height.saturating_sub(walk_depth);
 
     let mut remaining: BTreeSet<IrysTransactionId> = candidate_txids.iter().copied().collect();
-    let mut promoted: BTreeSet<IrysTransactionId> = BTreeSet::new();
+    let mut promoted: BTreeMap<IrysTransactionId, u64> = BTreeMap::new();
 
     // Primary path: by-hash parent walk over the reorg window. An in-window
     // ancestor missing from BOTH the tree and the DB is a local inconsistency
@@ -1009,7 +1031,7 @@ pub(crate) fn resolve_promoted_on_branch(
         |header| {
             remaining.retain(|txid| {
                 if block_includes_ledger_tx(header, DataLedger::Publish, txid) {
-                    promoted.insert(*txid);
+                    promoted.insert(*txid, header.height);
                     false
                 } else {
                     true
@@ -1041,8 +1063,8 @@ pub(crate) fn resolve_promoted_on_branch(
         let max_height = walk_min_height.saturating_sub(1);
         db.view_eyre(|tx| {
             for txid in &remaining {
-                if canonical_promoted_height(tx, txid, max_height)?.is_some() {
-                    promoted.insert(*txid);
+                if let Some(height) = canonical_promoted_height(tx, txid, max_height)? {
+                    promoted.insert(*txid, height);
                 }
             }
             Ok(())

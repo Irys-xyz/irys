@@ -1,6 +1,12 @@
+use crate::anchor_validation::validate_ingress_proof_anchor_for_inclusion;
 use crate::block_validation::calculate_perm_storage_total_fee;
+use crate::chunk_ingress_service::ChunkIngressServiceInner;
 use crate::mempool_service::TxIngressError;
+use irys_database::DatabaseProvider;
+use irys_database::tables::CompactCachedIngressProof;
+use irys_domain::BlockTreeReadGuard;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
+use irys_types::ingress::CachedIngressProof;
 use irys_types::storage_pricing::{
     Amount, calculate_term_fee,
     phantoms::{Irys, NetworkFee},
@@ -128,4 +134,82 @@ pub(crate) fn check_funding<T: IrysTransactionCommon>(
     }
 
     has_funds
+}
+
+/// Lowest anchor height that may be included in a block at `next_block_height`.
+pub(crate) fn min_ingress_proof_anchor_height(next_block_height: u64, config: &Config) -> u64 {
+    next_block_height
+        .saturating_sub(config.consensus.mempool.ingress_proof_anchor_expiry_depth as u64)
+}
+
+/// Proofs whose anchor has not expired.
+///
+/// A database error inside the expiry check counts as not expired. That is what
+/// the promotion selector does.
+pub(crate) fn unexpired_ingress_proofs(
+    proofs: impl IntoIterator<Item = CompactCachedIngressProof>,
+    block_tree: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    config: &Config,
+) -> Vec<CachedIngressProof> {
+    proofs
+        .into_iter()
+        .filter(|cached| {
+            !ChunkIngressServiceInner::is_ingress_proof_expired_static(
+                block_tree,
+                db,
+                config,
+                &cached.proof,
+            )
+            .expired_or_invalid
+        })
+        .map(|cached| cached.0)
+        .collect()
+}
+
+/// Keep the first proof for each stored signer. Later duplicates are counted
+/// and dropped. Order of the kept proofs is the input order.
+pub(crate) fn dedup_ingress_proofs_by_signer(
+    proofs: Vec<CachedIngressProof>,
+) -> (Vec<CachedIngressProof>, usize) {
+    keep_first_per_address(proofs, |proof| proof.address)
+}
+
+/// Proofs whose anchor is valid for inclusion. A database error is returned.
+/// An unknown or too-old anchor is omitted.
+pub(crate) fn anchor_valid_ingress_proofs(
+    proofs: Vec<CachedIngressProof>,
+    block_tree: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    min_anchor_height: u64,
+) -> eyre::Result<Vec<CachedIngressProof>> {
+    let mut kept = Vec::with_capacity(proofs.len());
+    for cached in proofs {
+        let valid = validate_ingress_proof_anchor_for_inclusion(
+            block_tree,
+            db,
+            min_anchor_height,
+            &cached.proof,
+        )?;
+        if valid {
+            kept.push(cached);
+        }
+    }
+    Ok(kept)
+}
+
+/// Keep the first item for each address, in input order. Returns the kept
+/// items and how many later duplicates were dropped.
+pub(crate) fn keep_first_per_address<T>(
+    items: Vec<T>,
+    address: impl Fn(&T) -> IrysAddress,
+) -> (Vec<T>, usize) {
+    let before = items.len();
+    let mut seen = HashSet::new();
+    let kept = items
+        .into_iter()
+        .filter(|item| seen.insert(address(item)))
+        .collect::<Vec<_>>();
+    let dropped = before - kept.len();
+    (kept, dropped)
 }

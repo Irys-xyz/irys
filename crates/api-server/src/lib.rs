@@ -161,6 +161,10 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(tx::get_tx_promotion_status),
         )
         .route(
+            "/tx/{tx_id}/ingress-status",
+            web::get().to(tx::get_tx_ingress_status),
+        )
+        .route(
             "/tx/{tx_id}/local/data-start-offset",
             web::get().to(tx::get_tx_local_start_offset),
         )
