@@ -4397,7 +4397,12 @@ pub async fn read_block_from_state(
                         // poll: it was discarded, and its event may still
                         // be in flight.
                         None if was_validation_scheduled => {
-                            return wait_for_discard_event(&mut event_receiver, block_hash).await;
+                            return wait_for_discard_event(
+                                &mut event_receiver,
+                                block_hash,
+                                Some(missed),
+                            )
+                            .await;
                         }
                         // Re-poll is non-definitive (still scheduled, or
                         // unknown without prior scheduled sighting). The
@@ -4428,7 +4433,7 @@ pub async fn read_block_from_state(
             // treats the synthetic outcome as a panic (correct: no event = no
             // assertion possible).
             if was_validation_scheduled {
-                return wait_for_discard_event(&mut event_receiver, block_hash).await;
+                return wait_for_discard_event(&mut event_receiver, block_hash, None).await;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             continue;
@@ -4478,9 +4483,12 @@ fn discard_outcome_for(
 /// if no such event arrives before the timeout (e.g. the block was removed by
 /// a parent's discard, which emits no event for the child), and
 /// `ReceiverLagged` if the receiver dropped events, which can include it.
+/// `missed_before_wait` is a lag the caller already consumed: if no event
+/// arrives, that lag can hold it, so the timeout reports `ReceiverLagged`.
 async fn wait_for_discard_event(
     event_receiver: &mut tokio::sync::broadcast::Receiver<BlockStateUpdated>,
     block_hash: &H256,
+    missed_before_wait: Option<u64>,
 ) -> BlockValidationOutcome {
     use tokio::sync::broadcast::error::RecvError;
 
@@ -4499,7 +4507,12 @@ async fn wait_for_discard_event(
             Ok(Err(RecvError::Closed)) => {
                 panic!("block event channel closed while waiting for the discard of {block_hash}")
             }
-            Err(_) => return BlockValidationOutcome::NoDiscardEventObserved,
+            Err(_) => {
+                return missed_before_wait
+                    .map_or(BlockValidationOutcome::NoDiscardEventObserved, |missed| {
+                        BlockValidationOutcome::ReceiverLagged { missed }
+                    });
+            }
         }
     }
 }
