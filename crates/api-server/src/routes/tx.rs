@@ -409,6 +409,14 @@ pub async fn get_tx_ingress_status(
     debug!("Get ingress status by tx_id: {}", tx_id);
 
     let header = lookup_data_tx_header(&state, tx_id).await?;
+    // Only Publish-targeting txs are promoted. A term-ledger tx would report
+    // proofs and deficits for a promotion that cannot happen.
+    if header.ledger_id != u32::from(DataLedger::Publish) {
+        return Err(ApiError::Custom(format!(
+            "tx {tx_id} targets ledger {}, not Publish; it is never promoted",
+            header.ledger_id
+        )));
+    }
     let tip = read_canonical_tip(&state)?;
     // Publish membership on the tip's branch, the check the selector uses. The
     // header's `promoted_height` is a branch-variant local hint.
