@@ -3,6 +3,7 @@
 //! This crate provides common development tasks like testing, formatting,
 //! and code checking.
 
+pub mod defects;
 pub mod failures;
 pub mod flaky;
 pub mod prune;

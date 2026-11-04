@@ -1,0 +1,4 @@
+# Defect instance log. Add rows only; do not edit or remove rows.
+# One [[instance]] table per instance. Fields: class, site, found ("YYYY-MM-DD"),
+# found_by, fix (PR number or commit), released_in (release tag), note (optional).
+# See README.md and `cargo xtask defects check`.

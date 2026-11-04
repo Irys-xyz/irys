@@ -217,6 +217,9 @@ jobs:
       - name: Update submodules
         run: git submodule update --init --recursive
 
+      - name: defect catalogue check
+        run: cargo xtask defects check
+
       - name: cargo check
         run: cargo xtask full-check
 

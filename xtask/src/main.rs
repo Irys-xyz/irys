@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use xshell::{Shell, cmd};
 
+use xtask::defects;
 use xtask::failures::{
     self, FailuresFile, RunResults, generate_nextest_config, get_failures_file_path,
     get_stats_file_path,
@@ -57,6 +58,16 @@ struct PruneArgs {
 struct Args {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum DefectsAction {
+    /// Validate the catalogue files. Reads only the catalogue directory, not git.
+    Check {
+        /// Catalogue directory (default: the one in this checkout).
+        #[clap(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -146,6 +157,11 @@ enum Commands {
         fix: bool,
     },
     CleanWorkspace,
+    /// Defect catalogue tools (`docs/99-reference/defect-catalogue/`).
+    Defects {
+        #[clap(subcommand)]
+        action: DefectsAction,
+    },
     /// Run multiversion integration tests from the multiversion-tests crate.
     ///
     /// Examples:
@@ -822,12 +838,19 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             run_command(Commands::UnusedDeps, sh)?;
             run_command(Commands::Deny, sh)?;
             run_command(Commands::Typos, sh)?;
+            run_command(
+                Commands::Defects {
+                    action: DefectsAction::Check { dir: None },
+                },
+                sh,
+            )?;
             if with_tests {
                 // Parsed, not built by hand, so the `XTASK_*` env vars apply exactly as they do to
                 // `cargo xtask test`.
                 run_command(Args::try_parse_from(["xtask", "test"])?.command, sh)?
             }
         }
+        Commands::Defects { action } => run_defects(action)?,
         Commands::CleanWorkspace => {
             // get workspace metadata
             let metadata = MetadataCommand::new().exec()?;
@@ -1238,6 +1261,22 @@ fn run_manual_prune(window: &PruneWindow) -> eyre::Result<()> {
     match prune::prune_recorded(workspace_root, target_dir, keep_after, unused_before)? {
         None => println!("No live usage records; nothing pruned."),
         Some(report) => report_prune(&report.executables, &report.units, false),
+    }
+    Ok(())
+}
+
+fn run_defects(action: DefectsAction) -> eyre::Result<()> {
+    match action {
+        DefectsAction::Check { dir } => {
+            let dir = dir.unwrap_or_else(defects::default_dir);
+            let problems = defects::catalogue::check(&dir);
+            for problem in &problems {
+                println!("{problem}");
+            }
+            if !problems.is_empty() {
+                eyre::bail!("defect catalogue: {} problem(s)", problems.len());
+            }
+        }
     }
     Ok(())
 }
