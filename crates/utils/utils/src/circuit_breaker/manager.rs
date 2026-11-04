@@ -67,8 +67,8 @@ where
     /// A closed breaker returns true and does not consume a trial. An open
     /// breaker moves to half-open and consumes one trial even when the cooldown
     /// has not elapsed. Grants stay bounded by `recovery_attempts` per window.
-    /// The source-peer body pull uses this. Every other send uses
-    /// [`Self::is_available`].
+    /// The source-peer body pull and the announced-chunk fetch use this.
+    /// Every other send uses [`Self::is_available`].
     #[must_use]
     pub fn begin_probe(&self, key: &K) -> bool {
         match self.breakers.get(key) {

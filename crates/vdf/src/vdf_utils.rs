@@ -16,11 +16,13 @@ pub const VDF_FAST_FORWARD_CHANNEL_CAPACITY: usize = 4_096;
 
 /// Shared re-anchor generation + buffer-suspect flag (FF senders, `run_vdf`,
 /// block-tree gate, recall-range validation). Generation bumps on applied heal;
-/// suspect is set while a heal is pending/running.
+/// suspect is set while a heal is pending/running. Also records whether
+/// `run_vdf` stopped because the node is shutting down.
 #[derive(Debug, Clone)]
 pub struct ReanchorSignals {
     generation: Arc<AtomicU64>,
     buffer_suspect: Arc<AtomicBool>,
+    stopped_for_shutdown: Arc<AtomicBool>,
 }
 
 impl ReanchorSignals {
@@ -28,7 +30,20 @@ impl ReanchorSignals {
         Self {
             generation: Arc::new(AtomicU64::new(0)),
             buffer_suspect: Arc::new(AtomicBool::new(false)),
+            stopped_for_shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// `run_vdf` only, just before it exits on the shutdown token and drops the
+    /// fast-forward receiver. Release.
+    pub(crate) fn record_shutdown_stop(&self) {
+        self.stopped_for_shutdown.store(true, Ordering::Release);
+    }
+
+    /// True once `run_vdf` has exited on the shutdown token. A poisoned-lock exit
+    /// never sets it, so a closed channel without it still means a dead VDF thread.
+    pub fn is_stopped_for_shutdown(&self) -> bool {
+        self.stopped_for_shutdown.load(Ordering::Acquire)
     }
 
     /// Current re-anchor generation (`0` until first applied heal). Acquire.
@@ -73,6 +88,14 @@ pub struct VdfReanchorGenerationChanged {
     pub current: u64,
 }
 
+/// `run_vdf` stopped for shutdown before this batch was fast-forwarded; the batch
+/// must requeue (not invalid, and not a node fault).
+#[derive(Debug, thiserror::Error)]
+#[error("VDF thread stopped for shutdown before step {step} was fast-forwarded")]
+pub struct VdfFastForwardStopped {
+    pub step: u64,
+}
+
 /// Fast-forward send half: only validated (or sync-trusted) steps.
 #[derive(Debug, Clone)]
 pub struct VdfFastForwardSender {
@@ -107,6 +130,7 @@ impl VdfFastForwardSender {
             start_step_number,
             steps,
             &self.sender,
+            &self.signals,
             captured_generation,
             send_timeout,
         )
@@ -189,6 +213,7 @@ pub(crate) async fn fast_forward_validated_steps(
     start_step_number: u64,
     steps: &[H256],
     vdf_fast_forward_sender: &Sender<Traced<VdfStep>>,
+    signals: &ReanchorSignals,
     generation: u64,
     send_timeout: Duration,
 ) -> eyre::Result<()> {
@@ -211,8 +236,18 @@ pub(crate) async fn fast_forward_validated_steps(
         {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
-                // Channel closed: the receiver was dropped because `run_vdf` has
-                // exited (e.g., graceful exit on a poisoned VDF state lock; see
+                // `run_vdf` exits on the shutdown token before the lifecycle stops
+                // block intake, so validation can still be draining when the
+                // receiver goes. That exit is requested, not a fault: requeue the
+                // batch instead of panicking an orderly shutdown.
+                if signals.is_stopped_for_shutdown() {
+                    return Err(VdfFastForwardStopped {
+                        step: start_step_number + i as u64,
+                    }
+                    .into());
+                }
+                // Otherwise the channel closed because `run_vdf` died
+                // (e.g., graceful exit on a poisoned VDF state lock; see
                 // crates/vdf/src/vdf.rs `run_vdf`). This is the same local-
                 // infrastructure failure class as the send-timeout arm below —
                 // the consumer is dead either way. Panic for the same reason: a
@@ -389,6 +424,24 @@ mod tests {
             !tx.try_send(request_at(30)),
             "send must report failure once the receiver is gone"
         );
+    }
+
+    // A receiver dropped by a shutdown stop is expected while validation drains:
+    // it must surface as the typed requeue error, not a panic.
+    #[tokio::test]
+    async fn send_reports_shutdown_stop_when_receiver_dropped() {
+        let (sender, rx, signals) = fast_forward_channel();
+        signals.record_shutdown_stop();
+        drop(rx);
+        let captured = sender.current_generation();
+        let error = sender
+            .send_validated_batch(7, &[H256::zero()], Duration::from_millis(50), captured)
+            .await
+            .expect_err("a shutdown stop must fail the send");
+        let stopped = error
+            .downcast_ref::<VdfFastForwardStopped>()
+            .expect("shutdown stop must be the typed requeue error");
+        assert_eq!(stopped.step, 7);
     }
 
     // Fail-stop: a dead receiver (run_vdf exited) must panic, never return an Err
