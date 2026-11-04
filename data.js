@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793829218151,
+  "lastUpdate": 1793831693496,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -21750,6 +21750,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000146,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6456313deeab0680a644dd5ae59798279c292b9b",
+          "message": "feat(api): add GET /v1/tx/{tx_id}/ingress-status (#1774)\n\n* feat(api): add GET /v1/tx/{tx_id}/ingress-status\n\nReports, for one data transaction, the ingress proofs this node has stored\nfor its data root, which signers count toward promotion, the active proof\nrequirements, and the remaining deficits.\n\n- Proof eligibility uses the promotion selector's own rules: expiry before\n  signer dedup, inclusion anchor window, pre_validate, Submit-range\n  assignment by recovered signer, stake for unassigned proofs, and the\n  last-assigned-slot clamp on the assignee gate. The selector's expiry,\n  dedup, and anchor filters move to tx_selector/helpers.rs so both paths\n  call the same code.\n- Promotion is Publish membership on the canonical tip's branch, the check\n  the selector uses (resolve_promoted_on_branch, now backed by\n  resolve_promotion_heights_on_branch). The header's promoted_height hint\n  is branch-variant and is not consulted. Once promoted, the proof fields\n  are null.\n- Extract first_intersecting_submit_slot_miners from\n  get_assigned_ingress_proofs; behaviour is unchanged.\n- Add ApiClientExt::get_ingress_status.\n\n* fix(api): reject non-Publish txs from ingress-status\n\nA term-ledger (OneYear/ThirtyDay) tx is never promoted, so reporting its\nproof counts and deficits invites clients to poll for a promotion that\ncannot happen. Return 400 for any ledger other than Publish.",
+          "timestamp": "2026-11-04T14:19:29-08:00",
+          "tree_id": "fc05b5613c095df8cda353595f008a811473c5e7",
+          "url": "https://github.com/Irys-xyz/irys/commit/6456313deeab0680a644dd5ae59798279c292b9b"
+        },
+        "date": 1793831691837,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015113,
+            "range": "± 0.000297",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.152513,
+            "range": "± 0.004735",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.564449,
+            "range": "± 0.067999",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.694394,
+            "range": "± 0.406741",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082682,
+            "range": "± 0.002804",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 842.145675,
+            "range": "± 12.507431",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1000.759487,
+            "range": "± 72.797035",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117518,
+            "range": "± 0.000642",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1180.040722,
+            "range": "± 7.685303",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1555.947714,
+            "range": "± 166.874719",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033745,
+            "range": "± 0.000832",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.360291,
+            "range": "± 0.43715",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.61451,
+            "range": "± 0.852273",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
             "range": "± 0.000002",
             "unit": "ms/iter"
           }
