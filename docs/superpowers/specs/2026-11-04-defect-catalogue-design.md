@@ -230,7 +230,8 @@ already covers the guidance.
   `--head`, `git diff -U0 --find-renames <merge-base>` (working tree, tracked files only; untracked
   files are not scanned, and `--help` says so). Added lines in a renamed file count under the new
   path. Deleted files and binary files are skipped.
-- `paths` globs are relative to the repo root (`globset` syntax). `patterns` use the Rust `regex`
+- `paths` globs are relative to the repo root (`glob::Pattern` syntax; the `glob` crate is already
+  in the lockfile). `patterns` use the Rust `regex`
   crate syntax (no look-around).
 - Seed classes set `paths` to keep the scan output small. For the response-body class, restrict
   to crates that talk to peers (`crates/p2p/**`, `crates/actors/**`, `crates/api-client/**`,
