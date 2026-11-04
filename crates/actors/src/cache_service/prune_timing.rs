@@ -3,8 +3,7 @@
 
 use super::*;
 use irys_database::{
-    DatabaseProviderCacheExt as _, DatabaseProviderTestExt as _, database,
-    db::{IrysDatabaseExt as _},
+    DatabaseProviderTestExt as _, database,
     db_cache::{CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata},
     tables::{CachedChunks, CachedChunksIndex, IrysBlockHeaders, MigratedBlockHashes},
 };
@@ -20,6 +19,7 @@ use irys_types::{
     UnpackedChunk, partition::PartitionAssignment, partition_chunk_offset_ii,
 };
 use nodit::interval::ii;
+use reth_db::transaction::DbTxMut as _;
 use std::{cell::Cell, ops::RangeInclusive, sync::RwLock, time::Instant};
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]

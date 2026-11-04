@@ -3657,7 +3657,6 @@ mod tests {
     /// field. The announcement must use the size a fetch will serve.
     #[tokio::test]
     async fn confirmed_prefix_chunk_is_announced_at_the_cached_root_size() {
-        use irys_database::db::IrysDatabaseExt as _;
         use irys_types::gossip::v2::GossipDataV2;
 
         let tmp = irys_testing_utils::utils::TempDirBuilder::new()
@@ -3698,7 +3697,7 @@ mod tests {
 
         let served = inner
             .irys_db
-            .view_eyre(|tx| {
+            .view_cache_eyre(|tx| {
                 irys_database::cached_unpacked_chunk(tx, data_root, TxChunkOffset::from(0), 32)
             })
             .expect("read")
@@ -3789,10 +3788,8 @@ mod tests {
     }
 
     fn insert_confirmed_cdr(db: &DatabaseProvider, data_root: H256, data_size: u64) {
-        use irys_database::db::IrysDatabaseExt as _;
-
         insert_unconfirmed_cdr(db, data_root, data_size);
-        db.update_eyre(|tx| {
+        db.update_cache_eyre(|tx| {
             irys_database::confirm_data_size_for_data_root(tx, &data_root, data_size).map(|_| ())
         })
         .expect("confirm cached data root");
@@ -4088,7 +4085,6 @@ mod tests {
     /// bodies until the test forces a sync.
     #[tokio::test]
     async fn http_ingest_returns_before_the_module_sweep() {
-        use irys_database::db::IrysDatabaseExt as _;
         use irys_domain::ChunkType;
         use irys_types::PartitionChunkOffset;
 
@@ -4118,7 +4114,7 @@ mod tests {
             let offset = PartitionChunkOffset::from(offset);
             let cached = inner
                 .irys_db
-                .view_eyre(|tx| {
+                .view_cache_eyre(|tx| {
                     irys_database::cached_unpacked_chunk(
                         tx,
                         chunk.data_root,

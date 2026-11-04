@@ -21,9 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use irys_database::DatabaseProvider;
-use irys_database::{
-    db::DatabaseProviderCacheExt as _, get_cache_size, tables::CachedChunks,
-};
+use irys_database::{db::DatabaseProviderCacheExt as _, get_cache_size, tables::CachedChunks};
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{

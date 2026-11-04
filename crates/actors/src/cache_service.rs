@@ -14,7 +14,6 @@ use irys_database::{
 use irys_database::{
     db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
     delete_cached_chunks_by_data_root, get_cache_size,
-    scoped_tx::{Cache, ScopedTx},
     tables::{
         CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof, IngressProofs,
     },
@@ -487,8 +486,8 @@ impl InnerCacheTask {
     /// Whether the root has at least one tx and every one is included at or
     /// below `migration_height`, and if not, why. Placements exist only after
     /// migration.
-    fn root_migration<T: reth_db::transaction::DbTx>(
-        tx: &ScopedTx<Cache>,
+    fn root_migration<C: reth_db::transaction::DbTx, T: reth_db::transaction::DbTx>(
+        tx: &C,
         consensus_tx: &T,
         data_root: DataRoot,
         migration_height: u64,
@@ -659,7 +658,7 @@ impl InnerCacheTask {
                 }
                 migration.insert(
                     *root,
-                    Self::root_migration(tx, &consensus_tx, *root, migration_height)?,
+                    Self::root_migration(tx.inner(), &consensus_tx, *root, migration_height)?,
                 );
             }
             Ok((proven, migration))
@@ -775,9 +774,15 @@ impl InnerCacheTask {
             let batch_counts = self
                 .db
                 .update_cache_eyre_at("cache_service.prune_chunks_batch", |write_tx| {
+                    let consensus_tx = self.db.tx()?;
                     let mut batch_counts = irys_database::ReclaimCounts::default();
                     for (root, durable_tx_offsets) in &confirmed {
-                        let migration = Self::root_migration(write_tx, *root, migration_height)?;
+                        let migration = Self::root_migration(
+                            write_tx.inner(),
+                            &consensus_tx,
+                            *root,
+                            migration_height,
+                        )?;
                         if migration != RootMigration::Migrated {
                             let count = u64::try_from(durable_tx_offsets.len())?;
                             tally.record_unmigrated(migration, count, count);
@@ -833,9 +838,15 @@ impl InnerCacheTask {
             let batch_pruned = self
                 .db
                 .update_cache_eyre_at("cache_service.prune_unprotected_chunks_batch", |write_tx| {
+                    let consensus_tx = self.db.tx()?;
                     let mut batch_pruned = 0_u64;
                     for (root, offsets) in &deletable {
-                        let migration = Self::root_migration(write_tx, *root, migration_height)?;
+                        let migration = Self::root_migration(
+                            write_tx.inner(),
+                            &consensus_tx,
+                            *root,
+                            migration_height,
+                        )?;
                         if migration != RootMigration::Migrated {
                             tally.record_unmigrated(migration, u64::try_from(offsets.len())?, 0);
                             continue;
@@ -1499,7 +1510,7 @@ impl InnerCacheTask {
                         // Bodies arrived since the filter, or sit on a live
                         // slot: keep the root until a later epoch.
                         if !cleared.contains(&rec.data_root)
-                            && Self::has_cached_bodies(write_tx, rec.data_root)?
+                            && Self::has_cached_bodies(write_tx.inner(), rec.data_root)?
                         {
                             continue;
                         }
@@ -3250,7 +3261,12 @@ mod tests {
         assert_eq!(
             db.view_cache_eyre(|tx| {
                 let consensus_tx = db.tx()?;
-                InnerCacheTask::root_migration(tx, &consensus_tx, data_root, migration_height)
+                InnerCacheTask::root_migration(
+                    tx.inner(),
+                    &consensus_tx,
+                    data_root,
+                    migration_height,
+                )
             })?,
             RootMigration::Migrated,
             "both transactions are migrated; that alone must not release an unwritten placement"
@@ -3281,7 +3297,9 @@ mod tests {
             })
         };
         assert!(cached_body()?.is_some());
-        assert!(db.view_cache_eyre(|tx| task.cached_body_still_unpersisted(tx.inner(), data_root))?);
+        assert!(
+            db.view_cache_eyre(|tx| task.cached_body_still_unpersisted(tx.inner(), data_root))?
+        );
 
         let tally = task.prune_durably_migrated_chunk_bodies(migration_height)?;
 
@@ -3296,7 +3314,9 @@ mod tests {
         new_storage.force_sync_pending_chunks()?;
         assert!(storage.is_data_chunk_persisted_at(old_offset));
         assert!(new_storage.is_data_chunk_persisted_at(new_offset));
-        assert!(!db.view_cache_eyre(|tx| task.cached_body_still_unpersisted(tx.inner(), data_root))?);
+        assert!(
+            !db.view_cache_eyre(|tx| task.cached_body_still_unpersisted(tx.inner(), data_root))?
+        );
         let completed = task.prune_durably_migrated_chunk_bodies(migration_height)?;
         assert_eq!(completed.deleted_durable, 1);
         assert!(cached_body()?.is_none());
@@ -4915,10 +4935,12 @@ mod tests {
             bytes: Base64(vec![7_u8; 32]),
             tx_offset: TxChunkOffset::from(0_u32),
         };
+        db.update_eyre(|tx| {
+            irys_database::set_data_tx_included_height(tx, &tx_header.id, 1)
+                .map_err(|error| eyre::eyre!("set included height: {error:?}"))
+        })?;
         db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
-            irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
-                .map_err(|error| eyre::eyre!("set included height: {error:?}"))?;
             database::cache_chunk(wtx, &chunk)?;
             irys_database::store_ingress_data_hash(
                 wtx,
@@ -4999,7 +5021,7 @@ mod tests {
             PruneMutation::NewTransaction => {
                 let mut new_header = tx_header;
                 new_header.id = H256::random();
-                db.update_eyre(|tx| {
+                db.update_cache_eyre(|tx| {
                     database::cache_data_root(tx, &new_header, None)?;
                     Ok(())
                 })?;
@@ -5197,10 +5219,12 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
+        db.update_eyre(|tx| {
+            irys_database::set_data_tx_included_height(tx, &tx_header.id, 1)
+                .map_err(|error| eyre::eyre!("set included height: {error:?}"))
+        })?;
         db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
-            irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
-                .map_err(|error| eyre::eyre!("set included height: {error:?}"))?;
             let c0 = UnpackedChunk {
                 data_root: tx_header.data_root,
                 data_size: tx_header.data_size,

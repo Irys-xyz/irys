@@ -7,22 +7,20 @@ use irys_actors::ChunkIngressService;
 use irys_actors::chunk_ingress_service::IngressProofGenerationState;
 use irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl;
 use irys_actors::test_helpers::build_test_service_senders;
-use irys_database::db::IrysDatabaseExt as _;
-use irys_database::tables::IrysTables;
-use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
+use irys_database::DatabaseProvider;
+use irys_database::db::{DatabaseProviderCacheExt as _, DatabaseProviderTestExt as _};
 use irys_domain::{BlockTree, BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_testing_utils::new_mock_signed_header;
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::{
     Config, DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-    DataTransactionMetadata, DatabaseProvider, H256, NodeConfig, TxChunkOffset, UnpackedChunk,
+    DataTransactionMetadata, H256, NodeConfig, TxChunkOffset, UnpackedChunk,
 };
 use opentelemetry_sdk::metrics::data::{
     AggregatedMetrics, HistogramDataPoint, MetricData, ResourceMetrics, ScopeMetrics,
 };
 use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 use reth::tasks::TaskExecutor;
-use reth_db::mdbx::DatabaseArguments;
 use std::sync::{Arc, RwLock};
 
 fn single_chunk(bytes: Vec<u8>) -> UnpackedChunk {
@@ -55,7 +53,7 @@ fn confirm_data_root(db: &DatabaseProvider, chunk: &UnpackedChunk) {
         },
         metadata: DataTransactionMetadata::new(),
     });
-    db.update_eyre(|tx| {
+    db.update_cache_eyre(|tx| {
         irys_database::cache_data_root(tx, &header, None)?;
         irys_database::confirm_data_size_for_data_root(tx, &chunk.data_root, chunk.data_size)?;
         Ok(())
@@ -78,14 +76,8 @@ async fn ingest_records_the_cache_commit_duration() {
     node_config.consensus.get_mut().chunk_size = 32;
     node_config.base_directory = tmp.path().to_path_buf();
     let config = Config::new_with_random_peer_id(node_config);
-    let db = DatabaseProvider(Arc::new(
-        open_or_create_db(
-            tmp.path().join("db"),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().expect("testing database arguments"),
-        )
-        .expect("open test database"),
-    ));
+    let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))
+        .expect("open test databases");
     let (service_senders, receivers) = build_test_service_senders();
     let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
         &new_mock_signed_header(),

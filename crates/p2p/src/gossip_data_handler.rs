@@ -263,13 +263,9 @@ where
     /// and commits it before replying. A DB error counts as not held, so
     /// the caller fetches rather than drops the chunk.
     pub(crate) fn chunk_is_held(&self, hash: &irys_types::ChunkPathHash) -> bool {
-        match self
-            .block_pool
-            .db
-            .view_cache_eyre(|tx| {
-                Ok(irys_database::cached_chunk_by_chunk_path_hash(tx, hash)?.is_some())
-            })
-        {
+        match self.block_pool.db.view_cache_eyre(|tx| {
+            Ok(irys_database::cached_chunk_by_chunk_path_hash(tx, hash)?.is_some())
+        }) {
             Ok(held) => held,
             Err(error) => {
                 warn!(%error, chunk.path_hash = %hash, "chunk cache lookup failed");
