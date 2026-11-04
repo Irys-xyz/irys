@@ -283,6 +283,22 @@ impl Config {
             self.consensus.num_partitions_per_slot > 0,
             "num_partitions_per_slot must be > 0"
         );
+        // Assignee proofs come from the miners assigned to a Submit slot, and a slot has
+        // `num_partitions_per_slot` of them. A larger requirement can never be met.
+        ensure!(
+            self.consensus
+                .hardforks
+                .frontier
+                .number_of_ingress_proofs_from_assignees
+                <= self.consensus.num_partitions_per_slot,
+            "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({}) \
+             must be <= num_partitions_per_slot ({})",
+            self.consensus
+                .hardforks
+                .frontier
+                .number_of_ingress_proofs_from_assignees,
+            self.consensus.num_partitions_per_slot,
+        );
 
         // ensure that the VDF step cache is >= chunks_per_partition.div_ceil(chunks_per_recall_range)
         let minimum_step_capacity = self
@@ -2322,6 +2338,13 @@ mod validate_tests {
             c.num_partitions_per_slot = 0;
         },
         "num_partitions_per_slot"
+    )]
+    #[case::frontier_assignee_proofs_exceed_slot_replicas(
+        |c: &mut ConsensusConfig| {
+            c.num_partitions_per_slot = 2;
+            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 3;
+        },
+        "must be <= num_partitions_per_slot"
     )]
     #[case::zero_vdf_checkpoints(
         |c: &mut ConsensusConfig| {
