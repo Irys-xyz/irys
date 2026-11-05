@@ -653,6 +653,11 @@ where
 {
     // type Error = <Self as Evm>::Error; unstable :c
 
+    /// Use only for a local invariant break, never for a fault that the block content causes.
+    /// Reth maps `EVMError::Custom` to an internal execution error: the engine API returns an
+    /// RPC error and does not mark the block invalid. A fault that the block content causes
+    /// (for example an unpayable shadow tx) must be `EVMError::Transaction`, which reth maps to
+    /// `BlockValidationError::InvalidTx` and reports as payload status `INVALID`.
     pub fn create_internal_error(msg: String) -> <Self as Evm>::Error {
         <Self as Evm>::Error::Custom(msg)
     }
@@ -689,8 +694,8 @@ where
                 return Ok(Either::Right(tx));
             }
             Err(e) => {
-                return Err(Self::create_internal_error(format!(
-                    "failed to decode shadow tx: {e}"
+                return Err(<Self as Evm>::Error::Transaction(InvalidTransaction::Str(
+                    format!("failed to decode shadow tx: {e}").into(),
                 )));
             }
         };
@@ -746,10 +751,18 @@ where
             )));
         }
 
-        self.distribute_priority_fee(total_fee, fee_payer_address, beneficiary)?;
-
-        let (new_account_state, target) =
-            self.process_shadow_transaction(&shadow_tx, tx_hash, beneficiary)?;
+        let processed = self
+            .distribute_priority_fee(total_fee, fee_payer_address, beneficiary)
+            .and_then(|()| self.process_shadow_transaction(&shadow_tx, tx_hash, beneficiary));
+        let (new_account_state, target) = match processed {
+            Ok(processed) => processed,
+            Err(err) => {
+                // A failed shadow tx must leave no state behind: the payload builder skips an
+                // invalid transaction and executes the next one on this EVM.
+                self.state.clear();
+                return Err(err);
+            }
+        };
 
         // at this point, the shadow tx has been processed, and it was valid *enough*
         // that we should generate a receipt for it even in a failure state
@@ -920,9 +933,17 @@ where
             // Validate account exists (but don't check balance since no transfer occurs)
             let account_state = self.load_account(target)?;
             if account_state.is_none() {
-                return Err(Self::create_internal_error(format!(
-                    "Shadow transaction priority fee failed: target account does not exist for same-address transfer. Target: {target}, Fee: {total_fee}"
-                )));
+                tracing::warn!(
+                    fee.target = %target,
+                    fee.total_fee = %total_fee,
+                    "Shadow transaction priority fee failed: target account does not exist for same-address transfer"
+                );
+                return Err(<Self as Evm>::Error::Transaction(
+                    InvalidTransaction::LackOfFundForMaxFee {
+                        fee: Box::new(total_fee),
+                        balance: Box::new(U256::ZERO),
+                    },
+                ));
             }
 
             tracing::trace!(
@@ -1002,8 +1023,8 @@ where
     /// Deducts the fee from the target account after validating sufficient balance.
     ///
     /// # Errors
-    /// - Returns an internal error if target account doesn't exist
-    /// - Returns an internal error if insufficient balance
+    /// - Returns an invalid transaction error if target account doesn't exist
+    /// - Returns an invalid transaction error if insufficient balance
     fn deduct_fee_from_target(
         &mut self,
         target: Address,
@@ -1018,9 +1039,12 @@ where
                 fee.target = %target,
                 "Target account does not exist, cannot deduct priority fee"
             );
-            return Err(Self::create_internal_error(format!(
-                "Shadow transaction priority fee failed: target account does not exist. Target: {target}, Required fee: {fee}"
-            )));
+            return Err(<Self as Evm>::Error::Transaction(
+                InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(fee),
+                    balance: Box::new(U256::ZERO),
+                },
+            ));
         };
 
         // Validate sufficient balance
@@ -1031,10 +1055,12 @@ where
                 fee.required = %fee,
                 "Target has insufficient balance for priority fee"
             );
-            return Err(Self::create_internal_error(format!(
-                "Shadow transaction priority fee failed: insufficient balance. Target: {}, Required fee: {}, Available balance: {}",
-                target, fee, account.info.balance
-            )));
+            return Err(<Self as Evm>::Error::Transaction(
+                InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(fee),
+                    balance: Box::new(account.info.balance),
+                },
+            ));
         }
 
         // Deduct fee
@@ -1064,7 +1090,12 @@ where
         if let Some(mut account) = beneficiary_state {
             // Update existing account
             let original_balance = account.info.balance;
-            account.info.balance = account.info.balance.saturating_add(fee);
+            account.info.balance =
+                original_balance
+                    .checked_add(fee)
+                    .ok_or(<Self as Evm>::Error::Transaction(
+                        InvalidTransaction::OverflowPaymentInTransaction,
+                    ))?;
 
             tracing::trace!(
                 fee.beneficiary = %beneficiary,
@@ -1249,10 +1280,11 @@ where
         let account_info = if let Some(mut account) = account {
             let original_balance = account.info.balance;
             // Add the incremented amount to the balance
-            account.info.balance = account
-                .info
-                .balance
-                .saturating_add(balance_increment.amount);
+            account.info.balance = original_balance
+                .checked_add(balance_increment.amount)
+                .ok_or(<Self as Evm>::Error::Transaction(
+                    InvalidTransaction::OverflowPaymentInTransaction,
+                ))?;
 
             tracing::trace!(
                 account.target_address = %balance_increment.target,
@@ -1313,13 +1345,20 @@ where
             ));
         };
         if new_account_info.info.balance < balance_decrement.amount {
-            return Err(Self::create_internal_error(format!(
-                "Shadow transaction failed: insufficient balance for decrement. Target: {}, Required: {}, Available: {}, Reference: {:?}",
-                balance_decrement.target,
-                balance_decrement.amount,
-                new_account_info.info.balance,
-                balance_decrement.irys_ref
-            )));
+            tracing::warn!(
+                account.target_address = %balance_decrement.target,
+                account.required = %balance_decrement.amount,
+                account.balance = %new_account_info.info.balance,
+                account.irys_ref = ?balance_decrement.irys_ref,
+                "Shadow transaction failed: insufficient balance for decrement"
+            );
+            return Err(Self::create_invalid_tx_error(
+                *tx_hash,
+                InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(balance_decrement.amount),
+                    balance: Box::new(new_account_info.info.balance),
+                },
+            ));
         }
         // Apply the decrement amount to the balance
         new_account_info.info.balance = new_account_info
@@ -1429,5 +1468,176 @@ mod tests {
         assert!(res.is_ok(), "expected Ok, got: {:?}", res);
         let result = res.unwrap().result;
         assert!(result.is_success(), "expected success, got: {:?}", result);
+    }
+
+    mod shadow_tx_errors {
+        use super::*;
+        use crate::shadow_tx::{
+            BalanceDecrement, BalanceIncrement, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR,
+            TransactionPacket, UnstakeDebit, encode_prefixed_input,
+        };
+        use revm::database::CacheDB;
+        use revm::state::AccountInfo;
+
+        const BENEFICIARY: Address = Address::repeat_byte(0xBE);
+        const TARGET: Address = Address::repeat_byte(0x7A);
+
+        fn evm_with_balances(
+            balances: &[(Address, U256)],
+        ) -> IrysEvm<CacheDB<EmptyDB>, NoOpInspector, PrecompilesMap> {
+            let mut db = CacheDB::new(EmptyDB::default());
+            for (address, balance) in balances {
+                db.insert_account_info(
+                    *address,
+                    AccountInfo {
+                        balance: *balance,
+                        ..Default::default()
+                    },
+                );
+            }
+            let mut cfg_env = CfgEnv::default();
+            cfg_env.spec = SpecId::CANCUN;
+            cfg_env.chain_id = 1;
+            let block_env = BlockEnv {
+                beneficiary: BENEFICIARY,
+                ..Default::default()
+            };
+            IrysEvmFactory::new().create_evm(db, EvmEnv { cfg_env, block_env })
+        }
+
+        fn shadow_tx_env(input: Bytes, priority_fee: u128) -> TxEnv {
+            TxEnv {
+                caller: Address::random(),
+                kind: TxKind::Call(*SHADOW_TX_DESTINATION_ADDR),
+                data: input,
+                gas_priority_fee: Some(priority_fee),
+                chain_id: Some(1),
+                ..TxEnv::default()
+            }
+        }
+
+        fn packet_tx_env(packet: TransactionPacket, priority_fee: u128) -> TxEnv {
+            let shadow_tx = ShadowTransaction::new_v1(packet, FixedBytes::ZERO);
+            shadow_tx_env(encode_prefixed_input(&shadow_tx), priority_fee)
+        }
+
+        fn stake(amount: U256) -> TransactionPacket {
+            TransactionPacket::Stake(BalanceDecrement {
+                amount,
+                target: TARGET,
+                irys_ref: FixedBytes::ZERO,
+            })
+        }
+
+        fn unstake_debit(target: Address) -> TransactionPacket {
+            TransactionPacket::UnstakeDebit(UnstakeDebit {
+                target,
+                irys_ref: FixedBytes::ZERO,
+            })
+        }
+
+        fn lack_of_funds(fee: U256, balance: U256) -> InvalidTransaction {
+            InvalidTransaction::LackOfFundForMaxFee {
+                fee: Box::new(fee),
+                balance: Box::new(balance),
+            }
+        }
+
+        fn assert_invalid_tx(
+            balances: &[(Address, U256)],
+            tx: TxEnv,
+            expected: InvalidTransaction,
+        ) {
+            let res = evm_with_balances(balances).transact_raw(tx);
+            match res {
+                Err(EVMError::Transaction(err)) => assert_eq!(err, expected),
+                other => panic!("expected EVMError::Transaction({expected:?}), got: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn decrement_with_insufficient_balance_is_invalid_tx() {
+            assert_invalid_tx(
+                &[(TARGET, U256::from(10))],
+                packet_tx_env(stake(U256::from(11)), 0),
+                lack_of_funds(U256::from(11), U256::from(10)),
+            );
+        }
+
+        #[test]
+        fn priority_fee_with_insufficient_balance_is_invalid_tx() {
+            assert_invalid_tx(
+                &[(TARGET, U256::from(10))],
+                packet_tx_env(unstake_debit(TARGET), 11),
+                lack_of_funds(U256::from(11), U256::from(10)),
+            );
+        }
+
+        #[test]
+        fn priority_fee_from_missing_account_is_invalid_tx() {
+            assert_invalid_tx(
+                &[],
+                packet_tx_env(unstake_debit(TARGET), 11),
+                lack_of_funds(U256::from(11), U256::ZERO),
+            );
+        }
+
+        #[test]
+        fn priority_fee_from_missing_beneficiary_account_is_invalid_tx() {
+            assert_invalid_tx(
+                &[],
+                packet_tx_env(unstake_debit(BENEFICIARY), 11),
+                lack_of_funds(U256::from(11), U256::ZERO),
+            );
+        }
+
+        #[test]
+        fn priority_fee_credit_overflow_is_invalid_tx() {
+            assert_invalid_tx(
+                &[(TARGET, U256::from(10)), (BENEFICIARY, U256::MAX)],
+                packet_tx_env(unstake_debit(TARGET), 1),
+                InvalidTransaction::OverflowPaymentInTransaction,
+            );
+        }
+
+        #[test]
+        fn balance_increment_overflow_is_invalid_tx() {
+            let packet = TransactionPacket::TermFeeReward(BalanceIncrement {
+                amount: U256::ONE,
+                target: TARGET,
+                irys_ref: FixedBytes::ZERO,
+            });
+            assert_invalid_tx(
+                &[(TARGET, U256::MAX)],
+                packet_tx_env(packet, 0),
+                InvalidTransaction::OverflowPaymentInTransaction,
+            );
+        }
+
+        #[test]
+        fn failed_shadow_tx_leaves_no_state() {
+            let mut evm = evm_with_balances(&[(TARGET, U256::from(10))]);
+            // The priority fee is paid, then the decrement fails.
+            let res = evm.transact_raw(packet_tx_env(stake(U256::from(10)), 1));
+            assert!(
+                matches!(res, Err(EVMError::Transaction(_))),
+                "expected EVMError::Transaction, got: {res:?}"
+            );
+            assert!(evm.state.is_empty(), "state left after failed shadow tx");
+
+            let res = evm.transact_raw(packet_tx_env(stake(U256::from(9)), 1));
+            assert!(res.is_ok(), "expected Ok, got: {res:?}");
+        }
+
+        #[test]
+        fn undecodable_shadow_tx_is_invalid_tx() {
+            let mut input = IRYS_SHADOW_EXEC.to_vec();
+            input.push(0xFF);
+            let res = evm_with_balances(&[]).transact_raw(shadow_tx_env(input.into(), 0));
+            assert!(
+                matches!(res, Err(EVMError::Transaction(InvalidTransaction::Str(_)))),
+                "expected EVMError::Transaction(Str(..)), got: {res:?}"
+            );
+        }
     }
 }
