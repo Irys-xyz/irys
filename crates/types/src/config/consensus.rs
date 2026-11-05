@@ -121,6 +121,12 @@ pub struct ConsensusConfig {
     pub safe_minimum_number_of_years: u64,
 
     /// Fee required to stake a mining address in Irys tokens
+    ///
+    /// Changing `stake_value`, `pledge_base_value` or `pledge_decay` on a live chain
+    /// needs a hardfork gate. Validation prices every commitment with the current
+    /// values, including the copy an epoch block must list again, and refunds use
+    /// them too. An ungated change rejects old blocks on replay, can leave no valid
+    /// epoch block, and refunds a different amount than the user paid.
     #[serde(
         deserialize_with = "serde_utils::token_amount",
         serialize_with = "serde_utils::serializes_token_amount"
