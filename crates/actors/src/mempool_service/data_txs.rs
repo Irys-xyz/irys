@@ -13,7 +13,6 @@ use irys_database::{
 use irys_domain::HardforkConfigExt as _;
 
 use irys_types::TxKnownStatus;
-use irys_types::storage_pricing::calculate_term_fee;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     DataLedger, DataTransactionHeader, H256, IrysTransactionCommon as _, IrysTransactionId,
@@ -364,55 +363,21 @@ impl Inner {
         let ledger = DataLedger::try_from(tx.ledger_id)
             .map_err(|_| TxIngressError::InvalidLedger(tx.ledger_id))?;
 
-        let cascade = self.config.consensus.hardforks.cascade.as_ref();
-        let epoch_length = match ledger {
-            DataLedger::Publish => self.config.consensus.epoch.submit_ledger_epoch_length,
-            DataLedger::Submit => {
-                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
-            }
-            DataLedger::OneYear => cascade.map(|c| c.one_year_epoch_length).ok_or_else(|| {
-                TxIngressError::FundMisalignment(
-                    "Cascade hardfork not configured for OneYear ledger".to_string(),
-                )
-            })?,
-            DataLedger::ThirtyDay => {
-                cascade.map(|c| c.thirty_day_epoch_length).ok_or_else(|| {
-                    TxIngressError::FundMisalignment(
-                        "Cascade hardfork not configured for ThirtyDay ledger".to_string(),
-                    )
-                })?
-            }
-        };
-        let epochs_for_storage = self.config.term_storage_epochs_at(
-            latest_block_timestamp_secs,
-            next_block_height,
-            epoch_length,
-        );
-
-        // OneYear/ThirtyDay pay for the partitions that store each slot.
-        // Submit is already rejected above.
-        let replica_count = match ledger {
-            DataLedger::Publish => self
-                .config
-                .publish_replica_count_at(latest_block_timestamp_secs),
-            DataLedger::OneYear | DataLedger::ThirtyDay => {
-                self.config.consensus.num_partitions_per_slot
-            }
-            DataLedger::Submit => {
-                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
-            }
-        };
-        let expected_term_fee = calculate_term_fee(
-            tx.data_size,
-            epochs_for_storage,
-            &self.config.consensus,
-            replica_count,
-            pricing_ema,
-            latest_block_timestamp_secs,
-        )
-        .map_err(|e| {
-            TxIngressError::FundMisalignment(format!("Failed to calculate term fee: {}", e))
-        })?;
+        if ledger == DataLedger::Submit {
+            return Err(TxIngressError::InvalidLedger(tx.ledger_id));
+        }
+        let expected_term_fee = self
+            .config
+            .required_term_fee_at(
+                ledger,
+                latest_block_timestamp_secs,
+                next_block_height,
+                tx.data_size,
+                pricing_ema,
+            )
+            .map_err(|e| {
+                TxIngressError::FundMisalignment(format!("Failed to calculate term fee: {}", e))
+            })?;
 
         // Validate term fee: user-provided must be >= expected
         if tx.term_fee < expected_term_fee {

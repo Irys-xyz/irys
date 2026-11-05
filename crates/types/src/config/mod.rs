@@ -11,8 +11,10 @@ pub use node::*;
 use crate::hardfork_config::Activation;
 use crate::irys::IrysSigner;
 use crate::storage_pricing::phantoms::{Irys, IrysPrice, NetworkFee, Usd};
-use crate::storage_pricing::{Amount, ReplicaCount, calculate_perm_fee_from_config};
-use crate::{H256, IrysPeerId, U256, UnixTimestamp};
+use crate::storage_pricing::{
+    Amount, ReplicaCount, calculate_perm_fee_from_config, calculate_term_fee,
+};
+use crate::{DataLedger, H256, IrysPeerId, U256, UnixTimestamp};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -166,6 +168,47 @@ impl Config {
         self.0
             .consensus
             .ingress_proof_reward_pool_at(timestamp, term_fee)
+    }
+
+    /// Required `term_fee` of a tx on `ledger` at a given timestamp. Picks the epoch length,
+    /// the replica count and the epochs to pay for here, at one timestamp, so no caller can
+    /// mix inputs from different rules. Publish and Submit use the Submit epoch length and
+    /// `publish_replica_count_at`. OneYear and ThirtyDay use the Cascade epoch length and one
+    /// replica per partition in a slot, and fail when Cascade is not configured. The caller
+    /// picks the EMA price.
+    pub fn required_term_fee_at(
+        &self,
+        ledger: DataLedger,
+        timestamp: UnixTimestamp,
+        block_height: u64,
+        bytes_to_store: u64,
+        ema_price: Amount<(IrysPrice, Usd)>,
+    ) -> eyre::Result<U256> {
+        let (epoch_length, replica_count) = match ledger {
+            DataLedger::Publish | DataLedger::Submit => (
+                self.0.consensus.epoch.submit_ledger_epoch_length,
+                self.publish_replica_count_at(timestamp),
+            ),
+            DataLedger::OneYear | DataLedger::ThirtyDay => {
+                let cascade = self.0.consensus.hardforks.cascade.as_ref().ok_or_else(|| {
+                    eyre::eyre!("Cascade hardfork not configured for {ledger:?} ledger")
+                })?;
+                let epoch_length = if ledger == DataLedger::OneYear {
+                    cascade.one_year_epoch_length
+                } else {
+                    cascade.thirty_day_epoch_length
+                };
+                (epoch_length, self.0.consensus.num_partitions_per_slot)
+            }
+        };
+        calculate_term_fee(
+            bytes_to_store,
+            self.term_storage_epochs_at(timestamp, block_height, epoch_length),
+            &self.0.consensus,
+            replica_count,
+            ema_price,
+            timestamp,
+        )
     }
 
     /// Required Publish `perm_fee` at a given timestamp. Picks the replica count and the
@@ -3334,6 +3377,101 @@ mod validate_tests {
         assert_eq!(
             config.term_storage_epochs_at(before, last_cycle_height, epoch_length),
             1
+        );
+    }
+
+    fn config_with_delta_at(activation: UnixTimestamp, cascade: bool) -> Config {
+        use crate::hardfork_config::Delta;
+
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        });
+        if !cascade {
+            consensus.hardforks.cascade = None;
+        }
+        Config::new_with_random_peer_id(node_config)
+    }
+
+    #[rstest]
+    #[case::publish(DataLedger::Publish)]
+    #[case::submit(DataLedger::Submit)]
+    #[case::one_year(DataLedger::OneYear)]
+    #[case::thirty_day(DataLedger::ThirtyDay)]
+    fn required_term_fee_uses_ledger_inputs(#[case] ledger: DataLedger) {
+        let activation = UnixTimestamp::from_secs(1_000);
+        let config = config_with_delta_at(activation, true);
+        let consensus = &config.consensus;
+        let cascade = consensus
+            .hardforks
+            .cascade
+            .as_ref()
+            .expect("testing config has Cascade");
+        let epoch_length = match ledger {
+            DataLedger::Publish | DataLedger::Submit => consensus.epoch.submit_ledger_epoch_length,
+            DataLedger::OneYear => cascade.one_year_epoch_length,
+            DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
+        };
+        let ema_price = Amount::token(Decimal::ONE).expect("ema price");
+        let bytes_to_store = 1 << 40;
+        let height = 3;
+
+        for (timestamp, before_delta) in
+            [(UnixTimestamp::from_secs(999), true), (activation, false)]
+        {
+            let epochs = if before_delta {
+                crate::ledger_expiry::calculate_submit_ledger_expiry(
+                    height,
+                    consensus.epoch.num_blocks_in_epoch,
+                    epoch_length,
+                )
+            } else {
+                epoch_length
+            };
+            let replica_count = match ledger {
+                DataLedger::Publish | DataLedger::Submit if before_delta => ReplicaCount::new(
+                    u64::from(config.number_of_ingress_proofs_total_at(timestamp)),
+                ),
+                _ => consensus.num_partitions_per_slot,
+            };
+            let expected = calculate_term_fee(
+                bytes_to_store,
+                epochs,
+                consensus,
+                replica_count,
+                ema_price,
+                timestamp,
+            )
+            .expect("expected term fee");
+            assert_eq!(
+                config
+                    .required_term_fee_at(ledger, timestamp, height, bytes_to_store, ema_price)
+                    .expect("required term fee"),
+                expected,
+                "{ledger:?} at {timestamp:?}"
+            );
+        }
+    }
+
+    #[rstest]
+    #[case::one_year(DataLedger::OneYear)]
+    #[case::thirty_day(DataLedger::ThirtyDay)]
+    fn required_term_fee_errors_without_cascade(#[case] ledger: DataLedger) {
+        let config = config_with_delta_at(UnixTimestamp::from_secs(1_000), false);
+        let ema_price = Amount::token(Decimal::ONE).expect("ema price");
+        assert!(
+            config
+                .required_term_fee_at(
+                    ledger,
+                    UnixTimestamp::from_secs(1_000),
+                    3,
+                    1 << 40,
+                    ema_price
+                )
+                .is_err()
         );
     }
 }

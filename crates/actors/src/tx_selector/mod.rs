@@ -584,12 +584,12 @@ pub async fn select_best_txs(
             irys_types::DataLedger::Publish => {
                 // For Publish ledger, validate both term and perm fees
                 // Calculate expected fees based on current EMA for the next block height
-                let Ok(expected_term_fee) = helpers::calculate_term_storage_fee(
-                    ctx.config,
-                    tx.data_size,
-                    &parent_ema_snapshot,
-                    next_block_height,
+                let Ok(expected_term_fee) = ctx.config.required_term_fee_at(
+                    ledger,
                     current_timestamp,
+                    next_block_height,
+                    tx.data_size,
+                    parent_ema_snapshot.ema_for_public_pricing(),
                 ) else {
                     debug!(
                         tx.id = ?tx.id,
@@ -722,29 +722,12 @@ pub async fn select_best_txs(
                 }
 
                 // Validate term fee amount against EMA pricing
-                let cascade = consensus
-                    .hardforks
-                    .cascade
-                    .as_ref()
-                    .expect("cascade config must exist when cascade is active");
-                let epoch_length = match ledger {
-                    DataLedger::OneYear => cascade.one_year_epoch_length,
-                    DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-                    DataLedger::Publish | DataLedger::Submit => unreachable!(),
-                };
-                let epochs_for_storage = ctx.config.term_storage_epochs_at(
+                let Ok(expected_term_fee) = ctx.config.required_term_fee_at(
+                    ledger,
                     current_timestamp,
                     next_block_height,
-                    epoch_length,
-                );
-                let replica_count = consensus.num_partitions_per_slot;
-                let Ok(expected_term_fee) = irys_types::storage_pricing::calculate_term_fee(
                     tx.data_size,
-                    epochs_for_storage,
-                    &consensus,
-                    replica_count,
                     parent_ema_snapshot.ema_for_public_pricing(),
-                    current_timestamp,
                 ) else {
                     debug!(
                         tx.id = ?tx.id,

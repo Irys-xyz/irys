@@ -5,7 +5,7 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_types::{
     CommitmentTransaction, DataLedger, IrysAddress, PledgeDataProvider as _, U256,
-    serialization::string_u64, storage_pricing::calculate_term_fee,
+    serialization::string_u64,
 };
 use serde::{Deserialize, Serialize};
 
@@ -89,12 +89,6 @@ pub async fn get_price(
             let tip_height = last_block_entry.height();
             let next_block_height = tip_height + 1;
 
-            let epochs_for_storage = state.config.term_storage_epochs_at(
-                latest_block_timestamp_secs,
-                next_block_height,
-                state.config.consensus.epoch.submit_ledger_epoch_length,
-            );
-
             // Determine pricing EMA for public quotes with special handling in
             // the last quarter of the adjustment interval.
             // - Not in last quarter: use stable public pricing (2 intervals ago)
@@ -105,26 +99,22 @@ pub async fn get_price(
                 state.config.consensus.ema.price_adjustment_interval,
             );
 
-            // Get hardfork params using the latest block's timestamp
-            let replica_count = state
-                .config
-                .publish_replica_count_at(latest_block_timestamp_secs);
-
             // From Delta the term fee pays for the full term; before, for the epochs left in the cycle
-            let term_fee = calculate_term_fee(
-                bytes_to_store,
-                epochs_for_storage,
-                &state.config.consensus,
-                replica_count,
-                pricing_ema,
-                latest_block_timestamp_secs,
-            )
-            .map_err(|e| {
-                (
-                    format!("Failed to calculate term fee: {e:?}"),
-                    StatusCode::BAD_REQUEST,
+            let term_fee = state
+                .config
+                .required_term_fee_at(
+                    data_ledger,
+                    latest_block_timestamp_secs,
+                    next_block_height,
+                    bytes_to_store,
+                    pricing_ema,
                 )
-            })?;
+                .map_err(|e| {
+                    (
+                        format!("Failed to calculate term fee: {e:?}"),
+                        StatusCode::BAD_REQUEST,
+                    )
+                })?;
 
             tracing::debug!(
                 "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}",
@@ -186,15 +176,10 @@ pub async fn get_price(
                     .into());
             }
 
-            let cascade = cascade.ok_or((
+            cascade.ok_or((
                 "Cascade hardfork not configured",
                 StatusCode::INTERNAL_SERVER_ERROR,
             ))?;
-            let epoch_length = match data_ledger {
-                DataLedger::OneYear => cascade.one_year_epoch_length,
-                DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-                DataLedger::Publish | DataLedger::Submit => unreachable!(),
-            };
 
             let (canonical, _) = tree.get_canonical_chain();
             let last_block_entry = canonical
@@ -208,33 +193,26 @@ pub async fn get_price(
             drop(tree);
 
             let next_block_height = tip_height + 1;
-            let epochs_for_storage = state.config.term_storage_epochs_at(
-                latest_block_timestamp_secs,
-                next_block_height,
-                epoch_length,
-            );
-
             let pricing_ema = ema.ema_for_public_quote(
                 tip_height,
                 state.config.consensus.ema.price_adjustment_interval,
             );
 
-            let replica_count = state.config.consensus.num_partitions_per_slot;
-
-            let term_fee = calculate_term_fee(
-                bytes_to_store,
-                epochs_for_storage,
-                &state.config.consensus,
-                replica_count,
-                pricing_ema,
-                latest_block_timestamp_secs,
-            )
-            .map_err(|e| {
-                (
-                    format!("Failed to calculate term fee: {e:?}"),
-                    StatusCode::BAD_REQUEST,
+            let term_fee = state
+                .config
+                .required_term_fee_at(
+                    data_ledger,
+                    latest_block_timestamp_secs,
+                    next_block_height,
+                    bytes_to_store,
+                    pricing_ema,
                 )
-            })?;
+                .map_err(|e| {
+                    (
+                        format!("Failed to calculate term fee: {e:?}"),
+                        StatusCode::BAD_REQUEST,
+                    )
+                })?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
                 perm_fee: U256::from(0),

@@ -29,6 +29,7 @@ use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
+#[cfg(test)]
 use irys_types::storage_pricing::ReplicaCount;
 #[cfg(test)]
 use irys_types::storage_pricing::{
@@ -6472,9 +6473,10 @@ fn calculate_perm_storage_total_fee(
     )
 }
 
-/// Helper function to calculate term storage fee using a specific EMA snapshot.
-/// The caller supplies the replica count for the ledger.
-pub fn calculate_term_storage_base_network_fee(
+/// Test oracle: term fee with explicit epochs and replica count, so tests can vary the inputs
+/// that production code picks in `Config::required_term_fee_at`.
+#[cfg(test)]
+fn calculate_term_storage_base_network_fee(
     bytes_to_store: u64,
     epochs_for_storage: u64,
     ema_snapshot: &EmaSnapshot,
@@ -6523,21 +6525,15 @@ fn validate_publish_price(
     block_ema: &EmaSnapshot,
     config: &Config,
 ) -> Result<(), PreValidationError> {
-    let epochs_for_storage = config.term_storage_epochs_at(
-        timestamp_secs,
-        block_height,
-        config.consensus.epoch.submit_ledger_epoch_length,
-    );
-
-    let expected_term_fee = calculate_term_storage_base_network_fee(
-        tx.data_size,
-        epochs_for_storage,
-        block_ema,
-        config,
-        config.publish_replica_count_at(timestamp_secs),
-        timestamp_secs,
-    )
-    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    let expected_term_fee = config
+        .required_term_fee_at(
+            DataLedger::Publish,
+            timestamp_secs,
+            block_height,
+            tx.data_size,
+            block_ema.ema_for_public_pricing(),
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
     let expected_perm_fee = config
         .required_publish_perm_fee_at(
             timestamp_secs,
@@ -6594,29 +6590,20 @@ fn validate_term_only_price(
         return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
     }
 
-    let cascade = config
-        .consensus
-        .hardforks
-        .cascade
-        .as_ref()
-        .ok_or(PreValidationError::CascadeNotConfigured { tx_id: tx.id })?;
-    let epoch_length = match ledger {
-        DataLedger::OneYear => cascade.one_year_epoch_length,
-        DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-        DataLedger::Publish | DataLedger::Submit => unreachable!(),
-    };
-    let epochs_for_storage =
-        config.term_storage_epochs_at(timestamp_secs, block_height, epoch_length);
+    // The helper fails on a missing Cascade config too; check first to keep the typed error.
+    if config.consensus.hardforks.cascade.is_none() {
+        return Err(PreValidationError::CascadeNotConfigured { tx_id: tx.id });
+    }
 
-    let expected_term_fee = calculate_term_storage_base_network_fee(
-        tx.data_size,
-        epochs_for_storage,
-        block_ema,
-        config,
-        config.consensus.num_partitions_per_slot,
-        timestamp_secs,
-    )
-    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    let expected_term_fee = config
+        .required_term_fee_at(
+            ledger,
+            timestamp_secs,
+            block_height,
+            tx.data_size,
+            block_ema.ema_for_public_pricing(),
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
     let actual_term_fee = tx.term_fee;
     if actual_term_fee < expected_term_fee {

@@ -1,44 +1,14 @@
 use crate::anchor_validation::validate_ingress_proof_anchor_for_inclusion;
 use crate::chunk_ingress_service::ChunkIngressServiceInner;
-use crate::mempool_service::TxIngressError;
 use irys_database::DatabaseProvider;
 use irys_database::tables::CompactCachedIngressProof;
 use irys_domain::BlockTreeReadGuard;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::ingress::CachedIngressProof;
-use irys_types::storage_pricing::calculate_term_fee;
-use irys_types::{Config, IrysAddress, IrysTransactionCommon, U256, UnixTimestamp};
+use irys_types::{Config, IrysAddress, IrysTransactionCommon, U256};
 use reth::rpc::types::BlockId;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use tracing::{debug, warn};
-
-/// Calculate the expected term fee for temporary storage
-/// From Delta a Publish/Submit tx pays for the full term; before Delta, for the epochs left in
-/// the current height cycle. See `Config::term_storage_epochs_at`.
-#[tracing::instrument(level = "trace", skip_all, fields(bytes_to_store = bytes_to_store, block_height = block_height))]
-pub(crate) fn calculate_term_storage_fee(
-    config: &Config,
-    bytes_to_store: u64,
-    ema: &Arc<irys_domain::EmaSnapshot>,
-    block_height: u64,
-    timestamp: UnixTimestamp,
-) -> Result<U256, TxIngressError> {
-    let epochs_for_storage = config.term_storage_epochs_at(
-        timestamp,
-        block_height,
-        config.consensus.epoch.submit_ledger_epoch_length,
-    );
-    calculate_term_fee(
-        bytes_to_store,
-        epochs_for_storage,
-        &config.consensus,
-        config.publish_replica_count_at(timestamp),
-        ema.ema_for_public_pricing(),
-        timestamp,
-    )
-    .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
-}
 
 pub(crate) async fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
     reth_adapter: &IrysRethNodeAdapter,
