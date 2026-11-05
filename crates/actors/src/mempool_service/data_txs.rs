@@ -451,8 +451,7 @@ impl Inner {
             let expected_perm_fee = calculate_perm_fee_from_config(
                 tx.data_size,
                 &self.config.consensus,
-                self.config
-                    .publish_replica_count_at(latest_block_timestamp_secs),
+                replica_count,
                 self.config
                     .number_of_ingress_proofs_total_at(latest_block_timestamp_secs),
                 pricing_ema,
