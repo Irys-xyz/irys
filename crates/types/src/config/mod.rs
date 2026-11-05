@@ -378,6 +378,11 @@ impl Config {
                     <= crate::storage_pricing::PRECISION_SCALE,
                 "hardforks.delta.capacity_chunk_reward_percent must be <= 1.0 (100%)"
             );
+            ensure!(
+                delta.ingress_proof_reward_pool_percent.amount
+                    <= crate::storage_pricing::PRECISION_SCALE,
+                "hardforks.delta.ingress_proof_reward_pool_percent must be <= 1.0 (100%)"
+            );
         }
         // Entropy packing emits whole SHA-256 hashes, so a chunk size that is
         // not a multiple of the hash size leaves the chunk's tail unpacked.
@@ -1386,6 +1391,7 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Amount::percentage(rust_decimal_macros::dec!(0.5))
                 .unwrap(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
         let config = Config::new_with_random_peer_id(node_config);
 
@@ -1400,7 +1406,7 @@ mod tests {
     }
 
     /// The ingress proof reward pool is one inclusion reward share for each required proof
-    /// before Delta, and one share in total from Delta.
+    /// before Delta, and `ingress_proof_reward_pool_percent` of `term_fee` in total from Delta.
     #[test]
     fn ingress_proof_reward_pool_switches_at_delta() {
         use crate::hardfork_config::Delta;
@@ -1417,6 +1423,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Amount::percentage(rust_decimal_macros::dec!(0.5))
                 .unwrap(),
+            ingress_proof_reward_pool_percent: Amount::percentage(rust_decimal_macros::dec!(0.02))
+                .unwrap(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let term_fee = U256::from(1_000);
@@ -1428,12 +1436,12 @@ mod tests {
                 .unwrap(),
             U256::from(150)
         );
-        // 5% x 1000
+        // 2% x 1000, not the 5% inclusion share
         assert_eq!(
             config
                 .ingress_proof_reward_pool_at(activation, term_fee)
                 .unwrap(),
-            U256::from(50)
+            U256::from(20)
         );
     }
 
@@ -2849,6 +2857,29 @@ mod validate_tests {
     }
 
     #[test]
+    fn validate_rejects_ingress_proof_reward_pool_above_term_fee() {
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.delta = Some(crate::hardfork_config::Delta {
+                activation_timestamp: crate::UnixTimestamp::from_secs(1500),
+                initial_slots_per_new_ledger:
+                    crate::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
+                capacity_chunk_reward_percent:
+                    crate::hardfork_config::Delta::default_capacity_chunk_reward_percent(),
+                ingress_proof_reward_pool_percent: crate::storage_pricing::Amount::percentage(
+                    rust_decimal_macros::dec!(1.01),
+                )
+                .unwrap(),
+            });
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("ingress_proof_reward_pool_percent must be <= 1.0"),
+            "unexpected validation error: {err}"
+        );
+    }
+
+    #[test]
     fn validate_rejects_capacity_chunk_reward_above_full_reward() {
         let cfg = config_with_consensus(|c| {
             c.hardforks.delta = Some(crate::hardfork_config::Delta {
@@ -2859,6 +2890,8 @@ mod validate_tests {
                     rust_decimal_macros::dec!(1.01),
                 )
                 .unwrap(),
+                ingress_proof_reward_pool_percent:
+                    crate::hardfork_config::Delta::default_ingress_proof_reward_pool_percent(),
             });
         });
         let err = cfg.validate().unwrap_err();
@@ -3351,6 +3384,7 @@ mod validate_tests {
             activation_timestamp: activation,
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
@@ -3389,6 +3423,7 @@ mod validate_tests {
             activation_timestamp: activation,
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
         if !cascade {
             consensus.hardforks.cascade = None;

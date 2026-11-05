@@ -8185,6 +8185,7 @@ mod tests {
             activation_timestamp: activation,
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let cascade = config.consensus.hardforks.cascade.as_ref().unwrap();
@@ -8253,6 +8254,7 @@ mod tests {
             activation_timestamp: activation,
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);
@@ -8329,6 +8331,7 @@ mod tests {
             activation_timestamp: activation,
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);
@@ -8409,6 +8412,7 @@ mod tests {
             activation_timestamp: activation,
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);

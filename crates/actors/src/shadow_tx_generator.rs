@@ -1621,6 +1621,8 @@ mod tests {
                 irys_types::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent:
                 irys_types::hardfork_config::Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent:
+                irys_types::hardfork_config::Delta::default_ingress_proof_reward_pool_percent(),
         });
     }
 

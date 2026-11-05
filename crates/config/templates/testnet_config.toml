@@ -243,8 +243,8 @@ number_of_ingress_proofs_from_assignees = 0
 # - a Publish tx credits the treasury its full perm_fee at inclusion;
 # - term fees pay for the full ledger term;
 # - the required perm_fee covers proof rewards on the tx's own term_fee;
-# - the ingress proofs of a Publish tx share one inclusion reward
-#   (immediate_tx_inclusion_reward_percent x term_fee), not one each.
+# - the ingress proofs of a Publish tx share one reward pool
+#   (ingress_proof_reward_pool_percent x term_fee), not one inclusion reward each.
 # Block-level changes apply from the first block at/after activation; ledger
 # seeding acts at the first epoch block at/after activation.
 # Uncomment to enable:
@@ -252,6 +252,7 @@ number_of_ingress_proofs_from_assignees = 0
 # activation_timestamp = "2026-09-01T00:00:00+00:00"
 # initial_slots_per_new_ledger = 1   # slots seeded per newly activated ledger (default: 1)
 # capacity_chunk_reward_percent = 0.5   # miner share of the reward for a capacity PoA (default: 0.5)
+# ingress_proof_reward_pool_percent = 0.05   # share of term_fee that the ingress proofs of a Publish tx split (default: 0.05)
 
 # Echo (the PoA partition must belong to the block miner) is enabled from genesis
 # when this section is absent. To activate it at a later height instead, uncomment:

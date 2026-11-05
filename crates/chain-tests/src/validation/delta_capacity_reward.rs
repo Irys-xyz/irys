@@ -34,6 +34,7 @@ fn delta_from_genesis_config() -> NodeConfig {
             activation_timestamp: UnixTimestamp::from_secs(1),
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
     })
 }
@@ -481,6 +482,7 @@ async fn heavy_delta_midchain_activation_boundary() -> eyre::Result<()> {
             activation_timestamp: UnixTimestamp::from_secs(activation),
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
     });
     let node = IrysNodeTest::new_genesis(config)

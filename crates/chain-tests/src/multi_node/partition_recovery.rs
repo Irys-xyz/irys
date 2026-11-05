@@ -926,6 +926,7 @@ async fn heavy4_delta_partition_recovery_supply_uses_full_emission() -> eyre::Re
             activation_timestamp: UnixTimestamp::from_secs(1),
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
     });
     genesis_config.storage.num_writes_before_sync = 1;

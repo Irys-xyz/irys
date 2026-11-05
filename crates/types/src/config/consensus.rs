@@ -153,8 +153,8 @@ pub struct ConsensusConfig {
     /// miner receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
     ///
     /// This field is also used for immediate ingress proof rewards. The ingress proof
-    /// producers share a pool of `tx.term_fee * immediate_tx_inclusion_reward_percent`
-    /// from Delta, and get that amount each before Delta. See `ingress_proof_reward_pool_at`.
+    /// producers share a pool of `tx.term_fee * Delta::ingress_proof_reward_pool_percent`
+    /// from Delta, and get `tx.term_fee * immediate_tx_inclusion_reward_percent` each before Delta. See `ingress_proof_reward_pool_at`.
     ///
     /// Both of these reward distribution mechanisms are opaque to the user,
     /// the user will only ever see `term_fee` and `perm_fee`.
@@ -648,22 +648,26 @@ impl ConsensusConfig {
     }
 
     /// Total ingress proof reward of a Publish tx at a given timestamp. Promotion splits it
-    /// equally across the tx's ingress proofs. From Delta it is one
-    /// `immediate_tx_inclusion_reward_percent` share of `term_fee`, the same as the Submit
-    /// inclusion reward. Before Delta it is one share for each required ingress proof.
+    /// equally across the tx's ingress proofs. From Delta it is `term_fee` x
+    /// `Delta::ingress_proof_reward_pool_percent`. Before Delta it is one
+    /// `immediate_tx_inclusion_reward_percent` share of `term_fee` for each required ingress proof.
     pub fn ingress_proof_reward_pool_at(
         &self,
         timestamp: UnixTimestamp,
         term_fee: crate::U256,
     ) -> Result<crate::U256> {
-        let inclusion_reward = mul_div(
-            term_fee,
-            self.immediate_tx_inclusion_reward_percent.amount,
-            PRECISION_SCALE,
-        )?;
         Ok(match self.hardforks.delta_for_block(timestamp) {
-            Activation::Active(_) => inclusion_reward,
-            Activation::Inactive => inclusion_reward.saturating_mul(crate::U256::from(
+            Activation::Active(delta) => mul_div(
+                term_fee,
+                delta.ingress_proof_reward_pool_percent.amount,
+                PRECISION_SCALE,
+            )?,
+            Activation::Inactive => mul_div(
+                term_fee,
+                self.immediate_tx_inclusion_reward_percent.amount,
+                PRECISION_SCALE,
+            )?
+            .saturating_mul(crate::U256::from(
                 self.hardforks.number_of_ingress_proofs_total_at(timestamp),
             )),
         })
@@ -1216,6 +1220,8 @@ mod tests {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
                 initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
                 capacity_chunk_reward_percent: Amount::percentage(percent).unwrap(),
+                ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(
+                ),
             })
         };
         let mut config_a = ConsensusConfig::testing();
@@ -1233,6 +1239,7 @@ mod tests {
             activation_timestamp: UnixTimestamp::from_secs(1500),
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
         assert_eq!(without_delta.hardforks.delta, None);
         assert_ne!(without_delta.keccak256_hash(), with_delta.keccak256_hash());

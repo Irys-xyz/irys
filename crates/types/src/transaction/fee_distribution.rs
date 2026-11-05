@@ -24,8 +24,8 @@
 ///
 /// ### Fee Distribution
 /// - term_fee: Processed identically to regular term data transactions.
-/// - Ingress proof reward pool: from Delta, one inclusion-reward share of term_fee in total
-///   (`immediate_tx_inclusion_reward_percent`); before Delta, one share for each required ingress proof. Promotion splits the
+/// - Ingress proof reward pool: from Delta, `Delta::ingress_proof_reward_pool_percent` of term_fee in total;
+///   before Delta, one `immediate_tx_inclusion_reward_percent` share for each required ingress proof. Promotion splits the
 ///   pool equally across the tx's ingress proofs. The pool is part of the transaction's
 ///   `perm_fee` field, with the base permanent storage cost.
 /// - perm_fee total value: Prepaid amount covering `safe_minimum_number_of_years` x the Publish replica count with `decay_rate` annual decline in storage costs PLUS the ingress proof reward pool
@@ -602,6 +602,7 @@ mod tests {
             activation_timestamp: UnixTimestamp::from_secs(0),
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
 
         let term_fee = BoundedFee::from(1000_u64);
