@@ -35,34 +35,8 @@ pub struct IrysHardforkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cascade: Option<Cascade>,
 
-    /// Delta hardfork. WIP and not deployed: every preset leaves it unset, and
-    /// it accumulates consensus changes that need a hardfork. Resolved at each
-    /// block's own timestamp. It carries these changes:
-    /// - Ledger seeding (slots for a data ledger that activates mid-chain) can
-    ///   only act on an epoch block. It acts at the first epoch block whose
-    ///   timestamp is >= `activation_timestamp`.
-    /// - The capacity PoA reward reduction acts on every block. It applies from
-    ///   the first block whose timestamp is >= `activation_timestamp`. The miner
-    ///   share is `Delta::capacity_chunk_reward_percent`.
-    /// - The solution hash puts the VDF seed before the chunk, from the first
-    ///   block whose timestamp is >= `activation_timestamp`.
-    /// - Publish storage fees pay for `num_partitions_per_slot` replicas, not
-    ///   `number_of_ingress_proofs_total`, from the first block whose timestamp is
-    ///   >= `activation_timestamp`.
-    /// - The treasury credit for a Publish tx at inclusion is the full `perm_fee`,
-    ///   from the first block whose timestamp is >= `activation_timestamp`.
-    /// - Term fees (Submit, OneYear, ThirtyDay) pay for the full ledger
-    ///   `epoch_length`, not the epochs left in the current height cycle, from the
-    ///   first block whose timestamp is >= `activation_timestamp`.
-    /// - The required `perm_fee` of a Publish tx adds the ingress proof rewards on the
-    ///   tx's own `term_fee`, not on the expected term fee, from the first block whose
-    ///   timestamp is >= `activation_timestamp`.
-    /// - The ingress proof reward of a Publish tx is one pool of
-    ///   `immediate_tx_inclusion_reward_percent` x `term_fee`, split across its proofs,
-    ///   not that amount for each proof, from the first block whose timestamp is >=
-    ///   `activation_timestamp`.
-    ///
-    /// None means disabled.
+    /// Delta hardfork. WIP: unset in every preset. Resolved at each block's own
+    /// timestamp. See [`Delta`] for the changes it carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
 
@@ -197,16 +171,20 @@ impl Cascade {
 /// without this fork the ledger stays slotless — and therefore unassigned and
 /// unstorable — until the following epoch.
 ///
-/// Resolved at each block's own timestamp. The first epoch block whose timestamp
-/// meets `activation_timestamp` seeds new ledgers; every block from the boundary
-/// onward applies the capacity-PoA reward adjustment and the new solution hash
-/// order. None means disabled.
+/// Resolved at each block's own timestamp. Every change except ledger seeding
+/// acts from the first block, of any kind, whose timestamp is >=
+/// `activation_timestamp`. Ledger seeding waits for the first epoch block whose
+/// timestamp is >= `activation_timestamp`. None means disabled.
+///
+/// The treasury rules assume Delta is active from genesis. A Publish tx included
+/// before activation and promoted or refunded after it keeps the pre-Delta
+/// treasury shortfall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Delta {
     /// Timestamp (seconds since epoch) at which this hardfork activates.
-    /// Ledger changes happen at the first epoch block whose timestamp meets or
-    /// exceeds this value. The reward and solution hash changes happen at the
-    /// first block of any kind whose timestamp meets or exceeds this value.
+    /// Ledger seeding happens at the first epoch block whose timestamp meets or
+    /// exceeds this value. Every other change happens at the first block of any
+    /// kind whose timestamp meets or exceeds this value.
     #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
     /// Slots allocated to a data ledger in the epoch it becomes active

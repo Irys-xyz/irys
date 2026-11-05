@@ -322,8 +322,9 @@ impl EpochSnapshot {
 
         self.try_genesis_init(new_epoch_block);
 
-        // Epoch-aligned, like the Cascade gate above: the epoch block's own
-        // timestamp decides Delta for every block in this epoch.
+        // Epoch-aligned, like the Cascade gate above, but only for slot seeding:
+        // the epoch block's own timestamp gates `allocate_additional_ledger_slots`.
+        // Other Delta changes resolve at each block's own timestamp.
         let delta = self
             .config
             .consensus
