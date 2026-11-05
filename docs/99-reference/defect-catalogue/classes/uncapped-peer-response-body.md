@@ -39,6 +39,8 @@ bytes with `serde_json::from_slice`.
 
 `cargo xtask defects scan`: the pattern matches `.json()`, `.json::<T>()`, `.text()` and `.bytes()`
 followed by `.await` on the same line, or at the end of a line (a chain that rustfmt splits). It
-misses a body read through a helper that hides the call, and a read outside the listed crates. It
+misses a body read through a helper that hides the call, a read outside the listed crates, and a
+copy of the correct form that drops the cap: a `.chunk()` loop with no limit has none of the
+matched calls. It
 also matches requests to non-peer services; check that the response comes from a peer. Manual check:
 for each new `client.get(..).send()` to a peer, follow the response to where the body is read.

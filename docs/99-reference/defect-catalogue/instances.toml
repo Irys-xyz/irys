@@ -19,7 +19,7 @@ found = "2026-05-19"
 found_by = "audit"
 fix = "#1425"
 released_in = "testnet-3.0.0"
-note = "slot_ranges changed to BTreeMap so the first intersecting slot is the lowest slot index on all nodes"
+note = "slot_ranges changed to BTreeMap so the first intersecting slot is the lowest slot index on all nodes; masked while config pins number_of_ingress_proofs_from_assignees to 0"
 
 [[instance]]
 class = "uncapped-peer-response-body"

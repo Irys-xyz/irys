@@ -134,9 +134,10 @@ New xtask subcommand with three actions. No model use.
   Added to `cargo xtask local-checks` and to CI next to the existing checks.
 - `trend [--since <YYYY-MM-DD> | --last-releases <N>]` — prints one row per class: id, severity,
   total instances, instances in the window, last `found` date, last `released_in`. Sorted by
-  instances in the window, then total. With no flag, the window column is omitted. Release ordering
-  for `--last-releases` uses semantic-version order of the `released_in` tags (testnet and mainnet
-  counted as separate streams is the builder's call; state the choice in `--help`).
+  instances in the window, then total. With no flag, the window column is omitted.
+  `--last-releases N` reads the release tags from git and takes the N highest versions of each
+  stream (testnet and mainnet apart, since their version numbers differ); an instance counts when
+  its `released_in` is one of those tags. A release with no logged instance still moves the window.
 - `scan [--base <ref>] [--head <ref>]` — runs `git diff -U0 <base>...<head>` (default base: the
   merge-base with `master`; default head: working tree) and matches each class's `patterns`
   against **added** lines in files that match its `paths`. Prints `class  file:line  line-text`.
@@ -202,7 +203,7 @@ Produce the seed with the add skill (this also tests the skill):
    - `crates/domain/src/models/block_tree.rs::BlockTree::get_by_solution_hash` — `solutions`
      changed from `HashMap<H256, HashSet<BlockHash>>` to `BTreeMap<H256, BTreeSet<BlockHash>>`.
    - `crates/actors/src/block_validation.rs::get_assigned_ingress_proofs` — `slot_ranges` changed
-     from `HashMap` to `BTreeMap`, so the last intersecting slot is the same on all nodes. The
+     from `HashMap` to `BTreeMap`, so the first intersecting slot is the same on all nodes. The
      semantic change (count unique miners over all slots) was reverted inside the PR; it is a rule
      change, not part of this class. Do not log it.
    The add skill confirms both against the final tree before it logs them.
@@ -229,8 +230,8 @@ already covers the guidance.
   **Why it is correct**), and one line under `## Do not flag` in `detect.md`. `check` does not
   parse either.
 - `scan` diff source: with `--head`, `git diff -U0 --find-renames <base>...<head>`; without
-  `--head`, `git diff -U0 --find-renames <merge-base>` (working tree, tracked files only; untracked
-  files are not scanned, and `--help` says so). Added lines in a renamed file count under the new
+  `--head`, `git diff -U0 --find-renames <merge-base>` (working tree), plus every line of each
+  untracked, non-ignored file. Added lines in a renamed file count under the new
   path. Deleted files and binary files are skipped.
 - `paths` globs are relative to the repo root (`glob::Pattern` syntax; the `glob` crate is already
   in the lockfile). `patterns` use the Rust `regex`
@@ -247,7 +248,6 @@ already covers the guidance.
 - Module layout inside `xtask` and the output formatting.
 - Regex crate choice for xtask.
 - Exact wording of the skills, within the steps above.
-- Release-stream handling in `trend --last-releases` (state it in `--help`).
 - Scan exit code policy beyond "exit 0 on hits".
 
 ## Calls I made (not discussed with the user)

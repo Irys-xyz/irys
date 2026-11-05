@@ -19,12 +19,17 @@ For each fix, do these steps in order.
    or a one-off. Skip one-offs and say why. One PR can contain several fixes; handle each.
 
 2. **Disclosure check.** This repo is public. Continue only if both are true:
-   - The fix is released: `git tag --contains <sha> | grep -E '^(testnet|mainnet)-[0-9]'` prints a
-     tag. The first such tag (lowest version) is `released_in`.
+   - The fix is released. Run
+     `git tag --contains <sha> | grep -E '^(testnet|mainnet)-[0-9]+\.[0-9]+\.[0-9]+$' | sort -V`.
+     It must print a tag. `released_in` is the first line of the output (the lowest version). Use
+     the tag as printed; do not edit it.
    - No open private advisory covers it. Read the titles and descriptions of
-     `gh api "repos/Irys-xyz/irys/security-advisories?state=draft"` and `?state=triage`.
+     `gh api "repos/Irys-xyz/irys/security-advisories?state=draft"` and `?state=triage`. If either
+     call fails (for example 403), this check fails.
 
-   If either fails, stop for this fix and report it. Do not write anything about it.
+   If either check fails, stop for this fix. Write nothing about it in the repo, a commit, a PR,
+   an issue or a comment. To the user, report only the PR or commit and one of: "not released",
+   "advisory list unavailable", "open advisory". Do not describe the defect.
 
 3. **Confirm the fix is in the final tree.** A squash-merged PR can contain a fix that a later
    commit in the same PR reverted. Read the current code at the site and confirm the correct form is

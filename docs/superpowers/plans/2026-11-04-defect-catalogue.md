@@ -1,5 +1,9 @@
 # Defect Catalogue Implementation Plan
 
+> **Superseded.** This plan is the record of the first build. The design spec and the tree are the
+> current authority: `detect.md` replaced the README index, and `scope`/`flag` replaced
+> `title`/`applies_when`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** An in-repo catalogue of fixed defect classes, an instance log, a model-free `cargo xtask defects check | trend | scan`, and two agent skills (review a diff; add entries from a PR or commit), seeded with two classes.

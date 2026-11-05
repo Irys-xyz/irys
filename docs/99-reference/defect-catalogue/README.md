@@ -28,9 +28,15 @@ private security advisories until the fix is released.
     must equal the line that the class front matter gives (`id`, `severity`, `scope`, `flag`); on
     a difference, `check` prints the expected line.
   - `cargo xtask defects trend [--since YYYY-MM-DD | --last-releases N]`: instance counts per
-    class, most frequent first.
+    class, most frequent first. `--since` counts by `found` date. `--last-releases N` counts
+    instances whose `released_in` is one of the last N release tags in git, per stream (testnet
+    and mainnet apart).
   - `cargo xtask defects scan [--base <ref>] [--head <ref>]`: matches class patterns against the
-    lines a diff adds. Hits are leads, not findings.
+    lines a diff adds (and every line of an untracked file, when there is no `--head`). Hits are
+    leads, not findings.
+- `detect.md` order: by severity (`fork`, `data-loss`, `dos`, `stall`, `other`), then by id. When
+  the list grows, group the lines under `###` area headings (for example consensus, p2p, storage)
+  inside `## Classes`.
 
 ## Known non-issues
 
