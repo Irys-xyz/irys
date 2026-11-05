@@ -237,7 +237,8 @@ number_of_ingress_proofs_from_assignees = 0
 # Delta is a WIP hardfork and is not deployed. It accumulates changes that
 # need a hardfork. Changes it carries now: a ledger activated mid-chain
 # gets its first slots in the activating epoch, and a capacity (entropy) PoA
-# earns a reduced block reward from the first block at/after activation.
+# earns a reduced block reward from the first block at/after activation, and
+# a Publish tx credits the treasury its full perm_fee at inclusion.
 # Uncomment to enable:
 # [consensus.Custom.hardforks.delta]
 # activation_timestamp = "2026-09-01T00:00:00+00:00"

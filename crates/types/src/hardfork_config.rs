@@ -46,6 +46,8 @@ pub struct IrysHardforkConfig {
     ///   share is `Delta::capacity_chunk_reward_percent`.
     /// - The solution hash puts the VDF seed before the chunk, from the first
     ///   block whose timestamp is >= `activation_timestamp`.
+    /// - The treasury credit for a Publish tx at inclusion is the full `perm_fee`,
+    ///   from the first block whose timestamp is >= `activation_timestamp`.
     ///
     /// None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,6 +161,9 @@ impl Cascade {
 /// - The solution hash is `sha256(seed || offset_le || poa_chunk)`, not
 ///   `sha256(poa_chunk || offset_le || seed)`. See
 ///   [`crate::compute_solution_hash`].
+/// - The treasury is credited the full `perm_fee` of a Publish tx at inclusion, not
+///   `perm_fee` minus the ingress proof reward. Promotion and refund later pay out
+///   of that credit.
 ///
 /// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
 /// but the epoch block's own header cannot list it: the producer derives the

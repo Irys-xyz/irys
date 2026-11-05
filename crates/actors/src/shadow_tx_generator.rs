@@ -6,6 +6,7 @@ use irys_reth::shadow_tx::{
 use irys_types::{
     BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, H256,
     IngressProofsList, IrysAddress, U256, UnixTimestamp,
+    hardfork_config::Activation,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
 };
 use reth::revm::primitives::ruint::Uint;
@@ -117,6 +118,11 @@ pub struct ShadowTxGenerator<'a> {
     /// timestamp. Block production and validation size the block's proof list
     /// by this same N, so the generator must slice and price with it too.
     number_of_ingress_proofs_total: u8,
+    /// True from Delta, at the block's own timestamp. The inclusion treasury credit
+    /// for a Publish tx is then the full `perm_fee`, because promotion pays the
+    /// ingress proof rewards out of the treasury and a refund pays back the full
+    /// `perm_fee`.
+    credit_full_perm_fee: bool,
 
     // Transaction slices
     commitment_txs: &'a [CommitmentTransaction],
@@ -299,6 +305,10 @@ impl<'a> ShadowTxGenerator<'a> {
         let number_of_ingress_proofs_total = config
             .hardforks
             .number_of_ingress_proofs_total_at(block_timestamp_secs);
+        let credit_full_perm_fee = matches!(
+            config.hardforks.delta_for_block(block_timestamp_secs),
+            Activation::Active(_)
+        );
 
         // Create a temporary generator to initialize the iterators
         let generator = Self {
@@ -309,6 +319,7 @@ impl<'a> ShadowTxGenerator<'a> {
             solution_hash,
             config,
             number_of_ingress_proofs_total,
+            credit_full_perm_fee,
             commitment_txs,
             submit_txs,
             one_year_txs,
@@ -372,6 +383,7 @@ impl<'a> ShadowTxGenerator<'a> {
             solution_hash,
             config,
             number_of_ingress_proofs_total,
+            credit_full_perm_fee,
             commitment_txs,
             submit_txs,
             one_year_txs,
@@ -741,9 +753,15 @@ impl<'a> ShadowTxGenerator<'a> {
             })?;
 
         if let Some(ref charges) = perm_charges {
+            let perm_fee_credit = if self.credit_full_perm_fee {
+                // Equals `tx.perm_fee`: `PublishFeeCharges` splits it into these two parts.
+                charges.perm_fee_treasury + charges.ingress_proof_reward
+            } else {
+                charges.perm_fee_treasury
+            };
             self.treasury_balance = self
                 .treasury_balance
-                .checked_add(charges.perm_fee_treasury)
+                .checked_add(perm_fee_credit)
                 .ok_or_else(|| {
                     ShadowTxGenError::TreasuryArithmetic(
                         "Treasury balance overflow when adding perm fee treasury".to_string(),
@@ -1597,6 +1615,135 @@ mod tests {
         // Verify treasury increased by the expected amount
         let expected_treasury = initial_treasury + term_charges.term_fee_treasury;
         assert_eq!(generator.treasury_balance(), expected_treasury);
+    }
+
+    fn config_with_delta_active(config: &mut ConsensusConfig) {
+        config.hardforks.delta = Some(irys_types::hardfork_config::Delta {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            initial_slots_per_new_ledger:
+                irys_types::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent:
+                irys_types::hardfork_config::Delta::default_capacity_chunk_reward_percent(),
+        });
+    }
+
+    /// Treasury after one Publish tx is included in a block that may also promote
+    /// it or refund its `perm_fee`. Returns (initial, final, term_fee_treasury,
+    /// perm_fee, ingress_proof_reward).
+    fn publish_tx_treasury(
+        delta_active: bool,
+        promote: bool,
+        refund: bool,
+    ) -> (U256, U256, U256, U256, U256) {
+        let mut config = ConsensusConfig::testing();
+        config.hardforks.frontier.number_of_ingress_proofs_total = 1;
+        if delta_active {
+            config_with_delta_active(&mut config);
+        }
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
+        let term_fee = U256::from(30000);
+        let perm_fee = U256::from(1_000_000);
+        let signer = IrysSigner::random_signer(&config);
+        let publish_tx = create_data_tx_header(&signer, term_fee, Some(perm_fee));
+        let submit_txs = vec![publish_tx.clone()];
+
+        let term_charges = TermFeeCharges::new(term_fee.into(), &config).unwrap();
+        let publish_charges =
+            PublishFeeCharges::new(perm_fee.into(), term_fee.into(), &config, 1).unwrap();
+
+        let publish_ledger = if promote {
+            let proof_signer = IrysSigner::random_signer(&config);
+            PublishLedgerWithTxs {
+                txs: submit_txs.clone(),
+                proofs: Some(IngressProofsList(vec![create_test_ingress_proof(
+                    &proof_signer,
+                    H256::from([10_u8; 32]),
+                    H256::from([14_u8; 32]),
+                )])),
+            }
+        } else {
+            PublishLedgerWithTxs::default()
+        };
+        let expiry_delta = LedgerExpiryBalanceDelta {
+            reward_balance_increment: BTreeMap::new(),
+            user_perm_fee_refunds: if refund {
+                vec![(publish_tx.id, perm_fee, publish_tx.signer)]
+            } else {
+                Vec::new()
+            },
+        };
+
+        let block_height = 101;
+        let reward_address = IrysAddress::from([20_u8; 20]);
+        let reward_amount = U256::from(5000);
+        let initial_treasury = U256::from(20_000_000);
+        let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
+        let mut generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            U256::zero(),
+            block_timestamp_secs,
+            &solution_hash,
+            &config,
+            &[],
+            &submit_txs,
+            &[],
+            &[],
+            &publish_ledger,
+            initial_treasury,
+            &expiry_delta,
+            &[],
+            &[],
+            &epoch_snapshot,
+        )
+        .expect("Should create generator");
+        for result in generator.by_ref() {
+            result.expect("Should be Ok");
+        }
+        (
+            initial_treasury,
+            generator.treasury_balance(),
+            term_charges.term_fee_treasury,
+            perm_fee,
+            publish_charges.ingress_proof_reward,
+        )
+    }
+
+    /// Before Delta the inclusion credit is `perm_fee` minus the ingress proof reward.
+    #[test]
+    fn publish_inclusion_credits_perm_fee_minus_reward_before_delta() {
+        let (initial, after, term_treasury, perm_fee, reward) =
+            publish_tx_treasury(false, false, false);
+        assert!(reward > U256::zero());
+        assert_eq!(after, initial + term_treasury + perm_fee - reward);
+    }
+
+    /// From Delta the inclusion credit is the full `perm_fee`.
+    #[test]
+    fn publish_inclusion_credits_full_perm_fee_from_delta() {
+        let (initial, after, term_treasury, perm_fee, reward) =
+            publish_tx_treasury(true, false, false);
+        assert!(reward > U256::zero());
+        assert_eq!(after, initial + term_treasury + perm_fee);
+    }
+
+    /// From Delta, promotion leaves only the storage share (`perm_fee` minus the
+    /// reward) of the perm fee in the treasury.
+    #[test]
+    fn publish_promotion_leaves_storage_share_from_delta() {
+        let (initial, after, term_treasury, perm_fee, reward) =
+            publish_tx_treasury(true, true, false);
+        assert_eq!(after, initial + term_treasury + perm_fee - reward);
+    }
+
+    /// From Delta, a refund returns the whole perm part: nothing of it stays.
+    #[test]
+    fn publish_refund_leaves_no_perm_fee_from_delta() {
+        let (initial, after, term_treasury, _perm_fee, _reward) =
+            publish_tx_treasury(true, false, true);
+        assert_eq!(after, initial + term_treasury);
     }
 
     #[test]
