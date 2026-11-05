@@ -5,8 +5,8 @@
 /// 1. User posts a transaction including the term_fee.
 /// 2. Block producer transaction inclusion:
 ///   - Block producer includes the transaction in a block.
-///   - Block producer's balance increases by 5% of the term_fee.
-///   - Remaining 95% of term_fee is added to the treasury (tracked in block headers).
+///   - Block producer's balance increases by `immediate_tx_inclusion_reward_percent` of the term_fee.
+///   - The rest of the term_fee is added to the treasury (tracked in block headers).
 /// 3. The user uploads data chunks associated with their transaction.
 /// 4. Miners assigned to store chunks gossip them amongst themselves.
 /// 5. Term ledger expiration payout:
@@ -18,17 +18,17 @@
 /// Users pay the following fees for permanent data storage:
 /// - term_fee: Standard fee for term storage (distributed as with regular term data)
 /// - perm_fee: Total fee for permanent storage which includes:
-///   - Base permanent storage cost (200 years × the Publish replica count, with 1% annual
-///     decline; see `Config::publish_replica_count_at`)
+///   - Base permanent storage cost (`safe_minimum_number_of_years` × the Publish replica count, with the
+///     `decay_rate` annual decline; see `Config::publish_replica_count_at`)
 ///   - PLUS the ingress proof reward pool (see `ConsensusConfig::ingress_proof_reward_pool_at`)
 ///
 /// ### Fee Distribution
 /// - term_fee: Processed identically to regular term data transactions.
-/// - Ingress proof reward pool: from Delta, 5% of term_fee in total, the same as the inclusion
-///   reward; before Delta, 5% of term_fee for each required ingress proof. Promotion splits the
+/// - Ingress proof reward pool: from Delta, one inclusion-reward share of term_fee in total
+///   (`immediate_tx_inclusion_reward_percent`); before Delta, one share for each required ingress proof. Promotion splits the
 ///   pool equally across the tx's ingress proofs. The pool is part of the transaction's
 ///   `perm_fee` field, with the base permanent storage cost.
-/// - perm_fee total value: Prepaid amount covering 200 years x the Publish replica count with 1% annual decline in storage costs PLUS the ingress proof reward pool
+/// - perm_fee total value: Prepaid amount covering `safe_minimum_number_of_years` x the Publish replica count with `decay_rate` annual decline in storage costs PLUS the ingress proof reward pool
 use crate::ingress::IngressProof;
 use crate::storage_pricing::{PRECISION_SCALE, mul_div};
 pub use crate::{
@@ -157,7 +157,8 @@ pub struct PublishFeeCharges {
     /// Total rewards to be distributed among ingress proof providers
     pub ingress_proof_reward: U256,
 
-    /// Full perm_fee that goes to treasury for permanent storage
+    /// Part of perm_fee that goes to treasury for permanent storage: `perm_fee` minus the
+    /// ingress proof reward pool (the storage share)
     pub perm_fee_treasury: U256,
 }
 

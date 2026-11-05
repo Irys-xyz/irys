@@ -829,8 +829,9 @@ impl Config {
         // (block_validation.rs) where the per-proof intersection loop overwrites
         // `assigned_miners` on each intersecting proof.  `slot_ranges` is a
         // `BTreeMap`, so slot order is deterministic, but the result still
-        // follows the order of the proofs in the block.  That order is not
-        // canonical, so a config bump could split nodes.  The fix is a
+        // follows the order of the proofs in the block.  Validators agree on that
+        // order (the signed block fixes it), but the result depends on the order
+        // the producer chooses.  The fix is a
         // consensus rule change that must be coordinated with a network
         // upgrade.  Under all currently-deployed configs the value is 0 and
         // the path is vacuous.

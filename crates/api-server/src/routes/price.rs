@@ -113,7 +113,7 @@ pub async fn get_price(
                 .config
                 .publish_replica_count_at(latest_block_timestamp_secs);
 
-            // Term fee pays for the full term the data is stored
+            // From Delta the term fee pays for the full term; before, for the epochs left in the cycle
             let term_fee = calculate_term_fee(
                 bytes_to_store,
                 epochs_for_storage,

@@ -14,7 +14,8 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Calculate the expected term fee for temporary storage
-/// A term tx pays for the full term it is stored. See `Config::term_storage_epochs_at`.
+/// From Delta a Publish/Submit tx pays for the full term; before Delta, for the epochs left in
+/// the current height cycle. See `Config::term_storage_epochs_at`.
 #[tracing::instrument(level = "trace", skip_all, fields(bytes_to_store = bytes_to_store, block_height = block_height))]
 pub(crate) fn calculate_term_storage_fee(
     config: &Config,
