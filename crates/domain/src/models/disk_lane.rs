@@ -5676,13 +5676,16 @@ mod tests {
             },
         );
         assert_old_pad_not_packed(wrote, &module, "newer pending entropy, lane up");
-        let head = pending_head(&module);
-        assert_ne!(
-            head,
-            Some((super::super::ChunkType::Data, Some(0x10))),
-            "packed the entropy copied before the replacement"
-        );
+        // The lane may already have written the replacement, so check the
+        // file after the lane stop flushes every pending chunk.
         drop(lane);
+        let head = pending_head(&module);
+        assert!(head.is_none(), "lane stop left {head:?} pending");
+        assert_eq!(
+            chunk_file_byte(&module, PartitionChunkOffset::from(0))?,
+            0x22,
+            "the replacement entropy is not on disk"
+        );
         Ok(())
     }
 

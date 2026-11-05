@@ -766,6 +766,14 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     peer1_node.wait_for_mempool(txid, seconds_to_wait).await?;
     peer2_node.wait_for_mempool(txid, seconds_to_wait).await?;
 
+    // Keep the peers' gossip off until both fork blocks are mined. The gossip
+    // service checks the broadcast flag when it sends, not when the tx is posted,
+    // so a scoped `*_without_gossip` call can still leak a peer's tx to the other
+    // peer. The other peer's fork block would then also include it, and the
+    // reorg block below would not.
+    peer1_node.gossip_disable();
+    peer2_node.gossip_disable();
+
     // Post a unique storage transaction to each peer
     let peer1_tx = peer1_node
         .post_data_tx_without_gossip(peer1_node.get_anchor().await?, data1, &peer1_signer)
@@ -783,6 +791,10 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Fail the test on any error results
     result1?;
     result2?;
+
+    // Each fork block now holds only its own peer's unique tx
+    peer1_node.gossip_enable();
+    peer2_node.gossip_enable();
 
     expected_height += 1;
 
@@ -1745,6 +1757,9 @@ async fn heavy3_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 
     // assert that a_blk1_tx1 is no longer present in the mempool
     // (nothing should be in the mempool)
+    a_node
+        .wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait.try_into()?)
+        .await?;
     let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash();
     let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
