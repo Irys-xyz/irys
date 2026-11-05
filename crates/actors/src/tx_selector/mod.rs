@@ -581,8 +581,9 @@ pub async fn select_best_txs(
             continue;
         }
         match ledger {
-            irys_types::DataLedger::Publish => {
-                // For Publish ledger, validate both term and perm fees
+            irys_types::DataLedger::Publish | irys_types::DataLedger::Submit => {
+                // Block validation prices a `ledger_id == Submit` tx exactly like a Publish tx
+                // (`validate_publish_price`), so both get the term and perm fee checks.
                 // Calculate expected fees based on current EMA for the next block height
                 let Ok(expected_term_fee) = helpers::calculate_term_storage_fee(
                     ctx.config,
@@ -672,13 +673,6 @@ pub async fn select_best_txs(
                     );
                     continue;
                 }
-            }
-            irys_types::DataLedger::Submit => {
-                debug!(
-                    tx.id = ?tx.id,
-                    tx.signer = ?tx.signer(),
-                    "Processing Submit ledger tx for single-block promotion"
-                );
             }
             DataLedger::OneYear | DataLedger::ThirtyDay => {
                 // Term-only ledgers: validate cascade is active, term fee, and fee structure
