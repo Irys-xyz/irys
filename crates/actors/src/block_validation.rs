@@ -8294,6 +8294,14 @@ mod tests {
         ));
         validate(&tx_priced_for(2, activation), activation)
             .expect("from Delta, a fee for num_partitions_per_slot replicas is sufficient");
+
+        // Perm fee for slot replicas, term fee for the ingress proof total: the term check rejects it.
+        let mut tx = tx_priced_for(2, activation);
+        tx.term_fee = tx_priced_for(1, activation).term_fee;
+        assert!(matches!(
+            validate(&tx, activation),
+            Err(PreValidationError::InsufficientTermFee { .. })
+        ));
     }
 
     /// The fee split takes the proof rewards from the tx's own `term_fee`. Before Delta the
