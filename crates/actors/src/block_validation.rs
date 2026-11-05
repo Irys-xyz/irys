@@ -38,7 +38,7 @@ use irys_types::{
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
     SealedBlock, SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
     calculate_difficulty, ensure_proof_layout, expected_chunk_byte_range,
-    hardfork_config::{Activation, Cascade, ForEpoch, IrysHardforkConfig},
+    hardfork_config::{Cascade, ForEpoch, IrysHardforkConfig},
     next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, validate_path_byte_range,
@@ -6509,12 +6509,8 @@ fn validate_publish_price(
         timestamp_secs,
     )
     .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-    // The split takes the proof rewards from the tx's own term fee, so from Delta the perm fee
-    // must cover base storage plus rewards on that fee, not on the expected one.
-    let reward_basis_term_fee = match config.consensus.hardforks.delta_for_block(timestamp_secs) {
-        Activation::Active(_) => tx.term_fee.get(),
-        Activation::Inactive => expected_term_fee,
-    };
+    let reward_basis_term_fee =
+        config.proof_reward_term_fee_at(timestamp_secs, tx.term_fee.get(), expected_term_fee);
     let expected_perm_fee = calculate_perm_storage_total_fee(
         tx.data_size,
         reward_basis_term_fee,

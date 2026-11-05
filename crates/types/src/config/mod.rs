@@ -11,7 +11,7 @@ pub use node::*;
 use crate::hardfork_config::Activation;
 use crate::irys::IrysSigner;
 use crate::storage_pricing::ReplicaCount;
-use crate::{H256, IrysPeerId, UnixTimestamp};
+use crate::{H256, IrysPeerId, U256, UnixTimestamp};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -136,6 +136,22 @@ impl Config {
                 self.0.consensus.epoch.num_blocks_in_epoch,
                 epoch_length,
             ),
+        }
+    }
+
+    /// Term fee that the required Publish `perm_fee` prices the ingress proof rewards on, at a
+    /// given timestamp. The fee split takes the rewards from the tx's own `term_fee`, so from
+    /// Delta the required `perm_fee` uses it too and the storage share stays funded. Before
+    /// Delta it uses the expected term fee.
+    pub fn proof_reward_term_fee_at(
+        &self,
+        timestamp: UnixTimestamp,
+        tx_term_fee: U256,
+        expected_term_fee: U256,
+    ) -> U256 {
+        match self.0.consensus.hardforks.delta_for_block(timestamp) {
+            Activation::Active(_) => tx_term_fee,
+            Activation::Inactive => expected_term_fee,
         }
     }
 
