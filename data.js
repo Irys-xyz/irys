@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793831693496,
+  "lastUpdate": 1793890147310,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -21858,6 +21858,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000113,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9ef308dcde74bcd45decc833836bb49b6645e90d",
+          "message": "fix(ci): make Coverage and Multiversion Tests pass on master (#1764)\n\n* fix(multiversion-tests): read the camelCase /v1/info fields\n\nThe node serializes NodeInfo in camelCase (isSyncing, blockHash,\npeerCount). The probe read snake_case keys with serde defaults, so\nthose fields were always None. The convergence check then ignored the\nsync state and the block-hash agreement.\n\nWhile a node syncs, it disables gossip broadcast. A data tx that the\nharness submits to a syncing peer goes into that peer's mempool but is\nnever sent to the other nodes, so the visibility wait times out with a\n404. The harness submitted right after the peer came up, while it still\nsynced.\n\nAlso upload the node logs when the multiversion job fails, because the\nnext run's --clean deletes them on the self-hosted runner.\n\n* test(mempool): make the mempool fork-recovery tests deterministic\n\nwait_for_mempool_best_txs_shape read best mempool txs at the block tree's\ncanonical tip as soon as the tip moved. The block tree moves the tip and\nbroadcasts the reorg before Reth applies the fork-choice update, and tx\nselection reads balances at the tip's EVM block, so the read failed with\n\"block not found\". Treat a tip whose EVM block Reth has not made\ncanonical yet as \"not ready\". The commitment fork-recovery test now also\nwaits for that shape before its final mempool read.\n\nIn the submit-tx fork-recovery test, post_data_tx_without_gossip\nrestores the gossip flag when the post returns, but the gossip service\nchecks the flag later, when it sends. A peer's \"private\" tx could then\nreach the other peer before that peer mined its fork block, so both fork\nblocks held it and the reorg block did not. Keep both peers' gossip off\nfrom the unique-tx posts until both fork blocks are mined.\n\n* test(chain-tests): wait for the discard event after a block leaves the tree\n\nThe block tree removes a discarded block from its cache before it\nbroadcasts the matching BlockStateUpdated. read_block_from_state could\ndrain an empty receiver, then see the block gone, and return\nNoDiscardEventObserved while the event was still in flight. Under slow\n(coverage-instrumented) runs this made rejection tests fail.\n\nWhen a block that was scheduled for validation is gone from the tree,\nwait (bounded) for its discard event before falling back to\nNoDiscardEventObserved.\n\n* test(chain-tests): keep receiver lag and close distinct from a missing discard event\n\nThe discard wait mapped every receiver error to NoDiscardEventObserved. A lag can drop the discard event, so report ReceiverLagged. A closed channel means the node stopped, so fail with a clear message. Only a timeout gives NoDiscardEventObserved.\n\n* test(chain-tests): report an earlier lag when the discard wait times out\n\nIn the lag branch the receiver has already consumed the lag, and the discard event can be among the missed events. If the wait then times out, report ReceiverLagged with that count, not NoDiscardEventObserved. The wait still reads new events, so a late discard event is still seen.\n\n* test(chain-tests): keep reading retained events after a lag in the discard wait\n\nA lagged broadcast receiver skips to the oldest retained message, so the discard event can still arrive. Add the missed count and keep waiting until the deadline; report ReceiverLagged with the total only on timeout.\n\n* test(domain): check the replacement entropy on disk after the lane stops\n\nThe lane can make the replacement durable before the test reads pending, and then the check that the old clone was not packed passes with nothing to check. Stop the lane first; its flush leaves nothing pending, and the file must hold the replacement bytes.\n\n* test(chain-tests): fail on a Reth provider error in the mempool shape wait\n\nThe wait retried on any error from the EVM block lookup, so a provider failure looked like a block that was not canonical yet. Retry only when the block is absent; return provider errors at once.",
+          "timestamp": "2026-11-05T14:32:47Z",
+          "tree_id": "1dedd0a4b69ce02db8cdbb26b06bf7958e860db9",
+          "url": "https://github.com/Irys-xyz/irys/commit/9ef308dcde74bcd45decc833836bb49b6645e90d"
+        },
+        "date": 1793890145856,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.01528,
+            "range": "± 0.00047",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153938,
+            "range": "± 0.006141",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.56042,
+            "range": "± 0.053766",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 11.207531,
+            "range": "± 0.91239",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.089195,
+            "range": "± 0.006451",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 822.785139,
+            "range": "± 39.164644",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 981.126836,
+            "range": "± 21.909478",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.118062,
+            "range": "± 0.002804",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1187.218787,
+            "range": "± 14.399062",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1681.079214,
+            "range": "± 204.54304",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033718,
+            "range": "± 0.00127",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.66875,
+            "range": "± 1.079694",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.247849,
+            "range": "± 1.177381",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
             "range": "± 0.000002",
             "unit": "ms/iter"
           }
