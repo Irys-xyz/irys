@@ -431,30 +431,28 @@ async fn block_stake_fee_below_minimum_gets_rejected() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
 
-    let test_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&test_signer]);
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
     genesis_node.mine_block().await?;
 
-    // Create a pledge commitment with invalid value
+    // Create a stake commitment with a fee below the minimum
     let consensus_config = &genesis_node.node_ctx.config.consensus;
-    let mut invalid_pledge = CommitmentTransaction::new(consensus_config);
-    invalid_pledge.set_commitment_type(CommitmentTypeV2::Stake);
-    invalid_pledge.set_anchor(genesis_node.get_anchor().await?);
-    invalid_pledge.set_signer(genesis_config.signer().address());
-    invalid_pledge.set_fee(consensus_config.mempool.commitment_fee - 1); // Below minimum!
-    invalid_pledge.set_value(consensus_config.stake_value.amount); // Valid value
+    let mut invalid_stake_commitment = CommitmentTransaction::new(consensus_config);
+    invalid_stake_commitment.set_commitment_type(CommitmentTypeV2::Stake);
+    invalid_stake_commitment.set_anchor(genesis_node.get_anchor().await?);
+    invalid_stake_commitment.set_signer(genesis_config.signer().address());
+    invalid_stake_commitment.set_fee(consensus_config.mempool.commitment_fee - 1); // Below minimum!
+    invalid_stake_commitment.set_value(consensus_config.stake_value.amount); // Valid value
 
     // Sign the commitment
     genesis_config
         .signer()
-        .sign_commitment(&mut invalid_pledge)?;
+        .sign_commitment(&mut invalid_stake_commitment)?;
 
     // Create block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {
-        invalid_stake: invalid_pledge.clone(),
+        invalid_stake: invalid_stake_commitment.clone(),
         prod: ProductionStrategy {
             inner: genesis_node.node_ctx.block_producer_inner.clone(),
         },
