@@ -6276,7 +6276,7 @@ pub async fn commitment_txs_are_valid(
         }
     }
 
-    // Validate that all commitment transactions have correct values
+    // Validate that all commitment transactions have correct values and fees
     for (idx, tx) in commitment_txs.iter().enumerate() {
         tx.validate_value(&config.consensus).map_err(|e| {
             error!(
@@ -6291,10 +6291,8 @@ pub async fn commitment_txs_are_valid(
                 reason: e.to_string(),
             }
         })?;
-    }
 
-    // Same rule as mempool ingress, so a block cannot carry what the mempool rejects.
-    for (idx, tx) in commitment_txs.iter().enumerate() {
+        // Same rule as mempool ingress, so a block cannot carry what the mempool rejects.
         tx.validate_fee(&config.consensus).map_err(|e| {
             error!(
                 "Commitment transaction {} at position {} has insufficient fee: {}",
@@ -7293,7 +7291,7 @@ pub async fn data_txs_are_valid(
             let timestamp_secs = block.timestamp_secs();
             let number_of_ingress_proofs_total =
                 config.number_of_ingress_proofs_total_at(timestamp_secs);
-            publish_txs.len() * number_of_ingress_proofs_total as usize
+            publish_txs.len() * usize::from(number_of_ingress_proofs_total)
         };
 
         if proofs_list.len() != expected_proof_count {
@@ -7325,7 +7323,7 @@ pub async fn data_txs_are_valid(
 
             let timestamp_secs = block.timestamp_secs();
             let mut expected_assigned_proofs =
-                config.number_of_ingress_proofs_from_assignees_at(timestamp_secs) as usize;
+                usize::from(config.number_of_ingress_proofs_from_assignees_at(timestamp_secs));
 
             // While the protocol can require X number of assigned proofs, if there
             // is less than that many assigned to the slot, it still needs to function.
@@ -7594,9 +7592,9 @@ pub async fn data_txs_are_valid(
             let timestamp_secs = block.timestamp_secs();
             let number_of_ingress_proofs_total =
                 config.number_of_ingress_proofs_total_at(timestamp_secs);
-            if tx_proofs.len() != number_of_ingress_proofs_total as usize {
+            if tx_proofs.len() != usize::from(number_of_ingress_proofs_total) {
                 return Err(PreValidationError::IngressProofCountMismatch {
-                    expected: number_of_ingress_proofs_total as usize,
+                    expected: usize::from(number_of_ingress_proofs_total),
                     actual: tx_proofs.len(),
                 });
             }

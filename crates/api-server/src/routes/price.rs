@@ -106,9 +106,6 @@ pub async fn get_price(
             );
 
             // Get hardfork params using the latest block's timestamp
-            let number_of_ingress_proofs_total = state
-                .config
-                .number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
             let replica_count = state
                 .config
                 .publish_replica_count_at(latest_block_timestamp_secs);
@@ -130,15 +127,14 @@ pub async fn get_price(
             })?;
 
             tracing::debug!(
-                "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}, num_ingress_proofs: {}",
+                "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}",
                 bytes_to_store,
                 term_fee,
                 state
                     .config
                     .consensus
                     .immediate_tx_inclusion_reward_percent
-                    .amount,
-                number_of_ingress_proofs_total
+                    .amount
             );
 
             // If the cost calculation fails, return 400 with the error text
