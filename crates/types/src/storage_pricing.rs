@@ -305,8 +305,8 @@ impl Amount<(CostPerChunk, Usd)> {
     }
 
     // Assuming you have a method to calculate cost for multiple replicas.
-    pub fn replica_count(self, count: u64) -> Result<Self> {
-        let count_u256 = U256::from(count);
+    pub fn replica_count(self, count: ReplicaCount) -> Result<Self> {
+        let count_u256 = U256::from(count.get());
         let total = safe_mul(self.amount, count_u256)?;
         Ok(Self {
             amount: total,
@@ -322,9 +322,9 @@ impl Amount<(CostPerChunkDurationAdjusted, Usd)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
-    pub fn replica_count(self, replicas: u64) -> Result<Self> {
+    pub fn replica_count(self, replicas: ReplicaCount) -> Result<Self> {
         // safe_mul for scale * integer is okay (the result is still scaled)
-        let total = safe_mul(self.amount, U256::from(replicas))?;
+        let total = safe_mul(self.amount, U256::from(replicas.get()))?;
         Ok(Self {
             amount: total,
             ..self
@@ -543,7 +543,7 @@ pub fn calculate_term_fee(
     let cost_per_chunk_duration =
         cost_per_chunk_per_epoch.cost_per_replica(epochs_for_storage, zero_decay)?;
 
-    let cost_with_replicas = cost_per_chunk_duration.replica_count(replica_count.get())?;
+    let cost_with_replicas = cost_per_chunk_duration.replica_count(replica_count)?;
 
     // Calculate base network fee using current EMA price
     let base_fee = cost_with_replicas.base_network_fee(
@@ -612,7 +612,7 @@ pub fn calculate_perm_fee_from_config(
     // Apply decay over storage duration
     let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
         .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-        .replica_count(replica_count.get())?;
+        .replica_count(replica_count)?;
 
     // Calculate base network fee
     let base_network_fee = cost_per_chunk_duration_adjusted.base_network_fee(
@@ -882,7 +882,7 @@ mod tests {
             // Action
             let total_cost = cost_per_period
                 .cost_per_replica(periods, decay_rate_per_year)?
-                .replica_count(1)?;
+                .replica_count(ReplicaCount::new(1))?;
 
             // Convert the result to Decimal for comparison
             let actual = total_cost.token_to_decimal().unwrap();
@@ -898,7 +898,7 @@ mod tests {
             );
 
             // Check cost for 10 replicas => multiply by 10
-            let cost_10 = total_cost.replica_count(10)?;
+            let cost_10 = total_cost.replica_count(ReplicaCount::new(10))?;
             let actual_10 = cost_10.token_to_decimal().unwrap();
             let expected_10 = dec!(8.66);
             let diff_10 = (actual_10 - expected_10).abs();
@@ -944,7 +944,7 @@ mod tests {
 
             let total = cost_per_epoch
                 .cost_per_replica(epochs_to_pay_for_storage, decay)?
-                .replica_count(1)?;
+                .replica_count(ReplicaCount::new(1))?;
 
             let actual_dec = total.token_to_decimal().unwrap();
             let expected_dec = dec!(500);
@@ -980,7 +980,7 @@ mod tests {
 
             let total = cost_per_epoch
                 .cost_per_replica(epochs, decay)?
-                .replica_count(1)?;
+                .replica_count(ReplicaCount::new(1))?;
 
             let actual_dec = total.token_to_decimal().unwrap();
             let expected_dec = Decimal::ZERO;
@@ -999,7 +999,7 @@ mod tests {
 
             let total = cost_per_epoch
                 .cost_per_replica(epochs, decay)?
-                .replica_count(1)?;
+                .replica_count(ReplicaCount::new(1))?;
 
             let actual_dec = total.token_to_decimal().unwrap();
             assert_eq!(
@@ -1783,7 +1783,7 @@ mod tests {
 
             let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate)?
-                .replica_count(u64::from(number_of_ingress_proofs_total))?;
+                .replica_count(ReplicaCount::new(u64::from(number_of_ingress_proofs_total)))?;
 
             let term_fee = cost_per_chunk_adjusted.base_network_fee(
                 U256::from(bytes_to_store),
@@ -1898,7 +1898,7 @@ mod tests {
 
             let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate)?
-                .replica_count(u64::from(number_of_ingress_proofs_total))?;
+                .replica_count(ReplicaCount::new(u64::from(number_of_ingress_proofs_total)))?;
 
             let term_fee = cost_per_chunk_adjusted.base_network_fee(
                 U256::from(bytes_to_store),
@@ -1962,7 +1962,7 @@ mod tests {
             // Calculate for 72 epochs (1 day) with 1 replica
             let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_per_day, decay_rate)?
-                .replica_count(1)?; // Single replica to match spreadsheet daily cost
+                .replica_count(ReplicaCount::new(1))?; // Single replica to match spreadsheet daily cost
 
             let daily_fee = cost_per_chunk_adjusted.base_network_fee(
                 U256::from(bytes_to_store),
@@ -2453,7 +2453,7 @@ mod tests {
                 Amount::new(safe_div(config.decay_rate.amount, epochs_per_year)?);
             let cost_with_decay = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-                .replica_count(u64::from(number_of_ingress_proofs_total))?;
+                .replica_count(ReplicaCount::new(u64::from(number_of_ingress_proofs_total)))?;
             let base_fee_with_decay = cost_with_decay.base_network_fee(
                 U256::from(bytes_to_store),
                 config.chunk_size,
@@ -2463,7 +2463,7 @@ mod tests {
             // Calculate without decay (decay_rate_per_year =  0)
             let cost_no_decay = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, Amount::percentage(dec!(0))?)?
-                .replica_count(u64::from(number_of_ingress_proofs_total))?;
+                .replica_count(ReplicaCount::new(u64::from(number_of_ingress_proofs_total)))?;
             let base_fee_no_decay = cost_no_decay.base_network_fee(
                 U256::from(bytes_to_store),
                 config.chunk_size,

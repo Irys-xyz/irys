@@ -107,8 +107,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             .replica_count(
                 ctx.node_ctx
                     .config
-                    .publish_replica_count_at(UnixTimestamp::from_secs(0))
-                    .get(),
+                    .publish_replica_count_at(UnixTimestamp::from_secs(0)),
             )?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
@@ -259,8 +258,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             .replica_count(
                 ctx.node_ctx
                     .config
-                    .publish_replica_count_at(UnixTimestamp::from_secs(0))
-                    .get(),
+                    .publish_replica_count_at(UnixTimestamp::from_secs(0)),
             )?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
