@@ -587,7 +587,8 @@ pub fn calculate_term_fee_from_config(
 }
 
 /// Calculate permanent storage fee including base network fee and ingress proof rewards.
-/// `replica_count` sets the storage cost. `number_of_ingress_proofs_total` sets the proof rewards.
+/// Storage cost scales with `replica_count`. Proof rewards are `number_of_ingress_proofs_total` x
+/// `immediate_tx_inclusion_reward_percent` x `term_fee`.
 pub fn calculate_perm_fee_from_config(
     bytes_to_store: u64,
     config: &ConsensusConfig,

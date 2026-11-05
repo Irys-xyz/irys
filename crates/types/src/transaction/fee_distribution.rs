@@ -18,13 +18,14 @@
 /// Users pay the following fees for permanent data storage:
 /// - term_fee: Standard fee for term storage (distributed as with regular term data)
 /// - perm_fee: Total fee for permanent storage which includes:
-///   - Base permanent storage cost (200 years × 10 replicas with 1% annual decline)
+///   - Base permanent storage cost (200 years × the Publish replica count, with 1% annual
+///     decline; see `Config::publish_replica_count_at`)
 ///   - PLUS ingress proof rewards (5% of term_fee × number_of_ingress_proofs)
 ///
 /// ### Fee Distribution
 /// - term_fee: Processed identically to regular term data transactions.
 /// - 5% of term_fee for each ingress-proof provided. These rewards are included in the transaction's `perm_fee` field along with the base permanent storage cost.
-/// - perm_fee total value: Prepaid amount covering 200 years x 10 replicas with 1% annual decline in storage costs PLUS ingress proof rewards (5% of term_fee × number_of_ingress_proofs)
+/// - perm_fee total value: Prepaid amount covering 200 years x the Publish replica count with 1% annual decline in storage costs PLUS ingress proof rewards (5% of term_fee × number_of_ingress_proofs)
 use crate::ingress::IngressProof;
 use crate::storage_pricing::{PRECISION_SCALE, mul_div};
 pub use crate::{

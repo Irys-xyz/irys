@@ -37,7 +37,7 @@ pub struct IrysHardforkConfig {
 
     /// Delta hardfork. WIP and not deployed: every preset leaves it unset, and
     /// it accumulates consensus changes that need a hardfork. Resolved at each
-    /// block's own timestamp. It carries two changes:
+    /// block's own timestamp. It carries these changes:
     /// - Ledger seeding (slots for a data ledger that activates mid-chain) can
     ///   only act on an epoch block. It acts at the first epoch block whose
     ///   timestamp is >= `activation_timestamp`.
@@ -46,6 +46,9 @@ pub struct IrysHardforkConfig {
     ///   share is `Delta::capacity_chunk_reward_percent`.
     /// - The solution hash puts the VDF seed before the chunk, from the first
     ///   block whose timestamp is >= `activation_timestamp`.
+    /// - Publish storage fees pay for `num_partitions_per_slot` replicas, not
+    ///   `number_of_ingress_proofs_total`, from the first block whose timestamp is
+    ///   >= `activation_timestamp`.
     /// - The treasury credit for a Publish tx at inclusion is the full `perm_fee`,
     ///   from the first block whose timestamp is >= `activation_timestamp`.
     /// - Term fees (Submit, OneYear, ThirtyDay) pay for the full ledger
@@ -167,6 +170,9 @@ impl Cascade {
 /// - The solution hash is `sha256(seed || offset_le || poa_chunk)`, not
 ///   `sha256(poa_chunk || offset_le || seed)`. See
 ///   [`crate::compute_solution_hash`].
+/// - Publish storage fees (term and perm) pay for `num_partitions_per_slot`
+///   replicas, not `number_of_ingress_proofs_total`. See
+///   `Config::publish_replica_count_at`.
 /// - The treasury is credited the full `perm_fee` of a Publish tx at inclusion, not
 ///   `perm_fee` minus the ingress proof reward. Promotion and refund later pay out
 ///   of that credit.
