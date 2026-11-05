@@ -1,6 +1,6 @@
 //! Per-class instance counts from the instance log, so we know which classes to prioritise.
 
-use crate::defects::catalogue::{Catalogue, Instance, parse_release};
+use crate::defects::catalogue::{Catalogue, Instance, Stream, parse_release};
 use chrono::NaiveDate;
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
@@ -10,9 +10,8 @@ use std::collections::BTreeSet;
 pub enum Window {
     /// Instances found on or after this date.
     Since(NaiveDate),
-    /// Instances whose fix shipped in one of the N highest released versions. Testnet and mainnet
-    /// tags count as one stream: a version is released when either stream first ships it.
-    LastReleases(usize),
+    /// Instances whose `released_in` tag is in this set (see [`last_releases`]).
+    Releases(BTreeSet<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,22 +34,34 @@ fn found(instance: &Instance) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(&instance.found, "%Y-%m-%d").ok()
 }
 
+/// The `count` highest release tags of each stream (testnet and mainnet apart), in version
+/// order. `tags` is every tag in the repo: a release with no logged instance still counts, and
+/// tags that are not release tags are ignored.
+pub fn last_releases(tags: &[String], count: usize) -> BTreeSet<String> {
+    let mut releases: Vec<(Stream, Version, &String)> = tags
+        .iter()
+        .filter_map(|tag| parse_release(tag).map(|(stream, version)| (stream, version, tag)))
+        .collect();
+    releases.sort_by(|a, b| b.1.cmp(&a.1));
+    [Stream::Testnet, Stream::Mainnet]
+        .into_iter()
+        .flat_map(|stream| {
+            releases
+                .iter()
+                .filter(move |(s, _, _)| *s == stream)
+                .take(count)
+                .map(|(_, _, tag)| (*tag).clone())
+        })
+        .collect()
+}
+
 /// One row per class, classes without instances included. Sorted by instances in the window
 /// (descending), then total (descending), then id.
 pub fn trend(catalogue: &Catalogue, window: Option<&Window>) -> Vec<TrendRow> {
-    let lowest_recent_version = match window {
-        Some(Window::LastReleases(count)) => {
-            let versions: BTreeSet<Version> =
-                catalogue.instances.iter().filter_map(version).collect();
-            versions.into_iter().rev().take(*count).min()
-        }
-        _ => None,
-    };
     let is_recent = |instance: &Instance| match window {
         None => false,
         Some(Window::Since(since)) => found(instance).is_some_and(|d| d >= *since),
-        Some(Window::LastReleases(_)) => lowest_recent_version
-            .is_some_and(|lowest| version(instance).is_some_and(|v| v >= lowest)),
+        Some(Window::Releases(tags)) => tags.contains(&instance.released_in),
     };
 
     let mut rows: Vec<TrendRow> = catalogue
@@ -203,14 +214,47 @@ mod tests {
         assert_eq!(ids(&rows), ["b", "a", "c"]);
     }
 
+    fn tags(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
+    }
+
     #[test]
-    fn trend_last_releases_merges_streams() {
-        let rows = trend(&fixture(), Some(&Window::LastReleases(1)));
+    fn last_releases_takes_highest_versions_per_stream() {
+        let all = tags(&[
+            "testnet-4.1.0",
+            "testnet-10.0.0",
+            "testnet-4.1.1",
+            "mainnet-4.0.9",
+            "mainnet-4.0.5",
+            "testnet-latest",
+            "backup/x",
+        ]);
+        assert_eq!(
+            last_releases(&all, 1),
+            BTreeSet::from(["mainnet-4.0.9".to_owned(), "testnet-10.0.0".to_owned()])
+        );
+        assert_eq!(
+            last_releases(&all, 2),
+            BTreeSet::from([
+                "mainnet-4.0.5".to_owned(),
+                "mainnet-4.0.9".to_owned(),
+                "testnet-10.0.0".to_owned(),
+                "testnet-4.1.1".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn trend_releases_counts_rows_whose_tag_is_in_the_set() {
+        // A release with no logged row still moves the window: testnet-4.2.0 has no row.
+        let window = Window::Releases(last_releases(
+            &tags(&["testnet-4.1.1", "testnet-4.2.0", "mainnet-4.1.1"]),
+            1,
+        ));
+        let rows = trend(&fixture(), Some(&window));
+        assert_eq!(ids(&rows), ["b", "a", "c"]);
         assert_eq!(rows[0].in_window, Some(1));
-        assert_eq!(rows[1].in_window, Some(1));
-        let rows = trend(&fixture(), Some(&Window::LastReleases(2)));
-        assert_eq!(rows[0].id, "a");
-        assert_eq!(rows[0].in_window, Some(2));
+        assert_eq!(rows[1].in_window, Some(0));
     }
 
     #[test]

@@ -254,6 +254,19 @@ fn section_headings(body: &str) -> Vec<&str> {
         .collect()
 }
 
+/// A `scope` or `flag` value: one non-empty line with no final `.`.
+fn is_detect_text(text: &str) -> bool {
+    !text.trim().is_empty() && !text.contains('\n') && !text.trim_end().ends_with('.')
+}
+
+/// A `fix` value: a PR number (`#1678`) or a commit SHA (7 to 40 hex digits).
+fn is_fix_reference(fix: &str) -> bool {
+    match fix.strip_prefix('#') {
+        Some(number) => !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()),
+        None => (7..=40).contains(&fix.len()) && fix.bytes().all(|b| b.is_ascii_hexdigit()),
+    }
+}
+
 fn validate_class(class: &ClassFile, problems: &mut Vec<String>) {
     let id = &class.slug;
     let meta = &class.meta;
@@ -267,9 +280,9 @@ fn validate_class(class: &ClassFile, problems: &mut Vec<String>) {
         ));
     }
     for (field, text) in [("scope", &meta.scope), ("flag", &meta.flag)] {
-        if text.trim().is_empty() || text.contains('\n') || text.trim_end().ends_with('.') {
+        if !is_detect_text(text) {
             problems.push(format!(
-                "class {id}: {field} must be one non-empty line with no final `.`"
+                "class {id}: {field} {text:?} must be one non-empty line with no final `.` (the {DETECT_FILE} line adds it)"
             ));
         }
     }
@@ -309,8 +322,11 @@ fn validate_instance(
     if instance.site.trim().is_empty() {
         problems.push(format!("{at}: site is empty"));
     }
-    if instance.fix.trim().is_empty() {
-        problems.push(format!("{at}: fix is empty"));
+    if !is_fix_reference(&instance.fix) {
+        problems.push(format!(
+            "{at}: fix {:?} must be a PR number such as #1678 or a commit SHA",
+            instance.fix
+        ));
     }
     if chrono::NaiveDate::parse_from_str(&instance.found, "%Y-%m-%d").is_err() {
         problems.push(format!(
@@ -341,8 +357,13 @@ fn validate_detect(catalogue: &Catalogue, problems: &mut Vec<String>) {
     }
     for class in &catalogue.classes {
         let id = class.slug.as_str();
+        let line = lines.remove(id);
+        if !is_detect_text(&class.meta.scope) || !is_detect_text(&class.meta.flag) {
+            // `validate_class` reports the field; a line built from it would be wrong too.
+            continue;
+        }
         let expected = detect_line(&class.meta);
-        match lines.remove(id) {
+        match line {
             None => problems.push(format!(
                 "{DETECT_FILE}: no line for class {id}; add: {expected}"
             )),
@@ -560,6 +581,38 @@ released_in = "testnet-4.1.0"
             let problems = problems_for(&detect_with(&[]), &[("uncapped-x", &class)], "");
             assert_one_problem_contains(&problems, "flag");
         }
+    }
+
+    #[test]
+    fn check_rejects_fix_that_is_not_pr_or_sha() {
+        for bad in ["later", "#", "#12a", "abc12", "g1234567"] {
+            let instances = VALID_INSTANCE.replace(r##"fix = "#1574""##, &format!("fix = {bad:?}"));
+            let problems = problems_for(
+                &detect_with(&[VALID_LINE]),
+                &[("uncapped-x", VALID_CLASS)],
+                &instances,
+            );
+            assert_one_problem_contains(&problems, "fix");
+        }
+        for good in ["#1", "abc1234", "0123456789abcdef0123456789abcdef01234567"] {
+            let instances =
+                VALID_INSTANCE.replace(r##"fix = "#1574""##, &format!("fix = {good:?}"));
+            let problems = problems_for(
+                &detect_with(&[VALID_LINE]),
+                &[("uncapped-x", VALID_CLASS)],
+                &instances,
+            );
+            assert!(problems.is_empty(), "{good}: {problems:?}");
+        }
+    }
+
+    #[test]
+    fn flag_with_final_period_reports_one_problem_that_quotes_it() {
+        let class = VALID_CLASS.replace("no byte cap\"", "no byte cap.\"");
+        let line = VALID_LINE.replace("cap.", "cap..");
+        let problems = problems_for(&detect_with(&[&line]), &[("uncapped-x", &class)], "");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_one_problem_contains(&problems, "no byte cap.\"");
     }
 
     #[test]

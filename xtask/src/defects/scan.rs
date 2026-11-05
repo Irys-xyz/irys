@@ -25,6 +25,33 @@ fn parse_hunk_header(line: &str) -> Option<(u32, u32, u32)> {
     Some((old_count, new_start, new_count))
 }
 
+/// The path of a `+++ ` header target, without its `b/` prefix. Git appends a tab to a path that
+/// has a space, and quotes a path that has a `"`, a `\\` or a control character.
+fn header_path(target: &str) -> Option<String> {
+    let target = target.strip_suffix('\t').unwrap_or(target);
+    let path = match target.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+        Some(quoted) => {
+            let mut path = String::with_capacity(quoted.len());
+            let mut chars = quoted.chars();
+            while let Some(c) = chars.next() {
+                if c != '\\' {
+                    path.push(c);
+                    continue;
+                }
+                match chars.next() {
+                    Some('t') => path.push('\t'),
+                    Some('n') => path.push('\n'),
+                    Some(other) => path.push(other),
+                    None => {}
+                }
+            }
+            path
+        }
+        None => target.to_owned(),
+    };
+    path.strip_prefix("b/").map(str::to_owned)
+}
+
 /// Parses `git diff -U0 --find-renames` output into the lines it adds. Hunk line counts decide
 /// which lines are content, so an added line that itself starts with `++` is not taken for a file
 /// header. Deleted files (`+++ /dev/null`) and binary files add no lines.
@@ -60,7 +87,7 @@ pub fn parse_added_lines(diff: &str) -> Vec<AddedLine> {
             new_left = 0;
         }
         if let Some(target) = line.strip_prefix("+++ ") {
-            path = target.strip_prefix("b/").map(str::to_owned);
+            path = header_path(target);
         } else if line.starts_with("diff --git ") {
             path = None;
         } else if let Some((old_count, new_start, new_count)) = parse_hunk_header(line) {
@@ -70,6 +97,18 @@ pub fn parse_added_lines(diff: &str) -> Vec<AddedLine> {
         }
     }
     added
+}
+
+/// Every line of a file the diff does not show (an untracked file), as added lines.
+pub fn file_as_added_lines(path: &str, text: &str) -> Vec<AddedLine> {
+    (1..)
+        .zip(text.lines())
+        .map(|(line, text)| AddedLine {
+            path: path.to_owned(),
+            line,
+            text: text.to_owned(),
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -115,6 +154,13 @@ pub fn compile(catalogue: &Catalogue) -> eyre::Result<Vec<CompiledClass>> {
         .collect()
 }
 
+/// `*` and `?` do not match `/`; `**` still matches any number of directories.
+const PATH_MATCH: glob::MatchOptions = glob::MatchOptions {
+    case_sensitive: true,
+    require_literal_separator: true,
+    require_literal_leading_dot: false,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanHit {
     pub class: String,
@@ -131,7 +177,11 @@ pub fn scan(classes: &[CompiledClass], added: &[AddedLine]) -> Vec<ScanHit> {
             added
                 .iter()
                 .filter(|line| {
-                    (class.paths.is_empty() || class.paths.iter().any(|p| p.matches(&line.path)))
+                    (class.paths.is_empty()
+                        || class
+                            .paths
+                            .iter()
+                            .any(|p| p.matches_with(&line.path, PATH_MATCH)))
                         && class.patterns.iter().any(|r| r.is_match(&line.text))
                 })
                 .map(|line| ScanHit {
@@ -293,6 +343,67 @@ Binary files a/x.png and b/x.png differ
         let classes = compile(&catalogue_with(&[], &[r"\.json\(\)", r"resp\."])).unwrap();
         let lines = [added("a.rs", 5, "let v = resp.json().await?;")];
         assert_eq!(scan(&classes, &lines).len(), 1);
+    }
+
+    #[test]
+    fn path_with_space_drops_trailing_tab() {
+        let diff = "--- a/a b.rs\t
++++ b/a b.rs\t
+@@ -1,0 +1 @@
++x
+";
+        assert_eq!(parse_added_lines(diff), [added("a b.rs", 1, "x")]);
+    }
+
+    #[test]
+    fn quoted_path_is_unquoted() {
+        let diff = r#"--- "a/q\"x\\y.rs"
++++ "b/q\"x\\y.rs"
+@@ -1,0 +1 @@
++x
+"#;
+        assert_eq!(parse_added_lines(diff), [added(r#"q"x\y.rs"#, 1, "x")]);
+    }
+
+    #[test]
+    fn untracked_file_lines_are_all_added() {
+        assert_eq!(
+            file_as_added_lines("n.rs", "a\nb\n"),
+            [added("n.rs", 1, "a"), added("n.rs", 2, "b")]
+        );
+    }
+
+    #[test]
+    fn star_glob_does_not_cross_directories() {
+        let classes = compile(&catalogue_with(&["crates/p2p/src/*.rs"], &["x"])).unwrap();
+        let lines = [
+            added("crates/p2p/src/a.rs", 1, "x"),
+            added("crates/p2p/src/sub/b.rs", 1, "x"),
+        ];
+        let hits = scan(&classes, &lines);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].path, "crates/p2p/src/a.rs");
+    }
+
+    #[test]
+    fn seed_hash_class_matches_turbofish_and_from() {
+        let (catalogue, problems) = crate::defects::catalogue::load(&crate::defects::default_dir());
+        assert!(problems.is_empty(), "{problems:?}");
+        let classes = compile(&catalogue).unwrap();
+        let path = "crates/actors/src/block_tree_service.rs";
+        for text in [
+            "let mut seen = HashSet::<H256>::new();",
+            "let m = HashMap::<H256, Vec<u8>>::with_capacity(4);",
+            "let m = HashMap::from([(a, b)]);",
+            "let s = HashSet::from_iter(ids);",
+        ] {
+            let hits = scan(&classes, &[added(path, 1, text)]);
+            assert!(
+                hits.iter()
+                    .any(|h| h.class == "hash-iteration-order-in-consensus"),
+                "no hit for {text:?}"
+            );
+        }
     }
 
     #[test]

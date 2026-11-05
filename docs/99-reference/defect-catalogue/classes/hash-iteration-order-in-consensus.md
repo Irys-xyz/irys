@@ -3,8 +3,27 @@ id = "hash-iteration-order-in-consensus"
 severity = "fork"
 scope = "consensus code: block validation, block production, shadow transactions, epoch and ledger state"
 flag = "a result that must be the same on every node depends on HashMap or HashSet iteration order (first match or `break`, last write wins, a tie-break, collect into a Vec, hash or serialize)"
-paths = ["crates/actors/src/block_validation.rs", "crates/actors/src/block_producer.rs", "crates/actors/src/block_producer/**", "crates/actors/src/shadow_tx_generator.rs", "crates/domain/src/models/**", "crates/domain/src/snapshots/**"]
-patterns = ['\bHash(Map|Set)\s*<', '\bHash(Map|Set)::(new|with_capacity|default)\b']
+paths = [
+    "crates/actors/src/anchor_validation.rs",
+    "crates/actors/src/block_producer.rs",
+    "crates/actors/src/block_producer/**",
+    "crates/actors/src/block_reward.rs",
+    "crates/actors/src/block_tree_service.rs",
+    "crates/actors/src/block_tree_service/**",
+    "crates/actors/src/block_validation.rs",
+    "crates/actors/src/commitment_dedup.rs",
+    "crates/actors/src/commitment_refunds.rs",
+    "crates/actors/src/data_tx_validation.rs",
+    "crates/actors/src/mempool_service.rs",
+    "crates/actors/src/mempool_service/**",
+    "crates/actors/src/shadow_tx_generator.rs",
+    "crates/actors/src/tx_inclusion.rs",
+    "crates/actors/src/validation_service.rs",
+    "crates/actors/src/validation_service/**",
+    "crates/domain/src/models/**",
+    "crates/domain/src/snapshots/**",
+]
+patterns = ['\bHash(Map|Set)\s*<', '\bHash(Map|Set)(::<.+?>)?::(new|with_capacity|default|from|from_iter)\b']
 +++
 
 ## Pattern
@@ -41,7 +60,8 @@ is safe; only iteration order is the defect.
 ## Detection
 
 `cargo xtask defects scan`: the patterns match a new `HashMap` / `HashSet` type or constructor in
-consensus paths. Each hit is a lead: check whether the code iterates it and whether the order reaches
+consensus paths (`new`, `with_capacity`, `default`, `from`, `from_iter`, with or without a
+turbofish). Each hit is a lead: check whether the code iterates it and whether the order reaches
 a consensus result. The scan misses an iteration of an existing map (no new type on the added line),
 maps in other files that consensus code calls, and other unordered sources (for example `join_all`
 completion order or `DashMap`). Manual check: for each consensus result in the diff, trace its

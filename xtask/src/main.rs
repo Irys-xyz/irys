@@ -70,8 +70,8 @@ enum DefectsAction {
     },
     /// Print instance counts per class, most frequent first.
     ///
-    /// `--last-releases N` takes the N highest versions among all `released_in` tags. Testnet and
-    /// mainnet tags count as one stream: a version is released when either stream first ships it.
+    /// `--last-releases N` reads the release tags from git and takes the N highest versions of
+    /// each stream (testnet and mainnet apart). A release with no logged instance still counts.
     Trend {
         /// Catalogue directory (default: the one in this checkout).
         #[clap(long)]
@@ -79,14 +79,14 @@ enum DefectsAction {
         /// Count instances found on or after this date (YYYY-MM-DD).
         #[clap(long, conflicts_with = "last_releases")]
         since: Option<chrono::NaiveDate>,
-        /// Count instances whose fix shipped in the last N released versions.
-        #[clap(long)]
-        last_releases: Option<usize>,
+        /// Count instances whose fix shipped in the last N releases of each stream (N >= 1).
+        #[clap(long, value_parser = clap::value_parser!(u64).range(1..))]
+        last_releases: Option<u64>,
     },
     /// Match class patterns against the lines a diff adds. Hits are leads to verify, not findings.
     ///
-    /// With `--head`, scans `<base>...<head>`. Without it, scans the working tree against `<base>`
-    /// (tracked files only: untracked files are not scanned). Always exits 0 on hits.
+    /// With `--head`, scans `<base>...<head>`. Without it, scans the working tree against `<base>`,
+    /// and every line of each untracked file (ignored files excluded). Always exits 0 on hits.
     Scan {
         /// Catalogue directory (default: the one in this checkout).
         #[clap(long)]
@@ -848,6 +848,13 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             .remove_and_run()?;
         }
         Commands::LocalChecks { with_tests, fix } => {
+            // First: it reads only the catalogue files, so a bad catalogue fails before any build.
+            run_command(
+                Commands::Defects {
+                    action: DefectsAction::Check { dir: None },
+                },
+                sh,
+            )?;
             run_command(
                 Commands::Fmt {
                     check_only: !fix,
@@ -868,12 +875,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             run_command(Commands::UnusedDeps, sh)?;
             run_command(Commands::Deny, sh)?;
             run_command(Commands::Typos, sh)?;
-            run_command(
-                Commands::Defects {
-                    action: DefectsAction::Check { dir: None },
-                },
-                sh,
-            )?;
             if with_tests {
                 // Parsed, not built by hand, so the `XTASK_*` env vars apply exactly as they do to
                 // `cargo xtask test`.
@@ -1315,14 +1316,26 @@ fn run_defects(action: DefectsAction) -> eyre::Result<()> {
             let catalogue = load_valid_catalogue(dir)?;
             let window = match (since, last_releases) {
                 (Some(date), _) => Some(defects::trend::Window::Since(date)),
-                (None, Some(count)) => Some(defects::trend::Window::LastReleases(count)),
+                (None, Some(count)) => {
+                    let sh = Shell::new()?;
+                    let tags: Vec<String> = cmd!(sh, "git tag --list")
+                        .read()?
+                        .lines()
+                        .map(str::to_owned)
+                        .collect();
+                    let releases = defects::trend::last_releases(&tags, usize::try_from(count)?);
+                    let names: Vec<&str> = releases.iter().map(String::as_str).collect();
+                    println!("window: {}", names.join(", "));
+                    Some(defects::trend::Window::Releases(releases))
+                }
                 (None, None) => None,
             };
             let rows = defects::trend::trend(&catalogue, window.as_ref());
             print!("{}", defects::trend::render_trend(&rows, window.is_some()));
         }
         DefectsAction::Scan { dir, base, head } => {
-            let classes = defects::scan::compile(&load_valid_catalogue(dir)?)?;
+            let catalogue = load_valid_catalogue(dir)?;
+            let classes = defects::scan::compile(&catalogue)?;
             let sh = Shell::new()?;
             let base = match base {
                 Some(base) => base,
@@ -1338,12 +1351,31 @@ fn run_defects(action: DefectsAction) -> eyre::Result<()> {
                 "--src-prefix=a/",
                 "--dst-prefix=b/",
             ];
-            let range = match head {
+            let range = match &head {
                 Some(head) => format!("{base}...{head}"),
                 None => base,
             };
-            let diff = cmd!(sh, "git diff {diff_args...} {range}").read()?;
-            let added = defects::scan::parse_added_lines(&diff);
+            // `core.quotepath=false`: a non-ASCII path stays as it is, not an escaped string.
+            let diff = cmd!(
+                sh,
+                "git -c core.quotepath=false diff {diff_args...} {range}"
+            )
+            .read()?;
+            let mut added = defects::scan::parse_added_lines(&diff);
+            if head.is_none() {
+                // `git diff` does not show untracked files: scan each one in full.
+                let untracked = cmd!(
+                    sh,
+                    "git -c core.quotepath=false ls-files -z --others --exclude-standard"
+                )
+                .read()?;
+                for path in untracked.split('\0').filter(|p| !p.is_empty()) {
+                    // A file that is not UTF-8 text (binary) has no lines to scan.
+                    if let Ok(text) = std::fs::read_to_string(path) {
+                        added.extend(defects::scan::file_as_added_lines(path, &text));
+                    }
+                }
+            }
             let hits = defects::scan::scan(&classes, &added);
             for hit in &hits {
                 println!(
@@ -1355,6 +1387,18 @@ fn run_defects(action: DefectsAction) -> eyre::Result<()> {
                 );
             }
             println!("{} lead(s); verify each before you report it.", hits.len());
+            let unscanned: Vec<&str> = catalogue
+                .classes
+                .iter()
+                .filter(|class| class.meta.patterns.is_empty())
+                .map(|class| class.slug.as_str())
+                .collect();
+            if !unscanned.is_empty() {
+                println!(
+                    "classes with no scan pattern (read the diff for these): {}",
+                    unscanned.join(", ")
+                );
+            }
         }
     }
     Ok(())
