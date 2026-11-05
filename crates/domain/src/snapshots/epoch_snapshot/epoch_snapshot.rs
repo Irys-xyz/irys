@@ -529,8 +529,10 @@ impl EpochSnapshot {
             self.config.consensus.num_chunks_in_partition,
         );
 
-        // Return early if there's no more work to do
+        // The list describes this epoch only. The snapshot is cloned from the previous
+        // epoch, so clear it, or the previous epoch's expiries are broadcast again.
         if expired_partitions.is_empty() {
+            self.expired_partition_infos = None;
             return;
         }
 
@@ -1796,6 +1798,35 @@ mod tests {
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
             assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
         }
+    }
+
+    /// An epoch with no expiries clears the list it inherited from the previous epoch.
+    #[test]
+    fn epoch_without_expiries_clears_expired_partition_infos() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let mut snapshot = EpochSnapshot {
+            ledgers: Ledgers::new(&config.consensus, ForBlock::inactive()),
+            partition_assignments: PartitionAssignments::new(),
+            all_active_partitions: Vec::new(),
+            unassigned_partitions: Vec::new(),
+            storage_submodules_config: None,
+            config: config.clone(),
+            commitment_state: CommitmentState::default(),
+            epoch_block: IrysBlockHeader::default(),
+            previous_epoch_block: None,
+            expired_partition_infos: Some(vec![ExpiringPartitionInfo {
+                partition_hash: H256::random(),
+                ledger_id: DataLedger::Submit,
+                slot_index: 0,
+            }]),
+            epoch_height: 0,
+        };
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = config.consensus.epoch.num_blocks_in_epoch;
+
+        snapshot.expire_ledger_slots(&header, ForBlock::inactive());
+
+        assert!(snapshot.expired_partition_infos.is_none());
     }
 
     fn snapshot_with_submodules(config: Config, submodule_paths: Vec<PathBuf>) -> EpochSnapshot {
