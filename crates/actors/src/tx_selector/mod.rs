@@ -1198,7 +1198,7 @@ async fn get_publish_txs_and_proofs(
             let number_of_ingress_proofs_total = ctx
                 .config
                 .number_of_ingress_proofs_total_at(current_timestamp);
-            let proofs_per_tx = number_of_ingress_proofs_total as usize;
+            let proofs_per_tx = usize::from(number_of_ingress_proofs_total);
 
             if all_proofs.len() < proofs_per_tx {
                 info!(
@@ -1259,7 +1259,7 @@ async fn get_publish_txs_and_proofs(
             let number_of_ingress_proofs_from_assignees = ctx
                 .config
                 .number_of_ingress_proofs_from_assignees_at(current_timestamp);
-            let mut expected_assigned_proofs = number_of_ingress_proofs_from_assignees as usize;
+            let mut expected_assigned_proofs = usize::from(number_of_ingress_proofs_from_assignees);
 
             if assigned_miners < expected_assigned_proofs {
                 warn!(
