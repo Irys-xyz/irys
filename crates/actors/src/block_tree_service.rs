@@ -1864,21 +1864,22 @@ impl BlockTreeServiceInner {
                     partition_hashes: H256List(expired_partition_hashes),
                     update_height: epoch_block.height,
                 });
+        }
 
-            // Let the cache service know some term ledger slots expired
-            if let Err(e) = self.service_senders.chunk_cache.send_traced(
-                crate::cache_service::CacheServiceAction::OnEpochProcessed(
-                    epoch_snapshot.clone(),
-                    None,
-                ),
-            ) {
-                error!(
-                    "Failed to send EpochProcessed event to CacheService for block {} (height {}): {}",
-                    block_hash,
-                    epoch_block.height(),
-                    e
-                );
-            }
+        // Prune the data-root cache on every epoch block, not only when partitions expire:
+        // the prune also evicts never-included roots past their expiry height.
+        if let Err(e) = self.service_senders.chunk_cache.send_traced(
+            crate::cache_service::CacheServiceAction::OnEpochProcessed(
+                epoch_snapshot.clone(),
+                None,
+            ),
+        ) {
+            error!(
+                "Failed to send EpochProcessed event to CacheService for block {} (height {}): {}",
+                block_hash,
+                epoch_block.height(),
+                e
+            );
         }
 
         // Let the node know about any newly assigned partition hashes to local storage modules
