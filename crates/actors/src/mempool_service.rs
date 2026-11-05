@@ -2436,6 +2436,10 @@ pub enum TxIngressError {
         chunks: u64,
         max_chunks: u64,
     },
+    /// Mainnet takes no data txs. Mirrors the `DataTxsNotAllowed` consensus
+    /// prevalidation check.
+    #[error("Data transaction {0} rejected: mainnet currently doesn't accept data transactions")]
+    DataTxsNotAllowed(H256),
     /// Some database error occurred
     #[error("Database operation failed: {0}")]
     DatabaseError(String),

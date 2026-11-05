@@ -119,7 +119,8 @@ async fn process_commitment_transaction(
             // `TxIngressError`.
             TxIngressError::ZeroDataSize(_)
             | TxIngressError::PrefixSizeExceedsDataSize(_)
-            | TxIngressError::DataSizeExceedsMax { .. } => {
+            | TxIngressError::DataSizeExceedsMax { .. }
+            | TxIngressError::DataTxsNotAllowed(_) => {
                 Err(ApiError::from((err.to_string(), StatusCode::BAD_REQUEST)))
             }
             TxIngressError::BalanceFetchError { address, reason } => {

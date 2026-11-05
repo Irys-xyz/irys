@@ -151,6 +151,9 @@ pub async fn post_tx(
             TxIngressError::DataSizeExceedsMax { .. } => {
                 Err((err.to_string(), StatusCode::BAD_REQUEST).into())
             }
+            TxIngressError::DataTxsNotAllowed(_) => {
+                Err((err.to_string(), StatusCode::BAD_REQUEST).into())
+            }
         };
     }
 

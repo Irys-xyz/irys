@@ -15,7 +15,7 @@ use irys_actors::block_discovery::{
     get_data_tx_in_parallel,
 };
 use irys_actors::{
-    MempoolFacade, block_discovery::BlockDiscoveryFacade,
+    MempoolFacade, TxIngressError, block_discovery::BlockDiscoveryFacade,
     chunk_ingress_service::facade::ChunkIngressFacadeImpl,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -211,12 +211,23 @@ where
             return Ok(());
         }
 
-        match self
+        let ingress = self
             .mempool
             .handle_data_transaction_ingress_gossip(tx)
-            .await
-            .map_err(GossipError::from)
-        {
+            .await;
+        // Mainnet takes no data txs. That is local policy, not an error: peers on
+        // an older build still gossip them, so drop them quietly and once.
+        if let Err(TxIngressError::DataTxsNotAllowed(_)) = ingress {
+            debug!(
+                "Data tx {} dropped: mainnet currently doesn't accept data txs",
+                tx_id
+            );
+            self.cache
+                .record_seen(source_peer_id, GossipCacheKey::Transaction(tx_id))?;
+            return Ok(());
+        }
+
+        match ingress.map_err(GossipError::from) {
             Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                 debug!("Transaction sent to mempool");
                 // Only record as seen after successful validation

@@ -186,6 +186,10 @@ pub enum PreValidationError {
         position: usize,
         signer: IrysAddress,
     },
+    #[error(
+        "ledger {ledger_id} holds {tx_count} data txs, but mainnet currently doesn't accept data txs"
+    )]
+    DataTxsNotAllowed { ledger_id: u32, tx_count: usize },
     #[error("PoA chunk offset out of tx's data chunks bounds")]
     PoAChunkOffsetOutOfDataChunksBounds,
     #[error("PoA chunk offset out of block bounds")]
@@ -638,6 +642,7 @@ impl PreValidationError {
             | Self::PoAChunkMissing
             | Self::MinerNotAllowed { .. }
             | Self::CommitmentSignerNotAllowed { .. }
+            | Self::DataTxsNotAllowed { .. }
             | Self::PoAChunkOffsetOutOfBlockBounds
             | Self::PoAChunkOffsetOutOfDataChunksBounds
             | Self::PoAChunkOffsetOutOfTxBounds
@@ -720,6 +725,7 @@ impl PreValidationError {
             Self::PoAChunkMissing => "poa_chunk_missing",
             Self::MinerNotAllowed { .. } => "miner_not_allowed",
             Self::CommitmentSignerNotAllowed { .. } => "commitment_signer_not_allowed",
+            Self::DataTxsNotAllowed { .. } => "data_txs_not_allowed",
             Self::PoAChunkOffsetOutOfDataChunksBounds => "poa_chunk_offset_out_of_data_bounds",
             Self::PoAChunkOffsetOutOfBlockBounds => "poa_chunk_offset_out_of_block_bounds",
             Self::PoALedgerInactive { .. } => "poa_ledger_inactive",
@@ -1733,6 +1739,31 @@ fn mainnet_commitment_signers_are_allowed(
     }
 }
 
+/// Returns true if the chain `chain_id` rejects every data tx, in any ledger
+/// (Submit, Publish or the term ledgers). Mainnet does; other chains don't.
+/// The mempool rejects them, the block producer selects none, and a block that
+/// includes one is invalid.
+pub fn mainnet_rejects_data_txs(chain_id: u64) -> bool {
+    chain_id == MAINNET_CHAIN_ID
+}
+
+/// On mainnet, every data ledger in a block must be empty.
+fn mainnet_block_has_no_data_txs(
+    chain_id: u64,
+    data_ledgers: &[DataTransactionLedger],
+) -> Result<(), PreValidationError> {
+    if !mainnet_rejects_data_txs(chain_id) {
+        return Ok(());
+    }
+    match data_ledgers.iter().find(|dl| !dl.tx_ids.0.is_empty()) {
+        Some(dl) => Err(PreValidationError::DataTxsNotAllowed {
+            ledger_id: dl.ledger_id,
+            tx_count: dl.tx_ids.0.len(),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Full pre-validation steps for a block
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
 pub async fn prevalidate_block(
@@ -2016,6 +2047,8 @@ pub async fn prevalidate_block(
     // ========================================
     // Transaction validation
     // ========================================
+
+    mainnet_block_has_no_data_txs(config.consensus.chain_id, &block.data_ledgers)?;
 
     // Validate all data ledger transactions: count, IDs, and signatures
     let max_data_txs = config
@@ -9645,5 +9678,50 @@ mod mainnet_commitment_signer_allowlist_tests {
         // Lower blocks and other chains are validated as before.
         assert!(mainnet_commitment_signers_are_allowed(MAINNET_CHAIN_ID, from - 1, &txs).is_ok());
         assert!(mainnet_commitment_signers_are_allowed(1270, from, &txs).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod mainnet_data_tx_ban_tests {
+    use super::*;
+
+    fn ledger(ledger_id: u32, tx_count: u64) -> DataTransactionLedger {
+        DataTransactionLedger {
+            ledger_id,
+            tx_ids: H256List((0..tx_count).map(H256::from_low_u64_be).collect()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_mainnet_rejects_data_txs() {
+        assert!(mainnet_rejects_data_txs(MAINNET_CHAIN_ID));
+        assert!(!mainnet_rejects_data_txs(1270));
+    }
+
+    #[test]
+    fn mainnet_blocks_may_not_include_data_txs() {
+        let empty = [ledger(0, 0), ledger(1, 0), ledger(10, 0), ledger(20, 0)];
+        assert!(mainnet_block_has_no_data_txs(MAINNET_CHAIN_ID, &empty).is_ok());
+
+        // A tx in any ledger is rejected: Publish, Submit and the term ledgers.
+        for ledger_id in [0, 1, 10, 20] {
+            let ledgers = empty.clone().map(|dl| {
+                if dl.ledger_id == ledger_id {
+                    ledger(ledger_id, 2)
+                } else {
+                    dl
+                }
+            });
+            assert_eq!(
+                mainnet_block_has_no_data_txs(MAINNET_CHAIN_ID, &ledgers),
+                Err(PreValidationError::DataTxsNotAllowed {
+                    ledger_id,
+                    tx_count: 2,
+                })
+            );
+            // Other chains are validated as before.
+            assert!(mainnet_block_has_no_data_txs(1270, &ledgers).is_ok());
+        }
     }
 }

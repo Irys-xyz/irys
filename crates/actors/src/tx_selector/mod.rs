@@ -795,16 +795,29 @@ pub async fn select_best_txs(
         }
     }
 
-    // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
-    let publish_txs_and_proofs = get_publish_txs_and_proofs(
-        ctx,
-        &canonical,
-        current_height,
-        tip_block_height,
-        current_timestamp,
-        &parent_epoch_snapshot,
-    )
-    .await?;
+    // Mainnet blocks may not include data txs, so select none: no Submit or
+    // term-ledger txs, and no Publish promotions.
+    let publish_txs_and_proofs =
+        if crate::block_validation::mainnet_rejects_data_txs(ctx.config.consensus.chain_id) {
+            submit_tx.clear();
+            one_year_tx.clear();
+            thirty_day_tx.clear();
+            PublishLedgerWithTxs {
+                txs: Vec::new(),
+                proofs: None,
+            }
+        } else {
+            // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
+            get_publish_txs_and_proofs(
+                ctx,
+                &canonical,
+                current_height,
+                tip_block_height,
+                current_timestamp,
+                &parent_epoch_snapshot,
+            )
+            .await?
+        };
 
     // Calculate total fees and log final summary
     let total_fee_collected: U256 = submit_tx
