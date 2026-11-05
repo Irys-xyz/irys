@@ -826,15 +826,16 @@ impl Config {
 
         // `number_of_ingress_proofs_from_assignees` MUST stay 0 in this codebase
         // version.  When > 0, the value flows through `get_assigned_ingress_proofs`
-        // (block_validation.rs) where the per-proof intersection loop picks
-        // `assigned_miners` via HashMap iteration order over `slot_ranges` — a
-        // consensus-fork vector when `block_range` straddles multiple Submit
-        // slots.  The determinism fix is a consensus rule change that must be
-        // coordinated with a network upgrade.  Under all currently-deployed configs the value is
-        // 0 and the non-deterministic path is vacuous; raising it without the
-        // determinism fix risks divergence between nodes.
+        // (block_validation.rs) where the per-proof intersection loop overwrites
+        // `assigned_miners` on each intersecting proof.  `slot_ranges` is a
+        // `BTreeMap`, so slot order is deterministic, but the result still
+        // follows the order of the proofs in the block.  That order is not
+        // canonical, so a config bump could split nodes.  The fix is a
+        // consensus rule change that must be coordinated with a network
+        // upgrade.  Under all currently-deployed configs the value is 0 and
+        // the path is vacuous.
         //
-        // When the determinism fix lands and gets activated, REMOVE this guard
+        // When the fix lands and gets activated, REMOVE this guard
         // (and the matching test in this file).  Until then this assert errs
         // loudly at startup so a config bump can't silently activate the bug.
         ensure!(
@@ -845,7 +846,7 @@ impl Config {
                 == 0,
             "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({}) must be 0 \
              until the assigned-miners determinism fix lands — the current `get_assigned_ingress_proofs` \
-             impl picks `assigned_miners` via non-deterministic HashMap iteration when \
+             impl derives `assigned_miners` from proof order when \
              block_range intersects multiple Submit slots",
             self.consensus
                 .hardforks
