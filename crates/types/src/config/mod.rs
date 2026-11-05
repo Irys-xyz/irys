@@ -120,6 +120,25 @@ impl Config {
         }
     }
 
+    /// Epochs a term fee pays for at a given timestamp. A term slot is kept `epoch_length`
+    /// epochs after its last write, so from Delta a tx pays for the full `epoch_length` at
+    /// every height. Before Delta it pays for the epochs left in the current height cycle.
+    pub fn term_storage_epochs_at(
+        &self,
+        timestamp: UnixTimestamp,
+        block_height: u64,
+        epoch_length: u64,
+    ) -> u64 {
+        match self.0.consensus.hardforks.delta_for_block(timestamp) {
+            Activation::Active(_) => epoch_length,
+            Activation::Inactive => crate::ledger_expiry::calculate_submit_ledger_expiry(
+                block_height,
+                self.0.consensus.epoch.num_blocks_in_epoch,
+                epoch_length,
+            ),
+        }
+    }
+
     // validate configuration invariants
     pub fn validate(&self) -> eyre::Result<()> {
         ensure!(
@@ -3178,5 +3197,49 @@ mod validate_tests {
         node_config.mempool.http_ingest_waits_for_module_write = true;
         let config = Config::new_with_random_peer_id(node_config);
         assert!(config.mempool.http_ingest_waits_for_module_write);
+    }
+
+    #[rstest]
+    #[case::submit(5)]
+    #[case::thirty_day(30)]
+    #[case::one_year(365)]
+    fn term_storage_epochs_full_term_from_delta(#[case] epoch_length: u64) {
+        use crate::hardfork_config::Delta;
+
+        let activation = UnixTimestamp::from_secs(1_000);
+        let before = UnixTimestamp::from_secs(999);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
+        let last_cycle_height = blocks_in_epoch * epoch_length - 1;
+        for height in [
+            0,
+            blocks_in_epoch,
+            3 * blocks_in_epoch + 1,
+            last_cycle_height,
+        ] {
+            assert_eq!(
+                config.term_storage_epochs_at(before, height, epoch_length),
+                crate::ledger_expiry::calculate_submit_ledger_expiry(
+                    height,
+                    blocks_in_epoch,
+                    epoch_length
+                ),
+            );
+            assert_eq!(
+                config.term_storage_epochs_at(activation, height, epoch_length),
+                epoch_length
+            );
+        }
+        assert_eq!(
+            config.term_storage_epochs_at(before, last_cycle_height, epoch_length),
+            1
+        );
     }
 }

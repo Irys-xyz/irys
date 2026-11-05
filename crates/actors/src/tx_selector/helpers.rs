@@ -32,7 +32,7 @@ pub(crate) fn calculate_perm_storage_fee(
 }
 
 /// Calculate the expected term fee for temporary storage
-/// This matches the calculation in the pricing API and uses dynamic epoch count
+/// A term tx pays for the full term it is stored. See `Config::term_storage_epochs_at`.
 #[tracing::instrument(level = "trace", skip_all, fields(bytes_to_store = bytes_to_store, block_height = block_height))]
 pub(crate) fn calculate_term_storage_fee(
     config: &Config,
@@ -41,9 +41,9 @@ pub(crate) fn calculate_term_storage_fee(
     block_height: u64,
     timestamp: UnixTimestamp,
 ) -> Result<U256, TxIngressError> {
-    let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+    let epochs_for_storage = config.term_storage_epochs_at(
+        timestamp,
         block_height,
-        config.consensus.epoch.num_blocks_in_epoch,
         config.consensus.epoch.submit_ledger_epoch_length,
     );
     calculate_term_fee(

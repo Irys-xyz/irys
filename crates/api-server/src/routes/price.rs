@@ -90,9 +90,9 @@ pub async fn get_price(
             let tip_height = last_block_entry.height();
             let next_block_height = tip_height + 1;
 
-            let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            let epochs_for_storage = state.config.term_storage_epochs_at(
+                latest_block_timestamp_secs,
                 next_block_height,
-                state.config.consensus.epoch.num_blocks_in_epoch,
                 state.config.consensus.epoch.submit_ledger_epoch_length,
             );
 
@@ -114,7 +114,7 @@ pub async fn get_price(
                 .config
                 .publish_replica_count_at(latest_block_timestamp_secs);
 
-            // Calculate term fee using the dynamic epoch count
+            // Term fee pays for the full term the data is stored
             let term_fee = calculate_term_fee(
                 bytes_to_store,
                 epochs_for_storage,
@@ -212,9 +212,9 @@ pub async fn get_price(
             drop(tree);
 
             let next_block_height = tip_height + 1;
-            let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            let epochs_for_storage = state.config.term_storage_epochs_at(
+                latest_block_timestamp_secs,
                 next_block_height,
-                state.config.consensus.epoch.num_blocks_in_epoch,
                 epoch_length,
             );
 

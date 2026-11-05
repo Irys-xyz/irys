@@ -737,9 +737,9 @@ pub async fn select_best_txs(
                     DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
                     DataLedger::Publish | DataLedger::Submit => unreachable!(),
                 };
-                let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+                let epochs_for_storage = ctx.config.term_storage_epochs_at(
+                    current_timestamp,
                     next_block_height,
-                    consensus.epoch.num_blocks_in_epoch,
                     epoch_length,
                 );
                 let replica_count = consensus.num_partitions_per_slot;

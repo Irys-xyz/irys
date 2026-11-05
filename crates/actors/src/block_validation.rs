@@ -6493,9 +6493,9 @@ fn validate_publish_price(
     block_ema: &EmaSnapshot,
     config: &Config,
 ) -> Result<(), PreValidationError> {
-    let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+    let epochs_for_storage = config.term_storage_epochs_at(
+        timestamp_secs,
         block_height,
-        config.consensus.epoch.num_blocks_in_epoch,
         config.consensus.epoch.submit_ledger_epoch_length,
     );
 
@@ -6578,11 +6578,8 @@ fn validate_term_only_price(
         DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
         DataLedger::Publish | DataLedger::Submit => unreachable!(),
     };
-    let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-        block_height,
-        config.consensus.epoch.num_blocks_in_epoch,
-        epoch_length,
-    );
+    let epochs_for_storage =
+        config.term_storage_epochs_at(timestamp_secs, block_height, epoch_length);
 
     let expected_term_fee = calculate_term_storage_base_network_fee(
         tx.data_size,
@@ -8157,6 +8154,74 @@ mod tests {
             .expect("fee for num_partitions_per_slot replicas is sufficient");
     }
 
+    /// A term fee priced on the epochs left in the height cycle is enough before Delta.
+    /// From Delta it must cover the full `epoch_length`, which is how long a slot is kept.
+    #[rstest::rstest]
+    #[case::one_year(DataLedger::OneYear)]
+    #[case::thirty_day(DataLedger::ThirtyDay)]
+    fn term_only_price_requires_full_term_from_delta(#[case] ledger: DataLedger) {
+        use irys_types::hardfork_config::Delta;
+
+        let mut header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let cascade = config.consensus.hardforks.cascade.as_ref().unwrap();
+        let epoch_length = match ledger {
+            DataLedger::OneYear => cascade.one_year_epoch_length,
+            _ => cascade.thirty_day_epoch_length,
+        };
+        // Last block of a cycle: the cycle remainder is one epoch.
+        let blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
+        header.height = blocks_in_epoch * epoch_length - 1;
+        let cycle_epochs = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            header.height,
+            blocks_in_epoch,
+            epoch_length,
+        );
+        assert_eq!(cycle_epochs, 1);
+        assert!(epoch_length > cycle_epochs);
+        let ema = EmaSnapshot::genesis(&header);
+        let data_size = 1 << 50;
+        let fee_for_epochs = |epochs, timestamp| {
+            calculate_term_storage_base_network_fee(
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                config.consensus.num_partitions_per_slot,
+                timestamp,
+            )
+            .unwrap()
+        };
+        let mut tx = DataTransactionHeader::new(&config.consensus);
+        tx.ledger_id = ledger as u32;
+        tx.data_size = data_size;
+        tx.perm_fee = None;
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_term_only_price(tx, ledger, header.height, timestamp, &ema, &config)
+        };
+
+        tx.term_fee = BoundedFee::new(fee_for_epochs(cycle_epochs, before_delta));
+        validate(&tx, before_delta).expect("before Delta, the cycle remainder is sufficient");
+
+        tx.term_fee = BoundedFee::new(fee_for_epochs(cycle_epochs, activation));
+        assert!(matches!(
+            validate(&tx, activation),
+            Err(PreValidationError::InsufficientTermFee { .. })
+        ));
+
+        tx.term_fee = BoundedFee::new(fee_for_epochs(epoch_length, activation));
+        validate(&tx, activation).expect("from Delta, the full term is sufficient");
+    }
+
     /// Publish fees pay for the ingress proof total before Delta and for
     /// `num_partitions_per_slot` replicas from Delta.
     #[test]
@@ -8177,14 +8242,14 @@ mod tests {
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);
-        let epochs = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-            header.height,
-            config.consensus.epoch.num_blocks_in_epoch,
-            config.consensus.epoch.submit_ledger_epoch_length,
-        );
         // Large enough that both fees are above the minimum term fee and scale with replicas.
         let data_size = 1 << 50;
         let tx_priced_for = |replicas, timestamp| {
+            let epochs = config.term_storage_epochs_at(
+                timestamp,
+                header.height,
+                config.consensus.epoch.submit_ledger_epoch_length,
+            );
             let term_fee = calculate_term_storage_base_network_fee(
                 data_size,
                 epochs,

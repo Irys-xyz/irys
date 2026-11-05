@@ -383,9 +383,9 @@ impl Inner {
                 })?
             }
         };
-        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+        let epochs_for_storage = self.config.term_storage_epochs_at(
+            latest_block_timestamp_secs,
             next_block_height,
-            self.config.consensus.epoch.num_blocks_in_epoch,
             epoch_length,
         );
 
