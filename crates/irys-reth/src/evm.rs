@@ -7,6 +7,7 @@ use either::Either;
 use alloy_consensus::{Block, Header};
 use alloy_dyn_abi::DynSolValue;
 use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
+use alloy_eips::eip7685::Requests;
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
@@ -53,6 +54,11 @@ mod constants {
 }
 
 /// Irys block executor that handles execution of both regular and shadow transactions.
+///
+/// Irys runs the Ethereum pre-block steps (`apply_pre_execution_changes` delegates) and no Ethereum
+/// post-block step (`finish` replaces the `EthBlockExecutor` version). At each reth / alloy-evm
+/// upgrade, compare both functions upstream: adopt the new post-block steps that Irys wants, and
+/// check that every new pre-block step is wanted, because it runs without a change here.
 #[derive(Debug)]
 pub struct IrysBlockExecutor<'a, Evm> {
     inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
@@ -99,8 +105,25 @@ where
         self.inner.execute_transaction_with_result_closure(tx, f)
     }
 
+    /// Irys has no post-block steps. None of the steps in `EthBlockExecutor::finish` applies:
+    /// - EIP-7685 requests (deposit logs, EIP-7002 / EIP-7251 system calls): Irys has no
+    ///   requests. Every block's requests are empty, so its header carries `EMPTY_REQUESTS_HASH`.
+    /// - Block and ommer rewards: Ethereum pays them only before the Merge, and Irys starts after
+    ///   it.
+    /// - Withdrawal credits: Irys has no withdrawals, and the CL rejects a block with any.
+    /// - DAO-fork drain: it runs only at the activation block, which for Irys is genesis, and
+    ///   genesis is never executed.
     fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
-        self.inner.finish()
+        let inner = self.inner;
+        Ok((
+            inner.evm,
+            BlockExecutionResult {
+                receipts: inner.receipts,
+                requests: Requests::default(),
+                gas_used: inner.gas_used,
+                blob_gas_used: inner.blob_gas_used,
+            },
+        ))
     }
 
     fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
@@ -1637,6 +1660,292 @@ mod tests {
             assert!(
                 matches!(res, Err(EVMError::Transaction(InvalidTransaction::Str(_)))),
                 "expected EVMError::Transaction(Str(..)), got: {res:?}"
+            );
+        }
+    }
+
+    /// Irys and Ethereum (`EthBlockExecutor`) execution of the same block. Irys makes no
+    /// post-block system calls and returns no EIP-7685 requests.
+    mod system_calls {
+        use super::*;
+        use alloy_consensus::{SignableTransaction as _, TxEip1559};
+        use alloy_eips::eip7002::{
+            WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_PREDEPLOY_CODE,
+        };
+        use alloy_eips::eip7251::{
+            CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS, CONSOLIDATION_REQUEST_PREDEPLOY_CODE,
+        };
+        use alloy_network::TxSignerSync as _;
+        use alloy_primitives::keccak256;
+        use alloy_signer_local::PrivateKeySigner;
+        use reth_chainspec::{Chain, ChainSpecBuilder};
+        use reth_primitives_traits::SignerRecoverable as _;
+        use revm::database::{BundleState, CacheDB, states::bundle_state::BundleRetention};
+        use revm::state::{AccountInfo, Bytecode};
+        use std::collections::BTreeMap;
+
+        type Recovered = reth_primitives_traits::Recovered<TransactionSigned>;
+        type StateChanges = BTreeMap<Address, (Option<AccountInfo>, BTreeMap<U256, U256>)>;
+
+        const CHAIN_ID: u64 = 1;
+
+        /// `PUSH1 1, PUSH0, SSTORE, STOP`: writes 1 to slot 0 when called.
+        const WRITE_SLOT_ZERO_CODE: [u8; 5] = [0x60, 0x01, 0x5f, 0x55, 0x00];
+
+        enum Executor {
+            /// `EthBlockExecutor`: all Ethereum pre- and post-block steps.
+            Ethereum,
+            Irys,
+        }
+
+        struct Outcome {
+            result: Result<BlockExecutionResult<Receipt>, BlockExecutionError>,
+            bundle: BundleState,
+        }
+
+        fn prague_chain_spec() -> Arc<ChainSpec> {
+            Arc::new(
+                ChainSpecBuilder::default()
+                    .chain(Chain::from_id(CHAIN_ID))
+                    .genesis(Default::default())
+                    .prague_activated()
+                    .build(),
+            )
+        }
+
+        fn contract(code: &[u8]) -> AccountInfo {
+            AccountInfo {
+                nonce: 1,
+                code_hash: keccak256(code),
+                code: Some(Bytecode::new_raw(Bytes::copy_from_slice(code))),
+                ..Default::default()
+            }
+        }
+
+        fn signed_call(signer: &PrivateKeySigner, to: Address, input: Bytes) -> Recovered {
+            let mut tx = TxEip1559 {
+                chain_id: CHAIN_ID,
+                nonce: 0,
+                gas_limit: 1_000_000,
+                max_fee_per_gas: 1_000_000_000,
+                max_priority_fee_per_gas: 0,
+                to: TxKind::Call(to),
+                // 1 wei: the minimum request fee of the request predeploys (the excess is zero).
+                value: U256::from(1),
+                access_list: Default::default(),
+                input,
+            };
+            let signature = signer.sign_transaction_sync(&mut tx).unwrap();
+            TransactionSigned::Eip1559(tx.into_signed(signature))
+                .try_into_recovered()
+                .unwrap()
+        }
+
+        /// Executes one block with `tx` on a fresh state and returns the execution result and the
+        /// resulting state changes. `account` is put into the state before the block.
+        fn execute(
+            executor: Executor,
+            account: Option<(Address, AccountInfo)>,
+            sender: Address,
+            tx: &Recovered,
+        ) -> Outcome {
+            let factory = IrysBlockExecutorFactory::new(
+                RethReceiptBuilder::default(),
+                prague_chain_spec(),
+                IrysEvmFactory::new(),
+            );
+
+            let mut cache = CacheDB::new(revm::database_interface::EmptyDB::default());
+            cache.insert_account_info(
+                sender,
+                AccountInfo {
+                    balance: U256::from(10_u128.pow(20)),
+                    ..Default::default()
+                },
+            );
+            if let Some((address, info)) = account {
+                cache.insert_account_info(address, info);
+            }
+            let mut state = State::builder()
+                .with_database(cache)
+                .with_bundle_update()
+                .build();
+
+            let mut cfg_env = CfgEnv::new_with_spec(SpecId::PRAGUE);
+            cfg_env.chain_id = CHAIN_ID;
+            let block_env = BlockEnv {
+                number: U256::from(1),
+                timestamp: U256::from(1),
+                gas_limit: 30_000_000,
+                basefee: 0,
+                ..Default::default()
+            };
+            let evm = factory
+                .evm_factory()
+                .create_evm(&mut state, EvmEnv { cfg_env, block_env });
+            let ctx = EthBlockExecutionCtx {
+                parent_hash: B256::ZERO,
+                parent_beacon_block_root: Some(B256::ZERO),
+                ommers: &[],
+                withdrawals: None,
+                extra_data: Bytes::new(),
+                tx_count_hint: None,
+            };
+            let inner = EthBlockExecutor::new(evm, ctx, factory.spec(), factory.receipt_builder());
+
+            let result = match executor {
+                Executor::Ethereum => run(inner, tx),
+                Executor::Irys => run(IrysBlockExecutor { inner }, tx),
+            };
+
+            state.merge_transitions(BundleRetention::Reverts);
+            Outcome {
+                result,
+                bundle: state.take_bundle(),
+            }
+        }
+
+        fn run<E>(
+            mut executor: E,
+            tx: &Recovered,
+        ) -> Result<BlockExecutionResult<Receipt>, BlockExecutionError>
+        where
+            E: BlockExecutor<Transaction = TransactionSigned, Receipt = Receipt>,
+        {
+            executor.apply_pre_execution_changes()?;
+            executor.execute_transaction(tx)?;
+            Ok(executor.finish()?.1)
+        }
+
+        /// Executes the same block with the Ethereum and the Irys executor. Both must succeed with
+        /// the same receipts and gas, and Irys must return no requests.
+        fn execute_both(
+            account: Option<(Address, AccountInfo)>,
+            to: Address,
+            input: Bytes,
+        ) -> (Outcome, Outcome) {
+            let signer = PrivateKeySigner::random();
+            let tx = signed_call(&signer, to, input);
+            let ethereum = execute(Executor::Ethereum, account.clone(), signer.address(), &tx);
+            let irys = execute(Executor::Irys, account, signer.address(), &tx);
+
+            let ethereum_result = ethereum.result.as_ref().unwrap();
+            let irys_result = irys.result.as_ref().unwrap();
+            assert!(
+                ethereum_result.receipts.iter().all(|r| r.success),
+                "tx must succeed"
+            );
+            assert_eq!(irys_result.receipts, ethereum_result.receipts);
+            assert_eq!(irys_result.gas_used, ethereum_result.gas_used);
+            assert_eq!(irys_result.blob_gas_used, ethereum_result.blob_gas_used);
+            assert!(
+                irys_result.requests.is_empty(),
+                "Irys block must have no requests, got {:?}",
+                irys_result.requests
+            );
+            (ethereum, irys)
+        }
+
+        /// The state changes that the state root sees: accounts that were destroyed or whose info
+        /// or storage values changed. Entries for touched but unchanged accounts are left out.
+        fn effective_changes(bundle: &BundleState) -> StateChanges {
+            bundle
+                .state
+                .iter()
+                .filter_map(|(address, account)| {
+                    let storage: BTreeMap<U256, U256> = account
+                        .storage
+                        .iter()
+                        .filter(|(_, slot)| slot.is_changed())
+                        .map(|(key, slot)| (*key, slot.present_value))
+                        .collect();
+                    (account.was_destroyed() || account.is_info_changed() || !storage.is_empty())
+                        .then(|| (*address, (account.info.clone(), storage)))
+                })
+                .collect()
+        }
+
+        fn storage_value(bundle: &BundleState, address: Address, slot: U256) -> U256 {
+            bundle
+                .state
+                .get(&address)
+                .and_then(|account| account.storage.get(&slot))
+                .map_or(U256::ZERO, |slot| slot.present_value)
+        }
+
+        /// No account at the request predeploy addresses: skipping the system calls changes no
+        /// state.
+        #[test]
+        fn no_system_contract_accounts_give_same_state() {
+            let (ethereum, irys) = execute_both(None, Address::repeat_byte(0x11), Bytes::new());
+            assert!(ethereum.result.unwrap().requests.is_empty());
+            assert_eq!(irys.bundle, ethereum.bundle);
+        }
+
+        /// An account with a balance but no code at a system contract address: the system call
+        /// only touches it, so skipping the call changes no state that the state root sees.
+        #[rstest::rstest]
+        #[case::withdrawal_requests(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS)]
+        #[case::consolidation_requests(CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS)]
+        fn system_contract_address_without_code_gives_same_state(#[case] address: Address) {
+            let funded = AccountInfo {
+                balance: U256::from(1_000),
+                ..Default::default()
+            };
+            let (ethereum, irys) = execute_both(
+                Some((address, funded)),
+                Address::repeat_byte(0x11),
+                Bytes::new(),
+            );
+            assert_eq!(
+                effective_changes(&irys.bundle),
+                effective_changes(&ethereum.bundle)
+            );
+        }
+
+        /// Code at a system contract address: Ethereum calls it, Irys does not.
+        #[rstest::rstest]
+        #[case::withdrawal_requests(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS)]
+        #[case::consolidation_requests(CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS)]
+        fn system_contract_is_not_called(#[case] address: Address) {
+            let (ethereum, irys) = execute_both(
+                Some((address, contract(&WRITE_SLOT_ZERO_CODE))),
+                Address::repeat_byte(0x11),
+                Bytes::new(),
+            );
+            assert_eq!(
+                storage_value(&ethereum.bundle, address, U256::ZERO),
+                U256::from(1),
+                "test setup: Ethereum execution must call the contract"
+            );
+            assert_eq!(storage_value(&irys.bundle, address, U256::ZERO), U256::ZERO);
+        }
+
+        /// A request predeploy with its real code is called by a user tx: Ethereum execution
+        /// produces a request, Irys execution does not.
+        #[rstest::rstest]
+        #[case::withdrawal(
+            WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS,
+            &WITHDRAWAL_REQUEST_PREDEPLOY_CODE,
+            // validator pubkey (48 bytes) + amount (8 bytes)
+            56
+        )]
+        #[case::consolidation(
+            CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS,
+            &CONSOLIDATION_REQUEST_PREDEPLOY_CODE,
+            // source pubkey (48 bytes) + target pubkey (48 bytes)
+            96
+        )]
+        fn request_predeploy_call_gives_no_requests(
+            #[case] address: Address,
+            #[case] code: &Bytes,
+            #[case] input_len: usize,
+        ) {
+            let input = Bytes::from(vec![0xab; input_len]);
+            let (ethereum, _irys) = execute_both(Some((address, contract(code))), address, input);
+            assert!(
+                !ethereum.result.unwrap().requests.is_empty(),
+                "test setup: Ethereum execution must produce a request"
             );
         }
     }
