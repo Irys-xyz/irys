@@ -1304,9 +1304,9 @@ async fn block_prod_fails_with_insufficient_storage_fees() -> eyre::Result<()> {
         },
     };
 
-    // Now attempt to mine a block - this should FAIL at Reth level
-    // because when the shadow tx generator creates the StorageFees shadow transaction,
-    // it will try to deduct more than the user has
+    // Now attempt to mine a block. The StorageFees shadow tx deducts more than the user has,
+    // so Reth rejects it as an invalid transaction and the payload builder skips it. The
+    // producer then finds the payload without its expected shadow txs and aborts.
     let result = evil_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await;
@@ -1319,9 +1319,9 @@ async fn block_prod_fails_with_insufficient_storage_fees() -> eyre::Result<()> {
     let error = result.map(|_| ()).unwrap_err();
     let error_msg = format!("{:?}", error);
 
-    // Verify it's failing due to insufficient balance in shadow tx
+    // Verify it's failing because the unpayable shadow tx is missing from the payload
     assert!(
-        error_msg.contains("missing payload"),
+        error_msg.contains("payload_missing_shadow_tx"),
         "Expected block production failure due to insufficient balance, got: {}",
         error_msg
     );
