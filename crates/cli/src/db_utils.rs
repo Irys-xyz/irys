@@ -59,7 +59,7 @@ pub(crate) fn import_genesis_to_db(genesis_dir: &Path, config: &Config) -> eyre:
 
     // Validate commitment signatures, no duplicates, only Stake/Pledge types,
     // at least one of each, and every pledger has a stake.
-    validate_genesis_commitments(&commitments)?;
+    validate_genesis_commitments(&commitments, &config.consensus)?;
 
     // Verify the block header's commitment ledger txids match the supplied commitments.
     {

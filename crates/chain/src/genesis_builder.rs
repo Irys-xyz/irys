@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 use eyre::Context as _;
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_types::{
-    CommitmentTransaction, CommitmentTypeV2, Config, H256, IrysAddress, IrysBlockHeader,
-    IrysTransactionCommon as _, U256, UnixTimestamp, UnixTimestampMs, calculate_initial_difficulty,
-    chainspec::irys_chain_spec, irys::IrysSigner,
+    CommitmentTransaction, CommitmentTypeV2, Config, ConsensusConfig, H256, IrysAddress,
+    IrysBlockHeader, IrysTransactionCommon as _, U256, UnixTimestamp, UnixTimestampMs,
+    calculate_initial_difficulty, chainspec::irys_chain_spec, irys::IrysSigner,
 };
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use k256::ecdsa::SigningKey;
@@ -379,7 +379,10 @@ pub async fn build_signed_genesis_block(
 /// - Only Stake and Pledge commitment types are present.
 /// - At least one stake and at least one pledge exist.
 /// - Every miner with pledge commitments also has a stake commitment.
-pub fn validate_genesis_commitments(commitments: &[CommitmentTransaction]) -> eyre::Result<()> {
+pub fn validate_genesis_commitments(
+    commitments: &[CommitmentTransaction],
+    consensus: &ConsensusConfig,
+) -> eyre::Result<()> {
     // Validate all commitment signatures.
     // A corrupted/tampered file should fail here rather than producing
     // a genesis block that peers will reject later.
@@ -414,6 +417,14 @@ pub fn validate_genesis_commitments(commitments: &[CommitmentTransaction]) -> ey
                 c.id(),
             ),
         }
+    }
+
+    // Values must match the configured price: they seed the genesis treasury, and
+    // refunds pay the configured amount back.
+    for (i, c) in commitments.iter().enumerate() {
+        c.validate_value(consensus).map_err(|e| {
+            eyre::eyre!("commitment {i} (txid={}) has an invalid value: {e}", c.id())
+        })?;
     }
 
     let has_stake = commitments
@@ -472,7 +483,7 @@ pub fn build_genesis_block_from_commitments(
     mut commitments: Vec<CommitmentTransaction>,
     block_signing_key: &SigningKey,
 ) -> eyre::Result<GenesisOutput> {
-    validate_genesis_commitments(&commitments)?;
+    validate_genesis_commitments(&commitments, &config.consensus)?;
 
     let GenesisPrelude {
         mut genesis_block,
@@ -589,4 +600,23 @@ fn signer_from_key(key: &SigningKey, config: &Config) -> IrysSigner {
 fn signer_from_key_address(key: &SigningKey) -> IrysAddress {
     use alloy_signer::utils::secret_key_to_address;
     secret_key_to_address(key).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::NodeConfig;
+
+    #[test]
+    fn genesis_commitment_with_wrong_value_is_rejected() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let mut stake = CommitmentTransaction::new_stake(&config.consensus, H256::zero());
+        stake.set_value(U256::zero());
+        signer.sign_commitment(&mut stake).unwrap();
+
+        let err = validate_genesis_commitments(&[stake], &config.consensus).unwrap_err();
+
+        assert!(err.to_string().contains("invalid value"), "{err}");
+    }
 }
