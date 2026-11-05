@@ -1,5 +1,7 @@
-use crate::hardfork_config::{Aurora, Borealis, Cascade, Echo, FrontierParams, IrysHardforkConfig};
-use crate::storage_pricing::ReplicaCount;
+use crate::hardfork_config::{
+    Activation, Aurora, Borealis, Cascade, Echo, FrontierParams, IrysHardforkConfig,
+};
+use crate::storage_pricing::{PRECISION_SCALE, ReplicaCount, mul_div};
 use crate::{
     H256, IrysAddress,
     storage_pricing::{
@@ -150,8 +152,9 @@ pub struct ConsensusConfig {
     /// This is the fee that is used for immediate tx inclusion fees:
     /// miner receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
     ///
-    /// This field is also used for immediate ingress proof rewards:
-    /// ingress proof producer receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
+    /// This field is also used for immediate ingress proof rewards. The ingress proof
+    /// producers share a pool of `tx.term_fee * immediate_tx_inclusion_reward_percent`
+    /// from Delta, and get that amount each before Delta. See `ingress_proof_reward_pool_at`.
     ///
     /// Both of these reward distribution mechanisms are opaque to the user,
     /// the user will only ever see `term_fee` and `perm_fee`.
@@ -642,6 +645,28 @@ impl ConsensusConfig {
     ) -> Result<Amount<(CostPerChunk, Usd)>> {
         let annual_cost = self.effective_annual_cost_per_gb(timestamp);
         Self::compute_cost_per_chunk_per_epoch(annual_cost, self.chunk_size, self.epochs_per_year())
+    }
+
+    /// Total ingress proof reward of a Publish tx at a given timestamp. Promotion splits it
+    /// equally across the tx's ingress proofs. From Delta it is one
+    /// `immediate_tx_inclusion_reward_percent` share of `term_fee`, the same as the Submit
+    /// inclusion reward. Before Delta it is one share for each required ingress proof.
+    pub fn ingress_proof_reward_pool_at(
+        &self,
+        timestamp: UnixTimestamp,
+        term_fee: crate::U256,
+    ) -> Result<crate::U256> {
+        let inclusion_reward = mul_div(
+            term_fee,
+            self.immediate_tx_inclusion_reward_percent.amount,
+            PRECISION_SCALE,
+        )?;
+        Ok(match self.hardforks.delta_for_block(timestamp) {
+            Activation::Active(_) => inclusion_reward,
+            Activation::Inactive => inclusion_reward.saturating_mul(crate::U256::from(
+                self.hardforks.number_of_ingress_proofs_total_at(timestamp),
+            )),
+        })
     }
 
     /// Returns the effective annual cost per GB at a given timestamp.

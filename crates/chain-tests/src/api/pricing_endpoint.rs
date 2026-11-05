@@ -19,10 +19,6 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size * 5;
 
     // Calculate the expected term fee using hardfork params from config to match API behavior
-    let number_of_ingress_proofs_total = ctx
-        .node_ctx
-        .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let replica_count = ctx
         .node_ctx
         .config
@@ -40,9 +36,10 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
         replica_count,
-        number_of_ingress_proofs_total,
+        ctx.node_ctx
+            .config
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
-        expected_term_fee,
         UnixTimestamp::from_secs(0),
     )?;
 
@@ -120,10 +117,6 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     };
 
     // Calculate the expected term fee using hardfork params from config to match API behavior
-    let number_of_ingress_proofs_total = ctx
-        .node_ctx
-        .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let replica_count = ctx
         .node_ctx
         .config
@@ -137,14 +130,11 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     )?;
 
     // Calculate expected perm_fee using the same method as the API
-    let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
-        expected_term_fee,
-        number_of_ingress_proofs_total,
-        ctx.node_ctx
+    let expected_perm_fee = expected_base_fee.amount
+        + ctx
+            .node_ctx
             .config
-            .consensus
-            .immediate_tx_inclusion_reward_percent,
-    )?;
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?;
 
     // action
     let response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
@@ -157,7 +147,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     );
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee includes both base fee and ingress rewards
-    assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
+    assert_eq!(price_info.perm_fee, expected_perm_fee);
     // Verify term_fee is calculated correctly
     assert_eq!(price_info.term_fee, expected_term_fee);
     assert_eq!(price_info.ledger, 0);
@@ -271,10 +261,6 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     };
 
     // Calculate the expected term fee using hardfork params from config to match API behavior
-    let number_of_ingress_proofs_total = ctx
-        .node_ctx
-        .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let replica_count = ctx
         .node_ctx
         .config
@@ -288,14 +274,11 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     )?;
 
     // Calculate expected perm_fee using the same method as the API
-    let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
-        expected_term_fee,
-        number_of_ingress_proofs_total,
-        ctx.node_ctx
+    let expected_perm_fee = expected_base_fee.amount
+        + ctx
+            .node_ctx
             .config
-            .consensus
-            .immediate_tx_inclusion_reward_percent,
-    )?;
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?;
 
     // action
     let response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
@@ -308,7 +291,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     );
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee includes both base fee and ingress rewards
-    assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
+    assert_eq!(price_info.perm_fee, expected_perm_fee);
     // Verify term_fee is calculated correctly
     assert_eq!(price_info.term_fee, expected_term_fee);
     assert_eq!(price_info.ledger, 0);
@@ -597,10 +580,6 @@ async fn heavy_pricing_quote_on_last_tip_before_roll_survives_roll() -> eyre::Re
     // Panics with the response body if the mempool rejects the quoted fees.
     ctx.post_data_tx_raw(&tx.header).await;
 
-    let number_of_ingress_proofs_total = ctx
-        .node_ctx
-        .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let replica_count = ctx
         .node_ctx
         .config
@@ -616,9 +595,10 @@ async fn heavy_pricing_quote_on_last_tip_before_roll_survives_roll() -> eyre::Re
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
         replica_count,
-        number_of_ingress_proofs_total,
+        ctx.node_ctx
+            .config
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?,
         ema_before_roll.ema_price_1_interval_ago,
-        expected_term_fee,
         UnixTimestamp::from_secs(0),
     )?;
     assert_eq!(
@@ -640,10 +620,6 @@ async fn verify_pricing_uses_ema(
     block_description: &str,
 ) -> eyre::Result<()> {
     // Calculate expected fees using the provided EMA
-    let number_of_ingress_proofs_total = ctx
-        .node_ctx
-        .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let replica_count = ctx
         .node_ctx
         .config
@@ -660,9 +636,10 @@ async fn verify_pricing_uses_ema(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
         replica_count,
-        number_of_ingress_proofs_total,
+        ctx.node_ctx
+            .config
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?,
         expected_ema,
-        expected_term_fee,
         UnixTimestamp::from_secs(0),
     )?;
 

@@ -6468,9 +6468,8 @@ fn calculate_perm_storage_total_fee(
         bytes_to_store,
         &config.consensus,
         config.publish_replica_count_at(timestamp_secs),
-        config.number_of_ingress_proofs_total_at(timestamp_secs),
+        config.ingress_proof_reward_pool_at(timestamp_secs, term_fee)?,
         ema_snapshot.ema_for_public_pricing(),
-        term_fee,
         timestamp_secs,
     )
 }
@@ -6532,7 +6531,6 @@ fn validate_publish_price(
         config.consensus.epoch.submit_ledger_epoch_length,
     );
 
-    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
     let expected_term_fee = calculate_term_storage_base_network_fee(
         tx.data_size,
         epochs_for_storage,
@@ -6574,16 +6572,13 @@ fn validate_publish_price(
         }
     })?;
 
-    PublishFeeCharges::new(
-        actual_perm_fee,
-        actual_term_fee,
-        &config.consensus,
-        number_of_ingress_proofs_total,
-    )
-    .map_err(|e| PreValidationError::InvalidPermFeeStructure {
-        tx_id: tx.id,
-        reason: e.to_string(),
-    })?;
+    config
+        .ingress_proof_reward_pool_at(timestamp_secs, actual_term_fee.get())
+        .and_then(|pool| PublishFeeCharges::new(actual_perm_fee, pool))
+        .map_err(|e| PreValidationError::InvalidPermFeeStructure {
+            tx_id: tx.id,
+            reason: e.to_string(),
+        })?;
     Ok(())
 }
 
@@ -8297,9 +8292,10 @@ mod tests {
                 data_size,
                 &config.consensus,
                 ReplicaCount::new(replicas),
-                1,
+                config
+                    .ingress_proof_reward_pool_at(timestamp, term_fee)
+                    .unwrap(),
                 ema.ema_for_public_pricing(),
-                term_fee,
                 timestamp,
             )
             .unwrap();
@@ -8406,6 +8402,73 @@ mod tests {
         )));
         validate(&tx, activation)
             .expect("from Delta, a perm fee priced on the actual term fee is sufficient");
+    }
+
+    /// From Delta the ingress proofs share one inclusion reward pool, so a perm fee of the
+    /// base storage cost plus one inclusion reward is sufficient. Before Delta the perm fee
+    /// must add one inclusion reward for each required ingress proof.
+    #[test]
+    fn publish_price_requires_one_proof_reward_pool_from_delta() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let replicas = ReplicaCount::new(3);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        // Same replica count on both sides of Delta, so only the proof reward pool changes.
+        consensus.num_partitions_per_slot = replicas;
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 3;
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        let data_size = 1 << 50;
+        // Perm fee = base storage cost + one inclusion reward on the tx's term fee.
+        let tx_with_one_reward_share = |timestamp| {
+            let epochs = config.term_storage_epochs_at(
+                timestamp,
+                header.height,
+                config.consensus.epoch.submit_ledger_epoch_length,
+            );
+            let term_fee = calculate_term_storage_base_network_fee(
+                data_size, epochs, &ema, &config, replicas, timestamp,
+            )
+            .unwrap();
+            let inclusion_reward =
+                TermFeeCharges::new(BoundedFee::new(term_fee), &config.consensus)
+                    .unwrap()
+                    .block_producer_reward;
+            let perm_fee = calculate_perm_fee_from_config(
+                data_size,
+                &config.consensus,
+                replicas,
+                inclusion_reward,
+                ema.ema_for_public_pricing(),
+                timestamp,
+            )
+            .unwrap();
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = data_size;
+            tx.term_fee = BoundedFee::new(term_fee);
+            tx.perm_fee = Some(BoundedFee::new(perm_fee.amount));
+            tx
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        assert!(matches!(
+            validate(&tx_with_one_reward_share(before_delta), before_delta),
+            Err(PreValidationError::InsufficientPermFee { .. })
+        ));
+        validate(&tx_with_one_reward_share(activation), activation)
+            .expect("from Delta, one inclusion reward for all proofs is sufficient");
     }
 
     /// Build a minimal `BlockTreeReadGuard` for tests that exercise the

@@ -658,16 +658,11 @@ pub async fn select_best_txs(
                     continue;
                 }
 
-                let number_of_ingress_proofs_total = ctx
+                if ctx
                     .config
-                    .number_of_ingress_proofs_total_at(current_timestamp);
-                if PublishFeeCharges::new(
-                    perm_fee,
-                    tx.term_fee,
-                    &ctx.config.node_config.consensus_config(),
-                    number_of_ingress_proofs_total,
-                )
-                .is_err()
+                    .ingress_proof_reward_pool_at(current_timestamp, tx.term_fee.get())
+                    .and_then(|pool| PublishFeeCharges::new(perm_fee, pool))
+                    .is_err()
                 {
                     debug!(
                         tx.id = ?tx.id,

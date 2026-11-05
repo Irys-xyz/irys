@@ -384,38 +384,6 @@ impl Amount<(NetworkFee, Irys)> {
             _t: PhantomData,
         })
     }
-
-    /// Add ingress proof rewards to the base network fee.
-    ///
-    /// According to business rules:
-    /// - Each ingress proof gets a reward of (fee_percentage × term_fee)
-    /// - Total ingress rewards = num_ingress_proofs × (fee_percentage × term_fee)
-    /// - Final perm_fee = base_network_fee + total_ingress_rewards
-    ///
-    /// # Errors
-    ///
-    /// Whenever any of the math operations fail due to bounds checks.
-    pub fn add_ingress_proof_rewards(
-        self,
-        term_fee: U256,
-        num_ingress_proofs: u8,
-        fee_percentage: Amount<Percentage>,
-    ) -> Result<Self> {
-        // Calculate reward per ingress proof (fee_percentage × term_fee)
-        let per_ingress_reward = mul_div(term_fee, fee_percentage.amount, PRECISION_SCALE)?;
-
-        // Calculate total ingress rewards
-        let total_ingress_rewards =
-            per_ingress_reward.saturating_mul(U256::from(num_ingress_proofs));
-
-        // Add ingress rewards to base network fee
-        let total = self.amount.saturating_add(total_ingress_rewards);
-
-        Ok(Self {
-            amount: total,
-            _t: PhantomData,
-        })
-    }
 }
 
 impl Amount<(IrysPrice, Usd)> {
@@ -586,16 +554,15 @@ pub fn calculate_term_fee_from_config(
     )
 }
 
-/// Calculate permanent storage fee including base network fee and ingress proof rewards.
-/// Storage cost scales with `replica_count`. Proof rewards are `number_of_ingress_proofs_total` x
-/// `immediate_tx_inclusion_reward_percent` x `term_fee`.
+/// Calculate permanent storage fee: the base network fee plus the ingress proof reward pool.
+/// Storage cost scales with `replica_count`. `ingress_proof_reward` is the total reward of all
+/// the tx's ingress proofs; get it from `ConsensusConfig::ingress_proof_reward_pool_at`.
 pub fn calculate_perm_fee_from_config(
     bytes_to_store: u64,
     config: &ConsensusConfig,
     replica_count: ReplicaCount,
-    number_of_ingress_proofs_total: u8,
+    ingress_proof_reward: U256,
     ema_price: Amount<(IrysPrice, Usd)>,
-    term_fee: U256,
     timestamp: UnixTimestamp,
 ) -> Result<Amount<(NetworkFee, Irys)>> {
     let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch_at(timestamp)?;
@@ -621,14 +588,10 @@ pub fn calculate_perm_fee_from_config(
         ema_price,
     )?;
 
-    // Add ingress proof rewards to the base network fee
-    let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
-        term_fee,
-        number_of_ingress_proofs_total,
-        config.immediate_tx_inclusion_reward_percent,
-    )?;
-
-    Ok(total_perm_fee)
+    // Add the ingress proof reward pool to the base network fee
+    Ok(Amount::new(
+        base_network_fee.amount.saturating_add(ingress_proof_reward),
+    ))
 }
 
 /// Exponentiation by squaring for precision scale:
@@ -1198,92 +1161,6 @@ mod tests {
 
             let result = original.sub_multiplier(above_one);
             assert!(result.is_err(), "Expected error for sub > 100%");
-        }
-
-        #[test]
-        fn test_add_ingress_proof_rewards_normal_case() -> Result<()> {
-            // Base network fee = 100 IRYS
-            let base_fee = Amount::<(NetworkFee, Irys)>::token(dec!(100.0))?;
-            // Term fee = 10 IRYS
-            let term_fee = Amount::<Irys>::token(dec!(10.0))?.amount;
-            // 5% miner fee
-            let five_percent = Amount::<Percentage>::percentage(dec!(0.05))?;
-            // 3 ingress proofs
-            let num_proofs = 3;
-
-            // Action
-            let result = base_fee.add_ingress_proof_rewards(term_fee, num_proofs, five_percent)?;
-
-            // Convert to decimal for comparison
-            let actual = result.token_to_decimal()?;
-            // Expected: 100 + (3 * 10 * 0.05) = 100 + 1.5 = 101.5
-            let expected = dec!(101.5);
-
-            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
-            Ok(())
-        }
-
-        #[test]
-        fn test_add_ingress_proof_rewards_zero_proofs() -> Result<()> {
-            // Base network fee = 50 IRYS
-            let base_fee = Amount::<(NetworkFee, Irys)>::token(dec!(50.0))?;
-            let term_fee = Amount::<Irys>::token(dec!(10.0))?.amount;
-            let five_percent = Amount::<Percentage>::percentage(dec!(0.05))?;
-            let num_proofs = 0;
-
-            // Action
-            let result = base_fee.add_ingress_proof_rewards(term_fee, num_proofs, five_percent)?;
-
-            // Convert to decimal for comparison
-            let actual = result.token_to_decimal()?;
-            // Expected: 50 + (0 * 10 * 0.05) = 50
-            let expected = dec!(50.0);
-
-            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
-            Ok(())
-        }
-
-        #[test]
-        fn test_add_ingress_proof_rewards_zero_percentage() -> Result<()> {
-            // Base network fee = 75 IRYS
-            let base_fee = Amount::<(NetworkFee, Irys)>::token(dec!(75.0))?;
-            let term_fee = Amount::<Irys>::token(dec!(20.0))?.amount;
-            let zero_percent = Amount::<Percentage>::percentage(dec!(0.0))?;
-            let num_proofs = 5;
-
-            // Action
-            let result = base_fee.add_ingress_proof_rewards(term_fee, num_proofs, zero_percent)?;
-
-            // Convert to decimal for comparison
-            let actual = result.token_to_decimal()?;
-            // Expected: 75 + (5 * 20 * 0.0) = 75
-            let expected = dec!(75.0);
-
-            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
-            Ok(())
-        }
-
-        #[test]
-        fn test_add_ingress_proof_rewards_large_values() -> Result<()> {
-            // Base network fee = 1000 IRYS
-            let base_fee = Amount::<(NetworkFee, Irys)>::token(dec!(1000.0))?;
-            // Term fee = 100 IRYS
-            let term_fee = Amount::<Irys>::token(dec!(100.0))?.amount;
-            // 10% fee
-            let ten_percent = Amount::<Percentage>::percentage(dec!(0.10))?;
-            // 10 ingress proofs
-            let num_proofs = 10;
-
-            // Action
-            let result = base_fee.add_ingress_proof_rewards(term_fee, num_proofs, ten_percent)?;
-
-            // Convert to decimal for comparison
-            let actual = result.token_to_decimal()?;
-            // Expected: 1000 + (10 * 100 * 0.10) = 1000 + 100 = 1100
-            let expected = dec!(1100.0);
-
-            assert_eq!(expected, actual, "Expected {}, got {}", expected, actual);
-            Ok(())
         }
     }
 
@@ -2274,9 +2151,8 @@ mod tests {
                 bytes_to_store,
                 &config,
                 ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
-                number_of_ingress_proofs_total,
+                config.ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), term_fee)?,
                 irys_price,
-                term_fee,
                 UnixTimestamp::from_secs(0),
             )?;
             let perm_fee_dec = perm_fee.token_to_decimal()?;
@@ -2335,9 +2211,8 @@ mod tests {
                 bytes_to_store,
                 &config,
                 ReplicaCount::new(u64::from(number_of_ingress_proofs_total)),
-                number_of_ingress_proofs_total,
+                config.ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), term_fee)?,
                 irys_price,
-                term_fee,
                 UnixTimestamp::from_secs(0),
             )?;
             let perm_fee_dec = perm_fee.token_to_decimal()?;
@@ -2397,9 +2272,8 @@ mod tests {
                 bytes,
                 &config,
                 ReplicaCount::new(u64::from(proofs)),
-                proofs,
+                config.ingress_proof_reward_pool_at(pre_ts, term_pre)?,
                 irys_price,
-                term_pre,
                 pre_ts,
             )?;
 
@@ -2414,9 +2288,8 @@ mod tests {
                 bytes,
                 &config,
                 ReplicaCount::new(u64::from(proofs)),
-                proofs,
+                config.ingress_proof_reward_pool_at(post_ts, term_post)?,
                 irys_price,
-                term_post,
                 post_ts,
             )?;
 

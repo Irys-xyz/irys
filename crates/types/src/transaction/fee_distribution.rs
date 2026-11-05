@@ -20,12 +20,15 @@
 /// - perm_fee: Total fee for permanent storage which includes:
 ///   - Base permanent storage cost (200 years × the Publish replica count, with 1% annual
 ///     decline; see `Config::publish_replica_count_at`)
-///   - PLUS ingress proof rewards (5% of term_fee × number_of_ingress_proofs)
+///   - PLUS the ingress proof reward pool (see `ConsensusConfig::ingress_proof_reward_pool_at`)
 ///
 /// ### Fee Distribution
 /// - term_fee: Processed identically to regular term data transactions.
-/// - 5% of term_fee for each ingress-proof provided. These rewards are included in the transaction's `perm_fee` field along with the base permanent storage cost.
-/// - perm_fee total value: Prepaid amount covering 200 years x the Publish replica count with 1% annual decline in storage costs PLUS ingress proof rewards (5% of term_fee × number_of_ingress_proofs)
+/// - Ingress proof reward pool: from Delta, 5% of term_fee in total, the same as the inclusion
+///   reward; before Delta, 5% of term_fee for each required ingress proof. Promotion splits the
+///   pool equally across the tx's ingress proofs. The pool is part of the transaction's
+///   `perm_fee` field, with the base permanent storage cost.
+/// - perm_fee total value: Prepaid amount covering 200 years x the Publish replica count with 1% annual decline in storage costs PLUS the ingress proof reward pool
 use crate::ingress::IngressProof;
 use crate::storage_pricing::{PRECISION_SCALE, mul_div};
 pub use crate::{
@@ -159,26 +162,11 @@ pub struct PublishFeeCharges {
 }
 
 impl PublishFeeCharges {
-    pub fn new(
-        perm_fee: BoundedFee,
-        term_fee: BoundedFee,
-        config: &ConsensusConfig,
-        num_ingress_proofs: u8,
-    ) -> eyre::Result<Self> {
+    /// `ingress_proof_reward` is the total reward of all the tx's ingress proofs, from
+    /// `ConsensusConfig::ingress_proof_reward_pool_at`.
+    pub fn new(perm_fee: BoundedFee, ingress_proof_reward: U256) -> eyre::Result<Self> {
         // Extract U256 for calculations - BoundedFee ensures inputs are validated
         let perm_fee_amount = perm_fee.get();
-        let term_fee_amount = term_fee.get();
-
-        // Calculate the reward for each ingress proof (x% of term_fee)
-        let per_ingress_reward = mul_div(
-            term_fee_amount,
-            config.immediate_tx_inclusion_reward_percent.amount,
-            PRECISION_SCALE,
-        )?;
-
-        // Calculate total ingress rewards for all proofs
-        let ingress_proof_reward =
-            per_ingress_reward.saturating_mul(U256::from(num_ingress_proofs));
 
         // Validate that perm_fee is sufficient to cover ingress rewards
         // According to business rules, perm_fee = base_permanent_storage_cost + ingress_proof_rewards
@@ -281,6 +269,13 @@ mod tests {
     use crate::storage_pricing::Amount;
     use crate::storage_pricing::phantoms::Percentage;
     use rust_decimal_macros::dec;
+
+    /// Ingress proof reward pool at a timestamp before any Delta activation.
+    fn pre_delta_pool(config: &ConsensusConfig, term_fee: BoundedFee) -> U256 {
+        config
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), term_fee.get())
+            .unwrap()
+    }
 
     #[test]
     fn test_term_fee_charges_new() {
@@ -408,14 +403,12 @@ mod tests {
         // Set ingress proof fee to 5%
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        let number_of_ingress_proofs_total = 3;
+        config.hardforks.frontier.number_of_ingress_proofs_total = 3;
 
         let term_fee = BoundedFee::from(1000_u64);
         let perm_fee = BoundedFee::from(10000_u64);
 
-        let charges =
-            PublishFeeCharges::new(perm_fee, term_fee, &config, number_of_ingress_proofs_total)
-                .unwrap();
+        let charges = PublishFeeCharges::new(perm_fee, pre_delta_pool(&config, term_fee)).unwrap();
 
         // Total ingress reward should be 3 * (5% of term_fee) = 3 * 50 = 150
         assert_eq!(charges.ingress_proof_reward, U256::from(150));
@@ -438,15 +431,10 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        let number_of_ingress_proofs_total = config
-            .hardforks
-            .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
 
         let term_fee = BoundedFee::from(1000_u64);
         let perm_fee = BoundedFee::from(10000_u64);
-        let charges =
-            PublishFeeCharges::new(perm_fee, term_fee, &config, number_of_ingress_proofs_total)
-                .unwrap();
+        let charges = PublishFeeCharges::new(perm_fee, pre_delta_pool(&config, term_fee)).unwrap();
 
         // Create some test ingress proofs
         let signer1 = IrysSigner::random_signer(&config);
@@ -501,13 +489,12 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        let number_of_ingress_proofs_total = 3;
+        config.hardforks.frontier.number_of_ingress_proofs_total = 3;
 
         let term_fee = BoundedFee::from(1000_u64);
         let perm_fee = BoundedFee::from(100_u64); // Too small to cover ingress rewards (150)
 
-        let result =
-            PublishFeeCharges::new(perm_fee, term_fee, &config, number_of_ingress_proofs_total);
+        let result = PublishFeeCharges::new(perm_fee, pre_delta_pool(&config, term_fee));
 
         // Should fail with insufficient fee error
         assert!(result.is_err());
@@ -524,14 +511,13 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        let number_of_ingress_proofs_total = 3;
+        config.hardforks.frontier.number_of_ingress_proofs_total = 3;
 
         let term_fee = BoundedFee::from(1000_u64);
         // Exactly equal to ingress rewards (150), no base storage cost
         let perm_fee = BoundedFee::from(150_u64);
 
-        let result =
-            PublishFeeCharges::new(perm_fee, term_fee, &config, number_of_ingress_proofs_total);
+        let result = PublishFeeCharges::new(perm_fee, pre_delta_pool(&config, term_fee));
 
         // Should fail because there's no base storage cost
         assert!(result.is_err());
@@ -551,15 +537,10 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        let number_of_ingress_proofs_total = config
-            .hardforks
-            .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
 
         let term_fee = BoundedFee::from(1003_u64); // Not evenly divisible
         let perm_fee = BoundedFee::from(10000_u64);
-        let charges =
-            PublishFeeCharges::new(perm_fee, term_fee, &config, number_of_ingress_proofs_total)
-                .unwrap();
+        let charges = PublishFeeCharges::new(perm_fee, pre_delta_pool(&config, term_fee)).unwrap();
 
         // Create 3 test ingress proofs
         let signers: Vec<_> = (0..3).map(|_| IrysSigner::random_signer(&config)).collect();
@@ -602,5 +583,59 @@ mod tests {
             .map(|fc| fc.amount)
             .fold(U256::from(0), |acc, amt| acc + amt);
         assert_eq!(total, charges.ingress_proof_reward);
+    }
+
+    /// From Delta the N proofs split one 5% pool. 5% of 1000 is 50, and 50 / 3 leaves a
+    /// remainder of 2 for the first proof.
+    #[test]
+    fn test_publish_fee_pool_split_across_proofs_from_delta() {
+        use crate::hardfork_config::Delta;
+        use crate::ingress::generate_ingress_proof;
+        use crate::irys::IrysSigner;
+
+        let mut config = ConsensusConfig::testing();
+        config.immediate_tx_inclusion_reward_percent =
+            Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
+        config.hardforks.frontier.number_of_ingress_proofs_total = 3;
+        config.hardforks.delta = Some(Delta {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        });
+
+        let term_fee = BoundedFee::from(1000_u64);
+        let perm_fee = BoundedFee::from(10000_u64);
+        let pool = config
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), term_fee.get())
+            .unwrap();
+        assert_eq!(pool, U256::from(50));
+        let charges = PublishFeeCharges::new(perm_fee, pool).unwrap();
+        assert_eq!(charges.perm_fee_treasury, U256::from(9950));
+
+        let data_root = H256::random();
+        let anchor = H256::random();
+        let proofs: Vec<_> = (0..3)
+            .map(|_| {
+                generate_ingress_proof(
+                    &IrysSigner::random_signer(&config),
+                    data_root,
+                    [vec![0_u8; 32]].iter().map(|c| Ok(c.as_slice())),
+                    config.chain_id,
+                    anchor,
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let amounts: Vec<U256> = charges
+            .ingress_proof_rewards(&proofs)
+            .unwrap()
+            .into_iter()
+            .map(|charge| charge.amount)
+            .collect();
+        assert_eq!(
+            amounts,
+            vec![U256::from(18), U256::from(16), U256::from(16)]
+        );
     }
 }

@@ -156,9 +156,21 @@ impl Config {
         }
     }
 
-    /// Required Publish `perm_fee` at a given timestamp. Picks the replica count, the ingress
-    /// proof total and the reward term fee here, at one timestamp, so no caller can mix inputs
-    /// from different rules. `expected_term_fee` is the term fee the same Publish tx must pay.
+    /// Total ingress proof reward of a Publish tx at a given timestamp. See
+    /// `ConsensusConfig::ingress_proof_reward_pool_at`.
+    pub fn ingress_proof_reward_pool_at(
+        &self,
+        timestamp: UnixTimestamp,
+        term_fee: U256,
+    ) -> eyre::Result<U256> {
+        self.0
+            .consensus
+            .ingress_proof_reward_pool_at(timestamp, term_fee)
+    }
+
+    /// Required Publish `perm_fee` at a given timestamp. Picks the replica count and the
+    /// ingress proof reward pool here, at one timestamp, so no caller can mix inputs from
+    /// different rules. `expected_term_fee` is the term fee the same Publish tx must pay.
     pub fn required_publish_perm_fee_at(
         &self,
         timestamp: UnixTimestamp,
@@ -167,13 +179,16 @@ impl Config {
         tx_term_fee: U256,
         expected_term_fee: U256,
     ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
+        let ingress_proof_reward = self.ingress_proof_reward_pool_at(
+            timestamp,
+            self.proof_reward_term_fee_at(timestamp, tx_term_fee, expected_term_fee),
+        )?;
         calculate_perm_fee_from_config(
             bytes_to_store,
             &self.0.consensus,
             self.publish_replica_count_at(timestamp),
-            self.number_of_ingress_proofs_total_at(timestamp),
+            ingress_proof_reward,
             ema_price,
-            self.proof_reward_term_fee_at(timestamp, tx_term_fee, expected_term_fee),
             timestamp,
         )
     }
@@ -1336,6 +1351,44 @@ mod tests {
         assert_eq!(
             config.publish_replica_count_at(activation),
             ReplicaCount::new(10)
+        );
+    }
+
+    /// The ingress proof reward pool is one inclusion reward share for each required proof
+    /// before Delta, and one share in total from Delta.
+    #[test]
+    fn ingress_proof_reward_pool_switches_at_delta() {
+        use crate::hardfork_config::Delta;
+        use crate::storage_pricing::Amount;
+
+        let activation = UnixTimestamp::from_secs(1_000);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.immediate_tx_inclusion_reward_percent =
+            Amount::percentage(rust_decimal_macros::dec!(0.05)).unwrap();
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 3;
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Amount::percentage(rust_decimal_macros::dec!(0.5))
+                .unwrap(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let term_fee = U256::from(1_000);
+
+        // 3 proofs x 5% x 1000
+        assert_eq!(
+            config
+                .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(999), term_fee)
+                .unwrap(),
+            U256::from(150)
+        );
+        // 5% x 1000
+        assert_eq!(
+            config
+                .ingress_proof_reward_pool_at(activation, term_fee)
+                .unwrap(),
+            U256::from(50)
         );
     }
 

@@ -57,6 +57,10 @@ pub struct IrysHardforkConfig {
     /// - The required `perm_fee` of a Publish tx adds the ingress proof rewards on the
     ///   tx's own `term_fee`, not on the expected term fee, from the first block whose
     ///   timestamp is >= `activation_timestamp`.
+    /// - The ingress proof reward of a Publish tx is one pool of
+    ///   `immediate_tx_inclusion_reward_percent` x `term_fee`, split across its proofs,
+    ///   not that amount for each proof, from the first block whose timestamp is >=
+    ///   `activation_timestamp`.
     ///
     /// None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,6 +185,10 @@ impl Cascade {
 /// - The required `perm_fee` of a Publish tx adds the ingress proof rewards on the
 ///   tx's own `term_fee`, not on the expected term fee. The fee split takes the
 ///   rewards from the tx's own `term_fee`, so this keeps the storage share funded.
+/// - The ingress proofs of a Publish tx share one reward pool of
+///   `immediate_tx_inclusion_reward_percent` x `term_fee`, the same as the inclusion
+///   reward, not that amount for each proof. The required `perm_fee` and the fee split
+///   use this pool. See `ConsensusConfig::ingress_proof_reward_pool_at`.
 ///
 /// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
 /// but the epoch block's own header cannot list it: the producer derives the

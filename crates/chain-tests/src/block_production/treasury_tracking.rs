@@ -123,17 +123,14 @@ async fn test_treasury_tracking() -> eyre::Result<()> {
     );
 
     // Block 3: Previous treasury + data tx fees
-    let number_of_ingress_proofs_total = node
-        .node_ctx
-        .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let data_tx1_fees = {
         let term_charges = TermFeeCharges::new(data_tx1.header.term_fee, &consensus_config)?;
         let publish_charges = PublishFeeCharges::new(
             data_tx1.header.perm_fee.unwrap(),
-            data_tx1.header.term_fee,
-            &consensus_config,
-            number_of_ingress_proofs_total,
+            consensus_config.ingress_proof_reward_pool_at(
+                UnixTimestamp::from_secs(0),
+                data_tx1.header.term_fee.get(),
+            )?,
         )?;
         term_charges.term_fee_treasury + publish_charges.perm_fee_treasury
     };
@@ -150,9 +147,10 @@ async fn test_treasury_tracking() -> eyre::Result<()> {
         let term_charges = TermFeeCharges::new(data_tx2.header.term_fee, &consensus_config)?;
         let publish_charges = PublishFeeCharges::new(
             data_tx2.header.perm_fee.unwrap(),
-            data_tx2.header.term_fee,
-            &consensus_config,
-            number_of_ingress_proofs_total,
+            consensus_config.ingress_proof_reward_pool_at(
+                UnixTimestamp::from_secs(0),
+                data_tx2.header.term_fee.get(),
+            )?,
         )?;
         term_charges.term_fee_treasury + publish_charges.perm_fee_treasury
     };

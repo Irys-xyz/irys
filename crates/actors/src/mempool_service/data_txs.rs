@@ -556,18 +556,12 @@ impl Inner {
                 .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
             last_block_entry.header().timestamp_secs()
         };
-        let number_of_ingress_proofs_total = self
-            .config
-            .number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
-        PublishFeeCharges::new(
-            actual_perm_fee,
-            actual_term_fee,
-            &self.config.node_config.consensus_config(),
-            number_of_ingress_proofs_total,
-        )
-        .map_err(|e| {
-            TxIngressError::FundMisalignment(format!("Invalid perm fee structure: {}", e))
-        })?;
+        self.config
+            .ingress_proof_reward_pool_at(latest_block_timestamp_secs, actual_term_fee.get())
+            .and_then(|pool| PublishFeeCharges::new(actual_perm_fee, pool))
+            .map_err(|e| {
+                TxIngressError::FundMisalignment(format!("Invalid perm fee structure: {}", e))
+            })?;
 
         Ok(())
     }
