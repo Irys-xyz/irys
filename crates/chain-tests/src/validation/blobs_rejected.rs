@@ -320,3 +320,60 @@ async fn heavy_evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<(
     genesis_node.stop().await;
     Ok(())
 }
+
+#[test_log::test(tokio::test)]
+async fn evm_payload_with_non_empty_requests_hash_is_rejected() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 4;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let signer = genesis_config.signer().clone();
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    genesis_node.mine_block().await?;
+
+    let (irys_block, _transactions, eth_payload) = produce_block(&genesis_node).await?;
+
+    // Mutate: set an EIP-7685 requests hash that is not the hash of an empty request list
+    let mutated = mutate_header(eth_payload.block(), |blk| {
+        blk.header.requests_hash = Some(B256::with_last_byte(1));
+    });
+
+    // Register mutated payload in local cache so validation can fetch it
+    inject_payload_into_cache(&genesis_node.node_ctx, mutated.clone()).await;
+
+    let mut header = (*irys_block).clone();
+    header.evm_block_hash = mutated.hash();
+    // Clear tx_ids in ledgers to match the empty body (keep ledger structure intact)
+    for ledger in header.data_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
+    for ledger in header.system_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
+    signer.sign_block_header(&mut header)?;
+
+    // Create new SealedBlock with mutated header and matching body.block_hash
+    let body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: vec![],
+        commitment_transactions: vec![],
+    };
+    let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
+
+    let outcome =
+        send_block_and_read_state(&genesis_node.node_ctx, sealed_block.clone(), true).await?;
+    assert_validation_error(
+        outcome,
+        |e| {
+            matches!(e, ValidationError::ShadowTransactionInvalid(msg)
+                if msg.contains("EIP-7685 requests hash"))
+        },
+        "block with a non-empty requests hash should be rejected",
+    );
+
+    genesis_node.stop().await;
+    Ok(())
+}

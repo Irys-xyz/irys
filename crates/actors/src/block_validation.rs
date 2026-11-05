@@ -10,7 +10,7 @@ use crate::{
 };
 use alloy_consensus::Transaction as _;
 use alloy_consensus::transaction::SignerRecoverable as _;
-use alloy_eips::eip7685::{Requests, RequestsOrHash};
+use alloy_eips::eip7685::{EMPTY_REQUESTS_HASH, Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
 use irys_database::DatabaseProvider;
@@ -5119,23 +5119,6 @@ pub async fn shadow_transactions_are_valid(
             "block contains EIP-4844 blobs/sidecars which are disabled",
         ));
     }
-    // Requests are disabled: reject if any present or if header-level requests hash is set.
-    if let Some(requests) = sidecar.requests()
-        && !requests.is_empty()
-    {
-        tracing::debug!(
-            block.block_hash = %block.block_hash,
-            block.evm_block_hash = %block.evm_block_hash,
-            block.versioned_hashes_len = requests.len(),
-            "Rejecting block: EIP-7685 requests which are disabled",
-        );
-        return Err(reject(
-            "block contains EIP-7685 requests which are disabled",
-        ));
-    }
-    // Note: `requests_hash` may be present even when the requests list is empty.
-    // Do not reject on presence of the hash alone; only non-empty requests are disallowed.
-
     // ensure the execution payload timestamp matches the block timestamp
     // truncated to full seconds
     let payload_timestamp: u128 = payload_v3.timestamp().into();
@@ -5197,8 +5180,10 @@ pub async fn shadow_transactions_are_valid(
         )));
     }
 
-    let evm_block: Block = payload_v3
-        .try_into_block()
+    // The sidecar carries the header fields that are not in the payload (parent beacon block
+    // root, requests hash).
+    let evm_block: Block = ExecutionPayload::V3(payload_v3)
+        .try_into_block_with_sidecar(&sidecar)
         .map_err(|e| reject(format!("payload conversion failed: {e}")))?;
 
     // Paid payout (EVM coinbase / beneficiary) must match the declared header
@@ -5213,16 +5198,19 @@ pub async fn shadow_transactions_are_valid(
         )));
     }
 
-    // Reject presence of EIP-7685 requests via header-level requests_hash as we disable requests.
-    if evm_block.header.requests_hash.is_some() {
+    // Irys has no EIP-7685 requests: every block's requests hash is the hash of an empty request
+    // list.
+    if evm_block.header.requests_hash != Some(EMPTY_REQUESTS_HASH) {
         tracing::debug!(
             block.block_hash = %block.block_hash,
             block.evm_block_hash = %block.evm_block_hash,
-            "Rejecting block: EIP-7685 requests_hash present which is disabled",
+            evm_block.requests_hash = ?evm_block.header.requests_hash,
+            "Rejecting block: EIP-7685 requests hash is not the empty requests hash",
         );
-        return Err(reject(
-            "block contains EIP-7685 requests_hash which is disabled",
-        ));
+        return Err(reject(format!(
+            "EVM block EIP-7685 requests hash {:?} is not the empty requests hash",
+            evm_block.header.requests_hash
+        )));
     }
 
     // 2. Enforce that no EIP-4844 (blob) transactions are present in the block
