@@ -674,11 +674,15 @@ pub async fn select_best_txs(
                 }
             }
             irys_types::DataLedger::Submit => {
-                debug!(
+                // Ingress rejects `ledger_id == Submit`, and block validation rejects it in
+                // every ledger list (the Submit list requires `ledger_id == Publish`). Skip it,
+                // so a tx that got past ingress cannot make this producer build an invalid block.
+                warn!(
                     tx.id = ?tx.id,
                     tx.signer = ?tx.signer(),
-                    "Processing Submit ledger tx for single-block promotion"
+                    "Skipping tx with ledger_id Submit: never valid in a block"
                 );
+                continue;
             }
             DataLedger::OneYear | DataLedger::ThirtyDay => {
                 // Term-only ledgers: validate cascade is active, term fee, and fee structure
