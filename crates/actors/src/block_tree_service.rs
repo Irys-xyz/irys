@@ -332,6 +332,7 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         | VE::RecallRangeInvalid(_)
         | VE::ShadowTransactionInvalid(_)
         | VE::CommitmentValueInvalid { .. }
+        | VE::CommitmentFeeInsufficient { .. }
         | VE::CommitmentVersionInvalid { .. }
         | VE::CommitmentTypeNotAllowed { .. }
         | VE::CommitmentOrderingFailed(_)

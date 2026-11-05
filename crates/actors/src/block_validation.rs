@@ -1075,6 +1075,14 @@ pub enum ValidationError {
         reason: String,
     },
 
+    /// Commitment transaction fee is below the minimum commitment fee
+    #[error("Commitment transaction {tx_id} at position {position} has insufficient fee: {reason}")]
+    CommitmentFeeInsufficient {
+        tx_id: H256,
+        position: usize,
+        reason: String,
+    },
+
     /// Commitment transaction version is below minimum required after hardfork activation
     #[error(
         "Commitment {tx_id} at position {position} has version {version}, minimum required is {minimum}"
@@ -1262,6 +1270,7 @@ impl ValidationError {
             | Self::RecallRangeInvalid(_)
             | Self::ShadowTransactionInvalid(_)
             | Self::CommitmentValueInvalid { .. }
+            | Self::CommitmentFeeInsufficient { .. }
             | Self::CommitmentVersionInvalid { .. }
             | Self::CommitmentTypeNotAllowed { .. }
             | Self::CommitmentOrderingFailed(_)
@@ -1327,6 +1336,7 @@ impl ValidationError {
             | Self::RecallRangeInvalid(_)
             | Self::ShadowTransactionInvalid(_)
             | Self::CommitmentValueInvalid { .. }
+            | Self::CommitmentFeeInsufficient { .. }
             | Self::CommitmentVersionInvalid { .. }
             | Self::CommitmentTypeNotAllowed { .. }
             | Self::CommitmentOrderingFailed(_)
@@ -1595,6 +1605,7 @@ impl ValidationError {
             Self::RecallRangeInvalid(_) => "recall_range_invalid",
             Self::ShadowTransactionInvalid(_) => "shadow_tx_invalid",
             Self::CommitmentValueInvalid { .. } => "commitment_value_invalid",
+            Self::CommitmentFeeInsufficient { .. } => "commitment_fee_insufficient",
             Self::CommitmentVersionInvalid { .. } => "commitment_version_invalid",
             Self::CommitmentTypeNotAllowed { .. } => "commitment_type_not_allowed",
             Self::CommitmentOrderingFailed(_) => "commitment_ordering_failed",
@@ -6271,6 +6282,23 @@ pub async fn commitment_txs_are_valid(
                 e
             );
             ValidationError::CommitmentValueInvalid {
+                tx_id: tx.id(),
+                position: idx,
+                reason: e.to_string(),
+            }
+        })?;
+    }
+
+    // Same rule as mempool ingress, so a block cannot carry what the mempool rejects.
+    for (idx, tx) in commitment_txs.iter().enumerate() {
+        tx.validate_fee(&config.consensus).map_err(|e| {
+            error!(
+                "Commitment transaction {} at position {} has insufficient fee: {}",
+                tx.id(),
+                idx,
+                e
+            );
+            ValidationError::CommitmentFeeInsufficient {
                 tx_id: tx.id(),
                 position: idx,
                 reason: e.to_string(),
