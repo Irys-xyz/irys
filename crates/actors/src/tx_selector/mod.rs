@@ -599,17 +599,12 @@ pub async fn select_best_txs(
                     continue;
                 };
 
-                let reward_basis_term_fee = ctx.config.proof_reward_term_fee_at(
+                let Ok(expected_perm_fee) = ctx.config.required_publish_perm_fee_at(
                     current_timestamp,
+                    tx.data_size,
+                    parent_ema_snapshot.ema_for_public_pricing(),
                     tx.term_fee.get(),
                     expected_term_fee,
-                );
-                let Ok(expected_perm_fee) = helpers::calculate_perm_storage_fee(
-                    ctx.config,
-                    tx.data_size,
-                    reward_basis_term_fee,
-                    &parent_ema_snapshot,
-                    current_timestamp,
                 ) else {
                     debug!(
                         tx.id = ?tx.id,

@@ -10,7 +10,8 @@ pub use node::*;
 
 use crate::hardfork_config::Activation;
 use crate::irys::IrysSigner;
-use crate::storage_pricing::ReplicaCount;
+use crate::storage_pricing::phantoms::{Irys, IrysPrice, NetworkFee, Usd};
+use crate::storage_pricing::{Amount, ReplicaCount, calculate_perm_fee_from_config};
 use crate::{H256, IrysPeerId, U256, UnixTimestamp};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
@@ -153,6 +154,28 @@ impl Config {
             Activation::Active(_) => tx_term_fee,
             Activation::Inactive => expected_term_fee,
         }
+    }
+
+    /// Required Publish `perm_fee` at a given timestamp. Picks the replica count, the ingress
+    /// proof total and the reward term fee here, at one timestamp, so no caller can mix inputs
+    /// from different rules. `expected_term_fee` is the term fee the same Publish tx must pay.
+    pub fn required_publish_perm_fee_at(
+        &self,
+        timestamp: UnixTimestamp,
+        bytes_to_store: u64,
+        ema_price: Amount<(IrysPrice, Usd)>,
+        tx_term_fee: U256,
+        expected_term_fee: U256,
+    ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
+        calculate_perm_fee_from_config(
+            bytes_to_store,
+            &self.0.consensus,
+            self.publish_replica_count_at(timestamp),
+            self.number_of_ingress_proofs_total_at(timestamp),
+            ema_price,
+            self.proof_reward_term_fee_at(timestamp, tx_term_fee, expected_term_fee),
+            timestamp,
+        )
     }
 
     // validate configuration invariants

@@ -13,7 +13,7 @@ use irys_database::{
 use irys_domain::HardforkConfigExt as _;
 
 use irys_types::TxKnownStatus;
-use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
+use irys_types::storage_pricing::calculate_term_fee;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     DataLedger, DataTransactionHeader, H256, IrysTransactionCommon as _, IrysTransactionId,
@@ -436,24 +436,18 @@ impl Inner {
                 TxIngressError::FundMisalignment("Publish tx missing perm_fee".to_string())
             })?;
 
-            let reward_basis_term_fee = self.config.proof_reward_term_fee_at(
-                latest_block_timestamp_secs,
-                tx.term_fee.get(),
-                expected_term_fee,
-            );
-            let expected_perm_fee = calculate_perm_fee_from_config(
-                tx.data_size,
-                &self.config.consensus,
-                replica_count,
-                self.config
-                    .number_of_ingress_proofs_total_at(latest_block_timestamp_secs),
-                pricing_ema,
-                reward_basis_term_fee,
-                latest_block_timestamp_secs,
-            )
-            .map_err(|e| {
-                TxIngressError::FundMisalignment(format!("Failed to calculate perm fee: {}", e))
-            })?;
+            let expected_perm_fee = self
+                .config
+                .required_publish_perm_fee_at(
+                    latest_block_timestamp_secs,
+                    tx.data_size,
+                    pricing_ema,
+                    tx.term_fee.get(),
+                    expected_term_fee,
+                )
+                .map_err(|e| {
+                    TxIngressError::FundMisalignment(format!("Failed to calculate perm fee: {}", e))
+                })?;
 
             // Validate perm fee: user-provided must be >= expected
             if perm_fee < expected_perm_fee.amount {

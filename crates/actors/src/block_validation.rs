@@ -29,8 +29,12 @@ use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
-use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
-use irys_types::storage_pricing::{Amount, ReplicaCount, calculate_perm_fee_from_config};
+use irys_types::storage_pricing::ReplicaCount;
+#[cfg(test)]
+use irys_types::storage_pricing::{
+    Amount, calculate_perm_fee_from_config,
+    phantoms::{Irys, NetworkFee},
+};
 use irys_types::{BlockHash, EvmBlockHash, H256List, LedgerChunkRange};
 use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
@@ -6450,9 +6454,10 @@ pub async fn commitment_txs_are_valid(
     Ok(())
 }
 
-/// Helper function to calculate permanent storage fee using a specific EMA snapshot
-/// This includes base network fee + ingress proof rewards
-pub fn calculate_perm_storage_total_fee(
+/// Test oracle: Publish perm fee priced on an explicit reward term fee. Production code
+/// uses `Config::required_publish_perm_fee_at`.
+#[cfg(test)]
+fn calculate_perm_storage_total_fee(
     bytes_to_store: u64,
     term_fee: U256,
     ema_snapshot: &EmaSnapshot,
@@ -6537,16 +6542,15 @@ fn validate_publish_price(
         timestamp_secs,
     )
     .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-    let reward_basis_term_fee =
-        config.proof_reward_term_fee_at(timestamp_secs, tx.term_fee.get(), expected_term_fee);
-    let expected_perm_fee = calculate_perm_storage_total_fee(
-        tx.data_size,
-        reward_basis_term_fee,
-        block_ema,
-        config,
-        timestamp_secs,
-    )
-    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    let expected_perm_fee = config
+        .required_publish_perm_fee_at(
+            timestamp_secs,
+            tx.data_size,
+            block_ema.ema_for_public_pricing(),
+            tx.term_fee.get(),
+            expected_term_fee,
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
     // Validate perm_fee is at least the expected amount
     check_perm_fee_sufficient(tx.id, tx.perm_fee, expected_perm_fee.amount)?;

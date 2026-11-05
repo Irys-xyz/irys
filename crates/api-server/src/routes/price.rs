@@ -5,8 +5,7 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_types::{
     CommitmentTransaction, DataLedger, IrysAddress, PledgeDataProvider as _, U256,
-    serialization::string_u64,
-    storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
+    serialization::string_u64, storage_pricing::calculate_term_fee,
 };
 use serde::{Deserialize, Serialize};
 
@@ -143,16 +142,17 @@ pub async fn get_price(
             );
 
             // If the cost calculation fails, return 400 with the error text
-            let total_perm_cost = calculate_perm_fee_from_config(
-                bytes_to_store,
-                &state.config.consensus,
-                replica_count,
-                number_of_ingress_proofs_total,
-                pricing_ema,
-                term_fee,
-                latest_block_timestamp_secs,
-            )
-            .map_err(|e| (format!("{e:?}"), StatusCode::BAD_REQUEST))?;
+            // A quote has no tx of its own: the expected term fee is the term fee.
+            let total_perm_cost = state
+                .config
+                .required_publish_perm_fee_at(
+                    latest_block_timestamp_secs,
+                    bytes_to_store,
+                    pricing_ema,
+                    term_fee,
+                    term_fee,
+                )
+                .map_err(|e| (format!("{e:?}"), StatusCode::BAD_REQUEST))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
                 perm_fee: total_perm_cost.amount,

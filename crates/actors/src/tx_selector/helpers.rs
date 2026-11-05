@@ -1,5 +1,4 @@
 use crate::anchor_validation::validate_ingress_proof_anchor_for_inclusion;
-use crate::block_validation::calculate_perm_storage_total_fee;
 use crate::chunk_ingress_service::ChunkIngressServiceInner;
 use crate::mempool_service::TxIngressError;
 use irys_database::DatabaseProvider;
@@ -7,29 +6,12 @@ use irys_database::tables::CompactCachedIngressProof;
 use irys_domain::BlockTreeReadGuard;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::ingress::CachedIngressProof;
-use irys_types::storage_pricing::{
-    Amount, calculate_term_fee,
-    phantoms::{Irys, NetworkFee},
-};
+use irys_types::storage_pricing::calculate_term_fee;
 use irys_types::{Config, IrysAddress, IrysTransactionCommon, U256, UnixTimestamp};
 use reth::rpc::types::BlockId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, warn};
-
-/// Calculate the expected protocol fee for permanent storage
-/// This includes base network fee + ingress proof rewards
-#[tracing::instrument(level = "trace", skip_all, err)]
-pub(crate) fn calculate_perm_storage_fee(
-    config: &Config,
-    bytes_to_store: u64,
-    term_fee: U256,
-    ema: &Arc<irys_domain::EmaSnapshot>,
-    timestamp_secs: UnixTimestamp,
-) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
-    calculate_perm_storage_total_fee(bytes_to_store, term_fee, ema, config, timestamp_secs)
-        .map_err(TxIngressError::other_display)
-}
 
 /// Calculate the expected term fee for temporary storage
 /// A term tx pays for the full term it is stored. See `Config::term_storage_epochs_at`.
