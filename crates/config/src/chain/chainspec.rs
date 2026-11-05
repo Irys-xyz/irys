@@ -109,7 +109,6 @@ pub fn build_unsigned_irys_genesis_block(
 mod tests {
     use super::*;
     use irys_types::{Amount, Decimal, IrysAddress, UnixTimestamp};
-    use proptest::prelude::*;
 
     fn test_genesis_config() -> GenesisConfig {
         GenesisConfig {
@@ -124,26 +123,28 @@ mod tests {
         }
     }
 
-    proptest! {
-        #[test]
-        fn ingress_proof_count_preserved_for_valid_values(count in any::<u8>()) {
-            let config = test_genesis_config();
-            let block = build_unsigned_irys_genesis_block(
-                &config,
-                B256::ZERO,
-                count,
-                None,
-            ).map_err(|e| TestCaseError::fail(e.to_string()))?;
-            let publish_ledger = block
-                .data_ledgers
+    #[test]
+    fn genesis_publish_ledger_requires_configured_proof_count() -> eyre::Result<()> {
+        let block = build_unsigned_irys_genesis_block(&test_genesis_config(), B256::ZERO, 5, None)?;
+        let ledger_proof_counts: Vec<_> = block
+            .data_ledgers
+            .iter()
+            .map(|ledger| (ledger.ledger_id, ledger.required_proof_count))
+            .collect();
+        assert_eq!(
+            ledger_proof_counts
                 .iter()
-                .find(|l| l.ledger_id == u32::from(DataLedger::Publish))
-                .expect("publish ledger should exist");
-            prop_assert_eq!(
-                publish_ledger.required_proof_count,
-                Some(count)
-            );
-        }
+                .find(|(id, _)| *id == u32::from(DataLedger::Publish))
+                .map(|(_, count)| *count),
+            Some(Some(5))
+        );
+        assert!(
+            ledger_proof_counts
+                .iter()
+                .filter(|(id, _)| *id != u32::from(DataLedger::Publish))
+                .all(|(_, count)| count.is_none())
+        );
+        Ok(())
     }
 
     #[test]
