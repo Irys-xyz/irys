@@ -239,7 +239,8 @@ number_of_ingress_proofs_from_assignees = 0
 # gets its first slots in the activating epoch, and a capacity (entropy) PoA
 # earns a reduced block reward from the first block at/after activation,
 # a Publish tx credits the treasury its full perm_fee at inclusion, and term
-# fees pay for the full ledger term.
+# fees pay for the full ledger term, and the required perm_fee covers proof
+# rewards on the tx's own term_fee.
 # Uncomment to enable:
 # [consensus.Custom.hardforks.delta]
 # activation_timestamp = "2026-09-01T00:00:00+00:00"

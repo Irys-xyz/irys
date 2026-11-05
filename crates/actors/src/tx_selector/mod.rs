@@ -27,6 +27,7 @@ use irys_domain::{
     HardforkConfigExt as _,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
+use irys_types::hardfork_config::Activation;
 use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
@@ -599,10 +600,21 @@ pub async fn select_best_txs(
                     continue;
                 };
 
+                // The split takes the proof rewards from the tx's own term fee, so from Delta the perm fee
+                // must cover base storage plus rewards on that fee, not on the expected one.
+                let reward_basis_term_fee = match ctx
+                    .config
+                    .consensus
+                    .hardforks
+                    .delta_for_block(current_timestamp)
+                {
+                    Activation::Active(_) => tx.term_fee.get(),
+                    Activation::Inactive => expected_term_fee,
+                };
                 let Ok(expected_perm_fee) = helpers::calculate_perm_storage_fee(
                     ctx.config,
                     tx.data_size,
-                    expected_term_fee,
+                    reward_basis_term_fee,
                     &parent_ema_snapshot,
                     current_timestamp,
                 ) else {

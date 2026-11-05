@@ -38,7 +38,7 @@ use irys_types::{
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
     SealedBlock, SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
     calculate_difficulty, ensure_proof_layout, expected_chunk_byte_range,
-    hardfork_config::{Cascade, ForEpoch, IrysHardforkConfig},
+    hardfork_config::{Activation, Cascade, ForEpoch, IrysHardforkConfig},
     next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, validate_path_byte_range,
@@ -6509,9 +6509,15 @@ fn validate_publish_price(
         timestamp_secs,
     )
     .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    // The split takes the proof rewards from the tx's own term fee, so from Delta the perm fee
+    // must cover base storage plus rewards on that fee, not on the expected one.
+    let reward_basis_term_fee = match config.consensus.hardforks.delta_for_block(timestamp_secs) {
+        Activation::Active(_) => tx.term_fee.get(),
+        Activation::Inactive => expected_term_fee,
+    };
     let expected_perm_fee = calculate_perm_storage_total_fee(
         tx.data_size,
-        expected_term_fee,
+        reward_basis_term_fee,
         block_ema,
         config,
         timestamp_secs,
@@ -8288,6 +8294,82 @@ mod tests {
         ));
         validate(&tx_priced_for(2, activation), activation)
             .expect("from Delta, a fee for num_partitions_per_slot replicas is sufficient");
+    }
+
+    /// The fee split takes the proof rewards from the tx's own `term_fee`. Before Delta the
+    /// perm fee only covers rewards on the expected term fee. From Delta it must cover
+    /// rewards on the tx's own term fee.
+    #[test]
+    fn publish_price_requires_rewards_on_actual_term_fee_from_delta() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        let data_size = 1 << 50;
+        let perm_fee_for_term_fee = |term_fee, timestamp| {
+            calculate_perm_storage_total_fee(data_size, term_fee, &ema, &config, timestamp)
+                .unwrap()
+                .amount
+        };
+        let tx_overpaying_term_fee = |timestamp| {
+            let epochs = config.term_storage_epochs_at(
+                timestamp,
+                header.height,
+                config.consensus.epoch.submit_ledger_epoch_length,
+            );
+            let expected_term_fee = calculate_term_storage_base_network_fee(
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                config.publish_replica_count_at(timestamp),
+                timestamp,
+            )
+            .unwrap();
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = data_size;
+            tx.term_fee = BoundedFee::new(expected_term_fee.saturating_mul(U256::from(3)));
+            (tx, expected_term_fee)
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        let (mut tx, expected_term_fee) = tx_overpaying_term_fee(before_delta);
+        tx.perm_fee = Some(BoundedFee::new(perm_fee_for_term_fee(
+            expected_term_fee,
+            before_delta,
+        )));
+        validate(&tx, before_delta)
+            .expect("before Delta, a perm fee priced on the expected term fee is sufficient");
+
+        let (mut tx, expected_term_fee) = tx_overpaying_term_fee(activation);
+        tx.perm_fee = Some(BoundedFee::new(perm_fee_for_term_fee(
+            expected_term_fee,
+            activation,
+        )));
+        assert!(matches!(
+            validate(&tx, activation),
+            Err(PreValidationError::InsufficientPermFee { .. })
+        ));
+
+        tx.perm_fee = Some(BoundedFee::new(perm_fee_for_term_fee(
+            tx.term_fee.get(),
+            activation,
+        )));
+        validate(&tx, activation)
+            .expect("from Delta, a perm fee priced on the actual term fee is sufficient");
     }
 
     /// Build a minimal `BlockTreeReadGuard` for tests that exercise the

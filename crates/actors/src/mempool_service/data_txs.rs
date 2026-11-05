@@ -13,6 +13,7 @@ use irys_database::{
 use irys_domain::HardforkConfigExt as _;
 
 use irys_types::TxKnownStatus;
+use irys_types::hardfork_config::Activation;
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
@@ -436,6 +437,17 @@ impl Inner {
                 TxIngressError::FundMisalignment("Publish tx missing perm_fee".to_string())
             })?;
 
+            // The split takes the proof rewards from the tx's own term fee, so from Delta the perm fee
+            // must cover base storage plus rewards on that fee, not on the expected one.
+            let reward_basis_term_fee = match self
+                .config
+                .consensus
+                .hardforks
+                .delta_for_block(latest_block_timestamp_secs)
+            {
+                Activation::Active(_) => tx.term_fee.get(),
+                Activation::Inactive => expected_term_fee,
+            };
             let expected_perm_fee = calculate_perm_fee_from_config(
                 tx.data_size,
                 &self.config.consensus,
@@ -444,7 +456,7 @@ impl Inner {
                 self.config
                     .number_of_ingress_proofs_total_at(latest_block_timestamp_secs),
                 pricing_ema,
-                expected_term_fee,
+                reward_basis_term_fee,
                 latest_block_timestamp_secs,
             )
             .map_err(|e| {

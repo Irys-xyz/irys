@@ -51,6 +51,9 @@ pub struct IrysHardforkConfig {
     /// - Term fees (Submit, OneYear, ThirtyDay) pay for the full ledger
     ///   `epoch_length`, not the epochs left in the current height cycle, from the
     ///   first block whose timestamp is >= `activation_timestamp`.
+    /// - The required `perm_fee` of a Publish tx adds the ingress proof rewards on the
+    ///   tx's own `term_fee`, not on the expected term fee, from the first block whose
+    ///   timestamp is >= `activation_timestamp`.
     ///
     /// None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +172,9 @@ impl Cascade {
 ///   of that credit.
 /// - Term fees (Submit, OneYear, ThirtyDay) pay for the full ledger `epoch_length`,
 ///   not the epochs left in the current height cycle.
+/// - The required `perm_fee` of a Publish tx adds the ingress proof rewards on the
+///   tx's own `term_fee`, not on the expected term fee. The fee split takes the
+///   rewards from the tx's own `term_fee`, so this keeps the storage share funded.
 ///
 /// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
 /// but the epoch block's own header cannot list it: the producer derives the
