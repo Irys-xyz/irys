@@ -484,6 +484,10 @@ pub fn build_genesis_block_from_commitments(
     // genesis blocks use identical ordering logic to regular blocks.
     commitments.sort();
 
+    // The genesis treasury is the sum of the genesis commitment values, but no EL
+    // account pays for them: genesis commitments are a grant. An unstake or unpledge
+    // of a genesis commitment credits the EL from this treasury, which adds that
+    // amount to the EL supply on top of the genesis alloc.
     let initial_treasury = genesis_block.append_commitments(&commitments)?;
 
     let total_pledges = commitments
