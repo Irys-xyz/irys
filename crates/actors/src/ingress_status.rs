@@ -160,12 +160,7 @@ pub(crate) fn assess_submit_ingress_proofs(
     )
     .map_err(|e| eyre!("canonical submit range lookup failed: {e:#}"))?;
     let slot_miners = |address: &IrysAddress| {
-        first_intersecting_submit_slot_miners(
-            address,
-            block_range.as_ref()?,
-            query.config,
-            query.epoch_snapshot,
-        )
+        first_intersecting_submit_slot_miners(address, block_range.as_ref()?, query.epoch_snapshot)
     };
 
     // Same walk as `get_assigned_ingress_proofs`: candidates in order, classified

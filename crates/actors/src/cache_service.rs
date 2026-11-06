@@ -327,8 +327,7 @@ impl InnerCacheTask {
             )
         })?;
 
-        let chunk_offset =
-            first_unexpired_slot_index * self.config.consensus.num_chunks_in_partition;
+        let chunk_offset = first_unexpired_slot_index * epoch_snapshot.partition_chunks();
 
         // Check to see if the first overlapping block in our first active submit ledger slot is in the block index
         let mut prune_height: Option<u64> = None;
@@ -938,6 +937,15 @@ impl InnerCacheTask {
         still
     }
 
+    /// Partition size of the canonical epoch. Fission changes it at an epoch
+    /// boundary, so slot indexes come from the snapshot, not the config.
+    fn canonical_partition_chunks(&self) -> u64 {
+        self.block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .partition_chunks()
+    }
+
     /// Splits unprotected bodies into those replicas have released, still
     /// grouped by root, and those this node must hold. One coverage call
     /// covers the whole pass.
@@ -950,7 +958,7 @@ impl InnerCacheTask {
         Vec<(DataRoot, BTreeSet<TxChunkOffset>)>,
         BTreeSet<(DataRoot, TxChunkOffset)>,
     )> {
-        let chunks_per_partition = self.config.consensus.num_chunks_in_partition;
+        let chunks_per_partition = self.canonical_partition_chunks();
         let mut candidates = Vec::new();
         for (root, offsets) in &unprotected_by_root {
             let spans = self.ledger_spans_for_root(*root, migration_height, span_cache)?;
@@ -1126,7 +1134,7 @@ impl InnerCacheTask {
                     // in `u64`. Debug builds panic on overflow. Release builds wrap.
                     // A product that does not fit is not this slot.
                     if (slot_index as u64)
-                        .checked_mul(sm.config.consensus.num_chunks_in_partition)
+                        .checked_mul(sm.partition_chunks())
                         .is_none()
                     {
                         continue;
@@ -1475,7 +1483,7 @@ impl InnerCacheTask {
         // the capacity pass releases those bodies and a later epoch evicts it.
         // Spans at every height: a promotion after the Submit horizon still
         // places the root on Publish.
-        let chunks_per_partition = self.config.consensus.num_chunks_in_partition;
+        let chunks_per_partition = self.canonical_partition_chunks();
         let mut span_cache = PruneSpanCache::default();
         let mut cleared: HashSet<DataRoot> = HashSet::new();
         for rec in &candidates {

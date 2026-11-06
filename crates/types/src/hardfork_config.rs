@@ -8,6 +8,8 @@ use crate::{
         phantoms::{CostPerGb, Percentage, Usd},
     },
 };
+// Fission's parameters live beside the partition-resize arithmetic they drive.
+pub use crate::partition_resize::Fission;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
@@ -48,6 +50,14 @@ pub struct IrysHardforkConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub echo: Option<Echo>,
+    /// Fission hardfork (partition resize) - shrinks partitions and the HDD recall range,
+    /// switches slot allocation to a target-based rule, and expands the
+    /// partition-ID supply byte-preservingly. Activation block E is the first
+    /// positive-height epoch block whose timestamp meets `activation_timestamp`
+    /// (Cascade's convention); E is mined under the old geometry and its children
+    /// under the new one. Scheduled independently of Delta. None means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fission: Option<Fission>,
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
@@ -519,6 +529,7 @@ mod tests {
             cascade: None,
             delta: None,
             echo: None,
+            fission: None,
         };
 
         assert_eq!(
@@ -552,6 +563,7 @@ mod tests {
             cascade: None,
             delta: None,
             echo: None,
+            fission: None,
         };
 
         // Before activation timestamp
@@ -584,6 +596,7 @@ mod tests {
             }),
             delta: None,
             echo: None,
+            fission: None,
         };
 
         // Before activation timestamp
@@ -608,6 +621,7 @@ mod tests {
         let no_cascade = IrysHardforkConfig {
             cascade: None,
             delta: None,
+            fission: None,
             ..config
         };
         assert!(
@@ -635,6 +649,7 @@ mod tests {
             }),
             delta: None,
             echo: None,
+            fission: None,
         };
 
         let before = UnixTimestamp::from_secs(1499);
@@ -655,6 +670,7 @@ mod tests {
         let no_cascade = IrysHardforkConfig {
             cascade: None,
             delta: None,
+            fission: None,
             ..config
         };
         assert!(no_cascade.ledger_absence_expected(DataLedger::OneYear as u32, at));
@@ -682,6 +698,7 @@ mod tests {
             }),
             delta: None,
             echo: None,
+            fission: None,
         };
 
         // Cascade active at the block's timestamp.
@@ -719,6 +736,7 @@ mod tests {
             cascade: None,
             delta: None,
             echo: None,
+            fission: None,
         };
 
         assert!(!config.is_borealis_active_at(UnixTimestamp::from_secs(1499)));
@@ -750,6 +768,7 @@ mod tests {
                 ),
             }),
             echo: None,
+            fission: None,
         };
 
         assert_eq!(
@@ -769,6 +788,7 @@ mod tests {
         // Unconfigured means never active.
         let no_delta = IrysHardforkConfig {
             delta: None,
+            fission: None,
             ..config
         };
         assert_eq!(
@@ -810,6 +830,31 @@ mod tests {
         );
     }
 
+    /// The table documented in docs/partition-resize-operations.md parses, and
+    /// Fission is independent of Delta.
+    #[test]
+    fn test_fission_toml_parses_without_delta() {
+        let toml_str = "
+            [frontier]
+            number_of_ingress_proofs_total = 5
+            number_of_ingress_proofs_from_assignees = 0
+
+            [fission]
+            activation_timestamp = \"2027-01-01T00:00:00+00:00\"
+            partition_chunks = 14500000
+            recall_chunks = 80
+            target_ingress_bytes_per_second = 20000000
+            minimum_partition_ids = 0
+        ";
+        let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.delta.is_none());
+        let fission = config.fission.expect("fission must parse");
+        assert_eq!(
+            fission,
+            Fission::proposed(UnixTimestamp::from_secs(1_798_761_600))
+        );
+    }
+
     #[test]
     fn test_toml_serialization() {
         let config = IrysHardforkConfig {
@@ -822,6 +867,7 @@ mod tests {
             cascade: None,
             delta: None,
             echo: Echo::from_genesis(),
+            fission: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -890,6 +936,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -917,6 +964,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             };
 
             let result = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -937,6 +985,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -970,6 +1019,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             };
 
             let aurora = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -1003,6 +1053,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             }
         }
 
@@ -1017,6 +1068,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             }
         }
 
@@ -1109,6 +1161,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             }
         }
 
@@ -1123,6 +1176,7 @@ mod tests {
                 }),
                 delta: None,
                 echo: Echo::from_genesis(),
+                fission: None,
                 ..base_config()
             };
             let toml_str = toml::to_string_pretty(&config).unwrap();

@@ -41,11 +41,12 @@ use irys_types::{BlockHash, EvmBlockHash, H256List, LedgerChunkRange};
 use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
-    DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
-    SealedBlock, SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
-    calculate_difficulty, ensure_proof_layout, expected_chunk_byte_range,
+    DataTransactionLedger, H256, IrysAddress, IrysBlockHeader, PoaData, SealedBlock,
+    SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
+    consensus_context::EpochConsensusContext,
+    ensure_proof_layout, expected_chunk_byte_range,
     hardfork_config::{Activation, Cascade, ForEpoch, IrysHardforkConfig},
-    next_cumulative_diff,
+    partition_resize::PartitionGeometry,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, validate_path_byte_range,
 };
@@ -144,6 +145,10 @@ pub enum PreValidationError {
     CascadeNotConfigured { tx_id: H256 },
     #[error("Invalid cumulative_difficulty (expected {expected} got {got})")]
     CumulativeDifficultyMismatch { expected: U256, got: U256 },
+    #[error(
+        "data ledgers must stay empty while the Fission activation is pending: ledger {ledger_id} holds {total_chunks} chunks"
+    )]
+    DataLedgersNotEmptyWhilePendingResize { ledger_id: u32, total_chunks: u64 },
     #[error("Invalid difficulty (expected {expected} got {got})")]
     DifficultyMismatch { expected: U256, got: U256 },
     #[error("Ema mismatch: recomputed EMA does not match Ema in block header")]
@@ -651,6 +656,7 @@ impl PreValidationError {
             | Self::CascadeNotConfigured { .. }
             | Self::CommitmentVersionInvalid { .. }
             | Self::CumulativeDifficultyMismatch { .. }
+            | Self::DataLedgersNotEmptyWhilePendingResize { .. }
             | Self::DataLedgerExtractionFailed(_)
             | Self::DifficultyMismatch { .. }
             | Self::DuplicateIngressProofSigner { .. }
@@ -836,6 +842,9 @@ impl PreValidationError {
             Self::TooManyPublishTxs { .. } => "too_many_publish_txs",
             Self::TxRootMismatch { .. } => "tx_root_mismatch",
             Self::TotalChunksMismatch { .. } => "total_chunks_mismatch",
+            Self::DataLedgersNotEmptyWhilePendingResize { .. } => {
+                "data_ledgers_not_empty_while_pending_resize"
+            }
             Self::PoaTxRootLeafMismatch { .. } => "poa_tx_root_leaf_mismatch",
             Self::ZeroSizeDataTx { .. } => "zero_size_data_tx",
             Self::PrefixSizeExceedsDataSize { .. } => "prefix_size_exceeds_data_size",
@@ -1870,24 +1879,33 @@ pub async fn prevalidate_block(
     )?;
 
     // Check the difficulty
-    difficulty_is_valid(
-        block,
-        previous_block,
-        &config.consensus.difficulty_adjustment,
-    )?;
+    let consensus_context = parent_epoch_snapshot.consensus_context();
+    let (expected_diff, _) =
+        consensus_context.child_difficulty(block.height, block.timestamp, previous_block);
+    if block.diff != expected_diff {
+        return Err(PreValidationError::DifficultyMismatch {
+            expected: expected_diff,
+            got: block.diff,
+        });
+    }
 
     // Validate the last_diff_timestamp field
-    last_diff_timestamp_is_valid(
-        block,
-        previous_block,
-        &config.consensus.difficulty_adjustment,
-    )?;
+    let expected_timestamp =
+        consensus_context.child_last_diff_timestamp(block.height, block.timestamp, previous_block);
+    if block.last_diff_timestamp != expected_timestamp {
+        return Err(PreValidationError::LastDiffTimestampMismatch {
+            expected: expected_timestamp,
+            got: block.last_diff_timestamp,
+        });
+    }
 
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
-        "difficulty_is_valid",
+        "difficulty_and_last_diff_timestamp_are_valid",
     );
+
+    data_ledgers_empty_while_pending_resize(block, &consensus_context)?;
 
     // Validate previous_cumulative_diff points to parent's cumulative_diff
     previous_cumulative_difficulty_is_valid(block, previous_block)?;
@@ -1898,7 +1916,7 @@ pub async fn prevalidate_block(
     );
 
     // Check the cumulative difficulty
-    cumulative_difficulty_is_valid(block, previous_block)?;
+    cumulative_difficulty_is_valid(block, previous_block, &consensus_context)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -2439,64 +2457,6 @@ pub fn timestamp_is_valid(
     Ok(())
 }
 
-/// Validates if a block's difficulty matches the expected difficulty calculated
-/// from previous block data.
-/// Returns Ok if valid, Err if the difficulty doesn't match the calculated value.
-pub fn difficulty_is_valid(
-    block: &IrysBlockHeader,
-    previous_block: &IrysBlockHeader,
-    difficulty_config: &DifficultyAdjustmentConfig,
-) -> Result<(), PreValidationError> {
-    let block_height = block.height;
-    let current_timestamp = block.timestamp;
-    let last_diff_timestamp = previous_block.last_diff_timestamp;
-    let current_difficulty = previous_block.diff;
-
-    let (diff, _stats) = calculate_difficulty(
-        block_height,
-        last_diff_timestamp,
-        current_timestamp,
-        current_difficulty,
-        difficulty_config,
-    );
-
-    if diff == block.diff {
-        Ok(())
-    } else {
-        Err(PreValidationError::DifficultyMismatch {
-            expected: diff,
-            got: block.diff,
-        })
-    }
-}
-
-/// Validates the `last_diff_timestamp` field in the block.
-///
-/// The value should equal the previous block's `last_diff_timestamp` unless the
-/// current block triggers a difficulty adjustment, in which case it must be set
-/// to the block's own timestamp.
-pub fn last_diff_timestamp_is_valid(
-    block: &IrysBlockHeader,
-    previous_block: &IrysBlockHeader,
-    difficulty_config: &DifficultyAdjustmentConfig,
-) -> Result<(), PreValidationError> {
-    let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
-    let expected = if block.height.is_multiple_of(blocks_between_adjustments) {
-        block.timestamp
-    } else {
-        previous_block.last_diff_timestamp
-    };
-
-    if block.last_diff_timestamp == expected {
-        Ok(())
-    } else {
-        Err(PreValidationError::LastDiffTimestampMismatch {
-            expected,
-            got: block.last_diff_timestamp,
-        })
-    }
-}
-
 /// Checks PoA data chunk data solution partitions has not expired
 pub fn check_poa_data_expiration(
     poa: &PoaData,
@@ -2513,6 +2473,24 @@ pub fn check_poa_data_expiration(
             partition_hash: poa.partition_hash,
         });
     };
+    Ok(())
+}
+
+/// While the Fission activation is pending on this branch the data ledgers
+/// must stay empty: E is validated under this same pending context, so
+/// `PartitionResizeState::activate` can then never fail `NonEmptyLedgers`.
+pub fn data_ledgers_empty_while_pending_resize(
+    block: &IrysBlockHeader,
+    consensus_context: &EpochConsensusContext,
+) -> Result<(), PreValidationError> {
+    if consensus_context.pending_activation()
+        && let Some(ledger) = block.data_ledgers.iter().find(|l| l.total_chunks != 0)
+    {
+        return Err(PreValidationError::DataLedgersNotEmptyWhilePendingResize {
+            ledger_id: ledger.ledger_id,
+            total_chunks: ledger.total_chunks,
+        });
+    }
     Ok(())
 }
 
@@ -2570,15 +2548,18 @@ pub fn poa_ledger_matches_assignment(
 /// Validates if a block's cumulative difficulty equals the previous cumulative difficulty
 /// plus the expected hashes from its new difficulty. Returns Ok if valid.
 ///
-/// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
+/// Note: Requires valid block difficulty - `prevalidate_block` checks it first.
 pub fn cumulative_difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
+    consensus_context: &EpochConsensusContext,
 ) -> Result<(), PreValidationError> {
-    let previous_cumulative_diff = previous_block.cumulative_diff;
-    let new_diff = block.diff;
-
-    let cumulative_diff = next_cumulative_diff(previous_cumulative_diff, new_diff);
+    let cumulative_diff = consensus_context.child_cumulative_diff(
+        block.height,
+        block.timestamp,
+        previous_block,
+        block.diff,
+    );
     if cumulative_diff == block.cumulative_diff {
         Ok(())
     } else {
@@ -2607,7 +2588,7 @@ pub fn previous_cumulative_difficulty_is_valid(
 /// Checks to see if the `solution_hash` exceeds the difficulty threshold
 /// of the previous block
 ///
-/// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
+/// Note: Requires valid block difficulty - `prevalidate_block` checks it first.
 pub fn solution_hash_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
@@ -3935,32 +3916,45 @@ impl RecallRangeError {
 
 /// Validate the block's VDF recall range.
 ///
+/// `geometry` is the parent epoch snapshot's (`EpochSnapshot::geometry`), so the
+/// activation block E itself is still checked under the legacy layout.
+///
 /// Fast path: local seed buffer. On mismatch or `buffer_suspect`, rebuild the
 /// window from the block's ancestry (tree/DB) and re-check; missing ancestors
 /// → soft `StepsUnavailable`.
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
-    config: &ConsensusConfig,
+    geometry: PartitionGeometry,
     steps_guard: &VdfStateReadonly,
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     buffer_suspect: bool,
 ) -> Result<(), RecallRangeError> {
     let global_step_number = block.vdf_limiter_info.global_step_number;
-    let reset_step_number = irys_efficient_sampling::reset_step_number(global_step_number, config);
+    if u64::from(block.poa.partition_chunk_offset) >= geometry.partition_chunks {
+        return Err(RecallRangeError::Mismatch(eyre::eyre!(
+            "partition offset exceeds active geometry"
+        )));
+    }
+    let reset_step_number = irys_efficient_sampling::reset_step_from_origin(
+        global_step_number,
+        geometry.recall_ranges(),
+        geometry.sampling_origin,
+    )
+    .map_err(RecallRangeError::Mismatch)?;
     info!(
         "Validating recall ranges steps from: {} to: {}",
         reset_step_number, global_step_number
     );
 
-    let recall_offset = usize::try_from(
-        u64::from(block.poa.partition_chunk_offset) / config.num_chunks_in_recall_range,
-    )
-    .map_err(|_| RecallRangeError::StepsUnavailable(eyre::eyre!("recall offset too large")))?;
-    let num_ranges = usize::try_from(irys_efficient_sampling::num_recall_ranges_in_partition(
-        config,
-    ))
-    .map_err(|_| RecallRangeError::StepsUnavailable(eyre::eyre!("recall range count too large")))?;
+    let recall_offset =
+        usize::try_from(u64::from(block.poa.partition_chunk_offset) / geometry.recall_chunks)
+            .map_err(|_| {
+                RecallRangeError::StepsUnavailable(eyre::eyre!("recall offset too large"))
+            })?;
+    let num_ranges = usize::try_from(geometry.recall_ranges()).map_err(|_| {
+        RecallRangeError::StepsUnavailable(eyre::eyre!("recall range count too large"))
+    })?;
 
     // Ancestry rebuild when the local buffer cannot be trusted.
     let fork_local_check = |cause: String| -> Result<(), RecallRangeError> {
@@ -4286,7 +4280,7 @@ mod recall_range_buffer_authority_tests {
         async fn run(&self, buffer_suspect: bool) -> Result<(), RecallRangeError> {
             recall_recall_range_is_valid(
                 &self.block,
-                &self.config,
+                PartitionGeometry::legacy(&self.config),
                 &self.steps_guard,
                 &self.block_tree_guard,
                 &self.db,
@@ -4825,6 +4819,10 @@ pub fn poa_is_valid(
     miner_address: &IrysAddress,
     block_height: u64,
 ) -> Result<(), PreValidationError> {
+    let geometry = epoch_snapshot.geometry();
+    if u64::from(poa.partition_chunk_offset) >= geometry.partition_chunks {
+        return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
+    }
     debug!("PoA validating");
     let poa_chunk_bytes: &[u8] = match &poa.chunk {
         Some(chunk) => chunk.as_ref(),
@@ -4860,7 +4858,7 @@ pub fn poa_is_valid(
             }
         })?;
         let ledger_chunk_offset =
-            slot_index_u64 * config.num_chunks_in_partition + u64::from(poa.partition_chunk_offset);
+            slot_index_u64 * geometry.partition_chunks + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
         let ledger = DataLedger::try_from(ledger_id)
@@ -5781,7 +5779,6 @@ async fn generate_expected_shadow_transactions(
             block.height,
             &parent_epoch_snapshot,
             &prev_block,
-            config,
             cascade_for_block,
         )
         .map_err(|e| node_fault(format!("NC-0042 expiry check: {e}")))?;
@@ -7965,14 +7962,13 @@ fn merge_same_block_historical_ledgers(
 pub(crate) fn first_intersecting_submit_slot_miners(
     address: &IrysAddress,
     block_range: &LedgerChunkRange,
-    config: &Config,
     epoch_snapshot: &EpochSnapshot,
 ) -> Option<usize> {
     let slot_indexes = get_submit_ledger_slot_assignments(address, epoch_snapshot);
+    let num_chunks_in_partition = epoch_snapshot.partition_chunks();
     let slot_ranges: BTreeMap<usize, LedgerChunkRange> = slot_indexes
         .iter()
         .map(|index| {
-            let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
             let start = *index as u64 * num_chunks_in_partition;
             let end = start + num_chunks_in_partition;
             let range = LedgerChunkRange(ie(
@@ -8056,12 +8052,9 @@ pub fn get_assigned_ingress_proofs(
 
         // The first intersecting Submit slot, in ascending slot-index order,
         // supplies `assigned_miners`. A later assigned proof overwrites it.
-        if let Some(miners) = first_intersecting_submit_slot_miners(
-            &proof_address,
-            &block_range,
-            config,
-            epoch_snapshot,
-        ) {
+        if let Some(miners) =
+            first_intersecting_submit_slot_miners(&proof_address, &block_range, epoch_snapshot)
+        {
             assigned_miners = miners;
             assigned_proofs.push(ingress_proof.clone());
         }
@@ -10523,8 +10516,10 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.difficulty_adjustment.difficulty_adjustment_interval = 10;
 
-        assert!(
-            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_ok()
+        let context = EpochConsensusContext::new(&config, None);
+        assert_eq!(
+            context.child_last_diff_timestamp(block.height, block.timestamp, &prev),
+            block.last_diff_timestamp
         );
     }
 
@@ -10542,8 +10537,10 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.difficulty_adjustment.difficulty_adjustment_interval = 10;
 
-        assert!(
-            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_ok()
+        let context = EpochConsensusContext::new(&config, None);
+        assert_eq!(
+            context.child_last_diff_timestamp(block.height, block.timestamp, &prev),
+            block.last_diff_timestamp
         );
     }
 
@@ -10561,8 +10558,10 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.difficulty_adjustment.difficulty_adjustment_interval = 10;
 
-        assert!(
-            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_err()
+        let context = EpochConsensusContext::new(&config, None);
+        assert_ne!(
+            context.child_last_diff_timestamp(block.height, block.timestamp, &prev),
+            block.last_diff_timestamp
         );
     }
 
@@ -11051,6 +11050,7 @@ mod commitment_version_tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -11068,6 +11068,7 @@ mod commitment_version_tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -12088,6 +12089,68 @@ mod engine_client_error_tests {
         assert_eq!(
             irys_types::config::ENGINE_CLIENT_MAX_REQUEST_BYTES,
             u64::from(jsonrpsee_core::TEN_MB_SIZE_BYTES),
+        );
+    }
+}
+
+#[cfg(test)]
+mod pending_resize_tests {
+    use super::*;
+    use irys_types::{
+        ConsensusConfig, DataLedger, UnixTimestamp, hardfork_config::Fission,
+        partition_resize::PartitionResizeState,
+    };
+
+    fn block_with_submit_chunks(total_chunks: u64) -> IrysBlockHeader {
+        let mut block = IrysBlockHeader::default();
+        block.data_ledgers = vec![DataTransactionLedger {
+            ledger_id: DataLedger::Submit as u32,
+            total_chunks,
+            ..Default::default()
+        }];
+        block
+    }
+
+    /// Blocks on a branch where Fission is scheduled but not yet active must
+    /// keep the data ledgers empty; once activated, or never scheduled, the
+    /// rule does not apply.
+    #[test]
+    fn pending_resize_rejects_non_empty_data_ledgers() {
+        let mut config = ConsensusConfig::testing();
+        let fission = Fission::proposed(UnixTimestamp::from_secs(0));
+        config.hardforks.fission = Some(fission);
+        let pending = EpochConsensusContext::new(&config, None);
+        assert!(
+            data_ledgers_empty_while_pending_resize(&block_with_submit_chunks(0), &pending).is_ok()
+        );
+        assert!(matches!(
+            data_ledgers_empty_while_pending_resize(&block_with_submit_chunks(1), &pending),
+            Err(PreValidationError::DataLedgersNotEmptyWhilePendingResize {
+                ledger_id,
+                total_chunks: 1,
+            }) if ledger_id == DataLedger::Submit as u32
+        ));
+
+        let activated = EpochConsensusContext::new(
+            &config,
+            Some(PartitionResizeState {
+                params: fission,
+                activation_height: config.epoch.num_blocks_in_epoch,
+                activation_hash: H256::repeat_byte(7),
+                sampling_origin: 2,
+                preserved_id_floor: 0,
+                reference_partition_chunks: config.num_chunks_in_partition,
+            }),
+        );
+        assert!(
+            data_ledgers_empty_while_pending_resize(&block_with_submit_chunks(1), &activated)
+                .is_ok()
+        );
+
+        let unscheduled = EpochConsensusContext::new(&ConsensusConfig::testing(), None);
+        assert!(
+            data_ledgers_empty_while_pending_resize(&block_with_submit_chunks(1), &unscheduled)
+                .is_ok()
         );
     }
 }
