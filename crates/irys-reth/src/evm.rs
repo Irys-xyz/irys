@@ -1686,6 +1686,7 @@ mod tests {
         use super::*;
         use alloy_consensus::{SignableTransaction as _, TxEip1559};
         use alloy_eips::eip4895::{Withdrawal, Withdrawals};
+        use alloy_eips::eip6110::MAINNET_DEPOSIT_CONTRACT_ADDRESS;
         use alloy_eips::eip7002::{
             WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_PREDEPLOY_CODE,
         };
@@ -1693,7 +1694,7 @@ mod tests {
             CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS, CONSOLIDATION_REQUEST_PREDEPLOY_CODE,
         };
         use alloy_network::TxSignerSync as _;
-        use alloy_primitives::keccak256;
+        use alloy_primitives::{b256, keccak256};
         use alloy_signer_local::PrivateKeySigner;
         use alloy_trie::TrieAccount;
         use alloy_trie::root::{state_root_unhashed, storage_root_unhashed};
@@ -1997,6 +1998,48 @@ mod tests {
                 !ethereum.result.unwrap().requests.is_empty(),
                 "test setup: Ethereum execution must produce a request"
             );
+        }
+
+        /// Irys execution does not parse deposit logs. The Ethereum run checks the test setup.
+        #[test]
+        fn deposit_log_is_not_parsed() {
+            // The chain spec has no deposit contract (as for Irys), so Ethereum execution reads
+            // deposit logs from the mainnet address.
+            let address = MAINNET_DEPOSIT_CONTRACT_ADDRESS;
+            // `PUSH32 DepositEvent topic, PUSH0, PUSH0, LOG1, STOP`: a log with no data.
+            let mut code = vec![0x7f];
+            code.extend_from_slice(
+                b256!("0x649bbc62d0e31342afea4e5cd82d4049e7e1ee912fc0889aa790803be39038c5")
+                    .as_slice(),
+            );
+            code.extend_from_slice(&[0x5f, 0x5f, 0xa1, 0x00]);
+            let account = Some((address, contract(&code)));
+            let signer = PrivateKeySigner::random();
+            let tx = signed_call(&signer, address, Bytes::new());
+
+            let ethereum = execute(
+                Executor::Ethereum,
+                account.clone(),
+                None,
+                signer.address(),
+                &tx,
+            );
+            let irys = execute(Executor::Irys, account, None, signer.address(), &tx);
+
+            assert!(
+                matches!(
+                    ethereum.result,
+                    Err(BlockExecutionError::Validation(
+                        BlockValidationError::DepositRequestDecode(_)
+                    ))
+                ),
+                "test setup: Ethereum execution must parse the deposit log, got {:?}",
+                ethereum.result.map(|_| ())
+            );
+            let irys_result = irys.result.unwrap();
+            assert_eq!(irys_result.receipts[0].logs.len(), 1);
+            assert!(irys_result.requests.is_empty());
+            assert_eq!(irys.state_root, ethereum.state_root);
         }
 
         /// A block with a withdrawal: Ethereum credits it, Irys rejects the block as invalid.
