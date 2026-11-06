@@ -8,7 +8,9 @@ use alloy_consensus::{Block, Header};
 use alloy_dyn_abi::DynSolValue;
 use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
 use alloy_eips::eip7685::Requests;
-use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
+use alloy_evm::block::{
+    BlockExecutionError, BlockExecutor, BlockValidationError, ExecutableTx, OnStateHook,
+};
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
 use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256};
@@ -55,10 +57,11 @@ mod constants {
 
 /// Irys block executor that handles execution of both regular and shadow transactions.
 ///
-/// Irys runs the Ethereum pre-block steps (`apply_pre_execution_changes` delegates) and no Ethereum
-/// post-block step (`finish` replaces the `EthBlockExecutor` version). At each reth / alloy-evm
-/// upgrade, compare both functions upstream: adopt the new post-block steps that Irys wants, and
-/// check that every new pre-block step is wanted, because it runs without a change here.
+/// Irys runs the Ethereum pre-block steps (`apply_pre_execution_changes` rejects withdrawals, then
+/// delegates) and no Ethereum post-block step (`finish` replaces the `EthBlockExecutor` version).
+/// At each reth / alloy-evm upgrade, compare both functions upstream: adopt the new post-block
+/// steps that Irys wants, and check that every new pre-block step is wanted, because it runs
+/// without a change here.
 #[derive(Debug)]
 pub struct IrysBlockExecutor<'a, Evm> {
     inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
@@ -93,7 +96,18 @@ where
     type Evm = E;
     type Result = alloy_evm::eth::EthTxResult<E::HaltReason, alloy_consensus::TxType>;
 
+    /// Irys has no withdrawals: a block with any withdrawal is invalid. It is rejected here,
+    /// before any transaction runs. The other pre-block steps are the Ethereum ones.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+        if self
+            .inner
+            .ctx
+            .withdrawals
+            .as_ref()
+            .is_some_and(|withdrawals| !withdrawals.is_empty())
+        {
+            return Err(BlockValidationError::msg("Irys blocks have no withdrawals").into());
+        }
         self.inner.apply_pre_execution_changes()
     }
 
@@ -110,7 +124,8 @@ where
     ///   requests. Every block's requests are empty, so its header carries `EMPTY_REQUESTS_HASH`.
     /// - Block and ommer rewards: Ethereum pays them only before the Merge, and Irys starts after
     ///   it.
-    /// - Withdrawal credits: Irys has no withdrawals, and the CL rejects a block with any.
+    /// - Withdrawal credits: Irys has no withdrawals; `apply_pre_execution_changes` rejects a block
+    ///   with any.
     /// - DAO-fork drain: it runs only at the activation block, which for Irys is genesis, and
     ///   genesis is never executed.
     fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
@@ -1665,10 +1680,12 @@ mod tests {
     }
 
     /// Irys and Ethereum (`EthBlockExecutor`) execution of the same block. Irys runs no
-    /// post-block step: no EIP-7002 / EIP-7251 system calls and no EIP-7685 requests.
+    /// post-block step: no EIP-7002 / EIP-7251 system calls, no EIP-7685 requests, and no
+    /// withdrawal credits.
     mod post_block_steps {
         use super::*;
         use alloy_consensus::{SignableTransaction as _, TxEip1559};
+        use alloy_eips::eip4895::{Withdrawal, Withdrawals};
         use alloy_eips::eip7002::{
             WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_PREDEPLOY_CODE,
         };
@@ -1684,6 +1701,7 @@ mod tests {
         use reth_primitives_traits::SignerRecoverable as _;
         use revm::database::{BundleState, CacheDB, states::bundle_state::BundleRetention};
         use revm::state::{AccountInfo, Bytecode};
+        use std::borrow::Cow;
         use std::collections::BTreeMap;
 
         type Recovered = reth_primitives_traits::Recovered<TransactionSigned>;
@@ -1748,6 +1766,7 @@ mod tests {
         fn execute(
             executor: Executor,
             account: Option<(Address, AccountInfo)>,
+            withdrawals: Option<&Withdrawals>,
             sender: Address,
             tx: &Recovered,
         ) -> Outcome {
@@ -1790,7 +1809,7 @@ mod tests {
                 parent_hash: B256::ZERO,
                 parent_beacon_block_root: Some(B256::ZERO),
                 ommers: &[],
-                withdrawals: None,
+                withdrawals: withdrawals.map(Cow::Borrowed),
                 extra_data: Bytes::new(),
                 tx_count_hint: None,
             };
@@ -1872,8 +1891,14 @@ mod tests {
         ) -> (Outcome, Outcome) {
             let signer = PrivateKeySigner::random();
             let tx = signed_call(&signer, to, input);
-            let ethereum = execute(Executor::Ethereum, account.clone(), signer.address(), &tx);
-            let irys = execute(Executor::Irys, account, signer.address(), &tx);
+            let ethereum = execute(
+                Executor::Ethereum,
+                account.clone(),
+                None,
+                signer.address(),
+                &tx,
+            );
+            let irys = execute(Executor::Irys, account, None, signer.address(), &tx);
 
             let ethereum_result = ethereum.result.as_ref().unwrap();
             let irys_result = irys.result.as_ref().unwrap();
@@ -1971,6 +1996,57 @@ mod tests {
             assert!(
                 !ethereum.result.unwrap().requests.is_empty(),
                 "test setup: Ethereum execution must produce a request"
+            );
+        }
+
+        /// A block with a withdrawal: Ethereum credits it, Irys rejects the block as invalid.
+        #[test]
+        fn block_with_withdrawals_is_invalid() {
+            let signer = PrivateKeySigner::random();
+            let tx = signed_call(&signer, Address::repeat_byte(0x11), Bytes::new());
+            let withdrawals = Withdrawals::new(vec![Withdrawal {
+                index: 0,
+                validator_index: 0,
+                address: Address::repeat_byte(0x22),
+                amount: 1,
+            }]);
+
+            let ethereum = execute(
+                Executor::Ethereum,
+                None,
+                Some(&withdrawals),
+                signer.address(),
+                &tx,
+            );
+            let irys = execute(
+                Executor::Irys,
+                None,
+                Some(&withdrawals),
+                signer.address(),
+                &tx,
+            );
+
+            assert!(
+                ethereum.result.is_ok(),
+                "test setup: Ethereum accepts withdrawals"
+            );
+            assert!(
+                matches!(irys.result, Err(BlockExecutionError::Validation(_))),
+                "expected an invalid-block error, got {:?}",
+                irys.result.map(|_| ())
+            );
+
+            let no_withdrawals = execute(
+                Executor::Irys,
+                None,
+                Some(&Withdrawals::default()),
+                signer.address(),
+                &tx,
+            );
+            assert!(
+                no_withdrawals.result.is_ok(),
+                "an empty withdrawal list must be valid, got {:?}",
+                no_withdrawals.result.map(|_| ())
             );
         }
     }
