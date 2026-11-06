@@ -1664,9 +1664,9 @@ mod tests {
         }
     }
 
-    /// Irys and Ethereum (`EthBlockExecutor`) execution of the same block. Irys makes no
-    /// post-block system calls and returns no EIP-7685 requests.
-    mod system_calls {
+    /// Irys and Ethereum (`EthBlockExecutor`) execution of the same block. Irys runs no
+    /// post-block step: no EIP-7002 / EIP-7251 system calls and no EIP-7685 requests.
+    mod post_block_steps {
         use super::*;
         use alloy_consensus::{SignableTransaction as _, TxEip1559};
         use alloy_eips::eip7002::{
@@ -1678,6 +1678,8 @@ mod tests {
         use alloy_network::TxSignerSync as _;
         use alloy_primitives::keccak256;
         use alloy_signer_local::PrivateKeySigner;
+        use alloy_trie::TrieAccount;
+        use alloy_trie::root::{state_root_unhashed, storage_root_unhashed};
         use reth_chainspec::{Chain, ChainSpecBuilder};
         use reth_primitives_traits::SignerRecoverable as _;
         use revm::database::{BundleState, CacheDB, states::bundle_state::BundleRetention};
@@ -1685,7 +1687,6 @@ mod tests {
         use std::collections::BTreeMap;
 
         type Recovered = reth_primitives_traits::Recovered<TransactionSigned>;
-        type StateChanges = BTreeMap<Address, (Option<AccountInfo>, BTreeMap<U256, U256>)>;
 
         const CHAIN_ID: u64 = 1;
 
@@ -1701,6 +1702,7 @@ mod tests {
         struct Outcome {
             result: Result<BlockExecutionResult<Receipt>, BlockExecutionError>,
             bundle: BundleState,
+            state_root: B256,
         }
 
         fn prague_chain_spec() -> Arc<ChainSpec> {
@@ -1741,8 +1743,8 @@ mod tests {
                 .unwrap()
         }
 
-        /// Executes one block with `tx` on a fresh state and returns the execution result and the
-        /// resulting state changes. `account` is put into the state before the block.
+        /// Executes one block with `tx` on a fresh state and returns the execution result, the
+        /// state changes and the state root. `account` is put into the state before the block.
         fn execute(
             executor: Executor,
             account: Option<(Address, AccountInfo)>,
@@ -1755,16 +1757,17 @@ mod tests {
                 IrysEvmFactory::new(),
             );
 
-            let mut cache = CacheDB::new(revm::database_interface::EmptyDB::default());
-            cache.insert_account_info(
+            let mut initial_accounts = vec![(
                 sender,
                 AccountInfo {
                     balance: U256::from(10_u128.pow(20)),
                     ..Default::default()
                 },
-            );
-            if let Some((address, info)) = account {
-                cache.insert_account_info(address, info);
+            )];
+            initial_accounts.extend(account);
+            let mut cache = CacheDB::new(revm::database_interface::EmptyDB::default());
+            for (address, info) in &initial_accounts {
+                cache.insert_account_info(*address, info.clone());
             }
             let mut state = State::builder()
                 .with_database(cache)
@@ -1799,10 +1802,53 @@ mod tests {
             };
 
             state.merge_transitions(BundleRetention::Reverts);
+            let bundle = state.take_bundle();
             Outcome {
                 result,
-                bundle: state.take_bundle(),
+                state_root: state_root(&initial_accounts, &bundle),
+                bundle,
             }
+        }
+
+        /// State root after the block: the initial accounts (no storage) with the bundle's changes
+        /// applied, hashed into the Ethereum state trie.
+        fn state_root(initial_accounts: &[(Address, AccountInfo)], bundle: &BundleState) -> B256 {
+            let mut accounts: BTreeMap<Address, (AccountInfo, BTreeMap<U256, U256>)> =
+                initial_accounts
+                    .iter()
+                    .map(|(address, info)| (*address, (info.clone(), BTreeMap::new())))
+                    .collect();
+            for (address, account) in &bundle.state {
+                let Some(info) = &account.info else {
+                    accounts.remove(address);
+                    continue;
+                };
+                let entry = accounts
+                    .entry(*address)
+                    .or_insert_with(|| (info.clone(), BTreeMap::new()));
+                if account.was_destroyed() {
+                    entry.1.clear();
+                }
+                entry.0 = info.clone();
+                for (slot, value) in &account.storage {
+                    entry.1.insert(*slot, value.present_value);
+                }
+            }
+            state_root_unhashed(accounts.into_iter().map(|(address, (info, storage))| {
+                let storage_root = storage_root_unhashed(
+                    storage
+                        .into_iter()
+                        .filter(|(_, value)| !value.is_zero())
+                        .map(|(slot, value)| (B256::from(slot), value)),
+                );
+                let account = TrieAccount {
+                    nonce: info.nonce,
+                    balance: info.balance,
+                    storage_root,
+                    code_hash: info.code_hash,
+                };
+                (address, account)
+            }))
         }
 
         fn run<E>(
@@ -1846,25 +1892,6 @@ mod tests {
             (ethereum, irys)
         }
 
-        /// The state changes that the state root sees: accounts that were destroyed or whose info
-        /// or storage values changed. Entries for touched but unchanged accounts are left out.
-        fn effective_changes(bundle: &BundleState) -> StateChanges {
-            bundle
-                .state
-                .iter()
-                .filter_map(|(address, account)| {
-                    let storage: BTreeMap<U256, U256> = account
-                        .storage
-                        .iter()
-                        .filter(|(_, slot)| slot.is_changed())
-                        .map(|(key, slot)| (*key, slot.present_value))
-                        .collect();
-                    (account.was_destroyed() || account.is_info_changed() || !storage.is_empty())
-                        .then(|| (*address, (account.info.clone(), storage)))
-                })
-                .collect()
-        }
-
         fn storage_value(bundle: &BundleState, address: Address, slot: U256) -> U256 {
             bundle
                 .state
@@ -1879,11 +1906,11 @@ mod tests {
         fn no_system_contract_accounts_give_same_state() {
             let (ethereum, irys) = execute_both(None, Address::repeat_byte(0x11), Bytes::new());
             assert!(ethereum.result.unwrap().requests.is_empty());
-            assert_eq!(irys.bundle, ethereum.bundle);
+            assert_eq!(irys.state_root, ethereum.state_root);
         }
 
         /// An account with a balance but no code at a system contract address: the system call
-        /// only touches it, so skipping the call changes no state that the state root sees.
+        /// only touches it, so skipping the call does not change the state root.
         #[rstest::rstest]
         #[case::withdrawal_requests(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS)]
         #[case::consolidation_requests(CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS)]
@@ -1897,10 +1924,7 @@ mod tests {
                 Address::repeat_byte(0x11),
                 Bytes::new(),
             );
-            assert_eq!(
-                effective_changes(&irys.bundle),
-                effective_changes(&ethereum.bundle)
-            );
+            assert_eq!(irys.state_root, ethereum.state_root);
         }
 
         /// Code at a system contract address: Ethereum calls it, Irys does not.
@@ -1919,6 +1943,7 @@ mod tests {
                 "test setup: Ethereum execution must call the contract"
             );
             assert_eq!(storage_value(&irys.bundle, address, U256::ZERO), U256::ZERO);
+            assert_ne!(irys.state_root, ethereum.state_root);
         }
 
         /// A request predeploy with its real code is called by a user tx: Ethereum execution
