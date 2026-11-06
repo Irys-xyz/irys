@@ -29,6 +29,7 @@ use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
+use irys_types::storage_pricing::PRECISION_SCALE;
 #[cfg(test)]
 use irys_types::storage_pricing::ReplicaCount;
 #[cfg(test)]
@@ -43,7 +44,7 @@ use irys_types::{
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
     SealedBlock, SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
     calculate_difficulty, ensure_proof_layout, expected_chunk_byte_range,
-    hardfork_config::{Cascade, ForEpoch, IrysHardforkConfig},
+    hardfork_config::{Activation, Cascade, ForEpoch, IrysHardforkConfig},
     next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, validate_path_byte_range,
@@ -6534,6 +6535,18 @@ fn validate_publish_price(
             block_ema.ema_for_public_pricing(),
         )
         .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    // From Delta the proof reward pool is priced on the tx's own term fee. This bound keeps that
+    // arithmetic in range for any pool percent <= 1, so the perm fee errors have local inputs only.
+    if matches!(
+        config.consensus.hardforks.delta_for_block(timestamp_secs),
+        Activation::Active(_)
+    ) && tx.term_fee.get() > U256::MAX / PRECISION_SCALE
+    {
+        return Err(PreValidationError::InvalidTermFeeStructure {
+            tx_id: tx.id,
+            reason: "term_fee is too large to price the ingress proof reward pool".to_string(),
+        });
+    }
     let expected_perm_fee = config
         .required_publish_perm_fee_at(
             timestamp_secs,
@@ -8458,6 +8471,54 @@ mod tests {
         ));
         validate(&tx_with_one_reward_share(activation), activation)
             .expect("from Delta, one inclusion reward for all proofs is sufficient");
+    }
+
+    /// From Delta the perm fee is priced on the tx's own term fee. A term fee too large for
+    /// that arithmetic is a peer fault, never a node fault.
+    #[test]
+    fn publish_price_rejects_unpriceable_term_fee_as_peer_fault() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        let tx_with_term_fee = |term_fee| {
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = 1024;
+            tx.term_fee = BoundedFee::new(term_fee);
+            tx.perm_fee = Some(BoundedFee::new(U256::MAX));
+            tx
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        for term_fee in [U256::MAX, U256::MAX / PRECISION_SCALE + U256::one()] {
+            let tx = tx_with_term_fee(term_fee);
+            let err = validate(&tx, activation).unwrap_err();
+            assert!(
+                matches!(err, PreValidationError::InvalidTermFeeStructure { .. }),
+                "from Delta, term_fee {term_fee} must be rejected as a bad term fee, got {err:?}"
+            );
+            assert!(!err.is_node_fault());
+
+            if let Err(err) = validate(&tx, before_delta) {
+                assert!(
+                    !err.is_node_fault(),
+                    "before Delta, term_fee {term_fee} must not be a node fault, got {err:?}"
+                );
+            }
+        }
     }
 
     /// Build a minimal `BlockTreeReadGuard` for tests that exercise the
