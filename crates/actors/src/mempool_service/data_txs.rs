@@ -456,13 +456,10 @@ impl Inner {
     /// Caches data_root with expiry, logging success/failure.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root, expiry_height = expiry_height))]
     fn cache_data_root_with_expiry(&self, tx: &DataTransactionHeader, expiry_height: u64) {
-        match self.irys_db.update_cache_eyre(|db_tx| {
-            let mut cdr = irys_database::cache_data_root(db_tx, tx, None)?
-                .ok_or_else(|| eyre!("failed to cache data_root"))?;
-            cdr.expiry_height = Some(expiry_height);
-            db_tx.put::<CachedDataRoots>(tx.data_root, cdr)?;
-            Ok(())
-        }) {
+        match self
+            .irys_db
+            .update_cache_eyre(|db_tx| record_data_root_expiry(db_tx, tx, expiry_height))
+        {
             Ok(()) => {
                 info!(
                     data_root = %tx.data_root,
@@ -562,5 +559,53 @@ impl Inner {
             Ok(None) => Ok(TxKnownStatus::Unknown),
             Err(_) => Err(TxReadError::DatabaseError),
         }
+    }
+}
+
+/// Caches the data root of `tx` and raises its pre-confirmation expiry to `expiry_height`.
+/// A root outlives every tx that references it, so the cache prune cannot evict a root
+/// while one of its txs is included but not migrated.
+fn record_data_root_expiry(
+    db_tx: &irys_database::ScopedTxMut<irys_database::Cache>,
+    tx: &DataTransactionHeader,
+    expiry_height: u64,
+) -> eyre::Result<()> {
+    let mut cdr = irys_database::cache_data_root(db_tx, tx, None)?
+        .ok_or_else(|| eyre!("failed to cache data_root"))?;
+    cdr.expiry_height = Some(
+        cdr.expiry_height
+            .map_or(expiry_height, |existing| existing.max(expiry_height)),
+    );
+    db_tx.put::<CachedDataRoots>(tx.data_root, cdr)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
+    use irys_types::{ConsensusConfig, H256};
+
+    /// A later tx on a shared data root with an older anchor must not lower the root's expiry.
+    #[test]
+    fn shared_data_root_keeps_latest_expiry() -> eyre::Result<()> {
+        let dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db =
+            irys_database::DatabaseProvider::for_testing(dir.path(), &dir.path().join("cache"))?;
+        let consensus = ConsensusConfig::testing();
+        let data_root = H256::random();
+        let make_tx = || {
+            let mut tx = DataTransactionHeader::new(&consensus);
+            tx.id = H256::random();
+            tx.data_root = data_root;
+            tx
+        };
+
+        db.update_cache_eyre(|db_tx| record_data_root_expiry(db_tx, &make_tx(), 119))?;
+        db.update_cache_eyre(|db_tx| record_data_root_expiry(db_tx, &make_tx(), 101))?;
+
+        let cdr = db.update_cache_eyre(|db_tx| Ok(db_tx.get::<CachedDataRoots>(data_root)?))?;
+        assert_eq!(cdr.expect("root cached").expiry_height, Some(119));
+        Ok(())
     }
 }

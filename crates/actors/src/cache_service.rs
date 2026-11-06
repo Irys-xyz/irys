@@ -308,6 +308,7 @@ impl InnerCacheTask {
     ///
     /// Determines the pruning horizon (one block before active submit ledger slots begin)
     /// and removes data roots from earlier blocks that are no longer needed for validation.
+    /// The prune never goes past the migrated tip.
     ///
     /// # Errors
     ///
@@ -380,9 +381,10 @@ impl InnerCacheTask {
                 first_unexpired_slot_index
             )
         })?;
-        // Term-ledger roots have no `block_set` before migration. A tx included after the
-        // migrated tip has `expiry_height = anchor height + tx_anchor_expiry_depth`, which is at
-        // least its inclusion height, so with this cap its root stays until migration.
+        // Term-ledger roots have no `block_set` before migration. A root's `expiry_height` is the
+        // maximum over its txs, and each tx's expiry (anchor height + tx_anchor_expiry_depth) is at
+        // least its inclusion height. So with this cap a root stays until every tx that
+        // references it, included after the migrated tip, has migrated.
         let migrated_tip = self
             .block_index_guard
             .read()
