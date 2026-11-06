@@ -8519,6 +8519,16 @@ mod tests {
                 );
             }
         }
+
+        // The largest term fee that still prices is not the bad-term-fee variant.
+        let boundary = tx_with_term_fee(U256::MAX / PRECISION_SCALE);
+        if let Err(err) = validate(&boundary, activation) {
+            assert!(
+                !matches!(err, PreValidationError::InvalidTermFeeStructure { .. }),
+                "term_fee at the pricing bound must not be rejected as a bad term fee, got {err:?}"
+            );
+            assert!(!err.is_node_fault(), "got {err:?}");
+        }
     }
 
     /// Build a minimal `BlockTreeReadGuard` for tests that exercise the
