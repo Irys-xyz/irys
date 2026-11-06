@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["ext/"]
+exclude = ["ext/", "formal"]
 members = [
   "crates/actors",
   "crates/c",
