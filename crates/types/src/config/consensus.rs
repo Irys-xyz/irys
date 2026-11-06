@@ -647,10 +647,11 @@ impl ConsensusConfig {
         Self::compute_cost_per_chunk_per_epoch(annual_cost, self.chunk_size, self.epochs_per_year())
     }
 
-    /// Total ingress proof reward of a Publish tx at a given timestamp. Promotion splits it
-    /// equally across the tx's ingress proofs. From Delta it is `term_fee` x
-    /// `Delta::ingress_proof_reward_pool_percent`. Before Delta it is one
-    /// `immediate_tx_inclusion_reward_percent` share of `term_fee` for each required ingress proof.
+    /// Total ingress proof reward of a Publish tx at a given timestamp. Promotion splits it into
+    /// equal shares across the tx's ingress proofs; the remainder goes to the first proof. From
+    /// Delta it is `term_fee` x `Delta::ingress_proof_reward_pool_percent`. Before Delta it is
+    /// one `immediate_tx_inclusion_reward_percent` share of `term_fee` for each required ingress
+    /// proof.
     pub fn ingress_proof_reward_pool_at(
         &self,
         timestamp: UnixTimestamp,

@@ -153,7 +153,6 @@ pub async fn get_price(
             .into()),
         DataLedger::OneYear | DataLedger::ThirtyDay => {
             // Term ledger pricing — term-fee only, no perm_fee
-
             // Single lock scope: cascade gating + fee/pricing inputs from same snapshot
             let tree = state.block_tree.read();
             let epoch_snapshot = tree.canonical_epoch_snapshot();
