@@ -1784,9 +1784,7 @@ pub trait BlockProdStrategy {
                         required_proof_count: Some(
                             self.inner()
                                 .config
-                                .number_of_ingress_proofs_total_at(current_timestamp.to_secs())
-                                .try_into()
-                                .map_err(BlockProductionError::irrecoverable)?,
+                                .number_of_ingress_proofs_total_at(current_timestamp.to_secs()),
                         ),
                     },
                     // Term Submit Ledger

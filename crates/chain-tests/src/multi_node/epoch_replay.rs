@@ -55,7 +55,7 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
     let mut config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.num_partitions_per_slot = 2;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(2);
             consensus.epoch.num_blocks_in_epoch = 2;
             consensus.block_migration_depth = 1;
             // The pinned partition hashes assume the pre-Cascade ledger set.

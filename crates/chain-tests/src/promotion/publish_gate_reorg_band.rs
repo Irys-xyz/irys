@@ -130,7 +130,7 @@ async fn heavy_publish_gate_skips_reorg_band_submit_row() -> eyre::Result<()> {
     let config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             // Small depths so the finalized floor (tip - block_tree_depth) is
             // reachable quickly while leaving a reorg-mutable band above it.
             // Invariants (Config::validate): migration < tree_depth, and

@@ -36,8 +36,7 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
         c.chunk_size = chunk_size;
         c.num_chunks_in_partition = 10;
         c.num_chunks_in_recall_range = 2;
-        c.num_partitions_per_slot = 1;
-        c.num_partitions_per_term_ledger_slot = 1;
+        c.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
         c.epoch.num_blocks_in_epoch = 2;
         c.block_migration_depth = block_migration_depth;
         c.entropy_packing_iterations = 1_000;
@@ -631,8 +630,7 @@ async fn spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::
         c.chunk_size = 32;
         c.num_chunks_in_partition = 10;
         c.num_chunks_in_recall_range = 2;
-        c.num_partitions_per_slot = 1;
-        c.num_partitions_per_term_ledger_slot = 1;
+        c.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
         c.entropy_packing_iterations = 1_000;
         // 0.5 packed partitions × 2 chunks/recall-range × 1s block time pins
         // genesis difficulty to zero: every scanned chunk is a solution, so the
@@ -917,8 +915,7 @@ async fn heavy4_delta_partition_recovery_supply_uses_full_emission() -> eyre::Re
         c.chunk_size = 32;
         c.num_chunks_in_partition = 10;
         c.num_chunks_in_recall_range = 2;
-        c.num_partitions_per_slot = 1;
-        c.num_partitions_per_term_ledger_slot = 1;
+        c.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
         c.epoch.num_blocks_in_epoch = 2;
         c.block_migration_depth = block_migration_depth;
         c.entropy_packing_iterations = 1_000;
@@ -929,6 +926,7 @@ async fn heavy4_delta_partition_recovery_supply_uses_full_emission() -> eyre::Re
             activation_timestamp: UnixTimestamp::from_secs(1),
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
     });
     genesis_config.storage.num_writes_before_sync = 1;

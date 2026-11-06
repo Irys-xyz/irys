@@ -1136,7 +1136,7 @@ mod tests {
         config.chunk_size = 32;
         config.num_chunks_in_partition = 10;
         config.num_chunks_in_recall_range = 2;
-        config.num_partitions_per_slot = 1;
+        config.num_partitions_per_slot = crate::storage_pricing::ReplicaCount::new(1);
         config.entropy_packing_iterations = 1_000;
         config.block_migration_depth = 1;
 

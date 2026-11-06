@@ -76,11 +76,11 @@ async fn genesis_test() {
 
         assert_eq!(
             pub_slots[0].partitions.len() as u64,
-            config.consensus.num_partitions_per_slot
+            config.consensus.num_partitions_per_slot.get()
         );
         assert_eq!(
             sub_slots[0].partitions.len() as u64,
-            config.consensus.num_partitions_per_slot
+            config.consensus.num_partitions_per_slot.get()
         );
 
         // Verify data partition assignments match _PUBLISH_ ledger slots
@@ -104,7 +104,7 @@ async fn genesis_test() {
             }
             assert_eq!(
                 slot.partitions.len(),
-                config.consensus.num_partitions_per_slot as usize
+                config.consensus.num_partitions_per_slot.get() as usize
             );
         }
 
@@ -129,7 +129,7 @@ async fn genesis_test() {
             }
             assert_eq!(
                 slot.partitions.len(),
-                config.consensus.num_partitions_per_slot as usize
+                config.consensus.num_partitions_per_slot.get() as usize
             );
         }
     }
@@ -186,7 +186,7 @@ async fn add_slots_test() {
         chunk_size: 32,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
-        num_partitions_per_slot: 1,
+        num_partitions_per_slot: irys_types::ReplicaCount::new(1),
         block_migration_depth: 1, // Testnet / single node config
         chain_id: 333,
         epoch: EpochConfig {
@@ -287,8 +287,8 @@ async fn unique_addresses_per_slot_test() {
         chunk_size: 32,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
-        num_partitions_per_slot: 10, // <- relevant to this test
-        block_migration_depth: 1,    // Testnet / single node config
+        num_partitions_per_slot: irys_types::ReplicaCount::new(10), // <- relevant to this test
+        block_migration_depth: 1,                                   // Testnet / single node config
         chain_id: 333,
         epoch: EpochConfig {
             capacity_scalar: 100,
@@ -421,7 +421,7 @@ async fn new_ledger_activation_slots_test(
         chunk_size: 32,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
-        num_partitions_per_slot: 1,
+        num_partitions_per_slot: irys_types::ReplicaCount::new(1),
         block_migration_depth: 1,
         chain_id: 333,
         epoch: EpochConfig {
@@ -444,6 +444,8 @@ async fn new_ledger_activation_slots_test(
                 activation_timestamp: UnixTimestamp::from_secs(0),
                 initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
                 capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+                ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(
+                ),
             }),
             ..ConsensusConfig::testing().hardforks
         },
@@ -509,7 +511,7 @@ async fn new_ledger_activation_slots_test(
         for (slot_index, slot) in slots.iter().enumerate() {
             assert_eq!(
                 slot.partitions.len() as u64,
-                config.consensus.num_partitions_per_slot,
+                config.consensus.num_partitions_per_slot.get(),
                 "{:?} slot {} must have its partitions assigned in the same epoch",
                 ledger,
                 slot_index
@@ -635,7 +637,7 @@ async fn partition_expiration_and_repacking_test() {
         chunk_size,
         num_chunks_in_partition: chunk_count,
         num_chunks_in_recall_range: 2,
-        num_partitions_per_slot: 1,
+        num_partitions_per_slot: irys_types::ReplicaCount::new(1),
         block_migration_depth: 1,
         epoch: EpochConfig {
             capacity_scalar: 100,
@@ -1187,7 +1189,7 @@ async fn partitions_assignment_determinism_test() {
         chunk_size,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
-        num_partitions_per_slot: 1,
+        num_partitions_per_slot: irys_types::ReplicaCount::new(1),
         block_migration_depth: 1, // Testnet / single node config
         chain_id: 1,
         epoch: EpochConfig {

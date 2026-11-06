@@ -80,7 +80,7 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
         c.chunk_size = 32;
         c.num_chunks_in_partition = 10;
         c.num_chunks_in_recall_range = 2;
-        c.num_partitions_per_slot = 1;
+        c.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
         c.block_migration_depth = 1;
         c.mempool.tx_anchor_expiry_depth = 3;
         c.mempool.ingress_proof_anchor_expiry_depth = anchor_expiry_depth;

@@ -31,7 +31,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         num_chunks_in_partition: 20,
         block_migration_depth: 1,
         num_chunks_in_recall_range: 5,
-        num_partitions_per_slot: 1,
+        num_partitions_per_slot: irys_types::ReplicaCount::new(1),
         entropy_packing_iterations: 1,
         ..node_config.consensus_config()
     });

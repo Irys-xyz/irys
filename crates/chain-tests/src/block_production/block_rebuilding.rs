@@ -473,6 +473,7 @@ async fn heavy_solution_discarded_wrong_hash_order() -> eyre::Result<()> {
         activation_timestamp: UnixTimestamp::from_secs(1),
         initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
         capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
     };
     let config = NodeConfig::testing().with_consensus(|consensus| {
         consensus.chunk_size = 32;

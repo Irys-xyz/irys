@@ -29,8 +29,14 @@ use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
-use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
-use irys_types::storage_pricing::{Amount, calculate_perm_fee_from_config};
+use irys_types::storage_pricing::PRECISION_SCALE;
+#[cfg(test)]
+use irys_types::storage_pricing::ReplicaCount;
+#[cfg(test)]
+use irys_types::storage_pricing::{
+    Amount, calculate_perm_fee_from_config,
+    phantoms::{Irys, NetworkFee},
+};
 use irys_types::{BlockHash, EvmBlockHash, H256List, LedgerChunkRange};
 use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
@@ -38,7 +44,7 @@ use irys_types::{
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
     SealedBlock, SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
     calculate_difficulty, ensure_proof_layout, expected_chunk_byte_range,
-    hardfork_config::{Cascade, ForEpoch, IrysHardforkConfig},
+    hardfork_config::{Activation, Cascade, ForEpoch, IrysHardforkConfig},
     next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, validate_path_byte_range,
@@ -1075,6 +1081,14 @@ pub enum ValidationError {
         reason: String,
     },
 
+    /// Commitment transaction fee is below the minimum commitment fee
+    #[error("Commitment transaction {tx_id} at position {position} has insufficient fee: {reason}")]
+    CommitmentFeeInsufficient {
+        tx_id: H256,
+        position: usize,
+        reason: String,
+    },
+
     /// Commitment transaction version is below minimum required after hardfork activation
     #[error(
         "Commitment {tx_id} at position {position} has version {version}, minimum required is {minimum}"
@@ -1262,6 +1276,7 @@ impl ValidationError {
             | Self::RecallRangeInvalid(_)
             | Self::ShadowTransactionInvalid(_)
             | Self::CommitmentValueInvalid { .. }
+            | Self::CommitmentFeeInsufficient { .. }
             | Self::CommitmentVersionInvalid { .. }
             | Self::CommitmentTypeNotAllowed { .. }
             | Self::CommitmentOrderingFailed(_)
@@ -1327,6 +1342,7 @@ impl ValidationError {
             | Self::RecallRangeInvalid(_)
             | Self::ShadowTransactionInvalid(_)
             | Self::CommitmentValueInvalid { .. }
+            | Self::CommitmentFeeInsufficient { .. }
             | Self::CommitmentVersionInvalid { .. }
             | Self::CommitmentTypeNotAllowed { .. }
             | Self::CommitmentOrderingFailed(_)
@@ -1595,6 +1611,7 @@ impl ValidationError {
             Self::RecallRangeInvalid(_) => "recall_range_invalid",
             Self::ShadowTransactionInvalid(_) => "shadow_tx_invalid",
             Self::CommitmentValueInvalid { .. } => "commitment_value_invalid",
+            Self::CommitmentFeeInsufficient { .. } => "commitment_fee_insufficient",
             Self::CommitmentVersionInvalid { .. } => "commitment_version_invalid",
             Self::CommitmentTypeNotAllowed { .. } => "commitment_type_not_allowed",
             Self::CommitmentOrderingFailed(_) => "commitment_ordering_failed",
@@ -1707,7 +1724,7 @@ fn expected_ledger_total_chunks(
 fn publish_ingress_proof_count_is_valid(
     publish_ledger: &DataTransactionLedger,
     publish_tx_count: usize,
-    number_of_ingress_proofs_total: u64,
+    number_of_ingress_proofs_total: u8,
 ) -> Result<(), PreValidationError> {
     let Some(proofs) = &publish_ledger.proofs else {
         return Ok(());
@@ -1717,12 +1734,9 @@ fn publish_ingress_proof_count_is_valid(
         proof_count,
         tx_count: publish_tx_count,
     };
-    // Convert N to usize once and multiply with checked arithmetic. Overflow is
-    // unreachable for a valid block (tx count and N are bounded), so fail closed
-    // as a mismatch rather than relying on an `as` cast that could wrap.
-    let Ok(n) = usize::try_from(number_of_ingress_proofs_total) else {
-        return Err(mismatch());
-    };
+    // Multiply with checked arithmetic. Overflow is unreachable for a valid block
+    // (tx count and N are bounded), so fail closed as a mismatch.
+    let n = usize::from(number_of_ingress_proofs_total);
     let Some(expected) = publish_tx_count.checked_mul(n) else {
         return Err(mismatch());
     };
@@ -6264,7 +6278,7 @@ pub async fn commitment_txs_are_valid(
         }
     }
 
-    // Validate that all commitment transactions have correct values
+    // Validate that all commitment transactions have correct values and fees
     for (idx, tx) in commitment_txs.iter().enumerate() {
         tx.validate_value(&config.consensus).map_err(|e| {
             error!(
@@ -6274,6 +6288,21 @@ pub async fn commitment_txs_are_valid(
                 e
             );
             ValidationError::CommitmentValueInvalid {
+                tx_id: tx.id(),
+                position: idx,
+                reason: e.to_string(),
+            }
+        })?;
+
+        // Same rule as mempool ingress, so a block cannot carry what the mempool rejects.
+        tx.validate_fee(&config.consensus).map_err(|e| {
+            error!(
+                "Commitment transaction {} at position {} has insufficient fee: {}",
+                tx.id(),
+                idx,
+                e
+            );
+            ValidationError::CommitmentFeeInsufficient {
                 tx_id: tx.id(),
                 position: idx,
                 reason: e.to_string(),
@@ -6425,34 +6454,35 @@ pub async fn commitment_txs_are_valid(
     Ok(())
 }
 
-/// Helper function to calculate permanent storage fee using a specific EMA snapshot
-/// This includes base network fee + ingress proof rewards
-pub fn calculate_perm_storage_total_fee(
+/// Test oracle: Publish perm fee priced on an explicit reward term fee. Production code
+/// uses `Config::required_publish_perm_fee_at`.
+#[cfg(test)]
+fn calculate_perm_storage_total_fee(
     bytes_to_store: u64,
     term_fee: U256,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
     timestamp_secs: UnixTimestamp,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
-    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
     calculate_perm_fee_from_config(
         bytes_to_store,
         &config.consensus,
-        number_of_ingress_proofs_total,
+        config.publish_replica_count_at(timestamp_secs),
+        config.ingress_proof_reward_pool_at(timestamp_secs, term_fee)?,
         ema_snapshot.ema_for_public_pricing(),
-        term_fee,
         timestamp_secs,
     )
 }
 
-/// Helper function to calculate term storage fee using a specific EMA snapshot
-/// Uses the same replica count as permanent storage but for the specified number of epochs
-pub fn calculate_term_storage_base_network_fee(
+/// Test oracle: term fee with explicit epochs and replica count, so tests can vary the inputs
+/// that production code picks in `Config::required_term_fee_at`.
+#[cfg(test)]
+fn calculate_term_storage_base_network_fee(
     bytes_to_store: u64,
     epochs_for_storage: u64,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
-    replica_count: u64,
+    replica_count: ReplicaCount,
     timestamp_secs: UnixTimestamp,
 ) -> eyre::Result<U256> {
     irys_types::storage_pricing::calculate_term_fee(
@@ -6496,30 +6526,36 @@ fn validate_publish_price(
     block_ema: &EmaSnapshot,
     config: &Config,
 ) -> Result<(), PreValidationError> {
-    let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-        block_height,
-        config.consensus.epoch.num_blocks_in_epoch,
-        config.consensus.epoch.submit_ledger_epoch_length,
-    );
-
-    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
-    let expected_term_fee = calculate_term_storage_base_network_fee(
-        tx.data_size,
-        epochs_for_storage,
-        block_ema,
-        config,
-        number_of_ingress_proofs_total,
-        timestamp_secs,
-    )
-    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-    let expected_perm_fee = calculate_perm_storage_total_fee(
-        tx.data_size,
-        expected_term_fee,
-        block_ema,
-        config,
-        timestamp_secs,
-    )
-    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    let expected_term_fee = config
+        .required_term_fee_at(
+            DataLedger::Publish,
+            timestamp_secs,
+            block_height,
+            tx.data_size,
+            block_ema.ema_for_public_pricing(),
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    // From Delta the proof reward pool is priced on the tx's own term fee. This bound keeps that
+    // arithmetic in range for any pool percent <= 1, so the perm fee errors have local inputs only.
+    if matches!(
+        config.consensus.hardforks.delta_for_block(timestamp_secs),
+        Activation::Active(_)
+    ) && tx.term_fee.get() > U256::MAX / PRECISION_SCALE
+    {
+        return Err(PreValidationError::InvalidTermFeeStructure {
+            tx_id: tx.id,
+            reason: "term_fee is too large to price the ingress proof reward pool".to_string(),
+        });
+    }
+    let expected_perm_fee = config
+        .required_publish_perm_fee_at(
+            timestamp_secs,
+            tx.data_size,
+            block_ema.ema_for_public_pricing(),
+            tx.term_fee.get(),
+            expected_term_fee,
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
     // Validate perm_fee is at least the expected amount
     check_perm_fee_sufficient(tx.id, tx.perm_fee, expected_perm_fee.amount)?;
@@ -6543,16 +6579,13 @@ fn validate_publish_price(
         }
     })?;
 
-    PublishFeeCharges::new(
-        actual_perm_fee,
-        actual_term_fee,
-        &config.consensus,
-        number_of_ingress_proofs_total,
-    )
-    .map_err(|e| PreValidationError::InvalidPermFeeStructure {
-        tx_id: tx.id,
-        reason: e.to_string(),
-    })?;
+    config
+        .ingress_proof_reward_pool_at(timestamp_secs, actual_term_fee.get())
+        .and_then(|pool| PublishFeeCharges::new(actual_perm_fee, pool))
+        .map_err(|e| PreValidationError::InvalidPermFeeStructure {
+            tx_id: tx.id,
+            reason: e.to_string(),
+        })?;
     Ok(())
 }
 
@@ -6570,32 +6603,20 @@ fn validate_term_only_price(
         return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
     }
 
-    let cascade = config
-        .consensus
-        .hardforks
-        .cascade
-        .as_ref()
-        .ok_or(PreValidationError::CascadeNotConfigured { tx_id: tx.id })?;
-    let epoch_length = match ledger {
-        DataLedger::OneYear => cascade.one_year_epoch_length,
-        DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-        DataLedger::Publish | DataLedger::Submit => unreachable!(),
-    };
-    let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-        block_height,
-        config.consensus.epoch.num_blocks_in_epoch,
-        epoch_length,
-    );
+    // The helper fails on a missing Cascade config too; check first to keep the typed error.
+    if config.consensus.hardforks.cascade.is_none() {
+        return Err(PreValidationError::CascadeNotConfigured { tx_id: tx.id });
+    }
 
-    let expected_term_fee = calculate_term_storage_base_network_fee(
-        tx.data_size,
-        epochs_for_storage,
-        block_ema,
-        config,
-        config.consensus.num_partitions_per_term_ledger_slot,
-        timestamp_secs,
-    )
-    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    let expected_term_fee = config
+        .required_term_fee_at(
+            ledger,
+            timestamp_secs,
+            block_height,
+            tx.data_size,
+            block_ema.ema_for_public_pricing(),
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
     let actual_term_fee = tx.term_fee;
     if actual_term_fee < expected_term_fee {
@@ -7270,7 +7291,7 @@ pub async fn data_txs_are_valid(
             let timestamp_secs = block.timestamp_secs();
             let number_of_ingress_proofs_total =
                 config.number_of_ingress_proofs_total_at(timestamp_secs);
-            publish_txs.len() * number_of_ingress_proofs_total as usize
+            publish_txs.len() * usize::from(number_of_ingress_proofs_total)
         };
 
         if proofs_list.len() != expected_proof_count {
@@ -7302,7 +7323,7 @@ pub async fn data_txs_are_valid(
 
             let timestamp_secs = block.timestamp_secs();
             let mut expected_assigned_proofs =
-                config.number_of_ingress_proofs_from_assignees_at(timestamp_secs) as usize;
+                usize::from(config.number_of_ingress_proofs_from_assignees_at(timestamp_secs));
 
             // While the protocol can require X number of assigned proofs, if there
             // is less than that many assigned to the slot, it still needs to function.
@@ -7571,9 +7592,9 @@ pub async fn data_txs_are_valid(
             let timestamp_secs = block.timestamp_secs();
             let number_of_ingress_proofs_total =
                 config.number_of_ingress_proofs_total_at(timestamp_secs);
-            if tx_proofs.len() != number_of_ingress_proofs_total as usize {
+            if tx_proofs.len() != usize::from(number_of_ingress_proofs_total) {
                 return Err(PreValidationError::IngressProofCountMismatch {
-                    expected: number_of_ingress_proofs_total as usize,
+                    expected: usize::from(number_of_ingress_proofs_total),
                     actual: tx_proofs.len(),
                 });
             }
@@ -8106,6 +8127,410 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tracing::{debug, info};
 
+    /// Term ledgers (OneYear/ThirtyDay) store `num_partitions_per_slot` replicas, so
+    /// their term fee must cover that many replicas.
+    #[rstest::rstest]
+    #[case::one_year(DataLedger::OneYear)]
+    #[case::thirty_day(DataLedger::ThirtyDay)]
+    fn term_only_price_requires_fee_for_slot_replica_count(#[case] ledger: DataLedger) {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().num_partitions_per_slot = ReplicaCount::new(2);
+        let config = Config::new_with_random_peer_id(node_config);
+        let header = IrysBlockHeader::new_mock_header();
+        let ema = EmaSnapshot::genesis(&header);
+        let timestamp = header.timestamp_secs();
+        let cascade = config.consensus.hardforks.cascade.as_ref().unwrap();
+        let epoch_length = match ledger {
+            DataLedger::OneYear => cascade.one_year_epoch_length,
+            _ => cascade.thirty_day_epoch_length,
+        };
+        let epochs = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            header.height,
+            config.consensus.epoch.num_blocks_in_epoch,
+            epoch_length,
+        );
+        // Large enough that the fee is above the minimum term fee and scales with replicas.
+        let data_size = 1 << 50;
+        let fee_for_replicas = |replicas| {
+            calculate_term_storage_base_network_fee(
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                ReplicaCount::new(replicas),
+                timestamp,
+            )
+            .unwrap()
+        };
+
+        assert!(fee_for_replicas(2) > fee_for_replicas(1));
+
+        let mut tx = DataTransactionHeader::new(&config.consensus);
+        tx.ledger_id = ledger as u32;
+        tx.data_size = data_size;
+        tx.perm_fee = None;
+
+        tx.term_fee = BoundedFee::new(fee_for_replicas(1));
+        assert!(matches!(
+            validate_term_only_price(&tx, ledger, header.height, timestamp, &ema, &config),
+            Err(PreValidationError::InsufficientTermFee { .. })
+        ));
+
+        tx.term_fee = BoundedFee::new(fee_for_replicas(2));
+        validate_term_only_price(&tx, ledger, header.height, timestamp, &ema, &config)
+            .expect("fee for num_partitions_per_slot replicas is sufficient");
+    }
+
+    /// A term fee priced on the epochs left in the height cycle is enough before Delta.
+    /// From Delta it must cover the full `epoch_length`, which is how long a slot is kept.
+    #[rstest::rstest]
+    #[case::one_year(DataLedger::OneYear)]
+    #[case::thirty_day(DataLedger::ThirtyDay)]
+    fn term_only_price_requires_full_term_from_delta(#[case] ledger: DataLedger) {
+        use irys_types::hardfork_config::Delta;
+
+        let mut header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let cascade = config.consensus.hardforks.cascade.as_ref().unwrap();
+        let epoch_length = match ledger {
+            DataLedger::OneYear => cascade.one_year_epoch_length,
+            _ => cascade.thirty_day_epoch_length,
+        };
+        // Last block of a cycle: the cycle remainder is one epoch.
+        let blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
+        header.height = blocks_in_epoch * epoch_length - 1;
+        let cycle_epochs = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            header.height,
+            blocks_in_epoch,
+            epoch_length,
+        );
+        assert_eq!(cycle_epochs, 1);
+        assert!(epoch_length > cycle_epochs);
+        let ema = EmaSnapshot::genesis(&header);
+        let data_size = 1 << 50;
+        let fee_for_epochs = |epochs, timestamp| {
+            calculate_term_storage_base_network_fee(
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                config.consensus.num_partitions_per_slot,
+                timestamp,
+            )
+            .unwrap()
+        };
+        let mut tx = DataTransactionHeader::new(&config.consensus);
+        tx.ledger_id = ledger as u32;
+        tx.data_size = data_size;
+        tx.perm_fee = None;
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_term_only_price(tx, ledger, header.height, timestamp, &ema, &config)
+        };
+
+        tx.term_fee = BoundedFee::new(fee_for_epochs(cycle_epochs, before_delta));
+        validate(&tx, before_delta).expect("before Delta, the cycle remainder is sufficient");
+
+        tx.term_fee = BoundedFee::new(fee_for_epochs(cycle_epochs, activation));
+        assert!(matches!(
+            validate(&tx, activation),
+            Err(PreValidationError::InsufficientTermFee { .. })
+        ));
+
+        tx.term_fee = BoundedFee::new(fee_for_epochs(epoch_length, activation));
+        validate(&tx, activation).expect("from Delta, the full term is sufficient");
+    }
+
+    /// Publish fees pay for the ingress proof total before Delta and for
+    /// `num_partitions_per_slot` replicas from Delta.
+    #[test]
+    fn publish_price_requires_fee_for_slot_replica_count_from_delta() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.num_partitions_per_slot = ReplicaCount::new(2);
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        // Large enough that both fees are above the minimum term fee and scale with replicas.
+        let data_size = 1 << 50;
+        let tx_priced_for = |replicas, timestamp| {
+            let epochs = config.term_storage_epochs_at(
+                timestamp,
+                header.height,
+                config.consensus.epoch.submit_ledger_epoch_length,
+            );
+            let term_fee = calculate_term_storage_base_network_fee(
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                ReplicaCount::new(replicas),
+                timestamp,
+            )
+            .unwrap();
+            let perm_fee = calculate_perm_fee_from_config(
+                data_size,
+                &config.consensus,
+                ReplicaCount::new(replicas),
+                config
+                    .ingress_proof_reward_pool_at(timestamp, term_fee)
+                    .unwrap(),
+                ema.ema_for_public_pricing(),
+                timestamp,
+            )
+            .unwrap();
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = data_size;
+            tx.term_fee = BoundedFee::new(term_fee);
+            tx.perm_fee = Some(BoundedFee::new(perm_fee.amount));
+            tx
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        validate(&tx_priced_for(1, before_delta), before_delta)
+            .expect("before Delta, a fee for the ingress proof total is sufficient");
+        assert!(matches!(
+            validate(&tx_priced_for(1, activation), activation),
+            Err(PreValidationError::InsufficientPermFee { .. })
+        ));
+        validate(&tx_priced_for(2, activation), activation)
+            .expect("from Delta, a fee for num_partitions_per_slot replicas is sufficient");
+
+        // Perm fee for slot replicas, term fee for the ingress proof total: the term check rejects it.
+        let mut tx = tx_priced_for(2, activation);
+        tx.term_fee = tx_priced_for(1, activation).term_fee;
+        assert!(matches!(
+            validate(&tx, activation),
+            Err(PreValidationError::InsufficientTermFee { .. })
+        ));
+    }
+
+    /// The fee split takes the proof rewards from the tx's own `term_fee`. Before Delta the
+    /// perm fee only covers rewards on the expected term fee. From Delta it must cover
+    /// rewards on the tx's own term fee.
+    #[test]
+    fn publish_price_requires_rewards_on_actual_term_fee_from_delta() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        let data_size = 1 << 50;
+        let perm_fee_for_term_fee = |term_fee, timestamp| {
+            calculate_perm_storage_total_fee(data_size, term_fee, &ema, &config, timestamp)
+                .unwrap()
+                .amount
+        };
+        let tx_overpaying_term_fee = |timestamp| {
+            let epochs = config.term_storage_epochs_at(
+                timestamp,
+                header.height,
+                config.consensus.epoch.submit_ledger_epoch_length,
+            );
+            let expected_term_fee = calculate_term_storage_base_network_fee(
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                config.publish_replica_count_at(timestamp),
+                timestamp,
+            )
+            .unwrap();
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = data_size;
+            tx.term_fee = BoundedFee::new(expected_term_fee.saturating_mul(U256::from(3)));
+            (tx, expected_term_fee)
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        let (mut tx, expected_term_fee) = tx_overpaying_term_fee(before_delta);
+        tx.perm_fee = Some(BoundedFee::new(perm_fee_for_term_fee(
+            expected_term_fee,
+            before_delta,
+        )));
+        validate(&tx, before_delta)
+            .expect("before Delta, a perm fee priced on the expected term fee is sufficient");
+
+        let (mut tx, expected_term_fee) = tx_overpaying_term_fee(activation);
+        tx.perm_fee = Some(BoundedFee::new(perm_fee_for_term_fee(
+            expected_term_fee,
+            activation,
+        )));
+        assert!(matches!(
+            validate(&tx, activation),
+            Err(PreValidationError::InsufficientPermFee { .. })
+        ));
+
+        tx.perm_fee = Some(BoundedFee::new(perm_fee_for_term_fee(
+            tx.term_fee.get(),
+            activation,
+        )));
+        validate(&tx, activation)
+            .expect("from Delta, a perm fee priced on the actual term fee is sufficient");
+    }
+
+    /// From Delta the ingress proofs share one inclusion reward pool, so a perm fee of the
+    /// base storage cost plus one inclusion reward is sufficient. Before Delta the perm fee
+    /// must add one inclusion reward for each required ingress proof.
+    #[test]
+    fn publish_price_requires_one_proof_reward_pool_from_delta() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let replicas = ReplicaCount::new(3);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        // Same replica count on both sides of Delta, so only the proof reward pool changes.
+        consensus.num_partitions_per_slot = replicas;
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 3;
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        let data_size = 1 << 50;
+        // Perm fee = base storage cost + one inclusion reward on the tx's term fee.
+        let tx_with_one_reward_share = |timestamp| {
+            let epochs = config.term_storage_epochs_at(
+                timestamp,
+                header.height,
+                config.consensus.epoch.submit_ledger_epoch_length,
+            );
+            let term_fee = calculate_term_storage_base_network_fee(
+                data_size, epochs, &ema, &config, replicas, timestamp,
+            )
+            .unwrap();
+            let inclusion_reward =
+                TermFeeCharges::new(BoundedFee::new(term_fee), &config.consensus)
+                    .unwrap()
+                    .block_producer_reward;
+            let perm_fee = calculate_perm_fee_from_config(
+                data_size,
+                &config.consensus,
+                replicas,
+                inclusion_reward,
+                ema.ema_for_public_pricing(),
+                timestamp,
+            )
+            .unwrap();
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = data_size;
+            tx.term_fee = BoundedFee::new(term_fee);
+            tx.perm_fee = Some(BoundedFee::new(perm_fee.amount));
+            tx
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        assert!(matches!(
+            validate(&tx_with_one_reward_share(before_delta), before_delta),
+            Err(PreValidationError::InsufficientPermFee { .. })
+        ));
+        validate(&tx_with_one_reward_share(activation), activation)
+            .expect("from Delta, one inclusion reward for all proofs is sufficient");
+    }
+
+    /// From Delta the perm fee is priced on the tx's own term fee. A term fee too large for
+    /// that arithmetic is a peer fault, never a node fault.
+    #[test]
+    fn publish_price_rejects_unpriceable_term_fee_as_peer_fault() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        let tx_with_term_fee = |term_fee| {
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = 1024;
+            tx.term_fee = BoundedFee::new(term_fee);
+            tx.perm_fee = Some(BoundedFee::new(U256::MAX));
+            tx
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        for term_fee in [U256::MAX, U256::MAX / PRECISION_SCALE + U256::one()] {
+            let tx = tx_with_term_fee(term_fee);
+            let err = validate(&tx, activation).unwrap_err();
+            assert!(
+                matches!(err, PreValidationError::InvalidTermFeeStructure { .. }),
+                "from Delta, term_fee {term_fee} must be rejected as a bad term fee, got {err:?}"
+            );
+            assert!(!err.is_node_fault());
+
+            if let Err(err) = validate(&tx, before_delta) {
+                assert!(
+                    !err.is_node_fault(),
+                    "before Delta, term_fee {term_fee} must not be a node fault, got {err:?}"
+                );
+            }
+        }
+
+        // The largest term fee that still prices is not the bad-term-fee variant.
+        let boundary = tx_with_term_fee(U256::MAX / PRECISION_SCALE);
+        if let Err(err) = validate(&boundary, activation) {
+            assert!(
+                !matches!(err, PreValidationError::InvalidTermFeeStructure { .. }),
+                "term_fee at the pricing bound must not be rejected as a bad term fee, got {err:?}"
+            );
+            assert!(!err.is_node_fault(), "got {err:?}");
+        }
+    }
+
     /// Build a minimal `BlockTreeReadGuard` for tests that exercise the
     /// `block_index` fast path of `poa_is_valid` — the helper's fallback is
     /// unreachable when `parent_height` is present in the index, so the
@@ -8227,76 +8652,6 @@ mod tests {
         // the generator short-circuits on an empty list, so it cannot panic.
         let none = ledger_with_tx(DataLedger::Publish, tx_id);
         assert!(publish_ingress_proof_count_is_valid(&none, 1, 3).is_ok());
-    }
-
-    /// `prevalidate_block` sizes N at the block's OWN timestamp
-    /// (`number_of_ingress_proofs_total_at(block.timestamp_secs())`), matching
-    /// block production and `data_txs_are_valid`. This must hold at an N-changing
-    /// hardfork boundary in BOTH directions: the first block after the fork carries
-    /// a proof list sized by the block's (new) N, so it passes the guard when N is
-    /// taken at the block timestamp — and would be wrongly rejected if N were taken
-    /// at the parent (pre-fork) timestamp.
-    ///
-    /// This locks in the guard's arithmetic under each N-source; the call site's
-    /// choice of `block.timestamp_secs()` is covered end-to-end elsewhere.
-    #[test]
-    fn ingress_proof_count_guard_uses_block_timestamp_across_hardfork() {
-        use irys_types::UnixTimestamp;
-        use irys_types::hardfork_config::{FrontierParams, IrysHardforkConfig, NextNameTBD};
-
-        // Parent sits just before activation; the boundary block sits at
-        // activation, so parent-N and block-N differ.
-        let activation = UnixTimestamp::from_secs(1_000);
-        let parent_ts = UnixTimestamp::from_secs(999);
-        let block_ts = activation;
-        let tx_id = H256::from([7_u8; 32]);
-
-        // Exercise an N increase and an N decrease across the same boundary.
-        for (frontier_n, fork_n) in [(1_u64, 3_u64), (3_u64, 1_u64)] {
-            let hardforks = IrysHardforkConfig {
-                frontier: FrontierParams {
-                    number_of_ingress_proofs_total: frontier_n,
-                    number_of_ingress_proofs_from_assignees: 0,
-                },
-                next_name_tbd: Some(NextNameTBD {
-                    activation_timestamp: activation,
-                    number_of_ingress_proofs_total: fork_n,
-                    number_of_ingress_proofs_from_assignees: 0,
-                }),
-                aurora: None,
-                borealis: None,
-                cascade: None,
-                delta: None,
-                echo: None,
-            };
-
-            let parent_n = hardforks.number_of_ingress_proofs_total_at(parent_ts);
-            let block_n = hardforks.number_of_ingress_proofs_total_at(block_ts);
-            assert_eq!(parent_n, frontier_n);
-            assert_eq!(block_n, fork_n);
-            assert_ne!(parent_n, block_n, "boundary must actually change N");
-
-            // Honest boundary block: one publish tx, proof list and
-            // `required_proof_count` sized by the block's N (what the producer
-            // emits at `block_ts`).
-            let honest =
-                publish_ledger_with_proofs(vec![tx_id], block_n as usize, Some(block_n as u8));
-
-            // Sized at the block timestamp (the call-site's choice): passes.
-            assert!(
-                publish_ingress_proof_count_is_valid(&honest, 1, block_n).is_ok(),
-                "honest boundary block must pass when N is taken at the block timestamp \
-                 (frontier={frontier_n}, fork={fork_n})",
-            );
-
-            // Sized at the parent timestamp (the rejected alternative): would
-            // false-reject the same honest block because parent-N != block-N.
-            assert!(
-                publish_ingress_proof_count_is_valid(&honest, 1, parent_n).is_err(),
-                "parent-timestamp N would false-reject an honest boundary block \
-                 (frontier={frontier_n}, fork={fork_n})",
-            );
-        }
     }
 
     /// A commitment tx carrying a foreign `chain_id` is rejected by prevalidation:
@@ -8579,7 +8934,7 @@ mod tests {
             chunk_size,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
-            num_partitions_per_slot: 1,
+            num_partitions_per_slot: irys_types::ReplicaCount::new(1),
             entropy_packing_iterations: 1_000,
             block_migration_depth: 1,
             ..node_config.consensus_config()
@@ -10688,7 +11043,6 @@ mod commitment_version_tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(activation_secs),
                     minimum_commitment_tx_version: min_version,
@@ -10709,7 +11063,6 @@ mod commitment_version_tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: None,
                 borealis: None,
                 cascade: None,
@@ -11210,7 +11563,7 @@ mod ingress_proof_local_bytes_tests {
             epochs,
             &parent_ema,
             &config,
-            config.number_of_ingress_proofs_total_at(timestamp),
+            config.publish_replica_count_at(timestamp),
             timestamp,
         )
         .expect("term fee");

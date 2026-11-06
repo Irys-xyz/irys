@@ -185,8 +185,8 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
 ///
 /// This test closes that gap by configuring the **validator's** consensus
 /// with `immediate_tx_inclusion_reward_percent = 0`. That zeroes the
-/// ingress-proof reward branch inside `PublishFeeCharges::new`, so:
-///   - `per_ingress_reward = 0`, `ingress_proof_reward = 0`
+/// ingress proof reward pool passed to `PublishFeeCharges::new`, so:
+///   - `ingress_proof_reward = 0`
 ///   - `perm_fee_amount >= ingress_proof_reward` is trivially satisfied for
 ///     any non-zero perm_fee.
 ///   - `perm_fee_treasury = perm_fee_amount` remains > 0.
@@ -550,14 +550,14 @@ async fn block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result
     let price_before_the_interval = genesis_node.get_ema_snapshot(&block.block_hash).unwrap();
 
     // Calculate expected fees using hardfork params from config to match validation behavior
-    let number_of_ingress_proofs_total = genesis_node
+    let replica_count = genesis_node
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         price_before_the_interval.ema_for_public_pricing(),
         UnixTimestamp::from_secs(0),
     )?;
@@ -565,9 +565,12 @@ async fn block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
+        genesis_node
+            .node_ctx
+            .config
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?,
         price_before_the_interval.ema_for_public_pricing(),
-        expected_term_fee,
         UnixTimestamp::from_secs(0),
     )?;
 
@@ -677,14 +680,14 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
     let price_before_the_interval = genesis_node.get_ema_snapshot(&block.block_hash).unwrap();
 
     // Calculate expected fees using hardfork params from config to match validation behavior
-    let number_of_ingress_proofs_total = genesis_node
+    let replica_count = genesis_node
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         price_before_the_interval.ema_for_public_pricing(),
         UnixTimestamp::from_secs(0),
     )?
@@ -694,9 +697,12 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
+        genesis_node
+            .node_ctx
+            .config
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?,
         price_before_the_interval.ema_for_public_pricing(),
-        expected_term_fee,
         UnixTimestamp::from_secs(0),
     )?;
 

@@ -90,6 +90,7 @@ pub(crate) fn create_consensus_config_from_response(
     config.num_partitions_per_slot = resp
         .num_partitions_per_slot
         .parse()
+        .map(irys_types::ReplicaCount::new)
         .unwrap_or(config.num_partitions_per_slot);
     config.num_chunks_in_partition = resp
         .num_chunks_in_partition

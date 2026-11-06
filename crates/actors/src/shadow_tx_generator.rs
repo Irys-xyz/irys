@@ -6,6 +6,7 @@ use irys_reth::shadow_tx::{
 use irys_types::{
     BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, H256,
     IngressProofsList, IrysAddress, U256, UnixTimestamp,
+    hardfork_config::Activation,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
 };
 use reth::revm::primitives::ruint::Uint;
@@ -113,10 +114,14 @@ pub struct ShadowTxGenerator<'a> {
     pub treasury_reward_share: U256,
     pub solution_hash: &'a H256,
     pub config: &'a ConsensusConfig,
-    /// Required ingress proofs per publish tx (N), taken at the block's own
-    /// timestamp. Block production and validation size the block's proof list
-    /// by this same N, so the generator must slice and price with it too.
-    number_of_ingress_proofs_total: u64,
+    /// The block's own timestamp. The ingress proof reward pool of a Publish tx
+    /// included in this block is taken at it, as block validation does.
+    block_timestamp_secs: UnixTimestamp,
+    /// True from Delta, at the block's own timestamp. The inclusion treasury credit
+    /// for a Publish tx is then the full `perm_fee`, because promotion pays the
+    /// ingress proof rewards out of the treasury and a refund pays back the full
+    /// `perm_fee`.
+    credit_full_perm_fee: bool,
 
     // Transaction slices
     commitment_txs: &'a [CommitmentTransaction],
@@ -296,9 +301,10 @@ impl<'a> ShadowTxGenerator<'a> {
             ledger_expiry_balance_delta.user_perm_fee_refunds.len()
         );
 
-        let number_of_ingress_proofs_total = config
-            .hardforks
-            .number_of_ingress_proofs_total_at(block_timestamp_secs);
+        let credit_full_perm_fee = matches!(
+            config.hardforks.delta_for_block(block_timestamp_secs),
+            Activation::Active(_)
+        );
 
         // Create a temporary generator to initialize the iterators
         let generator = Self {
@@ -308,7 +314,8 @@ impl<'a> ShadowTxGenerator<'a> {
             treasury_reward_share,
             solution_hash,
             config,
-            number_of_ingress_proofs_total,
+            block_timestamp_secs,
+            credit_full_perm_fee,
             commitment_txs,
             submit_txs,
             one_year_txs,
@@ -341,7 +348,7 @@ impl<'a> ShadowTxGenerator<'a> {
         let aggregated_rewards = Self::accumulate_ingress_rewards_for_init(
             publish_ledger,
             config,
-            number_of_ingress_proofs_total,
+            block_timestamp_secs,
             epoch_snapshot,
         )?;
         let publish_ledger_txs = if !aggregated_rewards.is_empty() {
@@ -371,7 +378,8 @@ impl<'a> ShadowTxGenerator<'a> {
             treasury_reward_share,
             solution_hash,
             config,
-            number_of_ingress_proofs_total,
+            block_timestamp_secs,
+            credit_full_perm_fee,
             commitment_txs,
             submit_txs,
             one_year_txs,
@@ -438,9 +446,15 @@ impl<'a> ShadowTxGenerator<'a> {
     fn accumulate_ingress_rewards_for_init(
         publish_ledger: &PublishLedgerWithTxs,
         config: &ConsensusConfig,
-        number_of_ingress_proofs_total: u64,
+        block_timestamp_secs: UnixTimestamp,
         epoch_snapshot: &EpochSnapshot,
     ) -> Result<BTreeMap<IrysAddress, (RewardAmount, RollingHash)>> {
+        // Required ingress proofs per publish tx (N), taken at the block's own
+        // timestamp. Block production and validation size the block's proof list
+        // by this same N, so the generator must slice with it too.
+        let number_of_ingress_proofs_total = config
+            .hardforks
+            .number_of_ingress_proofs_total_at(block_timestamp_secs);
         let mut rewards_map: BTreeMap<IrysAddress, (RewardAmount, RollingHash)> = BTreeMap::new();
 
         // Get ingress proofs if available
@@ -465,16 +479,14 @@ impl<'a> ShadowTxGenerator<'a> {
                 ))
             })?;
 
-            // Calculate fee distribution using PublishFeeCharges. Errors here
-            // reflect peer-supplied fee values outside the valid range →
-            // structural / consensus rejection.
-            let publish_charges = PublishFeeCharges::new(
-                perm_fee,
-                tx.term_fee,
-                config,
-                number_of_ingress_proofs_total,
-            )
-            .map_err(|e| ShadowTxGenError::Structural(e.to_string()))?;
+            // Calculate fee distribution using PublishFeeCharges. The reward pool is
+            // taken at this (promotion) block's timestamp. Errors here reflect
+            // peer-supplied fee values outside the valid range → structural /
+            // consensus rejection.
+            let publish_charges = config
+                .ingress_proof_reward_pool_at(block_timestamp_secs, tx.term_fee.get())
+                .and_then(|pool| PublishFeeCharges::new(perm_fee, pool))
+                .map_err(|e| ShadowTxGenError::Structural(e.to_string()))?;
 
             // Get all the ingress proofs for the transaction. The span is
             // sized from `number_of_ingress_proofs_total` (N), but the flat
@@ -484,14 +496,11 @@ impl<'a> ShadowTxGenerator<'a> {
             // every honest validator; classify as `Structural` instead.
             // Compute the slice bounds with checked arithmetic. Overflow is
             // unreachable for a valid block (index and N are bounded), so classify
-            // it as Structural rather than letting an `as` cast wrap.
-            let (start_index, end_index) = usize::try_from(number_of_ingress_proofs_total)
-                .ok()
-                .and_then(|n| {
-                    let start = index.checked_mul(n)?;
-                    let end = start.checked_add(n)?;
-                    Some((start, end))
-                })
+            // it as Structural.
+            let n = usize::from(number_of_ingress_proofs_total);
+            let (start_index, end_index) = index
+                .checked_mul(n)
+                .and_then(|start| Some((start, start.checked_add(n)?)))
                 .ok_or_else(|| {
                     ShadowTxGenError::Structural(format!(
                         "publish ledger tx {} ingress-proof slice offset overflowed for N={}",
@@ -720,13 +729,10 @@ impl<'a> ShadowTxGenerator<'a> {
         let perm_charges = tx
             .perm_fee
             .map(|perm_fee| {
-                PublishFeeCharges::new(
-                    perm_fee,
-                    tx.term_fee,
-                    self.config,
-                    self.number_of_ingress_proofs_total,
-                )
-                .map_err(|e| ShadowTxGenError::Structural(e.to_string()))
+                self.config
+                    .ingress_proof_reward_pool_at(self.block_timestamp_secs, tx.term_fee.get())
+                    .and_then(|pool| PublishFeeCharges::new(perm_fee, pool))
+                    .map_err(|e| ShadowTxGenError::Structural(e.to_string()))
             })
             .transpose()?;
 
@@ -744,9 +750,15 @@ impl<'a> ShadowTxGenerator<'a> {
             })?;
 
         if let Some(ref charges) = perm_charges {
+            let perm_fee_credit = if self.credit_full_perm_fee {
+                // Equals `tx.perm_fee`: `PublishFeeCharges` splits it into these two parts.
+                charges.perm_fee_treasury + charges.ingress_proof_reward
+            } else {
+                charges.perm_fee_treasury
+            };
             self.treasury_balance = self
                 .treasury_balance
-                .checked_add(charges.perm_fee_treasury)
+                .checked_add(perm_fee_credit)
                 .ok_or_else(|| {
                     ShadowTxGenError::TreasuryArithmetic(
                         "Treasury balance overflow when adding perm fee treasury".to_string(),
@@ -1602,6 +1614,219 @@ mod tests {
         assert_eq!(generator.treasury_balance(), expected_treasury);
     }
 
+    fn config_with_delta_active(config: &mut ConsensusConfig) {
+        config.hardforks.delta = Some(irys_types::hardfork_config::Delta {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            initial_slots_per_new_ledger:
+                irys_types::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent:
+                irys_types::hardfork_config::Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent:
+                irys_types::hardfork_config::Delta::default_ingress_proof_reward_pool_percent(),
+        });
+    }
+
+    /// Treasury after one Publish tx is included in a block that may also promote
+    /// it or refund its `perm_fee`. Returns (initial, final, term_fee_treasury,
+    /// perm_fee, ingress_proof_reward).
+    fn publish_tx_treasury(
+        delta_active: bool,
+        promote: bool,
+        refund: bool,
+    ) -> (U256, U256, U256, U256, U256) {
+        let mut config = ConsensusConfig::testing();
+        config.hardforks.frontier.number_of_ingress_proofs_total = 1;
+        if delta_active {
+            config_with_delta_active(&mut config);
+        }
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
+        let term_fee = U256::from(30000);
+        let perm_fee = U256::from(1_000_000);
+        let signer = IrysSigner::random_signer(&config);
+        let publish_tx = create_data_tx_header(&signer, term_fee, Some(perm_fee));
+        let submit_txs = vec![publish_tx.clone()];
+
+        let term_charges = TermFeeCharges::new(term_fee.into(), &config).unwrap();
+        let publish_charges = PublishFeeCharges::new(
+            perm_fee.into(),
+            config
+                .ingress_proof_reward_pool_at(block_timestamp_secs, term_fee)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let publish_ledger = if promote {
+            let proof_signer = IrysSigner::random_signer(&config);
+            PublishLedgerWithTxs {
+                txs: submit_txs.clone(),
+                proofs: Some(IngressProofsList(vec![create_test_ingress_proof(
+                    &proof_signer,
+                    H256::from([10_u8; 32]),
+                    H256::from([14_u8; 32]),
+                )])),
+            }
+        } else {
+            PublishLedgerWithTxs::default()
+        };
+        let expiry_delta = LedgerExpiryBalanceDelta {
+            reward_balance_increment: BTreeMap::new(),
+            user_perm_fee_refunds: if refund {
+                vec![(publish_tx.id, perm_fee, publish_tx.signer)]
+            } else {
+                Vec::new()
+            },
+        };
+
+        let block_height = 101;
+        let reward_address = IrysAddress::from([20_u8; 20]);
+        let reward_amount = U256::from(5000);
+        let initial_treasury = U256::from(20_000_000);
+        let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
+        let mut generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            U256::zero(),
+            block_timestamp_secs,
+            &solution_hash,
+            &config,
+            &[],
+            &submit_txs,
+            &[],
+            &[],
+            &publish_ledger,
+            initial_treasury,
+            &expiry_delta,
+            &[],
+            &[],
+            &epoch_snapshot,
+        )
+        .expect("Should create generator");
+        for result in generator.by_ref() {
+            result.expect("Should be Ok");
+        }
+        (
+            initial_treasury,
+            generator.treasury_balance(),
+            term_charges.term_fee_treasury,
+            perm_fee,
+            publish_charges.ingress_proof_reward,
+        )
+    }
+
+    /// Before Delta the inclusion credit is `perm_fee` minus the ingress proof reward.
+    #[test]
+    fn publish_inclusion_credits_perm_fee_minus_reward_before_delta() {
+        let (initial, after, term_treasury, perm_fee, reward) =
+            publish_tx_treasury(false, false, false);
+        assert!(reward > U256::zero());
+        assert_eq!(after, initial + term_treasury + perm_fee - reward);
+    }
+
+    /// From Delta the inclusion credit is the full `perm_fee`.
+    #[test]
+    fn publish_inclusion_credits_full_perm_fee_from_delta() {
+        let (initial, after, term_treasury, perm_fee, reward) =
+            publish_tx_treasury(true, false, false);
+        assert!(reward > U256::zero());
+        assert_eq!(after, initial + term_treasury + perm_fee);
+    }
+
+    /// From Delta, promotion leaves only the storage share (`perm_fee` minus the
+    /// reward) of the perm fee in the treasury.
+    #[test]
+    fn publish_promotion_leaves_storage_share_from_delta() {
+        let (initial, after, term_treasury, perm_fee, reward) =
+            publish_tx_treasury(true, true, false);
+        assert_eq!(after, initial + term_treasury + perm_fee - reward);
+    }
+
+    /// From Delta, a refund returns the whole perm part: nothing of it stays.
+    #[test]
+    fn publish_refund_leaves_no_perm_fee_from_delta() {
+        let (initial, after, term_treasury, _perm_fee, _reward) =
+            publish_tx_treasury(true, false, true);
+        assert_eq!(after, initial + term_treasury);
+    }
+
+    /// A tx priced before Delta (one reward share for each of N proofs) and promoted from
+    /// Delta pays the proofs one pool of one share. The fee split succeeds, because the
+    /// perm fee covers N shares, and the treasury pays out only the pool.
+    #[test]
+    fn publish_promotion_pays_one_pool_from_delta_for_tx_priced_before_delta() {
+        let mut config = ConsensusConfig::testing();
+        config.hardforks.frontier.number_of_ingress_proofs_total = 3;
+        config_with_delta_active(&mut config);
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
+        let term_fee = U256::from(30000);
+        let reward_share = TermFeeCharges::new(term_fee.into(), &config)
+            .unwrap()
+            .block_producer_reward;
+        let perm_fee = U256::from(1_000_000) + reward_share * U256::from(3);
+        let publish_tx = create_data_tx_header(
+            &IrysSigner::random_signer(&config),
+            term_fee,
+            Some(perm_fee),
+        );
+        let proofs = (0_u8..3)
+            .map(|i| {
+                create_test_ingress_proof(
+                    &IrysSigner::random_signer(&config),
+                    H256::from([10 + i; 32]),
+                    H256::from([14 + i; 32]),
+                )
+            })
+            .collect();
+        let publish_ledger = PublishLedgerWithTxs {
+            txs: vec![publish_tx],
+            proofs: Some(IngressProofsList(proofs)),
+        };
+
+        let block_height = 101;
+        let reward_address = IrysAddress::from([20_u8; 20]);
+        let reward_amount = U256::from(5000);
+        let initial_treasury = U256::from(20_000_000);
+        let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
+        let no_expiry = LedgerExpiryBalanceDelta::default();
+        let mut generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            U256::zero(),
+            block_timestamp_secs,
+            &solution_hash,
+            &config,
+            &[],
+            &[],
+            &[],
+            &[],
+            &publish_ledger,
+            initial_treasury,
+            &no_expiry,
+            &[],
+            &[],
+            &epoch_snapshot,
+        )
+        .expect("a perm fee priced for N shares covers the Delta pool");
+        let mut paid_to_proofs = U256::zero();
+        for result in generator.by_ref() {
+            if let ShadowTransaction::V1 {
+                packet: TransactionPacket::IngressProofReward(increment),
+                ..
+            } = result.expect("Should be Ok").shadow_tx
+            {
+                paid_to_proofs += U256::from_le_bytes(increment.amount.to_le_bytes());
+            }
+        }
+        assert_eq!(paid_to_proofs, reward_share);
+        assert_eq!(
+            generator.treasury_balance(),
+            initial_treasury - reward_share
+        );
+    }
+
     #[test]
     fn test_publish_tx_with_reward_address_redirection() {
         let mut config = ConsensusConfig::testing();
@@ -1664,12 +1889,11 @@ mod tests {
         let term_charges = TermFeeCharges::new(term_fee.into(), &config).unwrap();
 
         // Since perm_fee was calculated with 4 proofs in mind
-        let number_of_ingress_proofs_total = 4;
         let publish_charges = PublishFeeCharges::new(
             perm_fee.into(),
-            term_fee.into(),
-            &config,
-            number_of_ingress_proofs_total,
+            config
+                .ingress_proof_reward_pool_at(block_timestamp_secs, term_fee)
+                .unwrap(),
         )
         .unwrap();
 
@@ -2404,164 +2628,6 @@ mod tests {
         assert!(
             err.to_string().contains("ingress proofs at offset"),
             "Structural error must originate at the ingress-proof slice; got: {err:?}",
-        );
-    }
-
-    /// Generate the ingress-proof rewards of the first block after a hardfork
-    /// that changes N from `frontier_n` to `fork_n`. The parent is one second
-    /// before activation (N = `frontier_n`), the block is at activation
-    /// (N = `fork_n`). The block carries one publish tx with a proof list sized
-    /// by the block's N, as the producer emits it and the validator accepts it.
-    ///
-    /// Returns the generator result, the proof signers, and the total ingress
-    /// reward that the block's N gives.
-    fn boundary_block_ingress_rewards(
-        frontier_n: u64,
-        fork_n: u64,
-    ) -> (Result<Vec<ShadowMetadata>>, Vec<IrysAddress>, U256) {
-        use irys_types::hardfork_config::NextNameTBD;
-
-        let activation_secs = 1_000_u64;
-        let mut config = ConsensusConfig::testing();
-        config.hardforks.frontier.number_of_ingress_proofs_total = frontier_n;
-        config.hardforks.next_name_tbd = Some(NextNameTBD {
-            activation_timestamp: UnixTimestamp::from_secs(activation_secs),
-            number_of_ingress_proofs_total: fork_n,
-            number_of_ingress_proofs_from_assignees: 0,
-        });
-
-        let parent_timestamp_secs = UnixTimestamp::from_secs(activation_secs - 1);
-        let block_timestamp_secs = UnixTimestamp::from_secs(activation_secs);
-        assert_eq!(
-            config
-                .hardforks
-                .number_of_ingress_proofs_total_at(parent_timestamp_secs),
-            frontier_n,
-        );
-        assert_eq!(
-            config
-                .hardforks
-                .number_of_ingress_proofs_total_at(block_timestamp_secs),
-            fork_n,
-        );
-
-        let term_fee = U256::from(100_000_u64);
-        let perm_fee = U256::from(10_000_000_u64);
-        let tx_signer = IrysSigner::random_signer(&config);
-        let publish_tx = create_data_tx_header(&tx_signer, term_fee, Some(perm_fee));
-
-        let proof_signers: Vec<IrysSigner> = (0..fork_n)
-            .map(|_| IrysSigner::random_signer(&config))
-            .collect();
-        let proofs = proof_signers
-            .iter()
-            .map(|signer| {
-                create_test_ingress_proof(signer, H256::from([31_u8; 32]), H256::from([32_u8; 32]))
-            })
-            .collect();
-        let publish_ledger = PublishLedgerWithTxs {
-            txs: vec![publish_tx],
-            proofs: Some(IngressProofsList(proofs)),
-        };
-
-        let expected_total_reward =
-            PublishFeeCharges::new(perm_fee.into(), term_fee.into(), &config, fork_n)
-                .expect("fee charges at the block's N")
-                .ingress_proof_reward;
-
-        let expired_fees = LedgerExpiryBalanceDelta {
-            reward_balance_increment: BTreeMap::new(),
-            user_perm_fee_refunds: Vec::new(),
-        };
-        let block_height = 101_u64;
-        let reward_address = IrysAddress::from([30_u8; 20]);
-        let reward_amount = U256::from(5000_u64);
-        let solution_hash = H256::zero();
-        let epoch_snapshot = test_epoch_snapshot();
-
-        let result = ShadowTxGenerator::new(
-            &block_height,
-            &reward_address,
-            &reward_amount,
-            U256::zero(),
-            block_timestamp_secs,
-            &solution_hash,
-            &config,
-            &[],
-            &[],
-            &[],
-            &[],
-            &publish_ledger,
-            U256::from(100_000_000_u64),
-            &expired_fees,
-            &[],
-            &[],
-            &epoch_snapshot,
-        )
-        .and_then(Iterator::collect::<Result<Vec<_>>>);
-
-        (
-            result,
-            proof_signers.iter().map(IrysSigner::address).collect(),
-            expected_total_reward,
-        )
-    }
-
-    /// Sum the ingress-proof rewards per target address.
-    fn ingress_rewards_by_target(shadow_txs: &[ShadowMetadata]) -> BTreeMap<IrysAddress, U256> {
-        let mut rewards = BTreeMap::new();
-        for metadata in shadow_txs {
-            if let ShadowTransaction::V1 {
-                packet: TransactionPacket::IngressProofReward(increment),
-                ..
-            } = &metadata.shadow_tx
-            {
-                *rewards
-                    .entry(IrysAddress::from(increment.target))
-                    .or_insert(U256::zero()) += U256::from(increment.amount);
-            }
-        }
-        rewards
-    }
-
-    /// N decreases at the hardfork. The boundary block carries fewer proofs than
-    /// the parent's N. The generator must take N at the block's timestamp: if it
-    /// takes N at the parent's timestamp, it asks for more proofs than the list
-    /// holds and no block with Publish txs can be built at the boundary.
-    #[test]
-    fn boundary_block_pays_all_proofs_when_ingress_proof_count_decreases() {
-        let (result, proof_signers, expected_total_reward) = boundary_block_ingress_rewards(3, 1);
-        let shadow_txs = result.expect("boundary block with N decreasing must generate");
-
-        let rewards = ingress_rewards_by_target(&shadow_txs);
-        assert_eq!(
-            rewards.keys().copied().collect::<Vec<_>>(),
-            proof_signers.iter().copied().sorted().collect::<Vec<_>>(),
-        );
-        assert_eq!(
-            rewards.values().copied().fold(U256::zero(), |a, b| a + b),
-            expected_total_reward,
-        );
-    }
-
-    /// N increases at the hardfork. The boundary block carries more proofs than
-    /// the parent's N. Every proof in the list must be paid: if the generator
-    /// takes N at the parent's timestamp, it slices only the first proofs and
-    /// the tail is unpaid.
-    #[test]
-    fn boundary_block_pays_all_proofs_when_ingress_proof_count_increases() {
-        let (result, proof_signers, expected_total_reward) = boundary_block_ingress_rewards(1, 3);
-        let shadow_txs = result.expect("boundary block with N increasing must generate");
-
-        let rewards = ingress_rewards_by_target(&shadow_txs);
-        assert_eq!(
-            rewards.keys().copied().collect::<Vec<_>>(),
-            proof_signers.iter().copied().sorted().collect::<Vec<_>>(),
-            "every proof in the boundary block's list must be paid",
-        );
-        assert_eq!(
-            rewards.values().copied().fold(U256::zero(), |a, b| a + b),
-            expected_total_reward,
         );
     }
 

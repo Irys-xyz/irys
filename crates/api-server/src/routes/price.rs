@@ -6,7 +6,6 @@ use awc::http::StatusCode;
 use irys_types::{
     CommitmentTransaction, DataLedger, IrysAddress, PledgeDataProvider as _, U256,
     serialization::string_u64,
-    storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
 };
 use serde::{Deserialize, Serialize};
 
@@ -86,15 +85,8 @@ pub async fn get_price(
             let latest_block_timestamp_secs = last_block_entry.header().timestamp_secs();
             drop(tree);
 
-            // Calculate the actual epochs remaining for the next block based on height
             let tip_height = last_block_entry.height();
             let next_block_height = tip_height + 1;
-
-            let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-                next_block_height,
-                state.config.consensus.epoch.num_blocks_in_epoch,
-                state.config.consensus.epoch.submit_ledger_epoch_length,
-            );
 
             // Determine pricing EMA for public quotes with special handling in
             // the last quarter of the adjustment interval.
@@ -106,49 +98,46 @@ pub async fn get_price(
                 state.config.consensus.ema.price_adjustment_interval,
             );
 
-            // Get hardfork params using the latest block's timestamp
-            let number_of_ingress_proofs_total = state
+            // From Delta the term fee pays for the full term; before, for the epochs left in the cycle
+            let term_fee = state
                 .config
-                .number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
-
-            // Calculate term fee using the dynamic epoch count
-            let term_fee = calculate_term_fee(
-                bytes_to_store,
-                epochs_for_storage,
-                &state.config.consensus,
-                number_of_ingress_proofs_total,
-                pricing_ema,
-                latest_block_timestamp_secs,
-            )
-            .map_err(|e| {
-                (
-                    format!("Failed to calculate term fee: {e:?}"),
-                    StatusCode::BAD_REQUEST,
+                .required_term_fee_at(
+                    data_ledger,
+                    latest_block_timestamp_secs,
+                    next_block_height,
+                    bytes_to_store,
+                    pricing_ema,
                 )
-            })?;
+                .map_err(|e| {
+                    (
+                        format!("Failed to calculate term fee: {e:?}"),
+                        StatusCode::BAD_REQUEST,
+                    )
+                })?;
 
             tracing::debug!(
-                "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}, num_ingress_proofs: {}",
+                "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}",
                 bytes_to_store,
                 term_fee,
                 state
                     .config
                     .consensus
                     .immediate_tx_inclusion_reward_percent
-                    .amount,
-                number_of_ingress_proofs_total
+                    .amount
             );
 
             // If the cost calculation fails, return 400 with the error text
-            let total_perm_cost = calculate_perm_fee_from_config(
-                bytes_to_store,
-                &state.config.consensus,
-                number_of_ingress_proofs_total,
-                pricing_ema,
-                term_fee,
-                latest_block_timestamp_secs,
-            )
-            .map_err(|e| (format!("{e:?}"), StatusCode::BAD_REQUEST))?;
+            // A quote has no tx of its own: the expected term fee is the term fee.
+            let total_perm_cost = state
+                .config
+                .required_publish_perm_fee_at(
+                    latest_block_timestamp_secs,
+                    bytes_to_store,
+                    pricing_ema,
+                    term_fee,
+                    term_fee,
+                )
+                .map_err(|e| (format!("{e:?}"), StatusCode::BAD_REQUEST))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
                 perm_fee: total_perm_cost.amount,
@@ -164,8 +153,6 @@ pub async fn get_price(
             .into()),
         DataLedger::OneYear | DataLedger::ThirtyDay => {
             // Term ledger pricing — term-fee only, no perm_fee
-            let cascade = state.config.consensus.hardforks.cascade.as_ref();
-
             // Single lock scope: cascade gating + fee/pricing inputs from same snapshot
             let tree = state.block_tree.read();
             let epoch_snapshot = tree.canonical_epoch_snapshot();
@@ -186,15 +173,13 @@ pub async fn get_price(
                     .into());
             }
 
-            let cascade = cascade.ok_or((
-                "Cascade hardfork not configured",
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ))?;
-            let epoch_length = match data_ledger {
-                DataLedger::OneYear => cascade.one_year_epoch_length,
-                DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-                DataLedger::Publish | DataLedger::Submit => unreachable!(),
-            };
+            if state.config.consensus.hardforks.cascade.is_none() {
+                return Err((
+                    "Cascade hardfork not configured",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                    .into());
+            }
 
             let (canonical, _) = tree.get_canonical_chain();
             let last_block_entry = canonical
@@ -208,33 +193,26 @@ pub async fn get_price(
             drop(tree);
 
             let next_block_height = tip_height + 1;
-            let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-                next_block_height,
-                state.config.consensus.epoch.num_blocks_in_epoch,
-                epoch_length,
-            );
-
             let pricing_ema = ema.ema_for_public_quote(
                 tip_height,
                 state.config.consensus.ema.price_adjustment_interval,
             );
 
-            let replica_count = state.config.consensus.num_partitions_per_term_ledger_slot;
-
-            let term_fee = calculate_term_fee(
-                bytes_to_store,
-                epochs_for_storage,
-                &state.config.consensus,
-                replica_count,
-                pricing_ema,
-                latest_block_timestamp_secs,
-            )
-            .map_err(|e| {
-                (
-                    format!("Failed to calculate term fee: {e:?}"),
-                    StatusCode::BAD_REQUEST,
+            let term_fee = state
+                .config
+                .required_term_fee_at(
+                    data_ledger,
+                    latest_block_timestamp_secs,
+                    next_block_height,
+                    bytes_to_store,
+                    pricing_ema,
                 )
-            })?;
+                .map_err(|e| {
+                    (
+                        format!("Failed to calculate term fee: {e:?}"),
+                        StatusCode::BAD_REQUEST,
+                    )
+                })?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
                 perm_fee: U256::from(0),

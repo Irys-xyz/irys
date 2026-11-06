@@ -584,12 +584,12 @@ pub async fn select_best_txs(
             irys_types::DataLedger::Publish => {
                 // For Publish ledger, validate both term and perm fees
                 // Calculate expected fees based on current EMA for the next block height
-                let Ok(expected_term_fee) = helpers::calculate_term_storage_fee(
-                    ctx.config,
-                    tx.data_size,
-                    &parent_ema_snapshot,
-                    next_block_height,
+                let Ok(expected_term_fee) = ctx.config.required_term_fee_at(
+                    ledger,
                     current_timestamp,
+                    next_block_height,
+                    tx.data_size,
+                    parent_ema_snapshot.ema_for_public_pricing(),
                 ) else {
                     debug!(
                         tx.id = ?tx.id,
@@ -599,12 +599,12 @@ pub async fn select_best_txs(
                     continue;
                 };
 
-                let Ok(expected_perm_fee) = helpers::calculate_perm_storage_fee(
-                    ctx.config,
-                    tx.data_size,
-                    expected_term_fee,
-                    &parent_ema_snapshot,
+                let Ok(expected_perm_fee) = ctx.config.required_publish_perm_fee_at(
                     current_timestamp,
+                    tx.data_size,
+                    parent_ema_snapshot.ema_for_public_pricing(),
+                    tx.term_fee.get(),
+                    expected_term_fee,
                 ) else {
                     debug!(
                         tx.id = ?tx.id,
@@ -658,16 +658,11 @@ pub async fn select_best_txs(
                     continue;
                 }
 
-                let number_of_ingress_proofs_total = ctx
+                if ctx
                     .config
-                    .number_of_ingress_proofs_total_at(current_timestamp);
-                if PublishFeeCharges::new(
-                    perm_fee,
-                    tx.term_fee,
-                    &ctx.config.node_config.consensus_config(),
-                    number_of_ingress_proofs_total,
-                )
-                .is_err()
+                    .ingress_proof_reward_pool_at(current_timestamp, tx.term_fee.get())
+                    .and_then(|pool| PublishFeeCharges::new(perm_fee, pool))
+                    .is_err()
                 {
                     debug!(
                         tx.id = ?tx.id,
@@ -679,11 +674,15 @@ pub async fn select_best_txs(
                 }
             }
             irys_types::DataLedger::Submit => {
-                debug!(
+                // Ingress rejects `ledger_id == Submit`, and block validation rejects it in
+                // every ledger list (the Submit list requires `ledger_id == Publish`). Skip it,
+                // so a tx that got past ingress cannot make this producer build an invalid block.
+                warn!(
                     tx.id = ?tx.id,
                     tx.signer = ?tx.signer(),
-                    "Processing Submit ledger tx for single-block promotion"
+                    "Skipping tx with ledger_id Submit: never valid in a block"
                 );
+                continue;
             }
             DataLedger::OneYear | DataLedger::ThirtyDay => {
                 // Term-only ledgers: validate cascade is active, term fee, and fee structure
@@ -727,29 +726,12 @@ pub async fn select_best_txs(
                 }
 
                 // Validate term fee amount against EMA pricing
-                let cascade = consensus
-                    .hardforks
-                    .cascade
-                    .as_ref()
-                    .expect("cascade config must exist when cascade is active");
-                let epoch_length = match ledger {
-                    DataLedger::OneYear => cascade.one_year_epoch_length,
-                    DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-                    DataLedger::Publish | DataLedger::Submit => unreachable!(),
-                };
-                let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-                    next_block_height,
-                    consensus.epoch.num_blocks_in_epoch,
-                    epoch_length,
-                );
-                let replica_count = consensus.num_partitions_per_term_ledger_slot;
-                let Ok(expected_term_fee) = irys_types::storage_pricing::calculate_term_fee(
-                    tx.data_size,
-                    epochs_for_storage,
-                    &consensus,
-                    replica_count,
-                    parent_ema_snapshot.ema_for_public_pricing(),
+                let Ok(expected_term_fee) = ctx.config.required_term_fee_at(
+                    ledger,
                     current_timestamp,
+                    next_block_height,
+                    tx.data_size,
+                    parent_ema_snapshot.ema_for_public_pricing(),
                 ) else {
                     debug!(
                         tx.id = ?tx.id,
@@ -1209,7 +1191,7 @@ async fn get_publish_txs_and_proofs(
             let number_of_ingress_proofs_total = ctx
                 .config
                 .number_of_ingress_proofs_total_at(current_timestamp);
-            let proofs_per_tx = number_of_ingress_proofs_total as usize;
+            let proofs_per_tx = usize::from(number_of_ingress_proofs_total);
 
             if all_proofs.len() < proofs_per_tx {
                 info!(
@@ -1270,7 +1252,7 @@ async fn get_publish_txs_and_proofs(
             let number_of_ingress_proofs_from_assignees = ctx
                 .config
                 .number_of_ingress_proofs_from_assignees_at(current_timestamp);
-            let mut expected_assigned_proofs = number_of_ingress_proofs_from_assignees as usize;
+            let mut expected_assigned_proofs = usize::from(number_of_ingress_proofs_from_assignees);
 
             if assigned_miners < expected_assigned_proofs {
                 warn!(

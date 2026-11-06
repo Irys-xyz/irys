@@ -332,6 +332,7 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         | VE::RecallRangeInvalid(_)
         | VE::ShadowTransactionInvalid(_)
         | VE::CommitmentValueInvalid { .. }
+        | VE::CommitmentFeeInsufficient { .. }
         | VE::CommitmentVersionInvalid { .. }
         | VE::CommitmentTypeNotAllowed { .. }
         | VE::CommitmentOrderingFailed(_)
@@ -1863,21 +1864,23 @@ impl BlockTreeServiceInner {
                     partition_hashes: H256List(expired_partition_hashes),
                     update_height: epoch_block.height,
                 });
+        }
 
-            // Let the cache service know some term ledger slots expired
-            if let Err(e) = self.service_senders.chunk_cache.send_traced(
-                crate::cache_service::CacheServiceAction::OnEpochProcessed(
-                    epoch_snapshot.clone(),
-                    None,
-                ),
-            ) {
-                error!(
-                    "Failed to send EpochProcessed event to CacheService for block {} (height {}): {}",
-                    block_hash,
-                    epoch_block.height(),
-                    e
-                );
-            }
+        // Prune the data-root cache on every epoch block, not only when partitions expire: the
+        // prune height moves as Submit slots expire, and a run that hit the per-run eviction cap
+        // continues.
+        if let Err(e) = self.service_senders.chunk_cache.send_traced(
+            crate::cache_service::CacheServiceAction::OnEpochProcessed(
+                epoch_snapshot.clone(),
+                None,
+            ),
+        ) {
+            error!(
+                "Failed to send EpochProcessed event to CacheService for block {} (height {}): {}",
+                block_hash,
+                epoch_block.height(),
+                e
+            );
         }
 
         // Let the node know about any newly assigned partition hashes to local storage modules
