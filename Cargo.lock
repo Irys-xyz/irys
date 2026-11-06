@@ -5486,6 +5486,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-rpc-types-trace",
  "alloy-signer-local",
+ "alloy-trie",
  "arbitrary",
  "borsh",
  "bytes",

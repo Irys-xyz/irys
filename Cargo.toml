@@ -186,6 +186,7 @@ alloy-rpc-types-engine = { version = "1.7.3", default-features = false }
 alloy-rpc-types-trace = { version = "1.7.3", default-features = false }
 alloy-signer = { version = "1.7.3", default-features = false }
 alloy-signer-local = { version = "1.7.3", default-features = false }
+alloy-trie = { version = "0.9.5", default-features = false }
 
 # Reth crates
 # These point to a fork of reth with Irys-specific changes (branch: irys-changes)
