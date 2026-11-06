@@ -1,5 +1,4 @@
 mod anchor_canonical_reorg;
-mod blobs_rejected;
 mod cascade_block_rejection;
 mod cascade_ledger_shape;
 mod cascade_submit_expiry_promotion;
@@ -9,6 +8,7 @@ mod commitment_replay;
 mod data_tx_pricing;
 mod delta_capacity_reward;
 mod duplicate_stake;
+mod evm_payload_rejected;
 mod ingress_proof_reanchor_dedup;
 mod ingress_proof_validation;
 mod invalid_perm_fee_refund;
