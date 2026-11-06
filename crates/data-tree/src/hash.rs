@@ -16,7 +16,8 @@ const EMPTY_TABLE_LEN: usize = MAX_SUBTREE_HEIGHT as usize + 1;
 /// Data-tree domain tags (spec §3).
 ///
 /// Every data-tree preimage starts with one of these bytes. Tags `0x05` to
-/// `0x07` are reserved for proposed designs. Do not assign them.
+/// `0x07` are reserved for proposed designs. Do not assign them. `0x08` is the
+/// chunk leaf. The next free tag is `0x09`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum TreeDomainTag {
@@ -30,6 +31,9 @@ pub enum TreeDomainTag {
     ChunkKey = 0x03,
     /// Mining ticket. Defined by the segment-PoA spec. Not used by this tree (spec §3).
     Ticket = 0x04,
+    /// `0x08 ‖ be32(c) ‖ R_c` (37 B): the chunk-level leaf, the chunk index and
+    /// the chunk root (spec §3).
+    ChunkIndex = 0x08,
 }
 
 impl TreeDomainTag {
@@ -87,6 +91,19 @@ pub fn chunk_key(commitment: &DataCommitment, chunk_index: u32) -> ChunkKey {
     ChunkKey::from(digest(
         TreeDomainTag::ChunkKey.as_byte(),
         &[commitment.as_bytes(), &chunk_index.to_be_bytes()],
+    ))
+}
+
+/// `H(0x08 ‖ be32(c) ‖ R_c)`: the chunk-level leaf (spec §3, §4).
+///
+/// The chunk root takes its index before the chunk-level climb, so a chunk
+/// root shown at another index fails at the leaf (spec §6, §9).
+///
+/// `c` is `chunk_index`. `R_c` is `chunk_root`.
+pub fn chunk_leaf(chunk_index: u32, chunk_root: &NodeHash) -> NodeHash {
+    NodeHash::from(digest(
+        TreeDomainTag::ChunkIndex.as_byte(),
+        &[&chunk_index.to_be_bytes(), chunk_root.as_bytes()],
     ))
 }
 

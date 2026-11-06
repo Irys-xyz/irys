@@ -47,7 +47,7 @@ use super::{
     },
     write_data_path_updates,
 };
-use crate::db::IrysDatabaseExt as _;
+use crate::{Env, Submodule};
 
 /// Consistent read of one submodule index.
 // MDBX-SUBMODULE-INDEX: collapse this trait onto RocksSubmoduleStore when MDBX is gone. Do not delete behavior RocksDB v1 implements. The default methods below are the MDBX behavior.
@@ -258,6 +258,19 @@ pub trait SubmoduleRead {
     /// reports a complete span.
     // MDBX-SUBMODULE-INDEX: delete this default. MDBX reports every span incomplete. RocksDB v1 scans stored checksums.
     fn offset_crc_missing(
+        &self,
+        _start: PartitionChunkOffset,
+        _end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        Ok(true)
+    }
+
+    /// `true` when any offset in the inclusive span has no stored row.
+    ///
+    /// A row with `crc: None` still counts as present. The default is `true`:
+    /// an engine that does not scan offset rows never reports a complete span.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX reports every span incomplete. RocksDB v1 scans stored rows.
+    fn offset_row_missing(
         &self,
         _start: PartitionChunkOffset,
         _end: PartitionChunkOffset,
@@ -552,7 +565,7 @@ pub trait SubmoduleStore: Send + Sync {
 pub struct MdbxSubmoduleStore {
     /// Dropped first so the delay thread joins before `env` closes.
     lifetime: Arc<EngineLifetime>,
-    env: Arc<DatabaseEnv>,
+    env: Env<Submodule>,
     group: Arc<GroupCommit>,
     /// Held across `MDBX_SAFE_NOSYNC` and the enabled bit, and across a
     /// durable commit that still sees group commit as off. The flag makes
@@ -624,7 +637,7 @@ impl MdbxSubmoduleStore {
         let group = GroupCommit::new();
         Self {
             lifetime: EngineLifetime::new(Arc::clone(&group)),
-            env: Arc::new(env),
+            env: Env::new(Arc::new(env)),
             group,
             nosync_enable: Arc::new(Mutex::new(())),
             writable,
@@ -804,7 +817,7 @@ impl MdbxSubmoduleStore {
     }
 
     fn spawn_delay(&self) -> eyre::Result<()> {
-        let env = Arc::downgrade(&self.env);
+        let env = Arc::downgrade(self.env.arc());
         let group = Arc::clone(&self.group);
         self.lifetime
             .spawn(Arc::clone(&self.group), move || match env.upgrade() {
@@ -888,13 +901,7 @@ fn finish_durable(env: &DatabaseEnv, group: &GroupCommit) -> eyre::Result<()> {
 }
 
 fn sync_env(env: &DatabaseEnv) -> eyre::Result<()> {
-    let tx = env.tx()?;
-    let environment = tx.inner().env().clone();
-    drop(tx);
-    environment
-        .sync(true)
-        .map_err(|err| eyre::eyre!("mdbx env sync: {err}"))?;
-    Ok(())
+    crate::db::sync_mdbx_env(env)
 }
 
 // MDBX-SUBMODULE-INDEX: delete with MdbxSubmoduleStore. This sets MDBX_SAFE_NOSYNC on the submodule index only.

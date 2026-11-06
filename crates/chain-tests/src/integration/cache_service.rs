@@ -2,21 +2,20 @@ use crate::utils::IrysNodeTest;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
-use irys_database::db::IrysDatabaseExt as _;
+use irys_actors::cache_service::CacheServiceAction;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::{
     get_cache_size,
-    tables::{CachedChunks, IngressProofs},
+    tables::{CachedChunks, CachedDataRoots, IngressProofs},
     walk_all,
 };
 use irys_types::irys::IrysSigner;
-use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
-use reth_db::Database as _;
-use reth_db::transaction::DbTxMut as _;
+use irys_types::{Base64, DataLedger, NodeConfig, SendTraced as _, TxChunkOffset, UnpackedChunk};
 use std::time::Duration;
 use tracing::info;
 
 #[test_log::test(tokio::test)]
-async fn heavy_test_cache_pruning() -> eyre::Result<()> {
+async fn heavy_epoch_pruning_keeps_bodies_on_a_live_publish_slot() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     // Pre-Cascade expiry: the block counts below expire slot 0 by allocation age.
     config.consensus.get_mut().hardforks.cascade = None;
@@ -96,6 +95,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         )
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
+    let published_root = tx.header.data_root;
 
     // post data tx
     let resp = client
@@ -142,8 +142,8 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     node.wait_for_chunk_cache_count(expected_cached, 10).await?;
 
     // confirm that we have the right number of CachedChunks in mdbx table
-    let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
-        get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
+    let (chunk_cache_count, _) = &node.node_ctx.db.view_cache_eyre(|tx| {
+        get_cache_size::<CachedChunks, _>(tx.inner(), node.node_ctx.config.consensus.chunk_size)
     })?;
 
     assert_eq!(*chunk_cache_count, expected_cached);
@@ -155,9 +155,9 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         ingress_proofs = node
             .node_ctx
             .db
-            .view(|read_tx| walk_all::<IngressProofs, _>(read_tx))
-            .unwrap()
-            .unwrap();
+            .view_cache(|read_tx| walk_all::<IngressProofs, _>(read_tx.inner()))
+            .map_err(|e| eyre::eyre!("cache view_cache failed: {e}"))?
+            .map_err(|e| eyre::eyre!("walk_all<IngressProofs> failed: {e}"))?;
         if ingress_proofs.len() == expected_proofs {
             break;
         }
@@ -199,15 +199,37 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     node.mine_blocks(9).await?;
 
     // Manually remove ingress proofs to ensure there are no active proofs for a root
-    node.node_ctx.db.update(|tx| {
+    node.node_ctx.db.update_cache_eyre(|tx| {
         tx.clear::<IngressProofs>()?;
         eyre::Ok(())
-    })??;
+    })?;
 
     node.mine_blocks(1).await?;
 
-    // confirm that we no longer see an entry in CachedChunks mdbx table
-    node.wait_for_chunk_cache_count(0, 10).await?;
+    let snapshot = node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_epoch_snapshot();
+    assert!(snapshot.ledgers.get_slots(DataLedger::Submit)[0].is_expired);
+    assert!(!snapshot.ledgers.get_slots(DataLedger::Publish)[0].is_expired);
+    let (response, completed) = tokio::sync::oneshot::channel();
+    node.node_ctx
+        .service_senders
+        .chunk_cache
+        .send_traced(CacheServiceAction::OnEpochProcessed(
+            snapshot,
+            Some(response),
+        ))?;
+    tokio::time::timeout(Duration::from_secs(10), completed).await???;
+
+    // Submit expiry must not remove custody of a body on a live Publish slot.
+    node.wait_for_chunk_cache_count(1, 10).await?;
+    node.node_ctx.db.view_cache_eyre(|rtx| {
+        assert!(rtx.get::<CachedDataRoots>(published_root)?.is_some());
+        assert!(rtx.get::<IngressProofs>(published_root)?.is_none());
+        Ok(())
+    })?;
 
     // make sure we can read the chunks after migration
     let chunk_res = client

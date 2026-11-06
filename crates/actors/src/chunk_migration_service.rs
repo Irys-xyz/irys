@@ -1,7 +1,8 @@
 use crate::{cache_service::CacheServiceAction, services::ServiceSenders};
+use irys_database::DatabaseProvider;
 use irys_database::{
     block_header_by_hash, cached_chunk_by_chunk_offset,
-    db::IrysDatabaseExt as _,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
     tx_header_by_txid,
 };
@@ -13,8 +14,7 @@ use irys_storage::ie;
 use irys_types::{
     Base64, BlockHash, Config, DataLedger, DataRoot, DataTransactionHeader, DataTransactionLedger,
     H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof, SendTraced as _,
-    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
-    hash_sha256, validate_path,
+    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk, hash_sha256, validate_path,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -779,7 +779,7 @@ fn get_cached_chunk(
     data_root: DataRoot,
     chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
-    db.view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
+    db.view_cache_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
 }
 
 #[cfg(test)]
@@ -1082,8 +1082,8 @@ mod tests {
     use super::body_worker::{BodyMigrationWorker, MAX_BODY_MIGRATION_ATTEMPTS};
     use super::*;
     use irys_database::{
-        IrysDatabaseArgs as _, cache_chunk, cache_data_root, insert_block_header, insert_tx_header,
-        open_or_create_db, submodule::tables::PendingBodyMigration, tables::IrysTables,
+        DatabaseProviderTestExt as _, cache_chunk, cache_data_root, insert_block_header,
+        insert_tx_header, submodule::tables::PendingBodyMigration,
     };
     use irys_domain::{ChunkType, StorageModuleInfo};
     use irys_storage::{ie, ii};
@@ -1145,7 +1145,7 @@ mod tests {
                 chunk_size,
                 num_chunks_in_partition: partition_chunks,
                 num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
+                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
                 entropy_packing_iterations: 1,
                 chain_id: 1,
                 ..ConsensusConfig::testing()
@@ -1179,11 +1179,10 @@ mod tests {
         )?);
         let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![sm.clone()])));
 
-        let db = DatabaseProvider(Arc::new(open_or_create_db(
-            tmp.path().join("irys_db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing()?,
-        )?));
+        let db = DatabaseProvider::for_testing(
+            &(tmp.path().join("irys_db")),
+            &(tmp.path().join("irys_db")).join("cache"),
+        )?;
         let block_index = BlockIndex::new_for_testing(db.clone());
 
         let data = vec![7_u8; (chunk_size * num_chunks) as usize];
@@ -1253,7 +1252,7 @@ mod tests {
 
         /// Put every chunk body of the tx into the node's chunk cache.
         fn seed_cache(&self) -> eyre::Result<()> {
-            self.db.update_eyre(|wtx| {
+            self.db.update_cache_eyre(|wtx| {
                 cache_data_root(wtx, &self.tx.header, None)?;
                 for (i, node) in self.tx.chunks.iter().enumerate() {
                     let chunk = UnpackedChunk {
@@ -2211,7 +2210,7 @@ mod tests {
             let signer = IrysSigner::random_signer(&f.config.consensus);
             let tx =
                 signer.sign_transaction(signer.create_transaction(data.clone(), H256::zero())?)?;
-            f.db.update_eyre(|wtx| {
+            f.db.update_cache_eyre(|wtx| {
                 cache_data_root(wtx, &tx.header, None)?;
                 let node = &tx.chunks[0];
                 cache_chunk(
@@ -2380,7 +2379,7 @@ mod tests {
                 chunk_size,
                 num_chunks_in_partition: SPAN,
                 num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
+                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
                 entropy_packing_iterations: 1,
                 chain_id: 1,
                 ..ConsensusConfig::testing()
@@ -2421,11 +2420,10 @@ mod tests {
         )?;
 
         let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![sm.clone()])));
-        let db = DatabaseProvider(Arc::new(open_or_create_db(
-            tmp.path().join("irys_db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing()?,
-        )?));
+        let db = DatabaseProvider::for_testing(
+            &(tmp.path().join("irys_db")),
+            &(tmp.path().join("irys_db")).join("cache"),
+        )?;
         let (_shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
         let (senders, _receivers) = ServiceSenders::new();
         let worker = BodyMigrationWorker::new(
@@ -2468,7 +2466,7 @@ mod tests {
                 chunk_size,
                 num_chunks_in_partition: SPAN,
                 num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
+                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
                 entropy_packing_iterations: 1,
                 chain_id: 1,
                 ..ConsensusConfig::testing()
@@ -2519,11 +2517,10 @@ mod tests {
         )?;
 
         let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![sm.clone()])));
-        let db = DatabaseProvider(Arc::new(open_or_create_db(
-            tmp.path().join("irys_db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing()?,
-        )?));
+        let db = DatabaseProvider::for_testing(
+            &(tmp.path().join("irys_db")),
+            &(tmp.path().join("irys_db")).join("cache"),
+        )?;
         let (_shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
         let (senders, _receivers) = ServiceSenders::new();
         let worker = BodyMigrationWorker::new(
@@ -2790,7 +2787,7 @@ mod tests {
         f.sm.write_data_chunk(&unpacked_at(&f, 19))
             .map_err(|err| eyre::eyre!("write chunk 19: {err:?}"))?;
         f.sm.force_sync_pending_chunks()?;
-        f.db.update_eyre(|wtx| {
+        f.db.update_cache_eyre(|wtx| {
             cache_data_root(wtx, &f.tx.header, None)?;
             cache_chunk(wtx, &unpacked_at(&f, 18))?;
             Ok(())

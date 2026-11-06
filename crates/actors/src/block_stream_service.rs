@@ -25,9 +25,10 @@
 //! `seq <= last_seen` as a no-op (or reconnect for durable replay).
 
 use eyre::OptionExt as _;
+use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::block_stream::{BlockEvent, EventsPage, StreamEvent, StreamFrame};
-use irys_types::{DatabaseProvider, H256, TokioServiceHandle};
+use irys_types::{H256, TokioServiceHandle};
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use std::num::NonZeroUsize;
@@ -583,12 +584,10 @@ fn rebuild_state_in<T: reth_db::transaction::DbTx>(
 mod tests {
     use super::*;
     use irys_database::{
-        IrysDatabaseArgs as _, append_block_stream_event, open_or_create_db,
-        prune_block_stream_below, tables::IrysTables,
+        DatabaseProviderTestExt as _, append_block_stream_event, prune_block_stream_below,
     };
     use irys_types::block_stream::{BlockEvent, BlockHeaderView, OwnerId};
     use irys_types::{BlockTransactions, IrysBlockHeader, SealedBlock};
-    use reth_db::mdbx::DatabaseArguments;
 
     /// A minimal but well-formed `observed` event, so `decode_frame` round-trips it. The frame's `seq`
     /// comes from the DB key, not this body, so a constant body is fine for the regime assertions.
@@ -640,13 +639,7 @@ mod tests {
         irys_testing_utils::utils::tempfile::TempDir,
     ) {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().unwrap(),
-        )
-        .unwrap();
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache")).unwrap();
         for _ in 0..n {
             db.update_eyre(|tx| append_block_stream_event(tx, sample_event()))
                 .unwrap();

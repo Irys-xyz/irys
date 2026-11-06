@@ -1575,8 +1575,17 @@ impl SealedBlock {
                 ledger_type,
             );
 
+            // Each tx appears at most once per ledger, so it is charged and stored once per ledger.
+            let mut seen_in_ledger: HashSet<H256> = HashSet::default();
             let mut ledger_txs = Vec::with_capacity(ledger.tx_ids.0.len());
             for expected_id in &ledger.tx_ids.0 {
+                eyre::ensure!(
+                    seen_in_ledger.insert(*expected_id),
+                    "Malformed block {:?}: {:?} ledger repeats tx {}",
+                    block_header.block_hash,
+                    ledger_type,
+                    expected_id,
+                );
                 if let Some(tx) = data_tx_map.remove(expected_id) {
                     ledger_txs.push(tx);
                 } else {
@@ -2251,6 +2260,57 @@ mod tests {
             err.to_string().contains("duplicate Publish data ledger"),
             "unexpected error: {err}"
         );
+    }
+
+    fn header_with_ledgers(publish: Vec<H256>, submit: Vec<H256>) -> IrysBlockHeader {
+        let mut header = IrysBlockHeader::default();
+        let IrysBlockHeader::V1(ref mut v1) = header;
+        v1.data_ledgers = vec![
+            DataTransactionLedger {
+                ledger_id: DataLedger::Publish.into(),
+                tx_ids: H256List(publish),
+                ..Default::default()
+            },
+            DataTransactionLedger {
+                ledger_id: DataLedger::Submit.into(),
+                tx_ids: H256List(submit),
+                ..Default::default()
+            },
+        ];
+        v1.system_ledgers = vec![];
+        header
+    }
+
+    fn data_tx_with_id(id: H256) -> DataTransactionHeader {
+        let mut tx = DataTransactionHeader::default();
+        tx.id = id;
+        tx
+    }
+
+    #[test]
+    fn test_order_transactions_rejects_tx_repeated_within_ledger() {
+        let id = H256::random();
+        // Publish [A] + Submit [A, A]
+        let header = header_with_ledgers(vec![id], vec![id, id]);
+        let err = SealedBlock::order_transactions(&header, vec![data_tx_with_id(id)], vec![])
+            .expect_err("repeat within Submit must be rejected");
+        assert!(err.to_string().contains("repeats tx"), "unexpected: {err}");
+
+        // Submit [A, A] alone
+        let header = header_with_ledgers(vec![], vec![id, id]);
+        let err = SealedBlock::order_transactions(&header, vec![data_tx_with_id(id)], vec![])
+            .expect_err("repeat within Submit must be rejected");
+        assert!(err.to_string().contains("repeats tx"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn test_order_transactions_allows_tx_in_two_ledgers() {
+        let id = H256::random();
+        let header = header_with_ledgers(vec![id], vec![id]);
+        let txs = SealedBlock::order_transactions(&header, vec![data_tx_with_id(id)], vec![])
+            .expect("one entry per ledger is valid");
+        assert_eq!(txs.get_ledger_txs(DataLedger::Publish).len(), 1);
+        assert_eq!(txs.get_ledger_txs(DataLedger::Submit).len(), 1);
     }
 
     #[test]

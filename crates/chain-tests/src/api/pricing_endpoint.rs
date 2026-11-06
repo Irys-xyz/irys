@@ -19,14 +19,14 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size * 5;
 
     // Calculate the expected term fee using hardfork params from config to match API behavior
-    let number_of_ingress_proofs_total = ctx
+    let replica_count = ctx
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
         UnixTimestamp::from_secs(0),
     )?;
@@ -35,9 +35,11 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
+        ctx.node_ctx
+            .config
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
-        expected_term_fee,
         UnixTimestamp::from_secs(0),
     )?;
 
@@ -102,10 +104,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             .replica_count(
                 ctx.node_ctx
                     .config
-                    .consensus
-                    .hardforks
-                    .frontier
-                    .number_of_ingress_proofs_total,
+                    .publish_replica_count_at(UnixTimestamp::from_secs(0)),
             )?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
@@ -118,27 +117,24 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     };
 
     // Calculate the expected term fee using hardfork params from config to match API behavior
-    let number_of_ingress_proofs_total = ctx
+    let replica_count = ctx
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         ctx.node_ctx.config.consensus.chunk_size, // small data rounds up to chunk_size
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
         UnixTimestamp::from_secs(0),
     )?;
 
     // Calculate expected perm_fee using the same method as the API
-    let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
-        expected_term_fee,
-        number_of_ingress_proofs_total,
-        ctx.node_ctx
+    let expected_perm_fee = expected_base_fee.amount
+        + ctx
+            .node_ctx
             .config
-            .consensus
-            .immediate_tx_inclusion_reward_percent,
-    )?;
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?;
 
     // action
     let response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
@@ -151,7 +147,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     );
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee includes both base fee and ingress rewards
-    assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
+    assert_eq!(price_info.perm_fee, expected_perm_fee);
     // Verify term_fee is calculated correctly
     assert_eq!(price_info.term_fee, expected_term_fee);
     assert_eq!(price_info.ledger, 0);
@@ -252,10 +248,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             .replica_count(
                 ctx.node_ctx
                     .config
-                    .consensus
-                    .hardforks
-                    .frontier
-                    .number_of_ingress_proofs_total,
+                    .publish_replica_count_at(UnixTimestamp::from_secs(0)),
             )?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
@@ -268,27 +261,24 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     };
 
     // Calculate the expected term fee using hardfork params from config to match API behavior
-    let number_of_ingress_proofs_total = ctx
+    let replica_count = ctx
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         ctx.node_ctx.config.consensus.chunk_size * 2, // data rounds up to 2 chunks
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
         UnixTimestamp::from_secs(0),
     )?;
 
     // Calculate expected perm_fee using the same method as the API
-    let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
-        expected_term_fee,
-        number_of_ingress_proofs_total,
-        ctx.node_ctx
+    let expected_perm_fee = expected_base_fee.amount
+        + ctx
+            .node_ctx
             .config
-            .consensus
-            .immediate_tx_inclusion_reward_percent,
-    )?;
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?;
 
     // action
     let response = price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
@@ -301,7 +291,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     );
     let price_info = response.json::<PriceInfo>().await?;
     // Check that perm_fee includes both base fee and ingress rewards
-    assert_eq!(price_info.perm_fee, expected_perm_fee.amount);
+    assert_eq!(price_info.perm_fee, expected_perm_fee);
     // Verify term_fee is calculated correctly
     assert_eq!(price_info.term_fee, expected_term_fee);
     assert_eq!(price_info.ledger, 0);
@@ -324,7 +314,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
 #[test_log::test(tokio::test)]
 async fn heavy_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<()> {
     // Setup: Configure with interval of 4 blocks
-    // Last 25% = 1 block (position_in_interval == 3)
+    // Last 25% = 1 block (tip height % interval == 3)
     let price_adjustment_interval = 4;
     let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;
     config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
@@ -362,7 +352,7 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<(
 
     // Stage 1: NOT in last quarter (interval=4)
     let mut last_block = ctx
-        .ema_mine_until_next_not_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_tip_not_in_last_quarter(price_adjustment_interval)
         .await?;
 
     let ema_stage1 = ctx
@@ -388,7 +378,7 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<(
 
     // Stage 2: First block of last quarter (interval=4)
     last_block = ctx
-        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_tip_in_last_quarter(price_adjustment_interval)
         .await?;
 
     let ema_stage2 = ctx
@@ -417,168 +407,6 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<(
     ctx.post_publish_data_tx(&signer, data)
         .await
         .expect("Tx using API price at last-quarter boundary was not accepted");
-
-    ctx.stop().await;
-    Ok(())
-}
-
-/// Test that verifies pricing changes when a hardfork activates after mining some blocks.
-/// A single node is configured with a hardfork that activates ~5 seconds after genesis.
-#[test_log::test(tokio::test)]
-async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Result<()> {
-    use irys_types::hardfork_config::{FrontierParams, IrysHardforkConfig, NextNameTBD};
-
-    // Define our ingress proof values
-    const FRONTIER_PROOFS: u64 = 2;
-    const HARDFORK_PROOFS: u64 = 8;
-
-    // Calculate hardfork activation: current time + 5 seconds
-    // This ensures the hardfork is NOT active at genesis but activates after mining a few blocks
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let hardfork_activation = now_secs + 5;
-
-    // Configure the node with hardfork that activates in 5 seconds
-    let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;
-    config.consensus.get_mut().hardforks = IrysHardforkConfig {
-        frontier: FrontierParams {
-            number_of_ingress_proofs_total: FRONTIER_PROOFS,
-            number_of_ingress_proofs_from_assignees: 0,
-        },
-        next_name_tbd: Some(NextNameTBD {
-            activation_timestamp: UnixTimestamp::from_secs(hardfork_activation),
-            number_of_ingress_proofs_total: HARDFORK_PROOFS,
-            number_of_ingress_proofs_from_assignees: 0,
-        }),
-        aurora: None,
-        borealis: None,
-        cascade: None,
-        delta: None,
-        echo: None,
-        fission: None,
-    };
-
-    let ctx = crate::utils::IrysNodeTest::new_genesis(config)
-        .start()
-        .await;
-    let address = format!(
-        "http://127.0.0.1:{}",
-        ctx.node_ctx.config.node_config.http.bind_port
-    );
-    let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
-
-    // Verify hardfork is NOT active at genesis
-    let genesis_block = ctx.get_block_by_height(0).await?;
-    let genesis_timestamp_secs = genesis_block.timestamp_secs();
-    assert!(
-        genesis_timestamp_secs.as_secs() < hardfork_activation,
-        "Genesis timestamp ({}) should be before hardfork activation ({})",
-        genesis_timestamp_secs.as_secs(),
-        hardfork_activation
-    );
-    let proofs_at_genesis = ctx
-        .node_ctx
-        .config
-        .number_of_ingress_proofs_total_at(genesis_timestamp_secs);
-    assert_eq!(
-        proofs_at_genesis, FRONTIER_PROOFS,
-        "Before hardfork: should use frontier proofs"
-    );
-
-    // BEFORE hardfork: Query pricing (should use frontier proofs)
-    let response_before =
-        price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
-    assert_eq!(response_before.status(), reqwest::StatusCode::OK);
-    let price_before = response_before.json::<PriceInfo>().await?;
-
-    // Calculate expected fees with frontier params
-    let expected_term_fee_before = calculate_term_fee_from_config(
-        data_size_bytes,
-        &ctx.node_ctx.config.consensus,
-        FRONTIER_PROOFS,
-        ctx.node_ctx.config.consensus.genesis.genesis_price,
-        UnixTimestamp::from_secs(0),
-    )?;
-    let expected_perm_fee_before = calculate_perm_fee_from_config(
-        data_size_bytes,
-        &ctx.node_ctx.config.consensus,
-        FRONTIER_PROOFS,
-        ctx.node_ctx.config.consensus.genesis.genesis_price,
-        expected_term_fee_before,
-        UnixTimestamp::from_secs(0),
-    )?;
-
-    assert_eq!(
-        price_before.perm_fee, expected_perm_fee_before.amount,
-        "Before hardfork: perm_fee should match expected with {} ingress proofs",
-        FRONTIER_PROOFS
-    );
-
-    // Mine blocks until timestamp exceeds hardfork activation
-    // In testing config, block_time is 1 second, so we need ~5+ blocks
-    let post_hardfork_block = loop {
-        let block = ctx.mine_block().await?;
-        let block_timestamp_secs = block.timestamp_secs().as_secs();
-        if block_timestamp_secs >= hardfork_activation {
-            break block;
-        }
-    };
-
-    // Verify hardfork is now active using the block we just mined
-    let latest_timestamp_secs = post_hardfork_block.timestamp_secs();
-    assert!(
-        latest_timestamp_secs.as_secs() >= hardfork_activation,
-        "Latest block timestamp ({}) should be >= hardfork activation ({})",
-        latest_timestamp_secs.as_secs(),
-        hardfork_activation
-    );
-    let proofs_after_hardfork = ctx
-        .node_ctx
-        .config
-        .number_of_ingress_proofs_total_at(latest_timestamp_secs);
-    assert_eq!(
-        proofs_after_hardfork, HARDFORK_PROOFS,
-        "After hardfork: should use new hardfork proofs"
-    );
-
-    // AFTER hardfork: Query pricing (should use hardfork proofs)
-    let response_after =
-        price_endpoint_request(&address, DataLedger::Publish, data_size_bytes).await;
-    assert_eq!(response_after.status(), reqwest::StatusCode::OK);
-    let price_after = response_after.json::<PriceInfo>().await?;
-
-    // Calculate expected fees with hardfork params
-    let expected_term_fee_after = calculate_term_fee_from_config(
-        data_size_bytes,
-        &ctx.node_ctx.config.consensus,
-        HARDFORK_PROOFS,
-        ctx.node_ctx.config.consensus.genesis.genesis_price,
-        UnixTimestamp::from_secs(0),
-    )?;
-    let expected_perm_fee_after = calculate_perm_fee_from_config(
-        data_size_bytes,
-        &ctx.node_ctx.config.consensus,
-        HARDFORK_PROOFS,
-        ctx.node_ctx.config.consensus.genesis.genesis_price,
-        expected_term_fee_after,
-        UnixTimestamp::from_secs(0),
-    )?;
-
-    assert_eq!(
-        price_after.perm_fee, expected_perm_fee_after.amount,
-        "After hardfork: perm_fee should match expected with {} ingress proofs",
-        HARDFORK_PROOFS
-    );
-
-    // Assert perm_fee increased - more ingress proofs = higher storage cost
-    assert!(
-        price_after.perm_fee > price_before.perm_fee,
-        "perm_fee should increase after hardfork: before={}, after={}",
-        price_before.perm_fee,
-        price_after.perm_fee
-    );
 
     ctx.stop().await;
     Ok(())
@@ -626,7 +454,7 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary_decreasing() -> eyr
 
     // Stage 1: NOT in last quarter (interval=4)
     let mut last_block = ctx
-        .ema_mine_until_next_not_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_tip_not_in_last_quarter(price_adjustment_interval)
         .await?;
 
     let ema_stage1 = ctx
@@ -647,7 +475,7 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary_decreasing() -> eyr
 
     // Stage 2: First block of last quarter (interval=4)
     last_block = ctx
-        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_tip_in_last_quarter(price_adjustment_interval)
         .await?;
     let ema_stage2 = ctx
         .node_ctx
@@ -680,6 +508,109 @@ async fn heavy_pricing_ema_switches_at_last_quarter_boundary_decreasing() -> eyr
     Ok(())
 }
 
+// A quote made on the last tip before an EMA interval roll must stay valid after
+// the roll. The next block (height a multiple of the interval) shifts the public
+// pricing EMA, so a tx ingested after it is priced against the rolled snapshot.
+// With a falling price the rolled EMA is lower, which raises the required fee.
+#[test_log::test(tokio::test)]
+async fn heavy_pricing_quote_on_last_tip_before_roll_survives_roll() -> eyre::Result<()> {
+    let price_adjustment_interval = 4;
+    let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;
+    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    config.oracles = vec![irys_types::OracleConfig::Mock {
+        initial_price: irys_types::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0))
+            .unwrap(),
+        incremental_change: irys_types::storage_pricing::Amount::token(rust_decimal_macros::dec!(
+            0.05
+        ))
+        .unwrap(),
+        smoothing_interval: 999999,
+        initial_direction_up: false,
+        poll_interval_ms: 500,
+    }];
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let ctx = crate::utils::IrysNodeTest::new_genesis(config)
+        .start()
+        .await;
+    let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
+
+    ctx.mine_two_ema_intervals(price_adjustment_interval)
+        .await?;
+    while ctx.get_canonical_chain_height().await % price_adjustment_interval
+        != price_adjustment_interval - 1
+    {
+        ctx.mine_block().await?;
+    }
+    let tip_height = ctx.get_canonical_chain_height().await;
+    let tip = ctx.get_block_by_height(tip_height).await?;
+    let ema_before_roll = ctx
+        .get_ema_snapshot(&tip.block_hash)
+        .expect("EMA snapshot should exist");
+    assert!(
+        ema_before_roll.ema_price_1_interval_ago.amount
+            < ema_before_roll.ema_price_2_intervals_ago.amount,
+        "Expected newer EMA to be lower (decreasing trend)"
+    );
+
+    let quote = ctx
+        .get_data_price(DataLedger::Publish, data_size_bytes)
+        .await?;
+
+    let roll_block = ctx.mine_block().await?;
+    assert_eq!(roll_block.height, tip_height + 1);
+    assert!(roll_block.height.is_multiple_of(price_adjustment_interval));
+    let ema_after_roll = ctx
+        .get_ema_snapshot(&roll_block.block_hash)
+        .expect("EMA snapshot should exist");
+    assert_eq!(
+        ema_after_roll.ema_for_public_pricing(),
+        ema_before_roll.ema_price_1_interval_ago,
+        "The roll should move ema_price_1_interval_ago into public pricing"
+    );
+
+    let tx = signer.create_publish_transaction(
+        vec![3_u8; data_size_bytes as usize],
+        ctx.get_anchor().await?,
+        quote.perm_fee.into(),
+        quote.term_fee.into(),
+    )?;
+    let tx = signer.sign_transaction(tx)?;
+    // Panics with the response body if the mempool rejects the quoted fees.
+    ctx.post_data_tx_raw(&tx.header).await;
+
+    let replica_count = ctx
+        .node_ctx
+        .config
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
+    let expected_term_fee = calculate_term_fee_from_config(
+        data_size_bytes,
+        &ctx.node_ctx.config.consensus,
+        replica_count,
+        ema_before_roll.ema_price_1_interval_ago,
+        UnixTimestamp::from_secs(0),
+    )?;
+    let expected_perm_fee = calculate_perm_fee_from_config(
+        data_size_bytes,
+        &ctx.node_ctx.config.consensus,
+        replica_count,
+        ctx.node_ctx
+            .config
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?,
+        ema_before_roll.ema_price_1_interval_ago,
+        UnixTimestamp::from_secs(0),
+    )?;
+    assert_eq!(
+        (quote.term_fee, quote.perm_fee),
+        (expected_term_fee, expected_perm_fee.amount),
+        "Last tip before roll: quote should use lower-of-two (ema_price_1_interval_ago)"
+    );
+
+    ctx.stop().await;
+    Ok(())
+}
+
 /// Helper function to verify pricing API uses the expected EMA value
 async fn verify_pricing_uses_ema(
     ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
@@ -689,14 +620,14 @@ async fn verify_pricing_uses_ema(
     block_description: &str,
 ) -> eyre::Result<()> {
     // Calculate expected fees using the provided EMA
-    let number_of_ingress_proofs_total = ctx
+    let replica_count = ctx
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         expected_ema,
         UnixTimestamp::from_secs(0),
     )?;
@@ -704,9 +635,11 @@ async fn verify_pricing_uses_ema(
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
+        ctx.node_ctx
+            .config
+            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?,
         expected_ema,
-        expected_term_fee,
         UnixTimestamp::from_secs(0),
     )?;
 
@@ -834,10 +767,10 @@ async fn heavy_cascade_pricing_endpoint_uses_higher_annual_cost() -> eyre::Resul
     // Verify post-Cascade term_fee matches manual calculation using the same
     // formula as the API route (calculate_submit_ledger_expiry + calculate_term_fee)
     let next_height = ctx.get_canonical_chain_height().await + 1;
-    let number_of_ingress_proofs_total = ctx
+    let replica_count = ctx
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let epochs_for_storage = calculate_submit_ledger_expiry(
         next_height,
         consensus.epoch.num_blocks_in_epoch,
@@ -847,7 +780,7 @@ async fn heavy_cascade_pricing_endpoint_uses_higher_annual_cost() -> eyre::Resul
         data_size_bytes,
         epochs_for_storage,
         consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         consensus.genesis.genesis_price,
         UnixTimestamp::from_secs(0),
     )?;
@@ -896,10 +829,10 @@ async fn heavy_cascade_pricing_transition_at_exact_activation_height() -> eyre::
     let consensus = &ctx.node_ctx.config.consensus;
     let data_size_bytes = consensus.chunk_size * 100;
 
-    let number_of_ingress_proofs_total = ctx
+    let replica_count = ctx
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
 
     // Cascade activates from genesis (timestamp 0). Verify the fee at height 1
     // uses the Cascade annual_cost_per_gb rate.
@@ -913,7 +846,7 @@ async fn heavy_cascade_pricing_transition_at_exact_activation_height() -> eyre::
             data_size_bytes,
             epochs,
             consensus,
-            number_of_ingress_proofs_total,
+            replica_count,
             consensus.genesis.genesis_price,
             UnixTimestamp::from_secs(0),
         )

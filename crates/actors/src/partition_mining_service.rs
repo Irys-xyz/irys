@@ -8,6 +8,7 @@ use crate::{
     services::ServiceSenders,
 };
 use eyre::WrapErr as _;
+use irys_database::DatabaseProvider;
 use irys_domain::{ChunkType, RecallChunks, StorageModule};
 use irys_efficient_sampling::Ranges;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
@@ -16,7 +17,6 @@ use irys_types::partition_resize::PartitionGeometry;
 use irys_types::{
     Base64, BlockHash, ChunkDataPath, Config, DataLedger, H256List, PartitionChunkOffset,
     PartitionChunkRange, ProofDeserialize as _, SendTraced as _, TokioServiceHandle, U256,
-    app_state::DatabaseProvider,
     block_production::{Seed, SolutionContext, TxPathJob, TxPathSource},
     get_leaf_proof, partition_chunk_offset_ie, u256_from_le_bytes,
 };
@@ -156,7 +156,7 @@ fn check_startup_placement(
     placement: DerivePlacement,
 ) -> eyre::Result<()> {
     let derived = irys_database::tx_path_derive::derive_tx_path_at_offset_with(
-        db.0.as_ref(),
+        db.consensus().as_ref(),
         ledger,
         ledger_offset,
         chunk_size,
@@ -775,7 +775,7 @@ impl PartitionMiningServiceInner {
         };
         let Some(job) = TxPathJob::try_spawn(move || {
             let derived = irys_database::tx_path_derive::derive_tx_path_at_offset_with(
-                db.0.as_ref(),
+                db.consensus().as_ref(),
                 ledger,
                 ledger_offset,
                 chunk_size,
@@ -1285,6 +1285,7 @@ impl PartitionMiningService {
 mod tests {
     use super::*;
     use crate::packing_service::PackingRequest;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{PACKING_PARAMS_FILE_NAME, PackingParams, StorageModuleInfo};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
@@ -2433,16 +2434,11 @@ mod tests {
         if !enabled {
             return None;
         }
-        use irys_database::IrysDatabaseArgs as _;
         let db_dir = tmp.join("consensus");
         std::fs::create_dir_all(&db_dir).expect("consensus dir");
-        let db = irys_database::open_or_create_db(
-            &db_dir,
-            irys_database::tables::IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().expect("testing args"),
-        )
-        .expect("consensus db");
-        Some(DatabaseProvider(Arc::new(db)))
+        let db =
+            DatabaseProvider::for_testing(&db_dir, &db_dir.join("cache")).expect("consensus db");
+        Some(db)
     }
 
     fn mine_once(inner: &mut PartitionMiningServiceInner) -> Option<SolutionContext> {
@@ -3010,13 +3006,10 @@ mod tests {
         chunk_size: u64,
     ) -> DatabaseProvider {
         use irys_database::db::IrysDatabaseExt as _;
-        use irys_database::tables::IrysTables;
         use irys_database::{
-            IrysDatabaseArgs as _, insert_block_header, insert_block_index_items_for_block,
-            insert_tx_header, open_or_create_db,
+            insert_block_header, insert_block_index_items_for_block, insert_tx_header,
         };
         use irys_types::IrysBlockHeader;
-        use reth_db::mdbx::DatabaseArguments;
 
         let chunks = header.data_size.div_ceil(chunk_size);
         let mut genesis = IrysBlockHeader::new_mock_header();
@@ -3027,12 +3020,7 @@ mod tests {
         block.height = 1;
         block.block_hash = H256::repeat_byte(2);
         set_submit(&mut block, std::slice::from_ref(header), chunks);
-        let db = open_or_create_db(
-            dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().expect("testing args"),
-        )
-        .expect("open consensus db");
+        let db = DatabaseProvider::for_testing(dir, &dir.join("cache")).expect("open test db");
         db.update_eyre(|tx| {
             insert_tx_header(tx, header)?;
             for block in [&genesis, &block] {
@@ -3042,7 +3030,7 @@ mod tests {
             Ok(())
         })
         .expect("write chain");
-        DatabaseProvider(Arc::new(db))
+        db
     }
 
     fn set_submit(

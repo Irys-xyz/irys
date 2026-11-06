@@ -28,20 +28,21 @@ use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::walk_all;
 use irys_database::{
     cached_chunk_by_chunk_offset,
-    db::IrysDatabaseExt as _,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
     get_cache_size,
     tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
     tx_header_by_txid,
 };
 use irys_domain::{
     BlockState, BlockTreeEntry, ChainState, ChunkType, CommitmentSnapshotStatus, EmaSnapshot,
-    EpochSnapshot, get_canonical_chain,
+    EpochSnapshot, get_canonical_chain, tip_in_last_quarter_of_ema_interval,
 };
 use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 
+use irys_database::DatabaseProvider;
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::TempDirBuilder;
@@ -51,9 +52,8 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
     CommitmentV2WithMetadata, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
-    DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
-    NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
-    compute_solution_hash,
+    IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig, NodeMode,
+    PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk, compute_solution_hash,
 };
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, DataLedger, EvmBlockHash, H256, H256List, IrysAddress,
@@ -805,49 +805,36 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.diag_wait_state().await
     }
 
-    /// Returns true if the next block height is in the last quarter of the pricing interval.
-    pub fn ema_next_block_in_last_quarter(
-        next_block_height: u64,
-        price_adjustment_interval: u64,
-    ) -> bool {
-        // last_quarter_start = interval - ceil(interval/4)
-        let last_quarter_start =
-            price_adjustment_interval.saturating_sub(price_adjustment_interval.div_ceil(4));
-        (next_block_height % price_adjustment_interval) >= last_quarter_start
-    }
-
     /// Mine 2x price adjustment interval blocks to move public pricing off genesis EMA.
     pub async fn mine_two_ema_intervals(&self, price_adjustment_interval: u64) -> eyre::Result<()> {
         self.mine_blocks((price_adjustment_interval * 2) as usize)
             .await
     }
 
-    /// Mine until the next block would fall into the last quarter of the pricing interval
+    /// Mine until the tip is in the last quarter of the pricing interval
     /// and return the current tip header when the condition is met.
-    pub async fn ema_mine_until_next_in_last_quarter(
+    pub async fn ema_mine_until_tip_in_last_quarter(
         &self,
         price_adjustment_interval: u64,
     ) -> eyre::Result<IrysBlockHeader> {
         loop {
             let current_tip_height = self.get_canonical_chain_height().await;
-            let next_height = current_tip_height + 1;
-            if Self::ema_next_block_in_last_quarter(next_height, price_adjustment_interval) {
+            if tip_in_last_quarter_of_ema_interval(current_tip_height, price_adjustment_interval) {
                 return self.get_block_by_height(current_tip_height).await;
             }
             self.mine_block().await?;
         }
     }
 
-    /// Mine until the next block would NOT fall into the last quarter of the pricing interval
+    /// Mine until the tip is NOT in the last quarter of the pricing interval
     /// and return the current tip header when the condition is met.
-    pub async fn ema_mine_until_next_not_in_last_quarter(
+    pub async fn ema_mine_until_tip_not_in_last_quarter(
         &self,
         price_adjustment_interval: u64,
     ) -> eyre::Result<IrysBlockHeader> {
         loop {
             let current_tip_height = self.get_canonical_chain_height().await;
-            let next_height = current_tip_height + 1;
-            if !Self::ema_next_block_in_last_quarter(next_height, price_adjustment_interval) {
+            if !tip_in_last_quarter_of_ema_interval(current_tip_height, price_adjustment_interval) {
                 return self.get_block_by_height(current_tip_height).await;
             }
             self.mine_block().await?;
@@ -1608,8 +1595,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             let chunk_cache_count = self
                 .node_ctx
                 .db
-                .view_eyre(|tx| {
-                    get_cache_size::<CachedChunks, _>(tx, self.node_ctx.config.consensus.chunk_size)
+                .view_cache_eyre(|tx| {
+                    get_cache_size::<CachedChunks, _>(
+                        tx.inner(),
+                        self.node_ctx.config.consensus.chunk_size,
+                    )
                 })?
                 .0;
 
@@ -1741,24 +1731,23 @@ impl IrysNodeTest<IrysNodeCtx> {
                 return Ok(());
             }
 
-            // Snapshot ingress proofs from DB into a map by data_root and drop the read transaction
-            let ingress_proofs_by_root = {
-                let ro_tx = self
-                    .node_ctx
-                    .db
-                    .as_ref()
-                    .tx()
-                    .map_err(|e| {
-                        tracing::error!("Failed to create mdbx transaction: {}", e);
-                    })
-                    .unwrap();
-                let proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
-                let mut map: HashMap<_, Vec<_>> = HashMap::new();
-                for (data_root, proof) in proofs {
-                    map.entry(data_root).or_default().push(proof);
-                }
-                map
-            };
+            // Snapshot ingress proofs from the cache DB into a map by data_root.
+            // IngressProofs lives in the cache env after the V3->V4 split, so
+            // we open a read transaction against the cache env explicitly.
+            let ingress_proofs_by_root = self
+                .node_ctx
+                .db
+                .view_cache(|tx| walk_all::<IngressProofs, _>(tx.inner()))
+                .map_err(|e| eyre::eyre!("cache view_cache failed: {e}"))?
+                .map_err(|e| eyre::eyre!("walk_all<IngressProofs> failed: {e}"))?
+                .into_iter()
+                .fold(
+                    HashMap::new(),
+                    |mut map: HashMap<_, Vec<_>>, (data_root, proof)| {
+                        map.entry(data_root).or_default().push(proof);
+                        map
+                    },
+                );
 
             // Retrieve the transaction headers for all pending txids in a single batch
             let to_check: Vec<H256> = unconfirmed_promotions.clone();
@@ -2440,6 +2429,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         PublishLedgerWithTxs,
         Vec<CommitmentTransaction>,
     )> {
+        use reth::providers::BlockReader as _;
+
         let mut retries = 0;
         let max_retries = coverage_adjusted_timeout(seconds_to_wait);
         debug!(
@@ -2449,8 +2440,22 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut prev = (0, 0, 0);
         let expected = (submit_txs, publish_txs, commitment_txs);
         for _ in 0..max_retries {
-            let canonical_tip = self.get_canonical_chain().last().unwrap().block_hash();
-            let txs: MempoolTxs = self.get_best_mempool_tx(canonical_tip).await?;
+            let canonical_tip = self.get_canonical_chain().last().unwrap().header().clone();
+            // The block tree moves its tip before Reth applies the fork-choice update, and
+            // tx selection reads balances at the tip's EVM block. Until Reth has made that
+            // block canonical, the mempool view is not ready.
+            if self
+                .node_ctx
+                .reth_handle
+                .provider
+                .block_by_hash(canonical_tip.evm_block_hash)?
+                .is_none()
+            {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                retries += 1;
+                continue;
+            }
+            let txs: MempoolTxs = self.get_best_mempool_tx(canonical_tip.block_hash).await?;
             let MempoolTxs {
                 commitment_tx,
                 submit_tx,
@@ -2870,7 +2875,8 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn stop(self) -> IrysNodeTest<()> {
         let pre_stop_state = self.diag_wait_state().await;
         info!("Stopping node with state: {}", pre_stop_state);
-        let db_inner = Arc::clone(&self.node_ctx.db.0);
+        let consensus_db = Arc::clone(self.node_ctx.db.consensus());
+        let cache_db = Arc::clone(self.node_ctx.db.cache());
         // Internal timeouts in stop() now handle hung subsystems, so no outer timeout needed.
         self.node_ctx
             .stop(irys_types::ShutdownReason::ServiceCompleted("test".into()))
@@ -2886,14 +2892,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             info!("Dedicated test runtime stopped");
         }
         debug!(
-            refs = Arc::strong_count(&db_inner),
+            consensus_refs = Arc::strong_count(&consensus_db),
+            cache_refs = Arc::strong_count(&cache_db),
             "Waiting for DB references to drain"
         );
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Arc::strong_count(&db_inner) > 1 {
+        while Arc::strong_count(&consensus_db) > 1 || Arc::strong_count(&cache_db) > 1 {
             if Instant::now() > deadline {
                 warn!(
-                    refs = Arc::strong_count(&db_inner),
+                    consensus_refs = Arc::strong_count(&consensus_db),
+                    cache_refs = Arc::strong_count(&cache_db),
                     "DB still has outstanding references after 5s, proceeding"
                 );
                 break;
@@ -2901,7 +2909,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             sleep(Duration::from_millis(10)).await;
         }
         info!(
-            refs = Arc::strong_count(&db_inner),
+            consensus_refs = Arc::strong_count(&consensus_db),
+            cache_refs = Arc::strong_count(&cache_db),
             "Node test stop completed"
         );
         let cfg = self.cfg;
@@ -3019,13 +3028,15 @@ impl IrysNodeTest<IrysNodeCtx> {
                     for i in 0..expected_chunks {
                         // Read chunk directly from sender's DB cache by data_root + tx-relative offset
                         let tx_chunk_offset = irys_types::TxChunkOffset::from(i as u32);
-                        if let Ok(Some((_meta, cached_chunk))) = self.node_ctx.db.view_eyre(|tx| {
+                        let cached = self.node_ctx.db.view_cache_eyre(|tx| {
                             irys_database::cached_chunk_by_chunk_offset(
                                 tx,
                                 tx_header.data_root,
                                 tx_chunk_offset,
                             )
-                        }) && let Some(bytes) = cached_chunk.chunk
+                        })?;
+                        if let Some((_meta, cached_chunk)) = cached
+                            && let Some(bytes) = cached_chunk.chunk
                         {
                             let unpacked = irys_types::UnpackedChunk {
                                 data_root: tx_header.data_root,
@@ -3055,17 +3066,13 @@ impl IrysNodeTest<IrysNodeCtx> {
                             {
                                 let mut attempts = 0_usize;
                                 loop {
-                                    let got = peer
-                                        .node_ctx
-                                        .db
-                                        .view_eyre(|tx| {
-                                            irys_database::cached_chunk_by_chunk_offset(
-                                                tx,
-                                                verify_data_root,
-                                                verify_tx_offset,
-                                            )
-                                        })
-                                        .unwrap_or(None);
+                                    let got = peer.node_ctx.db.view_cache_eyre(|tx| {
+                                        irys_database::cached_chunk_by_chunk_offset(
+                                            tx,
+                                            verify_data_root,
+                                            verify_tx_offset,
+                                        )
+                                    })?;
                                     if got.is_some() || attempts >= 5 {
                                         break;
                                     }
@@ -3289,7 +3296,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             let cached = self
                 .node_ctx
                 .db
-                .view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, tx_offset))?;
+                .view_cache_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, tx_offset))?;
             if cached.is_some() {
                 return Ok(());
             }
@@ -4352,29 +4359,8 @@ pub async fn read_block_from_state(
         loop {
             match event_receiver.try_recv() {
                 Ok(event) => {
-                    if event.block_hash == *block_hash && event.discarded {
-                        // Block was discarded; extract the underlying
-                        // ValidationError from either dispatch arm.
-                        // `Invalid` carries consensus rejections (peer's
-                        // block is bad); `InternalFailure` carries
-                        // local/runtime issues including cancel reasons
-                        // like ParentMissing that route as internal. Both
-                        // surface to tests via
-                        // `BlockValidationOutcome::Discarded(error)` so
-                        // `assert_validation_error` works on either.
-                        match event.validation_result {
-                            irys_actors::block_tree_service::ValidationResult::Invalid(
-                                rejection,
-                            ) => {
-                                return BlockValidationOutcome::Discarded(rejection.err().clone());
-                            }
-                            irys_actors::block_tree_service::ValidationResult::InternalFailure(
-                                internal,
-                            ) => {
-                                return BlockValidationOutcome::Discarded(internal.err().clone());
-                            }
-                            irys_actors::block_tree_service::ValidationResult::Valid => {}
-                        }
+                    if let Some(outcome) = discard_outcome_for(&event, block_hash) {
+                        return outcome;
                     }
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -4413,10 +4399,15 @@ pub async fn read_block_from_state(
                         }
                         // Block missing AND we'd previously seen it
                         // scheduled — same recovery shape as the outer
-                        // poll's `NoDiscardEventObserved` path: we know it
-                        // was discarded, just can't recover the error.
+                        // poll: it was discarded, and its event may still
+                        // be in flight.
                         None if was_validation_scheduled => {
-                            return BlockValidationOutcome::NoDiscardEventObserved;
+                            return wait_for_discard_event(
+                                &mut event_receiver,
+                                block_hash,
+                                Some(missed),
+                            )
+                            .await;
                         }
                         // Re-poll is non-definitive (still scheduled, or
                         // unknown without prior scheduled sighting). The
@@ -4441,13 +4432,13 @@ pub async fn read_block_from_state(
 
         let Some(chain_state) = result else {
             // If we previously saw "validation scheduled" and now block status
-            // is None, the block was discarded — but without the matching
-            // event the harness can't surface the underlying ValidationError.
-            // Tests that need to assert on a specific error must observe via
-            // `assert_validation_error`, which will treat this synthetic
-            // outcome as a panic (correct: no event = no assertion possible).
+            // is None, the block was discarded. Its event can trail the
+            // removal, so wait for it; without it the harness can't surface
+            // the underlying ValidationError and `assert_validation_error`
+            // treats the synthetic outcome as a panic (correct: no event = no
+            // assertion possible).
             if was_validation_scheduled {
-                return BlockValidationOutcome::NoDiscardEventObserved;
+                return wait_for_discard_event(&mut event_receiver, block_hash, None).await;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             continue;
@@ -4462,6 +4453,75 @@ pub async fn read_block_from_state(
         }
     }
     BlockValidationOutcome::HarnessTimeout
+}
+
+/// Returns the outcome if `event` is the discard of `block_hash`.
+///
+/// `Invalid` carries consensus rejections (peer's block is bad);
+/// `InternalFailure` carries local/runtime issues including cancel reasons
+/// like ParentMissing that route as internal. Both surface to tests via
+/// `BlockValidationOutcome::Discarded(error)` so `assert_validation_error`
+/// works on either.
+fn discard_outcome_for(
+    event: &BlockStateUpdated,
+    block_hash: &H256,
+) -> Option<BlockValidationOutcome> {
+    if event.block_hash != *block_hash || !event.discarded {
+        return None;
+    }
+    match &event.validation_result {
+        irys_actors::block_tree_service::ValidationResult::Invalid(rejection) => {
+            Some(BlockValidationOutcome::Discarded(rejection.err().clone()))
+        }
+        irys_actors::block_tree_service::ValidationResult::InternalFailure(internal) => {
+            Some(BlockValidationOutcome::Discarded(internal.err().clone()))
+        }
+        irys_actors::block_tree_service::ValidationResult::Valid => None,
+    }
+}
+
+/// Waits for the discard event of a block that has left the block tree.
+///
+/// The block tree removes a discarded block from its cache before it
+/// broadcasts the matching `BlockStateUpdated`, so the block can be gone
+/// while its event is still in flight. Returns `NoDiscardEventObserved` only
+/// if no such event arrives before the timeout (e.g. the block was removed by
+/// a parent's discard, which emits no event for the child), and
+/// `ReceiverLagged` if the receiver dropped events, which can include it.
+/// `missed_before_wait` is a lag the caller already consumed. A lag during
+/// the wait does not end it: the event can still be in the retained
+/// messages. The timeout reports the total missed count.
+async fn wait_for_discard_event(
+    event_receiver: &mut tokio::sync::broadcast::Receiver<BlockStateUpdated>,
+    block_hash: &H256,
+    missed_before_wait: Option<u64>,
+) -> BlockValidationOutcome {
+    use tokio::sync::broadcast::error::RecvError;
+
+    let mut missed_total = missed_before_wait;
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(coverage_adjusted_timeout(5));
+    loop {
+        match tokio::time::timeout_at(deadline, event_receiver.recv()).await {
+            Ok(Ok(event)) => {
+                if let Some(outcome) = discard_outcome_for(&event, block_hash) {
+                    return outcome;
+                }
+            }
+            Ok(Err(RecvError::Lagged(missed))) => {
+                missed_total = Some(missed_total.unwrap_or(0) + missed);
+            }
+            Ok(Err(RecvError::Closed)) => {
+                panic!("block event channel closed while waiting for the discard of {block_hash}")
+            }
+            Err(_) => {
+                return missed_total
+                    .map_or(BlockValidationOutcome::NoDiscardEventObserved, |missed| {
+                        BlockValidationOutcome::ReceiverLagged { missed }
+                    });
+            }
+        }
+    }
 }
 
 /// Wait for a [`BlockStateUpdated`] event matching `predicate`, with a timeout.

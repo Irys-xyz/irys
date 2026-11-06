@@ -2,7 +2,6 @@
 //! vector inputs; the hex strings are the expected digests.
 
 use super::{assert_hex, concat_hex, empty_at_height, pattern};
-use crate::DataTree;
 use crate::MAX_SUBTREE_HEIGHT;
 use crate::SubtreeHeight;
 use crate::geometry::Geometry;
@@ -10,6 +9,7 @@ use crate::hash::{self, leaf, size_witness};
 use crate::types::DataTreeRoot;
 use crate::types::HASH_SIZE;
 use crate::verify::{verify_chunk, verify_segment};
+use crate::{DataTree, chunk_leaf, chunk_root};
 
 #[test]
 fn primitive_vectors() {
@@ -77,38 +77,38 @@ fn testing_root_vectors() {
     let rows: &[(u64, &str, &str)] = &[
         (
             1,
-            "8521b87ff724236722cfb6d6306ad59bceb4aee3e35ae73c41326cd31915e13e",
-            "594c8b3b9cff69e0b5dd50c7465a7b2f7dc722d445f0ac2952d135c04b79f2b6",
+            "0f5fe2ca48d3d3f37848fc851257fc094c8b27feaa82c905b2b8ffbd177f6543",
+            "6766c8a6ed3afeaeb38d74b508b774ee33c8396d1061ac2bd272bedd02f5c421",
         ),
         (
             8,
-            "2239889b93ac82ead2db9605f2584a25255c90206c1fccaddf54caa75b7fc1a1",
-            "6e9c94693cb2fea535b79bb9938982db61ff23ade48119a60340e9a680423469",
+            "bed46322520adad4b5c1808a4a30269e4fdbf89e89b83a1b8439442c01db2c83",
+            "e35809d4fdba5e31164f9e58ac91d659a117776eb7748cd7e518239039a92f2b",
         ),
         (
             9,
-            "3ba2878285288e004dcd35a73e9a3df4a19f5fe5acccaf8d84b50fc7254e6ddb",
-            "245a5af1aa8e606cb4e8878d93449d7872f68de9bb8b1db696c13ea81c393728",
+            "ffa37bcad0b5968333e8f06b23b1f4cc430d4ae8a37a344de34ffc631dd8bf21",
+            "515b428e3fa513840a5cf842a30d364a47d3cba26d7a483c845431d7ffebc852",
         ),
         (
             32,
-            "d3e81f198d6bd3782d1941172c89e49721d8f5e33cc709d4f6ba3f54b9e35f82",
-            "aa774e6e5029925d0c43c6f019c56222cb4f220bad6626bb37bdf17180f5d6ea",
+            "5a3b3c37b21874d69166aa06c52a0b5dd87ec378187adab4bc9d4ee42eb0ef0d",
+            "c21dea135c5673eb07cf2d641d7893b22ca83dd0986dc51b09b99b29026fdd6f",
         ),
         (
             33,
-            "bf98e27c471bfda3de1d44b4eb420f528238aa75e6e002fe1636c04a431713a9",
-            "074db04f4bc2e5cf84f47d2772cf100c0c09d372e15c28264f9edf9187645d00",
+            "3bf5a0750be0980d8941fdf6778ba8b61b633599aee08a7d710d8566a4baa787",
+            "c6ae46330fe254aebad232ff69bd954da161053bf629b8a64f130a4b2a4eb54d",
         ),
         (
             112,
-            "7fd698c547deb0bbb8f8ab7db08dd34616a496f141167252487509cb74824564",
-            "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+            "0a22641c8d9f53afbe333e832a5187307f4d4f31a0b43dad7ea3dfc0f84deb6e",
+            "82204503a718db465b3eeecea24b2896411211af0080555657eb2098fb969620",
         ),
         (
             157,
-            "81e7a996cd2ba141815aa48a1afe4f9c3d5c0ca450f12c9a605c20a0c3037c95",
-            "8eb9e426d13ab02def39117e53b838110f8cebfdfb7d0b9c1726e05001c00e0d",
+            "ca4c355dba86031d9f6eb8d8955305abf03cdc51de06ed264873a247148d64e1",
+            "74e1e5bff4f5047875b49f5d20afc762335d3c07002b8e55acba6e65357ba20d",
         ),
     ];
     for (data_size, root, commitment) in rows {
@@ -121,48 +121,48 @@ fn mainnet_root_vectors() {
     let rows: &[(u64, &str, &str)] = &[
         (
             1,
-            "2438dc9c444ab818a41197dfd3aa6502bc3e2fb03895b7ed79ab275539b7972b",
-            "9029711cdb35496538bd4e91ac809a8abe2e3bb94376d44595e097478a4a8698",
+            "646847d975529f524fd1f887a1dbdfb4514bece22e63e115d8a27b596bc5b827",
+            "a345efb5e682e6b6d54bf57e9d5632976c1ccef897b0214a1c4c2b4cece7eb5a",
         ),
         (
             4095,
-            "851d7b0214e05f85e581de8dd408f5a4b0c31d8baad3f42986f056949ee1d575",
-            "267ff99c8c7c3580124a730ee7e7c28781d3969a5e52ea164a8fc5fcfa78416b",
+            "ead4d363fdb5a39a35e89c15b67574c9116018ad3f02264c1ab7a7248f44b632",
+            "8994d60a594d001d6511afd273403fdc41c48e5e7b744a640ffab046737959b0",
         ),
         (
             4096,
-            "be58572dcfba33df3201cdbeda2799dd0c5b508a0df41a47912cb008896f9195",
-            "7f3301e487d66e71bbb39ab1ae67d6c3ce37fee25eab9daf8259a3713cd4d47c",
+            "b298a715260a196611a1a200298372756ad785dd459933d83ddfde245cd93bed",
+            "46e6159e0bfad886ad65fd1a4c48ae7f93160944353e7d678a6d2a2f14178d30",
         ),
         (
             4097,
-            "f516d84903ce88d9d1d80d4071ce945dc53707bd4ed60346a3ba6392412c9134",
-            "3262c546bc4db11e05171d083d33fef98a36ddbb18f56ee64fcc2b5f3bb0aade",
+            "2a6d480a36e68670061d18861bb2c4308663b7c26963d4b13fbc5ccf42b463d2",
+            "d57e36e3153ab9be17bd7cb1421909fbfe4360ee9d6d126d6a8705dcdf1e030f",
         ),
         (
             262_143,
-            "b6dd65dde53181e3443d128d05b7cbf57c5f4352caa8216ed365d716896335bd",
-            "5ab3d70ba6f6ef25d19d456d9d4bfa57ed26796d10339b4ba95f34bfd41d0f83",
+            "32ca509db863c5bccc517b8f6e94927da71404e1023f89c93390ff58af9326da",
+            "2bb9b4b7a3b6eeecb1e99eae46cd85efd969619f2d65e649628c10f4d53d544c",
         ),
         (
             262_144,
-            "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5f",
-            "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+            "cc7b595dd3aecd15cfb5ce7a733f449e63c05545a8d5f9e8e67d5bf4b6069b0d",
+            "9821bdbe69355f8a624164e5d73fb676e2cfb7af7483327cf6fc922c0b873b39",
         ),
         (
             262_145,
-            "dcc4ac982c84bdf0d6df5c16d2728b65bb4bae355b078b5a22e47a6a3e518825",
-            "ff03453747ac366f182de34614fef6816feda7428fc7d5b00f931561eaa8fc04",
+            "5504c86e3cf316bf05ecd96a2585c3b09781382c25f6c664b5330a5a444c3101",
+            "d9243949c7c500fa0606a8a7d4ad4285c727e81944f42d283f49f0d0544e770c",
         ),
         (
             917_504,
-            "3d86c811acf3356576cbe00b28814ad89ee42bd5aa36b755cea977620366de67",
-            "683b214b4775ab4fbe5baa64cf193f50a1ecb06ea3a90f3b3e85a60639c3c91f",
+            "7f4f92981ff51822adf2c7f7a394a9536e764256c8bd8b4d5daef31a62b8de07",
+            "0e751421c6429cba0e9ac6edc8c32edb88006e0d052518f6bd933d4b2a000d5e",
         ),
         (
             1_310_720,
-            "1d5501730df0426a6f2b223d3fc31703d5eb6e64bae166736c920ccd23594ac0",
-            "36c380c4cb361fe958b443d27656130e5f57e58b9fd8c80af9a0130a390b83ab",
+            "29f12d7ecbcface82c0ca4787c60bd6d6a0fb271a173599c977eee68aff59731",
+            "bac42e0026f41eff11d056d4ee30904dcf963734eef88c310c9a950f72ab0069",
         ),
     ];
     for (data_size, root, commitment) in rows {
@@ -180,10 +180,10 @@ fn testing_n112_proof_vectors() {
 
     let chunk2 = chunk_bytes(&geometry, &data, data_size, 2);
     let chunk_proof = tree.chunk_proof(2).unwrap();
-    // spec §10: the reference printed the siblings. The last hash is the witness.
+    // spec §10: the generator printed the siblings. The last hash is the witness.
     let chunk_siblings = concat_hex(&[
-        "dbc3c2433981a503f8ffa38629a9ec5d41501618b2afd860af52d6a93e06e8b6",
-        "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
+        "ec954565828ae61fff557dcb9cc3b4e6a5da4b5417db597bffc7e9d6ac716332",
+        "4bde04027ed46b4dc676b850d95e5b4f8ab4092f4c374528905967fbc157e399",
     ]);
     assert_eq!(chunk_proof[..chunk_proof.len() - HASH_SIZE], chunk_siblings);
     assert_eq!(
@@ -194,12 +194,12 @@ fn testing_n112_proof_vectors() {
 
     let chunk3 = chunk_bytes(&geometry, &data, data_size, 3);
     let segment_proof = tree.segment_proof(3, 1, &chunk3).unwrap();
-    // spec §10: the reference printed the siblings. The last hash is the witness.
+    // spec §10: the generator printed the siblings. The last hash is the witness.
     let segment_siblings = concat_hex(&[
         "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5",
         "fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072a",
-        "f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65",
-        "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
+        "fbc10578ab6a756a167ab57c071797202dd7a56d16acca9b268c230c87b0a7cc",
+        "4bde04027ed46b4dc676b850d95e5b4f8ab4092f4c374528905967fbc157e399",
     ]);
     assert_eq!(
         segment_proof[..segment_proof.len() - HASH_SIZE],
@@ -224,8 +224,44 @@ fn testing_n112_proof_vectors() {
 
     assert_hex(
         tree.chunk_key(3).unwrap().as_bytes(),
-        "91ff543f909c38411b53d65ef72e411ed81721af90f8f88f6b49450688b32674",
+        "507655a3cf308a380bd30de15bade83e504e6271cbba0482de73d5e58fe37bbc",
     );
+}
+
+/// spec §10 printed chunk leaves. For `C = 1` the root is `chunk_leaf(0, R_0)` (spec §4).
+#[test]
+fn testing_chunk_leaf_vectors() {
+    let geometry = Geometry::TESTING;
+    for (data_size, chunk_leaf_hex) in [
+        (
+            1_u64,
+            "0f5fe2ca48d3d3f37848fc851257fc094c8b27feaa82c905b2b8ffbd177f6543",
+        ),
+        (
+            32,
+            "5a3b3c37b21874d69166aa06c52a0b5dd87ec378187adab4bc9d4ee42eb0ef0d",
+        ),
+    ] {
+        let data = pattern(usize::try_from(data_size).unwrap());
+        let tree = DataTree::from_bytes(geometry, &data).unwrap();
+        let root = chunk_root(&geometry, &data).unwrap();
+        assert_hex(chunk_leaf(0, &root).as_bytes(), chunk_leaf_hex);
+        assert_hex(tree.data_tree_root().as_bytes(), chunk_leaf_hex);
+        assert_hex(tree.chunk_leaf(0).unwrap().as_bytes(), chunk_leaf_hex);
+    }
+
+    let data_size = 112_u64;
+    let data = pattern(usize::try_from(data_size).unwrap());
+    let tree = DataTree::from_bytes(geometry, &data).unwrap();
+    let chunk3 = chunk_bytes(&geometry, &data, data_size, 3);
+    let root = chunk_root(&geometry, &chunk3).unwrap();
+    assert_hex(
+        root.as_bytes(),
+        "dbc3c2433981a503f8ffa38629a9ec5d41501618b2afd860af52d6a93e06e8b6",
+    );
+    let printed_leaf = "ec954565828ae61fff557dcb9cc3b4e6a5da4b5417db597bffc7e9d6ac716332";
+    assert_hex(chunk_leaf(3, &root).as_bytes(), printed_leaf);
+    assert_hex(tree.chunk_leaf(3).unwrap().as_bytes(), printed_leaf);
 }
 
 fn assert_root(geometry: Geometry, data_size: u64, root: &str, commitment: &str) {

@@ -22,6 +22,8 @@ const NODE_TAG: u8 = 0x01;
 const SIZE_TAG: u8 = 0x02;
 /// Tag of a chunk key (spec §3).
 const CHUNK_KEY_TAG: u8 = 0x03;
+/// Tag of a chunk leaf (spec §3).
+const CHUNK_LEAF_TAG: u8 = 0x08;
 
 /// Largest `segments_per_chunk` the tree accepts (spec §2).
 const MAX_SEGMENTS_PER_CHUNK: u32 = 256;
@@ -169,6 +171,28 @@ pub(crate) fn chunk_key(commitment: &Hash, chunk_index: u32) -> Hash {
     sha256(&preimage)
 }
 
+/// `chunk_leaf(c, R) = H(0x08 ‖ be32(c) ‖ R)`: the chunk-level leaf (spec §3, §4).
+pub(crate) fn chunk_leaf(chunk_index: u32, chunk_root: &Hash) -> Hash {
+    let mut preimage = vec![CHUNK_LEAF_TAG];
+    preimage.extend_from_slice(&chunk_index.to_be_bytes());
+    preimage.extend_from_slice(chunk_root);
+    sha256(&preimage)
+}
+
+/// `L_c = chunk_leaf(c, R_c)` for every chunk root, `c` its position from 0 (spec §4).
+pub(crate) fn chunk_leaves(chunk_roots: &[Hash]) -> Vec<Hash> {
+    chunk_roots
+        .iter()
+        .enumerate()
+        .map(|(chunk_index, chunk_root)| {
+            chunk_leaf(
+                u32::try_from(chunk_index).expect("chunk index fits u32"),
+                chunk_root,
+            )
+        })
+        .collect()
+}
+
 /// The leaf of every segment of one chunk (spec §4).
 ///
 /// A segment past the data is `leaf("") = empty(0)`. `1 ≤ len(bytes) ≤ chunk_size`.
@@ -225,16 +249,16 @@ fn largest_power_of_two_below(count: usize) -> usize {
     power
 }
 
-/// `T(R[0..C])`: the chunk-level root (spec §4).
-pub(crate) fn data_tree_root(chunk_roots: &[Hash]) -> Hash {
-    assert!(!chunk_roots.is_empty());
-    if chunk_roots.len() == 1 {
-        return chunk_roots[0];
+/// `T(L[0..C])`: the chunk-level root over the chunk leaves (spec §4).
+pub(crate) fn data_tree_root(chunk_leaves: &[Hash]) -> Hash {
+    assert!(!chunk_leaves.is_empty());
+    if chunk_leaves.len() == 1 {
+        return chunk_leaves[0];
     }
-    let left_count = largest_power_of_two_below(chunk_roots.len());
+    let left_count = largest_power_of_two_below(chunk_leaves.len());
     node(
-        &data_tree_root(&chunk_roots[..left_count]),
-        &data_tree_root(&chunk_roots[left_count..]),
+        &data_tree_root(&chunk_leaves[..left_count]),
+        &data_tree_root(&chunk_leaves[left_count..]),
     )
 }
 
@@ -243,20 +267,20 @@ pub(crate) fn data_commitment(geometry: &Geometry, root: &Hash, data_size: u64) 
     node(root, &size_witness(geometry, data_size))
 }
 
-/// `path(c, R[0..C])`: the sibling hashes of chunk `c`, leaf to root (spec §4).
-pub(crate) fn path(chunk_index: usize, chunk_roots: &[Hash]) -> Vec<Hash> {
-    assert!(chunk_index < chunk_roots.len());
-    if chunk_roots.len() == 1 {
+/// `path(c, L[0..C])`: the sibling hashes of chunk `c`, leaf to root (spec §4).
+pub(crate) fn path(chunk_index: usize, chunk_leaves: &[Hash]) -> Vec<Hash> {
+    assert!(chunk_index < chunk_leaves.len());
+    if chunk_leaves.len() == 1 {
         return Vec::new();
     }
-    let left_count = largest_power_of_two_below(chunk_roots.len());
+    let left_count = largest_power_of_two_below(chunk_leaves.len());
     if chunk_index < left_count {
-        let mut siblings = path(chunk_index, &chunk_roots[..left_count]);
-        siblings.push(data_tree_root(&chunk_roots[left_count..]));
+        let mut siblings = path(chunk_index, &chunk_leaves[..left_count]);
+        siblings.push(data_tree_root(&chunk_leaves[left_count..]));
         siblings
     } else {
-        let mut siblings = path(chunk_index - left_count, &chunk_roots[left_count..]);
-        siblings.push(data_tree_root(&chunk_roots[..left_count]));
+        let mut siblings = path(chunk_index - left_count, &chunk_leaves[left_count..]);
+        siblings.push(data_tree_root(&chunk_leaves[..left_count]));
         siblings
     }
 }
@@ -277,6 +301,23 @@ pub(crate) fn depth(mut chunk_index: u32, mut chunk_count: u32) -> u32 {
     chunk_level_steps
 }
 
+/// `rightmost_chunk(n) = C − 1` (spec §5).
+pub(crate) fn rightmost_chunk(geometry: &Geometry, data_size: u64) -> u32 {
+    geometry.chunk_count(data_size) - 1
+}
+
+/// `rightmost_segment(n) = (C − 1, s_last − 1)` (spec §5).
+///
+/// `s_last = ceil(chunk_len(n, C − 1) / segment_size)`.
+pub(crate) fn rightmost_segment(geometry: &Geometry, data_size: u64) -> (u32, u32) {
+    let chunk_index = rightmost_chunk(geometry, data_size);
+    let last_data_segment_count = geometry
+        .chunk_len(data_size, chunk_index)
+        .div_ceil(geometry.segment_size());
+    let segment_index = u32::try_from(last_data_segment_count - 1).expect("segment index fits u32");
+    (chunk_index, segment_index)
+}
+
 fn concatenate(hashes: &[Hash]) -> Vec<u8> {
     hashes.concat()
 }
@@ -285,12 +326,12 @@ fn concatenate(hashes: &[Hash]) -> Vec<u8> {
 pub(crate) fn chunk_proof(
     geometry: &Geometry,
     data_size: u64,
-    chunk_roots: &[Hash],
+    chunk_leaves: &[Hash],
     chunk_index: u32,
 ) -> Vec<u8> {
     let mut hashes = path(
         usize::try_from(chunk_index).expect("index fits"),
-        chunk_roots,
+        chunk_leaves,
     );
     hashes.push(size_witness(geometry, data_size));
     concatenate(&hashes)
@@ -322,13 +363,13 @@ pub(crate) fn in_chunk_siblings(
 pub(crate) fn segment_proof(
     geometry: &Geometry,
     data_size: u64,
-    chunk_roots: &[Hash],
+    chunk_leaves: &[Hash],
     chunk_index: u32,
     segment_index: u32,
     chunk_bytes: &[u8],
 ) -> Vec<u8> {
     let mut proof = concatenate(&in_chunk_siblings(geometry, chunk_bytes, segment_index));
-    proof.extend(chunk_proof(geometry, data_size, chunk_roots, chunk_index));
+    proof.extend(chunk_proof(geometry, data_size, chunk_leaves, chunk_index));
     proof
 }
 
@@ -428,7 +469,7 @@ pub(crate) fn verify_chunk(
     require_size_witness_last(geometry, data_size, &hashes)?;
     let (witness, siblings) = hashes.split_last().expect("proof holds the witness");
     let root = climb(
-        chunk_root(geometry, bytes),
+        chunk_leaf(chunk_index, &chunk_root(geometry, bytes)),
         chunk_index,
         chunk_count,
         siblings,
@@ -485,8 +526,9 @@ pub(crate) fn verify_segment(
         };
         position >>= 1;
     }
+    // `running_hash` is the chunk root. It takes its index before the chunk level.
     let root = climb(
-        running_hash,
+        chunk_leaf(chunk_index, &running_hash),
         chunk_index,
         chunk_count,
         &siblings[subtree_height as usize..],

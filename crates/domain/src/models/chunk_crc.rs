@@ -1115,6 +1115,13 @@ mod tests {
             )?,
             "a proof with no checksum is missing"
         );
+        assert!(
+            !module.offset_row_missing_for_test(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(7),
+            )?,
+            "a proof-only row is still a presence row"
+        );
         module.clear_chunk_crc_complete()?;
         assert!(
             !module

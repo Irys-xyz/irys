@@ -1,8 +1,10 @@
 //! Honest proofs verify. One changed field is rejected (spec §5, §9).
 //!
-//! A proof for index `i` shown as index `k` fails when the bytes differ. When
-//! the bytes match it can still fail: the verifier also requires the depth and
-//! the left/right steps (spec §9). An accept is an explicit branch. It is not
+//! A chunk proof for index `i` shown as chunk index `k` fails, also when the
+//! bytes match: the chunk leaf hashes the index (spec §3, §9). A segment proof
+//! for segment `j` shown as segment `k` of the same chunk fails when the bytes
+//! differ. When the bytes match it can still fail: the verifier also requires
+//! the left/right steps (spec §9). That accept is an explicit branch. It is not
 //! dropped with `prop_assume`.
 //!
 //! See `strategies` for the `PROPTEST_CASES` soak command. The check functions
@@ -114,15 +116,9 @@ fn check_chunk(
     verify_chunk(geometry, commitment, data_size, chunk_index, chunk, &proof)
         .unwrap_or_else(|err| panic!("honest chunk {chunk_index}: {err}"));
 
+    // Equal bytes at another index do not pass: the chunk leaf differs (spec §3).
     for other_index in other_chunk_indexes(tree.chunk_count(), chunk_index, probe) {
-        let bytes_match = other_index < tree.chunk_count()
-            && chunk == chunk_bytes(data, geometry, data_size, other_index);
-        expect_rejection_or_identical_bytes(
-            bytes_match,
-            verify_chunk(geometry, commitment, data_size, other_index, chunk, &proof),
-            expected_chunk_rejection(geometry, data_size, other_index, chunk, &proof),
-            "chunk shown at another index",
-        );
+        require_chunk_rejection(geometry, commitment, data_size, other_index, chunk, &proof);
     }
 
     if let Some(flipped) = flip_first_bit(chunk) {

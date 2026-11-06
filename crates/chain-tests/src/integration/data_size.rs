@@ -22,7 +22,7 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
     let config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = chunk_size as u64;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             consensus.num_chunks_in_partition = 10;
             consensus.epoch.num_blocks_in_epoch = 4;
             consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;

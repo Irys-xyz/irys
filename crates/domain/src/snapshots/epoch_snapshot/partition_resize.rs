@@ -79,7 +79,7 @@ impl EpochSnapshot {
             * BigFloat::from_u64(state.params.partition_chunks)
             / BigFloat::from_u64(state.reference_partition_chunks);
         let min_count = (self.ledgers.active_ledgers().len() as u64)
-            .checked_mul(config.num_partitions_per_slot)
+            .checked_mul(config.num_partitions_per_slot.get())
             .ok_or(PartitionResizeError::Overflow("capacity minimum"))?;
         let budget = Self::capacity_partitions_for_demand(reference_demand, min_count, config)
             .ok_or(PartitionResizeError::Overflow("capacity reserve"))?;

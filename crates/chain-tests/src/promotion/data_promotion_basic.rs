@@ -5,7 +5,7 @@ use actix_web::test::{self, TestRequest, call_service};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use irys_actors::MempoolServiceMessage;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_testing_utils::initialize_tracing;
 use irys_types::SendTraced as _;
 use irys_types::ingress::generate_ingress_proof;
@@ -20,7 +20,7 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
     config.consensus.get_mut().num_chunks_in_recall_range = 2;
-    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.consensus.get_mut().num_partitions_per_slot = irys_types::ReplicaCount::new(1);
     config.storage.num_writes_before_sync = 1;
     config.consensus.get_mut().entropy_packing_iterations = 1_000;
     config.consensus.get_mut().block_migration_depth = 1; // Testnet / single node config
@@ -301,7 +301,7 @@ async fn promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
     let config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;
         })
@@ -424,7 +424,7 @@ async fn promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
     let config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;
             consensus.mempool.tx_anchor_expiry_depth = 3;
@@ -563,7 +563,7 @@ async fn test_ingress_proof_anchor_edge_case(
     let config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;
             consensus.mempool.tx_anchor_expiry_depth = 3;
@@ -702,8 +702,7 @@ async fn test_ingress_proof_anchor_edge_case(
         resp.err()
     );
 
-    genesis_node.node_ctx.db.update_eyre(|tx| {
-        use reth_db::transaction::DbTxMut as _;
+    genesis_node.node_ctx.db.update_cache_eyre(|tx| {
         tx.clear::<irys_database::tables::IngressProofs>()?; // wipe all existing ingress proofs
         // insert just our one, so it always gets included
         irys_database::store_ingress_proof_checked(tx, &edge_case_ingress_proof, &genesis_signer)

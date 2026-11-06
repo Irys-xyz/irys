@@ -34,7 +34,7 @@ async fn spiky_slow_heavy4_sync_partition_data_between_peers_test() -> eyre::Res
     let mut config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = chunk_size as u64;
-            consensus.num_partitions_per_slot = 3;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(3);
             consensus.num_chunks_in_partition = 60;
             consensus.epoch.num_blocks_in_epoch = 4;
             consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;

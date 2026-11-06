@@ -25,8 +25,13 @@ const GRID_MAX_CHUNKS: u32 = 64;
 /// Break: `size_witness` omits `chunk_size` or `segments_per_chunk`.
 ///
 /// Then one commitment is valid under two geometries that split the same bytes
-/// differently, `chunk_key` aliases, and a segment proof under one geometry
-/// verifies as a chunk proof under the other (spec §3, §7, §9).
+/// differently, `chunk_key` aliases, and proofs under one geometry verify under
+/// the other (spec §3, §7, §9).
+///
+/// The first pair splits the bytes into one chunk of two segments and into two
+/// chunks of one segment. The chunk leaf hashes the index at the chunk level
+/// only, so those roots differ too (spec §4). The second pair has one equal
+/// root, and only the witness separates it.
 #[test]
 fn commitment_and_chunk_key_bind_geometry() {
     let wide = Geometry::new(8, 2, 10).unwrap();
@@ -36,8 +41,9 @@ fn commitment_and_chunk_key_bind_geometry() {
     let wide_tree = DataTree::from_bytes(wide, data).unwrap();
     let narrow_tree = DataTree::from_bytes(narrow, data).unwrap();
 
-    // Both trees are `node(leaf("AAAA"), leaf("BBBB"))`. The witness is not.
-    assert_eq!(wide_tree.data_tree_root(), narrow_tree.data_tree_root());
+    // `chunk_leaf(0, node(leaf("AAAA"), leaf("BBBB")))` and
+    // `node(chunk_leaf(0, leaf("AAAA")), chunk_leaf(1, leaf("BBBB")))` (spec §4).
+    assert_ne!(wide_tree.data_tree_root(), narrow_tree.data_tree_root());
     assert_ne!(wide_tree.data_commitment(), narrow_tree.data_commitment());
     assert_ne!(
         wide_tree.chunk_key(0).unwrap(),
@@ -47,10 +53,11 @@ fn commitment_and_chunk_key_bind_geometry() {
     let segment_proof = wide_tree.segment_proof(0, 1, data).unwrap();
     let chunk_proof = narrow_tree.chunk_proof(1).unwrap();
     assert_eq!(segment_proof.len(), chunk_proof.len());
-    assert_eq!(
+    // `leaf("AAAA")` against `chunk_leaf(0, leaf("AAAA"))`.
+    assert_ne!(
         &segment_proof[..segment_proof.len() - HASH_SIZE],
         &chunk_proof[..chunk_proof.len() - HASH_SIZE],
-        "the sibling list is the shared data tree"
+        "an in-chunk sibling is not a chunk leaf"
     );
     assert_ne!(
         &segment_proof[segment_proof.len() - HASH_SIZE..],

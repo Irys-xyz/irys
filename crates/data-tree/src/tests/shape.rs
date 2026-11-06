@@ -1,5 +1,5 @@
 use crate::geometry::Geometry;
-use crate::hash::{node, size_witness};
+use crate::hash::{chunk_leaf, node, size_witness};
 use crate::shape::{climb, depth};
 use crate::types::{HASH_SIZE, NodeHash};
 use crate::{DataTree, DataTreeBuilder};
@@ -173,15 +173,20 @@ fn large_proof_chunk_counts() -> Vec<u32> {
 }
 
 /// One new tree of `chunk_count` full chunks. Nothing is reused from another count.
+///
+/// Returns the chunk leaves `L_c = chunk_leaf(c, R_c)` of the pushed chunk
+/// roots, the leaves of `build_layer`, `T` and `path` (spec §4).
 fn tree_for_chunk_count(chunk_count: u32) -> (Vec<NodeHash>, DataTree) {
     let geometry = Geometry::TESTING;
     let chunk_size = geometry.chunk_size();
-    let leaves: Vec<NodeHash> = (0..chunk_count).map(chunk_root_for_index).collect();
     let mut builder = DataTreeBuilder::new(geometry);
-    for chunk_root in &leaves {
+    let mut leaves = Vec::new();
+    for chunk_index in 0..chunk_count {
+        let chunk_root = chunk_root_for_index(chunk_index);
         builder
-            .push_chunk_root(*chunk_root, chunk_size)
+            .push_chunk_root(chunk_root, chunk_size)
             .expect("a full testing chunk is accepted");
+        leaves.push(chunk_leaf(chunk_index, &chunk_root));
     }
     let tree = builder.finish().expect("a non-empty builder finishes");
     (leaves, tree)

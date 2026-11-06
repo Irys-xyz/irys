@@ -21,6 +21,8 @@ irys_utils::define_metrics! {
     gauge CACHE_CHUNK_COUNT("irys.cache.chunk_count", "Number of cached chunks");
     gauge CACHE_CHUNK_SIZE_BYTES("irys.cache.chunk_size_bytes", "Total size of cached chunks in bytes");
     gauge CACHE_PRUNE_PASS_BODIES("irys.cache.prune_pass_bodies", "Cached bodies the last chunk-pruning pass deleted or kept, by outcome");
+    counter CACHE_INGRESS_PROOFS_KEPT_STORED_COPY("irys.cache.ingress_proofs_kept_stored_copy_total", "Expired local ingress proofs kept at cache capacity because a live Submit module stores the full data root");
+    counter CACHE_INGRESS_PROOF_RESTORES("irys.cache.ingress_proof_restores_total", "Restore-sweep generations for a data root a live Submit module stores, by outcome (restored, skipped, failed)");
     counter BLOCK_DISCOVERY_ERRORS("irys.block_discovery.errors_total", "Block discovery errors by type");
     counter BLOCK_DISCOVERY_SUCCESS("irys.block_discovery.success_total", "Successful block pre-validations");
     // `chunks_completed_total` is kept as a durable-store success counter (historical name).
@@ -234,6 +236,15 @@ pub(crate) fn record_cache_stats(chunk_count: u64, chunk_size_bytes: u64) {
     CACHE_CHUNK_SIZE_BYTES.record(chunk_size_bytes, &[]);
 }
 
+pub(crate) fn record_ingress_proof_kept_stored_copy() {
+    CACHE_INGRESS_PROOFS_KEPT_STORED_COPY.add(1, &[]);
+}
+
+/// `outcome`: `restored`, `skipped` (a benign generation error), or `failed`.
+pub(crate) fn record_ingress_proof_restore(outcome: &'static str) {
+    CACHE_INGRESS_PROOF_RESTORES.add(1, &[KeyValue::new("outcome", outcome)]);
+}
+
 pub(crate) fn record_cache_prune_pass(tally: &crate::cache_service::PruneTally) {
     for (outcome, bodies) in [
         ("candidates", tally.candidates),
@@ -248,6 +259,9 @@ pub(crate) fn record_cache_prune_pass(tally: &crate::cache_service::PruneTally) 
         ("root_not_migrated_placed", tally.root_not_migrated_placed),
         ("kept_unreadable", tally.unreadable),
         ("kept_unplaced", tally.unplaced_kept()),
+        ("kept_unreplicated", tally.kept_unreplicated),
+        ("kept_hold_only", tally.hold_only),
+        ("reannounced", tally.reannounced),
     ] {
         CACHE_PRUNE_PASS_BODIES.record(bodies, &[KeyValue::new("outcome", outcome)]);
     }

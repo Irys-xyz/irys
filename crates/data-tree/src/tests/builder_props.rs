@@ -149,13 +149,13 @@ fn tree_signature(
     result: Result<DataTree, BuildError>,
 ) -> Result<(u64, DataCommitment, Vec<NodeHash>), BuildError> {
     result.map(|tree| {
-        let chunk_roots = (0..tree.chunk_count())
+        let chunk_leaves = (0..tree.chunk_count())
             .map(|chunk_index| {
-                tree.chunk_root(chunk_index)
+                tree.chunk_leaf(chunk_index)
                     .expect("chunk index is below chunk_count")
             })
             .collect();
-        (tree.data_size(), tree.data_commitment(), chunk_roots)
+        (tree.data_size(), tree.data_commitment(), chunk_leaves)
     })
 }
 

@@ -6,6 +6,7 @@ use irys_actors::{
     peer_bandwidth_manager::PeerBandwidthManager,
     services::{ServiceReceivers, ServiceSenders},
 };
+use irys_database::DatabaseProviderTestExt as _;
 use irys_domain::{
     BlockTree, BlockTreeReadGuard, ChunkType, PeerList, StorageModule, StorageModuleInfo,
 };
@@ -174,17 +175,8 @@ impl DataSyncServiceTestHarness {
         // (no residual-hole proof-signer expansion).
         let db_path = config.node_config.base_directory.join("data_sync_test_db");
         let db = {
-            use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
-            use irys_types::app_state::DatabaseProvider;
-            use reth_db::mdbx::DatabaseArguments;
-            use std::sync::Arc;
-            let env = open_or_create_db(
-                db_path,
-                IrysTables::ALL,
-                DatabaseArguments::irys_testing().unwrap(),
-            )
-            .expect("test db");
-            DatabaseProvider(Arc::new(env))
+            use irys_database::DatabaseProvider;
+            DatabaseProvider::for_testing(&db_path, &db_path.join("cache")).expect("test db")
         };
 
         let inner = DataSyncServiceInner::new(
@@ -427,7 +419,7 @@ impl TestSetup {
                 chunk_size,
                 num_chunks_in_partition: num_chunks,
                 num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
+                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
                 entropy_packing_iterations: 1,
                 block_migration_depth: 1,
                 chain_id: 1,
@@ -978,7 +970,7 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
             chunk_size,
             num_chunks_in_partition: num_chunks,
             num_chunks_in_recall_range: 2,
-            num_partitions_per_slot: 1,
+            num_partitions_per_slot: irys_types::ReplicaCount::new(1),
             entropy_packing_iterations: 1,
             // Canonical chain holds only the mock genesis (length 1), so a
             // depth of 1 makes genesis the most recently migrated block.
@@ -1046,15 +1038,16 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
     ));
 
     let db = {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
-        use irys_types::app_state::DatabaseProvider;
-        let env = open_or_create_db(
-            config.node_config.base_directory.join("orchestrator-db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        use irys_database::DatabaseProvider;
+        DatabaseProvider::for_testing(
+            &config.node_config.base_directory.join("orchestrator-db"),
+            &config
+                .node_config
+                .base_directory
+                .join("orchestrator-db")
+                .join("cache"),
         )
-        .expect("open orchestrator test db");
-        DatabaseProvider(Arc::new(env))
+        .expect("open orchestrator test db")
     };
     let orchestrator = ChunkOrchestrator::new(
         storage_module.clone(),

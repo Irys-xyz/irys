@@ -5,18 +5,20 @@ use crate::mempool_service::validate_tx_signature;
 use crate::mempool_service::{Inner, TxReadError};
 use crate::metrics;
 use eyre::eyre;
-use irys_database::{db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid};
+use irys_database::{
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
+    tables::CachedDataRoots,
+    tx_header_by_txid,
+};
 use irys_domain::HardforkConfigExt as _;
 
 use irys_types::TxKnownStatus;
-use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     DataLedger, DataTransactionHeader, H256, IrysTransactionCommon as _, IrysTransactionId,
     SendTraced as _, U256,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
 };
-use reth_db::transaction::DbTxMut as _;
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
@@ -361,56 +363,21 @@ impl Inner {
         let ledger = DataLedger::try_from(tx.ledger_id)
             .map_err(|_| TxIngressError::InvalidLedger(tx.ledger_id))?;
 
-        let cascade = self.config.consensus.hardforks.cascade.as_ref();
-        let epoch_length = match ledger {
-            DataLedger::Publish => self.config.consensus.epoch.submit_ledger_epoch_length,
-            DataLedger::Submit => {
-                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
-            }
-            DataLedger::OneYear => cascade.map(|c| c.one_year_epoch_length).ok_or_else(|| {
-                TxIngressError::FundMisalignment(
-                    "Cascade hardfork not configured for OneYear ledger".to_string(),
-                )
-            })?,
-            DataLedger::ThirtyDay => {
-                cascade.map(|c| c.thirty_day_epoch_length).ok_or_else(|| {
-                    TxIngressError::FundMisalignment(
-                        "Cascade hardfork not configured for ThirtyDay ledger".to_string(),
-                    )
-                })?
-            }
-        };
-        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-            next_block_height,
-            self.config.consensus.epoch.num_blocks_in_epoch,
-            epoch_length,
-        );
-
-        // Publish uses the full ingress proof replica count (part of perm pipeline).
-        // OneYear/ThirtyDay use the independently configurable term ledger partition count.
-        // Submit is already rejected above.
-        let replica_count = match ledger {
-            DataLedger::Publish => self
-                .config
-                .number_of_ingress_proofs_total_at(latest_block_timestamp_secs),
-            DataLedger::OneYear | DataLedger::ThirtyDay => {
-                self.config.consensus.num_partitions_per_term_ledger_slot
-            }
-            DataLedger::Submit => {
-                return Err(TxIngressError::InvalidLedger(tx.ledger_id));
-            }
-        };
-        let expected_term_fee = calculate_term_fee(
-            tx.data_size,
-            epochs_for_storage,
-            &self.config.consensus,
-            replica_count,
-            pricing_ema,
-            latest_block_timestamp_secs,
-        )
-        .map_err(|e| {
-            TxIngressError::FundMisalignment(format!("Failed to calculate term fee: {}", e))
-        })?;
+        if ledger == DataLedger::Submit {
+            return Err(TxIngressError::InvalidLedger(tx.ledger_id));
+        }
+        let expected_term_fee = self
+            .config
+            .required_term_fee_at(
+                ledger,
+                latest_block_timestamp_secs,
+                next_block_height,
+                tx.data_size,
+                pricing_ema,
+            )
+            .map_err(|e| {
+                TxIngressError::FundMisalignment(format!("Failed to calculate term fee: {}", e))
+            })?;
 
         // Validate term fee: user-provided must be >= expected
         if tx.term_fee < expected_term_fee {
@@ -434,17 +401,18 @@ impl Inner {
                 TxIngressError::FundMisalignment("Publish tx missing perm_fee".to_string())
             })?;
 
-            let expected_perm_fee = calculate_perm_fee_from_config(
-                tx.data_size,
-                &self.config.consensus,
-                replica_count,
-                pricing_ema,
-                expected_term_fee,
-                latest_block_timestamp_secs,
-            )
-            .map_err(|e| {
-                TxIngressError::FundMisalignment(format!("Failed to calculate perm fee: {}", e))
-            })?;
+            let expected_perm_fee = self
+                .config
+                .required_publish_perm_fee_at(
+                    latest_block_timestamp_secs,
+                    tx.data_size,
+                    pricing_ema,
+                    tx.term_fee.get(),
+                    expected_term_fee,
+                )
+                .map_err(|e| {
+                    TxIngressError::FundMisalignment(format!("Failed to calculate perm fee: {}", e))
+                })?;
 
             // Validate perm fee: user-provided must be >= expected
             if perm_fee < expected_perm_fee.amount {
@@ -488,13 +456,10 @@ impl Inner {
     /// Caches data_root with expiry, logging success/failure.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root, expiry_height = expiry_height))]
     fn cache_data_root_with_expiry(&self, tx: &DataTransactionHeader, expiry_height: u64) {
-        match self.irys_db.update_eyre(|db_tx| {
-            let mut cdr = irys_database::cache_data_root(db_tx, tx, None)?
-                .ok_or_else(|| eyre!("failed to cache data_root"))?;
-            cdr.expiry_height = Some(expiry_height);
-            db_tx.put::<CachedDataRoots>(tx.data_root, cdr)?;
-            Ok(())
-        }) {
+        match self
+            .irys_db
+            .update_cache_eyre(|db_tx| record_data_root_expiry(db_tx, tx, expiry_height))
+        {
             Ok(()) => {
                 info!(
                     data_root = %tx.data_root,
@@ -553,18 +518,12 @@ impl Inner {
                 .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
             last_block_entry.header().timestamp_secs()
         };
-        let number_of_ingress_proofs_total = self
-            .config
-            .number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
-        PublishFeeCharges::new(
-            actual_perm_fee,
-            actual_term_fee,
-            &self.config.node_config.consensus_config(),
-            number_of_ingress_proofs_total,
-        )
-        .map_err(|e| {
-            TxIngressError::FundMisalignment(format!("Invalid perm fee structure: {}", e))
-        })?;
+        self.config
+            .ingress_proof_reward_pool_at(latest_block_timestamp_secs, actual_term_fee.get())
+            .and_then(|pool| PublishFeeCharges::new(actual_perm_fee, pool))
+            .map_err(|e| {
+                TxIngressError::FundMisalignment(format!("Invalid perm fee structure: {}", e))
+            })?;
 
         Ok(())
     }
@@ -600,5 +559,53 @@ impl Inner {
             Ok(None) => Ok(TxKnownStatus::Unknown),
             Err(_) => Err(TxReadError::DatabaseError),
         }
+    }
+}
+
+/// Caches the data root of `tx` and raises its pre-confirmation expiry to `expiry_height`.
+/// A root outlives every tx that references it, so the cache prune cannot evict a root
+/// while one of its txs is included but not migrated.
+fn record_data_root_expiry(
+    db_tx: &irys_database::ScopedTxMut<irys_database::Cache>,
+    tx: &DataTransactionHeader,
+    expiry_height: u64,
+) -> eyre::Result<()> {
+    let mut cdr = irys_database::cache_data_root(db_tx, tx, None)?
+        .ok_or_else(|| eyre!("failed to cache data_root"))?;
+    cdr.expiry_height = Some(
+        cdr.expiry_height
+            .map_or(expiry_height, |existing| existing.max(expiry_height)),
+    );
+    db_tx.put::<CachedDataRoots>(tx.data_root, cdr)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
+    use irys_types::{ConsensusConfig, H256};
+
+    /// A later tx on a shared data root with an older anchor must not lower the root's expiry.
+    #[test]
+    fn shared_data_root_keeps_latest_expiry() -> eyre::Result<()> {
+        let dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db =
+            irys_database::DatabaseProvider::for_testing(dir.path(), &dir.path().join("cache"))?;
+        let consensus = ConsensusConfig::testing();
+        let data_root = H256::random();
+        let make_tx = || {
+            let mut tx = DataTransactionHeader::new(&consensus);
+            tx.id = H256::random();
+            tx.data_root = data_root;
+            tx
+        };
+
+        db.update_cache_eyre(|db_tx| record_data_root_expiry(db_tx, &make_tx(), 119))?;
+        db.update_cache_eyre(|db_tx| record_data_root_expiry(db_tx, &make_tx(), 101))?;
+
+        let cdr = db.update_cache_eyre(|db_tx| Ok(db_tx.get::<CachedDataRoots>(data_root)?))?;
+        assert_eq!(cdr.expect("root cached").expiry_height, Some(119));
+        Ok(())
     }
 }

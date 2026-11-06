@@ -5,7 +5,7 @@ use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::tables::IngressProofs;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_testing_utils::initialize_tracing;
@@ -20,8 +20,6 @@ use reth::rpc::{
     api::EthApiClient,
     types::{Block, Header, TransactionRequest},
 };
-use reth_db::Database as _;
-use reth_db::transaction::DbTx as _;
 use reth_e2e_test_utils::transaction::TransactionTestContext;
 use reth_ethereum_primitives::{Receipt, Transaction};
 use std::{sync::Arc, time::Duration};
@@ -473,7 +471,7 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
             .await,
         "overflow pre-header chunk must not remain parked"
     );
-    let overflow_cached = genesis_node.node_ctx.db.view_eyre(|db_tx| {
+    let overflow_cached = genesis_node.node_ctx.db.view_cache_eyre(|db_tx| {
         irys_database::cached_chunk_by_chunk_offset(
             db_tx,
             tx.header.data_root,
@@ -768,6 +766,14 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     peer1_node.wait_for_mempool(txid, seconds_to_wait).await?;
     peer2_node.wait_for_mempool(txid, seconds_to_wait).await?;
 
+    // Keep the peers' gossip off until both fork blocks are mined. The gossip
+    // service checks the broadcast flag when it sends, not when the tx is posted,
+    // so a scoped `*_without_gossip` call can still leak a peer's tx to the other
+    // peer. The other peer's fork block would then also include it, and the
+    // reorg block below would not.
+    peer1_node.gossip_disable();
+    peer2_node.gossip_disable();
+
     // Post a unique storage transaction to each peer
     let peer1_tx = peer1_node
         .post_data_tx_without_gossip(peer1_node.get_anchor().await?, data1, &peer1_signer)
@@ -785,6 +791,10 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Fail the test on any error results
     result1?;
     result2?;
+
+    // Each fork block now holds only its own peer's unique tx
+    peer1_node.gossip_enable();
+    peer2_node.gossip_enable();
 
     expected_height += 1;
 
@@ -1347,12 +1357,11 @@ async fn heavy3_mempool_publish_fork_recovery_test(
         a_blk1_tx1.header.id
     );
 
-    let a_blk1_tx1_proof1 = {
-        let tx = a_node.node_ctx.db.tx()?;
-        // Get the ingress proof from the database
-        tx.get::<IngressProofs>(a_blk1_tx1.header.data_root)?
-            .expect("Able to get a_blk1_tx1’s ingress proof from DB")
-    };
+    let a_blk1_tx1_proof1 = a_node.node_ctx.db.view_cache_eyre(|tx| {
+        Ok(tx
+            .get::<IngressProofs>(a_blk1_tx1.header.data_root)?
+            .expect("Able to get a_blk1_tx1’s ingress proof from DB"))
+    })?;
 
     let a_blk1_tx1_mempool = {
         // Use mempool-only lookup (no DB fallback) to verify the tx was orphaned back into mempool state
@@ -1748,6 +1757,9 @@ async fn heavy3_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 
     // assert that a_blk1_tx1 is no longer present in the mempool
     // (nothing should be in the mempool)
+    a_node
+        .wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait.try_into()?)
+        .await?;
     let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash();
     let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
@@ -1792,7 +1804,7 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .num_chunks_in_recall_range = 2;
-    genesis_config.consensus.get_mut().num_partitions_per_slot = 1;
+    genesis_config.consensus.get_mut().num_partitions_per_slot = irys_types::ReplicaCount::new(1);
     genesis_config.storage.num_writes_before_sync = 1;
     genesis_config
         .consensus
@@ -2127,7 +2139,7 @@ async fn heavy_test_evm_gossip() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .num_chunks_in_recall_range = 2;
-    genesis_config.consensus.get_mut().num_partitions_per_slot = 1;
+    genesis_config.consensus.get_mut().num_partitions_per_slot = irys_types::ReplicaCount::new(1);
     genesis_config.storage.num_writes_before_sync = 1;
     genesis_config
         .consensus

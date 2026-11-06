@@ -5,3 +5,4 @@ pub(crate) mod promotion_with_multiple_proofs;
 pub(crate) mod publish_cap;
 pub(crate) mod publish_gate_reorg_band;
 pub(crate) mod stale_txid_in_cached_data_root;
+pub(crate) mod submit_proof_survives_cache_cap;

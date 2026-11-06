@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use irys_data_tree::{
     DataCommitment, DataTree, DataTreeRoot, Geometry, HASH_SIZE, MAX_SUBTREE_HEIGHT, NodeHash,
-    SizeError, SubtreeHeight, VerifyError, chunk_key, data_commitment, depth, empty, leaf, node,
-    size_witness, verify_chunk, verify_segment,
+    SizeError, SubtreeHeight, VerifyError, chunk_key, chunk_leaf, chunk_root, data_commitment,
+    depth, empty, leaf, node, size_witness, verify_chunk, verify_segment,
 };
 use serde::Deserialize;
 
@@ -23,8 +23,8 @@ const MOD251: &str = "mod251";
 const ZEROS: &str = "zeros";
 
 /// spec §10 primitive group: 4 leaves, node, 6 size witnesses, empty(0..=8),
-/// 3 spec chunk keys plus the printed key at c = 3.
-const PRIMITIVE_CASES: usize = 24;
+/// 3 spec chunk keys plus the printed key at c = 3, and 5 chunk leaves.
+const PRIMITIVE_CASES: usize = 29;
 /// spec §10 testing root rows.
 const TESTING_ROOT_CASES: usize = 7;
 /// spec §10 mainnet sizes, each as mod251 and as zeros.
@@ -38,7 +38,28 @@ const SEGMENT_PROOF_CASES: usize = 200;
 const MULTI_SEGMENT_CASES: usize = 6;
 /// spec §10 negative list, with one case per sibling bit of the printed segment proof,
 /// plus the spec §5 verifier-rule cases.
-const NEGATIVE_CASES: usize = 24;
+const FIXED_NEGATIVE_CASES: usize = 24;
+
+/// spec §10 `size_proof_wrong_size`: each `n` and its claimed sizes `n'`. One
+/// chunk case and one segment case per pair. `n'` is `n − 1`, `n + 1`, the
+/// nearest size with another chunk count, and the nearest segment boundary
+/// with the same chunk count, in increasing order.
+const SIZE_PROOF_CLAIMS: [(u64, &[u64]); 7] = [
+    (1, &[2, 8, 33]),
+    (8, &[7, 9, 16, 33]),
+    (9, &[8, 10, 33]),
+    (32, &[24, 31, 33]),
+    (33, &[32, 34, 40]),
+    (112, &[96, 104, 111, 113]),
+    (157, &[156, 158, 160, 161]),
+];
+
+/// Two checks, chunk and segment, per claimed size.
+const SIZE_PROOF_CASES: usize = 2 * (3 + 4 + 3 + 3 + 3 + 4 + 4);
+
+/// The fixed cases, the moved index, the size-proof cases, the chunk root as
+/// a leaf, and the padding slot.
+const NEGATIVE_CASES: usize = FIXED_NEGATIVE_CASES + 1 + SIZE_PROOF_CASES + 2;
 
 /// spec §5: test geometry, `n = 20`, one hash other than `empty(0)` at leaf 3.
 const MIXED_LEAF_DATA_SIZE: u64 = 20;
@@ -54,8 +75,13 @@ const TWO_DIGEST_SOURCE_DATA_SIZE: u64 = (HASH_SIZE * 2) as u64;
 /// `max_data_tx_chunks` is not an input to `size_witness` (spec §3).
 const TWO_DIGEST_MAX_DATA_TX_CHUNKS: u32 = 1;
 
-/// spec §10 negative names, in generator order (`examples/gen_vectors.rs`).
-const NEGATIVE_NAMES: [&str; NEGATIVE_CASES] = [
+/// spec §10: test geometry, `n = 20`, claimed as `n' = 25` (`rightmost_segment_padding_slot`).
+const PADDING_SLOT_DATA_SIZE: u64 = 20;
+const PADDING_SLOT_CLAIMED_DATA_SIZE: u64 = 25;
+
+/// spec §10 negative names before the chunk-leaf cases, in generator order
+/// (`examples/gen_vectors.rs`).
+const FIXED_NEGATIVE_NAMES: [&str; FIXED_NEGATIVE_CASES] = [
     "wrong_data_size_same_chunk_count",
     "wrong_data_size_other_chunk_count",
     "chunk_index_out_of_range",
@@ -81,6 +107,28 @@ const NEGATIVE_NAMES: [&str; NEGATIVE_CASES] = [
     "replaced_segment_witness",
     "data_size_above_max",
 ];
+
+/// Every negative name, in generator order.
+fn negative_names() -> Vec<String> {
+    let mut names: Vec<String> = FIXED_NEGATIVE_NAMES
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    names.push("chunk_proof_at_moved_index".to_string());
+    for (data_size, claimed_sizes) in SIZE_PROOF_CLAIMS {
+        for claimed_data_size in claimed_sizes {
+            for check in ["chunk", "segment"] {
+                names.push(format!(
+                    "size_proof_wrong_size_{check}_{data_size}_as_{claimed_data_size}"
+                ));
+            }
+        }
+    }
+    names.push("chunk_root_as_leaf".to_string());
+    names.push("rightmost_segment_padding_slot".to_string());
+    assert_eq!(names.len(), NEGATIVE_CASES);
+    names
+}
 
 const FILE_NAMES: [&str; 7] = [
     "chunk_proofs.json",
@@ -167,14 +215,16 @@ fn assert_descriptions(
         concat!(
             "Testing-geometry roots (spec §10): chunk_size 32, segments_per_chunk 4. ",
             "Bytes are mod251, the pattern of the printed root table. ",
-            "The case holds the chunk roots, data_tree_root, size_witness, and data_commitment."
+            "The case holds the chunk roots, the chunk leaves chunk_leaf(c, R_c), data_tree_root, ",
+            "size_witness, and data_commitment."
         )
     );
     assert_eq!(
         roots_mainnet,
         concat!(
             "Mainnet roots (spec §4, §10). Each data_size is stored twice: mod251 bytes, then zero bytes. ",
-            "The case holds the chunk roots, data_tree_root, size_witness, and data_commitment. ",
+            "The case holds the chunk roots, the chunk leaves chunk_leaf(c, R_c), data_tree_root, ",
+            "size_witness, and data_commitment. ",
             "Chunk counts 8, 9, 16, and 17 are full uploads (data_size = chunk_count * chunk_size). ",
             "1 GiB is 2^30 bytes (4096 chunks). 1 GiB + 1 is the next byte."
         )
@@ -186,7 +236,9 @@ fn assert_descriptions(
             "Mainnet geometry, mod251: every chunk of each full upload with chunk count 1 through 17 ",
             "(chunk count 5, chunk index 4 is the one-sibling proof, spec §4), ",
             "and chunks 0, 2047, and 4095 of 1 GiB. ",
-            "Testing geometry, mod251: every chunk of the printed 112-byte upload, including chunk 2."
+            "Testing geometry, mod251: every chunk of the printed 112-byte upload, including chunk 2. ",
+            "size_proof is true when chunk_index is rightmost_chunk(data_size) = chunk_count - 1, ",
+            "computed from data_size (spec §5, §9). Every upload here has that case."
         )
     );
     assert_eq!(
@@ -198,7 +250,9 @@ fn assert_descriptions(
             "and segment (0, 1) of 4097 bytes, which is 1 byte. ",
             "Testing geometry, mod251: the printed proof at data_size 112, chunk 3, segment 1. ",
             "Testing geometry, n = 20: segments 0 and 1 verify against the commitment whose leaf 3 ",
-            "is 32 bytes of 0xAB instead of empty(0) (spec §5). replaced_leaf names that leaf."
+            "is 32 bytes of 0xAB instead of empty(0) (spec §5). replaced_leaf names that leaf. ",
+            "size_proof is true when (chunk_index, segment_index) is rightmost_segment(data_size), ",
+            "computed from data_size (spec §5, §9). Every honest upload here has that case."
         )
     );
     assert_eq!(
@@ -233,7 +287,20 @@ fn assert_descriptions(
             "Segments 0 and 1 of that upload verify; they are in the segment-proof file. ",
             "An honest chunk proof and an honest segment proof whose last hash is size_witness(G, n+1) ",
             "fail before the climb. ",
-            "data_size = max_data_size + 1 is out of range. That case records a one-chunk maximum."
+            "data_size = max_data_size + 1 is out of range. That case records a one-chunk maximum. ",
+            "chunk_proof_at_moved_index: the bytes and proof of chunk 2 of n = 96, the last hash ",
+            "size_witness(G, 64), shown as chunk 1 of n' = 64 against the commitment re-derived for 64. ",
+            "The steps match, and the chunk leaf hashes the index, so it fails (spec §6). ",
+            "size_proof_wrong_size_<check>_<n>_as_<n'>: for n in 1, 8, 9, 32, 33, 112, and 157, ",
+            "the honest rightmost chunk or rightmost data segment of the n'-byte upload and its proof, ",
+            "at the indexes computed from n', against node(data_tree_root(n), size_witness(G, n')). ",
+            "n' is n - 1, n + 1, the nearest size with another chunk count, and the nearest segment ",
+            "boundary with the same chunk count (spec §9 size proof). ",
+            "chunk_root_as_leaf: honest one-chunk bytes and proof against ",
+            "node(chunk_root(bytes), size_witness(G, n)); the one-chunk root is chunk_leaf(0, R_0). ",
+            "rightmost_segment_padding_slot: the honest siblings of segment 3 of n = 20, the last hash ",
+            "size_witness(G, 25), and the one byte of segment 3 of the 25-byte upload, shown as the ",
+            "rightmost data segment of n' = 25 against the commitment re-derived for 25."
         )
     );
 }
@@ -247,7 +314,10 @@ fn primitives_description() -> String {
          empty covers heights 0 through {MAX_SUBTREE_HEIGHT}. \
          chunk_key uses the testing-geometry commitment of 112 mod251 bytes. \
          Chunk indexes are 0, 1, and 2^24, plus 3 so the printed chunk_key is in this file. \
-         2^24 is an input of the hash, not a chunk of that 112-byte tree."
+         2^24 is an input of the hash, not a chunk of that 112-byte tree. \
+         chunk_leaf hashes (chunk_index, chunk_root): (0, leaf(\"\")), (1, empty(6)), (2^24, empty(6)), \
+         (20971519, empty(6)), the last chunk index of a 5 TiB upload, and (3, R_3) of the \
+         testing-geometry 112-byte mod251 upload, the printed chunk leaf."
     )
 }
 
@@ -318,6 +388,49 @@ fn assert_printed_spec(
     assert_spec_chunk_proof(chunk_proofs);
     assert_spec_segment_proof(segment_proofs);
     assert_spec_chunk_key(primitives);
+    assert_spec_chunk_leaves(primitives, roots_testing);
+}
+
+/// spec §10 printed chunk leaves. For `C = 1` the `data_tree_root` is
+/// `chunk_leaf(0, R_0)`. `n = 112` prints `R_3` and `chunk_leaf(3, R_3)`.
+fn assert_spec_chunk_leaves(
+    primitives: &VectorFile<PrimitiveCase>,
+    roots_testing: &VectorFile<RootCase>,
+) {
+    for (data_size, chunk_leaf_hex) in [
+        (
+            1,
+            "0f5fe2ca48d3d3f37848fc851257fc094c8b27feaa82c905b2b8ffbd177f6543",
+        ),
+        (
+            32,
+            "5a3b3c37b21874d69166aa06c52a0b5dd87ec378187adab4bc9d4ee42eb0ef0d",
+        ),
+    ] {
+        let case = find_root(roots_testing, MOD251, data_size);
+        assert_eq!(
+            case.chunk_leaves,
+            [chunk_leaf_hex],
+            "spec §10 n = {data_size}"
+        );
+        assert_eq!(
+            case.data_tree_root, chunk_leaf_hex,
+            "spec §10 n = {data_size}"
+        );
+    }
+    let printed_root = "dbc3c2433981a503f8ffa38629a9ec5d41501618b2afd860af52d6a93e06e8b6";
+    let printed_leaf = "ec954565828ae61fff557dcb9cc3b4e6a5da4b5417db597bffc7e9d6ac716332";
+    let case = find_root(roots_testing, MOD251, 112);
+    assert_eq!(case.chunk_roots[3], printed_root, "spec §10 n = 112 R_3");
+    assert_eq!(case.chunk_leaves[3], printed_leaf, "spec §10 n = 112 L_3");
+    assert!(
+        primitives.cases.iter().any(|primitive| matches!(
+            primitive,
+            PrimitiveCase::ChunkLeaf { chunk_index: 3, chunk_root, hash }
+                if chunk_root == printed_root && hash == printed_leaf
+        )),
+        "spec §10 chunk_leaf(3, R_3) primitive"
+    );
 }
 
 /// `(data_size, chunk_count, data_tree_root, data_commitment)` from spec §10. mod251.
@@ -325,44 +438,44 @@ const TESTING_ROOT_ROWS: &[(u64, u32, &str, &str)] = &[
     (
         1,
         1,
-        "8521b87ff724236722cfb6d6306ad59bceb4aee3e35ae73c41326cd31915e13e",
-        "594c8b3b9cff69e0b5dd50c7465a7b2f7dc722d445f0ac2952d135c04b79f2b6",
+        "0f5fe2ca48d3d3f37848fc851257fc094c8b27feaa82c905b2b8ffbd177f6543",
+        "6766c8a6ed3afeaeb38d74b508b774ee33c8396d1061ac2bd272bedd02f5c421",
     ),
     (
         8,
         1,
-        "2239889b93ac82ead2db9605f2584a25255c90206c1fccaddf54caa75b7fc1a1",
-        "6e9c94693cb2fea535b79bb9938982db61ff23ade48119a60340e9a680423469",
+        "bed46322520adad4b5c1808a4a30269e4fdbf89e89b83a1b8439442c01db2c83",
+        "e35809d4fdba5e31164f9e58ac91d659a117776eb7748cd7e518239039a92f2b",
     ),
     (
         9,
         1,
-        "3ba2878285288e004dcd35a73e9a3df4a19f5fe5acccaf8d84b50fc7254e6ddb",
-        "245a5af1aa8e606cb4e8878d93449d7872f68de9bb8b1db696c13ea81c393728",
+        "ffa37bcad0b5968333e8f06b23b1f4cc430d4ae8a37a344de34ffc631dd8bf21",
+        "515b428e3fa513840a5cf842a30d364a47d3cba26d7a483c845431d7ffebc852",
     ),
     (
         32,
         1,
-        "d3e81f198d6bd3782d1941172c89e49721d8f5e33cc709d4f6ba3f54b9e35f82",
-        "aa774e6e5029925d0c43c6f019c56222cb4f220bad6626bb37bdf17180f5d6ea",
+        "5a3b3c37b21874d69166aa06c52a0b5dd87ec378187adab4bc9d4ee42eb0ef0d",
+        "c21dea135c5673eb07cf2d641d7893b22ca83dd0986dc51b09b99b29026fdd6f",
     ),
     (
         33,
         2,
-        "bf98e27c471bfda3de1d44b4eb420f528238aa75e6e002fe1636c04a431713a9",
-        "074db04f4bc2e5cf84f47d2772cf100c0c09d372e15c28264f9edf9187645d00",
+        "3bf5a0750be0980d8941fdf6778ba8b61b633599aee08a7d710d8566a4baa787",
+        "c6ae46330fe254aebad232ff69bd954da161053bf629b8a64f130a4b2a4eb54d",
     ),
     (
         112,
         4,
-        "7fd698c547deb0bbb8f8ab7db08dd34616a496f141167252487509cb74824564",
-        "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4",
+        "0a22641c8d9f53afbe333e832a5187307f4d4f31a0b43dad7ea3dfc0f84deb6e",
+        "82204503a718db465b3eeecea24b2896411211af0080555657eb2098fb969620",
     ),
     (
         157,
         5,
-        "81e7a996cd2ba141815aa48a1afe4f9c3d5c0ca450f12c9a605c20a0c3037c95",
-        "8eb9e426d13ab02def39117e53b838110f8cebfdfb7d0b9c1726e05001c00e0d",
+        "ca4c355dba86031d9f6eb8d8955305abf03cdc51de06ed264873a247148d64e1",
+        "74e1e5bff4f5047875b49f5d20afc762335d3c07002b8e55acba6e65357ba20d",
     ),
 ];
 
@@ -371,56 +484,56 @@ const MAINNET_ROOT_ROWS: &[(u64, u32, &str, &str)] = &[
     (
         1,
         1,
-        "2438dc9c444ab818a41197dfd3aa6502bc3e2fb03895b7ed79ab275539b7972b",
-        "9029711cdb35496538bd4e91ac809a8abe2e3bb94376d44595e097478a4a8698",
+        "646847d975529f524fd1f887a1dbdfb4514bece22e63e115d8a27b596bc5b827",
+        "a345efb5e682e6b6d54bf57e9d5632976c1ccef897b0214a1c4c2b4cece7eb5a",
     ),
     (
         4_095,
         1,
-        "851d7b0214e05f85e581de8dd408f5a4b0c31d8baad3f42986f056949ee1d575",
-        "267ff99c8c7c3580124a730ee7e7c28781d3969a5e52ea164a8fc5fcfa78416b",
+        "ead4d363fdb5a39a35e89c15b67574c9116018ad3f02264c1ab7a7248f44b632",
+        "8994d60a594d001d6511afd273403fdc41c48e5e7b744a640ffab046737959b0",
     ),
     (
         4_096,
         1,
-        "be58572dcfba33df3201cdbeda2799dd0c5b508a0df41a47912cb008896f9195",
-        "7f3301e487d66e71bbb39ab1ae67d6c3ce37fee25eab9daf8259a3713cd4d47c",
+        "b298a715260a196611a1a200298372756ad785dd459933d83ddfde245cd93bed",
+        "46e6159e0bfad886ad65fd1a4c48ae7f93160944353e7d678a6d2a2f14178d30",
     ),
     (
         4_097,
         1,
-        "f516d84903ce88d9d1d80d4071ce945dc53707bd4ed60346a3ba6392412c9134",
-        "3262c546bc4db11e05171d083d33fef98a36ddbb18f56ee64fcc2b5f3bb0aade",
+        "2a6d480a36e68670061d18861bb2c4308663b7c26963d4b13fbc5ccf42b463d2",
+        "d57e36e3153ab9be17bd7cb1421909fbfe4360ee9d6d126d6a8705dcdf1e030f",
     ),
     (
         262_143,
         1,
-        "b6dd65dde53181e3443d128d05b7cbf57c5f4352caa8216ed365d716896335bd",
-        "5ab3d70ba6f6ef25d19d456d9d4bfa57ed26796d10339b4ba95f34bfd41d0f83",
+        "32ca509db863c5bccc517b8f6e94927da71404e1023f89c93390ff58af9326da",
+        "2bb9b4b7a3b6eeecb1e99eae46cd85efd969619f2d65e649628c10f4d53d544c",
     ),
     (
         262_144,
         1,
-        "8e2d2d85eb5fd8e66d4f4b874b5ad6b5aa46cad790fbe64f61c374d8f8243d5f",
-        "774bddbe62aae051508341d9291b1533eda68d8f95f034c6905de097aa185730",
+        "cc7b595dd3aecd15cfb5ce7a733f449e63c05545a8d5f9e8e67d5bf4b6069b0d",
+        "9821bdbe69355f8a624164e5d73fb676e2cfb7af7483327cf6fc922c0b873b39",
     ),
     (
         262_145,
         2,
-        "dcc4ac982c84bdf0d6df5c16d2728b65bb4bae355b078b5a22e47a6a3e518825",
-        "ff03453747ac366f182de34614fef6816feda7428fc7d5b00f931561eaa8fc04",
+        "5504c86e3cf316bf05ecd96a2585c3b09781382c25f6c664b5330a5a444c3101",
+        "d9243949c7c500fa0606a8a7d4ad4285c727e81944f42d283f49f0d0544e770c",
     ),
     (
         917_504,
         4,
-        "3d86c811acf3356576cbe00b28814ad89ee42bd5aa36b755cea977620366de67",
-        "683b214b4775ab4fbe5baa64cf193f50a1ecb06ea3a90f3b3e85a60639c3c91f",
+        "7f4f92981ff51822adf2c7f7a394a9536e764256c8bd8b4d5daef31a62b8de07",
+        "0e751421c6429cba0e9ac6edc8c32edb88006e0d052518f6bd933d4b2a000d5e",
     ),
     (
         1_310_720,
         5,
-        "1d5501730df0426a6f2b223d3fc31703d5eb6e64bae166736c920ccd23594ac0",
-        "36c380c4cb361fe958b443d27656130e5f57e58b9fd8c80af9a0130a390b83ab",
+        "29f12d7ecbcface82c0ca4787c60bd6d6a0fb271a173599c977eee68aff59731",
+        "bac42e0026f41eff11d056d4ee30904dcf963734eef88c310c9a950f72ab0069",
     ),
 ];
 
@@ -450,10 +563,10 @@ fn assert_spec_chunk_proof(file: &VectorFile<ChunkProofCase>) {
             case.data_size == 112 && case.chunk_index == 2 && case.geometry.chunk_size == 32
         })
         .expect("spec §10 chunk proof");
-    // spec §10: the reference printed the siblings. The last hash is the witness.
+    // spec §10: the generator printed the siblings. The last hash is the witness.
     let siblings = concat!(
-        "dbc3c2433981a503f8ffa38629a9ec5d41501618b2afd860af52d6a93e06e8b6",
-        "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
+        "ec954565828ae61fff557dcb9cc3b4e6a5da4b5417db597bffc7e9d6ac716332",
+        "4bde04027ed46b4dc676b850d95e5b4f8ab4092f4c374528905967fbc157e399",
     );
     assert!(
         case.proof.starts_with(siblings),
@@ -471,7 +584,7 @@ fn assert_spec_chunk_proof(file: &VectorFile<ChunkProofCase>) {
     );
     assert_eq!(
         case.data_commitment,
-        "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4"
+        "82204503a718db465b3eeecea24b2896411211af0080555657eb2098fb969620"
     );
 }
 
@@ -486,12 +599,12 @@ fn assert_spec_segment_proof(file: &VectorFile<SegmentProofCase>) {
                 && case.geometry.chunk_size == 32
         })
         .expect("spec §10 segment proof");
-    // spec §10: the reference printed the siblings. The last hash is the witness.
+    // spec §10: the generator printed the siblings. The last hash is the witness.
     let siblings = concat!(
         "82bdff7cd7950d248431b84dd588f1777777ee141ebc86ac8f72080aaf11e0e5",
         "fe43d66afa4a9a5c4f9c9da89f4ffb52635c8f342e7ffb731d68e36c5982072a",
-        "f8e87ba8c906d8391fb1182e6c1e7d123392e8770d510b547edb3bbffe7cfb65",
-        "50cb073b3d437e037c34dc0d757489f56fd63b9122dd4edfbe8bc42812a5bd84",
+        "fbc10578ab6a756a167ab57c071797202dd7a56d16acca9b268c230c87b0a7cc",
+        "4bde04027ed46b4dc676b850d95e5b4f8ab4092f4c374528905967fbc157e399",
     );
     assert!(
         case.proof.starts_with(siblings),
@@ -527,11 +640,11 @@ fn assert_spec_chunk_key(file: &VectorFile<PrimitiveCase>) {
     assert_eq!(*chunk_index, 3);
     assert_eq!(
         *commitment,
-        "d3175b025ae584b19f464af849bff465ecf9b9a2c83376b947b5681d82cca1c4"
+        "82204503a718db465b3eeecea24b2896411211af0080555657eb2098fb969620"
     );
     assert_eq!(
         *hash,
-        "91ff543f909c38411b53d65ef72e411ed81721af90f8f88f6b49450688b32674"
+        "507655a3cf308a380bd30de15bade83e504e6271cbba0482de73d5e58fe37bbc"
     );
 }
 
@@ -656,6 +769,18 @@ fn check_primitives(file: &VectorFile<PrimitiveCase>) {
                 let key = chunk_key(&tree.data_commitment(), *chunk_index);
                 assert_eq!(hex_of(key.as_bytes()), *hash, "chunk_key {chunk_index}");
             }
+            PrimitiveCase::ChunkLeaf {
+                chunk_index,
+                chunk_root,
+                hash,
+            } => {
+                let root = NodeHash::from(decode_hash(chunk_root));
+                assert_eq!(
+                    hex_of(chunk_leaf(*chunk_index, &root).as_bytes()),
+                    *hash,
+                    "chunk_leaf {chunk_index}"
+                );
+            }
         }
     }
 }
@@ -666,7 +791,7 @@ fn check_roots(file: &VectorFile<RootCase>) {
         UploadKey::new(geometry, &case.pattern, case.data_size)
     });
     for (key, cases) in groups {
-        let tree = build_upload(&key);
+        let (_data, tree) = build_upload_with_bytes(&key);
         for case in cases {
             let label = format!("{} {}", case.pattern, case.data_size);
             assert_eq!(tree.chunk_count(), case.chunk_count, "{label}");
@@ -690,15 +815,27 @@ fn check_roots(file: &VectorFile<RootCase>) {
                 usize::try_from(case.chunk_count).unwrap(),
                 "{label}"
             );
-            for (chunk_index, expected) in case.chunk_roots.iter().enumerate() {
+            assert_eq!(case.chunk_leaves.len(), case.chunk_roots.len(), "{label}");
+            for (chunk_index, (expected_root, expected_leaf)) in
+                case.chunk_roots.iter().zip(&case.chunk_leaves).enumerate()
+            {
                 let chunk_index = u32::try_from(chunk_index).expect("chunk index fits");
-                let root = tree
-                    .chunk_root(chunk_index)
+                // spec §4: layer 0 holds `chunk_leaf(c, R_c)`. The stored leaf
+                // binds the file's chunk root without hashing the chunk again.
+                // `tests/spec_reference.rs` re-derives each root from the bytes.
+                let root = NodeHash::from(decode_hash(expected_root));
+                let stored_leaf = tree
+                    .chunk_leaf(chunk_index)
                     .unwrap_or_else(|err| panic!("{label}: {err}"));
                 assert_eq!(
-                    hex_of(root.as_bytes()),
-                    *expected,
-                    "{label} chunk {chunk_index}"
+                    stored_leaf,
+                    chunk_leaf(chunk_index, &root),
+                    "{label} chunk root {chunk_index}"
+                );
+                assert_eq!(
+                    hex_of(stored_leaf.as_bytes()),
+                    *expected_leaf,
+                    "{label} chunk leaf {chunk_index}"
                 );
             }
         }
@@ -721,6 +858,12 @@ fn check_chunk_proofs(file: &VectorFile<ChunkProofCase>) {
                 depth(case.chunk_index, case.chunk_count),
                 Some(case.depth),
                 "{label}"
+            );
+            // spec §5 `rightmost_chunk(n) = C − 1`, computed from `n`.
+            assert_eq!(
+                case.size_proof,
+                case.chunk_index == tree.chunk_count() - 1,
+                "{label} size_proof"
             );
             assert_eq!(
                 hex_of(tree.data_commitment().as_bytes()),
@@ -773,6 +916,12 @@ fn check_segment_proofs(file: &VectorFile<SegmentProofCase>) {
                 .segment_len(case.data_size, case.chunk_index, case.segment_index)
                 .unwrap_or_else(|err| panic!("{label}: {err}"));
             assert_eq!(segment_length, case.segment_length, "{label}");
+            assert_eq!(
+                case.size_proof,
+                (case.chunk_index, case.segment_index)
+                    == rightmost_segment(&geometry, case.data_size),
+                "{label} size_proof"
+            );
             let chunk = chunk_slice(&geometry, &data, case.data_size, case.chunk_index);
             let proof = tree
                 .segment_proof(case.chunk_index, case.segment_index, chunk)
@@ -961,8 +1110,8 @@ fn check_one_multi_segment(
 }
 
 fn check_negative(file: &VectorFile<NegativeCase>) {
-    let names: Vec<&str> = file.cases.iter().map(|case| case.name.as_str()).collect();
-    assert_eq!(names, NEGATIVE_NAMES);
+    let names: Vec<String> = file.cases.iter().map(|case| case.name.clone()).collect();
+    assert_eq!(names, negative_names());
     let file_geometry = file.geometry.as_ref().expect("negative file geometry");
     for case in &file.cases {
         if let Some(geometry) = &case.geometry {
@@ -997,6 +1146,12 @@ fn check_negative(file: &VectorFile<NegativeCase>) {
             Mutation::BadEmptyLeaf => check_bad_empty_leaf(&geometry, case),
             Mutation::ReplacedSizeWitness => check_replaced_size_witness(&geometry, case),
             Mutation::DataSizeAboveMax => check_data_size_above_max(&geometry, case),
+            Mutation::ChunkProofAtMovedIndex => check_chunk_proof_at_moved_index(&geometry, case),
+            Mutation::RightmostProofOfClaimedSize => {
+                check_rightmost_proof_of_claimed_size(&geometry, case)
+            }
+            Mutation::CommitmentOverChunkRoot => check_commitment_over_chunk_root(&geometry, case),
+            Mutation::PaddingSlotAsRightmostSegment => check_padding_slot(&geometry, case),
         }
     }
 }
@@ -1116,7 +1271,13 @@ fn check_segment_mutation(geometry: &Geometry, case: &NegativeCase) {
         | Mutation::PinnedSiblingNotEmpty
         | Mutation::BadEmptyLeaf
         | Mutation::ReplacedSizeWitness
-        | Mutation::DataSizeAboveMax => panic!("{} is not a segment mutation", case.name),
+        | Mutation::DataSizeAboveMax
+        | Mutation::ChunkProofAtMovedIndex
+        | Mutation::RightmostProofOfClaimedSize
+        | Mutation::CommitmentOverChunkRoot
+        | Mutation::PaddingSlotAsRightmostSegment => {
+            panic!("{} is not a segment mutation", case.name)
+        }
     };
     assert_eq!(hex_of(&proof), case.proof, "{}", case.name);
     assert_eq!(
@@ -1274,7 +1435,11 @@ fn mutate_chunk_proof(honest: &[u8], mutation: Mutation) -> Vec<u8> {
         | Mutation::PinnedSiblingNotEmpty
         | Mutation::BadEmptyLeaf
         | Mutation::ReplacedSizeWitness
-        | Mutation::DataSizeAboveMax => panic!("not a chunk-proof mutation"),
+        | Mutation::DataSizeAboveMax
+        | Mutation::ChunkProofAtMovedIndex
+        | Mutation::RightmostProofOfClaimedSize
+        | Mutation::CommitmentOverChunkRoot
+        | Mutation::PaddingSlotAsRightmostSegment => panic!("not a chunk-proof mutation"),
     }
 }
 
@@ -1303,7 +1468,11 @@ fn mutate_chunk_bytes(chunk: &[u8], mutation: Mutation) -> Vec<u8> {
         | Mutation::PinnedSiblingNotEmpty
         | Mutation::BadEmptyLeaf
         | Mutation::ReplacedSizeWitness
-        | Mutation::DataSizeAboveMax => panic!("not a chunk-byte mutation"),
+        | Mutation::DataSizeAboveMax
+        | Mutation::ChunkProofAtMovedIndex
+        | Mutation::RightmostProofOfClaimedSize
+        | Mutation::CommitmentOverChunkRoot
+        | Mutation::PaddingSlotAsRightmostSegment => panic!("not a chunk-byte mutation"),
     }
 }
 
@@ -1354,10 +1523,6 @@ fn group_uploads<'a, T>(
         groups.entry(key_of(case)).or_default().push(case);
     }
     groups
-}
-
-fn build_upload(key: &UploadKey) -> DataTree {
-    build_upload_with_bytes(key).1
 }
 
 fn build_upload_with_bytes(key: &UploadKey) -> (Vec<u8>, DataTree) {
@@ -1567,6 +1732,11 @@ enum PrimitiveCase {
         commitment: String,
         hash: String,
     },
+    ChunkLeaf {
+        chunk_index: u32,
+        chunk_root: String,
+        hash: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -1576,6 +1746,7 @@ struct RootCase {
     data_size: u64,
     chunk_count: u32,
     chunk_roots: Vec<String>,
+    chunk_leaves: Vec<String>,
     data_tree_root: String,
     size_witness: String,
     data_commitment: String,
@@ -1592,6 +1763,7 @@ struct ChunkProofCase {
     depth: u32,
     data_commitment: String,
     proof: String,
+    size_proof: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1606,6 +1778,7 @@ struct SegmentProofCase {
     chunk_count: u32,
     data_commitment: String,
     proof: String,
+    size_proof: bool,
     /// Set when leaf `leaf_index` is the stand-in hash instead of `empty(0)`.
     /// Honest segment proofs omit it (spec §5).
     #[serde(default)]
@@ -1711,6 +1884,15 @@ enum Mutation {
     ReplacedSizeWitness,
     /// `data_size = max_data_size + 1` for the case geometry (spec §5).
     DataSizeAboveMax,
+    /// Chunk `proof_chunk_index`'s bytes and siblings shown as chunk `chunk_index`
+    /// of the claimed size, against the re-derived commitment (spec §6).
+    ChunkProofAtMovedIndex,
+    /// The claimed upload's honest rightmost proof against the source root (spec §9).
+    RightmostProofOfClaimedSize,
+    /// One-chunk proof against `node(R_0, size_witness(G, n))` (spec §4).
+    CommitmentOverChunkRoot,
+    /// The source siblings of a padding slot as the claimed rightmost data segment (spec §9).
+    PaddingSlotAsRightmostSegment,
 }
 
 fn group_segment_proofs<'a>(
@@ -1981,6 +2163,193 @@ fn check_data_size_above_max(recorded: &Geometry, case: &NegativeCase) {
     expect_chunk_error(recorded, &tree.data_commitment(), case, bytes, &proof);
 }
 
+/// Replace the proof's last hash with `size_witness(G, data_size)` (spec §6).
+fn with_size_witness(geometry: &Geometry, mut proof: Vec<u8>, data_size: u64) -> Vec<u8> {
+    let witness_start = proof.len() - HASH_SIZE;
+    proof[witness_start..].copy_from_slice(size_witness(geometry, data_size).as_bytes());
+    proof
+}
+
+/// Assert the file's commitment and proof, then the expected rejection.
+fn expect_claim_error(
+    geometry: &Geometry,
+    case: &NegativeCase,
+    commitment: &DataCommitment,
+    bytes: &[u8],
+    proof: &[u8],
+) {
+    assert_eq!(hex_of(proof), case.proof, "{}", case.name);
+    assert_eq!(
+        hex_of(commitment.as_bytes()),
+        case.commitment,
+        "{}",
+        case.name
+    );
+    match case.check {
+        Check::VerifyChunk => expect_chunk_error(geometry, commitment, case, bytes, proof),
+        Check::VerifySegment => expect_segment_error(geometry, commitment, case, bytes, proof),
+    }
+}
+
+/// spec §6: `n = 96` chunk 2 as chunk 1 of `n' = 64`. The steps match, so the
+/// honest chunk leaf of index 2 climbs to the honest root under `(1, 2)`. The
+/// verifier hashes index 1 into the leaf and fails.
+fn check_chunk_proof_at_moved_index(geometry: &Geometry, case: &NegativeCase) {
+    assert_eq!(
+        (case.source_data_size, case.data_size, case.chunk_index),
+        (96, 64, 1),
+        "{}: spec §6",
+        case.name
+    );
+    let proof_chunk_index = case.proof_chunk_index.expect("proof chunk index");
+    assert_eq!(proof_chunk_index, 2, "{}: spec §6", case.name);
+    let (data, tree) = build_pattern_with_bytes(geometry, case);
+    let bytes = chunk_slice(geometry, &data, case.source_data_size, proof_chunk_index);
+    let honest = tree
+        .chunk_proof(proof_chunk_index)
+        .unwrap_or_else(|err| panic!("{}: {err}", case.name));
+    let proof = with_size_witness(geometry, honest, case.data_size);
+    let siblings = &proof[..proof.len() - HASH_SIZE];
+    let claimed_chunk_count = geometry.chunk_count(case.data_size).unwrap();
+    assert_eq!(
+        climb_without_empty_pin(
+            tree.chunk_leaf(proof_chunk_index).unwrap(),
+            case.chunk_index,
+            claimed_chunk_count,
+            siblings,
+        ),
+        NodeHash::from(*tree.data_tree_root().as_bytes()),
+        "{}: only the index in the leaf differs",
+        case.name
+    );
+    let rederived = data_commitment(geometry, &tree.data_tree_root(), case.data_size);
+    expect_claim_error(geometry, case, &rederived, bytes, &proof);
+}
+
+/// spec §9 size proof: the `n'`-byte upload's honest rightmost proof, at the
+/// indexes computed from `n'`, against `node(data_tree_root(n), size_witness(G, n'))`.
+fn check_rightmost_proof_of_claimed_size(geometry: &Geometry, case: &NegativeCase) {
+    let claims = SIZE_PROOF_CLAIMS
+        .iter()
+        .find(|(data_size, _)| *data_size == case.source_data_size)
+        .unwrap_or_else(|| panic!("{}: source size", case.name));
+    assert!(
+        claims.1.contains(&case.data_size),
+        "{}: claimed size",
+        case.name
+    );
+    let source = build_pattern(geometry, case);
+    let claimed_data = data_bytes(MOD251, case.data_size);
+    let claimed = DataTree::from_bytes(*geometry, &claimed_data)
+        .unwrap_or_else(|err| panic!("{}: {err}", case.name));
+    let (chunk_index, segment_index) = rightmost_segment(geometry, case.data_size);
+    assert_eq!(case.chunk_index, chunk_index, "{}", case.name);
+    let chunk = chunk_slice(geometry, &claimed_data, case.data_size, chunk_index);
+    let (bytes, proof) = match case.check {
+        Check::VerifyChunk => (
+            chunk,
+            claimed
+                .chunk_proof(chunk_index)
+                .unwrap_or_else(|err| panic!("{}: {err}", case.name)),
+        ),
+        Check::VerifySegment => {
+            assert_eq!(case.segment_index, Some(segment_index), "{}", case.name);
+            (
+                segment_slice(
+                    geometry,
+                    &claimed_data,
+                    case.data_size,
+                    chunk_index,
+                    segment_index,
+                ),
+                claimed
+                    .segment_proof(chunk_index, segment_index, chunk)
+                    .unwrap_or_else(|err| panic!("{}: {err}", case.name)),
+            )
+        }
+    };
+    let rederived = data_commitment(geometry, &source.data_tree_root(), case.data_size);
+    expect_claim_error(geometry, case, &rederived, bytes, &proof);
+}
+
+/// spec §4: for `C = 1` the root is `chunk_leaf(0, R_0)`. A commitment over
+/// `R_0` itself does not open.
+fn check_commitment_over_chunk_root(geometry: &Geometry, case: &NegativeCase) {
+    let (data, tree) = build_pattern_with_bytes(geometry, case);
+    assert_eq!(tree.chunk_count(), 1, "{}", case.name);
+    let bytes = chunk_slice(geometry, &data, case.source_data_size, 0);
+    let root = chunk_root(geometry, bytes).unwrap_or_else(|err| panic!("{}: {err}", case.name));
+    assert_eq!(
+        NodeHash::from(*tree.data_tree_root().as_bytes()),
+        chunk_leaf(0, &root),
+        "{}",
+        case.name
+    );
+    let proof = tree
+        .chunk_proof(0)
+        .unwrap_or_else(|err| panic!("{}: {err}", case.name));
+    verify_chunk(
+        geometry,
+        &tree.data_commitment(),
+        case.data_size,
+        0,
+        bytes,
+        &proof,
+    )
+    .unwrap_or_else(|err| panic!("{} honest: {err}", case.name));
+    let over_chunk_root = commitment_of_root(geometry, &root, case.data_size);
+    expect_claim_error(geometry, case, &over_chunk_root, bytes, &proof);
+}
+
+/// spec §9 size proof: `n = 20` claimed as `n' = 25`. The honest siblings of
+/// padding slot 3 open the re-derived commitment only from `leaf("")`. The
+/// claimed rightmost data segment has one byte.
+fn check_padding_slot(geometry: &Geometry, case: &NegativeCase) {
+    assert_eq!(
+        (case.source_data_size, case.data_size),
+        (PADDING_SLOT_DATA_SIZE, PADDING_SLOT_CLAIMED_DATA_SIZE),
+        "{}: spec §10",
+        case.name
+    );
+    let segment_index = case.segment_index.expect("segment index");
+    assert_eq!(
+        (case.chunk_index, segment_index),
+        rightmost_segment(geometry, case.data_size),
+        "{}",
+        case.name
+    );
+    let (data, tree) = build_pattern_with_bytes(geometry, case);
+    let chunk = chunk_slice(geometry, &data, case.source_data_size, case.chunk_index);
+    let honest = tree
+        .segment_proof(case.chunk_index, segment_index, chunk)
+        .unwrap_or_else(|err| panic!("{}: {err}", case.name));
+    let proof = with_size_witness(geometry, honest, case.data_size);
+    let claimed_data = data_bytes(MOD251, case.data_size);
+    let bytes = segment_slice(
+        geometry,
+        &claimed_data,
+        case.data_size,
+        case.chunk_index,
+        segment_index,
+    );
+    assert_eq!(bytes.len(), 1, "{}: one claimed byte", case.name);
+    let rederived = data_commitment(geometry, &tree.data_tree_root(), case.data_size);
+    assert_eq!(
+        commitment_of_unpinned_proof(
+            geometry,
+            case.data_size,
+            case.chunk_index,
+            segment_index,
+            &[],
+            &proof,
+        ),
+        rederived,
+        "{}: the honest leaf is leaf(\"\")",
+        case.name
+    );
+    expect_claim_error(geometry, case, &rederived, bytes, &proof);
+}
+
 fn assert_same_geometry_value(geometry: &Geometry, expected: Geometry, label: &str) {
     assert_eq!(geometry.chunk_size(), expected.chunk_size(), "{label}");
     assert_eq!(
@@ -2016,7 +2385,8 @@ fn mixed_leaf_inputs(
         geometry.height(),
         leaf_index,
     );
-    let commitment = commitment_of_root(geometry, &bad_root, MIXED_LEAF_DATA_SIZE);
+    // One chunk: `data_tree_root = chunk_leaf(0, R_0)` (spec §4).
+    let commitment = commitment_of_root(geometry, &chunk_leaf(0, &bad_root), MIXED_LEAF_DATA_SIZE);
     let segment = segment_slice(geometry, &data, MIXED_LEAF_DATA_SIZE, 0, segment_index).to_vec();
     let mut proof = Vec::new();
     for level in 0..geometry.height() {
@@ -2027,6 +2397,15 @@ fn mixed_leaf_inputs(
     }
     proof.extend_from_slice(size_witness(geometry, MIXED_LEAF_DATA_SIZE).as_bytes());
     (commitment, proof, segment)
+}
+
+/// `rightmost_segment(n) = (C − 1, s_last − 1)` (spec §5).
+fn rightmost_segment(geometry: &Geometry, data_size: u64) -> (u32, u32) {
+    let chunk_index = geometry.chunk_count(data_size).expect("data size in range") - 1;
+    (
+        chunk_index,
+        data_segment_count(geometry, data_size, chunk_index) - 1,
+    )
 }
 
 fn data_segment_count(geometry: &Geometry, data_size: u64, chunk_index: u32) -> u32 {
@@ -2085,7 +2464,13 @@ fn commitment_of_unpinned_proof(
         };
         walked >>= 1;
     }
-    let climbed = climb_without_empty_pin(root, chunk_index, chunk_count, chunk_siblings);
+    // The chunk root takes its index before the chunk level (spec §5).
+    let climbed = climb_without_empty_pin(
+        chunk_leaf(chunk_index, &root),
+        chunk_index,
+        chunk_count,
+        chunk_siblings,
+    );
     commitment_of_root(geometry, &climbed, data_size)
 }
 

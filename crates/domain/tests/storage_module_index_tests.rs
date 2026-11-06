@@ -1,7 +1,7 @@
+use irys_database::DatabaseProvider;
 use irys_database::{
-    IrysDatabaseArgs as _, cache_chunk, cache_data_root, cached_chunk_by_chunk_offset,
-    db::IrysDatabaseExt as _, open_or_create_db, submodule::SubmoduleStore as _,
-    tables::IrysTables,
+    DatabaseProviderTestExt as _, cache_chunk, cache_data_root, cached_chunk_by_chunk_offset,
+    db::DatabaseProviderCacheExt as _, submodule::SubmoduleStore as _,
 };
 use irys_domain::{ChunkType, StorageModule, StorageModuleInfo, StorageSubmodule};
 use irys_storage::*;
@@ -14,8 +14,6 @@ use irys_types::{
     partition_chunk_offset_ii,
 };
 use openssl::sha;
-use reth_db::Database as _;
-use reth_db::mdbx::DatabaseArguments;
 use tracing::info;
 
 #[test_log::test(test)]
@@ -33,7 +31,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         num_chunks_in_partition: 20,
         block_migration_depth: 1,
         num_chunks_in_recall_range: 5,
-        num_partitions_per_slot: 1,
+        num_partitions_per_slot: irys_types::ReplicaCount::new(1),
         entropy_packing_iterations: 1,
         ..node_config.consensus_config()
     });
@@ -346,21 +344,17 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // =========================================================================
 
     // Manually update the data_root -> partition_hash index
-    let db = open_or_create_db(
-        tmp_dir,
-        IrysTables::ALL,
-        DatabaseArguments::irys_testing().unwrap(),
-    )
-    .unwrap();
+    let db =
+        DatabaseProvider::for_testing(&tmp_dir.path().join("db"), &tmp_dir.path().join("cache"))?;
     let _part_hash_0 = storage_modules[0].partition_hash().unwrap();
     let _part_hash_1 = storage_modules[1].partition_hash().unwrap();
 
     // Loop though all the transactions and add their chunks to the cache
     for tx in &txs {
-        let _ = db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             cache_data_root(wtx, &tx.header, None)?;
             Ok(())
-        });
+        })?;
         let mut prev_byte_offset: u64 = 0;
         info!("num chunks in tx: {:?}", tx.proofs.len());
         for (i, proof) in tx.proofs.iter().enumerate() {
@@ -386,7 +380,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                 ),
             };
 
-            let _ = db.update_eyre(|tx| cache_chunk(tx, &chunk));
+            db.update_cache_eyre(|tx| cache_chunk(tx, &chunk))?;
             prev_byte_offset = proof.last_byte_index as u64 + 1; // Update for next iteration
         }
     }
@@ -402,7 +396,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
         // loop though the assigned partitions
         for storage_module in &storage_modules {
-            let _ = db.view(|tx| {
+            db.view_cache_eyre(|tx| {
                 for i in 0..num_chunks {
                     let tx_chunk_offset = TxChunkOffset::from(i);
                     // first make sure the ledger_offset falls within the bounds
@@ -413,7 +407,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                     }
 
                     // Request the chunk from the global db index by  data root & tx relative offset
-                    let res = cached_chunk_by_chunk_offset(tx, data_root, tx_chunk_offset).unwrap();
+                    let res = cached_chunk_by_chunk_offset(tx, data_root, tx_chunk_offset)?;
 
                     // Build a Chunk struct to store in the submodule
                     if let Some((_metadata, chunk)) = res {
@@ -435,7 +429,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
                     }
                     ledger_offset += 1;
                 }
-            });
+                Ok(())
+            })?;
             //storage_module.print_pending_writes();
         }
     }

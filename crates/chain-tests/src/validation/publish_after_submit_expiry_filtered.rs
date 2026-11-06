@@ -54,7 +54,7 @@
 //   drive the txs through the real flow.
 
 use crate::validation::submit_expiry_two_node_setup;
-use irys_database::{db::IrysDatabaseExt as _, store_external_ingress_proof_checked};
+use irys_database::{db::DatabaseProviderCacheExt as _, store_external_ingress_proof_checked};
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::{DataLedger, H256, ingress::generate_ingress_proof};
 use reth::rpc::types::TransactionTrait as _;
@@ -135,7 +135,7 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
             chain_id,
             proof_anchor,
         )?;
-        genesis_node.node_ctx.db.update_eyre(|rw_tx| {
+        genesis_node.node_ctx.db.update_cache_eyre(|rw_tx| {
             store_external_ingress_proof_checked(rw_tx, &proof, genesis_signer.address())?;
             Ok(())
         })?;

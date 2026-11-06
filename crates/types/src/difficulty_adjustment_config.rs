@@ -236,7 +236,7 @@ mod tests {
         consensus_config.chunk_size = 32;
         consensus_config.num_chunks_in_partition = 40;
         consensus_config.num_chunks_in_recall_range = 8;
-        consensus_config.num_partitions_per_slot = 1;
+        consensus_config.num_partitions_per_slot = crate::storage_pricing::ReplicaCount::new(1);
         consensus_config.block_migration_depth = 1; // Testnet / single node config
 
         let mut storage_module_count = 3;

@@ -16,7 +16,9 @@ pub enum ProbeError {
     Unexpected(String),
 }
 
+/// Subset of the node's `/v1/info` body. The node serializes it in camelCase.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     #[serde(deserialize_with = "string_or_u64")]
     pub height: u64,
@@ -389,6 +391,22 @@ mod tests {
             },
         ];
         assert!(is_converged(&infos, 1));
+    }
+
+    #[test]
+    fn parses_the_node_info_body_the_node_serves() {
+        let served = irys_types::NodeInfo {
+            height: 7,
+            peer_count: 2,
+            is_syncing: true,
+            ..Default::default()
+        };
+        let body = serde_json::to_string(&served).unwrap();
+        let parsed: NodeInfo = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed.height, 7);
+        assert_eq!(parsed.peer_count, Some(2));
+        assert_eq!(parsed.is_syncing, Some(true));
+        assert_eq!(parsed.block_hash, Some(served.block_hash.to_string()));
     }
 
     #[tokio::test]

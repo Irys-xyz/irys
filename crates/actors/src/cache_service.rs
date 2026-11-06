@@ -4,45 +4,52 @@ use crate::chunk_ingress_service::ingress_proofs::{
     reanchor_and_store_ingress_proof,
 };
 use crate::metrics;
+use eyre::WrapErr as _;
+use irys_database::DatabaseProvider;
 use irys_database::{
     cached_data_root_by_data_root, delete_ingress_proof_if_unchanged,
-    delete_unprotected_cached_chunks_older_than, get_data_tx_metadata,
+    delete_unprotected_cached_chunks_older_than, get_data_tx_metadata, ingress_leaf_count_complete,
     reclaim_cached_chunks_older_than, tx_header_by_txid,
 };
 use irys_database::{
-    db::IrysDatabaseExt as _,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
     delete_cached_chunks_by_data_root, get_cache_size,
     tables::{
         CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof, IngressProofs,
     },
 };
 use irys_domain::{
-    BlockBoundsError, BlockIndexReadGuard, BlockTreeReadGuard, ChainState, EpochSnapshot,
-    StorageModulesReadGuard,
+    BlockBoundsError, BlockIndexReadGuard, BlockTreeReadGuard, ChainState, ChunkPlacementStatus,
+    EpochSnapshot, StorageModule, StorageModulesReadGuard,
 };
 use irys_types::ingress::CachedIngressProof;
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::v2::{ChunkBroadcastMode, GossipBroadcastMessageV2};
 use irys_types::{
-    Config, DataLedger, DataRoot, DataTransactionHeader, DatabaseProvider, GIGABYTE, H256,
-    IngressProof, IrysBlockHeader, LedgerChunkOffset, PartitionChunkOffset, SendTraced as _,
-    TokioServiceHandle, Traced, TxChunkOffset, UnixTimestamp,
+    Config, DataLedger, DataRoot, DataTransactionHeader, GIGABYTE, H256, IngressProof,
+    IrysBlockHeader, LedgerChunkOffset, PartitionChunkOffset, SendTraced as _, TokioServiceHandle,
+    Traced, TxChunkOffset, UnixTimestamp,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
-use reth_db::transaction::DbTx as _;
-use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
+use rust_decimal::prelude::ToPrimitive as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Condvar;
 #[cfg(test)]
 use std::sync::Mutex;
+use std::time::Instant;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
 use tracing::{Instrument as _, debug, error, info, trace, warn};
+
+pub mod replica_custody;
+use replica_custody::{
+    CoverageCandidate, PassMode, ReplicaCustody, ledger_slot, slot_points, spans_touch_live_slot,
+};
 
 /// Outcome of the CDR pruning-horizon policy for one `CachedDataRoots` entry.
 struct CdrEvictionState {
@@ -52,6 +59,7 @@ struct CdrEvictionState {
 }
 
 /// One transaction's chunk span on a ledger, in ledger offsets.
+#[derive(Clone, Copy)]
 struct TxLedgerSpan {
     ledger: DataLedger,
     /// First chunk of this transaction on `ledger`.
@@ -63,6 +71,73 @@ struct TxLedgerSpan {
 /// `start + count`. `None` when the sum does not fit in a ledger offset.
 fn checked_ledger_offset(start: LedgerChunkOffset, count: u64) -> Option<LedgerChunkOffset> {
     (*start).checked_add(count).map(LedgerChunkOffset::from)
+}
+
+/// Block walks one prune pass may cache. A walk holds one block's ledger tx
+/// ids (32 bytes each) and spans (24 bytes each), so with 100-tx blocks a
+/// full cache stays under 26 MB. A full cache is cleared rather than grown.
+const MAX_CACHED_BLOCK_WALKS: usize = 4_096;
+
+/// Tx spans resolved from canonical blocks during one capacity-prune pass.
+///
+/// Spans are read only at or below `migration_height`. Migrated blocks are
+/// final, so a resolved span cannot change within the pass. The root's tx
+/// list, local placements and the write-time migration check can change, so
+/// they are read fresh on every use.
+#[derive(Default)]
+struct PruneSpanCache {
+    walks: HashMap<(u64, DataLedger), Option<BlockLedgerWalk>>,
+}
+
+/// Prefix walk over one block's tx list on one ledger. It advances only as
+/// far as a requested tx, so each prefix header is read once per pass.
+struct BlockLedgerWalk {
+    tx_ids: Vec<H256>,
+    /// Span of each walked tx, by position in `tx_ids`. `None` for a
+    /// zero-chunk tx.
+    spans: Vec<Option<TxLedgerSpan>>,
+    /// Start of the next unwalked tx. `None` once a missing header or an
+    /// overflowing offset leaves every later start unknown.
+    cursor: Option<LedgerChunkOffset>,
+}
+
+impl BlockLedgerWalk {
+    /// Span of the first occurrence of `tx_id`, walking further when needed.
+    ///
+    /// `chunk_count` reads a tx's chunk count; `None` means its header is
+    /// missing. The tx itself, or any earlier tx, being missing gives `None`.
+    fn span_of(
+        &mut self,
+        tx_id: H256,
+        ledger: DataLedger,
+        mut chunk_count: impl FnMut(&H256) -> eyre::Result<Option<u64>>,
+    ) -> eyre::Result<Option<TxLedgerSpan>> {
+        if let Some((_, span)) = self
+            .tx_ids
+            .iter()
+            .zip(&self.spans)
+            .find(|(id, _)| **id == tx_id)
+        {
+            return Ok(*span);
+        }
+        while let (Some(start), Some(&id)) = (self.cursor, self.tx_ids.get(self.spans.len())) {
+            let Some(count) = chunk_count(&id)? else {
+                self.cursor = None;
+                break;
+            };
+            let span = (count > 0).then_some(TxLedgerSpan {
+                ledger,
+                start,
+                chunk_count: count,
+            });
+            self.spans.push(span);
+            self.cursor = checked_ledger_offset(start, count);
+            if id == tx_id {
+                return Ok(span);
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Maximum evictions per invocation to prevent blocking the service.
@@ -90,7 +165,7 @@ pub(crate) struct PruneTally {
     pub candidates: u64,
     /// Deleted: persisted `Data` here with this signer's ingress hash.
     pub deleted_durable: u64,
-    /// Deleted: not stored or proven here, and its root is migrated.
+    /// Deleted: not stored or proven here, with a migrated root and remote custody.
     pub deleted_unplaced: u64,
     /// Kept: younger than migration depth plus the cache clean lag.
     pub too_young: u64,
@@ -100,7 +175,7 @@ pub(crate) struct PruneTally {
     /// Kept: persisted `Data` here, but this signer has no compact ingress
     /// hash for the chunk. The durable path never deletes these.
     pub no_ingress_hash: u64,
-    /// Kept: not durable here, and some tx of its root is not migrated yet.
+    /// Kept: some tx of its root is not migrated yet.
     pub root_not_migrated: u64,
     /// Of `root_not_migrated`: the root has no `CachedDataRoots` row, so it
     /// can never count as migrated.
@@ -115,9 +190,29 @@ pub(crate) struct PruneTally {
     /// Offered to the unplaced path. What it did not delete was placed or
     /// updated since the scan.
     pub unplaced_attempted: u64,
+    /// Kept: not stored, proven or owed here, and no remote assignee has
+    /// attested a persisted copy for every live slot the body occupies.
+    pub kept_unreplicated: u64,
+    /// Kept: a `HoldOnly` pass, below the cache threshold, deletes nothing.
+    /// These are the durable and released bodies a `Reclaim` pass would
+    /// have offered for deletion.
+    pub hold_only: u64,
+    /// Held bodies announced to peers this pass. Not an outcome: each is
+    /// also counted in `kept_unreplicated`.
+    pub reannounced: u64,
 }
 
 impl PruneTally {
+    fn record_unmigrated(&mut self, migration: RootMigration, count: u64, placed: u64) {
+        self.root_not_migrated += count;
+        self.root_not_migrated_placed += placed;
+        match migration {
+            RootMigration::NoRecord => self.root_no_record += count,
+            RootMigration::NoTxids => self.root_no_txids += count,
+            RootMigration::TxPending | RootMigration::Migrated => {}
+        }
+    }
+
     pub(crate) fn unplaced_kept(&self) -> u64 {
         self.unplaced_attempted
             .saturating_sub(self.deleted_unplaced)
@@ -125,6 +220,11 @@ impl PruneTally {
 }
 /// Maximum ingress proofs to scan per pruning invocation.
 const MAX_PROOF_CHECKS_PER_RUN: usize = 1_000;
+/// Maximum cached data roots the restore sweep checks per pruning invocation.
+const MAX_RESTORE_CHECKS_PER_RUN: usize = 1_000;
+/// Maximum ingress proofs the restore sweep tries to generate per pruning
+/// invocation.
+const MAX_RESTORES_PER_RUN: usize = 4;
 
 #[derive(Debug)]
 pub enum CacheServiceAction {
@@ -186,6 +286,9 @@ pub struct InnerCacheTask {
     /// Read access to local storage modules, used to answer "is this chunk
     /// body durably stored?" at prune time.
     pub storage_modules_guard: StorageModulesReadGuard,
+    /// Replica attestations, the re-announce schedule and the pass cadence,
+    /// shared by every clone of the task.
+    pub replica_custody: ReplicaCustody,
     /// Shared by a cloned task so a test thread can release the prune thread.
     #[cfg(test)]
     prune_recheck_pause: Arc<PruneRecheckPause>,
@@ -205,6 +308,7 @@ impl InnerCacheTask {
     ///
     /// Determines the pruning horizon (one block before active submit ledger slots begin)
     /// and removes data roots from earlier blocks that are no longer needed for validation.
+    /// The prune never goes past the migrated tip.
     ///
     /// # Errors
     ///
@@ -276,7 +380,21 @@ impl InnerCacheTask {
                 first_unexpired_slot_index
             )
         })?;
-        self.prune_data_root_cache(prune_height)
+        // Term-ledger roots have no `block_set` before migration. A root's `expiry_height` is the
+        // maximum over its txs, and each tx's expiry (anchor height + tx_anchor_expiry_depth) is at
+        // least its inclusion height. So with this cap a root stays until every tx that
+        // references it, included after the migrated tip, has migrated.
+        let migrated_tip = self
+            .block_index_guard
+            .read()
+            .try_latest_height()
+            .map_err(|e| e.wrap_err("Failed to read the migrated tip for cache pruning"))?
+            .unwrap_or(0);
+        // A slot the snapshot does not know counts as live: unknown keeps.
+        let live = |ledger: DataLedger, slot_index: usize| {
+            ledger_slot(&epoch_snapshot, ledger, slot_index).is_none_or(|slot| !slot.is_expired)
+        };
+        self.prune_data_root_cache(prune_height.min(migrated_tip), &live)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(migration_height))]
@@ -292,9 +410,12 @@ impl InnerCacheTask {
         );
 
         let ((chunk_cache_count, chunk_cache_size), ingress_proof_count) =
-            self.db.view_eyre(|tx| {
+            self.db.view_cache_eyre(|tx| {
                 Ok((
-                    get_cache_size::<CachedChunks, _>(tx, self.config.consensus.chunk_size)?,
+                    get_cache_size::<CachedChunks, _>(
+                        tx.inner(),
+                        self.config.consensus.chunk_size,
+                    )?,
                     tx.entries::<IngressProofs>()?,
                 ))
             })?;
@@ -302,16 +423,22 @@ impl InnerCacheTask {
             custom.migration_height= ?migration_height,
             "Chunk cache: {} chunks ({:.3} GB),  {} ingress proofs",
             chunk_cache_count,
-            (chunk_cache_size / GIGABYTE as u64),
+            (chunk_cache_size / u64::try_from(GIGABYTE)?),
             ingress_proof_count
         );
         metrics::record_cache_stats(chunk_cache_count, chunk_cache_size);
 
-        // Attempt pruning cache only if we're above `prune_at_capacity_percent`% of max capacity.
+        // Capacity selects reclamation; custody announcements also run below it.
         let max_cache_size_bytes = self.config.node_config.cache.max_cache_size_bytes;
-        let threshold_bytes = max_cache_size_bytes as f64
+        let threshold_bytes = max_cache_size_bytes
+            .to_f64()
+            .ok_or_else(|| eyre::eyre!("cache maximum does not fit f64"))?
             * (self.config.node_config.cache.prune_at_capacity_percent / 100_f64);
-        if chunk_cache_size as f64 > threshold_bytes {
+        let above_threshold = chunk_cache_size
+            .to_f64()
+            .ok_or_else(|| eyre::eyre!("cache size does not fit f64"))?
+            > threshold_bytes;
+        if above_threshold {
             debug!("Cache above target capacity, proceeding with pruning");
             if chunk_cache_size > max_cache_size_bytes {
                 warn!(
@@ -323,11 +450,24 @@ impl InnerCacheTask {
             // not completed the durable write/leaf handoff may temporarily
             // keep the cache above its configured maximum. Normal terminal
             // lifecycle pruning still removes expired or abandoned roots.
-            self.prune_durably_migrated_chunk_bodies(migration_height)?;
         } else {
-            debug!("Cache under target capacity, skipping chunk pruning");
+            debug!("Cache under target capacity, holding chunk bodies");
+        }
+        // Below the threshold the pass still runs, at most every
+        // `HOLD_ONLY_INTERVAL`, so bodies this node alone holds keep being
+        // re-announced to their assignees. It deletes nothing then.
+        if let Some(mode) = self
+            .replica_custody
+            .next_pass_mode(above_threshold, Instant::now())
+        {
+            self.prune_chunk_bodies(migration_height, mode)?;
         }
 
+        // Last: the restore sweep must not delay the reclaim that frees space.
+        // A failed sweep must not fail the pass: reclaim has already committed.
+        if let Err(error) = self.restore_submit_ingress_proofs() {
+            warn!(?error, "Ingress proof restore sweep failed");
+        }
         Ok(())
     }
 
@@ -356,8 +496,9 @@ impl InnerCacheTask {
     /// Whether the root has at least one tx and every one is included at or
     /// below `migration_height`, and if not, why. Placements exist only after
     /// migration.
-    fn root_migration<T: reth_db::transaction::DbTx>(
-        tx: &T,
+    fn root_migration<C: reth_db::transaction::DbTx, T: reth_db::transaction::DbTx>(
+        tx: &C,
+        consensus_tx: &T,
         data_root: DataRoot,
         migration_height: u64,
     ) -> eyre::Result<RootMigration> {
@@ -368,7 +509,7 @@ impl InnerCacheTask {
             return Ok(RootMigration::NoTxids);
         }
         for tx_id in cached.txid_set.iter() {
-            match get_data_tx_metadata(tx, tx_id)?.and_then(|m| m.included_height) {
+            match get_data_tx_metadata(consensus_tx, tx_id)?.and_then(|m| m.included_height) {
                 Some(height) if height <= migration_height => {}
                 _ => return Ok(RootMigration::TxPending),
             }
@@ -398,14 +539,20 @@ impl InnerCacheTask {
                 }
             }
         }
+        // Unmigrated confirmed CDRs carry a non-empty `block_set` hint and
+        // may still have `expiry_height` if the cache commit lagged. Evicting
+        // on that pre-confirmation TTL would drop roots that persist_metadata
+        // already treated as confirmed.
         let horizon = if all_txs_confirmed {
             match (inclusion_max_height, cached.expiry_height) {
                 (Some(h), _) => Some(h),
                 (None, Some(e)) => Some(e),
                 (None, None) => None,
             }
-        } else {
+        } else if cached.block_set.is_empty() {
             cached.expiry_height
+        } else {
+            None
         };
         let evictable = match (horizon, all_txs_confirmed) {
             (Some(max_height), _) => max_height < prune_height,
@@ -428,26 +575,28 @@ impl InnerCacheTask {
     /// file says `Data` for this chunk. A `Data` label whose index names
     /// another chunk is that chunk's bytes.
     ///
-    /// A placed or proven body is deleted only by
-    /// `delete_reclaimable_cached_chunks_older_than`: the offset must be
-    /// persisted `Data`, and the current signer's compact ingress hash must
-    /// be present. A body with neither a proof, a placement, nor an
-    /// assignment that still owes this chunk is deleted on age once every tx
-    /// of its root is migrated. That path does not require the ingress hash.
-    /// Before migration
-    /// no node has a placement yet, so "unassigned" cannot be told apart from
+    /// A placed or proven body requires persisted `Data` at every local
+    /// placement and the current signer's compact ingress hash before deletion.
+    /// A body this node neither stores, proves nor owes requires a remote
+    /// assignee's attestation for every live slot it occupies instead.
+    /// Both paths require every transaction of the root to be migrated:
+    /// before migration, "unassigned" cannot be distinguished from
     /// "assigned, not migrated".
+    ///
+    /// A `HoldOnly` pass classifies and consults replica coverage, then
+    /// announces held bodies without deleting anything.
     #[tracing::instrument(level = "trace", skip_all)]
-    fn prune_durably_migrated_chunk_bodies(
+    fn prune_chunk_bodies(
         &self,
         migration_height: u64,
+        mode: PassMode,
     ) -> eyre::Result<PruneTally> {
         let local_address = self.config.irys_signer().address();
         let min_chunk_age_in_blocks = self
             .config
             .consensus
             .block_migration_depth
-            .saturating_add(self.config.node_config.cache.cache_clean_lag as u32);
+            .saturating_add(u32::from(self.config.node_config.cache.cache_clean_lag));
         let target_time_between_blocks_secs =
             self.config.consensus.difficulty_adjustment.block_time;
         let min_chunk_age_secs =
@@ -460,11 +609,11 @@ impl InnerCacheTask {
 
         // Scan candidates under a short-lived read txn, then drop it before any
         // gated write (same shape as `prune_ingress_proofs`): holding a RO txn
-        // across consensus-writer-gate waits pins MVCC free-page reclamation.
+        // across cache-writer-gate waits pins MVCC free-page reclamation.
         let mut candidates: BTreeMap<DataRoot, BTreeSet<TxChunkOffset>> = BTreeMap::new();
         let mut tally = PruneTally::default();
         {
-            let tx = self.db.tx()?;
+            let tx = self.db.cache().begin_ro()?;
             let mut chunk_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
             let seek_key: DataRoot = H256::random();
             let mut chunk_walk = chunk_cursor.walk(Some(seek_key))?;
@@ -509,89 +658,60 @@ impl InnerCacheTask {
             drop(tx);
         }
 
-        let (proven_roots, root_migration) = self.db.view_eyre(|tx| {
+        let (proven_roots, root_migration) = self.db.view_cache_eyre(|tx| {
+            let consensus_tx = self.db.tx()?;
             let mut proven = BTreeSet::new();
             let mut migration = HashMap::with_capacity(candidates.len());
             for root in candidates.keys() {
-                if Self::has_local_ingress_proof(tx, *root, local_address)? {
+                if Self::has_local_ingress_proof(tx.inner(), *root, local_address)? {
                     proven.insert(*root);
                 }
-                migration.insert(*root, Self::root_migration(tx, *root, migration_height)?);
+                migration.insert(
+                    *root,
+                    Self::root_migration(tx.inner(), &consensus_tx, *root, migration_height)?,
+                );
             }
             Ok((proven, migration))
         })?;
 
         // Resolve placement and durability outside the write txn: each root
         // costs one submodule index read per storage module.
+        // clone: pruning needs a stable set of shared module handles outside the guard.
         let storage_modules = self.storage_modules_guard.read().clone();
+        let mut span_cache = PruneSpanCache::default();
         let mut durable_by_root: Vec<(DataRoot, BTreeSet<TxChunkOffset>)> =
             Vec::with_capacity(candidates.len());
         let mut unprotected_by_root: Vec<(DataRoot, BTreeSet<TxChunkOffset>)> = Vec::new();
         for (root, cached_offsets) in candidates {
-            let mut durable = BTreeSet::new();
-            let mut placed = BTreeSet::new();
-            let mut unreadable = false;
-            irys_domain::trace_index_read(irys_domain::CACHE_RECLAIM, || {
-                let proven = proven_roots.contains(&root);
-                for storage_module in &storage_modules {
-                    let read = storage_module
-                        .durable_tx_offsets_for_data_root(root, &cached_offsets)
-                        .and_then(|d| {
-                            // Placement only decides which unproven bodies this
-                            // node does not store. A local proof already keeps
-                            // those bodies, so the second index read is wasted.
-                            if proven {
-                                return Ok((d, BTreeSet::new()));
-                            }
-                            let p = storage_module
-                                .placed_tx_offsets_for_data_root(root, &cached_offsets)?;
-                            Ok((d, p))
-                        });
-                    match read {
-                        Ok((d, p)) => {
-                            durable.extend(d);
-                            placed.extend(p);
-                        }
-                        Err(error) => {
-                            // Unreadable placement metadata is evidence of
-                            // neither durability nor non-assignment; leave the
-                            // bodies for a later pass.
-                            unreadable = true;
-                            warn!(
-                                chunk.data_root = ?root,
-                                storage_module = %storage_module.id,
-                                ?error,
-                                "Skipping chunk prune candidate with unreadable storage metadata"
-                            );
-                        }
-                    }
-                }
+            let count = u64::try_from(cached_offsets.len())?;
+            tally.candidates += count;
+            let status = irys_domain::trace_index_read(irys_domain::CACHE_RECLAIM, || {
+                Self::local_chunk_placement_status(&storage_modules, root, &cached_offsets)
             });
-            tally.candidates += cached_offsets.len() as u64;
-            let not_durable = cached_offsets.difference(&durable).count() as u64;
-            let proven = proven_roots.contains(&root);
+            let ChunkPlacementStatus {
+                placed,
+                unpersisted,
+            } = match status {
+                Ok(status) => status,
+                Err(error) => {
+                    tally.unreadable += count;
+                    warn!(chunk.data_root = ?root, ?error, "Keeping cached bodies with unreadable placement metadata");
+                    continue;
+                }
+            };
             let migration = root_migration
                 .get(&root)
                 .copied()
                 .unwrap_or(RootMigration::NoRecord);
-            let migrated = migration == RootMigration::Migrated;
-            if unreadable {
-                tally.unreadable += not_durable;
-            } else if proven {
-                tally.not_durable += not_durable;
-            } else if !migrated {
-                tally.root_not_migrated += not_durable;
-                match migration {
-                    RootMigration::NoRecord => tally.root_no_record += not_durable,
-                    RootMigration::NoTxids => tally.root_no_txids += not_durable,
-                    RootMigration::TxPending | RootMigration::Migrated => {}
-                }
-                tally.root_not_migrated_placed += cached_offsets
-                    .iter()
-                    .filter(|offset| !durable.contains(offset) && placed.contains(offset))
-                    .count() as u64;
+            if migration != RootMigration::Migrated {
+                tally.record_unmigrated(migration, count, u64::try_from(placed.len())?);
+                continue;
             }
-            if !unreadable && !proven && migrated {
+            let durable: BTreeSet<_> = placed.difference(&unpersisted).copied().collect();
+            let not_durable = u64::try_from(cached_offsets.difference(&durable).count())?;
+            if proven_roots.contains(&root) {
+                tally.not_durable += not_durable;
+            } else {
                 let mut unprotected: BTreeSet<TxChunkOffset> =
                     cached_offsets.difference(&placed).copied().collect();
                 if !unprotected.is_empty() {
@@ -600,23 +720,43 @@ impl InnerCacheTask {
                         &unprotected,
                         &storage_modules,
                         migration_height,
+                        &mut span_cache,
                     )?;
                     unprotected.retain(|offset| !keep.contains(offset));
                 }
                 // Placed here, or assigned here and not yet persisted `Data`.
-                let unprotected_not_durable = unprotected
-                    .iter()
-                    .filter(|offset| !durable.contains(offset))
-                    .count() as u64;
+                let unprotected_not_durable = u64::try_from(
+                    unprotected
+                        .iter()
+                        .filter(|offset| !durable.contains(offset))
+                        .count(),
+                )?;
                 tally.not_durable += not_durable - unprotected_not_durable;
                 if !unprotected.is_empty() {
-                    tally.unplaced_attempted += unprotected.len() as u64;
                     unprotected_by_root.push((root, unprotected));
                 }
             }
             if !durable.is_empty() {
                 durable_by_root.push((root, durable));
             }
+        }
+
+        // No local module stores or owes these bodies, so this node may hold
+        // the only copy. Delete one only once a remote assignee attests a
+        // persisted copy for every live slot it occupies; hold the rest.
+        let (mut unprotected_by_root, held) =
+            self.split_replicated(unprotected_by_root, migration_height, &mut span_cache)?;
+        tally.kept_unreplicated += u64::try_from(held.len())?;
+        tally.reannounced += self.reannounce_held(&held)?;
+        if mode == PassMode::HoldOnly {
+            for (_, offsets) in durable_by_root.iter().chain(&unprotected_by_root) {
+                tally.hold_only += u64::try_from(offsets.len())?;
+            }
+            durable_by_root.clear();
+            unprotected_by_root.clear();
+        }
+        for (_, offsets) in &unprotected_by_root {
+            tally.unplaced_attempted += u64::try_from(offsets.len())?;
         }
 
         // The snapshot above can go stale before this delete. A checksum
@@ -629,18 +769,35 @@ impl InnerCacheTask {
         }
         let mut pruned_chunks = 0_u64;
         for batch in durable_by_root.chunks(256) {
-            let confirmed = self.recheck_durable_chunk_offsets(&storage_modules, batch);
+            let confirmed = self.recheck_durable_chunk_offsets(
+                &storage_modules,
+                batch,
+                migration_height,
+                &mut span_cache,
+            );
             let offered: usize = batch.iter().map(|(_, offsets)| offsets.len()).sum();
             let still_durable: usize = confirmed.iter().map(|(_, offsets)| offsets.len()).sum();
-            tally.not_durable += offered.saturating_sub(still_durable) as u64;
+            tally.not_durable += u64::try_from(offered.saturating_sub(still_durable))?;
             if confirmed.is_empty() {
                 continue;
             }
             let batch_counts = self
                 .db
-                .update_eyre_at("cache_service.prune_chunks_batch", |write_tx| {
+                .update_cache_eyre_at("cache_service.prune_chunks_batch", |write_tx| {
+                    let consensus_tx = self.db.tx()?;
                     let mut batch_counts = irys_database::ReclaimCounts::default();
                     for (root, durable_tx_offsets) in &confirmed {
+                        let migration = Self::root_migration(
+                            write_tx.inner(),
+                            &consensus_tx,
+                            *root,
+                            migration_height,
+                        )?;
+                        if migration != RootMigration::Migrated {
+                            let count = u64::try_from(durable_tx_offsets.len())?;
+                            tally.record_unmigrated(migration, count, count);
+                            continue;
+                        }
                         trace!(
                             chunk.data_root = ?root,
                             "Pruning durably stored cached chunk bodies"
@@ -677,6 +834,7 @@ impl InnerCacheTask {
                     &offsets,
                     &storage_modules,
                     migration_height,
+                    &mut span_cache,
                 )?;
                 let remaining: BTreeSet<TxChunkOffset> =
                     offsets.difference(&keep).copied().collect();
@@ -689,11 +847,22 @@ impl InnerCacheTask {
             }
             let batch_pruned = self
                 .db
-                .update_eyre_at("cache_service.prune_unprotected_chunks_batch", |write_tx| {
+                .update_cache_eyre_at("cache_service.prune_unprotected_chunks_batch", |write_tx| {
+                    let consensus_tx = self.db.tx()?;
                     let mut batch_pruned = 0_u64;
                     for (root, offsets) in &deletable {
+                        let migration = Self::root_migration(
+                            write_tx.inner(),
+                            &consensus_tx,
+                            *root,
+                            migration_height,
+                        )?;
+                        if migration != RootMigration::Migrated {
+                            tally.record_unmigrated(migration, u64::try_from(offsets.len())?, 0);
+                            continue;
+                        }
                         // A proof generated since the scan protects the root.
-                        if Self::has_local_ingress_proof(write_tx, *root, local_address)? {
+                        if Self::has_local_ingress_proof(write_tx.inner(), *root, local_address)? {
                             continue;
                         }
                         let pruned = delete_unprotected_cached_chunks_older_than(
@@ -714,6 +883,7 @@ impl InnerCacheTask {
         }
 
         info!(
+            prune.mode = ?mode,
             chunk.pruned_chunks = pruned_chunks,
             prune.candidates = tally.candidates,
             prune.deleted_durable = tally.deleted_durable,
@@ -727,10 +897,22 @@ impl InnerCacheTask {
             prune.root_not_migrated_placed = tally.root_not_migrated_placed,
             prune.kept_unreadable = tally.unreadable,
             prune.kept_unplaced = tally.unplaced_kept(),
+            prune.kept_unreplicated = tally.kept_unreplicated,
+            prune.kept_hold_only = tally.hold_only,
+            prune.reannounced = tally.reannounced,
             "Completed chunk pruning pass"
         );
         metrics::record_cache_prune_pass(&tally);
         Ok(tally)
+    }
+
+    /// One `Reclaim` pass, as `prune_cache` runs above the threshold.
+    #[cfg(test)]
+    fn prune_durably_migrated_chunk_bodies(
+        &self,
+        migration_height: u64,
+    ) -> eyre::Result<PruneTally> {
+        self.prune_chunk_bodies(migration_height, PassMode::Reclaim)
     }
 
     /// Offsets from `batch` that still have no local placement. A placement
@@ -755,31 +937,141 @@ impl InnerCacheTask {
         still
     }
 
-    /// Offsets from `batch` that are still persisted. A storage-module error
-    /// drops that module's offsets from the delete set and keeps the bodies.
+    /// Partition size of the canonical epoch. Fission changes it at an epoch
+    /// boundary, so slot indexes come from the snapshot, not the config.
+    fn canonical_partition_chunks(&self) -> u64 {
+        self.block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .partition_chunks()
+    }
+
+    /// Splits unprotected bodies into those replicas have released, still
+    /// grouped by root, and those this node must hold. One coverage call
+    /// covers the whole pass.
+    fn split_replicated(
+        &self,
+        unprotected_by_root: Vec<(DataRoot, BTreeSet<TxChunkOffset>)>,
+        migration_height: u64,
+        span_cache: &mut PruneSpanCache,
+    ) -> eyre::Result<(
+        Vec<(DataRoot, BTreeSet<TxChunkOffset>)>,
+        BTreeSet<(DataRoot, TxChunkOffset)>,
+    )> {
+        let chunks_per_partition = self.canonical_partition_chunks();
+        let mut candidates = Vec::new();
+        for (root, offsets) in &unprotected_by_root {
+            let spans = self.ledger_spans_for_root(*root, migration_height, span_cache)?;
+            candidates.extend(offsets.iter().map(|tx_offset| CoverageCandidate {
+                data_root: *root,
+                tx_offset: *tx_offset,
+                points: slot_points(&spans, *tx_offset, chunks_per_partition),
+            }));
+        }
+        let released = self.replica_custody.released(&candidates);
+        let mut held = BTreeSet::new();
+        let mut releasable_by_root = Vec::with_capacity(unprotected_by_root.len());
+        for (root, offsets) in unprotected_by_root {
+            let (releasable, unreleased): (BTreeSet<_>, BTreeSet<_>) = offsets
+                .into_iter()
+                .partition(|offset| released.contains(&(root, *offset)));
+            held.extend(unreleased.into_iter().map(|offset| (root, offset)));
+            if !releasable.is_empty() {
+                releasable_by_root.push((root, releasable));
+            }
+        }
+        Ok((releasable_by_root, held))
+    }
+
+    /// Announces the held bodies that are due, without pushing them: an
+    /// assignee that lacks one pulls it through its fetch path. Returns how
+    /// many were announced.
+    fn reannounce_held(&self, held: &BTreeSet<(DataRoot, TxChunkOffset)>) -> eyre::Result<u64> {
+        let due = self
+            .replica_custody
+            .due_reannouncements(held, Instant::now());
+        if due.is_empty() {
+            return Ok(0);
+        }
+        let chunk_size = self.config.consensus.chunk_size;
+        // Load and send one body at a time: a pass may announce up to
+        // `MAX_REANNOUNCED_PER_PASS` bodies, too many to hold at once.
+        self.db.view_cache_eyre(|tx| {
+            let mut announced = 0_u64;
+            for (root, tx_offset) in due {
+                // Deleted since the scan: nothing left to announce.
+                let Some(chunk) =
+                    irys_database::cached_unpacked_chunk(tx, root, tx_offset, chunk_size)?
+                else {
+                    continue;
+                };
+                let message = GossipBroadcastMessageV2::from(chunk)
+                    .with_chunk_mode(ChunkBroadcastMode::AnnounceOnly);
+                if self.gossip_broadcast.send_traced(message).is_err() {
+                    debug!("Gossip broadcast channel closed, stopping re-announcement");
+                    break;
+                }
+                announced += 1;
+            }
+            Ok(announced)
+        })
+    }
+
+    fn local_chunk_placement_status(
+        storage_modules: &[Arc<irys_domain::StorageModule>],
+        root: DataRoot,
+        offsets: &BTreeSet<TxChunkOffset>,
+    ) -> eyre::Result<ChunkPlacementStatus> {
+        let mut combined = ChunkPlacementStatus::default();
+        for storage_module in storage_modules {
+            let status = storage_module
+                .chunk_placement_status(root, offsets)
+                .wrap_err_with(|| {
+                    format!("storage module {} placement lookup", storage_module.id)
+                })?;
+            combined.placed.extend(status.placed);
+            combined.unpersisted.extend(status.unpersisted);
+        }
+        Ok(combined)
+    }
+
+    /// Offsets whose every local placement is still persisted. An unreadable
+    /// module keeps all bodies of that root until a later pass can check it.
     fn recheck_durable_chunk_offsets(
         &self,
         storage_modules: &[Arc<irys_domain::StorageModule>],
         batch: &[(DataRoot, BTreeSet<TxChunkOffset>)],
+        migration_height: u64,
+        span_cache: &mut PruneSpanCache,
     ) -> Vec<(DataRoot, BTreeSet<TxChunkOffset>)> {
         let mut confirmed = Vec::with_capacity(batch.len());
         for (root, offsets) in batch {
-            let mut still = BTreeSet::new();
-            for storage_module in storage_modules {
-                match storage_module.durable_tx_offsets_for_data_root(*root, offsets) {
-                    Ok(live) => still.extend(live),
-                    Err(error) => {
-                        warn!(
-                            chunk.data_root = ?root,
-                            storage_module = %storage_module.id,
-                            ?error,
-                            "keeping cached chunk bodies; durability re-check failed"
-                        );
+            let still = Self::local_chunk_placement_status(storage_modules, *root, offsets)
+                .and_then(|mut status| {
+                    status
+                        .placed
+                        .retain(|offset| !status.unpersisted.contains(offset));
+                    // Reopen can drop an unwritten placement's index row. A
+                    // persisted sibling must not hide that assigned hole.
+                    let owed = self.assigned_unpersisted_offsets(
+                        *root,
+                        &status.placed,
+                        storage_modules,
+                        migration_height,
+                        span_cache,
+                    )?;
+                    status.placed.retain(|offset| !owed.contains(offset));
+                    Ok(status.placed)
+                });
+            match still {
+                Ok(still) => {
+                    if !still.is_empty() {
+                        confirmed.push((*root, still));
                     }
                 }
-            }
-            if !still.is_empty() {
-                confirmed.push((*root, still));
+                Err(error) => {
+                    warn!(chunk.data_root = ?root, ?error, "Keeping cached bodies; durability re-check failed");
+                }
             }
         }
         confirmed
@@ -799,7 +1091,10 @@ impl InnerCacheTask {
         candidates: &BTreeSet<TxChunkOffset>,
         storage_modules: &[Arc<irys_domain::StorageModule>],
         migration_height: u64,
+        span_cache: &mut PruneSpanCache,
     ) -> eyre::Result<BTreeSet<TxChunkOffset>> {
+        #[cfg(test)]
+        let _timer = prune_timing::AssignmentTimer::start();
         let mut keep = BTreeSet::new();
         if candidates.is_empty()
             || storage_modules.iter().all(|sm| {
@@ -809,7 +1104,7 @@ impl InnerCacheTask {
         {
             return Ok(keep);
         }
-        let spans = self.ledger_spans_for_root(data_root, migration_height)?;
+        let spans = self.ledger_spans_for_root(data_root, migration_height, span_cache)?;
         if spans.is_empty() {
             return Ok(keep);
         }
@@ -886,14 +1181,18 @@ impl InnerCacheTask {
         &self,
         data_root: DataRoot,
         migration_height: u64,
+        span_cache: &mut PruneSpanCache,
     ) -> eyre::Result<Vec<TxLedgerSpan>> {
-        let headers = self.db.view_eyre(|tx| {
+        let headers = self.db.view_cache_eyre(|tx| {
             let Some(cached) = tx.get::<CachedDataRoots>(data_root)? else {
                 return Ok(Vec::new());
             };
+            let consensus_tx = self.db.tx()?;
             let mut headers = Vec::with_capacity(cached.txid_set.len());
             for tx_id in &cached.txid_set {
-                if let Some(header) = tx_header_by_txid(tx, tx_id)? {
+                #[cfg(test)]
+                prune_timing::record(prune_timing::Read::RootHeader);
+                if let Some(header) = tx_header_by_txid(&consensus_tx, tx_id)? {
                     headers.push(header);
                 }
             }
@@ -902,7 +1201,7 @@ impl InnerCacheTask {
         let mut spans = Vec::new();
         for header in &headers {
             for (ledger, height) in Self::inclusion_placements(header, migration_height) {
-                if let Some(span) = self.tx_span_in_block(header.id, ledger, height)? {
+                if let Some(span) = self.tx_span_in_block(header.id, ledger, height, span_cache)? {
                     spans.push(span);
                 }
             }
@@ -942,13 +1241,48 @@ impl InnerCacheTask {
     /// The tx's span inside `ledger` on the canonical block at `height`.
     ///
     /// `None` when the block, a prior tx header, or the tx itself is missing.
-    /// Guessing a start of 0 would assign the chunk to slot 0.
+    /// Guessing a start of 0 would assign the chunk to slot 0. The block's
+    /// prefix walk stays in `span_cache` for later txs of the same block.
     fn tx_span_in_block(
         &self,
         tx_id: H256,
         ledger: DataLedger,
         height: u64,
+        span_cache: &mut PruneSpanCache,
     ) -> eyre::Result<Option<TxLedgerSpan>> {
+        // The timing fixture's uncached baseline walks afresh on every lookup.
+        #[cfg(test)]
+        if prune_timing::span_cache_disabled() {
+            span_cache.walks.clear();
+        }
+        let key = (height, ledger);
+        if !span_cache.walks.contains_key(&key) {
+            if span_cache.walks.len() >= MAX_CACHED_BLOCK_WALKS {
+                span_cache.walks.clear();
+            }
+            let walk = self.block_ledger_walk(ledger, height)?;
+            span_cache.walks.insert(key, walk);
+        }
+        let Some(Some(walk)) = span_cache.walks.get_mut(&key) else {
+            return Ok(None);
+        };
+        let chunk_size = self.config.consensus.chunk_size;
+        self.db.view_eyre(|tx| {
+            walk.span_of(tx_id, ledger, |id| {
+                #[cfg(test)]
+                prune_timing::record(prune_timing::Read::PrefixHeader);
+                Ok(tx_header_by_txid(tx, id)?.map(|header| header.data_size.div_ceil(chunk_size)))
+            })
+        })
+    }
+
+    /// Unwalked prefix walk of `ledger` on the canonical block at `height`.
+    /// `None` when the block or its previous block is missing.
+    fn block_ledger_walk(
+        &self,
+        ledger: DataLedger,
+        height: u64,
+    ) -> eyre::Result<Option<BlockLedgerWalk>> {
         let Some(block) = self.onchain_header_at_height(height)? else {
             return Ok(None);
         };
@@ -958,31 +1292,11 @@ impl InnerCacheTask {
         let Some(tx_ids) = block.get_data_ledger_tx_ids_ordered(ledger) else {
             return Ok(None);
         };
-        let chunk_size = self.config.consensus.chunk_size;
-        self.db.view_eyre(|tx| {
-            let mut cursor = start;
-            for id in tx_ids {
-                let Some(header) = tx_header_by_txid(tx, id)? else {
-                    return Ok(None);
-                };
-                let count = header.data_size.div_ceil(chunk_size);
-                if *id == tx_id {
-                    if count == 0 {
-                        return Ok(None);
-                    }
-                    return Ok(Some(TxLedgerSpan {
-                        ledger,
-                        start: cursor,
-                        chunk_count: count,
-                    }));
-                }
-                let Some(next) = checked_ledger_offset(cursor, count) else {
-                    return Ok(None);
-                };
-                cursor = next;
-            }
-            Ok(None)
-        })
+        Ok(Some(BlockLedgerWalk {
+            tx_ids: tx_ids.to_vec(),
+            spans: Vec::new(),
+            cursor: Some(start),
+        }))
     }
 
     /// Ledger offset where `block` starts appending to `ledger`.
@@ -1008,6 +1322,8 @@ impl InnerCacheTask {
     /// Canonical header at `height`: the in-memory on-chain tree, else the
     /// migrated-block tables. The tree guard is dropped before the database read.
     fn onchain_header_at_height(&self, height: u64) -> eyre::Result<Option<IrysBlockHeader>> {
+        #[cfg(test)]
+        prune_timing::record(prune_timing::Read::CanonicalLookup);
         let from_tree = {
             let tree = self.block_tree_guard.read();
             let (chain, _) = tree.get_canonical_chain();
@@ -1022,6 +1338,8 @@ impl InnerCacheTask {
         if let Some(header) = from_tree {
             return Ok(Some(header));
         }
+        #[cfg(test)]
+        prune_timing::record(prune_timing::Read::CanonicalDatabaseLookup);
         self.db
             .view_eyre(|tx| irys_database::canonical_header_at_height(tx, height))
     }
@@ -1073,8 +1391,23 @@ impl InnerCacheTask {
         }
     }
 
+    /// True when at least one body of `data_root` is cached.
+    fn has_cached_bodies<T: reth_db::transaction::DbTx>(
+        tx: &T,
+        data_root: DataRoot,
+    ) -> eyre::Result<bool> {
+        Ok(tx
+            .cursor_dup_read::<CachedChunksIndex>()?
+            .seek_exact(data_root)?
+            .is_some())
+    }
+
     #[tracing::instrument(level = "trace", skip_all, fields(prune_height))]
-    fn prune_data_root_cache(&self, prune_height: u64) -> eyre::Result<()> {
+    fn prune_data_root_cache(
+        &self,
+        prune_height: u64,
+        live: &dyn Fn(DataLedger, usize) -> bool,
+    ) -> eyre::Result<()> {
         // Per-eviction observability state, buffered inside the write tx and
         // emitted only after `commit()` succeeds — otherwise a failed commit
         // (or a mid-loop delete error that drops the tx) would report
@@ -1092,11 +1425,12 @@ impl InnerCacheTask {
         let local_addr = signer.address();
 
         // Collect eviction candidates under a short RO txn (random seek + wraparound),
-        // then apply deletes in gated write batches so the consensus writer gate is
+        // then apply deletes in gated write batches so the cache writer gate is
         // released between batches rather than held for the whole table scan.
         let mut candidates: Vec<EvictionRecord> = Vec::new();
         {
-            let tx = self.db.tx()?;
+            let tx = self.db.cache().begin_ro()?;
+            let consensus_tx = self.db.tx()?;
             let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
             let seek_key: DataRoot = H256::random();
             let mut walker = cursor.walk(Some(seek_key))?;
@@ -1115,11 +1449,11 @@ impl InnerCacheTask {
                         break;
                     }
 
-                    let state = Self::cdr_eviction_state(&tx, &cached, prune_height)?;
+                    let state = Self::cdr_eviction_state(&consensus_tx, &cached, prune_height)?;
                     if !state.evictable {
                         continue;
                     }
-                    if Self::has_local_ingress_proof(&tx, data_root, local_addr)? {
+                    if Self::has_local_ingress_proof(tx.inner(), data_root, local_addr)? {
                         continue;
                     }
 
@@ -1143,13 +1477,38 @@ impl InnerCacheTask {
             drop(tx);
         }
 
+        // The prune height comes from Submit slots. A root's bodies may be
+        // the only copy of data still owed to a live term or Publish slot, so
+        // a root with cached bodies on a live slot of its own ledger stays;
+        // the capacity pass releases those bodies and a later epoch evicts it.
+        // Spans at every height: a promotion after the Submit horizon still
+        // places the root on Publish.
+        let chunks_per_partition = self.canonical_partition_chunks();
+        let mut span_cache = PruneSpanCache::default();
+        let mut cleared: HashSet<DataRoot> = HashSet::new();
+        for rec in &candidates {
+            if !self
+                .db
+                .view_cache_eyre(|tx| Self::has_cached_bodies(tx.inner(), rec.data_root))?
+            {
+                continue;
+            }
+            let spans = self.ledger_spans_for_root(rec.data_root, u64::MAX, &mut span_cache)?;
+            if spans_touch_live_slot(&spans, chunks_per_partition, live) {
+                debug!(data_root = %rec.data_root, "Deferring eviction of a root with cached bodies on a live slot");
+            } else {
+                cleared.insert(rec.data_root);
+            }
+        }
+
         let mut chunks_pruned: u64 = 0;
         let mut applied: Vec<EvictionRecord> = Vec::new();
         for batch in candidates.chunks(256) {
             let mut batch_applied: Vec<EvictionRecord> = Vec::new();
             let mut batch_chunks: u64 = 0;
             self.db
-                .update_eyre_at("cache_service.prune_data_root_cache", |write_tx| {
+                .update_cache_eyre_at("cache_service.prune_data_root_cache", |write_tx| {
+                    let consensus_tx = self.db.tx()?;
                     for rec in batch {
                         // Re-validate under the write txn: the root may have been
                         // re-cached, gained a local proof, or left its eviction
@@ -1157,9 +1516,20 @@ impl InnerCacheTask {
                         let Some(cached) = write_tx.get::<CachedDataRoots>(rec.data_root)? else {
                             continue;
                         };
-                        let state = Self::cdr_eviction_state(write_tx, &cached, prune_height)?;
+                        let state = Self::cdr_eviction_state(&consensus_tx, &cached, prune_height)?;
                         if !state.evictable
-                            || Self::has_local_ingress_proof(write_tx, rec.data_root, local_addr)?
+                            || Self::has_local_ingress_proof(
+                                write_tx.inner(),
+                                rec.data_root,
+                                local_addr,
+                            )?
+                        {
+                            continue;
+                        }
+                        // Bodies arrived since the filter, or sit on a live
+                        // slot: keep the root until a later epoch.
+                        if !cleared.contains(&rec.data_root)
+                            && Self::has_cached_bodies(write_tx.inner(), rec.data_root)?
                         {
                             continue;
                         }
@@ -1282,10 +1652,10 @@ impl InnerCacheTask {
         &self,
         by_data_root: &HashMap<H256, Vec<H256>>,
     ) -> eyre::Result<TxidScrubAttempt> {
-        self.db.update_eyre(|db_tx| {
-            // Snapshot canonical tree txids after taking the MDBX writer lock
-            // (same instant as the metadata recheck). try_read only: blocking
-            // would invert lock order with deep-reorg (tree-write → DB write).
+        self.db.update_cache_eyre(|db_tx| {
+            // Snapshot canonical tree txids after taking the cache writer lock.
+            // try_read only: blocking would invert lock order with deep-reorg
+            // (tree-write → DB write).
             let tree_set: HashSet<H256> = {
                 let tree = match self.block_tree_guard.try_read() {
                     Ok(tree) => tree,
@@ -1316,8 +1686,11 @@ impl InnerCacheTask {
                 set
             };
 
+            // Read metadata after the tree snapshot so migration from the tree
+            // into consensus storage cannot leave a tx absent from both views.
+            let consensus_tx = self.db.tx()?;
             for (data_root, txids_to_remove) in by_data_root {
-                let Some(mut cached) = cached_data_root_by_data_root(db_tx, *data_root)? else {
+                let Some(mut cached) = db_tx.get::<CachedDataRoots>(*data_root)? else {
                     continue;
                 };
 
@@ -1329,7 +1702,7 @@ impl InnerCacheTask {
                 let mut removal_set: HashSet<H256> = HashSet::new();
                 let mut raced_confirmed: usize = 0;
                 for tx_id in txids_to_remove {
-                    if get_data_tx_metadata(db_tx, tx_id)?.is_some() || tree_set.contains(tx_id) {
+                    if get_data_tx_metadata(&consensus_tx, tx_id)?.is_some() || tree_set.contains(tx_id) {
                         raced_confirmed += 1;
                         continue;
                     }
@@ -1381,10 +1754,16 @@ impl InnerCacheTask {
     /// Scans ingress proofs with capacity-aware deletion and regeneration:
     /// - (a) Promoted + expired: delete
     /// - (b) Unpromoted + expired + at capacity: delete, except a proof this
-    ///   node produced while a cached body for that root is still unpersisted.
-    ///   That proof is reanchored. The cap is for chunk bytes; the proof row
-    ///   is what keeps those bytes servable.
+    ///   node produced while a cached body for that root is still unpersisted,
+    ///   or while a live Submit module here durably stores the full
+    ///   placement. That proof is reanchored. The cap is for chunk bytes; the
+    ///   proof row is what keeps those bytes servable. An expired Submit slot
+    ///   fails the stored-copy check, so the proof stops once the cache
+    ///   bodies are gone.
     /// - (c) Unpromoted + expired + under capacity + local author: regenerate
+    ///
+    /// [`Self::restore_submit_ingress_proofs`] recreates a local proof that is
+    /// already gone; `prune_cache` runs it after chunk reclamation.
     #[tracing::instrument(level = "trace", skip_all)]
     fn prune_ingress_proofs(&self) -> eyre::Result<()> {
         // A stable prefix of still-valid proofs must not consume the budget
@@ -1402,7 +1781,8 @@ impl InnerCacheTask {
     ) -> eyre::Result<()> {
         let signer = self.config.irys_signer();
         let local_addr = signer.address();
-        let tx = self.db.tx()?;
+        let tx = self.db.cache().begin_ro()?;
+        let consensus_tx = self.db.tx()?;
         let mut cursor = tx.cursor_read::<IngressProofs>()?;
         let mut walker = cursor.walk(Some(seek_key))?;
         let mut wrapped = false;
@@ -1416,11 +1796,21 @@ impl InnerCacheTask {
         let mut to_reanchor: Vec<IngressProof> = Vec::new();
         let mut to_regen: Vec<IngressProof> = Vec::new();
         let mut processed = 0_usize;
+        // Local unpromoted proofs whose cached bodies are already persisted
+        // (or gone). Stored-copy IO runs after `tx` is dropped so a module
+        // scan cannot pin MDBX free-page reclamation.
+        let mut stored_copy_candidates: Vec<(
+            DataRoot,
+            CompactCachedIngressProof,
+            IngressProof,
+            RegenAction,
+            u64,
+        )> = Vec::new();
         let max_cache_size_bytes = &self.config.node_config.cache.max_cache_size_bytes;
 
         // Determine if cache is at capacity based on the CachedChunks table
         let (chunk_count, chunk_cache_size) =
-            get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
+            get_cache_size::<CachedChunks, _>(tx.inner(), self.config.consensus.chunk_size)?;
         let at_capacity = chunk_cache_size >= *max_cache_size_bytes;
         debug!(
             "Cache is {} at capacity - capacity: {}B, size {}B ({} chunks)",
@@ -1459,7 +1849,7 @@ impl InnerCacheTask {
                 }
                 let mut any_unpromoted = false;
                 for txid in cached_data_root.txid_set.iter() {
-                    if let Some(tx_header) = tx_header_by_txid(&tx, txid)?
+                    if let Some(tx_header) = tx_header_by_txid(&consensus_tx, txid)?
                         && tx_header.promoted_height().is_none()
                     {
                         any_unpromoted = true;
@@ -1471,13 +1861,17 @@ impl InnerCacheTask {
                 let is_locally_produced = address == local_addr;
 
                 if at_capacity {
-                    // A local unpromoted proof is the fence for cached bodies
-                    // no module has persisted. Deleting it in this pass makes
-                    // the body prune treat those bytes as unprotected.
-                    if is_locally_produced
-                        && any_unpromoted
-                        && self.cached_body_still_unpersisted(&tx, data_root)?
-                    {
+                    // The cap is for chunk bytes. A local unpromoted proof
+                    // stays while it fences cached bodies no module has
+                    // persisted (deleting it would leave those bytes
+                    // unprotected), or while a live Submit module here holds
+                    // a full durable copy and this node is staked: that miner
+                    // can still serve the chunks and re-signs from the
+                    // compact leaves.
+                    if !(is_locally_produced && any_unpromoted) {
+                        to_delete.push((data_root, compact, false));
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+                    } else if self.cached_body_still_unpersisted(tx.inner(), data_root)? {
                         match check_result.regeneration_action {
                             RegenAction::Reanchor => {
                                 to_reanchor.push(proof);
@@ -1489,14 +1883,19 @@ impl InnerCacheTask {
                             }
                             RegenAction::DoNotRegenerate => {
                                 error!(
-                                    "Cache is at capacity and the local proof for data root {} is expired with unpromoted txs and unpersisted cached bodies, but it does not meet reanchoring or regeneration criteria. Leaving the proof in place.",
+                                    "Cache is at capacity and the local proof for data root {} is expired with unpromoted txs (cached bodies are unpersisted), but it does not meet reanchoring or regeneration criteria. Leaving the proof in place.",
                                     &data_root
                                 );
                             }
                         }
                     } else {
-                        to_delete.push((data_root, compact, false));
-                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+                        stored_copy_candidates.push((
+                            data_root,
+                            compact,
+                            proof,
+                            check_result.regeneration_action,
+                            cached_data_root.data_size,
+                        ));
                     }
                 } else if is_locally_produced && any_unpromoted {
                     match check_result.regeneration_action {
@@ -1532,10 +1931,44 @@ impl InnerCacheTask {
         // per-proof write-tx loop below. Holding a long-lived reader open across
         // up to MAX_PROOF_CHECKS_PER_RUN short write txns would pin the MVCC
         // snapshot and hold back MDBX free-page reclamation; nothing past the scan
-        // reads from `tx` (the delete/reanchor/regen loops open their own txns).
+        // reads from `tx` (stored-copy module IO and the delete/reanchor/regen
+        // loops open their own txns).
         drop(walker);
         drop(cursor);
         drop(tx);
+        drop(consensus_tx);
+
+        if !stored_copy_candidates.is_empty() {
+            let modules = self.proof_submit_modules();
+            for (data_root, compact, proof, regen, data_size) in stored_copy_candidates {
+                if self.live_submit_module_holds_full_copy(&modules, data_root, data_size) {
+                    info!(
+                        ingress_proof.data_root = ?data_root,
+                        "Keeping expired local ingress proof at cache capacity: a live Submit module stores the full data root"
+                    );
+                    metrics::record_ingress_proof_kept_stored_copy();
+                    match regen {
+                        RegenAction::Reanchor => {
+                            to_reanchor.push(proof);
+                            debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for reanchoring; a live Submit module stores the full data root");
+                        }
+                        RegenAction::Regenerate => {
+                            to_regen.push(proof);
+                            debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for full regeneration; a live Submit module stores the full data root");
+                        }
+                        RegenAction::DoNotRegenerate => {
+                            error!(
+                                "Cache is at capacity and the local proof for data root {} is expired with unpromoted txs (a live Submit module stores the full data root), but it does not meet reanchoring or regeneration criteria. Leaving the proof in place.",
+                                &data_root
+                            );
+                        }
+                    }
+                } else {
+                    to_delete.push((data_root, compact, false));
+                    debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+                }
+            }
+        }
 
         // Delete expired proofs — per-signer to avoid wiping other signers' rows on the same
         // data_root. Content-aware delete closes the TOCTOU window: a fresh proof stored
@@ -1543,11 +1976,11 @@ impl InnerCacheTask {
         if !to_delete.is_empty() {
             let mut deleted_count = 0_usize;
             for (root, scanned, is_orphan) in to_delete.iter() {
-                match self.db.update_eyre(|rw_tx| {
+                match self.db.update_cache_eyre(|rw_tx| {
                     // Orphan deletions were scheduled because the data root had no
                     // `CachedDataRoots` entry at scan time. Re-check inside the write tx:
                     // if the root was re-cached since the scan, keep its proof.
-                    if *is_orphan && cached_data_root_by_data_root(rw_tx, *root)?.is_some() {
+                    if *is_orphan && rw_tx.get::<CachedDataRoots>(*root)?.is_some() {
                         return Ok(false);
                     }
                     delete_ingress_proof_if_unchanged(rw_tx, *root, scanned.clone())
@@ -1619,10 +2052,225 @@ impl InnerCacheTask {
         Ok(())
     }
 
-    /// True when `data_root` still has a cached body that no storage module
-    /// reports as persisted `Data`. An unreadable module is not that report:
-    /// the proof stays, and a later pass can delete it once the read succeeds
-    /// and every cached offset is persisted.
+    /// Local modules whose stored copy keeps or restores this node's proof:
+    /// those assigned to a live Submit slot. Empty while this node is not
+    /// staked: it cannot re-sign, and peers reject an unstaked signer's proof,
+    /// so no module read can help. Stake and slot liveness are copied out of
+    /// the canonical epoch snapshot and the block-tree lock is dropped before
+    /// the caller does any storage-module IO.
+    fn proof_submit_modules(&self) -> Vec<Arc<StorageModule>> {
+        let local_address = self.config.irys_signer().address();
+        let slot_live: Vec<bool> = {
+            let block_tree = self.block_tree_guard.read();
+            let epoch_snapshot = block_tree.canonical_epoch_snapshot();
+            if !epoch_snapshot.is_staked(local_address) {
+                return Vec::new();
+            }
+            epoch_snapshot.ledgers[DataLedger::Submit]
+                .get_slots()
+                .iter()
+                .map(|slot| !slot.is_expired)
+                .collect()
+        };
+        let submit_ledger_id = u32::from(DataLedger::Submit);
+        self.storage_modules_guard
+            .read()
+            .iter()
+            .filter(|sm| {
+                sm.partition_assignment().is_some_and(|assignment| {
+                    assignment.ledger_id == Some(submit_ledger_id)
+                        && assignment
+                            .slot_index
+                            .is_some_and(|slot_index| submit_slot_is_live(&slot_live, slot_index))
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// True when one of `modules` holds a placement of `data_root` that is
+    /// `data_size` bytes, lies inside its partition, and is persisted `Data`.
+    /// An unreadable module counts as holding it: a read error must not
+    /// delete the proof.
+    fn live_submit_module_holds_full_copy(
+        &self,
+        modules: &[Arc<StorageModule>],
+        data_root: DataRoot,
+        data_size: u64,
+    ) -> bool {
+        modules.iter().any(|storage_module| {
+            storage_module
+                .holds_full_persisted_data_root(data_root, data_size)
+                .unwrap_or_else(|error| {
+                    warn!(
+                        chunk.data_root = ?data_root,
+                        storage_module = %storage_module.id,
+                        ?error,
+                        "Keeping local ingress proof: storage metadata is unreadable"
+                    );
+                    true
+                })
+        })
+    }
+
+    /// Recreate this node's ingress proof for data roots a live Submit module
+    /// fully stores, when the proof row is gone and a tx is still unpromoted.
+    ///
+    /// A miner that finished writing a body may have lost its proof to the
+    /// cache cap, and generation does not wake again once every offset is
+    /// `Data`. Generation reads the compact leaves, not chunk bodies; with
+    /// incomplete leaves it returns `IncompleteLeaves` and a later pass tries
+    /// again.
+    fn restore_submit_ingress_proofs(&self) -> eyre::Result<()> {
+        // Same rotation as the proof scan: a random start, wrapped once, so a
+        // stable prefix of cached roots does not take the whole budget.
+        self.restore_submit_ingress_proofs_limited(
+            H256::random(),
+            MAX_RESTORE_CHECKS_PER_RUN,
+            MAX_RESTORES_PER_RUN,
+        )
+        .map(|_| ())
+    }
+
+    /// Check at most `max_checks` cached data roots, starting at `seek_key`
+    /// and wrapping once, and try at most `max_restores` generations.
+    /// Returns the number of generations tried.
+    ///
+    /// A root is tried when this node is staked, has no proof for the root
+    /// but has a leaf for every chunk, the cached data root has a confirmed
+    /// `data_size` and a non-empty `block_set` (the same pair ordinary
+    /// generation and compact-leaf backfill require), a tx is still unpromoted,
+    /// and a live Submit module holds a full persisted placement of the cached
+    /// `data_size`: the same copy that keeps a proof at capacity. Placement
+    /// reads run only for roots the database filter passes, after the read
+    /// transaction is closed.
+    fn restore_submit_ingress_proofs_limited(
+        &self,
+        seek_key: DataRoot,
+        max_checks: usize,
+        max_restores: usize,
+    ) -> eyre::Result<usize> {
+        let modules = self.proof_submit_modules();
+        if modules.is_empty() || max_restores == 0 {
+            return Ok(0);
+        }
+
+        let local_address = self.config.irys_signer().address();
+        let mut candidates: Vec<(DataRoot, u64)> = Vec::new();
+        {
+            let tx = self.db.cache().begin_ro()?;
+            let consensus_tx = self.db.tx()?;
+            let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
+            let mut walker = cursor.walk(Some(seek_key))?;
+            let mut wrapped = false;
+            let mut checked = 0_usize;
+            loop {
+                while let Some((data_root, cached_data_root)) = walker.next().transpose()? {
+                    if wrapped && data_root >= seek_key {
+                        break;
+                    }
+                    if checked >= max_checks {
+                        break;
+                    }
+                    checked += 1;
+                    if Self::has_local_ingress_proof(tx.inner(), data_root, local_address)? {
+                        continue;
+                    }
+                    // Generation needs every leaf and does not rebuild them
+                    // from module bytes. A count is one read; it keeps a root
+                    // whose chunks are still arriving off the module reads
+                    // and out of the generation budget.
+                    if !ingress_leaf_count_complete(
+                        tx.inner(),
+                        data_root,
+                        local_address,
+                        cached_data_root.data_size,
+                        self.config.consensus.chunk_size,
+                    )? {
+                        continue;
+                    }
+                    // Same CDR gate as ordinary generation
+                    // (`should_skip_ingress_proof_generation`) and compact-leaf
+                    // backfill. A live Submit copy does not replace it.
+                    if !cached_data_root.data_size_confirmed
+                        || cached_data_root.block_set.is_empty()
+                    {
+                        continue;
+                    }
+                    let mut any_unpromoted = false;
+                    for txid in cached_data_root.txid_set.iter() {
+                        if let Some(tx_header) = tx_header_by_txid(&consensus_tx, txid)?
+                            && tx_header.promoted_height().is_none()
+                        {
+                            any_unpromoted = true;
+                            break;
+                        }
+                    }
+                    if any_unpromoted {
+                        candidates.push((data_root, cached_data_root.data_size));
+                    }
+                }
+                if wrapped || checked >= max_checks {
+                    break;
+                }
+                wrapped = true;
+                walker = cursor.walk(None)?;
+            }
+        }
+
+        let mut attempted = 0_usize;
+        for (data_root, data_size) in candidates {
+            if attempted >= max_restores {
+                break;
+            }
+            let stored = modules.iter().any(|storage_module| {
+                storage_module
+                    .holds_full_persisted_data_root(data_root, data_size)
+                    .unwrap_or_else(|error| {
+                        warn!(
+                            ingress_proof.data_root = ?data_root,
+                            storage_module = %storage_module.id,
+                            ?error,
+                            "Skipping module for ingress proof restore: storage metadata is unreadable"
+                        );
+                        false
+                    })
+            });
+            if !stored {
+                continue;
+            }
+            attempted += 1;
+            match generate_and_store_ingress_proof(
+                &self.block_tree_guard,
+                &self.db,
+                &self.config,
+                data_root,
+                None,
+                &self.gossip_broadcast,
+                &self.ingress_proof_generation_state,
+            ) {
+                Ok(_) => {
+                    metrics::record_ingress_proof_restore("restored");
+                    info!(
+                        ingress_proof.data_root = ?data_root,
+                        "Restored ingress proof for a data root a live Submit module stores"
+                    );
+                }
+                Err(error) if error.is_benign() => {
+                    metrics::record_ingress_proof_restore("skipped");
+                    debug!(ingress_proof.data_root = ?data_root, "Skipped ingress proof restore: {error}");
+                }
+                Err(error) => {
+                    metrics::record_ingress_proof_restore("failed");
+                    warn!(ingress_proof.data_root = ?data_root, "Failed to restore ingress proof: {error}");
+                }
+            }
+        }
+        Ok(attempted)
+    }
+
+    /// True when a cached body has no persisted placement or still has an
+    /// unpersisted local placement. Unreadable metadata also keeps the proof.
     fn cached_body_still_unpersisted<T: reth_db::transaction::DbTx>(
         &self,
         tx: &T,
@@ -1645,36 +2293,29 @@ impl InnerCacheTask {
             return Ok(false);
         }
 
+        // clone: do not hold the module-list lock while reading storage metadata.
         let modules = self.storage_modules_guard.read().clone();
-        let mut persisted = BTreeSet::new();
-        for storage_module in &modules {
-            match storage_module.durable_tx_offsets_for_data_root(data_root, &offsets) {
-                Ok(durable) => persisted.extend(durable),
-                Err(error) => {
-                    warn!(
-                        chunk.data_root = ?data_root,
-                        storage_module = %storage_module.id,
-                        ?error,
-                        "Keeping local ingress proof: storage metadata is unreadable"
-                    );
-                    return Ok(true);
-                }
+        match Self::local_chunk_placement_status(&modules, data_root, &offsets) {
+            Ok(status) => Ok(!status.unpersisted.is_empty()
+                || offsets.iter().any(|offset| !status.placed.contains(offset))),
+            Err(error) => {
+                warn!(chunk.data_root = ?data_root, ?error, "Keeping local ingress proof: storage metadata is unreadable");
+                Ok(true)
             }
         }
-        Ok(offsets.iter().any(|offset| !persisted.contains(offset)))
     }
 
     fn spawn_pruning_task(
         &self,
         migration_height: u64,
-        response_sender: Option<oneshot::Sender<eyre::Result<()>>>,
+        response_senders: Vec<oneshot::Sender<eyre::Result<()>>>,
     ) {
         let clone = self.clone();
         std::thread::spawn(move || {
             // Same panic-survival rationale as `spawn_prune_txids_task`:
             // without `catch_unwind`, a panic anywhere in `prune_cache`
             // leaves `pruning_running = true` forever and waiters of
-            // `response_sender` hang.
+            // `response_senders` hang.
             let res: eyre::Result<()> =
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     clone.prune_cache(migration_height)
@@ -1690,11 +2331,7 @@ impl InnerCacheTask {
                 Ok(_) => Ok(()),
                 Err(e) => Err(eyre::eyre!(e.to_string())),
             };
-            if let Some(sender) = response_sender
-                && let Err(error) = sender.send(res)
-            {
-                warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
-            }
+            answer_prune_waiters(response_senders, res);
             // Notify service that pruning finished (drive the queue)
             if let Err(e) = clone
                 .cache_sender
@@ -1727,7 +2364,10 @@ impl InnerCacheTask {
                 };
             let completion = match &res {
                 Ok(_) => Ok(()),
-                Err(e) => Err(eyre::eyre!(e.to_string())),
+                Err(e) => {
+                    warn!(custom.error = ?e, "Epoch cache processing failed");
+                    Err(eyre::eyre!(e.to_string()))
+                }
             };
             if let Some(sender) = response_sender
                 && let Err(e) = sender.send(res)
@@ -1745,6 +2385,13 @@ impl InnerCacheTask {
     }
 }
 
+/// `slot_live[i]` is `!is_expired` for Submit slot `i`. An empty list is
+/// live: genesis has no slots, and expiry sets the flag without removing the
+/// slot. An index past a non-empty list is not live.
+fn submit_slot_is_live(slot_live: &[bool], slot_index: usize) -> bool {
+    slot_live.is_empty() || slot_live.get(slot_index).copied().unwrap_or(false)
+}
+
 /// Extract a human-readable message from a `catch_unwind` payload.
 /// `Box<dyn Any + Send>` panic payloads in practice carry either `&'static
 /// str` or `String`; fall back to a generic label otherwise so the
@@ -1760,6 +2407,43 @@ fn panic_payload_string(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 pub type CacheServiceSender = UnboundedSender<Traced<CacheServiceAction>>;
+
+/// Every queued prune, merged into one pass at the highest queued height.
+/// A pass reads its height only as "migrated at or below", so the highest
+/// height covers every lower one. `None` when nothing is queued.
+fn coalesce_prunes(
+    queue: &mut VecDeque<(u64, Option<oneshot::Sender<eyre::Result<()>>>)>,
+) -> Option<(u64, Vec<oneshot::Sender<eyre::Result<()>>>)> {
+    let (mut height, first) = queue.pop_front()?;
+    let mut waiters: Vec<_> = first.into_iter().collect();
+    for (queued_height, waiter) in queue.drain(..) {
+        height = height.max(queued_height);
+        waiters.extend(waiter);
+    }
+    Some((height, waiters))
+}
+
+/// Sends one pass's result to every waiter merged into it. The last waiter
+/// receives `res` itself; `eyre::Report` is not `Clone`, so the others
+/// receive its message.
+fn answer_prune_waiters(waiters: Vec<oneshot::Sender<eyre::Result<()>>>, res: eyre::Result<()>) {
+    let mut waiters = waiters.into_iter();
+    let last = waiters.next_back();
+    for waiter in waiters {
+        let copy = match &res {
+            Ok(()) => Ok(()),
+            Err(error) => Err(eyre::eyre!(error.to_string())),
+        };
+        if let Err(error) = waiter.send(copy) {
+            warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
+        }
+    }
+    if let Some(waiter) = last
+        && let Err(error) = waiter.send(res)
+    {
+        warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
+    }
+}
 
 #[derive(Debug)]
 pub struct ChunkCacheService {
@@ -1790,6 +2474,7 @@ impl ChunkCacheService {
     /// * `block_index_guard` - Read guard for block index lookups
     /// * `block_tree_guard` - Read guard for canonical chain access
     /// * `db` - Database provider for cache storage
+    /// * `replica_custody` - Remote attestations that release cached bodies this node alone holds
     /// * `rx` - Channel receiver for cache service actions
     /// * `config` - Node configuration including eviction strategy
     /// * `runtime_handle` - Tokio runtime for spawning the service
@@ -1807,6 +2492,7 @@ impl ChunkCacheService {
         gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
         cache_sender: CacheServiceSender,
         storage_modules_guard: StorageModulesReadGuard,
+        replica_custody: ReplicaCustody,
         ingress_proof_generation_state: IngressProofGenerationState,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
@@ -1827,6 +2513,7 @@ impl ChunkCacheService {
                     ingress_proof_generation_state,
                     cache_sender,
                     storage_modules_guard,
+                    replica_custody,
                     #[cfg(test)]
                     prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
                 },
@@ -1903,13 +2590,9 @@ impl ChunkCacheService {
         );
         match msg {
             CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
-                // Enqueue pruning; start if idle
                 self.pruning_queue.push_back((migration_height, sender));
-                if !self.pruning_running
-                    && let Some((h, s)) = self.pruning_queue.pop_front()
-                {
-                    self.pruning_running = true;
-                    self.cache_task.spawn_pruning_task(h, s);
+                if !self.pruning_running {
+                    self.start_queued_prune();
                 }
             }
             CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
@@ -1923,12 +2606,8 @@ impl ChunkCacheService {
                 }
             }
             CacheServiceAction::PruneCompleted(_res) => {
-                // Mark pruning idle and kick next if queued
                 self.pruning_running = false;
-                if let Some((h, s)) = self.pruning_queue.pop_front() {
-                    self.pruning_running = true;
-                    self.cache_task.spawn_pruning_task(h, s);
-                }
+                self.start_queued_prune();
             }
             CacheServiceAction::EpochProcessingCompleted(_res) => {
                 // Mark epoch processing idle and kick next if queued
@@ -1972,10 +2651,25 @@ impl ChunkCacheService {
             }
         }
     }
+
+    /// Starts one pass for everything queued. A pass can wait on replica
+    /// coverage for longer than a block interval, so prunes queued behind it
+    /// merge into one pass instead of running one by one.
+    fn start_queued_prune(&mut self) {
+        if let Some((migration_height, waiters)) = coalesce_prunes(&mut self.pruning_queue) {
+            self.pruning_running = true;
+            self.cache_task
+                .spawn_pruning_task(migration_height, waiters);
+        }
+    }
 }
 
 #[cfg(test)]
+mod prune_timing;
+
+#[cfg(test)]
 mod tests {
+    use reth_db::transaction::DbTxMut as _;
     /// Cache tests exercise pruning policy, not storage placement; an empty
     /// module set means "nothing is durably stored locally".
     fn test_storage_modules_guard() -> StorageModulesReadGuard {
@@ -1992,6 +2686,24 @@ mod tests {
         data_size: u64,
         offsets: &[u32],
     ) -> eyre::Result<StorageModulesReadGuard> {
+        storage_modules_guard_with_durable_on(
+            base_directory,
+            data_root,
+            data_size,
+            offsets,
+            DataLedger::Submit,
+        )
+    }
+
+    /// [`storage_modules_guard_with_durable`] with the module assigned to slot
+    /// 0 of `ledger`.
+    fn storage_modules_guard_with_durable_on(
+        base_directory: std::path::PathBuf,
+        data_root: DataRoot,
+        data_size: u64,
+        offsets: &[u32],
+        ledger: DataLedger,
+    ) -> eyre::Result<StorageModulesReadGuard> {
         use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
         use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
         use irys_types::{
@@ -2005,7 +2717,7 @@ mod tests {
                 chunk_size: 32,
                 num_chunks_in_partition: num_chunks,
                 num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
+                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
                 entropy_packing_iterations: 1,
                 chain_id: 1,
                 ..ConsensusConfig::testing()
@@ -2017,7 +2729,7 @@ mod tests {
         let info = StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
-                ledger_id: Some(DataLedger::Submit.into()),
+                ledger_id: Some(ledger.into()),
                 slot_index: Some(0),
                 miner_address: IrysAddress::random(),
                 partition_hash: H256::random(),
@@ -2058,23 +2770,24 @@ mod tests {
     }
 
     use super::*;
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_database::{
-        IrysDatabaseArgs as _, database,
+        database,
         db_cache::CachedDataRoot,
-        open_or_create_db,
-        tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
+        tables::{CachedChunks, CachedChunksIndex, CachedDataRoots},
     };
     use irys_domain::{BlockIndex, BlockTree};
     use irys_testing_utils::{
         IrysBlockHeaderTestExt as _, initialize_tracing, new_mock_signed_header,
     };
+    use irys_types::v2::GossipDataV2;
     use irys_types::{
         Base64, Config, DataTransactionHeader, DataTransactionHeaderV1,
         DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256List, IrysAddress,
-        NodeConfig, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
+        NodeConfig, TxChunkOffset, UnpackedChunk,
     };
     use reth_db::cursor::DbDupCursorRO as _;
-    use reth_db::mdbx::DatabaseArguments;
     use std::sync::{Arc, RwLock};
 
     /// `cache_data_root(_, _, None)` leaves expiry unset. Mempool ingress sets
@@ -2092,12 +2805,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: 64,
@@ -2105,11 +2813,11 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             eyre::Ok(())
         })??;
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             let mut cdr = wtx
                 .get::<CachedDataRoots>(tx_header.data_root)?
                 .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry"))?;
@@ -2125,13 +2833,13 @@ mod tests {
                 bytes: Base64(vec![0_u8; 8]),
                 tx_offset: TxChunkOffset::from(0_u32),
             };
-            db.update(|wtx| {
+            db.update_cache(|wtx| {
                 database::cache_chunk(wtx, &chunk)?;
                 eyre::Ok(())
             })??;
         }
         let data_root = tx_header.data_root;
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
             eyre::ensure!(has_root, "CachedDataRoots missing before prune");
             Ok(())
@@ -2158,6 +2866,7 @@ mod tests {
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
                 storage_modules_guard: test_storage_modules_guard(),
+                replica_custody: ReplicaCustody::all_replicated(),
                 #[cfg(test)]
                 prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
             },
@@ -2176,8 +2885,10 @@ mod tests {
     #[tokio::test]
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
         let (_temp_dir, db, data_root, service) = unconfirmed_cache(100, true)?;
-        service.cache_task.prune_data_root_cache(1)?;
-        db.view(|rtx| -> eyre::Result<()> {
+        service
+            .cache_task
+            .prune_data_root_cache(1, &no_live_slots)?;
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
             eyre::ensure!(has_root, "CachedDataRoots was prematurely pruned");
             Ok(())
@@ -2190,12 +2901,447 @@ mod tests {
     #[tokio::test]
     async fn prunes_expired_never_confirmed_data_root() -> eyre::Result<()> {
         let (_temp_dir, db, data_root, service) = unconfirmed_cache(5, false)?;
-        service.cache_task.prune_data_root_cache(6)?;
-        db.view(|rtx| -> eyre::Result<()> {
+        service
+            .cache_task
+            .prune_data_root_cache(6, &no_live_slots)?;
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
             eyre::ensure!(!has_root, "CachedDataRoots should have been pruned");
             Ok(())
         })??;
+        Ok(())
+    }
+
+    /// Liveness for root-prune tests that predate custody: no slot is live,
+    /// so nothing is deferred.
+    fn no_live_slots(_: DataLedger, _: usize) -> bool {
+        false
+    }
+
+    /// One evictable root, one tx on `ledger` included at height 1, and
+    /// optionally one cached body. Returns the task and the root.
+    fn root_prune_task(
+        ledger: DataLedger,
+        with_body: bool,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        InnerCacheTask,
+        DataRoot,
+    )> {
+        use irys_database::insert_tx_header;
+        use irys_database::tables::{IrysBlockHeaders, MigratedBlockHashes};
+        use irys_types::{DataTransactionLedger, IrysBlockHeader, U256};
+
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let chunk_size = config.consensus.chunk_size;
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                data_root: H256::random(),
+                data_size: chunk_size,
+                ledger_id: u32::from(ledger),
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|wtx| {
+            insert_tx_header(wtx, &header)?;
+            irys_database::set_data_tx_included_height(wtx, &header.id, 1)
+                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+            eyre::Ok(())
+        })??;
+        db.update_cache_eyre(|wtx| {
+            database::cache_data_root(wtx, &header, None)?;
+            if with_body {
+                database::cache_chunk(
+                    wtx,
+                    &UnpackedChunk {
+                        data_root: header.data_root,
+                        data_size: header.data_size,
+                        data_path: Base64(vec![]),
+                        bytes: Base64(vec![3_u8; 8]),
+                        tx_offset: TxChunkOffset::from(0_u32),
+                    },
+                )?;
+            }
+            eyre::Ok(())
+        })?;
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.test_sign();
+        let mut included = IrysBlockHeader::new_mock_header();
+        included.height = 1;
+        included.previous_block_hash = genesis.block_hash;
+        included.cumulative_diff = U256::from(2_u64);
+        match ledger {
+            DataLedger::Submit => {
+                included.data_ledgers[DataLedger::Submit].tx_ids = H256List(vec![header.id]);
+            }
+            term => included.data_ledgers.push(DataTransactionLedger {
+                ledger_id: u32::from(term),
+                tx_ids: H256List(vec![header.id]),
+                ..Default::default()
+            }),
+        }
+        included.test_sign();
+        db.update(|wtx| {
+            wtx.put::<IrysBlockHeaders>(genesis.block_hash, genesis.clone().into())?;
+            wtx.put::<MigratedBlockHashes>(0, genesis.block_hash)?;
+            wtx.put::<IrysBlockHeaders>(included.block_hash, included.clone().into())?;
+            wtx.put::<MigratedBlockHashes>(1, included.block_hash)?;
+            eyre::Ok(())
+        })??;
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        let (cache_sender, _cache_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = InnerCacheTask {
+            db,
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender,
+            storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
+        };
+        Ok((temp_dir, task, header.data_root))
+    }
+
+    /// Past the Submit horizon, a root keeps its row and bodies while one of
+    /// its spans is on a live slot of its own ledger, and only then.
+    #[rstest::rstest]
+    #[case::thirty_day_slot_live(DataLedger::ThirtyDay, true, true)]
+    #[case::thirty_day_slot_expired(DataLedger::ThirtyDay, false, false)]
+    #[case::submit_root(DataLedger::Submit, true, false)]
+    #[tokio::test]
+    async fn root_prune_defers_bodies_on_a_live_slot(
+        #[case] ledger: DataLedger,
+        #[case] thirty_day_live: bool,
+        #[case] survives: bool,
+    ) -> eyre::Result<()> {
+        let (_temp_dir, task, root) = root_prune_task(ledger, true)?;
+        let live = |slot_ledger: DataLedger, _: usize| {
+            thirty_day_live && slot_ledger == DataLedger::ThirtyDay
+        };
+
+        task.prune_data_root_cache(6, &live)?;
+
+        let (row, body) = task.db.view_cache_eyre(|rtx| {
+            Ok((
+                rtx.get::<CachedDataRoots>(root)?.is_some(),
+                irys_database::cached_chunk_meta_by_offset(rtx, root, TxChunkOffset::from(0_u32))?
+                    .is_some(),
+            ))
+        })?;
+        assert_eq!((row, body), (survives, survives));
+        Ok(())
+    }
+
+    /// Deferral protects bodies, not metadata: a root with none left goes.
+    #[tokio::test]
+    async fn root_prune_evicts_a_bodiless_root_on_a_live_slot() -> eyre::Result<()> {
+        let (_temp_dir, task, root) = root_prune_task(DataLedger::ThirtyDay, false)?;
+
+        task.prune_data_root_cache(6, &|_, _| true)?;
+
+        assert!(
+            task.db
+                .view_cache_eyre(|rtx| Ok(rtx.get::<CachedDataRoots>(root)?.is_none()))?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn queued_prunes_merge_at_the_highest_height() {
+        let mut queue = VecDeque::new();
+        assert!(coalesce_prunes(&mut queue).is_none());
+        let (first, _first_rx) = oneshot::channel();
+        let (second, _second_rx) = oneshot::channel();
+        queue.push_back((5, Some(first)));
+        queue.push_back((9, None));
+        queue.push_back((7, Some(second)));
+
+        let (height, waiters) = coalesce_prunes(&mut queue).expect("queued prunes");
+
+        assert_eq!(height, 9);
+        assert_eq!(waiters.len(), 2);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn every_waiter_hears_a_failed_pass() {
+        let (first, mut first_rx) = oneshot::channel();
+        let (second, mut second_rx) = oneshot::channel();
+
+        answer_prune_waiters(vec![first, second], Err(eyre::eyre!("disk gone")));
+
+        for rx in [&mut first_rx, &mut second_rx] {
+            let error = rx
+                .try_recv()
+                .expect("answered")
+                .expect_err("the pass failed");
+            assert_eq!(error.to_string(), "disk gone");
+        }
+    }
+
+    /// Prunes queued behind a running pass start as one pass, and every
+    /// waiter hears its result.
+    #[tokio::test]
+    async fn queued_prunes_run_as_one_pass() -> eyre::Result<()> {
+        let (_temp_dir, _db, _root, mut service) = unconfirmed_cache(100, true)?;
+        service.pruning_running = true;
+        let mut waiters = Vec::new();
+        for height in [4, 9, 6] {
+            let (waiter, answer) = oneshot::channel();
+            service.on_handle_message(CacheServiceAction::OnBlockMigrated(height, Some(waiter)));
+            waiters.push(answer);
+        }
+        assert_eq!(
+            service.pruning_queue.len(),
+            3,
+            "a running pass holds the queue"
+        );
+
+        service.on_handle_message(CacheServiceAction::PruneCompleted(Ok(())));
+
+        assert!(
+            service.pruning_queue.is_empty(),
+            "one pass takes every queued prune"
+        );
+        assert!(service.pruning_running);
+        for answer in waiters {
+            answer.await??;
+        }
+        Ok(())
+    }
+
+    #[rstest::rstest]
+    #[case::same_module(0, false)]
+    #[case::different_modules(1, false)]
+    #[case::different_modules_reversed(1, true)]
+    fn capacity_prune_keeps_reused_root_until_every_local_placement_is_persisted(
+        #[case] new_slot: usize,
+        #[case] reverse_modules: bool,
+    ) -> eyre::Result<()> {
+        use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
+        use irys_types::{
+            ConsensusConfig, ConsensusOptions, DataTransactionLedger, LedgerChunkRange,
+            SubmoduleIndexEngine, irys::IrysSigner, ledger_chunk_offset_ii,
+            partition::PartitionAssignment, partition_chunk_offset_ii,
+        };
+        use nodit::interval::ii;
+
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let mut node_config = NodeConfig {
+            base_directory: temp_dir.path().join("storage"),
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 8,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            ..NodeConfig::testing()
+        };
+        node_config.database.submodule_index = SubmoduleIndexEngine::Rocksdb;
+        let config = Config::new_with_random_peer_id(node_config);
+        let local_address = config.irys_signer().address();
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
+        let make_module = |slot| -> eyre::Result<_> {
+            let storage = Arc::new(StorageModule::new(
+                &StorageModuleInfo {
+                    id: slot,
+                    partition_assignment: Some(PartitionAssignment {
+                        ledger_id: Some(DataLedger::ThirtyDay.into()),
+                        slot_index: Some(slot),
+                        miner_address: local_address,
+                        partition_hash: H256::repeat_byte(u8::try_from(slot)? + 7),
+                    }),
+                    submodules: vec![(
+                        partition_chunk_offset_ii!(0, 7),
+                        format!("chunks-{slot}").into(),
+                    )],
+                },
+                &config,
+            )?);
+            storage.pack_with_zeros();
+            Ok(storage)
+        };
+        let storage = make_module(0)?;
+        let other_storage = make_module(1)?;
+        let new_storage = if new_slot == 0 {
+            &storage
+        } else {
+            &other_storage
+        };
+
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let make_transaction = |anchor| -> eyre::Result<_> {
+            let mut tx = signer.create_transaction(vec![9_u8; 32], anchor)?;
+            tx.header.ledger_id = DataLedger::ThirtyDay.into();
+            signer.sign_transaction(tx)
+        };
+        let old_tx = make_transaction(H256::repeat_byte(1))?;
+        let new_tx = make_transaction(H256::repeat_byte(2))?;
+        assert_ne!(old_tx.header.id, new_tx.header.id);
+        assert_eq!(old_tx.header.data_root, new_tx.header.data_root);
+        let chunk = old_tx
+            .data_chunks()?
+            .pop()
+            .ok_or_else(|| eyre::eyre!("fixture transaction has no chunk"))?;
+        let data_root = chunk.data_root;
+        let (_, old_paths) =
+            DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&old_tx.header));
+        storage.index_transaction_data(
+            &old_tx.header,
+            &old_paths[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            1,
+        )?;
+        storage.write_data_chunk(&chunk)?;
+        storage.force_sync_pending_chunks()?;
+        let old_offset = PartitionChunkOffset::from(0);
+        let new_offset = PartitionChunkOffset::from(4);
+        assert!(storage.is_data_chunk_persisted_at(old_offset));
+
+        let (_, new_paths) =
+            DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&new_tx.header));
+        let new_ledger_offset = u64::try_from(new_slot)? * 8 + 4;
+        new_storage.index_transaction_data(
+            &new_tx.header,
+            &new_paths[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(
+                new_ledger_offset,
+                new_ledger_offset
+            )),
+            2,
+        )?;
+        new_storage.sync_index_registrations()?;
+        let placements = storage.collect_data_root_infos(data_root)?.0.len()
+            + other_storage.collect_data_root_infos(data_root)?.0.len();
+        assert_eq!(placements, 2);
+        assert_eq!(
+            new_storage.get_chunk_type(&new_offset),
+            Some(ChunkType::Entropy)
+        );
+        assert!(!new_storage.is_data_chunk_persisted_at(new_offset));
+        assert!(
+            new_storage
+                .pending_body_migrations()?
+                .iter()
+                .any(|(at, job)| {
+                    *at == new_offset && job.data_root == data_root && job.block_height == 2
+                })
+        );
+
+        db.update_eyre(|tx| {
+            for (header, height) in [(&old_tx.header, 1), (&new_tx.header, 2)] {
+                irys_database::insert_tx_header(tx, header)?;
+                irys_database::set_data_tx_included_height(tx, &header.id, height)
+                    .map_err(|error| eyre::eyre!("set included height: {error:?}"))?;
+            }
+            Ok(())
+        })?;
+        db.update_cache_eyre(|tx| {
+            for (header, _) in [(&old_tx.header, 1), (&new_tx.header, 2)] {
+                database::cache_data_root(tx, header, None)?;
+            }
+            database::cache_chunk(tx, &chunk)?;
+            irys_database::store_ingress_data_hash(
+                tx,
+                data_root,
+                local_address,
+                chunk.tx_offset,
+                irys_types::generate_ingress_data_hash(&chunk.bytes.0, local_address),
+            )?;
+            let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
+            let entry = cursor
+                .seek_by_key_subkey(data_root, *chunk.tx_offset)?
+                .ok_or_else(|| eyre::eyre!("fixture cached body has no index"))?;
+            tx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
+            let mut aged = entry;
+            // Persisted age makes pruning eligible without a wall-clock sleep.
+            aged.meta.updated_at = UnixTimestamp::from_secs(0);
+            tx.put::<CachedChunksIndex>(data_root, aged)?;
+            Ok(())
+        })?;
+        let migration_height = 10;
+        assert_eq!(
+            db.view_cache_eyre(|tx| {
+                let consensus_tx = db.tx()?;
+                InnerCacheTask::root_migration(
+                    tx.inner(),
+                    &consensus_tx,
+                    data_root,
+                    migration_height,
+                )
+            })?,
+            RootMigration::Migrated,
+            "both transactions are migrated; that alone must not release an unwritten placement"
+        );
+
+        let genesis = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let (cache_sender, _cache_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut modules = vec![Arc::clone(&storage), Arc::clone(&other_storage)];
+        if reverse_modules {
+            modules.reverse();
+        }
+        let task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree))),
+            block_index_guard: BlockIndexReadGuard::new(BlockIndex::new_for_testing(db.clone())),
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender,
+            storage_modules_guard: StorageModulesReadGuard::new(Arc::new(RwLock::new(modules))),
+            replica_custody: ReplicaCustody::all_replicated(),
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
+        };
+        let cached_body = || {
+            db.view_cache_eyre(|tx| {
+                database::cached_chunk_by_chunk_offset(tx, data_root, chunk.tx_offset)
+            })
+        };
+        assert!(cached_body()?.is_some());
+        assert!(
+            db.view_cache_eyre(|tx| task.cached_body_still_unpersisted(tx.inner(), data_root))?
+        );
+
+        let tally = task.prune_durably_migrated_chunk_bodies(migration_height)?;
+
+        assert!(
+            cached_body()?.is_some(),
+            "pruning reclaimed the reused-root body while placement 4 still needs it; \
+             old placement is persisted, slot {new_slot} offset 4 is Entropy; {tally:?}"
+        );
+        assert_eq!(tally.deleted_durable, 0);
+
+        new_storage.write_data_chunk(&chunk)?;
+        new_storage.force_sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_persisted_at(old_offset));
+        assert!(new_storage.is_data_chunk_persisted_at(new_offset));
+        assert!(
+            !db.view_cache_eyre(|tx| task.cached_body_still_unpersisted(tx.inner(), data_root))?
+        );
+        let completed = task.prune_durably_migrated_chunk_bodies(migration_height)?;
+        assert_eq!(completed.deleted_durable, 1);
+        assert!(cached_body()?.is_none());
         Ok(())
     }
 
@@ -2214,9 +3360,31 @@ mod tests {
         no_root_record: bool,
     }
 
-    /// Runs one capacity prune over an old cached body. Reports whether it is
-    /// still cached, and the pass tally.
-    fn old_body_capacity_prune(body: OldBody) -> eyre::Result<(bool, PruneTally)> {
+    /// One old cached body on a task built from an `OldBody`, ready for any
+    /// number of passes. `broadcasts` receives everything the task gossips.
+    struct OldBodyTask {
+        _temp_dir: irys_testing_utils::utils::tempfile::TempDir,
+        db: DatabaseProvider,
+        data_root: DataRoot,
+        task: InnerCacheTask,
+        broadcasts: tokio::sync::mpsc::UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
+    }
+
+    impl OldBodyTask {
+        /// Whether the cached body is still indexed.
+        fn survives(&self) -> eyre::Result<bool> {
+            self.db.view_cache(|rtx| -> eyre::Result<bool> {
+                let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+                let mut walk = dup_cursor.walk(Some(self.data_root))?;
+                Ok(walk
+                    .next()
+                    .transpose()?
+                    .is_some_and(|(root, _)| root == self.data_root))
+            })?
+        }
+    }
+
+    fn old_body_task(body: OldBody, replica_custody: ReplicaCustody) -> eyre::Result<OldBodyTask> {
         let OldBody {
             local_proof,
             assigned,
@@ -2228,12 +3396,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: 64,
@@ -2242,12 +3405,14 @@ mod tests {
             metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
-            database::cache_data_root(wtx, &tx_header, None)?;
-            if migrated {
-                irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
-                    .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
-            }
-            eyre::Ok(())
+            db.update_cache_eyre(|cache_tx| {
+                database::cache_data_root(cache_tx, &tx_header, None)?;
+                if migrated {
+                    irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
+                        .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+                }
+                eyre::Ok(())
+            })
         })??;
         let chunk = UnpackedChunk {
             data_root: tx_header.data_root,
@@ -2256,7 +3421,7 @@ mod tests {
             bytes: Base64(vec![2_u8; 8]),
             tx_offset: TxChunkOffset::from(0_u32),
         };
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_chunk(wtx, &chunk)?;
             // Mark the cached chunk as very old so it qualifies for age-based pruning
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
@@ -2285,7 +3450,7 @@ mod tests {
         let block_index_guard =
             irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
         if local_proof {
-            db.update(|wtx| {
+            db.update_cache(|wtx| {
                 let mut ingress_proof = IngressProof::default();
                 ingress_proof.data_root = tx_header.data_root;
                 irys_database::store_external_ingress_proof_checked(
@@ -2297,13 +3462,13 @@ mod tests {
             })??;
         }
         if no_root_record {
-            db.update(|wtx| {
+            db.update_cache(|wtx| {
                 wtx.delete::<CachedDataRoots>(tx_header.data_root, None)?;
                 eyre::Ok(())
             })??;
         }
         if ingress_hash {
-            db.update(|wtx| {
+            db.update_cache(|wtx| {
                 irys_database::store_ingress_data_hash(
                     wtx,
                     tx_header.data_root,
@@ -2326,30 +3491,223 @@ mod tests {
         } else {
             test_storage_modules_guard()
         };
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let service_task = InnerCacheTask {
+        let (cache_sender, _cache_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (gossip_broadcast, broadcasts) = tokio::sync::mpsc::unbounded_channel();
+        let task = InnerCacheTask {
             db: db.clone(),
             block_tree_guard,
             block_index_guard,
             config,
-            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            gossip_broadcast,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
-            cache_sender: tx,
+            cache_sender,
             storage_modules_guard,
+            replica_custody,
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
+        Ok(OldBodyTask {
+            _temp_dir,
+            db,
+            data_root: tx_header.data_root,
+            task,
+            broadcasts,
+        })
+    }
 
-        let tally = service_task.prune_durably_migrated_chunk_bodies(10)?;
-        let survives = db.view(|rtx| -> eyre::Result<bool> {
-            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
-            Ok(walk
-                .next()
-                .transpose()?
-                .is_some_and(|(root, _)| root == tx_header.data_root))
-        })??;
-        Ok((survives, tally))
+    /// Runs one capacity prune over an old cached body. Reports whether it is
+    /// still cached, and the pass tally.
+    fn old_body_capacity_prune(body: OldBody) -> eyre::Result<(bool, PruneTally)> {
+        let fixture = old_body_task(body, ReplicaCustody::all_replicated())?;
+        let tally = fixture.task.prune_durably_migrated_chunk_bodies(10)?;
+        Ok((fixture.survives()?, tally))
+    }
+
+    /// A migrated body this node neither stores, proves nor owes stays until
+    /// a replica attests it, and coverage is offered exactly that body.
+    #[tokio::test]
+    async fn an_unattested_unplaced_body_survives_reclaim() -> eyre::Result<()> {
+        let coverage = Arc::new(replica_custody::stubs::ReleasedOnly::default());
+        let fixture = old_body_task(
+            OldBody {
+                migrated: true,
+                ..Default::default()
+            },
+            ReplicaCustody::new(coverage.clone()),
+        )?;
+
+        let tally = fixture.task.prune_durably_migrated_chunk_bodies(10)?;
+
+        assert!(fixture.survives()?);
+        assert_eq!(
+            tally,
+            PruneTally {
+                candidates: 1,
+                kept_unreplicated: 1,
+                reannounced: 1,
+                ..Default::default()
+            }
+        );
+        let calls = coverage.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one coverage call for the whole pass");
+        let offered: Vec<_> = calls[0]
+            .iter()
+            .map(|candidate| (candidate.data_root, candidate.tx_offset))
+            .collect();
+        assert_eq!(
+            offered,
+            vec![(fixture.data_root, TxChunkOffset::from(0_u32))]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_attested_unplaced_body_is_deleted() -> eyre::Result<()> {
+        let coverage = Arc::new(replica_custody::stubs::ReleasedOnly::default());
+        let fixture = old_body_task(
+            OldBody {
+                migrated: true,
+                ..Default::default()
+            },
+            ReplicaCustody::new(coverage.clone()),
+        )?;
+        coverage
+            .keys
+            .lock()
+            .unwrap()
+            .insert((fixture.data_root, TxChunkOffset::from(0_u32)));
+
+        let tally = fixture.task.prune_durably_migrated_chunk_bodies(10)?;
+
+        assert!(!fixture.survives()?);
+        assert_eq!(
+            tally,
+            PruneTally {
+                candidates: 1,
+                deleted_unplaced: 1,
+                unplaced_attempted: 1,
+                ..Default::default()
+            }
+        );
+        Ok(())
+    }
+
+    /// A `HoldOnly` pass keeps bodies a `Reclaim` pass deletes, and counts
+    /// them as held rather than in no outcome.
+    #[rstest::rstest]
+    #[case::durable(
+        OldBody { migrated: true, durable: true, ingress_hash: true, ..Default::default() },
+        PruneTally { candidates: 1, deleted_durable: 1, ..Default::default() },
+    )]
+    #[case::released_unplaced(
+        OldBody { migrated: true, ..Default::default() },
+        PruneTally { candidates: 1, deleted_unplaced: 1, unplaced_attempted: 1, ..Default::default() },
+    )]
+    #[tokio::test]
+    async fn a_hold_only_pass_deletes_nothing(
+        #[case] body: OldBody,
+        #[case] reclaimed: PruneTally,
+    ) -> eyre::Result<()> {
+        let fixture = old_body_task(body, ReplicaCustody::all_replicated())?;
+
+        let held = fixture.task.prune_chunk_bodies(10, PassMode::HoldOnly)?;
+
+        assert!(fixture.survives()?);
+        assert_eq!(
+            held,
+            PruneTally {
+                candidates: 1,
+                hold_only: 1,
+                ..Default::default()
+            }
+        );
+        let tally = fixture.task.prune_chunk_bodies(10, PassMode::Reclaim)?;
+        assert!(!fixture.survives()?, "the same body is reclaimable");
+        assert_eq!(tally, reclaimed);
+        Ok(())
+    }
+
+    /// Below the threshold the pass runs, so held bodies are offered to
+    /// coverage, but at most once per `HOLD_ONLY_INTERVAL`.
+    #[tokio::test]
+    async fn below_the_threshold_the_pass_holds_at_most_every_interval() -> eyre::Result<()> {
+        let coverage = Arc::new(replica_custody::stubs::ReleasedOnly::default());
+        let fixture = old_body_task(
+            OldBody {
+                migrated: true,
+                ..Default::default()
+            },
+            ReplicaCustody::new(coverage.clone()),
+        )?;
+
+        // One cached chunk against the 10 GiB testing maximum.
+        fixture.task.prune_cache(10)?;
+        fixture.task.prune_cache(10)?;
+
+        assert!(fixture.survives()?);
+        assert_eq!(
+            coverage.calls.lock().unwrap().len(),
+            1,
+            "the second pass falls within HOLD_ONLY_INTERVAL"
+        );
+        Ok(())
+    }
+
+    /// The offsets announced through the task's gossip sender since the last
+    /// call, each checked to be announce-only.
+    fn announced(fixture: &mut OldBodyTask) -> Vec<(DataRoot, TxChunkOffset)> {
+        let mut announced = Vec::new();
+        while let Ok(message) = fixture.broadcasts.try_recv() {
+            let (message, _span) = message.into_parts();
+            assert_eq!(message.chunk_mode, ChunkBroadcastMode::AnnounceOnly);
+            let GossipDataV2::Chunk(chunk) = &message.data else {
+                panic!("chunk broadcast");
+            };
+            announced.push((chunk.data_root, chunk.tx_offset));
+        }
+        announced
+    }
+
+    /// A held body is announced by a pass in either mode, and not again
+    /// within the re-announce interval.
+    #[tokio::test]
+    async fn a_held_body_is_announced_once_per_interval() -> eyre::Result<()> {
+        let mut fixture = old_body_task(
+            OldBody {
+                migrated: true,
+                ..Default::default()
+            },
+            ReplicaCustody::new(Arc::new(replica_custody::stubs::ReleasedOnly::default())),
+        )?;
+
+        let first = fixture.task.prune_chunk_bodies(10, PassMode::HoldOnly)?;
+        assert_eq!(first.reannounced, 1);
+        assert_eq!(
+            announced(&mut fixture),
+            vec![(fixture.data_root, TxChunkOffset::from(0_u32))]
+        );
+
+        let second = fixture.task.prune_chunk_bodies(10, PassMode::Reclaim)?;
+        assert_eq!(second.reannounced, 0);
+        assert!(announced(&mut fixture).is_empty());
+        assert!(fixture.survives()?, "a held body is kept");
+        Ok(())
+    }
+
+    /// Bodies replicas have released, and bodies this node stores, are not
+    /// this node's to announce, even when a `HoldOnly` pass keeps them.
+    #[rstest::rstest]
+    #[case::released_unplaced(OldBody { migrated: true, ..Default::default() })]
+    #[case::durable(OldBody { migrated: true, durable: true, ingress_hash: true, ..Default::default() })]
+    #[tokio::test]
+    async fn only_held_bodies_are_announced(#[case] body: OldBody) -> eyre::Result<()> {
+        let mut fixture = old_body_task(body, ReplicaCustody::all_replicated())?;
+
+        let tally = fixture.task.prune_chunk_bodies(10, PassMode::HoldOnly)?;
+
+        assert_eq!(tally.reannounced, 0);
+        assert!(announced(&mut fixture).is_empty());
+        Ok(())
     }
 
     fn old_body_survives_capacity_prune(
@@ -2406,6 +3764,19 @@ mod tests {
             (
                 OldBody {
                     assigned: true,
+                    ..OldBody::default()
+                },
+                false,
+                PruneTally {
+                    root_not_migrated: 1,
+                    root_not_migrated_placed: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                OldBody {
+                    durable: true,
+                    ingress_hash: true,
                     ..OldBody::default()
                 },
                 false,
@@ -2531,8 +3902,10 @@ mod tests {
     }
 
     /// Orders the cap must still allow: no cached body, every cached body
-    /// persisted, a remote proof, a fully promoted local proof, and a cache
-    /// that is under the hard cap.
+    /// persisted on an unstaked node, a remote proof, a fully promoted local
+    /// proof, and a cache that is under the hard cap. A staked miner whose
+    /// live Submit module stores the root keeps its proof; see
+    /// `prune_ingress_proofs_at_capacity_keeps_local_proof_for_stored_submit_copy`.
     #[tokio::test]
     async fn capacity_prune_still_drops_proofs_that_do_not_fence_unpersisted_bodies()
     -> eyre::Result<()> {
@@ -2546,7 +3919,7 @@ mod tests {
         let (proofs, chunks) = prune_cache_expired_proof(0, true, false, 1, Some(&[0]))?;
         assert_eq!(
             proofs, 0,
-            "persisted Data: the expired local proof is deleted"
+            "persisted Data on an unstaked node: the expired local proof is deleted"
         );
         assert_eq!(
             chunks, 1,
@@ -2595,12 +3968,7 @@ mod tests {
         node_config.cache.max_cache_size_bytes = max_cache_size_bytes;
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let data_size = 32_u64.saturating_mul(u64::from(chunk_count.max(1)));
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
@@ -2611,51 +3979,53 @@ mod tests {
         });
         let data_root = tx_header.data_root;
         db.update(|wtx| {
-            database::cache_data_root(wtx, &tx_header, None)?;
-            database::insert_tx_header(wtx, &tx_header)?;
-            irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
-                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
-            if promoted {
-                irys_database::set_data_tx_promoted_height(wtx, &tx_header.id, 2)
-                    .map_err(|e| eyre::eyre!("set_data_tx_promoted_height: {e:?}"))?;
-            }
-            for offset in 0..chunk_count {
-                let chunk = UnpackedChunk {
-                    data_root,
-                    data_size,
-                    data_path: Base64(vec![offset as u8]),
-                    bytes: Base64(vec![2_u8; 8]),
-                    tx_offset: TxChunkOffset::from(offset),
+            db.update_cache_eyre(|cache_tx| {
+                database::cache_data_root(cache_tx, &tx_header, None)?;
+                database::insert_tx_header(wtx, &tx_header)?;
+                irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
+                    .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+                if promoted {
+                    irys_database::set_data_tx_promoted_height(wtx, &tx_header.id, 2)
+                        .map_err(|e| eyre::eyre!("set_data_tx_promoted_height: {e:?}"))?;
+                }
+                for offset in 0..chunk_count {
+                    let chunk = UnpackedChunk {
+                        data_root,
+                        data_size,
+                        data_path: Base64(vec![offset as u8]),
+                        bytes: Base64(vec![2_u8; 8]),
+                        tx_offset: TxChunkOffset::from(offset),
+                    };
+                    database::cache_chunk(cache_tx, &chunk)?;
+                }
+                if chunk_count > 0 {
+                    let mut cur = cache_tx.cursor_dup_write::<CachedChunksIndex>()?;
+                    let mut walk = cur.walk_dup(Some(data_root), None)?;
+                    // Put the aged entries back after the walk: MDBX aborts when this table gets a
+                    // write while the walk deletes through its cursor (see
+                    // `put_during_delete_current_walk_aborts` in irys-database).
+                    let mut aged_entries = Vec::new();
+                    while let Some((_k, entry)) = walk.next().transpose()? {
+                        walk.delete_current()?;
+                        let mut updated = entry;
+                        updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                        aged_entries.push(updated);
+                    }
+                    for updated in aged_entries {
+                        cache_tx.put::<CachedChunksIndex>(data_root, updated)?;
+                    }
+                }
+                let mut proof = IngressProof::default();
+                proof.data_root = data_root;
+                proof.anchor = H256::random();
+                let address = if local_proof {
+                    config.irys_signer().address()
+                } else {
+                    IrysAddress::random()
                 };
-                database::cache_chunk(wtx, &chunk)?;
-            }
-            if chunk_count > 0 {
-                let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
-                let mut walk = cur.walk_dup(Some(data_root), None)?;
-                // Put the aged entries back after the walk: MDBX aborts when this table gets a
-                // write while the walk deletes through its cursor (see
-                // `put_during_delete_current_walk_aborts` in irys-database).
-                let mut aged_entries = Vec::new();
-                while let Some((_k, entry)) = walk.next().transpose()? {
-                    walk.delete_current()?;
-                    let mut updated = entry;
-                    updated.meta.updated_at = UnixTimestamp::from_secs(0);
-                    aged_entries.push(updated);
-                }
-                for updated in aged_entries {
-                    wtx.put::<CachedChunksIndex>(data_root, updated)?;
-                }
-            }
-            let mut proof = IngressProof::default();
-            proof.data_root = data_root;
-            proof.anchor = H256::random();
-            let address = if local_proof {
-                config.irys_signer().address()
-            } else {
-                IrysAddress::random()
-            };
-            irys_database::store_external_ingress_proof_checked(wtx, &proof, address)?;
-            eyre::Ok(())
+                irys_database::store_external_ingress_proof_checked(cache_tx, &proof, address)?;
+                eyre::Ok(())
+            })
         })??;
 
         let sm_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
@@ -2685,15 +4055,16 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard,
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
         service_task.prune_cache(10)?;
 
-        let proofs = db.view_eyre(|rtx| {
+        let proofs = db.view_cache_eyre(|rtx| {
             Ok(irys_database::ingress_proofs_by_data_root(rtx, data_root)?.len())
         })?;
-        let chunks = db.view_eyre(|rtx| {
+        let chunks = db.view_cache_eyre(|rtx| {
             let mut cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let walker = cursor.walk_dup(Some(data_root), None)?;
             let rows = walker.collect::<Result<Vec<_>, _>>()?;
@@ -2740,12 +4111,7 @@ mod tests {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let chunk_size = config.consensus.chunk_size;
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: chunk_size,
@@ -2756,11 +4122,13 @@ mod tests {
         });
         let data_root = tx_header.data_root;
         db.update(|wtx| {
-            database::cache_data_root(wtx, &tx_header, None)?;
-            insert_tx_header(wtx, &tx_header)?;
-            irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
-                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
-            eyre::Ok(())
+            db.update_cache_eyre(|cache_tx| {
+                database::cache_data_root(cache_tx, &tx_header, None)?;
+                insert_tx_header(wtx, &tx_header)?;
+                irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
+                    .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+                eyre::Ok(())
+            })
         })??;
         let chunk = UnpackedChunk {
             data_root,
@@ -2769,7 +4137,7 @@ mod tests {
             bytes: Base64(vec![2_u8; 8]),
             tx_offset: TxChunkOffset::from(0_u32),
         };
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_chunk(wtx, &chunk)?;
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(data_root), None)?;
@@ -2864,11 +4232,12 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard,
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
         service_task.prune_durably_migrated_chunk_bodies(10)?;
-        db.view(|rtx| -> eyre::Result<bool> {
+        db.view_cache(|rtx| -> eyre::Result<bool> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = dup_cursor.walk(Some(data_root))?;
             Ok(walk
@@ -2895,7 +4264,7 @@ mod tests {
                 chunk_size: 32,
                 num_chunks_in_partition: num_chunks,
                 num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
+                num_partitions_per_slot: irys_types::ReplicaCount::new(1),
                 entropy_packing_iterations: 1,
                 chain_id: 1,
                 ..ConsensusConfig::testing()
@@ -2935,12 +4304,7 @@ mod tests {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let chunk_size = config.consensus.chunk_size;
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         let cached = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
@@ -2955,25 +4319,27 @@ mod tests {
         let data_root = cached.data_root;
         let mut tx_ids = Vec::with_capacity(case.prior_chunks.len() + 1);
         db.update(|wtx| {
-            for chunks in case.prior_chunks {
-                let prior = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                    tx: DataTransactionHeaderV1 {
-                        id: H256::random(),
-                        data_root: H256::random(),
-                        data_size: chunks * chunk_size,
-                        ledger_id: DataLedger::Submit as u32,
-                        ..Default::default()
-                    },
-                    metadata: DataTransactionMetadata::new(),
-                });
-                insert_tx_header(wtx, &prior)?;
-                tx_ids.push(prior.id);
-            }
-            database::cache_data_root(wtx, &cached, None)?;
-            insert_tx_header(wtx, &cached)?;
-            irys_database::set_data_tx_included_height(wtx, &cached.id, 1)
-                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
-            eyre::Ok(())
+            db.update_cache_eyre(|cache_tx| {
+                for chunks in case.prior_chunks {
+                    let prior = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                        tx: DataTransactionHeaderV1 {
+                            id: H256::random(),
+                            data_root: H256::random(),
+                            data_size: chunks * chunk_size,
+                            ledger_id: DataLedger::Submit.into(),
+                            ..Default::default()
+                        },
+                        metadata: DataTransactionMetadata::new(),
+                    });
+                    insert_tx_header(wtx, &prior)?;
+                    tx_ids.push(prior.id);
+                }
+                database::cache_data_root(cache_tx, &cached, None)?;
+                insert_tx_header(wtx, &cached)?;
+                irys_database::set_data_tx_included_height(wtx, &cached.id, 1)
+                    .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+                eyre::Ok(())
+            })
         })??;
         tx_ids.push(cached.id);
 
@@ -3032,6 +4398,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard,
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -3047,6 +4414,7 @@ mod tests {
             &BTreeSet::from([candidate]),
             &task.storage_modules_guard.read(),
             10,
+            &mut PruneSpanCache::default(),
         )?;
         let views = sm.index_view_count().saturating_sub(views_before);
         let visits = sm.interval_visit_count().saturating_sub(visits_before);
@@ -3164,6 +4532,80 @@ mod tests {
         persisted_own: bool,
     }
 
+    /// The per-tx prefix walk that `BlockLedgerWalk` replaced. Chunk counts
+    /// stand in for headers; an absent count is a missing header.
+    fn uncached_span(
+        tx_ids: &[H256],
+        counts: &HashMap<H256, u64>,
+        start: u64,
+        tx_id: H256,
+    ) -> Option<(u64, u64)> {
+        let mut cursor = LedgerChunkOffset::from(start);
+        for id in tx_ids {
+            let count = *counts.get(id)?;
+            if *id == tx_id {
+                return (count > 0).then_some((*cursor, count));
+            }
+            cursor = checked_ledger_offset(cursor, count)?;
+        }
+        None
+    }
+
+    fn walk_chunk_count() -> impl proptest::strategy::Strategy<Value = Option<u64>> {
+        use proptest::prelude::*;
+        prop_oneof![
+            Just(None),
+            Just(Some(0)),
+            (1..4_u64).prop_map(Some),
+            (u64::MAX - 3..=u64::MAX).prop_map(Some),
+        ]
+    }
+
+    fn walk_start() -> impl proptest::strategy::Strategy<Value = u64> {
+        use proptest::prelude::*;
+        prop_oneof![0..10_u64, u64::MAX - 8..=u64::MAX]
+    }
+
+    proptest::proptest! {
+        /// Lookups in any order, including repeated ids, missing headers,
+        /// zero-chunk txs and overflowing starts, give the uncached answer.
+        /// Each block position is read at most once.
+        #[test]
+        fn block_walk_matches_the_uncached_prefix_walk(
+            block in proptest::collection::vec(0..8_u8, 0..12),
+            chunk_counts in proptest::collection::vec(walk_chunk_count(), 8),
+            start in walk_start(),
+            lookups in proptest::collection::vec(0..10_u8, 0..20),
+        ) {
+            let tx_ids: Vec<H256> = block.iter().map(|id| H256::repeat_byte(*id)).collect();
+            let counts: HashMap<H256, u64> = chunk_counts
+                .iter()
+                .zip(0_u8..)
+                .filter_map(|(count, id)| count.map(|count| (H256::repeat_byte(id), count)))
+                .collect();
+            let mut walk = BlockLedgerWalk {
+                tx_ids: tx_ids.clone(),
+                spans: Vec::new(),
+                cursor: Some(LedgerChunkOffset::from(start)),
+            };
+            let mut reads = 0_usize;
+            for lookup in lookups {
+                let tx_id = H256::repeat_byte(lookup);
+                let span = walk
+                    .span_of(tx_id, DataLedger::Submit, |id| {
+                        reads += 1;
+                        Ok(counts.get(id).copied())
+                    })
+                    .expect("in-memory counts never fail");
+                proptest::prop_assert_eq!(
+                    span.map(|span| (*span.start, span.chunk_count)),
+                    uncached_span(&tx_ids, &counts, start, tx_id)
+                );
+            }
+            proptest::prop_assert!(reads <= tx_ids.len());
+        }
+    }
+
     /// The slot that holds the cached body moved onto a partition whose file
     /// still says `Data` for a previous root. Capacity prune must keep that
     /// body. A `Data` label with no index row, a placement of this root, and
@@ -3190,6 +4632,10 @@ mod tests {
             "a placement of this root and persisted Data still delete the cache"
         );
         assert!(
+            shifted_slot_body_survives(SlotLabel::OtherPlacement)?.0,
+            "another persisted placement must not hide an assigned hole whose index row was dropped"
+        );
+        assert!(
             !shifted_slot_body_survives(SlotLabel::OtherSlot)?.0,
             "a module on another slot does not keep this chunk"
         );
@@ -3207,6 +4653,8 @@ mod tests {
         ClearedData,
         /// This root's placement row is present and the file says `Data`.
         OwnData,
+        /// This root is persisted elsewhere; the assigned offset has no row or body.
+        OtherPlacement,
         /// The module's slot does not cover the cached span.
         OtherSlot,
     }
@@ -3232,12 +4680,7 @@ mod tests {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let chunk_size = config.consensus.chunk_size;
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: chunk_size,
@@ -3249,11 +4692,13 @@ mod tests {
         let data_root = tx_header.data_root;
         let local_address = config.irys_signer().address();
         db.update(|wtx| {
-            database::cache_data_root(wtx, &tx_header, None)?;
-            insert_tx_header(wtx, &tx_header)?;
-            irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
-                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
-            eyre::Ok(())
+            db.update_cache_eyre(|cache_tx| {
+                database::cache_data_root(cache_tx, &tx_header, None)?;
+                insert_tx_header(wtx, &tx_header)?;
+                irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
+                    .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+                eyre::Ok(())
+            })
         })??;
         let chunk = UnpackedChunk {
             data_root,
@@ -3262,7 +4707,7 @@ mod tests {
             bytes: Base64(vec![2_u8; 8]),
             tx_offset: TxChunkOffset::from(0_u32),
         };
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_chunk(wtx, &chunk)?;
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
             let mut walk = cur.walk_dup(Some(data_root), None)?;
@@ -3279,7 +4724,7 @@ mod tests {
             for updated in aged_entries {
                 wtx.put::<CachedChunksIndex>(data_root, updated)?;
             }
-            if matches!(label, SlotLabel::OwnData) {
+            if matches!(label, SlotLabel::OwnData | SlotLabel::OtherPlacement) {
                 irys_database::store_ingress_data_hash(
                     wtx,
                     data_root,
@@ -3357,13 +4802,19 @@ mod tests {
                     "fixture index does not name the old root at partition offset 0, got {named:?}"
                 );
             }
-            SlotLabel::ClearedData | SlotLabel::OwnData => {
+            SlotLabel::ClearedData | SlotLabel::OwnData | SlotLabel::OtherPlacement => {
                 let (_, submodule) = sm.get_submodule_for_offset(partition_zero)?;
                 submodule.db.update(|tx| {
                     tx.add_data_root_info(
                         data_root,
                         &DataRootInfo {
-                            start_offset: RelativeChunkOffset::from(0_i32),
+                            start_offset: RelativeChunkOffset::from(
+                                if matches!(label, SlotLabel::OtherPlacement) {
+                                    2
+                                } else {
+                                    0
+                                },
+                            ),
                             data_size: sm.config.consensus.chunk_size,
                         },
                     )
@@ -3374,6 +4825,8 @@ mod tests {
         if write_data {
             let offsets: &[u32] = if matches!(label, SlotLabel::ForeignData) {
                 &[0, 2, 4]
+            } else if matches!(label, SlotLabel::OtherPlacement) {
+                &[2]
             } else {
                 &[0]
             };
@@ -3388,10 +4841,13 @@ mod tests {
                 );
             }
             sm.force_sync_pending_chunks()?;
-            eyre::ensure!(
-                sm.is_data_chunk_persisted_at(partition_zero),
-                "fixture offset 0 is not persisted Data"
-            );
+            let persisted = if matches!(label, SlotLabel::OtherPlacement) {
+                assert!(!sm.is_data_chunk_persisted_at(partition_zero));
+                PartitionChunkOffset::from(2)
+            } else {
+                partition_zero
+            };
+            assert!(sm.is_data_chunk_persisted_at(persisted));
         } else {
             eyre::ensure!(
                 !sm.is_data_chunk_persisted_at(partition_zero),
@@ -3416,7 +4872,7 @@ mod tests {
             &BTreeSet::from([TxChunkOffset::from(0)]),
         )?;
         match label {
-            SlotLabel::OwnData => {
+            SlotLabel::OwnData | SlotLabel::OtherPlacement => {
                 eyre::ensure!(!placed.is_empty(), "own placement row is missing");
             }
             _ => {
@@ -3443,13 +4899,14 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard,
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
         service_task.prune_durably_migrated_chunk_bodies(10)?;
         let views = sm.index_view_count().saturating_sub(views_before);
         let visits = sm.interval_visit_count().saturating_sub(visits_before);
-        let survived = db.view(|rtx| -> eyre::Result<bool> {
+        let survived = db.view_cache(|rtx| -> eyre::Result<bool> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = dup_cursor.walk(Some(data_root))?;
             Ok(walk
@@ -3460,23 +4917,30 @@ mod tests {
         Ok((survived, views, visits))
     }
 
-    /// A body that was durable in the snapshot stays in the cache when that
-    /// offset is Uninitialized before the delete.
+    #[derive(Clone, Copy)]
+    enum PruneMutation {
+        Reset,
+        NewTransaction,
+        NewPlacement,
+    }
+
+    #[rstest::rstest]
+    #[case::storage_reset(PruneMutation::Reset)]
+    #[case::new_transaction(PruneMutation::NewTransaction)]
+    #[case::new_placement(PruneMutation::NewPlacement)]
     #[tokio::test]
-    async fn keeps_cached_body_when_offset_is_uninitialized_before_delete() -> eyre::Result<()> {
+    async fn keeps_cached_body_when_prune_snapshot_becomes_stale(
+        #[case] mutation: PruneMutation,
+    ) -> eyre::Result<()> {
+        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
         use irys_domain::{ChunkType, StorageModule};
-        use irys_types::PartitionChunkOffset;
+        use irys_types::{PartitionChunkOffset, RelativeChunkOffset};
 
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let local_address = config.irys_signer().address();
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let data_root = H256::random();
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
@@ -3493,7 +4957,11 @@ mod tests {
             bytes: Base64(vec![7_u8; 32]),
             tx_offset: TxChunkOffset::from(0_u32),
         };
-        db.update(|wtx| {
+        db.update_eyre(|tx| {
+            irys_database::set_data_tx_included_height(tx, &tx_header.id, 1)
+                .map_err(|error| eyre::eyre!("set included height: {error:?}"))
+        })?;
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             database::cache_chunk(wtx, &chunk)?;
             irys_database::store_ingress_data_hash(
@@ -3548,6 +5016,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard,
+            replica_custody: ReplicaCustody::all_replicated(),
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
         task.arm_prune_recheck_pause();
@@ -3565,24 +5034,46 @@ mod tests {
             task.wait_for_prune_recheck_pause(std::time::Duration::from_secs(5)),
             "prune did not reach the durability re-check"
         );
-        sm.reset()?;
-        eyre::ensure!(
-            sm.get_chunk_type(&offset) == Some(ChunkType::Uninitialized),
-            "reset did not clear the offset"
-        );
-        eyre::ensure!(
-            !sm.is_data_chunk_persisted_at(offset),
-            "offset is still persisted after reset"
-        );
+        match mutation {
+            PruneMutation::Reset => {
+                sm.reset()?;
+                assert_eq!(sm.get_chunk_type(&offset), Some(ChunkType::Uninitialized));
+                assert!(!sm.is_data_chunk_persisted_at(offset));
+            }
+            PruneMutation::NewTransaction => {
+                let mut new_header = tx_header;
+                new_header.id = H256::random();
+                db.update_cache_eyre(|tx| {
+                    database::cache_data_root(tx, &new_header, None)?;
+                    Ok(())
+                })?;
+            }
+            PruneMutation::NewPlacement => {
+                let (_, submodule) = sm.get_submodule_for_offset(offset)?;
+                submodule.db.update(|tx| {
+                    tx.add_data_root_info(
+                        data_root,
+                        &DataRootInfo {
+                            start_offset: RelativeChunkOffset::from(4),
+                            data_size: 32,
+                        },
+                    )
+                })?;
+                assert!(!sm.is_data_chunk_persisted_at(PartitionChunkOffset::from(4)));
+            }
+        }
         task.release_prune_recheck_pause();
-        handle.join().expect("prune thread").expect("prune");
+        let tally = handle
+            .join()
+            .map_err(|_| eyre::eyre!("prune worker panicked"))??;
+        assert_eq!(tally.deleted_durable, 0);
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = dup_cursor.walk(Some(data_root))?;
             eyre::ensure!(
                 walk.next().transpose()?.is_some(),
-                "cached body was deleted after the offset became Uninitialized"
+                "cached body was deleted after the prune snapshot became stale"
             );
             Ok(())
         })??;
@@ -3593,12 +5084,7 @@ mod tests {
     #[tokio::test]
     async fn prunes_only_migrated_chunks_older_than_threshold() -> eyre::Result<()> {
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // Create two data roots: one "old" and one "new"
         let tx_header_old = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -3618,7 +5104,7 @@ mod tests {
             metadata: DataTransactionMetadata::new(),
         });
         let address = IrysAddress::random();
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header_old, None)?;
             database::cache_data_root(wtx, &tx_header_new, None)?;
             eyre::Ok(())
@@ -3632,7 +5118,7 @@ mod tests {
             tx_offset: TxChunkOffset::from(offset),
         };
 
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             // Manually insert index and chunk entries with controlled timestamps
             let chunk_old = mk_chunk(tx_header_old.data_root, 0, 10);
             let hash_old = chunk_old.chunk_path_hash();
@@ -3675,7 +5161,7 @@ mod tests {
 
         // Directly exercise the DB helper with a controlled cutoff time.
         // Use cutoff=5s so 0s is pruned and 10s is retained.
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let mut cur_old = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_root), None)?;
             let mut eligible = 0;
@@ -3692,7 +5178,7 @@ mod tests {
             Ok(())
         })??;
 
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             let pruned = irys_database::delete_reclaimable_cached_chunks_older_than(
                 wtx,
                 tx_header_old.data_root,
@@ -3704,7 +5190,7 @@ mod tests {
             eyre::Ok(())
         })??;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             // Old root should have no entries
             let mut cur_old = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_root), None)?;
@@ -3744,12 +5230,7 @@ mod tests {
         let ingress_address = config_below.irys_signer().address();
 
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // Create one data root with two chunks and mark them old to be eligible
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -3760,7 +5241,11 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|wtx| {
+        db.update_eyre(|tx| {
+            irys_database::set_data_tx_included_height(tx, &tx_header.id, 1)
+                .map_err(|error| eyre::eyre!("set included height: {error:?}"))
+        })?;
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             let c0 = UnpackedChunk {
                 data_root: tx_header.data_root,
@@ -3832,12 +5317,13 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx.clone(),
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
-        task_below.prune_cache(0)?;
+        task_below.prune_cache(1)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             // Expect both indices still present
             let m0 = irys_database::cached_chunk_meta_by_offset(
                 rtx,
@@ -3876,12 +5362,13 @@ mod tests {
                 tx_header.data_size,
                 &[0, 1],
             )?,
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
-        task_above.prune_cache(0)?;
+        task_above.prune_cache(1)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let mut cur = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = cur.walk(Some(tx_header.data_root))?;
             eyre::ensure!(
@@ -3899,12 +5386,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // Create a data root cached via mempool path
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -3914,13 +5396,13 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             eyre::Ok(())
         })??;
 
         // Set expiry_height to 5 so prune_height > expiry would trigger deletion
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             let mut cdr = wtx
                 .get::<CachedDataRoots>(tx_header.data_root)?
                 .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry"))?;
@@ -3933,7 +5415,7 @@ mod tests {
         let signer = config.irys_signer();
         let local_addr = signer.address();
 
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             let mut ingress_proof = IngressProof::default();
             ingress_proof.data_root = tx_header.data_root;
             irys_database::store_external_ingress_proof_checked(
@@ -3962,16 +5444,17 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         // Prune with prune_height greater than expiry (6 > 5).
         // Normally this would delete the data root, but because of the local proof, it should stay.
-        service_task.prune_data_root_cache(6)?;
+        service_task.prune_data_root_cache(6, &no_live_slots)?;
 
         // Verify it was NOT pruned
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
             eyre::ensure!(
                 has_root,
@@ -3993,12 +5476,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // Construct a CDR with empty txid_set directly — the only state
         // reachable by `(horizon=None, all_txs_confirmed=true)` after the
@@ -4012,7 +5490,7 @@ mod tests {
             expiry_height: None,
             cached_at: irys_types::UnixTimestamp::now()?,
         };
-        db.update(|wtx| -> eyre::Result<()> {
+        db.update_cache(|wtx| -> eyre::Result<()> {
             wtx.put::<CachedDataRoots>(data_root, cdr)?;
             Ok(())
         })??;
@@ -4035,13 +5513,14 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
-        service_task.prune_data_root_cache(1)?;
+        service_task.prune_data_root_cache(1, &no_live_slots)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
             eyre::ensure!(
                 !has_root,
@@ -4067,12 +5546,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
@@ -4087,7 +5561,7 @@ mod tests {
         // `all_txs_confirmed = true` together with `inclusion_max_height = None`:
         // every other path through the prune loop flips the flag to false
         // whenever metadata is missing.
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             let mut cdr = wtx
                 .get::<CachedDataRoots>(tx_header.data_root)?
@@ -4101,7 +5575,7 @@ mod tests {
         // Add a local ingress proof for this data_root.
         let signer = config.irys_signer();
         let local_addr = signer.address();
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             let mut ingress_proof = IngressProof::default();
             ingress_proof.data_root = tx_header.data_root;
             irys_database::store_external_ingress_proof_checked(wtx, &ingress_proof, local_addr)?;
@@ -4126,15 +5600,16 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         // Without the local-proof exemption the (None, None) state would be
         // evicted; with it the entry must survive.
-        service_task.prune_data_root_cache(1)?;
+        service_task.prune_data_root_cache(1, &no_live_slots)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
             eyre::ensure!(
                 has_root,
@@ -4159,12 +5634,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         let data_root = H256::random();
         let confirmed_tx_id = H256::random();
@@ -4184,14 +5654,16 @@ mod tests {
         let pending_tx = make_tx(pending_tx_id);
 
         db.update(|wtx| -> eyre::Result<()> {
-            // Both txs land in the same CDR.txid_set via the shared data_root.
-            database::cache_data_root(wtx, &confirmed_tx, None)?;
-            database::cache_data_root(wtx, &pending_tx, None)?;
-            // The confirmed sibling gets an inclusion height (term-ledger
-            // confirmation); the pending tx remains without a metadata row.
-            irys_database::set_data_tx_included_height(wtx, &confirmed_tx_id, 5)
-                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {:?}", e))?;
-            Ok(())
+            db.update_cache_eyre(|cache_tx| {
+                // Both txs land in the same CDR.txid_set via the shared data_root.
+                database::cache_data_root(cache_tx, &confirmed_tx, None)?;
+                database::cache_data_root(cache_tx, &pending_tx, None)?;
+                // The confirmed sibling gets an inclusion height (term-ledger
+                // confirmation); the pending tx remains without a metadata row.
+                irys_database::set_data_tx_included_height(wtx, &confirmed_tx_id, 5)
+                    .map_err(|e| eyre::eyre!("set_data_tx_included_height: {:?}", e))?;
+                Ok(())
+            })
         })??;
 
         let genesis_block = new_mock_signed_header();
@@ -4212,6 +5684,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
@@ -4219,9 +5692,9 @@ mod tests {
         // `prune_height = 100` is well past the confirmed tx's `included_height`
         // = 5.  Without the pending-tx guard the CDR would be evicted on
         // inclusion alone.
-        service_task.prune_data_root_cache(100)?;
+        service_task.prune_data_root_cache(100, &no_live_slots)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
             eyre::ensure!(
                 has_root,
@@ -4247,12 +5720,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // A shared data_root for all three proofs.
         let data_root = H256::random();
@@ -4272,58 +5740,60 @@ mod tests {
 
         // Persist CDR + unpromoted tx header + three ingress-proof rows.
         db.update(|wtx| -> eyre::Result<()> {
-            // CachedDataRoot with one pending txid (any_unpromoted = true).
-            let cdr = CachedDataRoot {
-                data_size: 64,
-                data_size_confirmed: false,
-                txid_set: vec![txid],
-                block_set: vec![],
-                expiry_height: None,
-                cached_at: irys_types::UnixTimestamp::now()?,
-            };
-            wtx.put::<CachedDataRoots>(data_root, cdr)?;
-
-            // Tx header for the pending txid; promoted_height = None (default).
-            let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: txid,
-                    data_root,
+            db.update_cache_eyre(|cache_tx| {
+                // CachedDataRoot with one pending txid (any_unpromoted = true).
+                let cdr = CachedDataRoot {
                     data_size: 64,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            });
-            database::insert_tx_header(wtx, &tx_header)?;
+                    data_size_confirmed: false,
+                    txid_set: vec![txid],
+                    block_set: vec![],
+                    expiry_height: None,
+                    cached_at: irys_types::UnixTimestamp::now()?,
+                };
+                cache_tx.put::<CachedDataRoots>(data_root, cdr)?;
 
-            // Two valid proofs (known anchor → not expired).
-            let make_proof = |anchor: H256| {
-                let mut p = IngressProof::default();
-                p.data_root = data_root;
-                p.anchor = anchor;
-                p
-            };
-            irys_database::store_external_ingress_proof_checked(
-                wtx,
-                &make_proof(valid_anchor),
-                addr_a,
-            )?;
-            irys_database::store_external_ingress_proof_checked(
-                wtx,
-                &make_proof(valid_anchor),
-                addr_b,
-            )?;
-            // One expired proof (unknown anchor).
-            irys_database::store_external_ingress_proof_checked(
-                wtx,
-                &make_proof(invalid_anchor),
-                addr_c,
-            )?;
+                // Tx header for the pending txid; promoted_height = None (default).
+                let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                    tx: DataTransactionHeaderV1 {
+                        id: txid,
+                        data_root,
+                        data_size: 64,
+                        ..Default::default()
+                    },
+                    metadata: DataTransactionMetadata::new(),
+                });
+                database::insert_tx_header(wtx, &tx_header)?;
 
-            Ok(())
+                // Two valid proofs (known anchor → not expired).
+                let make_proof = |anchor: H256| {
+                    let mut p = IngressProof::default();
+                    p.data_root = data_root;
+                    p.anchor = anchor;
+                    p
+                };
+                irys_database::store_external_ingress_proof_checked(
+                    cache_tx,
+                    &make_proof(valid_anchor),
+                    addr_a,
+                )?;
+                irys_database::store_external_ingress_proof_checked(
+                    cache_tx,
+                    &make_proof(valid_anchor),
+                    addr_b,
+                )?;
+                // One expired proof (unknown anchor).
+                irys_database::store_external_ingress_proof_checked(
+                    cache_tx,
+                    &make_proof(invalid_anchor),
+                    addr_c,
+                )?;
+
+                Ok(())
+            })
         })??;
 
         // Sanity: three proofs inserted.
-        let initial_count = db.view_eyre(|rtx| {
+        let initial_count = db.view_cache_eyre(|rtx| {
             Ok(irys_database::ingress_proofs_by_data_root(rtx, data_root)?.len())
         })?;
         assert_eq!(initial_count, 3, "expected 3 proofs before pruning");
@@ -4345,13 +5815,14 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         service_task.prune_ingress_proofs()?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let remaining = irys_database::ingress_proofs_by_data_root(rtx, data_root)?;
             assert_eq!(
                 remaining.len(),
@@ -4380,12 +5851,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         let low = H256::from([0x01; 32]);
         let high = H256::from([0xFE; 32]);
@@ -4393,37 +5859,39 @@ mod tests {
         let invalid_anchor = H256::random();
 
         db.update(|wtx| -> eyre::Result<()> {
-            for data_root in [low, high] {
-                let txid = H256::random();
-                wtx.put::<CachedDataRoots>(
-                    data_root,
-                    CachedDataRoot {
-                        data_size: 64,
-                        data_size_confirmed: false,
-                        txid_set: vec![txid],
-                        block_set: vec![],
-                        expiry_height: None,
-                        cached_at: irys_types::UnixTimestamp::now()?,
-                    },
-                )?;
-                database::insert_tx_header(
-                    wtx,
-                    &DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                        tx: DataTransactionHeaderV1 {
-                            id: txid,
-                            data_root,
+            db.update_cache_eyre(|cache_tx| {
+                for data_root in [low, high] {
+                    let txid = H256::random();
+                    cache_tx.put::<CachedDataRoots>(
+                        data_root,
+                        CachedDataRoot {
                             data_size: 64,
-                            ..Default::default()
+                            data_size_confirmed: false,
+                            txid_set: vec![txid],
+                            block_set: vec![],
+                            expiry_height: None,
+                            cached_at: irys_types::UnixTimestamp::now()?,
                         },
-                        metadata: DataTransactionMetadata::new(),
-                    }),
-                )?;
-                let mut proof = IngressProof::default();
-                proof.data_root = data_root;
-                proof.anchor = invalid_anchor;
-                irys_database::store_external_ingress_proof_checked(wtx, &proof, remote)?;
-            }
-            Ok(())
+                    )?;
+                    database::insert_tx_header(
+                        wtx,
+                        &DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                            tx: DataTransactionHeaderV1 {
+                                id: txid,
+                                data_root,
+                                data_size: 64,
+                                ..Default::default()
+                            },
+                            metadata: DataTransactionMetadata::new(),
+                        }),
+                    )?;
+                    let mut proof = IngressProof::default();
+                    proof.data_root = data_root;
+                    proof.anchor = invalid_anchor;
+                    irys_database::store_external_ingress_proof_checked(cache_tx, &proof, remote)?;
+                }
+                Ok(())
+            })
         })??;
 
         let genesis_block = new_mock_signed_header();
@@ -4443,13 +5911,14 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         service_task.prune_ingress_proofs_limited(high, 1)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let low_left = irys_database::ingress_proofs_by_data_root(rtx, low)?.len();
             let high_left = irys_database::ingress_proofs_by_data_root(rtx, high)?.len();
             assert_eq!(low_left, 1, "the lower proof is outside this pass");
@@ -4478,23 +5947,396 @@ mod tests {
     /// - sibling (valid anchor) proof is preserved
     #[tokio::test]
     async fn prune_ingress_proofs_at_capacity_deletes_local_proof() -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase::default())?;
+        assert_eq!(
+            pass.remaining,
+            vec![pass.sibling_addr],
+            "only the sibling proof should survive; the local expired proof is deleted at capacity"
+        );
+        Ok(())
+    }
+
+    /// At capacity with no cached body, a live Submit module that durably
+    /// stores the full placement keeps the local proof, and the staked node
+    /// reanchors it to the tip.
+    #[tokio::test]
+    async fn prune_ingress_proofs_at_capacity_keeps_local_proof_for_stored_submit_copy()
+    -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            ..AtCapacityCase::default()
+        })?;
+        let mut expected = vec![pass.author_addr, pass.sibling_addr];
+        expected.sort();
+        assert_eq!(
+            pass.remaining, expected,
+            "the local proof must survive while a live Submit module stores the data root"
+        );
+        assert_eq!(
+            pass.author_anchor,
+            Some(pass.tip_hash),
+            "the kept proof is reanchored to the tip"
+        );
+        Ok(())
+    }
+
+    /// The reanchor checks the leaf count, not the leaves. One missing leaf
+    /// still fails it; the kept row stays as it was, expired, for a later
+    /// pass.
+    #[tokio::test]
+    async fn prune_ingress_proofs_at_capacity_reanchor_needs_every_leaf() -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            missing_leaf: true,
+            ..AtCapacityCase::default()
+        })?;
+        assert!(pass.remaining.contains(&pass.author_addr));
+        let anchor = pass.author_anchor.expect("the local proof is kept");
+        assert_ne!(anchor, pass.tip_hash, "the reanchor did not run");
+        Ok(())
+    }
+
+    /// A stored copy keeps the local proof only when it is a full, durable
+    /// placement of the cached data root on a live Submit slot, and the proof
+    /// is this node's with an unpromoted tx. Every other case is deleted at
+    /// capacity, as before.
+    #[rstest::rstest]
+    #[case::module_on_another_ledger(AtCapacityCase {
+        module: Some(StoredCopy { ledger: DataLedger::OneYear, ..StoredCopy::FULL_SUBMIT }),
+        ..AtCapacityCase::default()
+    })]
+    #[case::partial_placement(AtCapacityCase {
+        module: Some(StoredCopy { offsets: &[0], ..StoredCopy::FULL_SUBMIT }),
+        ..AtCapacityCase::default()
+    })]
+    #[case::placement_size_differs_from_cached_root(AtCapacityCase {
+        module: Some(StoredCopy { placement_size: 96, offsets: &[0, 1, 2], ..StoredCopy::FULL_SUBMIT }),
+        ..AtCapacityCase::default()
+    })]
+    #[case::every_tx_promoted(AtCapacityCase {
+        module: Some(StoredCopy::FULL_SUBMIT),
+        promoted: true,
+        ..AtCapacityCase::default()
+    })]
+    #[case::remote_author(AtCapacityCase {
+        module: Some(StoredCopy::FULL_SUBMIT),
+        remote_author: true,
+        ..AtCapacityCase::default()
+    })]
+    #[case::submit_slot_expired(AtCapacityCase {
+        module: Some(StoredCopy::FULL_SUBMIT),
+        expire_submit_slot_0: true,
+        ..AtCapacityCase::default()
+    })]
+    #[case::node_unstaked(AtCapacityCase {
+        module: Some(StoredCopy::FULL_SUBMIT),
+        unstaked: true,
+        ..AtCapacityCase::default()
+    })]
+    #[tokio::test]
+    async fn prune_ingress_proofs_at_capacity_deletes_proof_without_a_live_full_copy(
+        #[case] case: AtCapacityCase,
+    ) -> eyre::Result<()> {
+        let pass = at_capacity_expired_proof_pass(case)?;
+        assert_eq!(
+            pass.remaining,
+            vec![pass.sibling_addr],
+            "the expired proof must be deleted; only the sibling survives"
+        );
+        Ok(())
+    }
+
+    /// The restore sweep tries generation only on a staked node, for a root
+    /// this node has no proof for but every leaf of, with confirmed
+    /// `data_size` and a non-empty `block_set`, an unpromoted tx, that a live
+    /// Submit module stores as one full persisted placement of the cached
+    /// `data_size`.
+    #[rstest::rstest]
+    #[case::stored_without_a_local_proof(
+        AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), ..AtCapacityCase::RESTORE },
+        1
+    )]
+    #[case::local_proof_present(
+        AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), ..AtCapacityCase::default() },
+        0
+    )]
+    #[case::no_module(AtCapacityCase::RESTORE, 0)]
+    #[case::module_on_another_ledger(
+        AtCapacityCase {
+            module: Some(StoredCopy { ledger: DataLedger::OneYear, ..StoredCopy::FULL_SUBMIT }),
+            ..AtCapacityCase::RESTORE
+        },
+        0
+    )]
+    #[case::partial_placement(
+        AtCapacityCase {
+            module: Some(StoredCopy { offsets: &[0], ..StoredCopy::FULL_SUBMIT }),
+            ..AtCapacityCase::RESTORE
+        },
+        0
+    )]
+    #[case::placement_size_differs_from_cached_root(
+        AtCapacityCase {
+            module: Some(StoredCopy { placement_size: 96, offsets: &[0, 1, 2], ..StoredCopy::FULL_SUBMIT }),
+            ..AtCapacityCase::RESTORE
+        },
+        0
+    )]
+    #[case::every_tx_promoted(
+        AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), promoted: true, ..AtCapacityCase::RESTORE },
+        0
+    )]
+    #[case::submit_slot_expired(
+        AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            expire_submit_slot_0: true,
+            ..AtCapacityCase::RESTORE
+        },
+        0
+    )]
+    #[case::node_unstaked(
+        AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), unstaked: true, ..AtCapacityCase::RESTORE },
+        0
+    )]
+    #[case::missing_leaf(
+        AtCapacityCase { module: Some(StoredCopy::FULL_SUBMIT), missing_leaf: true, ..AtCapacityCase::RESTORE },
+        0
+    )]
+    #[case::unconfirmed_data_size(
+        AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            unconfirmed_size: true,
+            ..AtCapacityCase::RESTORE
+        },
+        0
+    )]
+    #[case::empty_block_set(
+        AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            empty_block_set: true,
+            ..AtCapacityCase::RESTORE
+        },
+        0
+    )]
+    #[tokio::test]
+    async fn restore_tries_only_roots_a_live_submit_module_fully_stores(
+        #[case] case: AtCapacityCase,
+        #[case] expected_attempts: usize,
+    ) -> eyre::Result<()> {
+        let fixture = proof_fixture(case)?;
+        let attempts = fixture.task.restore_submit_ingress_proofs_limited(
+            fixture.data_root,
+            MAX_RESTORE_CHECKS_PER_RUN,
+            MAX_RESTORES_PER_RUN,
+        )?;
+        assert_eq!(attempts, expected_attempts);
+        Ok(())
+    }
+
+    /// A staked miner whose live Submit module stores the root, with every
+    /// leaf and no proof row, gets the row back anchored to the tip.
+    #[tokio::test]
+    async fn restore_regenerates_a_missing_local_proof() -> eyre::Result<()> {
+        let fixture = proof_fixture(AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            ..AtCapacityCase::RESTORE
+        })?;
+        let local_address = fixture.task.config.irys_signer().address();
+        let local_anchor = |db: &DatabaseProvider| {
+            db.view_cache_eyre(|rtx| {
+                Ok(irys_database::ingress_proof_by_data_root_address(
+                    rtx,
+                    fixture.data_root,
+                    local_address,
+                )?
+                .map(|compact| compact.0.proof.anchor))
+            })
+        };
+        assert_eq!(local_anchor(&fixture.db)?, None);
+
+        fixture.task.restore_submit_ingress_proofs()?;
+        assert_eq!(local_anchor(&fixture.db)?, Some(fixture.tip_hash));
+        Ok(())
+    }
+
+    /// Both budgets hold. A root that takes a check but is not a candidate
+    /// still uses one; a zero generation budget tries nothing.
+    #[tokio::test]
+    async fn restore_stops_at_its_check_and_generation_budgets() -> eyre::Result<()> {
+        let fixture = proof_fixture(AtCapacityCase {
+            module: Some(StoredCopy::FULL_SUBMIT),
+            ..AtCapacityCase::RESTORE
+        })?;
+        // A cached root with no txs sorts first: the walk from zero checks it
+        // before the stored root.
+        let first = H256::zero();
+        assert!(first < fixture.data_root);
+        fixture.db.update_cache(|wtx| {
+            wtx.put::<CachedDataRoots>(
+                first,
+                irys_database::db_cache::CachedDataRoot {
+                    data_size: 32,
+                    data_size_confirmed: false,
+                    txid_set: vec![],
+                    block_set: vec![],
+                    expiry_height: None,
+                    cached_at: irys_types::UnixTimestamp::now()?,
+                },
+            )?;
+            eyre::Ok(())
+        })??;
+
+        // A successful try stores the proof, so the root stops being a
+        // candidate: the passes that must try nothing go first.
+        let task = &fixture.task;
+        assert_eq!(task.restore_submit_ingress_proofs_limited(first, 1, 4)?, 0);
+        assert_eq!(task.restore_submit_ingress_proofs_limited(first, 2, 0)?, 0);
+        let last = H256::repeat_byte(0xff);
+        assert!(fixture.data_root < last);
+        assert_eq!(
+            task.restore_submit_ingress_proofs_limited(last, 2, 4)?,
+            1,
+            "a start past every root wraps to both"
+        );
+        assert_eq!(
+            task.restore_submit_ingress_proofs_limited(first, 2, 4)?,
+            0,
+            "the restored root has a proof now"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn submit_slot_is_live_reads_the_expiry_flags() {
+        assert!(submit_slot_is_live(&[], 0), "no slots is live");
+        assert!(submit_slot_is_live(&[true, false], 0));
+        assert!(!submit_slot_is_live(&[true, false], 1), "expired slot");
+        assert!(!submit_slot_is_live(&[true], 3), "index past the slot list");
+    }
+
+    /// A module holding a durable placement of the test data root, on slot 0
+    /// of `ledger`. The cached data root is 64 bytes (two 32-byte chunks).
+    #[derive(Clone, Copy, Debug)]
+    struct StoredCopy {
+        ledger: DataLedger,
+        placement_size: u64,
+        offsets: &'static [u32],
+    }
+
+    impl StoredCopy {
+        const FULL_SUBMIT: Self = Self {
+            ledger: DataLedger::Submit,
+            placement_size: 64,
+            offsets: &[0, 1],
+        };
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct AtCapacityCase {
+        /// `None` installs no storage module.
+        module: Option<StoredCopy>,
+        /// The root's only tx is promoted.
+        promoted: bool,
+        /// The expired proof is signed by another address, not this node.
+        remote_author: bool,
+        /// No expired proof is stored, as on a node that already lost it.
+        no_expired_proof: bool,
+        /// The canonical epoch snapshot has two Submit slots, slot 0 expired.
+        expire_submit_slot_0: bool,
+        /// This node has no active stake in the canonical epoch snapshot.
+        unstaked: bool,
+        /// This node has the leaf for chunk 0 but not chunk 1.
+        missing_leaf: bool,
+        /// CDR `data_size_confirmed` is false (restore skip).
+        unconfirmed_size: bool,
+        /// CDR `block_set` is empty (restore skip).
+        empty_block_set: bool,
+    }
+
+    impl AtCapacityCase {
+        /// This node's proof is already gone; only the sibling's remains.
+        const RESTORE: Self = Self {
+            module: None,
+            promoted: false,
+            remote_author: false,
+            no_expired_proof: true,
+            expire_submit_slot_0: false,
+            unstaked: false,
+            missing_leaf: false,
+            unconfirmed_size: false,
+            empty_block_set: false,
+        };
+    }
+
+    struct AtCapacityProofPass {
+        /// Signer addresses still holding a proof for the root, sorted.
+        remaining: Vec<IrysAddress>,
+        author_addr: IrysAddress,
+        /// Anchor of the author's proof after the pass, if it is still there.
+        author_anchor: Option<H256>,
+        sibling_addr: IrysAddress,
+        /// Canonical tip, the anchor a reanchor or restore signs.
+        tip_hash: H256,
+    }
+
+    /// One `prune_ingress_proofs` pass at capacity with no cached body.
+    fn at_capacity_expired_proof_pass(case: AtCapacityCase) -> eyre::Result<AtCapacityProofPass> {
+        let fixture = proof_fixture(case)?;
+        fixture.task.prune_ingress_proofs()?;
+        let rows = fixture.db.view_cache_eyre(|rtx| {
+            irys_database::ingress_proofs_by_data_root(rtx, fixture.data_root)
+        })?;
+        let author_anchor = rows
+            .iter()
+            .find(|(_, proof)| proof.address == fixture.author_addr)
+            .map(|(_, proof)| proof.proof.anchor);
+        let mut remaining: Vec<IrysAddress> =
+            rows.into_iter().map(|(_, proof)| proof.address).collect();
+        remaining.sort();
+        Ok(AtCapacityProofPass {
+            remaining,
+            author_addr: fixture.author_addr,
+            author_anchor,
+            sibling_addr: fixture.sibling_addr,
+            tip_hash: fixture.tip_hash,
+        })
+    }
+
+    struct ProofFixture {
+        task: InnerCacheTask,
+        db: DatabaseProvider,
+        data_root: DataRoot,
+        author_addr: IrysAddress,
+        sibling_addr: IrysAddress,
+        tip_hash: H256,
+        _db_dir: irys_testing_utils::utils::tempfile::TempDir,
+        _sm_dir: irys_testing_utils::utils::tempfile::TempDir,
+    }
+
+    /// A cache at capacity with no cached body: one 64-byte cached data root
+    /// with one tx, an expired proof (this node's unless `remote_author`, and
+    /// absent with `no_expired_proof`), and a sibling proof anchored to
+    /// genesis that never expires. This node is staked and holds both leaves
+    /// unless `unstaked` or `missing_leaf` says otherwise.
+    fn proof_fixture(case: AtCapacityCase) -> eyre::Result<ProofFixture> {
         let mut node_config = NodeConfig::testing();
         // Force at_capacity = true: chunk_cache_size (0) >= 0.
         node_config.cache.max_cache_size_bytes = 0;
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         let data_root = H256::random();
         let txid = H256::random();
 
-        // Address of the local signer (derived from NodeConfig::testing()'s fixed key).
+        // The local signer (derived from NodeConfig::testing()'s fixed key).
         let local_addr = config.irys_signer().address();
+        // The expired proof's author: this node, or a remote address.
+        let author_addr = if case.remote_author {
+            IrysAddress::random()
+        } else {
+            local_addr
+        };
         // A different address for the sibling proof.
         let sibling_addr = IrysAddress::random();
 
@@ -4505,55 +6347,142 @@ mod tests {
         let expired_anchor = H256::random();
 
         db.update(|wtx| -> eyre::Result<()> {
-            // CachedDataRoot with one pending (unpromoted) txid.
-            let cdr = irys_database::db_cache::CachedDataRoot {
-                data_size: 64,
-                data_size_confirmed: false,
-                txid_set: vec![txid],
-                block_set: vec![],
-                expiry_height: None,
-                cached_at: irys_types::UnixTimestamp::now()?,
-            };
-            wtx.put::<CachedDataRoots>(data_root, cdr)?;
-
-            // Unpromoted tx header (promoted_height = None by default).
-            let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: txid,
-                    data_root,
+            db.update_cache_eyre(|cache_tx| {
+                // CachedDataRoot with one pending (unpromoted) txid.
+                let cdr = irys_database::db_cache::CachedDataRoot {
                     data_size: 64,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            });
-            database::insert_tx_header(wtx, &tx_header)?;
+                    data_size_confirmed: !case.unconfirmed_size,
+                    txid_set: vec![txid],
+                    block_set: if case.empty_block_set {
+                        vec![]
+                    } else {
+                        vec![valid_anchor]
+                    },
+                    expiry_height: None,
+                    cached_at: irys_types::UnixTimestamp::now()?,
+                };
+                cache_tx.put::<CachedDataRoots>(data_root, cdr)?;
 
-            // Local proof with expired anchor → at-capacity branch deletes it.
-            let mut local_proof = IngressProof::default();
-            local_proof.data_root = data_root;
-            local_proof.anchor = expired_anchor;
-            irys_database::store_external_ingress_proof_checked(wtx, &local_proof, local_addr)?;
+                // Unpromoted tx header (promoted_height = None by default).
+                let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                    tx: DataTransactionHeaderV1 {
+                        id: txid,
+                        data_root,
+                        data_size: 64,
+                        ..Default::default()
+                    },
+                    metadata: DataTransactionMetadata::new(),
+                });
+                database::insert_tx_header(wtx, &tx_header)?;
+                if case.promoted {
+                    irys_database::set_data_tx_included_height(wtx, &txid, 1)
+                        .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+                    irys_database::set_data_tx_promoted_height(wtx, &txid, 2)
+                        .map_err(|e| eyre::eyre!("set_data_tx_promoted_height: {e:?}"))?;
+                }
 
-            // Sibling proof with valid anchor → not expired → survives.
-            let mut sibling_proof = IngressProof::default();
-            sibling_proof.data_root = data_root;
-            sibling_proof.anchor = valid_anchor;
-            irys_database::store_external_ingress_proof_checked(wtx, &sibling_proof, sibling_addr)?;
+                // Proof with expired anchor.
+                if !case.no_expired_proof {
+                    let mut expired_proof = IngressProof::default();
+                    expired_proof.data_root = data_root;
+                    expired_proof.anchor = expired_anchor;
+                    irys_database::store_external_ingress_proof_checked(
+                        cache_tx,
+                        &expired_proof,
+                        author_addr,
+                    )?;
+                }
 
-            Ok(())
+                // Sibling proof with valid anchor → not expired → survives.
+                let mut sibling_proof = IngressProof::default();
+                sibling_proof.data_root = data_root;
+                sibling_proof.anchor = valid_anchor;
+                irys_database::store_external_ingress_proof_checked(
+                    cache_tx,
+                    &sibling_proof,
+                    sibling_addr,
+                )?;
+
+                // This node's compact leaves for the two chunks.
+                let leaf_count: u32 = if case.missing_leaf { 1 } else { 2 };
+                for offset in 0..leaf_count {
+                    irys_database::store_ingress_data_hash(
+                        cache_tx,
+                        data_root,
+                        local_addr,
+                        TxChunkOffset::from(offset),
+                        H256::random(),
+                    )?;
+                }
+
+                Ok(())
+            })
         })??;
 
-        let initial_count = db.view_eyre(|rtx| {
+        let initial_count = db.view_cache_eyre(|rtx| {
             Ok(irys_database::ingress_proofs_by_data_root(rtx, data_root)?.len())
         })?;
-        assert_eq!(initial_count, 2, "expected 2 proofs before pruning");
+        assert_eq!(
+            initial_count,
+            if case.no_expired_proof { 1 } else { 2 },
+            "proofs before pruning"
+        );
 
-        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let mut block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let mut snapshot = EpochSnapshot::default();
+        if !case.unstaked {
+            snapshot.commitment_state.stake_commitments.insert(
+                local_addr,
+                irys_domain::StakeEntry {
+                    id: H256::random(),
+                    commitment_status: irys_types::CommitmentStatus::Active,
+                    signer: local_addr,
+                    amount: irys_types::U256::from(10_000_u64),
+                    reward_address: local_addr,
+                },
+            );
+        }
+        if case.expire_submit_slot_0 {
+            snapshot.ledgers[DataLedger::Submit].allocate_slots(2, 0);
+            // Pre-Cascade expiry: slot 0 is old enough, the last slot never expires.
+            snapshot.ledgers.expire_partitions(
+                1_000_000,
+                irys_types::hardfork_config::ForBlock::inactive(),
+                |_| 0,
+                config.consensus.num_chunks_in_partition,
+            );
+            let slots = snapshot.ledgers.get_slots(DataLedger::Submit);
+            assert!(slots[0].is_expired && !slots[1].is_expired);
+        } else {
+            snapshot.ledgers[DataLedger::Submit].allocate_slots(1, 0);
+            let slots = snapshot.ledgers.get_slots(DataLedger::Submit);
+            assert!(
+                !slots.is_empty() && !slots[0].is_expired,
+                "keep/restore happy path uses a live Submit slot"
+            );
+        }
+        block_tree
+            .blocks
+            .get_mut(&genesis_block.block_hash)
+            .expect("genesis entry")
+            .epoch_snapshot = Arc::new(snapshot);
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let block_index = BlockIndex::new_for_testing(db.clone());
         let block_index_guard =
             irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+
+        let sm_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let storage_modules_guard = match case.module {
+            Some(copy) => storage_modules_guard_with_durable_on(
+                sm_dir.path().to_path_buf(),
+                data_root,
+                copy.placement_size,
+                copy.offsets,
+                copy.ledger,
+            )?,
+            None => test_storage_modules_guard(),
+        };
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {
@@ -4564,34 +6493,22 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
-            storage_modules_guard: test_storage_modules_guard(),
+            storage_modules_guard,
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
-        service_task.prune_ingress_proofs()?;
-
-        db.view(|rtx| -> eyre::Result<()> {
-            let remaining = irys_database::ingress_proofs_by_data_root(rtx, data_root)?;
-            assert_eq!(
-                remaining.len(),
-                1,
-                "only the sibling proof should survive; got {}",
-                remaining.len()
-            );
-            let addr = remaining[0].1.address;
-            assert_eq!(
-                addr, sibling_addr,
-                "surviving proof must be the sibling (valid anchor)"
-            );
-            assert_ne!(
-                addr, local_addr,
-                "local expired proof must have been deleted at capacity"
-            );
-            Ok(())
-        })??;
-
-        Ok(())
+        Ok(ProofFixture {
+            task: service_task,
+            db,
+            data_root,
+            author_addr,
+            sibling_addr,
+            tip_hash: valid_anchor,
+            _db_dir: _temp_dir,
+            _sm_dir: sm_dir,
+        })
     }
 
     /// `prune_ingress_proofs` must handle ≥2 expired signers for the same data_root in
@@ -4610,12 +6527,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // Shared data_root for all three proofs.
         let data_root = H256::random();
@@ -4635,59 +6547,61 @@ mod tests {
         let expired_anchor_c = H256::random();
 
         db.update(|wtx| -> eyre::Result<()> {
-            // CDR with one pending (unpromoted) txid.
-            let cdr = CachedDataRoot {
-                data_size: 64,
-                data_size_confirmed: false,
-                txid_set: vec![txid],
-                block_set: vec![],
-                expiry_height: None,
-                cached_at: irys_types::UnixTimestamp::now()?,
-            };
-            wtx.put::<CachedDataRoots>(data_root, cdr)?;
-
-            // Unpromoted tx header (promoted_height = None by default).
-            let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: txid,
-                    data_root,
+            db.update_cache_eyre(|cache_tx| {
+                // CDR with one pending (unpromoted) txid.
+                let cdr = CachedDataRoot {
                     data_size: 64,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            });
-            database::insert_tx_header(wtx, &tx_header)?;
+                    data_size_confirmed: false,
+                    txid_set: vec![txid],
+                    block_set: vec![],
+                    expiry_height: None,
+                    cached_at: irys_types::UnixTimestamp::now()?,
+                };
+                cache_tx.put::<CachedDataRoots>(data_root, cdr)?;
 
-            let make_proof = |anchor: H256| {
-                let mut p = IngressProof::default();
-                p.data_root = data_root;
-                p.anchor = anchor;
-                p
-            };
+                // Unpromoted tx header (promoted_height = None by default).
+                let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                    tx: DataTransactionHeaderV1 {
+                        id: txid,
+                        data_root,
+                        data_size: 64,
+                        ..Default::default()
+                    },
+                    metadata: DataTransactionMetadata::new(),
+                });
+                database::insert_tx_header(wtx, &tx_header)?;
 
-            // addr_a: valid anchor → not expired → survives.
-            irys_database::store_external_ingress_proof_checked(
-                wtx,
-                &make_proof(valid_anchor),
-                addr_a,
-            )?;
-            // addr_b and addr_c: expired anchors → will be pruned.
-            irys_database::store_external_ingress_proof_checked(
-                wtx,
-                &make_proof(expired_anchor_b),
-                addr_b,
-            )?;
-            irys_database::store_external_ingress_proof_checked(
-                wtx,
-                &make_proof(expired_anchor_c),
-                addr_c,
-            )?;
+                let make_proof = |anchor: H256| {
+                    let mut p = IngressProof::default();
+                    p.data_root = data_root;
+                    p.anchor = anchor;
+                    p
+                };
 
-            Ok(())
+                // addr_a: valid anchor → not expired → survives.
+                irys_database::store_external_ingress_proof_checked(
+                    cache_tx,
+                    &make_proof(valid_anchor),
+                    addr_a,
+                )?;
+                // addr_b and addr_c: expired anchors → will be pruned.
+                irys_database::store_external_ingress_proof_checked(
+                    cache_tx,
+                    &make_proof(expired_anchor_b),
+                    addr_b,
+                )?;
+                irys_database::store_external_ingress_proof_checked(
+                    cache_tx,
+                    &make_proof(expired_anchor_c),
+                    addr_c,
+                )?;
+
+                Ok(())
+            })
         })??;
 
         // Sanity: three proofs inserted.
-        let initial_count = db.view_eyre(|rtx| {
+        let initial_count = db.view_cache_eyre(|rtx| {
             Ok(irys_database::ingress_proofs_by_data_root(rtx, data_root)?.len())
         })?;
         assert_eq!(initial_count, 3, "expected 3 proofs before pruning");
@@ -4709,13 +6623,14 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         service_task.prune_ingress_proofs()?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             // Exactly one proof must remain — addr_a's.
             let remaining = irys_database::ingress_proofs_by_data_root(rtx, data_root)?;
             assert_eq!(
@@ -4748,6 +6663,121 @@ mod tests {
             Ok(())
         })??;
 
+        Ok(())
+    }
+
+    /// With an empty Submit ledger the epoch prune height comes from the canonical tip. A
+    /// term-ledger root included above the migrated tip has no `block_set` yet, so only the
+    /// cap at the migrated tip keeps it.
+    #[test]
+    fn epoch_prune_keeps_unmigrated_root_above_migrated_tip() -> eyre::Result<()> {
+        use irys_domain::{ChainState, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot};
+        use irys_types::{BlockIndexItem, BlockTransactions, LedgerIndexItem, SealedBlock};
+
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
+
+        // Canonical chain 0..=4, all ledgers empty; heights 0..=1 are migrated.
+        let migrated_tip = 1;
+        let canonical_tip = 4;
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let mut block_tree: Option<BlockTree> = None;
+        let mut parent_hash = H256::zero();
+        for height in 0..=canonical_tip {
+            let mut header = new_mock_signed_header();
+            header.height = height;
+            header.previous_block_hash = parent_hash;
+            header.cumulative_diff = height.into();
+            for ledger in header.data_ledgers.iter_mut() {
+                ledger.total_chunks = 0;
+            }
+            header.test_sign();
+            parent_hash = header.block_hash;
+            if height <= migrated_tip {
+                let ledgers = header
+                    .data_ledgers
+                    .iter()
+                    .map(|ledger| LedgerIndexItem {
+                        total_chunks: 0,
+                        tx_root: ledger.tx_root,
+                        ledger: DataLedger::try_from(ledger.ledger_id).expect("known ledger"),
+                    })
+                    .collect::<Vec<_>>();
+                let item = BlockIndexItem {
+                    block_hash: header.block_hash,
+                    num_ledgers: ledgers.len() as u8,
+                    ledgers,
+                };
+                block_index.push_item(&item, height)?;
+            }
+            let Some(tree) = block_tree.as_mut() else {
+                block_tree = Some(BlockTree::new(&header, config.consensus.clone()));
+                continue;
+            };
+            let sealed = Arc::new(SealedBlock::new_unchecked(
+                Arc::new(header.clone()),
+                BlockTransactions::default(),
+            ));
+            tree.add_common(
+                header.block_hash,
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                dummy_ema_snapshot(),
+                ChainState::Onchain,
+            )?;
+            tree.mark_tip(&header.block_hash)?;
+        }
+
+        // `kept`: tx included at height 2, above the migrated tip; expiry 2 is below the
+        // uncapped prune height (canonical tip - 1). `evicted`: expiry below the migrated tip.
+        let kept = H256::random();
+        let evicted = H256::random();
+        db.update_cache(|wtx| -> eyre::Result<()> {
+            for (data_root, expiry_height) in [(kept, 2), (evicted, 0)] {
+                let cdr = CachedDataRoot {
+                    data_size: 64,
+                    data_size_confirmed: false,
+                    txid_set: vec![H256::random()],
+                    block_set: vec![],
+                    expiry_height: Some(expiry_height),
+                    cached_at: irys_types::UnixTimestamp::now()?,
+                };
+                wtx.put::<CachedDataRoots>(data_root, cdr)?;
+            }
+            Ok(())
+        })??;
+
+        let task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard: irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(
+                block_tree.expect("genesis"),
+            ))),
+            block_index_guard: irys_domain::block_index_guard::BlockIndexReadGuard::new(
+                block_index,
+            ),
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tokio::sync::mpsc::unbounded_channel().0,
+            storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
+        };
+        task.on_epoch_processed(Arc::new(EpochSnapshot::default()))?;
+
+        db.view_cache_eyre(|tx| {
+            assert!(
+                tx.get::<CachedDataRoots>(kept)?.is_some(),
+                "a root included above the migrated tip must stay until migration"
+            );
+            assert!(
+                tx.get::<CachedDataRoots>(evicted)?.is_none(),
+                "a root expired below the migrated tip is pruned"
+            );
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -4822,6 +6852,7 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         }
@@ -4841,12 +6872,7 @@ mod tests {
     )> {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
 
         let data_root = H256::random();
         let cdr = CachedDataRoot {
@@ -4857,7 +6883,7 @@ mod tests {
             expiry_height: Some(100),
             cached_at: irys_types::UnixTimestamp::now()?,
         };
-        db.update(|wtx| -> eyre::Result<()> {
+        db.update_cache(|wtx| -> eyre::Result<()> {
             wtx.put::<CachedDataRoots>(data_root, cdr)?;
             Ok(())
         })??;
@@ -4872,12 +6898,7 @@ mod tests {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let local_addr = config.irys_signer().address();
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
 
         let data_root = H256::random();
         let cdr = CachedDataRoot {
@@ -4888,48 +6909,86 @@ mod tests {
             expiry_height: Some(1),
             cached_at: irys_types::UnixTimestamp::now()?,
         };
-        db.update(|wtx| -> eyre::Result<()> {
+        db.update_cache(|wtx| -> eyre::Result<()> {
             wtx.put::<CachedDataRoots>(data_root, cdr)?;
             Ok(())
         })??;
 
         // Scan-time view: past its horizon, no local proof → evictable.
-        db.view_eyre(|tx| {
+        db.view_cache_eyre(|tx| {
             let cached = tx.get::<CachedDataRoots>(data_root)?.expect("cdr");
-            let state = InnerCacheTask::cdr_eviction_state(tx, &cached, 100)?;
+            let consensus_tx = db.tx()?;
+            let state = InnerCacheTask::cdr_eviction_state(&consensus_tx, &cached, 100)?;
             assert!(state.evictable, "expired unprotected CDR is evictable");
             assert!(!InnerCacheTask::has_local_ingress_proof(
-                tx, data_root, local_addr
+                tx.inner(),
+                data_root,
+                local_addr
             )?);
             Ok(())
         })?;
 
         // A local proof lands after the scan; the write-phase re-check must veto.
-        db.update(|wtx| -> eyre::Result<()> {
+        db.update_cache(|wtx| -> eyre::Result<()> {
             let mut proof = IngressProof::default();
             proof.data_root = data_root;
             irys_database::store_external_ingress_proof_checked(wtx, &proof, local_addr)?;
             Ok(())
         })??;
-        db.view_eyre(|tx| {
+        db.view_cache_eyre(|tx| {
             assert!(InnerCacheTask::has_local_ingress_proof(
-                tx, data_root, local_addr
+                tx.inner(),
+                data_root,
+                local_addr
             )?);
             Ok(())
         })?;
 
         // The horizon can also reopen (root re-cached with a future expiry): re-evaluated
         // under the write txn, the predicate stops the delete.
-        db.update(|wtx| -> eyre::Result<()> {
+        db.update_cache(|wtx| -> eyre::Result<()> {
             let mut cached = wtx.get::<CachedDataRoots>(data_root)?.expect("cdr");
             cached.expiry_height = Some(1_000);
             wtx.put::<CachedDataRoots>(data_root, cached)?;
             Ok(())
         })??;
-        db.view_eyre(|tx| {
+        db.view_cache_eyre(|tx| {
             let cached = tx.get::<CachedDataRoots>(data_root)?.expect("cdr");
-            let state = InnerCacheTask::cdr_eviction_state(tx, &cached, 100)?;
+            let consensus_tx = db.tx()?;
+            let state = InnerCacheTask::cdr_eviction_state(&consensus_tx, &cached, 100)?;
             assert!(!state.evictable, "revived expiry must veto eviction");
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unmigrated_confirmed_cdr_is_not_evicted_on_expiry_height() -> eyre::Result<()> {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
+
+        let data_root = H256::random();
+        let cdr = CachedDataRoot {
+            data_size: 64,
+            data_size_confirmed: false,
+            txid_set: vec![H256::random()],
+            block_set: vec![H256::random()],
+            expiry_height: Some(1),
+            cached_at: irys_types::UnixTimestamp::now()?,
+        };
+        db.update_cache(|wtx| -> eyre::Result<()> {
+            wtx.put::<CachedDataRoots>(data_root, cdr)?;
+            Ok(())
+        })??;
+
+        db.view_cache_eyre(|tx| {
+            let cached = tx.get::<CachedDataRoots>(data_root)?.expect("cdr");
+            let consensus_tx = db.tx()?;
+            let state = InnerCacheTask::cdr_eviction_state(&consensus_tx, &cached, 100)?;
+            assert!(
+                !state.evictable,
+                "confirmed-but-unmigrated CDR must not evict on expiry_height"
+            );
             Ok(())
         })?;
         Ok(())
@@ -4953,7 +7012,7 @@ mod tests {
         by_data_root.insert(data_root, vec![tx_a]);
         task.prune_txids_from_cached_data_roots(&by_data_root)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let cached = rtx
                 .get::<CachedDataRoots>(data_root)?
                 .expect("CDR must still exist");
@@ -4981,7 +7040,7 @@ mod tests {
         by_data_root.insert(data_root, vec![tx_b]);
         task.prune_txids_from_cached_data_roots(&by_data_root)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let cached = rtx
                 .get::<CachedDataRoots>(data_root)?
                 .expect("CDR must still exist");
@@ -5015,7 +7074,7 @@ mod tests {
         by_data_root.insert(data_root, vec![tx_c]);
         task.prune_txids_from_cached_data_roots(&by_data_root)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let cached = rtx
                 .get::<CachedDataRoots>(data_root)?
                 .expect("CDR must still exist");
@@ -5052,11 +7111,11 @@ mod tests {
                 .block_hash()
         };
 
-        // Hold this env's writer gate + MDBX RW tx so the scrub parks inside
-        // `update_eyre` (on the gate, then the env lock) before it can read the tree.
+        // Hold the cache writer gate + MDBX RW tx so the scrub parks inside
+        // `update_cache_eyre` (on the gate, then the env lock) before it can read the tree.
         // Locals drop in reverse order: MDBX first, then the gate.
-        let gate = irys_database::db::lock_writer_gate(&db, "test.spares_txid_blocker");
-        let blocker = db.tx_mut()?;
+        let gate = irys_database::db::lock_writer_gate(db.cache(), "test.spares_txid_blocker");
+        let blocker = db.cache().tx_mut()?;
 
         // Queue tx_x for removal and run the scrub on another thread; with the
         // fix it parks on the writer path this thread holds, ahead of the tree read.
@@ -5108,7 +7167,7 @@ mod tests {
 
         handle.join().expect("prune thread panicked")?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let cached = rtx
                 .get::<CachedDataRoots>(data_root)?
                 .expect("CDR must still exist");
@@ -5143,7 +7202,7 @@ mod tests {
                 "a write-held tree lock must defer the attempt, not block or scrub"
             );
         }
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let cached = rtx
                 .get::<CachedDataRoots>(data_root)?
                 .expect("CDR must still exist");
@@ -5159,7 +7218,7 @@ mod tests {
             task.try_prune_txids_once(&by_data_root)?,
             TxidScrubAttempt::Done
         );
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let cached = rtx
                 .get::<CachedDataRoots>(data_root)?
                 .expect("CDR must still exist");
@@ -5192,7 +7251,7 @@ mod tests {
         drop(tree_write);
         handle.join().expect("scrub thread panicked")?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let cached = rtx
                 .get::<CachedDataRoots>(data_root)?
                 .expect("CDR must still exist");

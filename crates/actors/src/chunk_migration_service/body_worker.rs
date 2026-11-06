@@ -10,11 +10,11 @@ use super::{
     LoadedMigrationChunks, MigrationError, load_chunks_for_migration, write_chunks_to_module,
 };
 use crate::DataSyncServiceMessage;
+use irys_database::DatabaseProvider;
 use irys_database::submodule::tables::PendingBodyMigration;
 use irys_domain::{BatchEnqueueItem, ChunkType, StorageModule, StorageModulesReadGuard};
 use irys_types::{
-    Config, DataLedger, PartitionChunkOffset, SendTraced as _, Traced, TxChunkOffset,
-    UnpackedChunk, app_state::DatabaseProvider,
+    Config, DataLedger, PartitionChunkOffset, SendTraced as _, Traced, TxChunkOffset, UnpackedChunk,
 };
 use nodit::Interval;
 use nodit::interval::ii;

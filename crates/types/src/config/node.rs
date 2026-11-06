@@ -112,11 +112,11 @@ pub struct DatabaseConfig {
 
     /// Optional override for the MDBX geometry upper bound — the max DB size
     /// *and* the virtual address-space reservation made at open — of irys-owned
-    /// databases (consensus + storage submodules). `None` = production defaults
-    /// (consensus inherits reth's 8 TiB; submodules use 2 TiB), harmless as sparse
-    /// reservations on real disks. Test configs set a small value so many
-    /// concurrent node databases don't exhaust the process's ~128 TiB user
-    /// address space. See `TEST_DB_GEOMETRY_MAX_SIZE`.
+    /// databases (consensus, cache and storage submodules). `None` = production
+    /// defaults (consensus and cache inherit reth's 8 TiB; submodules use 2 TiB),
+    /// harmless as sparse reservations on real disks. Test configs set a small
+    /// value so many concurrent node databases don't exhaust the process's
+    /// ~128 TiB user address space. See `TEST_DB_GEOMETRY_MAX_SIZE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_max_size: Option<usize>,
 
@@ -1268,6 +1268,12 @@ pub struct P2PGossipConfig {
     /// Limits database reconstruction of historical bodies.
     /// `0` means unlimited.
     pub max_concurrent_block_body_serves: usize,
+    /// Re-broadcast gossip-received chunks as announcements instead of full
+    /// bodies. `false` restores push-everything (the rollback switch).
+    pub chunk_announce: bool,
+    /// Wait before fetching an announced chunk, so the origin's push lands
+    /// first. Later fetch rounds wait 2 s and 8 s.
+    pub chunk_fetch_delay_ms: u64,
 }
 
 impl Default for P2PGossipConfig {
@@ -1278,7 +1284,24 @@ impl Default for P2PGossipConfig {
             enable_scoring: true,
             max_concurrent_gossip_chunks: 50,
             max_concurrent_block_body_serves: 8,
+            chunk_announce: true,
+            chunk_fetch_delay_ms: 500,
         }
+    }
+}
+
+#[cfg(test)]
+mod p2p_gossip_config_tests {
+    use super::*;
+
+    #[test]
+    fn p2p_gossip_chunk_announce_defaults() {
+        let cfg = P2PGossipConfig::default();
+        assert!(cfg.chunk_announce);
+        assert_eq!(cfg.chunk_fetch_delay_ms, 500);
+        let parsed: P2PGossipConfig = toml::from_str("broadcast_batch_size = 7").expect("parse");
+        assert!(parsed.chunk_announce, "missing keys take defaults");
+        assert_eq!(parsed.broadcast_batch_size, 7);
     }
 }
 
@@ -1633,6 +1656,11 @@ pub struct MempoolNodeConfig {
     pub max_http_chunk_waiters: usize,
     /// Monotonic wait for an admission permit, in milliseconds.
     pub http_chunk_admission_timeout_millis: u64,
+    /// Rollback switch for public `POST /v1/chunk` ingest. `false` (the
+    /// default) returns once the body is cached and queued on each assigned
+    /// storage module's disk lane. `true` waits for the disk lane to pack
+    /// the body, as before the change.
+    pub http_ingest_waits_for_module_write: bool,
 }
 
 impl Default for MempoolNodeConfig {
@@ -1663,6 +1691,7 @@ impl Default for MempoolNodeConfig {
             max_http_chunk_admission: 256,
             max_http_chunk_waiters: 32,
             http_chunk_admission_timeout_millis: 5000,
+            http_ingest_waits_for_module_write: false,
         }
     }
 }
@@ -1876,6 +1905,7 @@ impl NodeConfig {
                 max_http_chunk_admission: 256,
                 max_http_chunk_waiters: 32,
                 http_chunk_admission_timeout_millis: 5000,
+                http_ingest_waits_for_module_write: false,
             },
             metrics: MetricsConfig::default(),
 
@@ -2093,6 +2123,7 @@ impl NodeConfig {
                 max_http_chunk_admission: 256,
                 max_http_chunk_waiters: 32,
                 http_chunk_admission_timeout_millis: 5000,
+                http_ingest_waits_for_module_write: false,
             },
             metrics: MetricsConfig::default(),
 
@@ -2126,6 +2157,10 @@ impl NodeConfig {
     /// get the irys consensus data directory path
     pub fn irys_consensus_data_dir(&self) -> PathBuf {
         self.base_directory.join("irys_consensus_data")
+    }
+    /// Get the irys cache DB directory path
+    pub fn irys_cache_data_dir(&self) -> PathBuf {
+        self.base_directory.join("irys_cache_data")
     }
 
     /// get the irys mempool persistence path

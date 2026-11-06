@@ -8,9 +8,11 @@ use crate::{
 use crate::metrics;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
+use irys_database::DatabaseProvider;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, commitment_tx_by_txid,
-    db::IrysDatabaseExt as _, tx_header_by_txid,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
+    tx_header_by_txid,
 };
 use irys_domain::{
     BlockTreeReadGuard, CommitmentSnapshotStatus, block_index_guard::BlockIndexReadGuard,
@@ -18,9 +20,9 @@ use irys_domain::{
 use irys_reward_curve::HalvingCurve;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
-    DatabaseProvider, H256, IrysBlockHeader, IrysTransactionId, SealedBlock, SendTraced as _,
-    SystemLedger, TokioServiceHandle, Traced, get_ingress_proofs,
+    BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader, H256,
+    IrysBlockHeader, IrysTransactionId, SealedBlock, SendTraced as _, SystemLedger,
+    TokioServiceHandle, Traced, get_ingress_proofs,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -429,6 +431,15 @@ impl BlockDiscoveryServiceInner {
                             PreValidationError::IngressProofsMissing,
                         )
                     })?;
+
+                // Check to see if we have a confirmed data_size for the data_root.
+                // Keyed solely on tx_header.data_root, so fetch once per tx and reuse
+                // across the per-proof loop.
+                let cdr = self
+                    .db
+                    .view_cache_eyre(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
+                    .map_err(BlockDiscoveryInternalError::DatabaseError)?;
+
                 // Validate the signatures and data_roots
                 for proof in tx_proofs.iter() {
                     proof.pre_validate(&tx_header.data_root).map_err(|e| {
@@ -437,14 +448,8 @@ impl BlockDiscoveryServiceInner {
                         )
                     })?;
 
-                    // Check to see if we have a confirmed data_size for the data_root
-                    let cdr = self
-                        .db
-                        .view_eyre(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
-                        .map_err(BlockDiscoveryInternalError::DatabaseError)?;
-
                     // If so, compare it with the data_size in the tx
-                    if let Some(cdr) = cdr {
+                    if let Some(cdr) = &cdr {
                         // If the tx data_size doesn't match the confirmed size, this is an invalid promotion
                         if cdr.data_size_confirmed && cdr.data_size != tx_header.data_size {
                             return Err(BlockDiscoveryError::BlockValidationError(
@@ -1262,6 +1267,7 @@ where
 #[cfg(test)]
 mod data_tx_lookup_tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_database::insert_tx_header;
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{ConsensusConfig, H256};
@@ -1269,12 +1275,7 @@ mod data_tx_lookup_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn db_lookup_finds_stored_txs_and_reports_missing() -> eyre::Result<()> {
         let tmp_dir = TempDirBuilder::new().prefix("data_tx_lookup").build();
-        let db = DatabaseProvider(Arc::new(
-            irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
-                tmp_dir.path(),
-                irys_types::DbSyncMode::UtterlyNoSync,
-            )?,
-        ));
+        let db = DatabaseProvider::for_testing(tmp_dir.path(), &tmp_dir.path().join("cache"))?;
         let mut stored = DataTransactionHeader::new(&ConsensusConfig::testing());
         stored.id = H256::repeat_byte(1);
         db.update_eyre(|tx| insert_tx_header(tx, &stored))?;

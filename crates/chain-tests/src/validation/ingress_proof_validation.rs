@@ -6,6 +6,7 @@ use irys_actors::{
     block_validation::PreValidationError,
     shadow_tx_generator::PublishLedgerWithTxs,
 };
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::tables::IngressProofs as IngressProofsTable;
 use irys_database::walk_all;
 use irys_types::ingress::{IngressProofV1, generate_ingress_proof};
@@ -13,7 +14,6 @@ use irys_types::{
     CommitmentTransaction, DataTransactionHeader, IngressProof, IngressProofsList, IrysBlockHeader,
     NodeConfig, irys::IrysSigner,
 };
-use reth_db::Database as _;
 
 /// This test verifies that blocks containing ingress proofs from unstaked nodes are rejected.
 /// It creates an EvilBlockProdStrategy that replaces real ingress proofs with proofs
@@ -93,22 +93,17 @@ async fn block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Result<()>
         .await?;
 
     // 6. Retrieve a valid ingress proof to use as template
-    let valid_proof = {
-        let ro_tx = genesis_node
-            .node_ctx
-            .db
-            .as_ref()
-            .tx()
-            .expect("create mdbx read tx");
+    let valid_proof = genesis_node.node_ctx.db.view_cache_eyre(|db_tx| {
         let mut found_proof = None;
-        for (root, cached) in walk_all::<IngressProofsTable, _>(&ro_tx).expect("walk proofs") {
+        for (root, cached) in walk_all::<IngressProofsTable, _>(db_tx.inner()).expect("walk proofs")
+        {
             if root == tx.header.data_root {
                 found_proof = Some(cached.proof.clone());
                 break;
             }
         }
-        found_proof.expect("should have a valid ingress proof")
-    };
+        Ok(found_proof.expect("should have a valid ingress proof"))
+    })?;
 
     // 7. Create evil ingress proof signed by UNSTAKED signer
     let mut evil_proof = IngressProof::V1(IngressProofV1 {
@@ -294,13 +289,13 @@ async fn mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()> {
     // Directly store signer B's proof in the database (bypassing the mempool ingestion check
     // which now rejects proofs from unstaked signers). This simulates a proof that was
     // stored when signer B was staked but is now in the DB after they unstaked.
-    genesis_node.node_ctx.db.update(|rw_tx| {
+    genesis_node.node_ctx.db.update_cache_eyre(|rw_tx| {
         irys_database::store_external_ingress_proof_checked(
             rw_tx,
             &signer_b_proof,
             signer_b.address(),
         )
-    })??;
+    })?;
 
     // Mine additional blocks to ensure tx anchor is old enough for inclusion
     // (tx anchor must be at least block_migration_depth=6 blocks behind current tip)

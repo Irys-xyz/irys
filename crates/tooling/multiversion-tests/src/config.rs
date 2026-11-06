@@ -141,6 +141,11 @@ fn patch_reth_network(
     Ok(())
 }
 
+/// Consensus keys that an older genesis binary can still serve but the current
+/// `ConsensusConfig` no longer has. It denies unknown fields, so a peer config
+/// that keeps one of these keys fails to parse.
+const REMOVED_CONSENSUS_KEYS: &[&str] = &["num_partitions_per_term_ledger_slot"];
+
 /// Rewrites a peer node's config file, replacing `consensus = "Testing"` with
 /// `[consensus.Custom]` populated from the genesis node's `/v1/network/config`
 /// response plus the actual genesis hash.
@@ -167,6 +172,9 @@ pub fn patch_peer_consensus(
             _ => None,
         })
         .ok_or(ConfigError::InvalidConsensusJson)?;
+    for key in REMOVED_CONSENSUS_KEYS {
+        consensus_toml.remove(*key);
+    }
 
     if let Some(overlay) = template_overlay {
         overlay_template_onto_consensus(&mut consensus_toml, overlay);
@@ -443,6 +451,23 @@ mod tests {
             let result: Result<Value, _> = content.parse();
             prop_assert!(result.is_ok(), "generated config is not valid TOML");
         }
+    }
+
+    #[test]
+    fn peer_consensus_drops_removed_keys() {
+        let workspace = test_tmp_dir();
+        let config_path = workspace.path().join("config.toml");
+        std::fs::write(&config_path, "consensus = \"Testing\"\n").unwrap();
+        let consensus_json = serde_json::json!({
+            "chain_id": 1270,
+            "num_partitions_per_term_ledger_slot": 1,
+        });
+        patch_peer_consensus(&config_path, &consensus_json, "0xabc", None).unwrap();
+
+        let table = read_generated_toml(&config_path);
+        let custom = table["consensus"]["Custom"].as_table().unwrap();
+        assert!(!custom.contains_key("num_partitions_per_term_ledger_slot"));
+        assert!(custom.contains_key("chain_id"));
     }
 
     #[test]

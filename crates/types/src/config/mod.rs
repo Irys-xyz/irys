@@ -8,8 +8,13 @@ pub mod node;
 pub use consensus::*;
 pub use node::*;
 
+use crate::hardfork_config::Activation;
 use crate::irys::IrysSigner;
-use crate::{H256, IrysPeerId, UnixTimestamp};
+use crate::storage_pricing::phantoms::{Irys, IrysPrice, NetworkFee, Usd};
+use crate::storage_pricing::{
+    Amount, ReplicaCount, calculate_perm_fee_from_config, calculate_term_fee,
+};
+use crate::{DataLedger, H256, IrysPeerId, U256, UnixTimestamp};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -91,7 +96,7 @@ impl Config {
     }
 
     /// Get the number of ingress proofs required at a given timestamp (in seconds).
-    pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u64 {
+    pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u8 {
         self.0
             .consensus
             .hardforks
@@ -99,11 +104,136 @@ impl Config {
     }
 
     /// Get the number of ingress proofs from assignees required at a given timestamp (in seconds).
-    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u64 {
+    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u8 {
         self.0
             .consensus
             .hardforks
             .number_of_ingress_proofs_from_assignees_at(timestamp)
+    }
+
+    /// Replica count that Publish storage fees (term and perm) pay for at a given timestamp.
+    /// Before Delta the fees use the ingress proof total. From Delta they use the replica
+    /// partitions in a slot, which is what the network stores.
+    pub fn publish_replica_count_at(&self, timestamp: UnixTimestamp) -> ReplicaCount {
+        match self.0.consensus.hardforks.delta_for_block(timestamp) {
+            Activation::Active(_) => self.0.consensus.num_partitions_per_slot,
+            Activation::Inactive => {
+                ReplicaCount::new(u64::from(self.number_of_ingress_proofs_total_at(timestamp)))
+            }
+        }
+    }
+
+    /// Epochs a term fee pays for at a given timestamp. A term slot is kept `epoch_length`
+    /// epochs after its last write, so from Delta a tx pays for the full `epoch_length` at
+    /// every height. Before Delta it pays for the epochs left in the current height cycle.
+    pub fn term_storage_epochs_at(
+        &self,
+        timestamp: UnixTimestamp,
+        block_height: u64,
+        epoch_length: u64,
+    ) -> u64 {
+        match self.0.consensus.hardforks.delta_for_block(timestamp) {
+            Activation::Active(_) => epoch_length,
+            Activation::Inactive => crate::ledger_expiry::calculate_submit_ledger_expiry(
+                block_height,
+                self.0.consensus.epoch.num_blocks_in_epoch,
+                epoch_length,
+            ),
+        }
+    }
+
+    /// Term fee that the required Publish `perm_fee` prices the ingress proof rewards on, at a
+    /// given timestamp. The fee split takes the rewards from the tx's own `term_fee`, so from
+    /// Delta the required `perm_fee` uses it too and the storage share stays funded. Before
+    /// Delta it uses the expected term fee.
+    pub fn proof_reward_term_fee_at(
+        &self,
+        timestamp: UnixTimestamp,
+        tx_term_fee: U256,
+        expected_term_fee: U256,
+    ) -> U256 {
+        match self.0.consensus.hardforks.delta_for_block(timestamp) {
+            Activation::Active(_) => tx_term_fee,
+            Activation::Inactive => expected_term_fee,
+        }
+    }
+
+    /// Total ingress proof reward of a Publish tx at a given timestamp. See
+    /// `ConsensusConfig::ingress_proof_reward_pool_at`.
+    pub fn ingress_proof_reward_pool_at(
+        &self,
+        timestamp: UnixTimestamp,
+        term_fee: U256,
+    ) -> eyre::Result<U256> {
+        self.0
+            .consensus
+            .ingress_proof_reward_pool_at(timestamp, term_fee)
+    }
+
+    /// Required `term_fee` of a tx on `ledger` at a given timestamp. Picks the epoch length,
+    /// the replica count and the epochs to pay for here, at one timestamp, so no caller can
+    /// mix inputs from different rules. Publish and Submit use the Submit epoch length and
+    /// `publish_replica_count_at`. OneYear and ThirtyDay use the Cascade epoch length and one
+    /// replica per partition in a slot, and fail when Cascade is not configured. The caller
+    /// picks the EMA price.
+    pub fn required_term_fee_at(
+        &self,
+        ledger: DataLedger,
+        timestamp: UnixTimestamp,
+        block_height: u64,
+        bytes_to_store: u64,
+        ema_price: Amount<(IrysPrice, Usd)>,
+    ) -> eyre::Result<U256> {
+        let (epoch_length, replica_count) = match ledger {
+            DataLedger::Publish | DataLedger::Submit => (
+                self.0.consensus.epoch.submit_ledger_epoch_length,
+                self.publish_replica_count_at(timestamp),
+            ),
+            DataLedger::OneYear | DataLedger::ThirtyDay => {
+                let cascade = self.0.consensus.hardforks.cascade.as_ref().ok_or_else(|| {
+                    eyre::eyre!("Cascade hardfork not configured for {ledger:?} ledger")
+                })?;
+                let epoch_length = if ledger == DataLedger::OneYear {
+                    cascade.one_year_epoch_length
+                } else {
+                    cascade.thirty_day_epoch_length
+                };
+                (epoch_length, self.0.consensus.num_partitions_per_slot)
+            }
+        };
+        calculate_term_fee(
+            bytes_to_store,
+            self.term_storage_epochs_at(timestamp, block_height, epoch_length),
+            &self.0.consensus,
+            replica_count,
+            ema_price,
+            timestamp,
+        )
+    }
+
+    /// Required Publish `perm_fee` at a given timestamp. Picks the replica count and the
+    /// ingress proof reward pool here, at one timestamp, so no caller can mix inputs from
+    /// different rules. `expected_term_fee` is the term fee the same Publish tx must pay.
+    pub fn required_publish_perm_fee_at(
+        &self,
+        timestamp: UnixTimestamp,
+        bytes_to_store: u64,
+        ema_price: Amount<(IrysPrice, Usd)>,
+        tx_term_fee: U256,
+        expected_term_fee: U256,
+    ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
+        let ingress_proof_reward = self.ingress_proof_reward_pool_at(
+            timestamp,
+            self.proof_reward_term_fee_at(timestamp, tx_term_fee, expected_term_fee),
+        )?;
+        calculate_perm_fee_from_config(
+            bytes_to_store,
+            &self.0.consensus,
+            self.publish_replica_count_at(timestamp),
+            ingress_proof_reward,
+            ema_price,
+            timestamp,
+        )
     }
 
     // validate configuration invariants
@@ -248,6 +378,11 @@ impl Config {
                     <= crate::storage_pricing::PRECISION_SCALE,
                 "hardforks.delta.capacity_chunk_reward_percent must be <= 1.0 (100%)"
             );
+            ensure!(
+                delta.ingress_proof_reward_pool_percent.amount
+                    <= crate::storage_pricing::PRECISION_SCALE,
+                "hardforks.delta.ingress_proof_reward_pool_percent must be <= 1.0 (100%)"
+            );
         }
         // Entropy packing emits whole SHA-256 hashes, so a chunk size that is
         // not a multiple of the hash size leaves the chunk's tail unpacked.
@@ -283,13 +418,37 @@ impl Config {
         }
         // Zero → genesis capacity math hits log10(0) / NaN during epoch-snapshot build.
         ensure!(
-            self.consensus.num_partitions_per_slot > 0,
+            self.consensus.num_partitions_per_slot.get() > 0,
             "num_partitions_per_slot must be > 0"
         );
-        // Zero multiplies OneYear/ThirtyDay term fees down to the minimum USD fee.
+        let ingress_proofs_total = self
+            .consensus
+            .hardforks
+            .frontier
+            .number_of_ingress_proofs_total;
+        let assignee_proofs = self
+            .consensus
+            .hardforks
+            .frontier
+            .number_of_ingress_proofs_from_assignees;
+        // Zero promotes Publish txs without any ingress proof.
         ensure!(
-            self.consensus.num_partitions_per_term_ledger_slot > 0,
-            "num_partitions_per_term_ledger_slot must be > 0"
+            ingress_proofs_total > 0,
+            "consensus.hardforks.frontier.number_of_ingress_proofs_total must be > 0"
+        );
+        // Assignee proofs are a subset of the total proofs.
+        ensure!(
+            assignee_proofs <= ingress_proofs_total,
+            "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({assignee_proofs}) \
+             must be <= number_of_ingress_proofs_total ({ingress_proofs_total})",
+        );
+        // Validation clamps the assignee requirement to the miners assigned to the Submit
+        // slot, at most `num_partitions_per_slot`. A larger value is never applied.
+        ensure!(
+            u64::from(assignee_proofs) <= self.consensus.num_partitions_per_slot.get(),
+            "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({assignee_proofs}) \
+             must be <= num_partitions_per_slot ({})",
+            self.consensus.num_partitions_per_slot,
         );
 
         // ensure that the VDF step cache is >= chunks_per_partition.div_ceil(chunks_per_recall_range)
@@ -718,15 +877,17 @@ impl Config {
 
         // `number_of_ingress_proofs_from_assignees` MUST stay 0 in this codebase
         // version.  When > 0, the value flows through `get_assigned_ingress_proofs`
-        // (block_validation.rs) where the per-proof intersection loop picks
-        // `assigned_miners` via HashMap iteration order over `slot_ranges` — a
-        // consensus-fork vector when `block_range` straddles multiple Submit
-        // slots.  The determinism fix is a consensus rule change that must be
-        // coordinated with a network upgrade.  Under all currently-deployed configs the value is
-        // 0 and the non-deterministic path is vacuous; raising it without the
-        // determinism fix risks divergence between nodes.
+        // (block_validation.rs) where the per-proof intersection loop overwrites
+        // `assigned_miners` on each intersecting proof.  `slot_ranges` is a
+        // `BTreeMap`, so slot order is deterministic, but the result still
+        // follows the order of the proofs in the block.  Validators agree on that
+        // order (the signed block fixes it), but the result depends on the order
+        // the producer chooses.  The fix is a
+        // consensus rule change that must be coordinated with a network
+        // upgrade.  Under all currently-deployed configs the value is 0 and
+        // the path is vacuous.
         //
-        // When the determinism fix lands and gets activated, REMOVE this guard
+        // When the fix lands and gets activated, REMOVE this guard
         // (and the matching test in this file).  Until then this assert errs
         // loudly at startup so a config bump can't silently activate the bug.
         ensure!(
@@ -737,21 +898,13 @@ impl Config {
                 == 0,
             "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({}) must be 0 \
              until the assigned-miners determinism fix lands — the current `get_assigned_ingress_proofs` \
-             impl picks `assigned_miners` via non-deterministic HashMap iteration when \
+             impl derives `assigned_miners` from proof order when \
              block_range intersects multiple Submit slots",
             self.consensus
                 .hardforks
                 .frontier
                 .number_of_ingress_proofs_from_assignees,
         );
-        if let Some(ref fork) = self.consensus.hardforks.next_name_tbd {
-            ensure!(
-                fork.number_of_ingress_proofs_from_assignees == 0,
-                "consensus.hardforks.next_name_tbd.number_of_ingress_proofs_from_assignees ({}) \
-                 must be 0 until the assigned-miners determinism fix lands — see frontier guard above",
-                fork.number_of_ingress_proofs_from_assignees,
-            );
-        }
 
         Ok(())
     }
@@ -848,6 +1001,7 @@ impl From<&NodeConfig> for MempoolConfig {
             max_http_chunk_admission: value.mempool.max_http_chunk_admission,
             max_http_chunk_waiters: value.mempool.max_http_chunk_waiters,
             http_chunk_admission_timeout_millis: value.mempool.http_chunk_admission_timeout_millis,
+            http_ingest_waits_for_module_write: value.mempool.http_ingest_waits_for_module_write,
         }
     }
 }
@@ -990,6 +1144,8 @@ pub struct MempoolConfig {
     pub max_http_chunk_waiters: usize,
     /// Monotonic wait for an admission permit, in milliseconds.
     pub http_chunk_admission_timeout_millis: u64,
+    /// See `MempoolNodeConfig::http_ingest_waits_for_module_write`.
+    pub http_ingest_waits_for_module_write: bool,
 }
 
 impl MempoolConfig {
@@ -1020,6 +1176,7 @@ impl MempoolConfig {
             max_http_chunk_admission: 256,
             max_http_chunk_waiters: 32,
             http_chunk_admission_timeout_millis: 5000,
+            http_ingest_waits_for_module_write: false,
         }
     }
 }
@@ -1220,6 +1377,77 @@ mod tests {
     use pretty_assertions::assert_eq;
     use toml;
 
+    /// Publish storage fees pay for the ingress proof total before Delta and for the
+    /// slot replica count from Delta.
+    #[test]
+    fn publish_replica_count_switches_at_delta() {
+        use crate::hardfork_config::Delta;
+        use crate::storage_pricing::{Amount, ReplicaCount};
+
+        let activation = UnixTimestamp::from_secs(1_000);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.num_partitions_per_slot = ReplicaCount::new(10);
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 3;
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Amount::percentage(rust_decimal_macros::dec!(0.5))
+                .unwrap(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+
+        assert_eq!(
+            config.publish_replica_count_at(UnixTimestamp::from_secs(999)),
+            ReplicaCount::new(3)
+        );
+        assert_eq!(
+            config.publish_replica_count_at(activation),
+            ReplicaCount::new(10)
+        );
+    }
+
+    /// The ingress proof reward pool is one inclusion reward share for each required proof
+    /// before Delta, and `ingress_proof_reward_pool_percent` of `term_fee` in total from Delta.
+    #[test]
+    fn ingress_proof_reward_pool_switches_at_delta() {
+        use crate::hardfork_config::Delta;
+        use crate::storage_pricing::Amount;
+
+        let activation = UnixTimestamp::from_secs(1_000);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.immediate_tx_inclusion_reward_percent =
+            Amount::percentage(rust_decimal_macros::dec!(0.05)).unwrap();
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 3;
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Amount::percentage(rust_decimal_macros::dec!(0.5))
+                .unwrap(),
+            ingress_proof_reward_pool_percent: Amount::percentage(rust_decimal_macros::dec!(0.02))
+                .unwrap(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let term_fee = U256::from(1_000);
+
+        // 3 proofs x 5% x 1000
+        assert_eq!(
+            config
+                .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(999), term_fee)
+                .unwrap(),
+            U256::from(150)
+        );
+        // 2% x 1000, not the 5% inclusion share
+        assert_eq!(
+            config
+                .ingress_proof_reward_pool_at(activation, term_fee)
+                .unwrap(),
+            U256::from(20)
+        );
+    }
+
     /// The derived default (cores - 2) exceeds this on any wide host.
     #[test]
     fn vdf_thread_limit_is_clamped_to_the_checkpoint_count() {
@@ -1288,7 +1516,6 @@ mod tests {
         num_chunks_in_partition = 10
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1
-        num_partitions_per_term_ledger_slot = 1
         entropy_packing_iterations = 1000
         safe_minimum_number_of_years = 200
         stake_value = 20000.0
@@ -2324,15 +2551,31 @@ mod validate_tests {
     #[rstest]
     #[case::zero_num_partitions_per_slot(
         |c: &mut ConsensusConfig| {
-            c.num_partitions_per_slot = 0;
+            c.num_partitions_per_slot = crate::storage_pricing::ReplicaCount::new(0);
         },
         "num_partitions_per_slot"
     )]
-    #[case::zero_num_partitions_per_term_ledger_slot(
+    #[case::zero_frontier_ingress_proofs_total(
         |c: &mut ConsensusConfig| {
-            c.num_partitions_per_term_ledger_slot = 0;
+            c.hardforks.frontier.number_of_ingress_proofs_total = 0;
         },
-        "num_partitions_per_term_ledger_slot"
+        "number_of_ingress_proofs_total must be > 0"
+    )]
+    #[case::frontier_assignee_proofs_exceed_total(
+        |c: &mut ConsensusConfig| {
+            c.num_partitions_per_slot = crate::storage_pricing::ReplicaCount::new(3);
+            c.hardforks.frontier.number_of_ingress_proofs_total = 2;
+            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 3;
+        },
+        "must be <= number_of_ingress_proofs_total"
+    )]
+    #[case::frontier_assignee_proofs_exceed_slot_replicas(
+        |c: &mut ConsensusConfig| {
+            c.num_partitions_per_slot = crate::storage_pricing::ReplicaCount::new(2);
+            c.hardforks.frontier.number_of_ingress_proofs_total = 3;
+            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 3;
+        },
+        "must be <= num_partitions_per_slot"
     )]
     #[case::zero_vdf_checkpoints(
         |c: &mut ConsensusConfig| {
@@ -2583,7 +2826,6 @@ mod validate_tests {
     /// Until that fix is gated behind a hardfork activation, the value MUST
     /// stay `0` everywhere (no nondeterministic path is exercised because
     /// the caller's clamp zeroes the requirement when the input is 0).
-    /// These tests pin both ensure! arms.
     #[test]
     fn validate_rejects_nonzero_assignee_proofs_on_frontier() {
         let cfg = config_with_consensus(|c| {
@@ -2595,42 +2837,6 @@ mod validate_tests {
             msg.contains("frontier.number_of_ingress_proofs_from_assignees"),
             "expected frontier guard error, got: {msg}"
         );
-    }
-
-    #[test]
-    fn validate_rejects_nonzero_assignee_proofs_on_next_name_tbd() {
-        use crate::hardfork_config::NextNameTBD;
-        let cfg = config_with_consensus(|c| {
-            c.hardforks.next_name_tbd = Some(NextNameTBD {
-                activation_timestamp: crate::UnixTimestamp::from_secs(u64::MAX),
-                number_of_ingress_proofs_total: 1,
-                number_of_ingress_proofs_from_assignees: 1,
-            });
-        });
-        let err = cfg.validate().unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("next_name_tbd.number_of_ingress_proofs_from_assignees"),
-            "expected next_name_tbd guard error, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn validate_accepts_assignee_proofs_zero_on_both_arms() {
-        // Default `NodeConfig::testing()` already pins both arms to 0; this
-        // asserts that the guard does NOT spuriously reject the happy path
-        // (e.g. by mishandling the `Option` arm when next_name_tbd is set).
-        use crate::hardfork_config::NextNameTBD;
-        let cfg = config_with_consensus(|c| {
-            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 0;
-            c.hardforks.next_name_tbd = Some(NextNameTBD {
-                activation_timestamp: crate::UnixTimestamp::from_secs(u64::MAX),
-                number_of_ingress_proofs_total: 1,
-                number_of_ingress_proofs_from_assignees: 0,
-            });
-        });
-        cfg.validate()
-            .expect("both arms set to 0 should pass the assignee-proofs guard");
     }
 
     #[rstest]
@@ -2654,6 +2860,29 @@ mod validate_tests {
     }
 
     #[test]
+    fn validate_rejects_ingress_proof_reward_pool_above_term_fee() {
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.delta = Some(crate::hardfork_config::Delta {
+                activation_timestamp: crate::UnixTimestamp::from_secs(1500),
+                initial_slots_per_new_ledger:
+                    crate::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
+                capacity_chunk_reward_percent:
+                    crate::hardfork_config::Delta::default_capacity_chunk_reward_percent(),
+                ingress_proof_reward_pool_percent: crate::storage_pricing::Amount::percentage(
+                    rust_decimal_macros::dec!(1.01),
+                )
+                .unwrap(),
+            });
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("ingress_proof_reward_pool_percent must be <= 1.0"),
+            "unexpected validation error: {err}"
+        );
+    }
+
+    #[test]
     fn validate_rejects_capacity_chunk_reward_above_full_reward() {
         let cfg = config_with_consensus(|c| {
             c.hardforks.delta = Some(crate::hardfork_config::Delta {
@@ -2664,6 +2893,8 @@ mod validate_tests {
                     rust_decimal_macros::dec!(1.01),
                 )
                 .unwrap(),
+                ingress_proof_reward_pool_percent:
+                    crate::hardfork_config::Delta::default_ingress_proof_reward_pool_percent(),
             });
         });
         let err = cfg.validate().unwrap_err();
@@ -2863,6 +3094,7 @@ mod validate_tests {
         assert_eq!(nc.mempool.max_http_chunk_admission, 256);
         assert_eq!(nc.mempool.max_http_chunk_waiters, 32);
         assert_eq!(nc.mempool.http_chunk_admission_timeout_millis, 5000);
+        assert!(!nc.mempool.http_ingest_waits_for_module_write);
 
         Config::new_with_random_peer_id(nc)
             .validate()
@@ -3114,6 +3346,170 @@ mod validate_tests {
         assert!(
             err.contains("stake_pledge_drives"),
             "expected the stake_pledge_drives rule to fire, got: {err}"
+        );
+    }
+
+    /// The rollback switch for HTTP chunk ingest defaults to the
+    /// non-waiting path, parses from an operator `[mempool]` section, and
+    /// reaches the runtime `MempoolConfig` the chunk ingress service reads.
+    #[test]
+    fn http_ingest_waits_for_module_write_defaults_off_and_reaches_runtime_config() {
+        assert!(
+            !NodeConfig::testing()
+                .mempool
+                .http_ingest_waits_for_module_write
+        );
+        assert!(!MempoolNodeConfig::default().http_ingest_waits_for_module_write);
+        assert!(!MempoolConfig::testing().http_ingest_waits_for_module_write);
+
+        let parsed: MempoolNodeConfig =
+            toml::from_str("http_ingest_waits_for_module_write = true").expect("parse");
+        assert!(parsed.http_ingest_waits_for_module_write);
+
+        let mut node_config = NodeConfig::testing();
+        node_config.mempool.http_ingest_waits_for_module_write = true;
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.mempool.http_ingest_waits_for_module_write);
+    }
+
+    #[rstest]
+    #[case::submit(5)]
+    #[case::thirty_day(30)]
+    #[case::one_year(365)]
+    fn term_storage_epochs_full_term_from_delta(#[case] epoch_length: u64) {
+        use crate::hardfork_config::Delta;
+
+        let activation = UnixTimestamp::from_secs(1_000);
+        let before = UnixTimestamp::from_secs(999);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
+        let last_cycle_height = blocks_in_epoch * epoch_length - 1;
+        for height in [
+            0,
+            blocks_in_epoch,
+            3 * blocks_in_epoch + 1,
+            last_cycle_height,
+        ] {
+            assert_eq!(
+                config.term_storage_epochs_at(before, height, epoch_length),
+                crate::ledger_expiry::calculate_submit_ledger_expiry(
+                    height,
+                    blocks_in_epoch,
+                    epoch_length
+                ),
+            );
+            assert_eq!(
+                config.term_storage_epochs_at(activation, height, epoch_length),
+                epoch_length
+            );
+        }
+        assert_eq!(
+            config.term_storage_epochs_at(before, last_cycle_height, epoch_length),
+            1
+        );
+    }
+
+    fn config_with_delta_at(activation: UnixTimestamp, cascade: bool) -> Config {
+        use crate::hardfork_config::Delta;
+
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        if !cascade {
+            consensus.hardforks.cascade = None;
+        }
+        Config::new_with_random_peer_id(node_config)
+    }
+
+    #[rstest]
+    #[case::publish(DataLedger::Publish)]
+    #[case::submit(DataLedger::Submit)]
+    #[case::one_year(DataLedger::OneYear)]
+    #[case::thirty_day(DataLedger::ThirtyDay)]
+    fn required_term_fee_uses_ledger_inputs(#[case] ledger: DataLedger) {
+        let activation = UnixTimestamp::from_secs(1_000);
+        let config = config_with_delta_at(activation, true);
+        let consensus = &config.consensus;
+        let cascade = consensus
+            .hardforks
+            .cascade
+            .as_ref()
+            .expect("testing config has Cascade");
+        let epoch_length = match ledger {
+            DataLedger::Publish | DataLedger::Submit => consensus.epoch.submit_ledger_epoch_length,
+            DataLedger::OneYear => cascade.one_year_epoch_length,
+            DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
+        };
+        let ema_price = Amount::token(Decimal::ONE).expect("ema price");
+        let bytes_to_store = 1 << 40;
+        let height = 3;
+
+        for (timestamp, before_delta) in
+            [(UnixTimestamp::from_secs(999), true), (activation, false)]
+        {
+            let epochs = if before_delta {
+                crate::ledger_expiry::calculate_submit_ledger_expiry(
+                    height,
+                    consensus.epoch.num_blocks_in_epoch,
+                    epoch_length,
+                )
+            } else {
+                epoch_length
+            };
+            let replica_count = match ledger {
+                DataLedger::Publish | DataLedger::Submit if before_delta => ReplicaCount::new(
+                    u64::from(config.number_of_ingress_proofs_total_at(timestamp)),
+                ),
+                _ => consensus.num_partitions_per_slot,
+            };
+            let expected = calculate_term_fee(
+                bytes_to_store,
+                epochs,
+                consensus,
+                replica_count,
+                ema_price,
+                timestamp,
+            )
+            .expect("expected term fee");
+            assert_eq!(
+                config
+                    .required_term_fee_at(ledger, timestamp, height, bytes_to_store, ema_price)
+                    .expect("required term fee"),
+                expected,
+                "{ledger:?} at {timestamp:?}"
+            );
+        }
+    }
+
+    #[rstest]
+    #[case::one_year(DataLedger::OneYear)]
+    #[case::thirty_day(DataLedger::ThirtyDay)]
+    fn required_term_fee_errors_without_cascade(#[case] ledger: DataLedger) {
+        let config = config_with_delta_at(UnixTimestamp::from_secs(1_000), false);
+        let ema_price = Amount::token(Decimal::ONE).expect("ema price");
+        assert!(
+            config
+                .required_term_fee_at(
+                    ledger,
+                    UnixTimestamp::from_secs(1_000),
+                    3,
+                    1 << 40,
+                    ema_price
+                )
+                .is_err()
         );
     }
 }

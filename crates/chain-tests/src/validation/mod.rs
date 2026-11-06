@@ -379,6 +379,105 @@ async fn block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
+// A malicious block producer includes a stake commitment with a fee below the minimum commitment fee.
+// The block is rejected because block validation applies the same fee rule as mempool ingress.
+#[test_log::test(tokio::test)]
+async fn block_stake_fee_below_minimum_gets_rejected() -> eyre::Result<()> {
+    use irys_types::CommitmentTypeV2;
+
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub invalid_stake: CommitmentTransaction,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+        async fn get_mempool_txs(
+            &self,
+            _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
+            let invalid_stake = self.invalid_stake.clone();
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![invalid_stake.clone()],
+                commitment_txs_to_bill: vec![invalid_stake],
+                submit_txs: vec![],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
+                    reward_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
+                },
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
+            })
+        }
+    }
+
+    // Configure a test network with accelerated epochs
+    let num_blocks_in_epoch = 4;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    genesis_node.mine_block().await?;
+
+    // Create a stake commitment with a fee below the minimum
+    let consensus_config = &genesis_node.node_ctx.config.consensus;
+    let mut invalid_stake_commitment = CommitmentTransaction::new(consensus_config);
+    invalid_stake_commitment.set_commitment_type(CommitmentTypeV2::Stake);
+    invalid_stake_commitment.set_anchor(genesis_node.get_anchor().await?);
+    invalid_stake_commitment.set_signer(genesis_config.signer().address());
+    invalid_stake_commitment.set_fee(consensus_config.mempool.commitment_fee - 1); // Below minimum!
+    invalid_stake_commitment.set_value(consensus_config.stake_value.amount); // Valid value
+
+    // Sign the commitment
+    genesis_config
+        .signer()
+        .sign_commitment(&mut invalid_stake_commitment)?;
+
+    // Create block with evil strategy
+    let block_prod_strategy = EvilBlockProdStrategy {
+        invalid_stake: invalid_stake_commitment.clone(),
+        prod: ProductionStrategy {
+            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // Send block directly to block tree service for validation
+    // Note: We do NOT gossip the invalid commitment to mempool because mempool validation
+    // would reject it. We're testing block validation, not mempool validation.
+    let outcome = send_block_and_read_state(&genesis_node.node_ctx, block.clone(), false).await?;
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::CommitmentFeeInsufficient { .. }),
+        "block with stake fee below minimum should be rejected",
+    );
+
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
 // This test creates a malicious block producer that includes a pledge commitment with invalid value.
 // The assertion will fail (block will be discarded) because pledge commitments must have value
 // calculated using calculate_pledge_value_at_count().
@@ -1028,11 +1127,12 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
 #[test_log::test(tokio::test)]
 async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<()> {
     use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
+    use irys_database::db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _};
     use irys_types::{
         IngressProofsList, U256,
         ingress::{CachedIngressProof, generate_ingress_proof},
     };
-    use reth_db::{Database as _, transaction::DbTxMut as _};
+    use reth_db::transaction::DbTxMut as _;
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -1184,25 +1284,29 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
         },
     ];
 
-    // First, add the data transaction and ingress proofs to the database so discovery can find them
-    genesis_node.node_ctx.db.update(|tx| {
+    // First, add the data transaction and ingress proofs to the database so discovery can find them.
+    // Consensus tables (IrysDataTxHeaders) and cache tables (CachedDataRoots, IngressProofs)
+    // are in separate envs — write them in two separate transactions.
+    {
         use irys_database::tables::{CompactTxHeader, IrysDataTxHeaders};
-
-        // Store the data transaction
-        tx.put::<IrysDataTxHeaders>(data_tx.id, CompactTxHeader(data_tx.clone()))?;
-        irys_database::cache_data_root(tx, &data_tx, None)?;
-
-        // Store the ingress proofs (with duplicates from same address)
-        for cached_proof in &duplicate_proofs {
-            irys_database::store_external_ingress_proof_checked(
-                tx,
-                &cached_proof.proof,
-                cached_proof.address,
-            )?;
-        }
-
-        Ok::<_, eyre::Report>(())
-    })??;
+        genesis_node.node_ctx.db.update_eyre(|tx| {
+            tx.put::<IrysDataTxHeaders>(data_tx.id, CompactTxHeader(data_tx.clone()))?;
+            Ok(())
+        })?;
+    }
+    {
+        genesis_node.node_ctx.db.update_cache_eyre(|tx| {
+            irys_database::cache_data_root(tx, &data_tx, None)?;
+            for cached_proof in &duplicate_proofs {
+                irys_database::store_external_ingress_proof_checked(
+                    tx,
+                    &cached_proof.proof,
+                    cached_proof.address,
+                )?;
+            }
+            Ok(())
+        })?;
+    }
 
     // Create block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {

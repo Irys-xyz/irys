@@ -20,6 +20,7 @@ use alloy_rpc_types_engine::{
 };
 use alloy_signer_local::LocalSigner;
 use eyre::{OptionExt as _, eyre};
+use irys_database::DatabaseProvider;
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
     ExponentialMarketAvgCalculation, HardforkConfigExt as _,
@@ -38,8 +39,8 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, H256, H256List, IrysAddress, IrysBlockHeader,
     IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, SendTraced as _, Signature,
     SystemTransactionLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
-    VDFLimiterInfo, app_state::DatabaseProvider, block_production::SolutionContext,
-    compute_solution_hash, storage_pricing::Amount, u256_from_le_bytes as hash_to_number,
+    VDFLimiterInfo, block_production::SolutionContext, compute_solution_hash,
+    storage_pricing::Amount, u256_from_le_bytes as hash_to_number,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -1874,9 +1875,7 @@ pub trait BlockProdStrategy {
                         required_proof_count: Some(
                             self.inner()
                                 .config
-                                .number_of_ingress_proofs_total_at(current_timestamp.to_secs())
-                                .try_into()
-                                .map_err(BlockProductionError::irrecoverable)?,
+                                .number_of_ingress_proofs_total_at(current_timestamp.to_secs()),
                         ),
                     },
                     // Term Submit Ledger
@@ -2539,6 +2538,19 @@ fn choose_oracle_price(
         (parent_price, "parent_fallback")
     };
 
+    // `oracle_price_is_valid` rejects zero. A 100% safe range would otherwise
+    // bound 0 to 0 and the producer would include a price it then rejects.
+    let (chosen, source) = if chosen.amount.is_zero() {
+        tracing::warn!(
+            parent_price = %parent_price,
+            oracle_price = %oracle_price,
+            "oracle price is zero; using parent price so the block passes prevalidation"
+        );
+        (parent_price, "parent_zero_oracle")
+    } else {
+        (chosen, source)
+    };
+
     tracing::debug!(
         parent_secs = parent_ts.as_secs(),
         oracle_secs = oracle_updated_at.as_secs(),
@@ -2742,6 +2754,22 @@ mod oracle_choice_tests {
             oracle_price
         };
         assert_eq!(chosen, expected);
+    }
+
+    #[test]
+    fn fresh_zero_oracle_price_uses_parent() {
+        let parent_price = Amount::token(dec!(0.05)).unwrap();
+        let oracle_price = Amount::token(dec!(0.0)).unwrap();
+
+        let chosen = choose_oracle_price(
+            UnixTimestamp::from_secs(1000),
+            parent_price,
+            oracle_price,
+            UnixTimestamp::from_secs(1000),
+        );
+
+        assert_eq!(chosen, parent_price);
+        assert!(!chosen.amount.is_zero());
     }
 }
 
