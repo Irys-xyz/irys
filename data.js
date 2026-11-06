@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793890147310,
+  "lastUpdate": 1793969699862,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -21967,6 +21967,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ff070cbf4c002331972c4ba33b6b99e233876e43",
+          "message": "fix(fees): price storage for the replicas and term paid, and fix treasury and validation gaps (#1770)\n\n* fix(pricing): price term ledgers for the replicas they store\n\n`num_partitions_per_term_ledger_slot` set the replica count that\nOneYear/ThirtyDay term fees are priced for, but partition assignment\nnever read it: every term ledger slot gets `num_partitions_per_slot`\nreplicas. When the two values differed, users paid for replicas the\nnetwork did not store, and the expiry payout split that fee over the\nminers that actually held the data.\n\nRemove the field. Term ledger pricing (price route, mempool ingress,\nblock producer tx selection, block validation) now uses\n`num_partitions_per_slot`, the same value that sizes the slots.\n\nThe block validation check is `term_fee >= expected`, so blocks priced\nfor more replicas still validate on replay. Mainnet and testnet set\nboth values to 10, so their required fees do not change.\n\nConsensus config files that still set the key no longer parse\n(`deny_unknown_fields`); remove the key before upgrade. The\nconsensus-config hash snapshots change with the field removal.\n\n* fix(config): cap assignee ingress proofs at the slot replica count\n\nAssignee ingress proofs come from the miners assigned to a Submit slot,\nand a slot has num_partitions_per_slot of them. Reject a config whose\nnumber_of_ingress_proofs_from_assignees is larger, because promotion\ncould never meet it.\n\n* chore(hardfork): remove the unused NextNameTBD hardfork\n\nNextNameTBD was a placeholder fork to override the ingress proof counts.\nNo network ever activated it, and every preset sets it to None. Remove\nthe config entry, the chainspec variant, its validation arm, and the\ntests that exist only to cross its activation boundary.\n\nFrontier is now the only source of the ingress proof counts. The\nconsensus-config hash does not change: the entry was skipped when None.\n\n* fix(config): require ingress proofs and cap assignee proofs at the total\n\nConfig::validate now rejects number_of_ingress_proofs_total == 0 (it\npromotes Publish txs without any ingress proof) and\nnumber_of_ingress_proofs_from_assignees > number_of_ingress_proofs_total\n(assignee proofs are a subset of the total).\n\nCorrect the slot-cap comment: validation clamps the assignee requirement\nto the assigned miners, so a larger value is never applied.\n\n* docs: drop the removed next_name_tbd entry from the water-fill design\n\n* fix(pricing): type replica counts and price Publish on slot replicas from Delta\n\nAdd the ReplicaCount newtype. ConsensusConfig::num_partitions_per_slot is\na ReplicaCount (serde-transparent, so TOML and the consensus hash do not\nchange), and the term and perm fee functions take a ReplicaCount. Term\nledgers pass the config field directly.\n\nPublish storage was priced on the ingress proof total, but Submit and\nPublish slots store num_partitions_per_slot replicas. Config::\npublish_replica_count_at returns the ingress proof total before Delta\nand num_partitions_per_slot from Delta. The perm fee takes the replica\ncount for the storage cost and the ingress proof total for the proof\nrewards, which pay the proof signers.\n\nBlocks before Delta keep the old rule, so history still validates.\nMainnet has 10 for both values and does not change.\n\n* refactor(config): store ingress proof counts as u8\n\nThe Publish ledger header stores the required proof count as a u8, so\nnumber_of_ingress_proofs_total and number_of_ingress_proofs_from_assignees\nare now u8 too. The proof-count parameters of the perm fee, the proof\nrewards, PublishFeeCharges, the shadow-tx generator and the genesis\nbuilder take a u8, and the fallible u8 conversions are gone.\n\nThe canonical JSON writes u8 as a number and u64 as a string, so the\nconsensus-config hash changes (advisory only).\n\n* fix(treasury): credit the full perm fee at inclusion from Delta\n\nThe user pays the full perm_fee at inclusion. Promotion then pays the\ningress proof reward out of the treasury, and a refund pays back the\nfull perm_fee. Crediting only perm_fee minus the reward at inclusion left\nthe counter short by the reward once per Publish tx. From Delta the\ninclusion credit is the full perm_fee; earlier blocks keep the old value.\n\n* fix(pricing): price term storage for the full term from Delta\n\nA term slot is kept epoch_length epochs after its last write, but term fees\npaid only for the epochs left in the current height cycle. A tx late in a\ncycle paid for about one epoch and was stored a full term.\n\nFrom Delta, every term fee path charges the full epoch_length through\nConfig::term_storage_epochs_at. Before Delta the cycle remainder is kept so\nhistorical blocks still validate.\n\n* fix(reth): report unpayable shadow txs as invalid transactions\n\nA shadow tx failure that the block content causes (insufficient balance,\nmissing fee payer account, balance credit overflow, undecodable shadow tx)\nmust be EVMError::Transaction. Reth maps it to\nBlockValidationError::InvalidTx and answers newPayload with INVALID, so the\nblock is rejected as a peer fault. EVMError::Custom maps to an internal\nexecution error, which reth returns as an engine RPC error without marking\nthe block invalid; keep it for local invariant breaks only.\n\nBalance credits use checked addition: an overflow is an invalid\ntransaction, not a silent loss of funds.\n\nA failed shadow tx clears the pending account state, because the payload\nbuilder skips an invalid transaction and executes the next one on the same\nEVM.\n\n* docs(config): commitment price changes need a hardfork gate\n\nValidation prices every commitment with the current stake and pledge\nvalues, including the copy an epoch block lists again, and refunds use\nthem too. Record that an ungated change breaks replay and epoch blocks.\n\n* fix(pricing): price the perm fee on the actual term fee from Delta\n\nThe fee split takes the ingress proof rewards from the tx's own term fee.\nA perm fee sized on the expected term fee could leave the storage share\nnear zero when the tx overpays its term fee. From Delta the required perm\nfee is base storage plus rewards on the tx's own term fee, in validation,\nmempool ingress and the tx selector.\n\n* docs(pricing): list every Delta change and name the configured replica count\n\nThe Delta lists left out Publish replica pricing and miscounted the\nchanges. Fee docs hard-coded 10 replicas and implied that proof rewards\ndepend only on the proof count.\n\n* test(pricing): check the Publish term fee arm of Delta replica pricing\n\nValidation checks the perm fee first, so the existing cases never reached\nthe term fee check. A tx with a sufficient perm fee and a term fee for the\nproof total must fail on the term fee.\n\n* refactor(mempool): reuse the Publish replica count in the perm fee check\n\n* refactor(pricing): share the proof reward term fee rule\n\nValidation, mempool ingress and the tx selector must pick the same term\nfee for the required perm fee. One Config method keeps them in step.\n\n* docs(genesis): the genesis treasury is not backed by an EL debit\n\n* test(multiversion): drop removed consensus keys from a peer's config\n\nAn older genesis binary still serves num_partitions_per_term_ledger_slot.\nConsensusConfig denies unknown fields, so a newer peer that kept the key\nfailed to parse its config.\n\n* fix(validation): check the commitment minimum fee in blocks\n\nMempool ingress rejects a commitment fee below the minimum, but block\nvalidation did not. A producer could include such a commitment and\nvalidators accepted it. Block validation now applies the same rule.\n\n* refactor(pricing): take ReplicaCount in Amount::replica_count\n\nThe replica count stays typed down to the multiplication, so a caller\ncannot pass an unrelated integer.\n\n* refactor(pricing): pick the Publish perm fee inputs in one place\n\nConfig::required_publish_perm_fee_at picks the replica count, the ingress\nproof total and the reward term fee at one timestamp. Validation, mempool\ningress, the tx selector and the price route call it, so a site cannot mix\ninputs from different rules.\n\n* fix(fees): pay ingress proofs one inclusion-reward pool from Delta\n\nThe ingress proof reward was immediate_tx_inclusion_reward_percent x\nterm_fee for each proof, so the pool grew with the proof count. From Delta\nthe proofs share one pool of that amount, the same rule as the Submit\ninclusion reward. The required perm_fee and the fee split both take the\npool from ConsensusConfig::ingress_proof_reward_pool_at, so no path can\ncompute it another way. Each block uses the pool at its own timestamp.\nEarlier blocks keep the per-proof rule.\n\n* fix(tx-selector): check fees on Submit-ledger txs\n\nBlock validation prices a Submit-ledger tx like a Publish tx. The selector\nnow applies the same term and perm fee checks, so it never picks a tx that\nvalidation rejects.\n\n* refactor(tx-selector): widen proof counts with usize::from\n\n* test(chainspec): replace u8 identity proptest with a ledger check\n\nThe proptest only checked that a u8 passed to the genesis builder came back\nunchanged. The new test checks that only the Publish ledger carries the\nrequired proof count.\n\n* docs(config): fix the assigned-miners guard comment\n\nslot_ranges is a BTreeMap. The remaining non-determinism is the proof order.\n\n* fix(epoch): clear expired partitions in an epoch with no expiries\n\nThe snapshot is cloned from the previous epoch. Without the reset, an\nepoch with no expiries kept the previous list, and the node broadcast it\nagain and repacked partitions that were already capacity.\n\n* fix(block): reject a tx id repeated within one data ledger\n\nEach tx appears at most once per data ledger, so it is charged and\nstored once per ledger. A tx in two different ledgers stays valid.\nThe check runs in SealedBlock::new for producers and validators.\n\n* fix(genesis): check commitment values against the consensus config\n\nGenesis commitment values seed the treasury, and refunds pay the\nconfigured price back. A genesis built from imported commitment files now\nrejects a stake or pledge whose value does not match the config.\n\n* fix(cache): prune the data-root cache on every epoch block\n\nThe prune also evicts never-included roots past their expiry height, so it\nmust not depend on partitions expiring in the epoch.\n\n* docs(hardfork): list the Delta changes once and fix their timing\n\nOnly ledger seeding waits for an epoch block. Every other change acts from\nthe first block at or after activation.\n\n* docs(pricing): fix fee comments\n\nName the config fields instead of fixed percentages, state when a term fee\npays for the full term, and correct the treasury and assignee-order notes.\n\n* test(validation): clean up the stake fee test\n\nName the commitment as a stake, fix its comment and drop an unused funded signer.\n\n* refactor: condense fee and validation code\n\nMerge the two commitment checks into one loop, widen proof counts with\nusize::from, and drop a proof count used only in a debug log.\n\n* revert(tx-selector): drop the fee checks on Submit-ledger txs\n\nIngress rejects a tx whose ledger_id is Submit, so the selector never sees\none. If one got through, block validation rejects it in any ledger: each\nledger list requires a matching ledger_id, and the Submit list requires\nPublish. The added checks could not run and did not stop an invalid block.\n\n* refactor(pricing): pick the term fee inputs in one place\n\nAdd Config::required_term_fee_at. It picks the epoch length, the replica count\nand the epochs to pay for from one ledger and one timestamp, so producer,\nvalidator, mempool and price route cannot mix inputs from different rules.\n\n* fix(tx-selector): skip a tx whose ledger_id is Submit\n\nNo valid tx has ledger_id Submit: ingress rejects it, and block validation\nrejects it in every ledger list. The selector included such a tx with only a\nlog line. Skip it, so a tx that got past ingress cannot make the producer\nbuild an invalid block.\n\n* feat(hardfork): add the Delta ingress proof reward pool percent\n\nFrom Delta, the ingress proofs of a Publish tx share one pool. The pool\npercent is now its own Delta parameter (default 0.05), not the inclusion\nreward percent, so the two can differ. Config validation rejects a value\nabove 1.0.\n\n* test(block-production): expect the missing shadow tx error for an unpayable fee\n\nReth now rejects an unpayable shadow tx as an invalid transaction, and the\npayload builder skips it. The producer then aborts because the payload lacks\nits expected shadow txs.\n\n* fix(validation): reject a term fee too large to price from Delta\n\nFrom Delta the required perm fee prices the ingress proof reward pool on\nthe tx's own term_fee. A term_fee above U256::MAX / PRECISION_SCALE made\nthat arithmetic fail as FeeCalculationFailed, which is a node fault. Bound\nthe term fee first and reject it as InvalidTermFeeStructure, so the perm\nfee computation has local inputs only.\n\n* fix(cache): never prune past the migrated tip\n\nWith no Submit row at the first unexpired slot offset (for example an\nempty Submit ledger), the epoch prune height fell back to the canonical\ntip - 1. A OneYear/ThirtyDay root included above the migrated tip has no\nblock_set before migration, so its anchor expiry was its horizon and the\nprune deleted its chunks before migration stored them. Cap the prune\nheight at the migrated tip: a tx's anchor expiry is at least its\ninclusion height.\n\nAlso log a failed epoch prune, and fix the comment on why the prune runs\non every epoch block.\n\n* docs: fix stale fee comments and drop unreachable code\n\nCorrect the ingress proof reward, full-term fee and expiry payout docs to\nmatch the code, drop a stale comment and an unused binding in the price\nroute, and make a test assert message name the checked error.\n\n* fix(mempool): keep the latest expiry of a shared data root\n\nA root outlives every tx that references it. The last tx to arrive no\nlonger lowers the root expiry, so the cache prune cannot evict a root\nwhile one of its txs is included but not migrated.\n\n* test: lock the term fee bound and the prune comments\n\n* docs: state the proof pool remainder rule\n\nPromotion pays each ingress proof an equal share of the pool and gives the\ndivision remainder to the first proof. Also join two adjacent comments in the\nterm price route.",
+          "timestamp": "2026-11-06T12:36:07Z",
+          "tree_id": "bf3f33d6ee3fbd4f2d32f5ed4276de3224bb6e43",
+          "url": "https://github.com/Irys-xyz/irys/commit/ff070cbf4c002331972c4ba33b6b99e233876e43"
+        },
+        "date": 1793969698389,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012025,
+            "range": "± 0.000197",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.122775,
+            "range": "± 0.001597",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.215737,
+            "range": "± 0.049303",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.035726,
+            "range": "± 0.131933",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074939,
+            "range": "± 0.001388",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 748.613801,
+            "range": "± 3.39242",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 978.366716,
+            "range": "± 48.128528",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.154751,
+            "range": "± 0.026049",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1268.856881,
+            "range": "± 190.46334",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1557.876808,
+            "range": "± 5.303225",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034324,
+            "range": "± 0.000468",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.817009,
+            "range": "± 0.094535",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.339316,
+            "range": "± 0.2982",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
