@@ -152,9 +152,9 @@ pub struct ConsensusConfig {
     /// This is the fee that is used for immediate tx inclusion fees:
     /// miner receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
     ///
-    /// This field is also used for immediate ingress proof rewards. The ingress proof
-    /// producers share a pool of `tx.term_fee * Delta::ingress_proof_reward_pool_percent`
-    /// from Delta, and get `tx.term_fee * immediate_tx_inclusion_reward_percent` each before Delta. See `ingress_proof_reward_pool_at`.
+    /// Before Delta each ingress proof also gets this share of `tx.term_fee`. From Delta the
+    /// ingress proofs share a pool of `tx.term_fee * Delta::ingress_proof_reward_pool_percent`.
+    /// See `ingress_proof_reward_pool_at`.
     ///
     /// Both of these reward distribution mechanisms are opaque to the user,
     /// the user will only ever see `term_fee` and `perm_fee`.

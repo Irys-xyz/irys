@@ -85,7 +85,6 @@ pub async fn get_price(
             let latest_block_timestamp_secs = last_block_entry.header().timestamp_secs();
             drop(tree);
 
-            // Calculate the actual epochs remaining for the next block based on height
             let tip_height = last_block_entry.height();
             let next_block_height = tip_height + 1;
 
@@ -154,7 +153,6 @@ pub async fn get_price(
             .into()),
         DataLedger::OneYear | DataLedger::ThirtyDay => {
             // Term ledger pricing — term-fee only, no perm_fee
-            let cascade = state.config.consensus.hardforks.cascade.as_ref();
 
             // Single lock scope: cascade gating + fee/pricing inputs from same snapshot
             let tree = state.block_tree.read();
@@ -176,10 +174,13 @@ pub async fn get_price(
                     .into());
             }
 
-            cascade.ok_or((
-                "Cascade hardfork not configured",
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ))?;
+            if state.config.consensus.hardforks.cascade.is_none() {
+                return Err((
+                    "Cascade hardfork not configured",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                    .into());
+            }
 
             let (canonical, _) = tree.get_canonical_chain();
             let last_block_entry = canonical

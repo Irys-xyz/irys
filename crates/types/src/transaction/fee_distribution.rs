@@ -10,8 +10,9 @@
 /// 3. The user uploads data chunks associated with their transaction.
 /// 4. Miners assigned to store chunks gossip them amongst themselves.
 /// 5. Term ledger expiration payout:
-///   - When the transaction expires from the submit ledger (when the partitions containing its chunks are reset at an epoch boundary), each miner is paid their portion (term_fee / num_chunks_in_partition) for all assigned chunks expiring in their partition.
-///   - For a full 16TB partition, this payout is approximately $0.60 per miner.
+///   - When the transaction expires from the submit ledger (when the partitions containing its
+///     chunks are reset at an epoch boundary), its `term_fee_treasury` share is split equally
+///     across the unique miners that stored it. The division remainder goes to the first miner.
 ///   - Miners continue to earn full inflation/block rewards from any blocks they produce while mining these partitions.
 ///
 /// ## Permanent Data Payment Distribution
@@ -24,10 +25,11 @@
 ///
 /// ### Fee Distribution
 /// - term_fee: Processed identically to regular term data transactions.
-/// - Ingress proof reward pool: from Delta, `Delta::ingress_proof_reward_pool_percent` of term_fee in total;
-///   before Delta, one `immediate_tx_inclusion_reward_percent` share for each required ingress proof. Promotion splits the
-///   pool equally across the tx's ingress proofs. The pool is part of the transaction's
-///   `perm_fee` field, with the base permanent storage cost.
+/// - Ingress proof reward pool: from Delta, `Delta::ingress_proof_reward_pool_percent` of
+///   term_fee in total; before Delta, one `immediate_tx_inclusion_reward_percent` share for
+///   each required ingress proof. Promotion splits the pool equally across the tx's ingress
+///   proofs. The pool is part of the transaction's `perm_fee` field, with the base permanent
+///   storage cost.
 /// - perm_fee total value: Prepaid amount covering `safe_minimum_number_of_years` x the Publish replica count with `decay_rate` annual decline in storage costs PLUS the ingress proof reward pool
 use crate::ingress::IngressProof;
 use crate::storage_pricing::{PRECISION_SCALE, mul_div};

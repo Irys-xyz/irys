@@ -1322,7 +1322,7 @@ async fn block_prod_fails_with_insufficient_storage_fees() -> eyre::Result<()> {
     // Verify it's failing because the unpayable shadow tx is missing from the payload
     assert!(
         error_msg.contains("payload_missing_shadow_tx"),
-        "Expected block production failure due to insufficient balance, got: {}",
+        "Expected block production failure due to a missing shadow tx in the payload, got: {}",
         error_msg
     );
 

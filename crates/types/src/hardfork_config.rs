@@ -154,14 +154,16 @@ impl Cascade {
 /// - The treasury is credited the full `perm_fee` of a Publish tx at inclusion, not
 ///   `perm_fee` minus the ingress proof reward. Promotion and refund later pay out
 ///   of that credit.
-/// - Term fees (Submit, OneYear, ThirtyDay) pay for the full ledger `epoch_length`,
-///   not the epochs left in the current height cycle.
+/// - Term fees (Publish, Submit, OneYear, ThirtyDay) pay for the full ledger `epoch_length`,
+///   not the epochs left in the current height cycle. Publish uses the Submit epoch length.
 /// - The required `perm_fee` of a Publish tx adds the ingress proof rewards on the
 ///   tx's own `term_fee`, not on the expected term fee. The fee split takes the
 ///   rewards from the tx's own `term_fee`, so this keeps the storage share funded.
 /// - The ingress proofs of a Publish tx share one reward pool of
-///   `ingress_proof_reward_pool_percent` x `term_fee`, not `immediate_tx_inclusion_reward_percent`
-///   x `term_fee` for each proof. The required `perm_fee` and the fee split use this pool. See `ConsensusConfig::ingress_proof_reward_pool_at`.
+///   `ingress_proof_reward_pool_percent` x `term_fee`, not
+///   `immediate_tx_inclusion_reward_percent` x `term_fee` for each proof. The required
+///   `perm_fee` and the fee split use this pool. See
+///   `ConsensusConfig::ingress_proof_reward_pool_at`.
 ///
 /// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
 /// but the epoch block's own header cannot list it: the producer derives the
