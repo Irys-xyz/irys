@@ -1866,8 +1866,8 @@ impl BlockTreeServiceInner {
                 });
         }
 
-        // Prune the data-root cache on every epoch block, not only when partitions expire:
-        // the prune also evicts never-included roots past their expiry height.
+        // Prune the data-root cache on every epoch block, not only when partitions expire, so a
+        // run that hit the per-run eviction cap continues without waiting for an expiry.
         if let Err(e) = self.service_senders.chunk_cache.send_traced(
             crate::cache_service::CacheServiceAction::OnEpochProcessed(
                 epoch_snapshot.clone(),

@@ -380,11 +380,20 @@ impl InnerCacheTask {
                 first_unexpired_slot_index
             )
         })?;
+        // Term-ledger roots have no `block_set` before migration. A tx included after the
+        // migrated tip has `expiry_height = anchor height + tx_anchor_expiry_depth`, which is at
+        // least its inclusion height, so with this cap its root stays until migration.
+        let migrated_tip = self
+            .block_index_guard
+            .read()
+            .try_latest_height()
+            .map_err(|e| e.wrap_err("Failed to read the migrated tip for cache pruning"))?
+            .unwrap_or(0);
         // A slot the snapshot does not know counts as live: unknown keeps.
         let live = |ledger: DataLedger, slot_index: usize| {
             ledger_slot(&epoch_snapshot, ledger, slot_index).is_none_or(|slot| !slot.is_expired)
         };
-        self.prune_data_root_cache(prune_height, &live)
+        self.prune_data_root_cache(prune_height.min(migrated_tip), &live)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(migration_height))]
@@ -2345,7 +2354,10 @@ impl InnerCacheTask {
                 };
             let completion = match &res {
                 Ok(_) => Ok(()),
-                Err(e) => Err(eyre::eyre!(e.to_string())),
+                Err(e) => {
+                    warn!(custom.error = ?e, "Epoch cache processing failed");
+                    Err(eyre::eyre!(e.to_string()))
+                }
             };
             if let Some(sender) = response_sender
                 && let Err(e) = sender.send(res)
@@ -6641,6 +6653,121 @@ mod tests {
             Ok(())
         })??;
 
+        Ok(())
+    }
+
+    /// With an empty Submit ledger the epoch prune height comes from the canonical tip. A
+    /// term-ledger root included above the migrated tip has no `block_set` yet, so only the
+    /// cap at the migrated tip keeps it.
+    #[test]
+    fn epoch_prune_keeps_unmigrated_root_above_migrated_tip() -> eyre::Result<()> {
+        use irys_domain::{ChainState, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot};
+        use irys_types::{BlockIndexItem, BlockTransactions, LedgerIndexItem, SealedBlock};
+
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
+
+        // Canonical chain 0..=4, all ledgers empty; heights 0..=1 are migrated.
+        let migrated_tip = 1;
+        let canonical_tip = 4;
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let mut block_tree: Option<BlockTree> = None;
+        let mut parent_hash = H256::zero();
+        for height in 0..=canonical_tip {
+            let mut header = new_mock_signed_header();
+            header.height = height;
+            header.previous_block_hash = parent_hash;
+            header.cumulative_diff = height.into();
+            for ledger in header.data_ledgers.iter_mut() {
+                ledger.total_chunks = 0;
+            }
+            header.test_sign();
+            parent_hash = header.block_hash;
+            if height <= migrated_tip {
+                let ledgers = header
+                    .data_ledgers
+                    .iter()
+                    .map(|ledger| LedgerIndexItem {
+                        total_chunks: 0,
+                        tx_root: ledger.tx_root,
+                        ledger: DataLedger::try_from(ledger.ledger_id).expect("known ledger"),
+                    })
+                    .collect::<Vec<_>>();
+                let item = BlockIndexItem {
+                    block_hash: header.block_hash,
+                    num_ledgers: ledgers.len() as u8,
+                    ledgers,
+                };
+                block_index.push_item(&item, height)?;
+            }
+            let Some(tree) = block_tree.as_mut() else {
+                block_tree = Some(BlockTree::new(&header, config.consensus.clone()));
+                continue;
+            };
+            let sealed = Arc::new(SealedBlock::new_unchecked(
+                Arc::new(header.clone()),
+                BlockTransactions::default(),
+            ));
+            tree.add_common(
+                header.block_hash,
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                dummy_ema_snapshot(),
+                ChainState::Onchain,
+            )?;
+            tree.mark_tip(&header.block_hash)?;
+        }
+
+        // `kept`: tx included at height 2, above the migrated tip; expiry 2 is below the
+        // uncapped prune height (canonical tip - 1). `evicted`: expiry below the migrated tip.
+        let kept = H256::random();
+        let evicted = H256::random();
+        db.update_cache(|wtx| -> eyre::Result<()> {
+            for (data_root, expiry_height) in [(kept, 2), (evicted, 0)] {
+                let cdr = CachedDataRoot {
+                    data_size: 64,
+                    data_size_confirmed: false,
+                    txid_set: vec![H256::random()],
+                    block_set: vec![],
+                    expiry_height: Some(expiry_height),
+                    cached_at: irys_types::UnixTimestamp::now()?,
+                };
+                wtx.put::<CachedDataRoots>(data_root, cdr)?;
+            }
+            Ok(())
+        })??;
+
+        let task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard: irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(
+                block_tree.expect("genesis"),
+            ))),
+            block_index_guard: irys_domain::block_index_guard::BlockIndexReadGuard::new(
+                block_index,
+            ),
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tokio::sync::mpsc::unbounded_channel().0,
+            storage_modules_guard: test_storage_modules_guard(),
+            replica_custody: ReplicaCustody::all_replicated(),
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
+        };
+        task.on_epoch_processed(Arc::new(EpochSnapshot::default()))?;
+
+        db.view_cache_eyre(|tx| {
+            assert!(
+                tx.get::<CachedDataRoots>(kept)?.is_some(),
+                "a root included above the migrated tip must stay until migration"
+            );
+            assert!(
+                tx.get::<CachedDataRoots>(evicted)?.is_none(),
+                "a root expired below the migrated tip is pruned"
+            );
+            Ok(())
+        })?;
         Ok(())
     }
 
