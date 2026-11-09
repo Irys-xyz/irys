@@ -130,7 +130,7 @@ the context; `irys-c` is whatever the referenced `crates/c` contains.
 
 How `all-threads` is measured (`cpu::throughput`), and why:
 * A shared work queue: threads pull batches from an atomic counter. A fixed share per thread made the
-  wall time that of the slowest thread; under a hypervisor one briefly pre-empted vCPU skewed results
+  wall time that of the slowest thread; under a hypervisor one briefly preempted vCPU skewed results
   by 15–25%.
 * At least 8 batches per thread. With 2 (e.g. AVX-512 ×16 at 32 chunks per thread) the queue cannot
   balance: 1 015 vs 1 150 chunks/s.
@@ -198,7 +198,7 @@ Findings:
 Three times in ~150 runs, a long single launch (25–40 s: twice `ref`, once unsliced `fast-contig`)
 silently did not execute. Symptoms: stale cudaEvent timestamps (a negative elapsed time equal to the
 previous run), wrong output, no CUDA error, and then a hang on the next launch with the GPU idle. The
-5090 drives an active Windows desktop, so it is regularly pre-empted. A driver-level reset that WSL2
+5090 drives an active Windows desktop, so it is regularly preempted. A driver-level reset that WSL2
 never reports fits the evidence, but is not confirmed. No sliced launch ever failed. Mitigations:
 * the fast kernels run Phase 2 in launches of `--slice` hash counts (default 50 000, ~0.3 s each).
   The chain state lives entirely in the buffer, so a launch resumes exactly where the last stopped.

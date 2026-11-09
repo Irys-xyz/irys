@@ -67,12 +67,19 @@ impl Choice {
             b.predicted_chunks_per_s
                 .total_cmp(&a.predicted_chunks_per_s)
         });
-        self.best = self.candidates[0].name.clone();
+        self.best = self
+            .candidates
+            .first()
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
     }
 
     pub fn print(&self, what: &str) {
         println!("[tune] {what}: {}", self.key);
-        let top = self.candidates[0].predicted_chunks_per_s;
+        let Some(top) = self.candidates.first().map(|c| c.predicted_chunks_per_s) else {
+            println!("[tune]   no candidate ran");
+            return;
+        };
         for c in &self.candidates {
             println!(
                 "[tune]   {:<44} {:>9.1} chunks/s predicted at {} it  {:>5.1}%  {}",
@@ -269,6 +276,13 @@ pub fn tune_gpu(
             note: format!("{:.0} ms / {:.0} ms", ms[0], ms[1]),
         });
         kept.push(cfg);
+    }
+    if choice.candidates.is_empty() {
+        return Err(gpu::CudaError {
+            what: "GPU auto-tune",
+            code: -1,
+            message: "no launch shape fits in free VRAM or produced correct output".to_string(),
+        });
     }
     choice.sort();
     // same order as the candidates

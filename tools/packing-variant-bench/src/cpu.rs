@@ -213,7 +213,7 @@ pub const MIN_BATCHES_PER_THREAD: usize = 8;
 /// pulling batches from a shared counter. `id(k)` gives the id of chunk `k`.
 ///
 /// A fixed share per thread would make the wall time that of the slowest thread, so one briefly
-/// pre-empted vCPU (common under a hypervisor) would skew the result. Every worker first runs
+/// preempted vCPU (common under a hypervisor) would skew the result. Every worker first runs
 /// short batches for [`WARMUP`], which also pre-faults its buffers.
 pub fn throughput(
     kind: CpuKind,

@@ -132,8 +132,13 @@ impl PackingWorkerState {
                 // the worker runs one GPU batch at a time (see `start_worker`)
                 let batch_size = match self.0.config.gpu_packing_batch_size {
                     irys_types::config::GpuPackingBatchSize::Fixed(chunks) => chunks,
+                    // A request is at most one window, so a larger packer would only hold idle
+                    // VRAM. A fixed capacity also lets every request reuse the pooled packer, and
+                    // the pooled packer (~0.5 GiB) barely reduces the free VRAM measured here.
                     irys_types::config::GpuPackingBatchSize::Auto => {
-                        CUDAConfig::from_device_default()?.auto_batch_size_for_device(0, 1)?
+                        CUDAConfig::from_device_default()?
+                            .auto_batch_size_for_device(0, 1)?
+                            .min(REMOTE_PACK_WINDOW_CHUNKS)
                     }
                 };
                 let split = split_interval(&chunk_range, batch_size)?;

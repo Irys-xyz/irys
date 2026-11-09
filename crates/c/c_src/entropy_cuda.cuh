@@ -15,7 +15,7 @@
 //    contiguous chunk per 256 KiB at the end.
 //  * Phase 2 runs in launches covering a range of hash counts. The whole chain state is in the
 //    buffer (the left input is buf[(h - 1) mod 8192]), so a launch resumes exactly where the
-//    previous one stopped; short launches keep the GPU responsive and avoid long pre-emption
+//    previous one stopped; short launches keep the GPU responsive and avoid long preemption
 //    windows under WDDM (Windows / WSL2), where long single launches were seen to fail silently.
 #pragma once
 #include <stdint.h>

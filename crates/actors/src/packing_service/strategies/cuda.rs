@@ -110,9 +110,14 @@ impl super::PackingStrategy for CudaPackingStrategy {
 
             // Pack on the GPU and write each chunk as its slab arrives: the batch is never held
             // in host memory as a whole, and the GPU fills the next slab while chunks are written.
+            // Both halves hold the permit: if the writer stops early, the GPU side keeps its
+            // packer (and VRAM) until it notices, and no new batch may start before then.
+            let permit = Arc::new(permit);
             let handle = runtime_handle.clone().spawn(async move {
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CHUNKS_IN_FLIGHT);
+                let gpu_permit = Arc::clone(&permit);
                 let gpu = runtime_handle.spawn_blocking(move || -> eyre::Result<()> {
+                    let _permit = gpu_permit;
                     packers.with_packer(packer_capacity, |packer| {
                         packer.pack(
                             num_chunks,

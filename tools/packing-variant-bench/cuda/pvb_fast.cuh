@@ -252,7 +252,7 @@ __device__ __forceinline__ uint32_t read_index(uint32_t w0) {
 // One launch covers Phase 2 hash counts [h0, h1). The whole chain state lives in the buffer
 // (A's left input and B's prev are both buf[(h - 1) mod 8192]), so a later launch resumes exactly
 // where the previous one stopped. Splitting a long run into short launches keeps each kernel
-// brief, which matters under WDDM (Windows / WSL2), where the GPU is pre-empted for the desktop.
+// brief, which matters under WDDM (Windows / WSL2), where the GPU is preempted for the desktop.
 // `phase1` runs the seed and Phase 1 first; it is set only on the first launch, with h0 == 8192.
 template <int VARIANT, int LAYOUT>
 __global__ void kernel(uint64_t offset_start, uint64_t chunks, uint32_t *__restrict__ base, unsigned int h0,

@@ -61,7 +61,7 @@ struct Args {
     kernel: Vec<packing_variant_bench::gpu::Kernel>,
 
     /// GPU: split each fast-kernel run into launches of at most this many Phase 2 hashes (0 = one
-    /// launch). Short launches avoid long pre-emption windows and driver timeouts on WDDM
+    /// launch). Short launches avoid long preemption windows and driver timeouts on WDDM
     /// (Windows / WSL2); measured overhead is within noise. The `ref` kernel always runs as one
     /// launch, as production does.
     #[cfg(feature = "cuda")]
