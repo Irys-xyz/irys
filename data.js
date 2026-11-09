@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793969699862,
+  "lastUpdate": 1794222818021,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -22074,6 +22074,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000112,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "dac38e585cae5b074a7877ae04bfd21d29d07d3e",
+          "message": "fix: Irys blocks have no EIP-7685 requests or withdrawals (#1791)\n\n* fix(irys-reth): remove the post-block steps from block execution\n\nIrys has no EIP-7685 requests: every block's requests are empty, and\nits header carries the empty requests hash.\n\nIrysBlockExecutor::finish now does no post-block step. It does not\nparse EIP-6110 deposit logs and does not make the EIP-7002 / EIP-7251\nsystem calls. The other Ethereum post-block steps do not apply to\nIrys: there are no block or ommer rewards after the Merge, the CL\nrejects withdrawals, and the DAO-fork step runs only at genesis.\n\nFor a valid block, while the request predeploy addresses have no code\nand no empty account, the removed steps change no state, so the state\nroot and the block hash do not change. Tests compare the state with\nthe Ethereum executor on the same block, and check that Irys does not\ncall code at those addresses.\n\n* fix(validation): require the empty EIP-7685 requests hash\n\nBuild the EVM block with the payload sidecar, so that the header has\nits real requests hash. Reject a block whose requests hash is not the\nhash of an empty request list as a peer fault. This is the rule that\nreth applies, because the node submits each payload with an empty\nrequest list.\n\nRemove the two checks that read fields that are never set, and the\ncomment that contradicted them.\n\n* docs(config): forbid empty genesis accounts at the request predeploys\n\nThe genesis EVM state must not hold an empty account at the EIP-7002\nor EIP-7251 request predeploy address. Irys makes no post-block system\ncall to those addresses, so such an account stays in state, while an\nexecutor that makes the Ethereum system calls deletes it at block 1.\n\n* test(irys-reth): compare real state roots in block execution tests\n\nThe tests that compare Irys and Ethereum execution of the same block\nnow hash the resulting state into the Ethereum state trie and compare\nthe state roots, in place of a filtered view of the state changes.\n\n* fix(irys-reth): reject blocks with withdrawals in block execution\n\nIrys has no withdrawals. Block execution now rejects a block with any\nwithdrawal as an invalid block, before any transaction runs. The CL\nalready rejects such a block before it submits it to reth; this rule\napplies also to payloads that reach reth by other paths, and to block\nbuilding.\n\n* docs: note the block executor check at the reth and alloy-evm pins\n\nAt each reth or alloy-evm upgrade, compare the upstream pre- and\npost-block steps with IrysBlockExecutor.\n\n* test(chain-tests): share the flow of the EVM payload rejection tests\n\nRename blobs_rejected.rs to evm_payload_rejected.rs, because it also\ncovers withdrawals and the requests hash, and move the shared flow of\nits five tests into assert_mutated_payload_rejected. The tests check\nthe same things as before.\n\n* test(irys-reth): check that block execution does not parse deposit logs\n\nIrys has no EIP-7685 requests, so block execution does not read\ndeposit logs. Add a test for it.",
+          "timestamp": "2026-11-09T10:17:46Z",
+          "tree_id": "b0d085f29b33b6468615037252042e92feb5c772",
+          "url": "https://github.com/Irys-xyz/irys/commit/dac38e585cae5b074a7877ae04bfd21d29d07d3e"
+        },
+        "date": 1794222814772,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012604,
+            "range": "± 0.000371",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.12055,
+            "range": "± 0.002997",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.217539,
+            "range": "± 0.027433",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.264651,
+            "range": "± 0.275931",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.076317,
+            "range": "± 0.001731",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 765.061497,
+            "range": "± 19.409441",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 980.986803,
+            "range": "± 22.713892",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.126019,
+            "range": "± 0.003829",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1308.334665,
+            "range": "± 24.944508",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1575.423154,
+            "range": "± 53.136891",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034496,
+            "range": "± 0.00043",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 204.23926,
+            "range": "± 2.005408",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 266.047471,
+            "range": "± 1.582652",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
             "range": "± 0",
             "unit": "ms/iter"
           }
