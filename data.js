@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794222818021,
+  "lastUpdate": 1794239604295,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -22183,6 +22183,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2047d646efdfc873b0bcd8e186dbc43b945bcda0",
+          "message": "fix(c): hash packing Phase 1 with a reusable SHA-256 context (#1794)\n\nOpenSSL 3's one-shot SHA256() looks the digest up by name in the shared\nprovider store on every call, which contends across threads. Phase 1\nmade 8192 such calls per chunk: at 1000 iterations (testnet, tests) CPU\npacking ran ~30x slower on 32 threads (~3.5x on one). Output unchanged.",
+          "timestamp": "2026-11-09T15:37:53Z",
+          "tree_id": "6ad591871e628ac7835bb43f641f0a9d86c49204",
+          "url": "https://github.com/Irys-xyz/irys/commit/2047d646efdfc873b0bcd8e186dbc43b945bcda0"
+        },
+        "date": 1794239602534,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015052,
+            "range": "± 0.000302",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.156923,
+            "range": "± 0.009477",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.588089,
+            "range": "± 0.062409",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.395014,
+            "range": "± 0.441316",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.08183,
+            "range": "± 0.000314",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 835.661016,
+            "range": "± 17.07528",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1040.561431,
+            "range": "± 41.621481",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120348,
+            "range": "± 0.000826",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1213.8442,
+            "range": "± 8.923352",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1677.442202,
+            "range": "± 185.323714",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.131402,
+            "range": "± 0.041079",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 216.731703,
+            "range": "± 14.100471",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.650449,
+            "range": "± 3.560129",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
