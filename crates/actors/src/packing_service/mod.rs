@@ -682,7 +682,7 @@ mod tests {
         let tmp_dir = TempDirBuilder::new().prefix("zero_gpu_batch").build();
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = tmp_dir.path().to_path_buf();
-        node_config.packing.local.gpu_packing_batch_size = 0;
+        node_config.packing.local.gpu_packing_batch_size = 0.into();
         let consensus = node_config.consensus_config();
         node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
             entropy_packing_iterations: 1,
@@ -1327,7 +1327,7 @@ mod tests {
             packing: irys_types::PackingConfig {
                 local: irys_types::LocalPackingConfig {
                     cpu_packing_concurrency: 1,
-                    gpu_packing_batch_size: 1,
+                    gpu_packing_batch_size: 1.into(),
                     cpu_packing_thread_priority: irys_types::CpuPackingThreadPriority::Idle,
                 },
                 remote: Default::default(),
@@ -1802,7 +1802,7 @@ mod tests {
             packing: irys_types::PackingConfig {
                 local: irys_types::LocalPackingConfig {
                     cpu_packing_concurrency: concurrency,
-                    gpu_packing_batch_size: 10,
+                    gpu_packing_batch_size: 10.into(),
                     cpu_packing_thread_priority: irys_types::CpuPackingThreadPriority::Idle,
                 },
                 remote: Default::default(),

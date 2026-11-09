@@ -39,7 +39,7 @@ pub(crate) async fn packing_worker_full_node_test() -> eyre::Result<()> {
         bind_port: 0,
         bind_addr: "127.0.0.1".to_string(),
         cpu_packing_concurrency: 2,
-        gpu_packing_batch_size: 0,
+        gpu_packing_batch_size: 0.into(),
         max_pending: NonZero::new(1).unwrap(),
     };
 
@@ -82,7 +82,7 @@ pub(crate) async fn packing_worker_full_node_test() -> eyre::Result<()> {
         packing: irys_types::PackingConfig {
             local: irys_types::LocalPackingConfig {
                 cpu_packing_concurrency: 0,
-                gpu_packing_batch_size: 0,
+                gpu_packing_batch_size: 0.into(),
                 cpu_packing_thread_priority: irys_types::CpuPackingThreadPriority::Idle,
             },
             remote: vec![RemotePackingConfig {

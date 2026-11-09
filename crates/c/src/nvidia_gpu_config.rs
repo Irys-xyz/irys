@@ -61,6 +61,21 @@ fn get_device_name(device_id: i32) -> Result<String, String> {
     Ok(name.to_string_lossy().into_owned())
 }
 
+/// Free and total memory of CUDA device `device_id`, in bytes.
+pub fn get_device_memory(device_id: i32) -> Result<(usize, usize), String> {
+    let (mut free, mut total) = (0_usize, 0_usize);
+    // SAFETY: both out-pointers are valid for writes.
+    let result =
+        unsafe { crate::capacity_cuda::irys_cuda_mem_info(device_id, &mut free, &mut total) };
+    if result != 0 {
+        return Err(format!(
+            "Failed to get the memory of device {}: error code {}",
+            device_id, result
+        ));
+    }
+    Ok((free, total))
+}
+
 pub fn set_current_cuda_device_for_thread(device_id: i32) -> Result<(), String> {
     match unsafe { cudaSetDevice(device_id) } {
         0 => Ok(()),
