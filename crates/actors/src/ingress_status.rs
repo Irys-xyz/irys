@@ -156,6 +156,7 @@ pub(crate) fn assess_submit_ingress_proofs(
         &tx_header.id,
         query.parent_height,
         query.config.consensus.block_migration_depth,
+        query.config.consensus.chunk_size,
         query.block_tree,
         query.db,
     )

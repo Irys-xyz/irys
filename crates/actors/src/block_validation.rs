@@ -8037,6 +8037,7 @@ pub fn get_assigned_ingress_proofs(
         &tx_header.id,
         parent_height,
         config.consensus.block_migration_depth,
+        config.consensus.chunk_size,
         block_tree,
         db,
     )
@@ -10701,6 +10702,7 @@ mod tests {
             &tx_id,
             5,
             config.consensus.block_migration_depth,
+            config.consensus.chunk_size,
             &block_tree_guard,
             &db,
         )?;
@@ -10947,6 +10949,7 @@ mod tests {
             &tx_id,
             5,
             config.consensus.block_migration_depth,
+            config.consensus.chunk_size,
             &block_tree_guard,
             &db,
         )?
