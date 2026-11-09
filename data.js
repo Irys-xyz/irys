@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794240695187,
+  "lastUpdate": 1794254568741,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -22399,6 +22399,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000119,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "007ed0f750ee8da5a5bff859691db31f8f34cace",
+          "message": "perf(vdf): SHA-NI hash chain, interleaved validation, ARMv8 SHA on aarch64 (#1795)\n\n* perf(vdf): use ARMv8 SHA-256 instructions on aarch64\n\n* perf(vdf): hash the VDF chain with SHA-NI in registers on x86_64\n\n* perf(vdf): interleave two chains per task when validation has more chains than threads\n\n* test(vdf): compare long SHA-NI chains against compress256",
+          "timestamp": "2026-11-09T19:47:45Z",
+          "tree_id": "8ef606899042ded38e4c167afda9be3f38307183",
+          "url": "https://github.com/Irys-xyz/irys/commit/007ed0f750ee8da5a5bff859691db31f8f34cace"
+        },
+        "date": 1794254567255,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015067,
+            "range": "± 0.000537",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.151892,
+            "range": "± 0.001953",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.543367,
+            "range": "± 0.033108",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.535412,
+            "range": "± 0.379068",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.072536,
+            "range": "± 0.001663",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 728.767755,
+            "range": "± 12.132647",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 945.16933,
+            "range": "± 49.96771",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.12177,
+            "range": "± 0.003239",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1178.767302,
+            "range": "± 10.045163",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1605.112386,
+            "range": "± 173.778675",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.113094,
+            "range": "± 0.031505",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 217.353349,
+            "range": "± 25.549843",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 268.018698,
+            "range": "± 31.466305",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000117,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
