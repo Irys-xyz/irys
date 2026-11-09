@@ -5,7 +5,7 @@
 //! stored for one data root and names the miner each stored proof belongs to.
 
 use crate::block_producer::ledger_expiry::resolve_promotion_heights_on_branch;
-use crate::block_validation::submit_assignees_for_range;
+use crate::block_validation::{clamped_assigned_requirement, submit_assignees_for_range};
 use crate::tx_selector::helpers::{
     anchor_valid_ingress_proofs, dedup_ingress_proofs_by_signer, keep_first_per_address,
     min_ingress_proof_anchor_height, unexpired_ingress_proofs,
@@ -205,7 +205,8 @@ pub(crate) fn assess_submit_ingress_proofs(
                 .config
                 .number_of_ingress_proofs_total_at(query.requirement_timestamp),
         ),
-        required_assigned: configured_assigned.min(assigned_miners) as u64,
+        required_assigned: clamped_assigned_requirement(configured_assigned, assigned_miners)
+            as u64,
         signers,
     })
 }

@@ -7964,6 +7964,15 @@ pub(crate) fn submit_assignees_for_range(
         .collect()
 }
 
+/// Assigned proofs a tx needs: the configured requirement, clamped to the
+/// number of miners assigned to the Submit slots its range intersects. The
+/// protocol can require X assigned proofs, but with fewer than X assignees it
+/// still has to promote. Validation, the tx selector and the ingress-status
+/// route all take the requirement from here.
+pub(crate) fn clamped_assigned_requirement(expected: usize, assigned_miners: usize) -> usize {
+    expected.min(assigned_miners)
+}
+
 /// Clamp-and-check used by the per-tx Publish proof loop in
 /// [`data_txs_are_valid`].  Extracted as a pure helper so unit tests can
 /// exercise the exact production logic byte-for-byte instead of modelling it
@@ -7981,13 +7990,12 @@ pub(crate) fn check_assigned_proof_count(
     assigned_miners: usize,
     assigned_proofs_len: usize,
 ) -> Result<(), PreValidationError> {
-    let mut expected = expected_initial;
-    if assigned_miners < expected {
+    let expected = clamped_assigned_requirement(expected_initial, assigned_miners);
+    if expected < expected_initial {
         warn!(
             "Clamping expected_assigned_proofs from {} to {} to match number of assigned miners ",
-            expected, assigned_miners
+            expected_initial, expected
         );
-        expected = assigned_miners;
     }
     if assigned_proofs_len < expected {
         return Err(PreValidationError::AssignedProofCountMismatch {
@@ -11042,9 +11050,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Helper: build the shared DB + BlockTree used by the three determinism
-    /// tests.  Returns (db, block_tree_guard, config, tx_id, data_root,
-    /// tx_header).
+    /// tests.  Returns (tmp_dir, db, block_tree_guard, config, tx_id,
+    /// data_root, tx_header); keep `tmp_dir` bound so the DB outlives the test.
     fn build_determinism_test_fixtures() -> eyre::Result<(
+        irys_testing_utils::tempfile::TempDir,
         DatabaseProvider,
         irys_domain::BlockTreeReadGuard,
         Config,
@@ -11068,11 +11077,7 @@ mod tests {
         use std::sync::RwLock;
 
         let tmp = TempDirBuilder::new().build();
-        // Leak the TempDir so it lives for the duration of the test; the OS
-        // will clean it up anyway.
-        let _tmp = Box::leak(Box::new(tmp));
-
-        let db = DatabaseProvider::for_testing(_tmp.path(), &_tmp.path().join("cache"))?;
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
 
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -11128,7 +11133,7 @@ mod tests {
         let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
         let block_tree_guard = irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
 
-        Ok((db, block_tree_guard, config, tx_id, data_root, header))
+        Ok((tmp, db, block_tree_guard, config, tx_id, data_root, header))
     }
 
     /// Regression: `block_range` spans two slots (slot 1 = [10,20), slot 2 =
@@ -11143,7 +11148,7 @@ mod tests {
             partition::PartitionAssignment,
         };
 
-        let (db, block_tree_guard, config, _tx_id, data_root, header) =
+        let (_tmp, db, block_tree_guard, config, _tx_id, data_root, header) =
             build_determinism_test_fixtures()?;
 
         let consensus = ConsensusConfig::testing();
@@ -11209,7 +11214,7 @@ mod tests {
             partition::PartitionAssignment,
         };
 
-        let (db, block_tree_guard, config, _tx_id, data_root, header) =
+        let (_tmp, db, block_tree_guard, config, _tx_id, data_root, header) =
             build_determinism_test_fixtures()?;
 
         let consensus = ConsensusConfig::testing();
@@ -11285,7 +11290,7 @@ mod tests {
             partition::PartitionAssignment,
         };
 
-        let (db, block_tree_guard, config, _tx_id, data_root, header) =
+        let (_tmp, db, block_tree_guard, config, _tx_id, data_root, header) =
             build_determinism_test_fixtures()?;
 
         let consensus = ConsensusConfig::testing();
@@ -11373,7 +11378,7 @@ mod tests {
             partition::PartitionAssignment,
         };
 
-        let (db, block_tree_guard, config, _tx_id, data_root, header) =
+        let (_tmp, db, block_tree_guard, config, _tx_id, data_root, header) =
             build_determinism_test_fixtures()?;
 
         let consensus = ConsensusConfig::testing();
@@ -11521,7 +11526,7 @@ mod tests {
     async fn assigned_miners_zero_proofs_returns_correct_counts() -> eyre::Result<()> {
         use irys_types::partition::PartitionAssignment;
 
-        let (db, block_tree_guard, config, _tx_id, _data_root, header) =
+        let (_tmp, db, block_tree_guard, config, _tx_id, _data_root, header) =
             build_determinism_test_fixtures()?;
 
         // Register one miner to slot 1 — intersects block_range [10, 24].
