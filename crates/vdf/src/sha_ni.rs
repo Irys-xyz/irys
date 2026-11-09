@@ -421,20 +421,51 @@ mod tests {
         }
     }
 
-    /// A longer chain than the proptests reach, in the 25-checkpoint step
-    /// shape, wrapping the salt mid-step.
-    #[test]
-    fn long_chain_matches_compress256() {
+    /// Long chains in the 25-checkpoint step shape, far beyond what the
+    /// proptests reach: every checkpoint of the single-chain and the
+    /// interleaved paths must equal the `compress256` oracle. The near-MAX
+    /// salts wrap to zero mid-step (after checkpoint 11 and 4 respectively).
+    #[rstest::rstest]
+    #[case::low_salts(U256::from(1), U256::from(26))]
+    #[case::wrapping_salts(U256::MAX - U256::from(10), U256::MAX - U256::from(3))]
+    fn long_chains_match_compress256(#[case] salt_a: U256, #[case] salt_b: U256) {
+        const CHECKPOINTS: usize = 25;
+        const ITERATIONS: u64 = 100_000;
         let Some(sha_ni) = detect_or_skip() else {
             return;
         };
-        let salt = U256::MAX - U256::from(10);
-        let (expected_seed, expected_checkpoints) =
-            oracle(salt, H256::repeat_byte(0xAB), 25, 1_000);
-        let mut seed = H256::repeat_byte(0xAB);
-        let mut checkpoints = vec![H256::zero(); 25];
-        sha_ni.chains([salt_le(salt)], [&mut seed], 1_000, [&mut checkpoints]);
-        assert_eq!(seed, expected_seed);
-        assert_eq!(checkpoints, expected_checkpoints);
+        let (seed_a, seed_b) = (H256::repeat_byte(0xAB), H256::repeat_byte(0x5C));
+        let expected_a = oracle(salt_a, seed_a, CHECKPOINTS, ITERATIONS);
+        let expected_b = oracle(salt_b, seed_b, CHECKPOINTS, ITERATIONS);
+
+        let mut seed = seed_a;
+        let mut checkpoints = vec![H256::zero(); CHECKPOINTS];
+        sha_ni.chains(
+            [salt_le(salt_a)],
+            [&mut seed],
+            ITERATIONS,
+            [&mut checkpoints],
+        );
+        assert_eq!((seed, checkpoints), expected_a, "single chain");
+
+        let (mut pair_seed_a, mut pair_seed_b) = (seed_a, seed_b);
+        let mut checkpoints_a = vec![H256::zero(); CHECKPOINTS];
+        let mut checkpoints_b = vec![H256::zero(); CHECKPOINTS];
+        sha_ni.chains(
+            [salt_le(salt_a), salt_le(salt_b)],
+            [&mut pair_seed_a, &mut pair_seed_b],
+            ITERATIONS,
+            [&mut checkpoints_a, &mut checkpoints_b],
+        );
+        assert_eq!(
+            (pair_seed_a, checkpoints_a),
+            expected_a,
+            "interleaved chain a"
+        );
+        assert_eq!(
+            (pair_seed_b, checkpoints_b),
+            expected_b,
+            "interleaved chain b"
+        );
     }
 }
