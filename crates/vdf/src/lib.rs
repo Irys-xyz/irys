@@ -12,6 +12,8 @@ use sha2::digest::typenum::U64;
 use std::time::Duration;
 
 pub mod metrics;
+#[cfg(target_arch = "x86_64")]
+mod sha_ni;
 pub mod state;
 pub mod vdf;
 pub mod vdf_utils;
@@ -95,6 +97,37 @@ pub fn vdf_sha(
         checkpoints.len(),
     );
 
+    #[cfg(target_arch = "x86_64")]
+    if let Some(sha_ni) = sha_ni::ShaNi::detect() {
+        let mut salt = [0_u8; 32];
+        start_salt.to_little_endian(&mut salt);
+        sha_ni.chains(
+            [salt],
+            [seed],
+            num_iterations_per_checkpoint,
+            [&mut checkpoints[..num_checkpoints]],
+        );
+        return;
+    }
+
+    vdf_sha_compress256(
+        start_salt,
+        seed,
+        num_checkpoints,
+        num_iterations_per_checkpoint,
+        checkpoints,
+    );
+}
+
+/// [`vdf_sha`] on `sha2::compress256`: the fallback for CPUs without a
+/// specialised path, and the oracle the specialised paths are tested against.
+fn vdf_sha_compress256(
+    start_salt: U256,
+    seed: &mut H256,
+    num_checkpoints: usize,
+    num_iterations_per_checkpoint: u64,
+    checkpoints: &mut [H256],
+) {
     let mut blocks = [[0_u8; 64]; 2];
     start_salt.to_little_endian(&mut blocks[0][..32]);
     blocks[1] = SHA256_64B_PADDING;
@@ -281,14 +314,15 @@ pub fn last_step_checkpoints_is_valid(
         (0..config.num_checkpoints_in_vdf_step)
             .into_par_iter()
             .map(|i| {
-                let mut blocks = [[0_u8; 64]; 2];
-                (start_salt + i).to_little_endian(&mut blocks[0][..32]);
-                blocks[1] = SHA256_64B_PADDING;
-                blocks[0][32..64].copy_from_slice(cp[i].as_bytes());
-
-                compress_n_rounds(&mut blocks, num_iterations);
-                let mut result = H256::zero();
-                result.as_mut().copy_from_slice(&blocks[0][32..64]);
+                // One checkpoint: `num_iterations` hashes of `cp[i]` under its salt.
+                let mut result = cp[i];
+                vdf_sha(
+                    start_salt + i,
+                    &mut result,
+                    1,
+                    num_iterations,
+                    &mut [H256::zero()],
+                );
                 result
             })
             .collect::<Vec<H256>>()
