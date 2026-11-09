@@ -41,7 +41,13 @@ pub fn compute_entropy_chunk(
     out_entropy_chunk.clear();
     // Phase 1: sequential hashing
     for _i in 0..(chunk_size / SHA_HASH_SIZE) {
-        previous_segment = sha::sha256(&previous_segment);
+        // Not the one-shot `sha::sha256`: in OpenSSL 3 that is `EVP_Q_digest(.., "SHA256", ..)`,
+        // which looks the digest up by name in the shared provider store on every call. Across
+        // packing threads that lookup contends and stops scaling past a few threads (Phase 1 ran
+        // ~34x slower on 32 threads). `Sha256::new()` (SHA256_Init) keeps no shared state.
+        let mut hasher = sha::Sha256::new();
+        hasher.update(&previous_segment);
+        previous_segment = hasher.finish();
         for j in 0..SHA_HASH_SIZE {
             out_entropy_chunk.push(previous_segment[j]); // inserting in [i * SHA_HASH_SIZE + j] entropy_chunk vector
         }
