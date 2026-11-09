@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794254568741,
+  "lastUpdate": 1794255856187,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -22507,6 +22507,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000117,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "eb71b337105c80ab5ca8baedd383b6b15751459a",
+          "message": "fix(multiversion-tests): exec sleep in the stub node script (#1793)\n\n* fix(multiversion-tests): exec sleep in the stub node script\n\nThe stub script ran `sleep 3600` under /bin/sh. dash forks `sleep`\ninstead of exec'ing it. When `respawn` sent SIGKILL to the shell after\nthe fork, the orphaned `sleep` kept the stdout/stderr pipes open, and\nthe log drain in `respawn` waited until `sleep` exited, one hour later.\nThe test passed only when `respawn` won the race against the fork, so\nunder full-suite load it timed out.\n\n`exec sleep 3600` makes `sleep` the child process, so the kill closes\nthe pipes.\n\n* test(multiversion-tests): respawn only after the stub runs sleep\n\nThe respawn test passed with the forking stub whenever the kill landed\nbefore the shell forked `sleep`, so it did not guard the fix. The test\nnow waits until the child's /proc comm is `sleep` before it respawns,\nand bounds `respawn` at 30s. A stub that forks instead of exec'ing now\nfails in 10s with a clear message instead of hanging to the nextest\ntimeout.\n\n* test(multiversion-tests): run the respawn test on Linux only\n\nThe readiness check reads /proc/<pid>/comm. Without /proc (macOS) it\nretried until its timeout and failed the test.",
+          "timestamp": "2026-11-09T20:03:55Z",
+          "tree_id": "b7af8fb565daa89f13955abebf5283ac926d18ec",
+          "url": "https://github.com/Irys-xyz/irys/commit/eb71b337105c80ab5ca8baedd383b6b15751459a"
+        },
+        "date": 1794255854705,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015757,
+            "range": "± 0.000724",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.154542,
+            "range": "± 0.002894",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.565792,
+            "range": "± 0.117493",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.570435,
+            "range": "± 0.100972",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.069388,
+            "range": "± 0.001738",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 689.154201,
+            "range": "± 10.058179",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 865.396919,
+            "range": "± 11.567409",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120948,
+            "range": "± 0.002007",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1223.778748,
+            "range": "± 68.955804",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1704.640311,
+            "range": "± 137.486978",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.094799,
+            "range": "± 0.032009",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 155.255741,
+            "range": "± 18.657199",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 202.864079,
+            "range": "± 21.221836",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000125,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
