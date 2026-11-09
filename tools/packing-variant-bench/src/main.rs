@@ -420,7 +420,7 @@ fn run_tune(args: &Args, logical: usize, report: &mut Report) {
     let id = |k: u64| fixed_id(OFFSET_START + k);
 
     for &v in &args.variants {
-        let key = autotune::cpu_key(v, threads);
+        let key = autotune::cpu_key(v, threads, args.iterations);
         let best = match cache.get(&key) {
             Some(best) if !args.retune => {
                 println!("[tune] cpu (cached): {key}\n[tune]   -> {best}");
@@ -472,7 +472,7 @@ fn tune_gpu(
 
     gpu::set_chunk_id_prefix(&fixed_id(OFFSET_START))?;
     let id = |k: u64| fixed_id(k);
-    let key = autotune::gpu_key(&gpu::device_info()?, v);
+    let key = autotune::gpu_key(&gpu::device_info()?, v, args.iterations, args.slice);
     let cached = cache.get(&key).filter(|_| !args.retune);
     let (best, configs) = match cached {
         Some(best) => {

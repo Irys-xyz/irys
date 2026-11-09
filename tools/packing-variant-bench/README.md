@@ -150,7 +150,8 @@ iteration count. A single short run over-weights fixed per-chunk costs, and runs
 iterations are not yet on the line (AVX-512 A at 24k costs ~25% more per chunk than the fit
 predicts). Choices are cached in `$XDG_CACHE_HOME/packing-variant-bench/tune.json`, keyed by CPU brand
 string, available extensions, thread count and `PVB_CPU_DISABLE` (CPU), or SM count, compute
-capability, VRAM and driver version (GPU). `--retune` ignores the cache; `--confirm` runs the choice
+capability, VRAM, driver version and `--slice` (GPU), plus the variant and target iteration count.
+Targets below 8192 iterations are predicted at 8192 (Phase 1 always runs in full). `--retune` ignores the cache; `--confirm` runs the choice
 at full length. CPU tuning takes ~1–2 min (1 s warm-up per candidate); GPU tuning ~20 s.
 
 Results (32 threads, A / B, chunks/s at 1M iterations, predicted → confirmed):

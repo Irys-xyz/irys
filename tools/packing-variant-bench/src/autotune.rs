@@ -26,7 +26,9 @@ use std::{collections::BTreeMap, path::Path};
 pub const CALIBRATION_ITERATIONS: [u32; 2] = [8192 + 48_000, 8192 + 96_000];
 
 /// Throughput predicted at `target` iterations from `chunks` timed at the two calibration lengths.
+/// Below 8192 iterations a chunk still runs the whole of Phase 1, so `target` is clamped to it.
 fn predict(chunks: u64, secs: [f64; 2], target: u32) -> f64 {
+    let target = target.max(8192);
     let [i0, i1] = CALIBRATION_ITERATIONS.map(f64::from);
     let per_chunk = secs.map(|t| t / chunks as f64);
     let slope = (per_chunk[1] - per_chunk[0]) / (i1 - i0);
@@ -118,14 +120,16 @@ pub fn cpu_brand() -> String {
     "unknown-cpu".to_string()
 }
 
-pub fn cpu_key(v: Variant, threads: usize) -> String {
+/// Cache key for a CPU choice. Includes the target iterations: the ranking is a prediction at
+/// that count, and fixed per-chunk costs weigh differently at e.g. 1000 and 1M iterations.
+pub fn cpu_key(v: Variant, threads: usize, target_iterations: u32) -> String {
     let avail: Vec<&str> = CpuKind::ALL
         .iter()
         .filter(|k| k.available())
         .map(|k| k.name())
         .collect();
     format!(
-        "cpu | {} | threads={threads} | variant={} | available={} | PVB_CPU_DISABLE={}",
+        "cpu | {} | threads={threads} | variant={} | iterations={target_iterations} | available={} | PVB_CPU_DISABLE={}",
         cpu_brand(),
         v.name(),
         avail.join(","),
@@ -141,7 +145,7 @@ pub fn tune_cpu(
     id: &(dyn Fn(u64) -> ChunkId + Sync),
 ) -> Choice {
     let mut choice = Choice {
-        key: cpu_key(v, threads),
+        key: cpu_key(v, threads, target_iterations),
         best: String::new(),
         target_iterations,
         calibration_iterations: CALIBRATION_ITERATIONS,
@@ -199,9 +203,16 @@ impl GpuConfig {
 }
 
 #[cfg(feature = "cuda")]
-pub fn gpu_key(dev: &crate::gpu::DeviceInfo, v: Variant) -> String {
+/// Cache key for a GPU choice: the device, plus the target iterations and Phase 2 launch slice
+/// the candidates were ranked at.
+pub fn gpu_key(
+    dev: &crate::gpu::DeviceInfo,
+    v: Variant,
+    target_iterations: u32,
+    slice: u32,
+) -> String {
     format!(
-        "gpu | sm={} cc={} mem={}MiB driver={} | variant={}",
+        "gpu | sm={} cc={} mem={}MiB driver={} | variant={} | iterations={target_iterations} | slice={slice}",
         dev.sm_count,
         dev.compute_capability,
         dev.mem_total_bytes >> 20,
@@ -247,7 +258,7 @@ pub fn tune_gpu(
     }
 
     let mut choice = Choice {
-        key: gpu_key(&dev, v),
+        key: gpu_key(&dev, v, target_iterations, slice),
         best: String::new(),
         target_iterations,
         calibration_iterations: CALIBRATION_ITERATIONS,
