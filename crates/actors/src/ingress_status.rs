@@ -5,7 +5,9 @@
 //! stored for one data root and names the miner each stored proof belongs to.
 
 use crate::block_producer::ledger_expiry::resolve_promotion_heights_on_branch;
-use crate::block_validation::{clamped_assigned_requirement, submit_assignees_for_range};
+use crate::block_validation::{
+    clamped_assigned_requirement, required_ingress_proofs_total, submit_assignees_for_range,
+};
 use crate::tx_selector::helpers::{
     anchor_valid_ingress_proofs, dedup_ingress_proofs_by_signer, keep_first_per_address,
     min_ingress_proof_anchor_height, unexpired_ingress_proofs,
@@ -201,11 +203,11 @@ pub(crate) fn assess_submit_ingress_proofs(
             .number_of_ingress_proofs_from_assignees_at(query.requirement_timestamp),
     );
     Ok(IngressProofAssessment {
-        required_total: u64::from(
-            query
-                .config
-                .number_of_ingress_proofs_total_at(query.requirement_timestamp),
-        ),
+        required_total: u64::from(required_ingress_proofs_total(
+            &query.config.consensus.hardforks,
+            query.requirement_timestamp,
+            query.epoch_snapshot,
+        )),
         required_assigned: clamped_assigned_requirement(configured_assigned, assigned_miners)
             as u64,
         signers,
@@ -547,6 +549,41 @@ mod tests {
         write_submit_range(&harness.db, &header, 10, 25)?;
         let still_empty = harness.assess(&header, &[], TS)?;
         assert_eq!(still_empty, empty);
+        Ok(())
+    }
+
+    /// From Delta the total requirement is clamped to the active stakes: with
+    /// 2 stakes and a configured total of 6, two eligible proofs meet it.
+    #[test]
+    fn ingress_status_total_clamped_to_active_stakes_from_delta() -> eyre::Result<()> {
+        let node = NodeConfig::testing().with_consensus(|consensus| {
+            consensus.hardforks.frontier.number_of_ingress_proofs_total = 6;
+            consensus.hardforks.delta = Some(irys_types::hardfork_config::Delta {
+                activation_timestamp: UnixTimestamp::from_secs(0),
+                initial_slots_per_new_ledger:
+                    irys_types::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
+                capacity_chunk_reward_percent:
+                    irys_types::hardfork_config::Delta::default_capacity_chunk_reward_percent(),
+                ingress_proof_reward_pool_percent:
+                    irys_types::hardfork_config::Delta::default_ingress_proof_reward_pool_percent(),
+            });
+        });
+        let mut harness = Harness::open(Config::new_with_random_peer_id(node), 0, 5)?;
+        let data_root = H256::random();
+        let header = data_header(H256::random(), data_root);
+        write_submit_range(&harness.db, &header, 10, 25)?;
+        let anchor = harness.anchor_at(0);
+        let mut proofs = Vec::new();
+        for marker in 1_u8..=2 {
+            let signer = harness.signer();
+            harness.stake(signer.address());
+            proofs.push(harness.proof(&signer, data_root, anchor, marker)?);
+        }
+
+        let got = harness.assess(&header, &proofs, TS)?;
+        assert_eq!(got.required_total, 2, "6 clamps to the 2 active stakes");
+        assert_eq!(got.eligible(), 2);
+        assert!(got.proof_requirements_met());
         Ok(())
     }
 

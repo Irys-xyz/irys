@@ -1704,8 +1704,9 @@ fn expected_ledger_total_chunks(
 }
 
 /// Reject a publish ledger whose flat ingress-proof list length is not
-/// `publish_tx_count * number_of_ingress_proofs_total` (N), or whose
-/// peer-supplied `required_proof_count` is not N.
+/// `publish_tx_count * N`, or whose peer-supplied `required_proof_count` is
+/// not N. N is [`required_ingress_proofs_total`]: the configured total clamped
+/// to the parent epoch's active stakes.
 ///
 /// `ShadowTxGenerator` slices the flat proofs list as `[i*N .. i*N+N]` for each
 /// publish tx `i`. A short/mis-sized peer-supplied list is a consensus-invalid
@@ -1801,7 +1802,11 @@ pub async fn prevalidate_block(
     publish_ingress_proof_count_is_valid(
         publish_ledger,
         publish_tx_count,
-        config.number_of_ingress_proofs_total_at(block.timestamp_secs()),
+        required_ingress_proofs_total(
+            &config.consensus.hardforks,
+            block.timestamp_secs(),
+            &parent_epoch_snapshot,
+        ),
     )?;
 
     debug!(
@@ -7277,8 +7282,11 @@ pub async fn data_txs_are_valid(
         // publish_tx and the number of proofs_per_tx
         let expected_proof_count = {
             let timestamp_secs = block.timestamp_secs();
-            let number_of_ingress_proofs_total =
-                config.number_of_ingress_proofs_total_at(timestamp_secs);
+            let number_of_ingress_proofs_total = required_ingress_proofs_total(
+                &config.consensus.hardforks,
+                timestamp_secs,
+                &parent_epoch_snapshot,
+            );
             publish_txs.len() * usize::from(number_of_ingress_proofs_total)
         };
 
@@ -7569,8 +7577,11 @@ pub async fn data_txs_are_valid(
             }
 
             let timestamp_secs = block.timestamp_secs();
-            let number_of_ingress_proofs_total =
-                config.number_of_ingress_proofs_total_at(timestamp_secs);
+            let number_of_ingress_proofs_total = required_ingress_proofs_total(
+                &config.consensus.hardforks,
+                timestamp_secs,
+                &parent_epoch_snapshot,
+            );
             if tx_proofs.len() != usize::from(number_of_ingress_proofs_total) {
                 return Err(PreValidationError::IngressProofCountMismatch {
                     expected: usize::from(number_of_ingress_proofs_total),
@@ -7969,6 +7980,33 @@ pub(crate) fn submit_assignees_for_range(
 /// protocol can require X assigned proofs, but with fewer than X assignees it
 /// still has to promote. Validation, the tx selector and the ingress-status
 /// route all take the requirement from here.
+/// Ingress proofs each promoted tx carries in a block at `timestamp`.
+///
+/// Before Delta this is the configured total. From Delta it is clamped to the
+/// number of `Active` stakes in `epoch_snapshot`, and never below 1: proof
+/// signers are deduplicated and must be staked, so a network with fewer stakes
+/// than the configured total could never promote. Same idea as
+/// [`clamped_assigned_requirement`] for assignees.
+///
+/// Block production, the tx selector, prevalidation, `data_txs_are_valid`,
+/// the shadow-tx generator, and the ingress-status route all size proofs with
+/// this, each from the parent block's epoch snapshot and the block's own
+/// timestamp, so they agree on every block.
+pub(crate) fn required_ingress_proofs_total(
+    hardforks: &irys_types::hardfork_config::IrysHardforkConfig,
+    timestamp: UnixTimestamp,
+    epoch_snapshot: &EpochSnapshot,
+) -> u8 {
+    let configured = hardforks.number_of_ingress_proofs_total_at(timestamp);
+    match hardforks.delta_for_block(timestamp) {
+        irys_types::hardfork_config::Activation::Active(_) => {
+            let stakes = u8::try_from(epoch_snapshot.active_stake_count()).unwrap_or(u8::MAX);
+            configured.min(stakes.max(1))
+        }
+        irys_types::hardfork_config::Activation::Inactive => configured,
+    }
+}
+
 pub(crate) fn clamped_assigned_requirement(expected: usize, assigned_miners: usize) -> usize {
     expected.min(assigned_miners)
 }
@@ -8112,6 +8150,63 @@ pub fn get_assigned_ingress_proofs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot_with_stakes(statuses: &[irys_types::CommitmentStatus]) -> EpochSnapshot {
+        let mut snapshot = EpochSnapshot::default();
+        for status in statuses {
+            let address = IrysAddress::random();
+            snapshot.commitment_state.stake_commitments.insert(
+                address,
+                irys_domain::StakeEntry {
+                    id: H256::random(),
+                    commitment_status: *status,
+                    signer: address,
+                    amount: U256::from(1),
+                    reward_address: address,
+                },
+            );
+        }
+        snapshot
+    }
+
+    /// Before Delta the configured total stands. From Delta it is clamped to
+    /// the `Active` stakes, never below 1 and never above the configured total.
+    #[test]
+    fn required_ingress_proofs_total_clamps_to_active_stakes_from_delta() {
+        use irys_types::CommitmentStatus::{Active, Inactive, Pending};
+        let mut consensus = ConsensusConfig::testing();
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 10;
+        consensus.hardforks.delta = Some(irys_types::hardfork_config::Delta {
+            activation_timestamp: UnixTimestamp::from_secs(1_000),
+            initial_slots_per_new_ledger:
+                irys_types::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent:
+                irys_types::hardfork_config::Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent:
+                irys_types::hardfork_config::Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let hardforks = &consensus.hardforks;
+        let before = UnixTimestamp::from_secs(999);
+        let after = UnixTimestamp::from_secs(1_000);
+
+        let four = snapshot_with_stakes(&[Active, Active, Active, Active, Pending, Inactive]);
+        assert_eq!(required_ingress_proofs_total(hardforks, before, &four), 10);
+        assert_eq!(
+            required_ingress_proofs_total(hardforks, after, &four),
+            4,
+            "only Active stakes count"
+        );
+        assert_eq!(
+            required_ingress_proofs_total(hardforks, after, &snapshot_with_stakes(&[])),
+            1,
+            "never below one proof"
+        );
+        assert_eq!(
+            required_ingress_proofs_total(hardforks, after, &snapshot_with_stakes(&[Active; 12])),
+            10,
+            "never above the configured total"
+        );
+    }
 
     use irys_config::StorageSubmodulesConfig;
     use irys_database::DatabaseProviderTestExt as _;
