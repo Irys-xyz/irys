@@ -1058,6 +1058,26 @@ mod tests {
         EpochSnapshot::default()
     }
 
+    /// `snapshot` plus `count` active stakes that sign no proof, so a test's
+    /// configured ingress-proof total is not clamped below what it exercises.
+    fn with_bystander_stakes(mut snapshot: EpochSnapshot, count: usize) -> EpochSnapshot {
+        use irys_domain::StakeEntry;
+        for _ in 0..count {
+            let address = IrysAddress::random();
+            snapshot.commitment_state.stake_commitments.insert(
+                address,
+                StakeEntry {
+                    id: H256::random(),
+                    commitment_status: CommitmentStatus::Active,
+                    signer: address,
+                    amount: U256::from(1000),
+                    reward_address: address,
+                },
+            );
+        }
+        snapshot
+    }
+
     /// Creates an epoch snapshot with stake entries where reward_address can differ from signer.
     /// miners_with_rewards is a slice of (signer, reward_address) tuples.
     fn test_epoch_snapshot_with_reward_addresses(
@@ -1917,12 +1937,16 @@ mod tests {
         let reward_dest2 = IrysAddress::random(); // Different from signer2
         // signer3 keeps reward_address = signer (tests mixed scenario)
 
-        // Create epoch snapshot with reward redirection
-        let epoch_snapshot = test_epoch_snapshot_with_reward_addresses(&[
-            (proof_signer1.address(), reward_dest1),
-            (proof_signer2.address(), reward_dest2),
-            (proof_signer3.address(), proof_signer3.address()), // No redirection
-        ]);
+        // Create epoch snapshot with reward redirection. One bystander stake
+        // keeps N at 4.
+        let epoch_snapshot = with_bystander_stakes(
+            test_epoch_snapshot_with_reward_addresses(&[
+                (proof_signer1.address(), reward_dest1),
+                (proof_signer2.address(), reward_dest2),
+                (proof_signer3.address(), proof_signer3.address()), // No redirection
+            ]),
+            1,
+        );
 
         // Build expected shadow txs with redirected addresses:
         // - signer1's reward → reward_dest1
@@ -2592,7 +2616,8 @@ mod tests {
         let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000_u64);
         let solution_hash = H256::zero();
-        let epoch_snapshot = test_epoch_snapshot();
+        // Three stakes, so N stays 3 and one proof is short.
+        let epoch_snapshot = with_bystander_stakes(test_epoch_snapshot(), 3);
 
         // `accumulate_ingress_rewards_for_init` runs inside `new`, so the OOB
         // slice would panic here on pre-fix code. Post-fix it is a clean Err.
@@ -2634,14 +2659,13 @@ mod tests {
         );
     }
 
-    /// From Delta the proof list is sliced by the total clamped to the active
-    /// stakes. Configured 3, one active stake: one proof per tx is a complete
-    /// list, and that proof gets the whole reward pool.
+    /// The proof list is sliced by the total clamped to the active stakes.
+    /// Configured 3, one active stake: one proof per tx is a complete list,
+    /// and that proof gets the whole reward pool.
     #[test]
-    fn publish_ingress_slice_uses_the_stake_clamped_total_from_delta() {
+    fn publish_ingress_slice_uses_the_stake_clamped_total() {
         let mut config = ConsensusConfig::testing();
         config.hardforks.frontier.number_of_ingress_proofs_total = 3;
-        config_with_delta_active(&mut config);
         let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let term_fee = U256::from(100_000_u64);
         let perm_fee = U256::from(10_000_000_u64);

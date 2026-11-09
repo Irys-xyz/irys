@@ -55,7 +55,11 @@ pub struct IrysHardforkConfig {
 /// These are the parameters active from block 0.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FrontierParams {
-    /// Number of ingress proofs required for promotion
+    /// Number of ingress proofs required for promotion. Each promoted tx
+    /// carries this many, clamped to the number of `Active` stakes in the
+    /// parent epoch snapshot (at least 1): proof signers are distinct stakers,
+    /// so a network with fewer stakes could never promote. The reward pool is
+    /// split across the proofs carried, so the clamp does not change fees.
     pub number_of_ingress_proofs_total: u8,
 
     /// Number of ingress proofs required from assignees
@@ -164,11 +168,6 @@ impl Cascade {
 ///   `immediate_tx_inclusion_reward_percent` x `term_fee` for each proof. The required
 ///   `perm_fee` and the fee split use this pool. See
 ///   `ConsensusConfig::ingress_proof_reward_pool_at`.
-/// - Each promoted tx carries `number_of_ingress_proofs_total` proofs clamped to
-///   the number of `Active` stakes in the parent epoch snapshot (at least 1).
-///   Proof signers are distinct stakers, so a network with fewer stakes than the
-///   configured total could never promote. The reward pool is split across the
-///   proofs carried, so the clamp does not change what the uploader pays.
 ///
 /// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
 /// but the epoch block's own header cannot list it: the producer derives the

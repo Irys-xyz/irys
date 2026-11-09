@@ -552,21 +552,12 @@ mod tests {
         Ok(())
     }
 
-    /// From Delta the total requirement is clamped to the active stakes: with
-    /// 2 stakes and a configured total of 6, two eligible proofs meet it.
+    /// The total requirement is clamped to the active stakes: with 2 stakes and
+    /// a configured total of 6, two eligible proofs meet it.
     #[test]
-    fn ingress_status_total_clamped_to_active_stakes_from_delta() -> eyre::Result<()> {
+    fn ingress_status_total_clamped_to_active_stakes() -> eyre::Result<()> {
         let node = NodeConfig::testing().with_consensus(|consensus| {
             consensus.hardforks.frontier.number_of_ingress_proofs_total = 6;
-            consensus.hardforks.delta = Some(irys_types::hardfork_config::Delta {
-                activation_timestamp: UnixTimestamp::from_secs(0),
-                initial_slots_per_new_ledger:
-                    irys_types::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
-                capacity_chunk_reward_percent:
-                    irys_types::hardfork_config::Delta::default_capacity_chunk_reward_percent(),
-                ingress_proof_reward_pool_percent:
-                    irys_types::hardfork_config::Delta::default_ingress_proof_reward_pool_percent(),
-            });
         });
         let mut harness = Harness::open(Config::new_with_random_peer_id(node), 0, 5)?;
         let data_root = H256::random();
@@ -615,6 +606,10 @@ mod tests {
         }
         let unstaked = harness.signer();
         proofs.push(harness.proof(&unstaked, data_root, anchor, 5)?);
+        // Three stakes that sign nothing keep the total at 6.
+        for _ in 0..3 {
+            harness.stake(IrysAddress::random());
+        }
 
         let got = harness.assess(&header, &proofs, TS)?;
         assert_eq!(got.observed(), 5);

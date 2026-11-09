@@ -21,9 +21,10 @@ async fn spiky_heavy3_reanchor_duplicate_ingress_proof_signers() -> eyre::Result
 
     // Configure consensus for short epochs and low expiry depth.
     // number_of_ingress_proofs_total = 3 is critical: the test only has two distinct
-    // signers (genesis + peer), so requiring 3 proofs means the threshold can only be
-    // met if reanchored proofs are counted — verifying that reanchoring does not produce
-    // duplicate signer entries that would inflate the count.
+    // proof signers (genesis + peer), so requiring 3 proofs means the threshold can only
+    // be met if reanchored proofs are counted — verifying that reanchoring does not produce
+    // duplicate signer entries that would inflate the count. The total is clamped to the
+    // active stakes, so a third staked signer that signs nothing keeps it at 3.
     let mut genesis_config = NodeConfig::testing()
         .with_consensus(|c| {
             c.chunk_size = 32;
@@ -35,9 +36,10 @@ async fn spiky_heavy3_reanchor_duplicate_ingress_proof_signers() -> eyre::Result
         })
         .with_genesis_peer_discovery_timeout(1000);
 
-    // Create and fund peer signer
+    // Create and fund peer signer, and a bystander that only stakes
     let peer_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+    let bystander = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_signer, &bystander]);
 
     // Start genesis node
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
@@ -47,9 +49,23 @@ async fn spiky_heavy3_reanchor_duplicate_ingress_proof_signers() -> eyre::Result
         .testing_peer_with_assignments(&peer_signer)
         .await?;
 
-    // Mine through 2 epochs for partition assignment
+    genesis_node
+        .post_stake_commitment_with_signer(&bystander)
+        .await?;
+
+    // Mine through 2 epochs for partition assignment and the bystander stake
     genesis_node.mine_until_next_epoch().await?;
     genesis_node.mine_until_next_epoch().await?;
+    assert_eq!(
+        genesis_node
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .active_stake_count(),
+        3,
+        "genesis, peer, and bystander stakes must be active"
+    );
 
     let current_height = genesis_node.get_canonical_chain_height().await;
     peer_node

@@ -7980,13 +7980,11 @@ pub(crate) fn submit_assignees_for_range(
 /// protocol can require X assigned proofs, but with fewer than X assignees it
 /// still has to promote. Validation, the tx selector and the ingress-status
 /// route all take the requirement from here.
-/// Ingress proofs each promoted tx carries in a block at `timestamp`.
-///
-/// Before Delta this is the configured total. From Delta it is clamped to the
-/// number of `Active` stakes in `epoch_snapshot`, and never below 1: proof
-/// signers are deduplicated and must be staked, so a network with fewer stakes
-/// than the configured total could never promote. Same idea as
-/// [`clamped_assigned_requirement`] for assignees.
+/// Ingress proofs each promoted tx carries in a block at `timestamp`: the
+/// configured total clamped to the number of `Active` stakes in
+/// `epoch_snapshot`, and never below 1. Proof signers are deduplicated and must
+/// be staked, so a network with fewer stakes than the configured total could
+/// never promote. Same idea as [`clamped_assigned_requirement`] for assignees.
 ///
 /// Block production, the tx selector, prevalidation, `data_txs_are_valid`,
 /// the shadow-tx generator, and the ingress-status route all size proofs with
@@ -7998,13 +7996,8 @@ pub(crate) fn required_ingress_proofs_total(
     epoch_snapshot: &EpochSnapshot,
 ) -> u8 {
     let configured = hardforks.number_of_ingress_proofs_total_at(timestamp);
-    match hardforks.delta_for_block(timestamp) {
-        irys_types::hardfork_config::Activation::Active(_) => {
-            let stakes = u8::try_from(epoch_snapshot.active_stake_count()).unwrap_or(u8::MAX);
-            configured.min(stakes.max(1))
-        }
-        irys_types::hardfork_config::Activation::Inactive => configured,
-    }
+    let stakes = u8::try_from(epoch_snapshot.active_stake_count()).unwrap_or(u8::MAX);
+    configured.min(stakes.max(1))
 }
 
 pub(crate) fn clamped_assigned_requirement(expected: usize, assigned_miners: usize) -> usize {
@@ -8169,40 +8162,29 @@ mod tests {
         snapshot
     }
 
-    /// Before Delta the configured total stands. From Delta it is clamped to
-    /// the `Active` stakes, never below 1 and never above the configured total.
+    /// The configured total is clamped to the `Active` stakes, never below 1
+    /// and never above the configured total.
     #[test]
-    fn required_ingress_proofs_total_clamps_to_active_stakes_from_delta() {
+    fn required_ingress_proofs_total_clamps_to_active_stakes() {
         use irys_types::CommitmentStatus::{Active, Inactive, Pending};
         let mut consensus = ConsensusConfig::testing();
         consensus.hardforks.frontier.number_of_ingress_proofs_total = 10;
-        consensus.hardforks.delta = Some(irys_types::hardfork_config::Delta {
-            activation_timestamp: UnixTimestamp::from_secs(1_000),
-            initial_slots_per_new_ledger:
-                irys_types::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
-            capacity_chunk_reward_percent:
-                irys_types::hardfork_config::Delta::default_capacity_chunk_reward_percent(),
-            ingress_proof_reward_pool_percent:
-                irys_types::hardfork_config::Delta::default_ingress_proof_reward_pool_percent(),
-        });
         let hardforks = &consensus.hardforks;
-        let before = UnixTimestamp::from_secs(999);
-        let after = UnixTimestamp::from_secs(1_000);
+        let at = UnixTimestamp::from_secs(1_000);
 
         let four = snapshot_with_stakes(&[Active, Active, Active, Active, Pending, Inactive]);
-        assert_eq!(required_ingress_proofs_total(hardforks, before, &four), 10);
         assert_eq!(
-            required_ingress_proofs_total(hardforks, after, &four),
+            required_ingress_proofs_total(hardforks, at, &four),
             4,
             "only Active stakes count"
         );
         assert_eq!(
-            required_ingress_proofs_total(hardforks, after, &snapshot_with_stakes(&[])),
+            required_ingress_proofs_total(hardforks, at, &snapshot_with_stakes(&[])),
             1,
             "never below one proof"
         );
         assert_eq!(
-            required_ingress_proofs_total(hardforks, after, &snapshot_with_stakes(&[Active; 12])),
+            required_ingress_proofs_total(hardforks, at, &snapshot_with_stakes(&[Active; 12])),
             10,
             "never above the configured total"
         );
