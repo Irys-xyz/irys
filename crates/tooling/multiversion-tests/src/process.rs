@@ -348,7 +348,10 @@ mod tests {
     static SHARED_STUB: LazyLock<StubBinary> = LazyLock::new(|| {
         let dir = TempDirBuilder::new().prefix("stub-bin-").build();
         let script_path = dir.path().join("stub-node");
-        std::fs::write(&script_path, "#!/bin/sh\nsleep 3600\n").unwrap();
+        // `exec` makes `sleep` the child process. Without it, some shells fork
+        // `sleep`, and a SIGKILL to the shell leaves `sleep` holding the
+        // stdout/stderr pipes open, so the log drain in `respawn` never ends.
+        std::fs::write(&script_path, "#!/bin/sh\nexec sleep 3600\n").unwrap();
         std::fs::set_permissions(&script_path, PermissionsExt::from_mode(0o755)).unwrap();
         StubBinary {
             _dir: dir,
