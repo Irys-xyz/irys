@@ -1,5 +1,5 @@
 use crate::vdf_utils::{ReanchorSignals, VdfReanchorGenerationChanged};
-use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
+use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, vdf_sha_pair, warn_mismatches};
 use eyre::{bail, eyre};
 use irys_efficient_sampling::num_recall_ranges_in_partition;
 use irys_types::{
@@ -624,65 +624,102 @@ pub fn vdf_step_batch_is_valid(
     let computed_last_checkpoints: OnceLock<H256List> = OnceLock::new();
     let last_index = batch_steps.len() - 1;
 
-    pool.install(|| {
-        (0..batch_steps.len()).into_par_iter().try_for_each(|i| {
-            let cancel_state = cancel.load(Ordering::Relaxed);
-            if cancel_state == CancelEnum::InvalidStep as u8 {
-                return Err(eyre!(
-                    "One of the previous threads found a mismatch, stopping further calculations"
-                ));
-            }
-            if cancel_state == CancelEnum::Cancelled as u8 {
-                bail!("Cancelled");
-            }
-
-            let previous_step_number = batch_start_step_number - 1 + i as u64;
-            let salt = U256::from(step_number_to_salt_number(config, previous_step_number));
-            let mut seed = if i == 0 {
-                previous_seed
-            } else {
-                batch_steps[i - 1]
-            };
-            if previous_step_number > 0
-                && previous_step_number.is_multiple_of(config.reset_frequency as u64)
-            {
-                info!(
-                    "Applying reset seed {:?} to step number {}",
-                    vdf_info.seed, previous_step_number
-                );
-                seed = apply_reset_seed(seed, vdf_info.seed);
-            }
-            let mut checkpoints = vec![H256::default(); config.num_checkpoints_in_vdf_step];
-            vdf_sha(
-                salt,
-                &mut seed,
-                config.num_checkpoints_in_vdf_step,
-                config.num_iterations_per_checkpoint(),
-                &mut checkpoints,
+    // The salt and starting seed for recomputing step `i` of the batch.
+    let step_input = |i: usize| -> (U256, H256) {
+        let previous_step_number = batch_start_step_number - 1 + i as u64;
+        let salt = U256::from(step_number_to_salt_number(config, previous_step_number));
+        let mut seed = if i == 0 {
+            previous_seed
+        } else {
+            batch_steps[i - 1]
+        };
+        if previous_step_number > 0
+            && previous_step_number.is_multiple_of(config.reset_frequency as u64)
+        {
+            info!(
+                "Applying reset seed {:?} to step number {}",
+                vdf_info.seed, previous_step_number
             );
+            seed = apply_reset_seed(seed, vdf_info.seed);
+        }
+        (salt, seed)
+    };
 
-            if seed != batch_steps[i] {
-                // Unconditional store: a real validation finding takes priority
-                // over any concurrent `Cancelled` state. The block is invalid
-                // regardless of whether shutdown/preemption also asked us to
-                // stop — cancellation is a coordination signal and must never
-                // be allowed to mask a deterministic protocol violation.
-                cancel.store(CancelEnum::InvalidStep as u8, Ordering::Relaxed);
-                return Err(eyre!(
-                    "VDF step {} is invalid! Expected: {:?}, got: {:?}",
-                    previous_step_number,
-                    batch_steps[i],
-                    seed
-                ));
-            }
+    // Checks the recomputed step `i` against the block.
+    let check_step = |i: usize, seed: H256, checkpoints: Vec<H256>| -> eyre::Result<()> {
+        let previous_step_number = batch_start_step_number - 1 + i as u64;
+        if seed != batch_steps[i] {
+            // Unconditional store: a real validation finding takes priority
+            // over any concurrent `Cancelled` state. The block is invalid
+            // regardless of whether shutdown/preemption also asked us to
+            // stop — cancellation is a coordination signal and must never
+            // be allowed to mask a deterministic protocol violation.
+            cancel.store(CancelEnum::InvalidStep as u8, Ordering::Relaxed);
+            return Err(eyre!(
+                "VDF step {} is invalid! Expected: {:?}, got: {:?}",
+                previous_step_number,
+                batch_steps[i],
+                seed
+            ));
+        }
 
-            if verify_last_step_checkpoints && i == last_index {
-                // Infallible: only one thread reaches this branch.
-                let _ = computed_last_checkpoints.set(H256List(checkpoints));
-            }
+        if verify_last_step_checkpoints && i == last_index {
+            // Infallible: only one thread reaches this branch.
+            let _ = computed_last_checkpoints.set(H256List(checkpoints));
+        }
 
-            Ok(())
-        })
+        Ok(())
+    };
+
+    let num_checkpoints = config.num_checkpoints_in_vdf_step;
+    let num_iterations = config.num_iterations_per_checkpoint();
+    // Each step is an independent chain; once there are more steps than
+    // threads, two steps per task interleave on the SHA unit.
+    let steps_per_task = if crate::interleave_chains(pool, batch_steps.len()) {
+        2
+    } else {
+        1
+    };
+    pool.install(|| {
+        (0..batch_steps.len().div_ceil(steps_per_task))
+            .into_par_iter()
+            .try_for_each(|task_idx| {
+                let cancel_state = cancel.load(Ordering::Relaxed);
+                if cancel_state == CancelEnum::InvalidStep as u8 {
+                    return Err(eyre!(
+                        "One of the previous threads found a mismatch, stopping further calculations"
+                    ));
+                }
+                if cancel_state == CancelEnum::Cancelled as u8 {
+                    bail!("Cancelled");
+                }
+
+                let i = task_idx * steps_per_task;
+                let (salt, mut seed) = step_input(i);
+                let mut checkpoints = vec![H256::default(); num_checkpoints];
+                if steps_per_task == 2 && i + 1 < batch_steps.len() {
+                    let (next_salt, mut next_seed) = step_input(i + 1);
+                    let mut next_checkpoints = vec![H256::default(); num_checkpoints];
+                    vdf_sha_pair(
+                        [salt, next_salt],
+                        [&mut seed, &mut next_seed],
+                        num_checkpoints,
+                        num_iterations,
+                        [&mut checkpoints, &mut next_checkpoints],
+                    );
+                    check_step(i, seed, checkpoints)?;
+                    check_step(i + 1, next_seed, next_checkpoints)
+                } else {
+                    vdf_sha(
+                        salt,
+                        &mut seed,
+                        num_checkpoints,
+                        num_iterations,
+                        &mut checkpoints,
+                    );
+                    check_step(i, seed, checkpoints)
+                }
+            })
     })?;
 
     if verify_last_step_checkpoints {
@@ -891,6 +928,105 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "Cancellation took too long: {:?}",
             elapsed
+        );
+    }
+
+    /// Step validation hashes one or two steps per task depending on the pool
+    /// size (see `crate::interleave_chains`). Every pool size must accept the
+    /// steps, and reject a corrupted step in either slot of a pair, the odd
+    /// last step, or the last step's checkpoints. 7 steps across reset
+    /// boundaries 3 and 6; steps come from the `sha2::compress256` oracle.
+    #[rstest::rstest]
+    #[case::one_thread(1)]
+    #[case::two_threads(2)]
+    #[case::three_threads(3)]
+    #[case::thread_per_step(8)]
+    fn step_batch_validation_across_pool_sizes(#[case] threads: usize) {
+        let mut node_config = NodeConfig::testing();
+        let vdf = &mut node_config.consensus.get_mut().vdf;
+        vdf.sha_1s_difficulty = 25 * 5;
+        vdf.num_checkpoints_in_vdf_step = 25;
+        vdf.reset_frequency = 3;
+        let config = Config::new_with_random_peer_id(node_config).vdf.clone();
+        let reset_seed = H256::repeat_byte(0x13);
+        let prev_output = H256::repeat_byte(0x42);
+
+        let num_steps = 7_usize;
+        let mut steps = Vec::new();
+        let mut last_checkpoints = Vec::new();
+        let mut seed = prev_output;
+        for i in 0..num_steps as u64 {
+            if i > 0 && i.is_multiple_of(config.reset_frequency as u64) {
+                seed = apply_reset_seed(seed, reset_seed);
+            }
+            let salt = U256::from(step_number_to_salt_number(&config, i));
+            let mut checkpoints = vec![H256::zero(); 25];
+            crate::vdf_sha_compress256(
+                salt,
+                &mut seed,
+                25,
+                config.num_iterations_per_checkpoint(),
+                &mut checkpoints,
+            );
+            steps.push(seed);
+            last_checkpoints = checkpoints;
+        }
+        let vdf_info = VDFLimiterInfo {
+            output: seed,
+            global_step_number: num_steps as u64,
+            seed: reset_seed,
+            next_seed: reset_seed,
+            prev_output,
+            last_step_checkpoints: H256List(last_checkpoints),
+            steps: H256List(steps),
+            vdf_difficulty: None,
+            next_vdf_difficulty: None,
+        };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        // Only the initial seed is buffered, so every step is recomputed.
+        let vdf_state = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
+            global_step: Arc::new(AtomicU64::new(0)),
+            global_step_from_the_latest_canonical_block: 0,
+            minimum_step_to_keep: 0,
+            capacity: 1000,
+            seeds: VecDeque::from([Seed(prev_output)]),
+            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
+        })));
+        let validate = |info: &VDFLimiterInfo| {
+            vdf_steps_are_valid(
+                &pool,
+                info,
+                &config,
+                &vdf_state,
+                Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+            )
+        };
+
+        validate(&vdf_info).expect("valid steps must pass");
+
+        for index in 0..num_steps {
+            let mut corrupted = vdf_info.clone();
+            corrupted.steps.0[index].0[0] ^= 1;
+            // Step `index` and the step hashed from it both mismatch; either
+            // task may report first and stop the other.
+            let err = validate(&corrupted).expect_err("a corrupted step must fail");
+            let err = err.to_string();
+            assert!(
+                err.contains("is invalid") || err.contains("found a mismatch"),
+                "step {index}: {err}"
+            );
+        }
+
+        let mut corrupted = vdf_info;
+        corrupted.last_step_checkpoints.0[3].0[0] ^= 1;
+        let err = validate(&corrupted).expect_err("corrupted checkpoints must fail");
+        assert!(
+            err.to_string()
+                .contains("last step checkpoints are invalid"),
+            "{err}"
         );
     }
 
