@@ -6787,11 +6787,18 @@ impl SubmoduleWrite for Batch<'_> {
         Ok(())
     }
 
-    fn clear_ledger_data(&mut self) -> eyre::Result<()> {
+    fn clear_ledger_data(
+        &mut self,
+        uninitialized: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<()> {
         for cf in [Cf::DataRoots, Cf::Pending, Cf::Interval, Cf::Content] {
             self.overlay.cleared[cf.index()] = true;
             self.overlay.maps[cf.index()].clear();
             self.overlay.deleted_ranges[cf.index()].clear();
+        }
+        // Content is cleared above, so no offset value is read for its keys.
+        for &(start, end) in uninitialized {
+            self.delete_offset_range(Cf::OffsetMeta, start, end)?;
         }
         Ok(())
     }

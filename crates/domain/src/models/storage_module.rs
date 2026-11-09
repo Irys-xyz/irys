@@ -2500,7 +2500,12 @@ impl StorageModule {
             file.commit()?;
             submodule.db.set_chunk_crc_complete(false)?;
             submodule.crc_complete.store(false, Ordering::SeqCst);
-            submodule.db.update(|tx| tx.clear_ledger_data())?;
+            let spans: Vec<_> = kept
+                .iter()
+                .filter(|(_, kind)| **kind == ChunkType::Uninitialized)
+                .map(|(interval, _)| (interval.start(), interval.end()))
+                .collect();
+            submodule.db.update(|tx| tx.clear_ledger_data(&spans))?;
             #[cfg(test)]
             if FAIL_AFTER_OPEN_LEDGER_RESET.with(|flag| flag.replace(false)) {
                 eyre::bail!("injected failure after the open ledger reset");
@@ -3794,13 +3799,13 @@ impl StorageModule {
         }
     }
 
-    /// Bump the index generation and drop queued bytes. A packed write that
-    /// captured the old generation does not commit. Lock order:
-    /// `pending_writes`, then `entropy_cache`.
-    /// Drop every pending body, proof, and reservation. Returns the offsets
-    /// that had any of them: their bytes on disk may already be a body that
-    /// never reached a durable point, so a reset that keeps labels must not
-    /// keep those offsets.
+    /// Bump the index generation and drop every pending body, proof, and
+    /// reservation. A packed write that captured the old generation does not
+    /// commit. Lock order: `pending_writes`, then `entropy_cache`.
+    ///
+    /// Returns the offsets that had any of them. Their bytes on disk may
+    /// already be a body that never reached a durable point, so a reset that
+    /// keeps labels must not keep those offsets.
     fn clear_pending_for_reset(&self) -> BTreeSet<PartitionChunkOffset> {
         let mut pending = self.pending_writes.write().unwrap();
         let touched: BTreeSet<PartitionChunkOffset> = pending
@@ -3885,7 +3890,7 @@ impl StorageModule {
         // A recall may already have queued a suspect against the old bytes.
         // Confirming it after this clear would judge the wiped module.
         // Repairs belong to those bytes. The next assignment must not repack them.
-        recover_mutex(&self.crc_suspects).clear();
+        let suspects = std::mem::take(&mut *recover_mutex(&self.crc_suspects));
         recover_mutex(&self.crc_repairs).clear();
         recover_mutex(&self.packing_retries).clear();
         self.fail_queued_sweeps();
@@ -3921,9 +3926,6 @@ impl StorageModule {
                 storage_interval
             }
             ResetScope::LedgerData => {
-                for (_, submodule) in self.submodules.iter() {
-                    submodule.db.update(|tx| tx.clear_ledger_data())?;
-                }
                 // Labels change only at a durable point, which needs
                 // `sync_in_progress`. This call holds it, so the snapshot is
                 // current until the swap, and the index pass below does not
@@ -3934,8 +3936,20 @@ impl StorageModule {
                     let end = intervals.last_key_value().unwrap().0.end();
                     (keep_entropy_labels(&intervals, &touched), ii(start, end))
                 };
-                // Proof rows go, entropy checksums stay. Same pass as open.
-                Self::reconcile_presence(&self.submodules, &kept)?;
+                // One range delete per new `Uninitialized` span, no value
+                // read: this holds `sync_in_progress` and, from the
+                // reassignment callers, the assignment write lock.
+                for (submodule_interval, submodule) in self.submodules.iter() {
+                    let spans = Self::uninitialized_spans(&kept, *submodule_interval);
+                    submodule.db.update(|tx| tx.clear_ledger_data(&spans))?;
+                }
+                // Suspects queued against bytes that stay `Entropy` still
+                // name those bytes. The rest were cleared with the old data.
+                recover_mutex(&self.crc_suspects).extend(
+                    suspects
+                        .into_iter()
+                        .filter(|offset| kept.get_at_point(*offset) == Some(&ChunkType::Entropy)),
+                );
                 *self.intervals.write().unwrap() = kept;
                 storage_interval
             }
@@ -10284,11 +10298,6 @@ fn intervals_file_error(path: &Path, action: &str) -> String {
     )
 }
 
-/// Reads and deserializes intervals from storage state file
-///
-/// Loads the stored interval mapping that tracks chunk states.
-/// Expects a JSON-formatted file containing StorageIntervals.
-/// A read or parse failure names `path` and how to reset that module.
 /// What a storage-module reset erases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResetScope {
@@ -10351,6 +10360,11 @@ fn keep_entropy_labels(
     kept
 }
 
+/// Reads and deserializes intervals from storage state file
+///
+/// Loads the stored interval mapping that tracks chunk states.
+/// Expects a JSON-formatted file containing StorageIntervals.
+/// A read or parse failure names `path` and how to reset that module.
 pub fn read_intervals_file(path: &Path) -> eyre::Result<StorageIntervals> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -21534,7 +21548,7 @@ mod tests {
         Ok(())
     }
 
-    /// Arms a failure after the open reset marker and clears it on drop.
+    /// Arms a failure after the open ledger reset and clears it on drop.
     struct OpenLedgerResetFail;
 
     impl OpenLedgerResetFail {
@@ -21550,6 +21564,7 @@ mod tests {
         }
     }
 
+    /// Arms a failure after the open reset marker and clears it on drop.
     struct OpenResetMarkerFail;
 
     impl OpenResetMarkerFail {
@@ -21778,7 +21793,6 @@ mod tests {
         }
     }
 
-    /// One `Data` chunk and one tx row on a fresh module.
     /// Offset that [`seed_data_and_entropy`] packs as entropy.
     const ENTROPY_OFFSET: u32 = 1;
 
@@ -21855,6 +21869,7 @@ mod tests {
         Ok(())
     }
 
+    /// One `Data` chunk and one tx row on a fresh module.
     fn seed_labeled_data(
         config: &Config,
         sub: &Path,
