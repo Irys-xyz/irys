@@ -872,37 +872,6 @@ impl Config {
             );
         }
 
-        // `number_of_ingress_proofs_from_assignees` MUST stay 0 in this codebase
-        // version.  When > 0, the value flows through `get_assigned_ingress_proofs`
-        // (block_validation.rs) where the per-proof intersection loop overwrites
-        // `assigned_miners` on each intersecting proof.  `slot_ranges` is a
-        // `BTreeMap`, so slot order is deterministic, but the result still
-        // follows the order of the proofs in the block.  Validators agree on that
-        // order (the signed block fixes it), but the result depends on the order
-        // the producer chooses.  The fix is a
-        // consensus rule change that must be coordinated with a network
-        // upgrade.  Under all currently-deployed configs the value is 0 and
-        // the path is vacuous.
-        //
-        // When the fix lands and gets activated, REMOVE this guard
-        // (and the matching test in this file).  Until then this assert errs
-        // loudly at startup so a config bump can't silently activate the bug.
-        ensure!(
-            self.consensus
-                .hardforks
-                .frontier
-                .number_of_ingress_proofs_from_assignees
-                == 0,
-            "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({}) must be 0 \
-             until the assigned-miners determinism fix lands — the current `get_assigned_ingress_proofs` \
-             impl derives `assigned_miners` from proof order when \
-             block_range intersects multiple Submit slots",
-            self.consensus
-                .hardforks
-                .frontier
-                .number_of_ingress_proofs_from_assignees,
-        );
-
         Ok(())
     }
 }
@@ -2838,23 +2807,18 @@ mod validate_tests {
         );
     }
 
-    /// Guard for `number_of_ingress_proofs_from_assignees`: the consensus
-    /// rule that consumes this value (`get_assigned_ingress_proofs`) only
-    /// became deterministic once `slot_ranges` switched to a `BTreeMap`.
-    /// Until that fix is gated behind a hardfork activation, the value MUST
-    /// stay `0` everywhere (no nondeterministic path is exercised because
-    /// the caller's clamp zeroes the requirement when the input is 0).
+    /// Assignee proofs are accepted once they fit the total and the slot's
+    /// replica count: `get_assigned_ingress_proofs` no longer depends on proof
+    /// order, so a non-zero value is safe to configure.
     #[test]
-    fn validate_rejects_nonzero_assignee_proofs_on_frontier() {
+    fn validate_accepts_assignee_proofs_within_limits() {
         let cfg = config_with_consensus(|c| {
-            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 1;
+            c.num_partitions_per_slot = crate::storage_pricing::ReplicaCount::new(2);
+            c.hardforks.frontier.number_of_ingress_proofs_total = 3;
+            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 2;
         });
-        let err = cfg.validate().unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("frontier.number_of_ingress_proofs_from_assignees"),
-            "expected frontier guard error, got: {msg}"
-        );
+        cfg.validate()
+            .expect("2 assignee proofs of 3 total with 2 replicas must validate");
     }
 
     #[rstest]

@@ -65,7 +65,7 @@ use reth_db::Database as _;
 use reth_db::transaction::DbTx as _;
 use reth_ethereum_primitives::Block;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     ops::ControlFlow,
     sync::Arc,
     time::Duration,
@@ -7931,6 +7931,39 @@ fn merge_same_block_historical_ledgers(
     }
 }
 
+/// Unique miner addresses assigned to any Submit-ledger slot whose chunk range
+/// intersects `block_range`.
+///
+/// This is the assignee population for one tx: a proof counts as assigned when
+/// its signer is in the set, and the set's size clamps the configured assignee
+/// requirement. It depends only on `(block_range, epoch_snapshot)`, never on
+/// which proofs a block carries or their order. Validation, the tx selector and
+/// the ingress-status route all classify proofs through this one function.
+pub(crate) fn submit_assignees_for_range(
+    block_range: &LedgerChunkRange,
+    config: &Config,
+    epoch_snapshot: &EpochSnapshot,
+) -> HashSet<IrysAddress> {
+    let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
+    epoch_snapshot
+        .partition_assignments
+        .data_partitions
+        .values()
+        .filter(|pa| pa.ledger_id == Some(DataLedger::Submit.into()))
+        .filter(|pa| {
+            pa.slot_index.is_some_and(|slot| {
+                let start = slot as u64 * num_chunks_in_partition;
+                let slot_range = LedgerChunkRange(ie(
+                    LedgerChunkOffset::from(start),
+                    LedgerChunkOffset::from(start + num_chunks_in_partition),
+                ));
+                block_range.intersection(&slot_range).is_some()
+            })
+        })
+        .map(|pa| pa.miner_address)
+        .collect()
+}
+
 /// Clamp-and-check used by the per-tx Publish proof loop in
 /// [`data_txs_are_valid`].  Extracted as a pure helper so unit tests can
 /// exercise the exact production logic byte-for-byte instead of modelling it
@@ -8044,40 +8077,8 @@ pub fn get_assigned_ingress_proofs(
     // more than one intersecting slot).  This is a consensus rule change and
     // must be coordinated with a network upgrade.
 
-    // 1. Collect the slot indices of all Submit-ledger partitions whose
-    //    chunk range intersects block_range.
-    let intersecting_slots: HashSet<usize> = epoch_snapshot
-        .partition_assignments
-        .data_partitions
-        .iter()
-        .filter(|(_, pa)| pa.ledger_id == Some(DataLedger::Submit.into()))
-        .filter_map(|(_, pa)| pa.slot_index)
-        .filter(|&slot| {
-            let start = slot as u64 * config.consensus.num_chunks_in_partition;
-            let end = start + config.consensus.num_chunks_in_partition;
-            let slot_range = LedgerChunkRange(ie(
-                LedgerChunkOffset::from(start),
-                LedgerChunkOffset::from(end),
-            ));
-            block_range.intersection(&slot_range).is_some()
-        })
-        .collect();
-
-    // 2. Unique miner addresses across all intersecting slots.  This is the
-    //    eligibility population used to clamp `expected_assigned_proofs`.
-    let assigned_miners: usize = epoch_snapshot
-        .partition_assignments
-        .data_partitions
-        .iter()
-        .filter(|(_, pa)| {
-            pa.ledger_id == Some(DataLedger::Submit.into())
-                && pa
-                    .slot_index
-                    .is_some_and(|i| intersecting_slots.contains(&i))
-        })
-        .map(|(_, pa)| pa.miner_address)
-        .collect::<HashSet<IrysAddress>>()
-        .len();
+    let assignees = submit_assignees_for_range(&block_range, config, epoch_snapshot);
+    let assigned_miners = assignees.len();
 
     // 3. Per-proof: classify each proof as assigned-or-not.  Never mutates
     //    `assigned_miners` — that value is now fixed above.
@@ -8091,25 +8092,12 @@ pub fn get_assigned_ingress_proofs(
             })?;
 
         // Is the proof from a miner assigned to store the data in the submit ledger?
-        let proof_slots = get_submit_ledger_slot_assignments(&proof_address, epoch_snapshot);
-        if proof_slots.iter().any(|i| intersecting_slots.contains(i)) {
+        if assignees.contains(&proof_address) {
             assigned_proofs.push(ingress_proof.clone());
         }
     }
 
     Ok((assigned_proofs, assigned_miners))
-}
-
-fn get_submit_ledger_slot_assignments(
-    address: &IrysAddress,
-    epoch_snapshot: &EpochSnapshot,
-) -> Vec<usize> {
-    let mut partition_assignments = epoch_snapshot.get_partition_assignments(*address);
-    partition_assignments.retain(|pa| pa.ledger_id == Some(DataLedger::Submit.into()));
-    partition_assignments
-        .iter()
-        .map(|pa| pa.slot_index.expect("Submit-ledger partition assignment must have slot_index — invariant from epoch_snapshot"))
-        .collect()
 }
 
 #[cfg(test)]
@@ -11065,9 +11053,8 @@ mod tests {
         DataTransactionHeader,
     )> {
         use irys_database::{
-            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db,
-            set_data_tx_included_height,
-            tables::{IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+            insert_tx_header, set_data_tx_included_height,
+            tables::{IrysBlockHeaders, MigratedBlockHashes},
         };
         use irys_domain::BlockTree;
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
@@ -11077,7 +11064,6 @@ mod tests {
             H256List,
         };
         use reth_db::Database as _;
-        use reth_db::mdbx::DatabaseArguments;
         use reth_db::transaction::DbTxMut as _;
         use std::sync::RwLock;
 
@@ -11086,12 +11072,7 @@ mod tests {
         // will clean it up anyway.
         let _tmp = Box::leak(Box::new(tmp));
 
-        let env = open_or_create_db(
-            _tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(env));
+        let db = DatabaseProvider::for_testing(_tmp.path(), &_tmp.path().join("cache"))?;
 
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -11435,7 +11416,10 @@ mod tests {
             &config,
             &epoch_snapshot,
         )?;
-        assert_eq!(new_miners, 2, "new semantics across both intersecting slots");
+        assert_eq!(
+            new_miners, 2,
+            "new semantics across both intersecting slots"
+        );
         assert_eq!(assigned.len(), 1);
 
         // Reproduce the OLD algorithm's value computation in-place to keep
@@ -11451,8 +11435,7 @@ mod tests {
             .data_partitions
             .iter()
             .filter(|(_, pa)| {
-                pa.miner_address == proof_address
-                    && pa.ledger_id == Some(DataLedger::Submit as u32)
+                pa.miner_address == proof_address && pa.ledger_id == Some(DataLedger::Submit as u32)
             })
             .filter_map(|(_, pa)| pa.slot_index)
             .collect();
@@ -11463,7 +11446,9 @@ mod tests {
             .iter()
             .filter(|(_, pa)| {
                 pa.ledger_id == Some(DataLedger::Submit as u32)
-                    && pa.slot_index.is_some_and(|i| alice_slot_indices.contains(&i))
+                    && pa
+                        .slot_index
+                        .is_some_and(|i| alice_slot_indices.contains(&i))
             })
             .map(|(_, pa)| pa.miner_address)
             .collect::<HashSet<IrysAddress>>()

@@ -5,7 +5,7 @@
 //! stored for one data root and names the miner each stored proof belongs to.
 
 use crate::block_producer::ledger_expiry::resolve_promotion_heights_on_branch;
-use crate::block_validation::first_intersecting_submit_slot_miners;
+use crate::block_validation::submit_assignees_for_range;
 use crate::tx_selector::helpers::{
     anchor_valid_ingress_proofs, dedup_ingress_proofs_by_signer, keep_first_per_address,
     min_ingress_proof_anchor_height, unexpired_ingress_proofs,
@@ -38,8 +38,9 @@ pub struct IngressStatusQuery<'a> {
 ///
 /// `signers` names every observed stored address, in first-seen cache order.
 /// `required_assigned` is the configured assignee gate after `min` with the
-/// miner count of the last eligible assigned proof's Submit slot. It is 0 when
-/// no eligible proof was assigned. Counts and deficits are computed from
+/// number of unique miners on the Submit slots the tx's canonical range
+/// intersects. It is 0 when the tx has no canonical Submit range yet. Counts
+/// and deficits are computed from
 /// `signers` and these two requirements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngressProofAssessment {
@@ -159,39 +160,31 @@ pub(crate) fn assess_submit_ingress_proofs(
         query.db,
     )
     .map_err(|e| eyre!("canonical submit range lookup failed: {e:#}"))?;
-    let slot_miners = |address: &IrysAddress| {
-        first_intersecting_submit_slot_miners(
-            address,
-            block_range.as_ref()?,
-            query.config,
-            query.epoch_snapshot,
-        )
-    };
-
-    // Same walk as `get_assigned_ingress_proofs`: candidates in order, classified
-    // by the recovered signer, and the last assigned proof's slot sets the clamp.
-    let mut assigned_miners = 0;
-    let mut candidate_assigned = HashMap::with_capacity(candidates.len());
-    for (stored, recovered) in &candidates {
-        let miners = slot_miners(recovered);
-        if let Some(miners) = miners {
-            assigned_miners = miners;
-        }
-        candidate_assigned.insert(*stored, miners.is_some());
-    }
+    // Same rule as `get_assigned_ingress_proofs`: a signer is assigned when it
+    // holds a Submit slot intersecting the tx's canonical range, and the
+    // assignee gate clamps to the number of such miners.
+    let assignees = block_range
+        .as_ref()
+        .map(|range| submit_assignees_for_range(range, query.config, query.epoch_snapshot))
+        .unwrap_or_default();
+    let assigned_miners = assignees.len();
+    let candidate_assigned: HashMap<IrysAddress, bool> = candidates
+        .iter()
+        .map(|(stored, recovered)| (*stored, assignees.contains(recovered)))
+        .collect();
 
     let signers = observed
         .into_iter()
         .map(|address| {
             // A stored proof that is not a candidate (expired, bad anchor, or
             // failed `pre_validate`) has no recovered signer, so its stored
-            // address is checked directly; it never feeds the clamp.
+            // address is checked directly.
             let (assigned, eligible) = match candidate_assigned.get(&address) {
                 Some(&assigned) => (
                     assigned,
                     assigned || query.epoch_snapshot.is_staked(address),
                 ),
-                None => (slot_miners(&address).is_some(), false),
+                None => (assignees.contains(&address), false),
             };
             IngressProofSigner {
                 address,
@@ -762,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn ingress_status_expired_assigned_signer_does_not_raise_the_clamp() -> eyre::Result<()> {
+    fn ingress_status_expired_assigned_signer_still_owes_the_assignee_proof() -> eyre::Result<()> {
         let mut harness = Harness::open(config_with(1, 2), 201, 201)?;
         let data_root = H256::random();
         let header = data_header(H256::random(), data_root);
@@ -783,9 +776,10 @@ mod tests {
         assert_eq!(got.eligible(), 0);
         assert_eq!(got.eligible_assigned(), 0);
         assert_eq!(
-            got.required_assigned, 0,
-            "only a candidate can reveal slot miners"
+            got.required_assigned, 1,
+            "one miner holds the intersecting slot, so 2 clamps to 1 with or without a candidate"
         );
+        assert_eq!(got.remaining_assigned(), 1);
         assert!(!got.proof_requirements_met());
         Ok(())
     }
@@ -858,14 +852,17 @@ mod tests {
         assert_eq!(low_then_high.eligible_assigned(), 2);
         assert_eq!(
             low_then_high.required_assigned, 2,
-            "last assigned slot has 3 miners"
+            "4 unique miners hold intersecting slots, so the configured 2 is not clamped"
         );
 
+        // The gate is a property of the range and the epoch, not of proof order.
+        // `signers` keeps first-seen order, so compare the order-free fields.
         let high_then_low = harness.assess(&header, &[high_proof, low_proof], TS)?;
         assert_eq!(high_then_low.assigned(), 2);
+        assert_eq!(high_then_low.eligible_assigned(), 2);
         assert_eq!(
-            high_then_low.required_assigned, 1,
-            "the last assigned proof's slot has 1 miner, so 2 clamps to 1"
+            high_then_low.required_assigned, low_then_high.required_assigned,
+            "proof order must not change the assignee gate"
         );
         Ok(())
     }
