@@ -95,6 +95,11 @@ max_pending_chunk_requests = 100
 [packing.local]
 cpu_packing_concurrency = 4
 gpu_packing_batch_size = 1024
+# Scheduling priority of the CPU packing hash threads (Linux only).
+# "idle" (default) runs them only when no other thread wants the CPU.
+# { nice = N } sets nice level N, -20 (highest) to 19 (lowest); 0 is normal.
+# A negative N needs CAP_SYS_NICE or a matching RLIMIT_NICE.
+# cpu_packing_thread_priority = "idle"
 
 [cache]
 cache_clean_lag = 2

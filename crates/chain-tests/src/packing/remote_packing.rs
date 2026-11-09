@@ -83,6 +83,7 @@ pub(crate) async fn packing_worker_full_node_test() -> eyre::Result<()> {
             local: irys_types::LocalPackingConfig {
                 cpu_packing_concurrency: 0,
                 gpu_packing_batch_size: 0,
+                cpu_packing_thread_priority: irys_types::CpuPackingThreadPriority::Idle,
             },
             remote: vec![RemotePackingConfig {
                 url: format!("http://{}:{}", local_addr.ip(), local_addr.port()),

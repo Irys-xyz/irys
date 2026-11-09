@@ -1328,6 +1328,7 @@ mod tests {
                 local: irys_types::LocalPackingConfig {
                     cpu_packing_concurrency: 1,
                     gpu_packing_batch_size: 1,
+                    cpu_packing_thread_priority: irys_types::CpuPackingThreadPriority::Idle,
                 },
                 remote: Default::default(),
             },
@@ -1802,6 +1803,7 @@ mod tests {
                 local: irys_types::LocalPackingConfig {
                     cpu_packing_concurrency: concurrency,
                     gpu_packing_batch_size: 10,
+                    cpu_packing_thread_priority: irys_types::CpuPackingThreadPriority::Idle,
                 },
                 remote: Default::default(),
             },
