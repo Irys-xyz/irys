@@ -6787,6 +6787,15 @@ impl SubmoduleWrite for Batch<'_> {
         Ok(())
     }
 
+    fn clear_ledger_data(&mut self) -> eyre::Result<()> {
+        for cf in [Cf::DataRoots, Cf::Pending, Cf::Interval, Cf::Content] {
+            self.overlay.cleared[cf.index()] = true;
+            self.overlay.maps[cf.index()].clear();
+            self.overlay.deleted_ranges[cf.index()].clear();
+        }
+        Ok(())
+    }
+
     fn note_placement_origin(
         &mut self,
         ledger: u32,

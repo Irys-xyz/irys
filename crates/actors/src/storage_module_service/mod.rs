@@ -531,11 +531,13 @@ impl StorageModuleServiceInner {
                 {
                     let ledger_before = existing_pa.ledger_id;
 
-                    // A ledger slot is changing. Clear the old index and store
-                    // the final assignment under one write lock. That covers
-                    // ledger→capacity and a same-epoch ledger→ledger
-                    // reassignment. A failed reset leaves the previous
-                    // assignment, so the next update still sees the change.
+                    // A ledger slot is changing. Drop the old ledger data and
+                    // store the final assignment under one write lock. That
+                    // covers ledger→capacity and a same-epoch ledger→ledger
+                    // reassignment. The partition is the same, so its entropy
+                    // stays and only the gaps are repacked. A failed reset
+                    // leaves the previous assignment, so the next update
+                    // still sees the change.
                     // Capacity→ledger does not reset: index repair runs below.
                     if ledger_before.is_some() {
                         match self.reset_and_install(existing, Some(info_pa), update_height) {

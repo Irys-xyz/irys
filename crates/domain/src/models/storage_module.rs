@@ -2121,6 +2121,11 @@ thread_local! {
     /// `crc_complete` is cleared. Production writes both, marker first.
     static FAIL_AFTER_OPEN_RESET_MARKER: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// Test open fails after a same-partition ledger reset rewrote the labels
+    /// and cleared the ledger rows, and before the packing params name the
+    /// new assignment.
+    static FAIL_AFTER_OPEN_LEDGER_RESET: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 fn note_submodule_open(step: &'static str) {
@@ -2278,6 +2283,8 @@ impl StorageModule {
         let mut rebind_after_bind: Vec<(PathBuf, Option<H256>, Option<u32>, Option<usize>)> =
             Vec::new();
         let mut reset_dbs: Vec<SubmoduleIndex> = Vec::new();
+        // Intervals files of submodules whose partition is leaving a ledger.
+        let mut ledger_resets: Vec<PathBuf> = Vec::new();
         let index_write_generation = Arc::new(AtomicU64::new(0));
         let index_commit_fail_next = Arc::new(AtomicBool::new(false));
 
@@ -2355,18 +2362,22 @@ impl StorageModule {
                     };
 
                 // A different partition clears the old labels and index rows.
-                // A ledger or slot change does the same when the module already
-                // holds a ledger: the bytes belong to the previous assignment.
-                // The marker is written after packing validation, interval
-                // repair, and coverage. A refusal before that leaves the bytes
-                // alone. Capacity gaining a ledger keeps the bytes.
+                // The same partition leaving a ledger (to another ledger, slot,
+                // or capacity) keeps its entropy, which depends only on the
+                // partition hash, miner, and offset: only the `Data` labels and
+                // the ledger rows go. Both are written after packing
+                // validation, interval repair, and coverage. A refusal before
+                // that leaves the bytes alone. Capacity gaining a ledger keeps
+                // the bytes.
                 let ledger_or_slot_changed =
                     params.ledger != want_ledger || params.slot != want_slot;
                 let leaving_a_ledger = params.ledger.is_some() && ledger_or_slot_changed;
-                let wipe = params.partition_hash != want_hash || leaving_a_ledger;
-                if wipe || ledger_or_slot_changed {
-                    if wipe {
+                let hash_changed = params.partition_hash != want_hash;
+                if hash_changed || ledger_or_slot_changed {
+                    if hash_changed {
                         reset_dbs.push(submodule_db.clone());
+                    } else if leaving_a_ledger {
+                        ledger_resets.push(sub_base_path.join("intervals.json"));
                     }
                     rebind_after_bind.push((
                         params_path.clone(),
@@ -2474,6 +2485,27 @@ impl StorageModule {
         // The packing bind runs after that clear, so a new partition hash is
         // the one that stays.
         Self::finish_pending_resets(&submodule_map)?;
+        // Before the rebind below: a crash before the file names the new
+        // assignment repeats this on the next open. Each step is idempotent.
+        // The offset rows are reconciled against these labels after load.
+        for (_, submodule) in submodule_map.iter() {
+            let intervals_path = recover_mutex(&submodule.intervals_file).clone();
+            if !ledger_resets.contains(&intervals_path) {
+                continue;
+            }
+            let kept =
+                keep_entropy_labels(&read_intervals_file(&intervals_path)?, &BTreeSet::new());
+            let mut file = get_atomic_file(&intervals_path)?;
+            file.write_all(serde_json::to_string(&kept)?.as_bytes())?;
+            file.commit()?;
+            submodule.db.set_chunk_crc_complete(false)?;
+            submodule.crc_complete.store(false, Ordering::SeqCst);
+            submodule.db.update(|tx| tx.clear_ledger_data())?;
+            #[cfg(test)]
+            if FAIL_AFTER_OPEN_LEDGER_RESET.with(|flag| flag.replace(false)) {
+                eyre::bail!("injected failure after the open ledger reset");
+            }
+        }
         for (index, partition, packing) in pack_binds {
             index.bind_packing_identity(partition, &packing)?;
         }
@@ -3765,8 +3797,20 @@ impl StorageModule {
     /// Bump the index generation and drop queued bytes. A packed write that
     /// captured the old generation does not commit. Lock order:
     /// `pending_writes`, then `entropy_cache`.
-    fn clear_pending_for_reset(&self) {
+    /// Drop every pending body, proof, and reservation. Returns the offsets
+    /// that had any of them: their bytes on disk may already be a body that
+    /// never reached a durable point, so a reset that keeps labels must not
+    /// keep those offsets.
+    fn clear_pending_for_reset(&self) -> BTreeSet<PartitionChunkOffset> {
         let mut pending = self.pending_writes.write().unwrap();
+        let touched: BTreeSet<PartitionChunkOffset> = pending
+            .chunks
+            .keys()
+            .chain(pending.written_ahead.keys())
+            .chain(pending.occupancy.keys())
+            .chain(pending.proofs.keys())
+            .copied()
+            .collect();
         self.index_write_generation.fetch_add(1, Ordering::SeqCst);
         pending.chunks.clear();
         pending.occupancy.clear();
@@ -3776,6 +3820,7 @@ impl StorageModule {
         pending.proofs.clear();
         pending.written_ahead.clear();
         self.entropy_cache.lock().unwrap().clear();
+        touched
     }
 
     /// Erase the index, then mark every offset `Uninitialized`.
@@ -3798,14 +3843,23 @@ impl StorageModule {
     /// stores the new assignment before it releases the assignment lock.
     /// After `reset` alone, the previous assignment is still visible.
     pub fn reset(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
-        self.wipe_for_reset(true)
+        self.wipe_for_reset(true, ResetScope::Everything)
     }
 
     /// Wipe the module. `drop_marker` is false when the caller still has to
     /// store an assignment: the marker stays until that store succeeds, so a
     /// failed store leaves the wipe unfinished and a later matching assignment
     /// can pack it.
-    fn wipe_for_reset(&self, drop_marker: bool) -> eyre::Result<Interval<PartitionChunkOffset>> {
+    ///
+    /// [`ResetScope::LedgerData`] keeps `Entropy` labels and their checksum
+    /// rows. Every other label, and every offset that had a pending body,
+    /// becomes `Uninitialized`. The marker is the same as a full wipe, so a
+    /// crash before it drops is finished on open as a full wipe.
+    fn wipe_for_reset(
+        &self,
+        drop_marker: bool,
+        scope: ResetScope,
+    ) -> eyre::Result<Interval<PartitionChunkOffset>> {
         #[cfg(test)]
         self.note_sync_lock_probe();
         let _sync_guard = self.lock_sync();
@@ -3824,7 +3878,10 @@ impl StorageModule {
             self.inject_sync_failure(SyncFailurePoint::ResetMarkerWrite)?;
             submodule.db.set_reset_in_progress()?;
         }
-        self.clear_pending_for_reset();
+        // No pwrite runs while this call holds `sync_in_progress`, and a
+        // body stays in `pending` until its durable point. So every offset
+        // whose bytes may differ from its label is in this set.
+        let touched = self.clear_pending_for_reset();
         // A recall may already have queued a suspect against the old bytes.
         // Confirming it after this clear would judge the wiped module.
         // Repairs belong to those bytes. The next assignment must not repack them.
@@ -3846,20 +3903,42 @@ impl StorageModule {
         // `finish_pending_resets`, which clears the flag again and wipes.
         self.clear_chunk_crc_complete()?;
 
-        for (_, submodule) in self.submodules.iter() {
-            submodule.db.update(|tx| tx.clear())?;
-        }
-
-        let storage_interval = {
-            let mut intervals = self.intervals.write().unwrap();
-            let start = intervals.first_key_value().unwrap().0.start();
-            let end = intervals.last_key_value().unwrap().0.end();
-            let storage_interval = ii(start, end);
-            *intervals = StorageIntervals::new();
-            intervals
-                .insert_strict(storage_interval, ChunkType::Uninitialized)
-                .expect("Failed to create new interval, should never happen as interval is empty!");
-            storage_interval
+        let storage_interval = match scope {
+            ResetScope::Everything => {
+                for (_, submodule) in self.submodules.iter() {
+                    submodule.db.update(|tx| tx.clear())?;
+                }
+                let mut intervals = self.intervals.write().unwrap();
+                let start = intervals.first_key_value().unwrap().0.start();
+                let end = intervals.last_key_value().unwrap().0.end();
+                let storage_interval = ii(start, end);
+                *intervals = StorageIntervals::new();
+                intervals
+                    .insert_strict(storage_interval, ChunkType::Uninitialized)
+                    .expect(
+                        "Failed to create new interval, should never happen as interval is empty!",
+                    );
+                storage_interval
+            }
+            ResetScope::LedgerData => {
+                for (_, submodule) in self.submodules.iter() {
+                    submodule.db.update(|tx| tx.clear_ledger_data())?;
+                }
+                // Labels change only at a durable point, which needs
+                // `sync_in_progress`. This call holds it, so the snapshot is
+                // current until the swap, and the index pass below does not
+                // hold the interval lock against readers.
+                let (kept, storage_interval) = {
+                    let intervals = self.intervals.read().unwrap();
+                    let start = intervals.first_key_value().unwrap().0.start();
+                    let end = intervals.last_key_value().unwrap().0.end();
+                    (keep_entropy_labels(&intervals, &touched), ii(start, end))
+                };
+                // Proof rows go, entropy checksums stay. Same pass as open.
+                Self::reconcile_presence(&self.submodules, &kept)?;
+                *self.intervals.write().unwrap() = kept;
+                storage_interval
+            }
         };
         // Publish the epoch with the mask clear. A rewrite that already read
         // the old map fails its epoch check and does not restore that mask.
@@ -3952,7 +4031,8 @@ impl StorageModule {
         update_height: u64,
     ) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let mut assignment = self.partition_assignment.write().unwrap();
-        let interval = self.wipe_for_reset(false)?;
+        let scope = reset_scope_for(assignment.as_ref(), next.as_ref());
+        let interval = self.wipe_for_reset(false, scope)?;
         self.store_assignment(&mut assignment, next, update_height)?;
         self.drop_reset_marker()?;
         Ok(interval)
@@ -3999,7 +4079,8 @@ impl StorageModule {
             ledger_id: None,
             slot_index: None,
         };
-        let interval = self.wipe_for_reset(false)?;
+        // Same partition: only the expired slot's data goes.
+        let interval = self.wipe_for_reset(false, ResetScope::LedgerData)?;
         self.store_assignment(&mut assignment, Some(capacity), notice_height)?;
         self.drop_reset_marker()?;
         Ok(Some(interval))
@@ -10208,6 +10289,68 @@ fn intervals_file_error(path: &Path, action: &str) -> String {
 /// Loads the stored interval mapping that tracks chunk states.
 /// Expects a JSON-formatted file containing StorageIntervals.
 /// A read or parse failure names `path` and how to reset that module.
+/// What a storage-module reset erases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResetScope {
+    /// Every label becomes `Uninitialized` and the whole index is cleared:
+    /// a different partition hash, or no partition at all.
+    Everything,
+    /// Same partition, different ledger, slot, or capacity. Its entropy is
+    /// still valid: `Entropy` labels and their checksums stay, and only the
+    /// ledger data goes.
+    LedgerData,
+}
+
+/// A reassignment keeps the entropy when the partition and miner are the same
+/// and the module held a ledger. Anything else wipes the whole module.
+fn reset_scope_for(
+    current: Option<&PartitionAssignment>,
+    next: Option<&PartitionAssignment>,
+) -> ResetScope {
+    match (current, next) {
+        (Some(current), Some(next))
+            if current.partition_hash == next.partition_hash
+                && current.miner_address == next.miner_address
+                && current.ledger_id.is_some() =>
+        {
+            ResetScope::LedgerData
+        }
+        _ => ResetScope::Everything,
+    }
+}
+
+/// `intervals` with only `Entropy` kept: `Data`, `Interrupted`, and every
+/// offset in `touched` become `Uninitialized`.
+///
+/// `Data` bytes are packed for the old ledger. `Interrupted` and `touched`
+/// offsets may hold a body that never reached a durable point. Entropy depends
+/// only on the partition hash, the miner, and the offset, so it stays valid.
+fn keep_entropy_labels(
+    intervals: &StorageIntervals,
+    touched: &BTreeSet<PartitionChunkOffset>,
+) -> StorageIntervals {
+    let mut kept = StorageIntervals::new();
+    for (interval, kind) in intervals.iter() {
+        let kind = match kind {
+            ChunkType::Entropy => ChunkType::Entropy,
+            ChunkType::Data | ChunkType::Interrupted | ChunkType::Uninitialized => {
+                ChunkType::Uninitialized
+            }
+        };
+        kept.insert_merge_touching_if_values_equal(*interval, kind)
+            .expect("a copy of a non-overlapping map does not overlap");
+    }
+    for offset in touched {
+        let point = ii(*offset, *offset);
+        if kept.get_at_point(*offset) == Some(&ChunkType::Entropy) {
+            let _ = kept.cut(point);
+            kept.insert_merge_touching_if_values_equal(point, ChunkType::Uninitialized)
+                .expect("the cut point is free");
+        }
+    }
+    kept
+}
+
 pub fn read_intervals_file(path: &Path) -> eyre::Result<StorageIntervals> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -21392,6 +21535,21 @@ mod tests {
     }
 
     /// Arms a failure after the open reset marker and clears it on drop.
+    struct OpenLedgerResetFail;
+
+    impl OpenLedgerResetFail {
+        fn arm() -> Self {
+            FAIL_AFTER_OPEN_LEDGER_RESET.with(|flag| flag.set(true));
+            Self
+        }
+    }
+
+    impl Drop for OpenLedgerResetFail {
+        fn drop(&mut self) {
+            FAIL_AFTER_OPEN_LEDGER_RESET.with(|flag| flag.set(false));
+        }
+    }
+
     struct OpenResetMarkerFail;
 
     impl OpenResetMarkerFail {
@@ -21621,6 +21779,82 @@ mod tests {
     }
 
     /// One `Data` chunk and one tx row on a fresh module.
+    /// Offset that [`seed_data_and_entropy`] packs as entropy.
+    const ENTROPY_OFFSET: u32 = 1;
+
+    /// [`seed_labeled_data`] plus durable entropy at [`ENTROPY_OFFSET`].
+    fn seed_data_and_entropy(
+        config: &Config,
+        sub: &Path,
+        assigned: PartitionAssignment,
+    ) -> eyre::Result<()> {
+        seed_labeled_data(config, sub, assigned)?;
+        let storage = StorageModule::new(&one_span(3, sub, Some(assigned)), config)?;
+        let offset = PartitionChunkOffset::from(ENTROPY_OFFSET);
+        assert!(storage.write_chunk(offset, vec![0xA5_u8; 32], ChunkType::Entropy));
+        storage.force_sync_pending_chunks()?;
+        eyre::ensure!(
+            storage.get_chunk_type(&offset) == Some(ChunkType::Entropy),
+            "entropy was not stored"
+        );
+        drop(storage);
+        Ok(())
+    }
+
+    /// Data at offset 0 and its ledger rows are gone. The entropy at
+    /// [`ENTROPY_OFFSET`] keeps its label, its bytes, and, on a checksum
+    /// index, its checksum row. No full-wipe marker is left.
+    fn assert_ledger_data_dropped(
+        storage: &StorageModule,
+        sub: &Path,
+        why: &str,
+    ) -> eyre::Result<()> {
+        let data = PartitionChunkOffset::from(0);
+        let entropy = PartitionChunkOffset::from(ENTROPY_OFFSET);
+        assert_eq!(
+            storage.get_chunk_type(&data),
+            Some(ChunkType::Uninitialized),
+            "{why}"
+        );
+        assert_eq!(
+            interval_label(sub, 0)?,
+            Some(ChunkType::Uninitialized),
+            "{why}"
+        );
+        assert_eq!(live_tx_rows(storage)?, 0, "{why}: the ledger row stayed");
+        assert_eq!(
+            storage.get_chunk_type(&entropy),
+            Some(ChunkType::Entropy),
+            "{why}"
+        );
+        assert_eq!(
+            interval_label(sub, ENTROPY_OFFSET)?,
+            Some(ChunkType::Entropy),
+            "{why}"
+        );
+        assert_eq!(
+            storage.read_chunk_internal(entropy)?,
+            vec![0xA5_u8; 32],
+            "{why}: the entropy bytes changed"
+        );
+        let (_, submodule) = storage.get_submodule_for_offset(entropy)?;
+        assert!(!submodule.db.reset_in_progress()?, "{why}: marker left set");
+        if submodule.db.stores_offset_crc() {
+            let entropy_row = submodule.db.view(|tx| tx.get_offset_meta(entropy))?;
+            assert!(
+                entropy_row.is_some_and(|row| row.crc.is_some() && row.proof.is_none()),
+                "{why}: the entropy checksum was dropped"
+            );
+            let data_row = submodule.db.view(|tx| tx.get_offset_meta(data))?;
+            assert!(data_row.is_none(), "{why}: the data row stayed");
+            assert!(
+                !submodule.db.chunk_crc_complete()?,
+                "{why}: crc_complete stayed set"
+            );
+        }
+        Ok(())
+    }
+
     fn seed_labeled_data(
         config: &Config,
         sub: &Path,
@@ -21821,14 +22055,15 @@ mod tests {
         Ok(())
     }
 
-    /// A crash after the slot-change marker, and before the wipe finishes,
-    /// leaves the old file and the old label. The next open finishes the wipe.
+    /// A crash after a same-partition slot change dropped the data, and before
+    /// the packing params name the new slot, leaves the old params. The next
+    /// open repeats the reset and finishes. Entropy survives both opens.
     #[test]
-    fn crash_during_slot_change_wipe_finishes_on_the_next_open() -> eyre::Result<()> {
+    fn crash_during_same_partition_slot_change_finishes_on_the_next_open() -> eyre::Result<()> {
         // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let tmp = TempDirBuilder::new()
-                .prefix(&format!("slot_marker_{engine:?}"))
+                .prefix(&format!("slot_ledger_reset_{engine:?}"))
                 .build();
             let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
                 node.database = index_database(engine);
@@ -21836,63 +22071,265 @@ mod tests {
             let hash = H256::repeat_byte(0x72);
             let sub = tmp.path().join("sub");
             let submit = Some(u32::from(DataLedger::Submit));
-            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            seed_data_and_entropy(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
             {
-                let index = open_submodule_index(&sub, &config.node_config.database)?;
-                if index.stores_offset_crc() {
-                    index.set_chunk_crc_complete(true)?;
-                }
-            }
-            {
-                let _fail = OpenResetMarkerFail::arm();
+                let _fail = OpenLedgerResetFail::arm();
                 let err = StorageModule::new(
                     &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
                     &config,
                 )
-                .expect_err("the open stops after the marker");
+                .expect_err("the open stops after the ledger reset");
                 assert!(
                     err.to_string()
-                        .contains("injected failure after the open reset marker"),
+                        .contains("injected failure after the open ledger reset"),
                     "{engine:?}: {err}"
                 );
             }
             let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
-            assert_eq!(loaded.slot, Some(0), "{engine:?}: the file was published");
-            assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Data));
+            assert_eq!(
+                loaded.slot,
+                Some(0),
+                "{engine:?}: params named the new slot early"
+            );
+            assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Uninitialized));
+            assert_eq!(
+                interval_label(&sub, ENTROPY_OFFSET)?,
+                Some(ChunkType::Entropy)
+            );
             {
                 let index = open_submodule_index(&sub, &config.node_config.database)?;
-                assert!(index.reset_in_progress()?, "{engine:?}: marker missing");
-                if index.stores_offset_crc() {
-                    assert!(
-                        index.chunk_crc_complete()?,
-                        "{engine:?}: crc_complete was cleared before the wipe"
-                    );
-                }
+                assert!(
+                    !index.reset_in_progress()?,
+                    "{engine:?}: no full-wipe marker"
+                );
                 let rows = index.view(|tx| {
                     tx.tx_intervals_in_range(
                         PartitionChunkOffset::from(0),
                         PartitionChunkOffset::from(0),
                     )
                 })?;
-                assert!(
-                    !rows.is_empty(),
-                    "{engine:?}: the interrupted wipe cleared the row"
-                );
+                assert!(rows.is_empty(), "{engine:?}: the ledger rows stayed");
             }
 
             let opened = StorageModule::new(
                 &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
                 &config,
             )?;
-            assert_wiped(&opened, &sub, "the next open finishes the slot wipe")?;
+            assert_ledger_data_dropped(&opened, &sub, "the next open finishes")?;
             let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
             assert_eq!(loaded.slot, Some(1));
-            let (_, submodule) = opened.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-            if submodule.db.stores_offset_crc() {
-                assert!(!submodule.db.chunk_crc_complete()?);
-            }
         }
         Ok(())
+    }
+
+    /// A crash during a same-partition slot change, then an open that packing
+    /// refuses: the refusal changes nothing. The next accepted open finishes
+    /// the slot change and keeps the entropy.
+    #[test]
+    fn refused_open_does_not_finish_a_same_partition_slot_change() -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let tmp = TempDirBuilder::new()
+                .prefix(&format!("slot_ledger_refuse_{engine:?}"))
+                .build();
+            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
+                node.database = index_database(engine);
+            });
+            let hash = H256::repeat_byte(0x75);
+            let submit = Some(u32::from(DataLedger::Submit));
+            let sub = tmp.path().join("sub");
+            seed_data_and_entropy(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            {
+                let _fail = OpenLedgerResetFail::arm();
+                let _err = StorageModule::new(
+                    &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                    &config,
+                )
+                .expect_err("the open stops after the ledger reset");
+            }
+            let bytes_before = chunk_file_prefix(&sub, 128)?;
+            let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
+            let mut params = PackingParams::from_toml(&params_path)?;
+            let recorded = params
+                .entropy_packing_iterations
+                .expect("open records iterations");
+            params.entropy_packing_iterations = Some(recorded + 1);
+            params.write_to_disk(&params_path)?;
+            let err = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                &config,
+            )
+            .expect_err("a refused open must not finish the slot change");
+            assert!(
+                err.to_string().contains("packing identity"),
+                "{engine:?}: {err}"
+            );
+            assert_eq!(chunk_file_prefix(&sub, 128)?, bytes_before);
+            assert_eq!(
+                interval_label(&sub, ENTROPY_OFFSET)?,
+                Some(ChunkType::Entropy)
+            );
+            assert_eq!(PackingParams::from_toml(&params_path)?.slot, Some(0));
+            params.entropy_packing_iterations = Some(recorded);
+            params.write_to_disk(&params_path)?;
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                &config,
+            )?;
+            assert_ledger_data_dropped(&opened, &sub, "the accepted open finishes")?;
+        }
+        Ok(())
+    }
+
+    /// Leaving a ledger for capacity at open keeps the entropy and its
+    /// checksum, and drops the data label, its row, and the ledger rows.
+    #[test]
+    fn open_ledger_to_capacity_keeps_entropy() -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let tmp = TempDirBuilder::new()
+                .prefix(&format!("open_to_capacity_{engine:?}"))
+                .build();
+            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
+                node.database = index_database(engine);
+            });
+            let hash = H256::repeat_byte(0x76);
+            let sub = tmp.path().join("sub");
+            let submit = Some(u32::from(DataLedger::Submit));
+            seed_data_and_entropy(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, None, None))),
+                &config,
+            )?;
+            assert_ledger_data_dropped(&opened, &sub, "ledger to capacity")?;
+            let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+            assert_eq!((loaded.ledger, loaded.slot), (None, None));
+        }
+        Ok(())
+    }
+
+    /// A same-partition reassignment at runtime keeps the entropy. A new
+    /// partition wipes it. Slot expiry keeps it.
+    #[test]
+    fn runtime_reassignment_keeps_entropy_only_for_the_same_partition() -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let tmp = TempDirBuilder::new()
+                .prefix(&format!("runtime_reassign_{engine:?}"))
+                .build();
+            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
+                node.database = index_database(engine);
+            });
+            let hash = H256::repeat_byte(0x79);
+            let submit = Some(u32::from(DataLedger::Submit));
+
+            // Ledger to capacity, same partition.
+            let sub = tmp.path().join("to_capacity");
+            seed_data_and_entropy(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let storage = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(0)))),
+                &config,
+            )?;
+            storage.reset_with_assignment(Some(assignment(&config, hash, None, None)), 5)?;
+            assert_ledger_data_dropped(&storage, &sub, "runtime ledger to capacity")?;
+            drop(storage);
+
+            // Slot expiry.
+            let sub = tmp.path().join("expiry");
+            seed_data_and_entropy(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let storage = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(0)))),
+                &config,
+            )?;
+            assert!(storage.reset_expired_to_capacity(hash, 1_000)?.is_some());
+            assert_ledger_data_dropped(&storage, &sub, "slot expiry")?;
+            drop(storage);
+
+            // A new partition.
+            let sub = tmp.path().join("new_hash");
+            seed_data_and_entropy(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let storage = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(0)))),
+                &config,
+            )?;
+            storage.reset_with_assignment(
+                Some(assignment(&config, H256::repeat_byte(0x7a), None, None)),
+                5,
+            )?;
+            assert_eq!(
+                storage.get_chunk_type(&PartitionChunkOffset::from(ENTROPY_OFFSET)),
+                Some(ChunkType::Uninitialized),
+                "{engine:?}: a new partition must wipe the entropy"
+            );
+        }
+        Ok(())
+    }
+
+    /// An entropy offset with a data body still pending may already hold
+    /// those bytes on disk. A same-partition reset must not keep its label.
+    #[test]
+    fn same_partition_reset_drops_entropy_with_a_pending_body() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("reset_pending_body").build();
+        let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
+            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
+        });
+        let hash = H256::repeat_byte(0x7b);
+        let submit = Some(u32::from(DataLedger::Submit));
+        let sub = tmp.path().join("sub");
+        seed_data_and_entropy(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+        let storage = StorageModule::new(
+            &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(0)))),
+            &config,
+        )?;
+        let offset = PartitionChunkOffset::from(ENTROPY_OFFSET);
+        assert!(storage.write_chunk(offset, vec![0xD1_u8; 32], ChunkType::Data));
+        storage.reset_with_assignment(Some(assignment(&config, hash, None, None)), 5)?;
+        assert_eq!(
+            storage.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized)
+        );
+        assert_eq!(
+            interval_label(&sub, ENTROPY_OFFSET)?,
+            Some(ChunkType::Uninitialized)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn keep_entropy_labels_keeps_only_untouched_entropy() {
+        let mut intervals = StorageIntervals::new();
+        for (start, end, kind) in [
+            (0_u32, 1_u32, ChunkType::Data),
+            (2, 5, ChunkType::Entropy),
+            (6, 6, ChunkType::Interrupted),
+            (7, 9, ChunkType::Uninitialized),
+        ] {
+            intervals
+                .insert_strict(
+                    ii(
+                        PartitionChunkOffset::from(start),
+                        PartitionChunkOffset::from(end),
+                    ),
+                    kind,
+                )
+                .unwrap();
+        }
+        let touched = BTreeSet::from([PartitionChunkOffset::from(3)]);
+        let kept = keep_entropy_labels(&intervals, &touched);
+        let label = |offset: u32| {
+            kept.get_at_point(PartitionChunkOffset::from(offset))
+                .copied()
+        };
+        for offset in [0, 1, 3, 6, 7, 9] {
+            assert_eq!(
+                label(offset),
+                Some(ChunkType::Uninitialized),
+                "offset {offset}"
+            );
+        }
+        for offset in [2, 4, 5] {
+            assert_eq!(label(offset), Some(ChunkType::Entropy), "offset {offset}");
+        }
     }
 
     /// A restart that does not change the assignment keeps the bytes and the
@@ -22055,79 +22492,6 @@ mod tests {
                 &config,
             )?;
             assert_kept(&opened, &sub, "the original slot after a refused open")?;
-        }
-        Ok(())
-    }
-
-    /// A crash after the slot-change marker leaves the old bytes. A later
-    /// open that packing refuses does not finish that wipe. The next
-    /// accepted open does.
-    #[test]
-    fn refused_open_does_not_finish_a_slot_change_marker() -> eyre::Result<()> {
-        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
-        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
-            let tmp = TempDirBuilder::new()
-                .prefix(&format!("slot_marker_refuse_{engine:?}"))
-                .build();
-            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
-                node.database = index_database(engine);
-            });
-            let hash = H256::repeat_byte(0x75);
-            let submit = Some(u32::from(DataLedger::Submit));
-            let sub = tmp.path().join("sub");
-            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
-            let bytes_before = chunk_file_prefix(&sub, 32)?;
-            {
-                let _fail = OpenResetMarkerFail::arm();
-                let err = StorageModule::new(
-                    &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
-                    &config,
-                )
-                .expect_err("the open stops after the marker");
-                assert!(
-                    err.to_string()
-                        .contains("injected failure after the open reset marker"),
-                    "{engine:?}: {err}"
-                );
-            }
-            let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
-            let mut params = PackingParams::from_toml(&params_path)?;
-            let recorded = params
-                .entropy_packing_iterations
-                .expect("open records iterations");
-            params.entropy_packing_iterations = Some(recorded + 1);
-            params.write_to_disk(&params_path)?;
-            let err = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
-                &config,
-            )
-            .expect_err("a refused open must not finish the wipe");
-            assert!(
-                err.to_string().contains("packing identity"),
-                "{engine:?}: {err}"
-            );
-            assert_eq!(
-                interval_label(&sub, 0)?,
-                Some(ChunkType::Data),
-                "{engine:?}: the refused open finished the wipe"
-            );
-            assert_eq!(chunk_file_prefix(&sub, 32)?, bytes_before);
-            {
-                let index = open_submodule_index(&sub, &config.node_config.database)?;
-                assert!(
-                    index.reset_in_progress()?,
-                    "{engine:?}: the refused open cleared the crash marker"
-                );
-                let loaded = PackingParams::from_toml(&params_path)?;
-                assert_eq!(loaded.slot, Some(0));
-            }
-            params.entropy_packing_iterations = Some(recorded);
-            params.write_to_disk(&params_path)?;
-            let opened = StorageModule::new(
-                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
-                &config,
-            )?;
-            assert_wiped(&opened, &sub, "the accepted open finishes the crash wipe")?;
         }
         Ok(())
     }
