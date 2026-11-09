@@ -120,7 +120,9 @@ max_pending_chunk_requests = 100
 
 [packing.local]
 cpu_packing_concurrency = 4
-gpu_packing_batch_size = 1024
+# Chunks per GPU packing batch, or "auto" to size batches from the GPU (4 per CUDA core, capped
+# by free GPU memory shared between concurrent batches). 0 packs on the CPU.
+gpu_packing_batch_size = "auto"
 # Scheduling priority of the CPU packing hash threads (Linux only).
 # "idle" (default) runs them only when no other thread wants the CPU.
 # { nice = N } sets nice level N, -20 (highest) to 19 (lowest); 0 is normal.

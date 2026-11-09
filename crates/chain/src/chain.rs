@@ -910,8 +910,8 @@ impl IrysNode {
             info!("Found 1 CUDA GPUs - {}", &gpu_info.device_name);
             let gpu_config = CUDAConfig::from_device_default()?;
             info!(
-                "Using blocks: {}, threads per block: {}",
-                &gpu_config.blocks, &gpu_config.threads_per_block
+                "GPU packing: {} SMs x {} cores, {} threads per block",
+                &gpu_config.sm_count, &gpu_config.cores_per_sm, &gpu_config.threads_per_block
             );
         }
 

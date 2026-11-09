@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use irys_domain::{EntropyRejection, EntropyWrite, StorageModule};
-use irys_packing::{CUDAConfig, capacity_pack_range_cuda_c};
+use irys_packing::CudaPackerPool;
 use irys_types::{
     Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, partition::PartitionHash,
     split_interval,
@@ -14,11 +14,17 @@ use tracing::{debug, warn};
 
 use crate::packing_service::config::PackingConfig;
 
+/// Chunks buffered between the GPU and the entropy writer (256 MiB). When the disk falls behind,
+/// the GPU side waits instead of buffering more.
+const CHUNKS_IN_FLIGHT: usize = 1024;
+
 /// CUDA/GPU-based packing strategy
 pub(crate) struct CudaPackingStrategy {
     packing_config: PackingConfig,
     semaphore: Arc<Semaphore>,
     runtime_handle: tokio::runtime::Handle,
+    /// Idle packers, reused across batches.
+    packers: Arc<CudaPackerPool>,
 }
 
 impl CudaPackingStrategy {
@@ -32,6 +38,7 @@ impl CudaPackingStrategy {
             packing_config,
             semaphore,
             runtime_handle,
+            packers: Default::default(),
         }
     }
 }
@@ -96,62 +103,46 @@ impl super::PackingStrategy for CudaPackingStrategy {
             let chain_id = self.packing_config.chain_id;
             let entropy_iterations = storage_module.config.consensus.entropy_packing_iterations;
             let runtime_handle = self.runtime_handle.clone();
-            // Size in `usize`. A `u32` product wraps once the batch is 16384
-            // chunks of 256KiB, and the CUDA capacity check then fails forever.
-            let batch_bytes = super::cuda_entropy_batch_bytes(num_chunks, chunk_size).ok_or_else(
-                || {
-                    format!(
-                        "CUDA packing buffer size overflows for SM {storage_module_id}: {num_chunks} chunks of {chunk_size} bytes"
-                    )
-                },
-            )?;
+            let packers = Arc::clone(&self.packers);
+            let packer_capacity = self.packing_config.max_chunks;
+            let chunk_bytes =
+                usize::try_from(chunk_size).expect("protocol-fixed chunk_size fits usize");
 
-            // Pack batch on GPU
+            // Pack on the GPU and write each chunk as its slab arrives: the batch is never held
+            // in host memory as a whole, and the GPU fills the next slab while chunks are written.
             let handle = runtime_handle.clone().spawn(async move {
-                let packed = runtime_handle
-                    .spawn_blocking(move || -> eyre::Result<Vec<u8>> {
-                        let mut out: Vec<u8> = Vec::with_capacity(batch_bytes);
-                        capacity_pack_range_cuda_c(
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CHUNKS_IN_FLIGHT);
+                let gpu = runtime_handle.spawn_blocking(move || -> eyre::Result<()> {
+                    packers.with_packer(packer_capacity, |packer| {
+                        packer.pack(
                             num_chunks,
                             mining_address,
-                            start as u64,
+                            u64::from(start),
                             partition_hash,
                             entropy_iterations,
                             chain_id,
-                            CUDAConfig::from_device_default()?,
-                            &mut out,
-                        )?;
-                        eyre::Result::Ok(out)
+                            |_first, slab| {
+                                for chunk in slab.chunks_exact(chunk_bytes) {
+                                    // fails once the writer stopped: stop packing this batch
+                                    tx.blocking_send(chunk.to_vec())
+                                        .map_err(|_| eyre::eyre!("entropy writer stopped"))?;
+                                }
+                                Ok(())
+                            },
+                        )
                     })
-                    .await;
-                let out = match packed {
-                    Ok(Ok(bytes)) => bytes,
-                    Ok(Err(err)) => {
-                        stop_flag.store(true, Ordering::Relaxed);
-                        return Err(format!(
-                            "CUDA packing failed for SM {storage_module_id}: {err:?}"
-                        ));
-                    }
-                    Err(err) => {
-                        stop_flag.store(true, Ordering::Relaxed);
-                        return Err(format!(
-                            "CUDA packing task panicked for SM {storage_module_id}: {err:?}"
-                        ));
-                    }
-                };
+                });
 
                 // Write packed chunks. The module refuses a label that is not
                 // uninitialized, and a hash that is no longer this assignment.
-                for i in 0..num_chunks {
+                let mut written: u32 = 0;
+                while let Some(chunk) = rx.recv().await {
+                    let i = written;
+                    written += 1;
                     let offset = PartitionChunkOffset::from(start + i);
-                    let byte_range = super::cuda_chunk_byte_range(i, chunk_size).ok_or_else(|| {
-                        format!(
-                            "CUDA packing chunk {i} byte range overflows for SM {storage_module_id}"
-                        )
-                    })?;
                     let wrote = storage_module_clone.write_entropy_chunk(
                         offset,
-                        out[byte_range].to_vec(),
+                        chunk,
                         partition_hash,
                     );
                     match wrote {
@@ -168,7 +159,7 @@ impl super::PackingStrategy for CudaPackingStrategy {
                     }
 
                     // Wait for the disk before queueing more entropy.
-                    if i % short_writes_before_sync == 0 {
+                    if i.is_multiple_of(short_writes_before_sync) {
                         yield_now().await;
                         if let Err(err) = crate::packing_service::wait_for_pending_room(
                             &storage_module_clone,
@@ -180,6 +171,29 @@ impl super::PackingStrategy for CudaPackingStrategy {
                             return Err(err);
                         }
                     }
+                }
+
+                // The channel closed: either every chunk arrived, or the GPU side failed.
+                match gpu.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        stop_flag.store(true, Ordering::Relaxed);
+                        return Err(format!(
+                            "CUDA packing failed for SM {storage_module_id}: {err:?}"
+                        ));
+                    }
+                    Err(err) => {
+                        stop_flag.store(true, Ordering::Relaxed);
+                        return Err(format!(
+                            "CUDA packing task panicked for SM {storage_module_id}: {err:?}"
+                        ));
+                    }
+                }
+                if written != num_chunks {
+                    stop_flag.store(true, Ordering::Relaxed);
+                    return Err(format!(
+                        "CUDA packing produced {written} of {num_chunks} chunks for SM {storage_module_id}"
+                    ));
                 }
                 drop(permit);
                 Ok(())
