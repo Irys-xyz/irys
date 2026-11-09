@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794255856187,
+  "lastUpdate": 1794263966952,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -22614,6 +22614,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000125,
+            "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4c31354bbac152b34f1723af39b3474057c09d52",
+          "message": "feat(packing): optimised CUDA kernel, streaming packer and auto GPU batch size (#1796)\n\n* feat(packing): optimised CUDA kernel, streaming packer and auto GPU batch size\n\nEach GPU thread packs one chunk, so throughput is the number of chunks in\nflight. The 1024-chunk batches of the default config left ~8 of 170 SMs\nof an RTX 5090 busy, and the kernel hashed one byte at a time through\nlocal memory: ~83 chunks/s at 1M iterations end to end.\n\n- Register-resident, unrolled SHA-256 kernel over a segment-interleaved\n  buffer, Phase 2 in short launches (long ones failed silently under WDDM)\n- irys_cuda_packer / CudaPacker / CudaPackerPool: reusable per-batch\n  device buffers and stream, output streamed in pinned 128 MiB slabs\n  that overlap with the next slab and the next batch\n- first, last and a random chunk of every batch checked against the CPU\n  while the GPU works; the first before any output\n- gpu_packing_batch_size accepts \"auto\": 4 chunks per CUDA core capped\n  by free VRAM per concurrent batch; templates use it\n- packing service and remote worker stream chunks through the pool\n\n~12 200 chunks/s at 1M iterations (~146x) and ~106 000 at 1000 (~17x).\n\n* chore(tools): add packing variant benchmark and tuner\n\nStandalone workspace under tools/packing-variant-bench: the pre-port\nCUDA kernel (ref) and optimised kernels, production GPU packing end to\nend (--mode prod), CPU SHA-NI / AVX-512 / AVX2 paths, an auto-tuner and\nthe A/B packing-variant comparison.\n\n* fix(packing): hold the CUDA batch permit until the GPU side finishes; cap worker auto batch at one window\n\n* fix(tools): clamp tuner prediction to Phase 1; key tune cache by iterations and slice",
+          "timestamp": "2026-11-09T22:19:50Z",
+          "tree_id": "8d8f7f6f67609ed6871b8e7c5fd73fdcd2b3d594",
+          "url": "https://github.com/Irys-xyz/irys/commit/4c31354bbac152b34f1723af39b3474057c09d52"
+        },
+        "date": 1794263963340,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.01194,
+            "range": "± 0.000128",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.11993,
+            "range": "± 0.001522",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.242394,
+            "range": "± 0.043919",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.969157,
+            "range": "± 0.119143",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.065888,
+            "range": "± 0.001042",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 661.414753,
+            "range": "± 3.808232",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 879.279663,
+            "range": "± 46.520483",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119769,
+            "range": "± 0.000284",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1215.605102,
+            "range": "± 94.993822",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1680.217559,
+            "range": "± 88.9602",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.078584,
+            "range": "± 0.031667",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 204.848257,
+            "range": "± 31.671915",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 189.415731,
+            "range": "± 11.700512",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
             "range": "± 0.000003",
             "unit": "ms/iter"
           }
