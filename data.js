@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794263966952,
+  "lastUpdate": 1794268286844,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -22723,6 +22723,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "469c54e292788dcbb7f7ee67a81ed30bb1e370fb",
+          "message": "fix(consensus): deterministic assignee ingress proofs, tx-scoped assignee range, stake-clamped proof total (#1797)\n\n* fix(consensus): make assigned_miners deterministic in get_assigned_ingress_proofs\n\nCONSENSUS RULE CHANGE — must be coordinated with a network upgrade.\n\nOld semantics: assigned_miners was set inside the per-proof loop, once per\nintersecting slot found by iterating `slot_ranges: HashMap<usize, LedgerChunkRange>`\n(non-deterministic RandomState). When a miner held multiple intersecting slots the\nvalue written was whichever slot the HashMap yielded first. The value was also\nre-overwritten on each proof iteration (\"last write wins\"), so the final result\ndepended on both proof ordering and HashMap randomness — a consensus-fork vector.\n\nNew semantics: assigned_miners = count of unique miner addresses across ALL\nSubmit-ledger slots whose chunk range intersects block_range. This is a pure\nfunction of (block_range, epoch_snapshot) computed once, before the per-proof loop.\nThe per-proof loop now only classifies proofs as assigned-or-not.\n\nWhy the new semantics is correct:\n  1. Deterministic: same result on every node regardless of HashMap key order or\n     proof submission order.\n  2. Matches the variable name and the intent of the caller (the\n     expected_assigned_proofs clamp): \"how many distinct miners are eligible to\n     contribute an assigned proof?\" is a property of the epoch, not the proof set.\n  3. Robust: if the \"same miner never assigned to the same slot twice\" invariant\n     is ever violated, we still get a correct unique-address count.\n\nWhen block_range spans multiple slots whose miner sets overlap, the new value is\n>= the old value (strictly larger if any miner covers more than one intersecting\nslot). This is a consensus rule change.\n\nAlso subsumes the pre-existing \"last write wins\" latent bug in the old proof loop\n(the rewrite naturally eliminates it).\n\nTests added:\n- assigned_miners_multi_slot_unique_address_count (regression: same miner in two\n  slots, must equal 1 unique address across 5 repeated calls)\n- assigned_miners_single_slot_two_miners (single slot, two distinct miners,\n  assigned_miners == 2 regardless of how many proofs submitted)\n- assigned_miners_zero_proofs_returns_correct_counts (zero proofs still counts\n  intersecting miners correctly; empty epoch yields 0)\n\n(cherry picked from commit f9a6105a5a48b3d80fbbcdbf3a008a9811a60122)\n\n* refactor(validation): extract check_assigned_proof_count + invisibility test\n\nSplits the per-tx Publish proof clamp-and-check into a pure helper so unit\ntests can exercise the production logic byte-for-byte instead of modelling it.\nAdds `assigned_miners_rule_change_invisible_under_current_config`, which uses\nthat helper to prove the consensus rule change introduced in d6e033880 is\ninvisible under every deployed `ConsensusConfig` (mainnet/testnet/testing all\nhave `number_of_ingress_proofs_from_assignees = 0`):\n\n- old/new `assigned_miners` values diverge (1 vs. 2 in the Alice-in-slot-1,\n  Bob-in-slot-2 scenario), confirming the rule change is real\n- under `from_assignees = 0` both values produce ACCEPT (clamp + count check\n  are both no-ops), so today's network sees no observable behavior change\n- under `from_assignees = 2` the values diverge in outcome (old ACCEPTS,\n  new REJECTS with `AssignedProofCountMismatch { expected: 2, actual: 1 }`)\n\nThe test pins the \"no separate hardfork gate required\" conclusion: activation\nof the new semantics is implicitly tied to the future hardfork that bumps\n`from_assignees > 0`, which is itself a coordinated network upgrade.\n\n(cherry picked from commit 68e04668ba3f9e877aa086216727260b7a6aec51)\n\n* fix(consensus): allow assignee ingress proofs and share the assignee rule\n\n`get_assigned_ingress_proofs` now derives `assigned_miners` from the epoch\nand the tx's canonical Submit range alone, so the startup guard that pinned\n`number_of_ingress_proofs_from_assignees` to 0 is removed. Its test becomes\na positive check that 2 assignee proofs of 3 with 2 replicas validates.\n\nThe rule lives in one helper, `submit_assignees_for_range`: the unique\nminers on every Submit slot the range intersects. Validation, the tx\nselector (through `get_assigned_ingress_proofs`) and the\n`/v1/tx/{id}/ingress-status` assessment all use it. The ingress-status\nroute used `first_intersecting_submit_slot_miners`, which took the clamp\nfrom the last assigned proof's slot; it now reports the same gate the\nvalidator enforces, including when no assigned proof is a candidate yet.\nThe two ingress-status tests that pinned the old order-dependent clamp\nassert the new rule instead.\n\n* refactor(validation): share the assigned-proof clamp; own the fixture TempDir\n\nclamped_assigned_requirement is the one clamp of the configured assignee\nrequirement to the assignee count. check_assigned_proof_count, the tx\nselector and the ingress-status assessment all use it; each keeps its own\ntimestamp input, and check_assigned_proof_count still does the comparison.\n\nbuild_determinism_test_fixtures returns its TempDir instead of leaking it,\nso each test drops the database directory when it ends.\n\n* fix(consensus): count assignees for the tx's own Submit chunks\n\n`find_canonical_ledger_range` returned the confirming block's whole Submit\ndelta, `[prev.total_chunks, block.total_chunks - 1]`, although its doc\nnames the range the tx contributed. When a block's Submit range spans\ntwo slots, miners on a slot that holds none of a tx's chunks counted as\nthat tx's assignees: their proofs were classified as assigned, and the\nclamped requirement could exceed the miners that store the tx.\n\nThe lookup now lays out the block's Submit txs in on-chain order, each\nspanning `ceil(data_size / chunk_size)` chunks, and returns the tx's own\nspan. A block's only Submit tx spans the whole delta, so no tx size is\nread for it. Otherwise the sizes come from the sealed tree block's tx\nbodies, or from the stored tx headers for a migrated block or a sealed\nblock that does not list its Submit txs. A missing header or a layout\nthat runs past the block's chunk range is a local storage error.\n\nValidation, the tx selector, and the ingress-status route all use this\nrange through `get_assigned_ingress_proofs` / `submit_assignees_for_range`.\n\n* feat(consensus): from Delta, clamp required ingress proofs to active stakes\n\nThe total ingress proofs per promoted tx was the configured\n`number_of_ingress_proofs_total` regardless of the network. Proof signers\nare deduplicated and must be staked, so a network with fewer stakes than\nthat total can never promote a tx: mainnet's preset requires 10.\n\nFrom Delta, the requirement is the configured total clamped to the number\nof `Active` stakes in the parent block's epoch snapshot, and never below\n1, mirroring the assignee clamp to the assigned miners. Before Delta it is\nunchanged, so this needs no separate activation: it ships with Delta.\n\n`required_ingress_proofs_total` is the single source. Block production\n(`required_proof_count`), the tx selector, prevalidation, both checks in\n`data_txs_are_valid`, the shadow-tx generator's proof slicing, and the\ningress-status route all use it with the parent epoch snapshot and the\nblock's own timestamp, so producer and validators agree on every block.\nThe ingress reward pool is already split across the proofs carried, so the\nuploader's fee is unchanged.\n\n* feat(consensus): clamp required ingress proofs to active stakes on every network\n\nDrops the Delta gate from 399ba9253: the clamp applies from this release,\nwith no separate activation. Networks running this code must upgrade\ntogether, because a network with fewer active stakes than the configured\ntotal now accepts blocks that older nodes reject (mainnet's preset is 10).\n\nThe rule now lives on `number_of_ingress_proofs_total` instead of the\nDelta notes.\n\nTests that relied on the configured total exceeding their stakes now\nstake a bystander that signs no proof, so the clamped total stays where\nthe test needs it:\n- `spiky_heavy3_reanchor_duplicate_ingress_proof_signers` (3 with two\n  proof signers)\n- `heavy_test_submit_ingress_proof_survives_cache_cap` and\n  `heavy_test_rocks_v1_submit_nonzero_slot_data_poa` (2 with one node)\n- the shadow-tx short-proof and reward-redirection tests and\n  `ingress_status_partial_eligible_proofs`\nEach chain test asserts the active stake count before it relies on it.\n\n* refactor(validation): compute the proof total once per block; document the ungated clamp\n\ndata_txs_are_valid computed required_ingress_proofs_total, which scans\nthe epoch's stakes, once for the aggregate proof count and again for\nevery publish tx. The inputs do not change per tx: compute it once and\nreuse it.\n\nThe number_of_ingress_proofs_total doc now says the stake clamp applies\nto every block with no hardfork gate.",
+          "timestamp": "2026-11-09T23:31:13Z",
+          "tree_id": "c6a608f22aac70c7ec2473d8f28d45212dc97812",
+          "url": "https://github.com/Irys-xyz/irys/commit/469c54e292788dcbb7f7ee67a81ed30bb1e370fb"
+        },
+        "date": 1794268283562,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011986,
+            "range": "± 0.000036",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120264,
+            "range": "± 0.00133",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.205149,
+            "range": "± 0.019493",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.913862,
+            "range": "± 0.056379",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.065543,
+            "range": "± 0.001379",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 657.742118,
+            "range": "± 4.213143",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 861.60275,
+            "range": "± 43.134194",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120085,
+            "range": "± 0.003353",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1176.718228,
+            "range": "± 7.302539",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1543.218059,
+            "range": "± 6.047129",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.026816,
+            "range": "± 0.001409",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 137.827292,
+            "range": "± 0.750061",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 180.353054,
+            "range": "± 1.373045",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000117,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
