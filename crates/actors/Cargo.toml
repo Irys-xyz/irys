@@ -51,6 +51,7 @@ itertools.workspace = true
 rayon.workspace = true
 reth-ethereum-primitives.workspace = true
 thiserror.workspace = true
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

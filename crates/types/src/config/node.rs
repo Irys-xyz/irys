@@ -1139,6 +1139,9 @@ pub struct LocalPackingConfig {
 
     /// Batch size for GPU-accelerated packing operations
     pub gpu_packing_batch_size: u32,
+
+    /// Scheduling priority of the CPU packing hash threads
+    pub cpu_packing_thread_priority: CpuPackingThreadPriority,
 }
 
 impl Default for LocalPackingConfig {
@@ -1146,8 +1149,23 @@ impl Default for LocalPackingConfig {
         Self {
             cpu_packing_concurrency: 2, // TODO: default to something like numcpus - 4
             gpu_packing_batch_size: 0,
+            cpu_packing_thread_priority: CpuPackingThreadPriority::Idle,
         }
     }
+}
+
+/// Scheduling priority of the CPU packing hash threads.
+/// Linux applies it per thread. Other platforms keep the default priority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuPackingThreadPriority {
+    /// `SCHED_IDLE`: the threads run only when no other thread wants the CPU.
+    Idle,
+    /// Nice level, -20 (highest) to 19 (lowest); 0 is normal. The kernel
+    /// clamps values outside that range. A negative level needs
+    /// `CAP_SYS_NICE` or a matching `RLIMIT_NICE`; without it the threads
+    /// keep the default priority and the node logs a warning.
+    Nice(i8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1868,6 +1886,7 @@ impl NodeConfig {
                 local: LocalPackingConfig {
                     cpu_packing_concurrency: 4,
                     gpu_packing_batch_size: 1024,
+                    cpu_packing_thread_priority: CpuPackingThreadPriority::Idle,
                 },
                 remote: Default::default(),
             },
@@ -2084,6 +2103,7 @@ impl NodeConfig {
                 local: LocalPackingConfig {
                     cpu_packing_concurrency: 4,
                     gpu_packing_batch_size: 1024,
+                    cpu_packing_thread_priority: CpuPackingThreadPriority::Idle,
                 },
                 remote: Default::default(),
             },

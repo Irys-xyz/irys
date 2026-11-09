@@ -1775,6 +1775,27 @@ mod tests {
         assert_eq!(config, expected_config);
     }
 
+    #[rstest::rstest]
+    #[case::idle(
+        r#"cpu_packing_thread_priority = "idle""#,
+        node::CpuPackingThreadPriority::Idle
+    )]
+    #[case::nice(
+        "cpu_packing_thread_priority = { nice = 10 }",
+        node::CpuPackingThreadPriority::Nice(10)
+    )]
+    #[case::negative_nice(
+        "cpu_packing_thread_priority = { nice = -5 }",
+        node::CpuPackingThreadPriority::Nice(-5)
+    )]
+    fn cpu_packing_thread_priority_parses_from_toml(
+        #[case] raw: &str,
+        #[case] expected: node::CpuPackingThreadPriority,
+    ) {
+        let parsed: node::LocalPackingConfig = toml::from_str(raw).unwrap();
+        assert_eq!(parsed.cpu_packing_thread_priority, expected);
+    }
+
     #[test]
     fn test_roundtrip_toml_serdes() {
         let cfg = NodeConfig::testing();
