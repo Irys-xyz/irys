@@ -33,6 +33,15 @@ pub struct CommitmentState {
 }
 
 impl CommitmentState {
+    /// Addresses with an `Active` stake: the signers an ingress proof can
+    /// count for.
+    pub(crate) fn active_stake_count(&self) -> usize {
+        self.stake_commitments
+            .values()
+            .filter(|entry| entry.commitment_status == CommitmentStatus::Active)
+            .count()
+    }
+
     pub(crate) fn is_staked(&self, address: IrysAddress) -> bool {
         if let Some(commitment) = self.stake_commitments.get(&address) {
             return commitment.commitment_status == CommitmentStatus::Active;

@@ -391,6 +391,19 @@ async fn heavy_test_rocks_v1_submit_nonzero_slot_data_poa() -> eyre::Result<()> 
         .frontier
         .number_of_ingress_proofs_total = 2;
     let (node, signer) = start_rocks_node(config, 5).await?;
+    // The required total is clamped to the active stakes. The uploader runs no
+    // node and signs no proof: staking it keeps the total at 2.
+    node.post_stake_commitment_with_signer(&signer).await?;
+    node.mine_until_next_epoch().await?;
+    assert_eq!(
+        node.node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .active_stake_count(),
+        2,
+        "the uploader's stake must be active before the txs"
+    );
 
     let _first =
         post_ledger_tx(&node, &signer, DataLedger::Publish, aligned_bytes(4, 0x51)).await?;

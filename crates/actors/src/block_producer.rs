@@ -1781,10 +1781,14 @@ pub trait BlockProdStrategy {
                         total_chunks: publish_total_chunks,
                         expires: None,
                         proofs: opt_proofs,
+                        // Same N the selector sized the proofs with: the
+                        // configured total clamped to the parent epoch's stakes.
                         required_proof_count: Some(
-                            self.inner()
-                                .config
-                                .number_of_ingress_proofs_total_at(current_timestamp.to_secs()),
+                            crate::block_validation::required_ingress_proofs_total(
+                                &self.inner().config.consensus.hardforks,
+                                current_timestamp.to_secs(),
+                                &epoch_snapshot,
+                            ),
                         ),
                     },
                     // Term Submit Ledger

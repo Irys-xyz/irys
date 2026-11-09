@@ -55,7 +55,12 @@ pub struct IrysHardforkConfig {
 /// These are the parameters active from block 0.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FrontierParams {
-    /// Number of ingress proofs required for promotion
+    /// Number of ingress proofs required for promotion. Each promoted tx
+    /// carries this many, clamped to the number of `Active` stakes in the
+    /// parent epoch snapshot (at least 1): proof signers are distinct stakers,
+    /// so a network with fewer stakes could never promote. The clamp applies to
+    /// every block; no hardfork gates it. The reward pool is split across the
+    /// proofs carried, so the clamp does not change fees.
     pub number_of_ingress_proofs_total: u8,
 
     /// Number of ingress proofs required from assignees
