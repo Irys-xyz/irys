@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794239604295,
+  "lastUpdate": 1794240695187,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -22290,6 +22290,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000113,
+            "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "28bd9374bdc642ae6e55b6ad3a21a45ee692b07f",
+          "message": "feat(packing): run CPU packing hashes at a configurable thread priority (#1792)\n\nCPU packing hashed on the node's shared blocking pool, at the same\npriority as validation, mining and the VDF. Under load it competed with\nthem for CPU.\n\nThe entropy hash now runs on a dedicated rayon pool. Each pool thread\nsets its own priority at start, from the new\n`packing.local.cpu_packing_thread_priority` field:\n\n- \"idle\" (default): SCHED_IDLE, runs only when no other thread wants\n  the CPU.\n- { nice = N }: nice level N, -20 to 19. A negative N needs\n  CAP_SYS_NICE or a matching RLIMIT_NICE; on failure the node logs a\n  warning and keeps the default priority.\n\nThe pool is dedicated because an unprivileged thread cannot raise its\npriority again, so a shared pool thread would stay slow for later work.\nThe storage-module write stays on the normal-priority caller thread: it\ntakes locks that mining and sync also take, and a starved idle thread\nmust not hold them. Linux only; other platforms log a warning and keep\nthe default priority.",
+          "timestamp": "2026-11-09T15:46:42Z",
+          "tree_id": "6ee847dc1ea9f5856a24ad29c67235ebfa4a4593",
+          "url": "https://github.com/Irys-xyz/irys/commit/28bd9374bdc642ae6e55b6ad3a21a45ee692b07f"
+        },
+        "date": 1794240691789,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.01195,
+            "range": "± 0.000115",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.122183,
+            "range": "± 0.002524",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.200052,
+            "range": "± 0.025835",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.902278,
+            "range": "± 0.231574",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074909,
+            "range": "± 0.000383",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 755.788357,
+            "range": "± 5.633493",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 978.5064,
+            "range": "± 3.364308",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.121445,
+            "range": "± 0.003199",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1222.499044,
+            "range": "± 5.878884",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1582.41138,
+            "range": "± 22.27812",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.03416,
+            "range": "± 0.000671",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 229.398156,
+            "range": "± 6.180035",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 286.489451,
+            "range": "± 16.784633",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000119,
             "range": "± 0.000001",
             "unit": "ms/iter"
           }
