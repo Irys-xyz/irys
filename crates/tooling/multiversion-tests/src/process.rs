@@ -427,6 +427,8 @@ mod tests {
         assert!(matches!(proc.pid(), Err(ProcessError::NoPid)));
     }
 
+    // Linux only: the readiness check reads `/proc/<pid>/comm`.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn respawn_replaces_child_process() {
         if !can_exec_in_tmp() {
