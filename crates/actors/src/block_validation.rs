@@ -7278,17 +7278,14 @@ pub async fn data_txs_are_valid(
     }
 
     if let Some(proofs_list) = &publish_ledger.proofs {
-        // Compute the expected total number of proofs based on the number of
-        // publish_tx and the number of proofs_per_tx
-        let expected_proof_count = {
-            let timestamp_secs = block.timestamp_secs();
-            let number_of_ingress_proofs_total = required_ingress_proofs_total(
-                &config.consensus.hardforks,
-                timestamp_secs,
-                &parent_epoch_snapshot,
-            );
-            publish_txs.len() * usize::from(number_of_ingress_proofs_total)
-        };
+        // Proofs per publish tx (N): one value for the aggregate count below
+        // and each tx's own count in the loop. The inputs do not change per tx.
+        let number_of_ingress_proofs_total = required_ingress_proofs_total(
+            &config.consensus.hardforks,
+            block.timestamp_secs(),
+            &parent_epoch_snapshot,
+        );
+        let expected_proof_count = publish_txs.len() * usize::from(number_of_ingress_proofs_total);
 
         if proofs_list.len() != expected_proof_count {
             return Err(PreValidationError::PublishLedgerProofCountMismatch {
@@ -7576,12 +7573,6 @@ pub async fn data_txs_are_valid(
                 }
             }
 
-            let timestamp_secs = block.timestamp_secs();
-            let number_of_ingress_proofs_total = required_ingress_proofs_total(
-                &config.consensus.hardforks,
-                timestamp_secs,
-                &parent_epoch_snapshot,
-            );
             if tx_proofs.len() != usize::from(number_of_ingress_proofs_total) {
                 return Err(PreValidationError::IngressProofCountMismatch {
                     expected: usize::from(number_of_ingress_proofs_total),
