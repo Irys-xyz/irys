@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794268286844,
+  "lastUpdate": 1794345050683,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -22831,6 +22831,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000117,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "018a5f1acc52a417fc95b60503fa61dd19355416",
+          "message": "feat: add Fission hardfork (epoch-gated partition resize) (#1655)\n\n* feat: add Estuary hardfork (epoch-gated partition resize)\n\nOptional, unscheduled hardfork that shrinks partitions to 14,500,000 chunks\nand the HDD recall range to 80 chunks, with epoch-aligned activation, a\ntransition difficulty, per-partition-step fork-choice weight, target-based\nslot allocation, journaled storage truncation after finality, and a\nstorage capacity API.\n\n* fix: address CodeRabbit review on Estuary partition resize\n\n- Pack a regrown partition suffix from the storage-module tick so a full\n  packing channel defers it instead of dropping it\n- Check solutions against the resize geometry before building the Reth\n  payload, and log every rejection\n- Checked conversions for recall-range offsets in the miner\n- Make the chain test's truncation wait non-vacuous\n\n* refactor: rename the Estuary hardfork to Fission\n\nMaster shipped the Echo hardfork, so the partition-resize fork takes the\nnext letter. The config key is now [hardforks.fission]; the fork is\nunscheduled on mainnet and testnet, so no deployed config uses the old key.",
+          "timestamp": "2026-11-10T12:50:29-08:00",
+          "tree_id": "169038db43ad9017eb4b3fd940e5a3a07b68f75e",
+          "url": "https://github.com/Irys-xyz/irys/commit/018a5f1acc52a417fc95b60503fa61dd19355416"
+        },
+        "date": 1794345047279,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.01193,
+            "range": "± 0.000058",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119919,
+            "range": "± 0.001736",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.208971,
+            "range": "± 0.028048",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.981123,
+            "range": "± 0.086725",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.065991,
+            "range": "± 0.000766",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 658.546623,
+            "range": "± 6.678966",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 860.72752,
+            "range": "± 42.347759",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117379,
+            "range": "± 0.003482",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1174.177645,
+            "range": "± 5.338002",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1536.924603,
+            "range": "± 6.484128",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027405,
+            "range": "± 0.001084",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 137.775542,
+            "range": "± 0.70641",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 179.527488,
+            "range": "± 0.755888",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
