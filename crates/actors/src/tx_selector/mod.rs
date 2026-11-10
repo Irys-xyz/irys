@@ -2,7 +2,9 @@ pub(crate) mod helpers;
 
 use crate::block_discovery::{TxLookupResult, get_data_tx_in_parallel_inner};
 use crate::block_producer::ledger_expiry::LedgerExpiryError;
-use crate::block_validation::get_assigned_ingress_proofs;
+use crate::block_validation::{
+    clamped_assigned_requirement, get_assigned_ingress_proofs, required_ingress_proofs_total,
+};
 use crate::chunk_ingress_service::ChunkIngressState;
 use crate::data_tx_validation::data_tx_structural_defect;
 use crate::mempool_guard::MempoolReadGuard;
@@ -1187,9 +1189,11 @@ async fn get_publish_txs_and_proofs(
             }
 
             // Check for minimum number of ingress proofs
-            let number_of_ingress_proofs_total = ctx
-                .config
-                .number_of_ingress_proofs_total_at(current_timestamp);
+            let number_of_ingress_proofs_total = required_ingress_proofs_total(
+                &ctx.config.consensus.hardforks,
+                current_timestamp,
+                epoch_snapshot,
+            );
             let proofs_per_tx = usize::from(number_of_ingress_proofs_total);
 
             if all_proofs.len() < proofs_per_tx {
@@ -1251,14 +1255,14 @@ async fn get_publish_txs_and_proofs(
             let number_of_ingress_proofs_from_assignees = ctx
                 .config
                 .number_of_ingress_proofs_from_assignees_at(current_timestamp);
-            let mut expected_assigned_proofs = usize::from(number_of_ingress_proofs_from_assignees);
-
-            if assigned_miners < expected_assigned_proofs {
+            let configured_assigned_proofs = usize::from(number_of_ingress_proofs_from_assignees);
+            let expected_assigned_proofs =
+                clamped_assigned_requirement(configured_assigned_proofs, assigned_miners);
+            if expected_assigned_proofs < configured_assigned_proofs {
                 warn!(
                     "Clamping expected_assigned_proofs from {} to {} for tx {}",
-                    expected_assigned_proofs, assigned_miners, &tx_header.id
+                    configured_assigned_proofs, expected_assigned_proofs, &tx_header.id
                 );
-                expected_assigned_proofs = assigned_miners;
             }
 
             // Check if we have enough assigned proofs

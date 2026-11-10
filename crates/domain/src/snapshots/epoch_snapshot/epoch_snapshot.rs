@@ -1721,6 +1721,11 @@ impl EpochSnapshot {
         self.commitment_state.is_staked(miner_address)
     }
 
+    /// Number of addresses with an `Active` stake in this epoch.
+    pub fn active_stake_count(&self) -> usize {
+        self.commitment_state.active_stake_count()
+    }
+
     // NON CANONICAL HASH
     // SHOULD BE USED FOR DEBUGGING ONLY
     pub fn get_hash(&self) -> String {

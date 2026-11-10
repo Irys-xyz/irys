@@ -6,10 +6,12 @@ use irys_types::{
     Base64, ChunkBytes, IrysAddress, PackedChunk, UnpackedChunk, partition::PartitionHash,
 };
 
-#[cfg(feature = "nvidia")]
 pub use crate::cuda_config::CUDAConfig;
-#[cfg(feature = "nvidia")]
 pub mod cuda_config;
+#[cfg(feature = "nvidia")]
+pub mod cuda_packer;
+#[cfg(feature = "nvidia")]
+pub use crate::cuda_packer::{CudaPacker, CudaPackerPool};
 #[cfg(feature = "nvidia")]
 pub use irys_c::capacity_cuda;
 
@@ -144,52 +146,32 @@ pub fn capacity_pack_range_cuda_c(
     config: CUDAConfig,
     entropy: &mut Vec<u8>,
 ) -> eyre::Result<()> {
-    let mining_addr_len = mining_address.len();
-    let partition_hash_len = partition_hash.0.len();
-    let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
-    let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
-
-    let entropy_ptr = entropy.as_mut_ptr();
-
-    // Sanity check: enforce capacity matches CUDA C implementation expectations
-    let expected_entropy_capacity =
-        (num_chunks as usize) * (irys_types::ConsensusConfig::CHUNK_SIZE as usize);
+    let chunk_size = irys_types::ConsensusConfig::CHUNK_SIZE as usize;
+    // Sanity check: the whole batch is returned in `entropy`
+    let expected_entropy_capacity = (num_chunks as usize) * chunk_size;
     assert!(
         entropy.capacity() == expected_entropy_capacity,
         "CUDA entropy buffer capacity must equal num_chunks * CHUNK_SIZE ({}), got {}",
         expected_entropy_capacity,
         entropy.capacity()
     );
+    entropy.clear();
 
-    let result;
-
-    let blocks = config.blocks;
-    let threads_per_block = config.threads_per_block;
-
-    unsafe {
-        result = capacity_cuda::compute_entropy_chunks_cuda(
-            mining_addr,
-            mining_addr_len,
-            chunk_offset,
-            irys_chain_id,
-            num_chunks as i64,
-            partition_hash,
-            partition_hash_len,
-            entropy_ptr,
-            entropy_packing_iterations,
-            blocks,
-            threads_per_block,
-        );
-    }
-    use capacity_cuda::entropy_chunk_errors::*;
-    match result {
-        NO_ERROR => {
-            // SAFETY: the kernel wrote all `capacity` bytes of the buffer
-            unsafe { entropy.set_len(entropy.capacity()) };
+    // One-off packer: long-running callers keep a `CudaPacker` instead and consume slabs as they
+    // arrive, rather than allocating per batch and holding the whole batch in host memory.
+    let mut packer = cuda_packer::CudaPacker::new(0, num_chunks.max(1), &config)?;
+    packer.pack(
+        num_chunks,
+        mining_address,
+        chunk_offset,
+        partition_hash,
+        entropy_packing_iterations,
+        irys_chain_id,
+        |_first, slab| {
+            entropy.extend_from_slice(slab);
             Ok(())
-        }
-        _ => Err(eyre::eyre!("GPU kernel error: {:?}", &result)),
-    }
+        },
+    )
 }
 
 #[cfg(feature = "nvidia")]
@@ -796,6 +778,52 @@ mod tests {
             assert!(
                 rust_chunk.as_slice() == cuda_chunk,
                 "CUDA and Rust packing differ for chunk {i}"
+            );
+        }
+    }
+
+    /// Below 8192 iterations only Phase 1 runs (testnet and devnet use 1000): the GPU's first
+    /// launch must stop after Phase 1 and still match the CPU for every chunk.
+    #[cfg(feature = "nvidia")]
+    #[rstest::rstest]
+    #[case::testnet(1_000)]
+    #[case::phase1_only(8_192)]
+    #[case::one_phase2_step(8_193)]
+    fn cuda_entropy_matches_cpu_at_low_iterations(#[case] iterations: u32) {
+        let mining_address = IrysAddress::random();
+        let partition_hash = H256::random();
+        let chunk_offset: std::ffi::c_ulong = 77;
+        let num_chunks: u32 = 300;
+        let chunk_size = ConsensusConfig::CHUNK_SIZE as usize;
+        let chain_id = ConsensusConfig::testing().chain_id;
+
+        let mut gpu = Vec::with_capacity(num_chunks as usize * chunk_size);
+        capacity_pack_range_cuda_c(
+            num_chunks,
+            mining_address,
+            chunk_offset,
+            partition_hash,
+            iterations,
+            chain_id,
+            CUDAConfig::from_device_default().unwrap(),
+            &mut gpu,
+        )
+        .unwrap();
+
+        let mut cpu = Vec::with_capacity(chunk_size);
+        for (i, gpu_chunk) in gpu.chunks(chunk_size).enumerate() {
+            capacity_single::compute_entropy_chunk(
+                mining_address,
+                chunk_offset + i as std::ffi::c_ulong,
+                partition_hash.0,
+                iterations,
+                chunk_size,
+                &mut cpu,
+                chain_id,
+            );
+            assert!(
+                cpu == gpu_chunk,
+                "chunk {i} differs at {iterations} iterations"
             );
         }
     }

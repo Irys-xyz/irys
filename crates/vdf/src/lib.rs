@@ -12,6 +12,8 @@ use sha2::digest::typenum::U64;
 use std::time::Duration;
 
 pub mod metrics;
+#[cfg(target_arch = "x86_64")]
+mod sha_ni;
 pub mod state;
 pub mod vdf;
 pub mod vdf_utils;
@@ -95,6 +97,37 @@ pub fn vdf_sha(
         checkpoints.len(),
     );
 
+    #[cfg(target_arch = "x86_64")]
+    if let Some(sha_ni) = sha_ni::ShaNi::detect() {
+        let mut salt = [0_u8; 32];
+        start_salt.to_little_endian(&mut salt);
+        sha_ni.chains(
+            [salt],
+            [seed],
+            num_iterations_per_checkpoint,
+            [&mut checkpoints[..num_checkpoints]],
+        );
+        return;
+    }
+
+    vdf_sha_compress256(
+        start_salt,
+        seed,
+        num_checkpoints,
+        num_iterations_per_checkpoint,
+        checkpoints,
+    );
+}
+
+/// [`vdf_sha`] on `sha2::compress256`: the fallback for CPUs without a
+/// specialised path, and the oracle the specialised paths are tested against.
+fn vdf_sha_compress256(
+    start_salt: U256,
+    seed: &mut H256,
+    num_checkpoints: usize,
+    num_iterations_per_checkpoint: u64,
+    checkpoints: &mut [H256],
+) {
     let mut blocks = [[0_u8; 64]; 2];
     start_salt.to_little_endian(&mut blocks[0][..32]);
     blocks[1] = SHA256_64B_PADDING;
@@ -107,6 +140,75 @@ pub fn vdf_sha(
         compress_n_rounds(&mut blocks, num_iterations_per_checkpoint);
         seed.as_mut().copy_from_slice(&blocks[0][32..64]);
         *slot = *seed;
+    }
+}
+
+/// [`vdf_sha`] on two independent chains: chain `j` gives exactly what
+/// `vdf_sha(start_salts[j], seeds[j], num_checkpoints, .., checkpoints[j])`
+/// gives. With SHA-NI the two chains interleave on this thread, which nearly
+/// doubles throughput but makes each chain slower than running it alone, so
+/// only throughput-bound validation uses this (see [`interleave_chains`]).
+pub(crate) fn vdf_sha_pair(
+    start_salts: [U256; 2],
+    seeds: [&mut H256; 2],
+    num_checkpoints: usize,
+    num_iterations_per_checkpoint: u64,
+    checkpoints: [&mut [H256]; 2],
+) {
+    let [seed_a, seed_b] = seeds;
+    let [checkpoints_a, checkpoints_b] = checkpoints;
+
+    #[cfg(target_arch = "x86_64")]
+    if let Some(sha_ni) = sha_ni::ShaNi::detect() {
+        let salts = start_salts.map(|salt| {
+            let mut bytes = [0_u8; 32];
+            salt.to_little_endian(&mut bytes);
+            bytes
+        });
+        sha_ni.chains(
+            salts,
+            [seed_a, seed_b],
+            num_iterations_per_checkpoint,
+            [
+                &mut checkpoints_a[..num_checkpoints],
+                &mut checkpoints_b[..num_checkpoints],
+            ],
+        );
+        return;
+    }
+
+    let [salt_a, salt_b] = start_salts;
+    vdf_sha(
+        salt_a,
+        seed_a,
+        num_checkpoints,
+        num_iterations_per_checkpoint,
+        checkpoints_a,
+    );
+    vdf_sha(
+        salt_b,
+        seed_b,
+        num_checkpoints,
+        num_iterations_per_checkpoint,
+        checkpoints_b,
+    );
+}
+
+/// Whether validating `num_chains` equally long independent chains on `pool`
+/// should hash them in [`vdf_sha_pair`]s. A pair takes ~1.2x as long as one
+/// chain, so pairing only shortens the wall time once there are more chains
+/// than threads (e.g. 25 checkpoints on 8 threads: 4 rounds of single chains
+/// against 2 rounds of pairs). With a thread per chain it would only add
+/// latency.
+pub(crate) fn interleave_chains(pool: &rayon::ThreadPool, num_chains: usize) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        num_chains > pool.current_num_threads() && sha_ni::ShaNi::detect().is_some()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (pool, num_chains);
+        false
     }
 }
 
@@ -268,7 +370,6 @@ pub fn last_step_checkpoints_is_valid(
 
     // Insert the seed at the head of the checkpoint list
     checkpoint_hashes.0.insert(0, seed);
-    let cp = checkpoint_hashes.clone();
 
     // Calculate the starting salt value for checkpoint validation
     let start_salt = U256::from(step_number_to_salt_number(
@@ -277,21 +378,33 @@ pub fn last_step_checkpoints_is_valid(
     ));
 
     let num_iterations = config.num_iterations_per_checkpoint();
-    let test: Vec<H256> = pool.install(|| {
-        (0..config.num_checkpoints_in_vdf_step)
-            .into_par_iter()
-            .map(|i| {
-                let mut blocks = [[0_u8; 64]; 2];
-                (start_salt + i).to_little_endian(&mut blocks[0][..32]);
-                blocks[1] = SHA256_64B_PADDING;
-                blocks[0][32..64].copy_from_slice(cp[i].as_bytes());
-
-                compress_n_rounds(&mut blocks, num_iterations);
-                let mut result = H256::zero();
-                result.as_mut().copy_from_slice(&blocks[0][32..64]);
-                result
-            })
-            .collect::<Vec<H256>>()
+    let num_checkpoints = config.num_checkpoints_in_vdf_step;
+    // Checkpoint `i` is `num_iterations` hashes of the checkpoint before it
+    // (`checkpoint_hashes[i]`) under salt `start_salt + i`. Each slot starts as
+    // that input seed and is hashed in place, one or two chains per task.
+    let mut test: Vec<H256> = checkpoint_hashes.0[..num_checkpoints].to_vec();
+    let chains_per_task = if interleave_chains(pool, num_checkpoints) {
+        2
+    } else {
+        1
+    };
+    pool.install(|| {
+        test.par_chunks_mut(chains_per_task)
+            .enumerate()
+            .for_each(|(task_idx, seeds)| {
+                let salt = start_salt + task_idx * chains_per_task;
+                match seeds {
+                    [seed] => vdf_sha(salt, seed, 1, num_iterations, &mut [H256::zero()]),
+                    [seed_a, seed_b] => vdf_sha_pair(
+                        [salt, salt + 1],
+                        [seed_a, seed_b],
+                        1,
+                        num_iterations,
+                        [&mut [H256::zero()], &mut [H256::zero()]],
+                    ),
+                    _ => unreachable!("chunks hold one or two chains"),
+                }
+            });
     });
 
     let is_valid = test == vdf_info.last_step_checkpoints;
@@ -744,6 +857,74 @@ mod tests {
 
             prop_assert_eq!(seed, *verification.last().unwrap());
             prop_assert_eq!(checkpoints, verification);
+        }
+    }
+
+    /// Checkpoint validation hashes one or two chains per task depending on
+    /// the pool size (see `interleave_chains`). Every pool size must accept
+    /// the step and reject a corruption at any checkpoint index, in either
+    /// slot of a pair. The step comes from the `sha2::compress256` oracle.
+    mod checkpoint_validation_across_pool_sizes {
+        use super::*;
+        use rstest::rstest;
+
+        #[rstest]
+        #[case::one_thread(1)]
+        #[case::two_threads(2)]
+        #[case::three_threads(3)]
+        #[case::eight_threads(8)]
+        #[case::thread_per_checkpoint(25)]
+        fn validates_and_rejects_every_index(#[case] threads: usize) {
+            let mut config = irys_types::NodeConfig::testing().vdf();
+            config.num_checkpoints_in_vdf_step = 25;
+            config.sha_1s_difficulty = 25 * 7;
+            config.reset_frequency = 4;
+            let prev_output = H256::repeat_byte(0x42);
+            let reset_seed = H256::repeat_byte(0x99);
+            // Step 5 starts after reset boundary 4, so the reset seed applies.
+            let global_step_number = 5_u64;
+
+            let salt = U256::from(step_number_to_salt_number(&config, global_step_number - 1));
+            let mut seed = apply_reset_seed(prev_output, reset_seed);
+            let mut checkpoints = vec![H256::zero(); 25];
+            vdf_sha_compress256(
+                salt,
+                &mut seed,
+                25,
+                config.num_iterations_per_checkpoint(),
+                &mut checkpoints,
+            );
+            let vdf_info = VDFLimiterInfo {
+                output: seed,
+                global_step_number,
+                seed: reset_seed,
+                next_seed: reset_seed,
+                prev_output,
+                last_step_checkpoints: H256List(checkpoints),
+                steps: H256List(vec![seed]),
+                vdf_difficulty: None,
+                next_vdf_difficulty: None,
+            };
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+
+            last_step_checkpoints_is_valid(&pool, &vdf_info, &config)
+                .expect("valid checkpoints must pass");
+
+            // The last checkpoint must also equal the output and step, which
+            // fail earlier checks, so corrupt only the others.
+            for index in 0..24 {
+                let mut corrupted = vdf_info.clone();
+                corrupted.last_step_checkpoints.0[index].0[0] ^= 1;
+                let err = last_step_checkpoints_is_valid(&pool, &corrupted, &config)
+                    .expect_err("a corrupted checkpoint must fail");
+                assert!(
+                    err.to_string().contains("Checkpoints are invalid"),
+                    "index {index}: {err}"
+                );
+            }
         }
     }
 

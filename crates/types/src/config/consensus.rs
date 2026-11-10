@@ -254,6 +254,13 @@ pub struct BlockRewardConfig {
 /// `Alloc` and `StateRoot` are mutually exclusive *by construction*: a network's
 /// genesis EVM state is described **either** by an inline account allocation
 /// **or** by a pinned state root — never both.
+///
+/// Rule for both variants: the genesis state must not hold an empty account (nonce 0, balance 0,
+/// no code) at the EIP-7002 or EIP-7251 request predeploy address
+/// (`0x00000961Ef480Eb55e80D19ad83579A64c007002`, `0x0000BBdDc7CE488642fb579F8B00f3a590007251`).
+/// Irys makes no post-block system call to those addresses, so such an account stays in state. An
+/// executor that makes the Ethereum system calls deletes it at block 1 (EIP-161) and gets a
+/// different state root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GenesisEvmState {

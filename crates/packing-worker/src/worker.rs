@@ -13,6 +13,9 @@ pub struct PackingWorkerStateInner {
     pub config: PackingWorkerConfig,
     pub runtime_handle: Handle,
     pub packing_semaphore: Arc<Semaphore>,
+    /// GPU packers, reused across batches and requests.
+    #[cfg(feature = "nvidia")]
+    pub cuda_packers: Arc<irys_packing::CudaPackerPool>,
 }
 
 #[derive(Clone)]
@@ -41,6 +44,8 @@ pub async fn start_worker(
         config,
         packing_semaphore: packing_semaphore.into(),
         runtime_handle: Handle::current(),
+        #[cfg(feature = "nvidia")]
+        cuda_packers: Default::default(),
     }));
 
     let server = run_server(state, listener);
@@ -75,7 +80,7 @@ mod tests {
             bind_addr: "127.0.0.1".to_string(),
             cpu_packing_concurrency: 2,
             // smaller than the request, so the CUDA path packs several batches in order
-            gpu_packing_batch_size: 50,
+            gpu_packing_batch_size: 50.into(),
             max_pending: NonZero::new(1).unwrap(),
         };
 

@@ -103,6 +103,12 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
         },
     )]);
 
+    // The required total is clamped to the active stakes. This signer runs no
+    // node and signs no proof: staking it keeps the total at 2, so the tx stays
+    // unpromoted.
+    let bystander = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&bystander]);
+
     // min_chunk_age = (block_migration_depth + cache_clean_lag) * block_time
     let consensus = config.consensus_config();
     let min_chunk_age_secs =
@@ -116,6 +122,17 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
         .packing_waiter
         .wait_for_idle(Some(Duration::from_secs(10)))
         .await?;
+    node.post_stake_commitment_with_signer(&bystander).await?;
+    node.mine_until_next_epoch().await?;
+    assert_eq!(
+        node.node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .active_stake_count(),
+        2,
+        "the bystander's stake must be active before the tx"
+    );
 
     // A 3-chunk Publish tx, confirmed on Submit.
     let data_chunks: [[u8; 32]; 3] = [[10; 32], [20; 32], [30; 32]];

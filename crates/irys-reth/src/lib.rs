@@ -2257,6 +2257,104 @@ mod tests {
 
         Ok(())
     }
+
+    /// Irys has no EIP-7685 requests. A block with calls to the request predeploys (code present,
+    /// Prague active) has an empty requests hash and is valid.
+    #[test_log::test(tokio::test)]
+    async fn heavy_request_predeploy_calls_give_empty_requests_hash() -> eyre::Result<()> {
+        use alloy_consensus::TxEip1559;
+        use alloy_eips::eip7002::{
+            WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_PREDEPLOY_CODE,
+        };
+        use alloy_eips::eip7251::{
+            CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS, CONSOLIDATION_REQUEST_PREDEPLOY_CODE,
+        };
+        use alloy_eips::eip7685::EMPTY_REQUESTS_HASH;
+        use alloy_genesis::GenesisAccount;
+        use reth::providers::ReceiptProvider as _;
+
+        let mut genesis = custom_chain().genesis.clone();
+        genesis.config.prague_time = Some(0);
+        for (address, code) in [
+            (
+                WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS,
+                &WITHDRAWAL_REQUEST_PREDEPLOY_CODE,
+            ),
+            (
+                CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS,
+                &CONSOLIDATION_REQUEST_PREDEPLOY_CODE,
+            ),
+        ] {
+            genesis.alloc.insert(
+                address,
+                GenesisAccount::default()
+                    .with_nonce(Some(1))
+                    .with_code(Some(code.clone())),
+            );
+        }
+
+        let signer = EthereumWallet::from(Wallet::new(1).wallet_gen()[0].clone()).default_signer();
+        let (mut nodes, _tasks, _) = setup_irys_reth(
+            &[signer.address()],
+            Arc::new(genesis.into()),
+            false,
+            eth_payload_attributes_with_beneficiary,
+        )
+        .await?;
+        let mut node = nodes.remove(0);
+
+        // withdrawal request: validator pubkey (48 bytes) + amount (8 bytes);
+        // consolidation request: source pubkey (48 bytes) + target pubkey (48 bytes)
+        let requests = [
+            (WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, 56),
+            (CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS, 96),
+        ];
+        let mut tx_hashes = Vec::new();
+        for (nonce, (predeploy, input_len)) in (0_u64..).zip(requests) {
+            let tx = sign_tx(
+                TxEip1559 {
+                    chain_id: 1,
+                    nonce,
+                    gas_limit: 1_000_000,
+                    max_fee_per_gas: 10_000_000_000,
+                    max_priority_fee_per_gas: 1_000_000_000,
+                    to: TxKind::Call(predeploy),
+                    // Minimum request fee of the request predeploys (the excess is zero).
+                    value: U256::from(1),
+                    access_list: Default::default(),
+                    input: vec![0xab; input_len].into(),
+                },
+                &signer,
+            )
+            .await;
+            let outcome = node
+                .inner
+                .pool
+                .add_transaction(TransactionOrigin::Local, tx)
+                .await?;
+            tx_hashes.push(outcome.hash);
+        }
+
+        let payload = advance_block(&mut node, vec![]).await?;
+
+        assert_txs_in_block(&payload, &tx_hashes, "request predeploy calls");
+        for hash in tx_hashes {
+            let receipt = node
+                .inner
+                .provider
+                .receipt_by_hash(hash)?
+                .expect("receipt of included tx");
+            assert!(
+                receipt.success,
+                "request predeploy call {hash} must succeed"
+            );
+        }
+        assert_eq!(
+            payload.block().header().requests_hash,
+            Some(EMPTY_REQUESTS_HASH)
+        );
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "test-utils", test))]

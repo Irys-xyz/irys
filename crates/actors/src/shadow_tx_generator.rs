@@ -450,11 +450,14 @@ impl<'a> ShadowTxGenerator<'a> {
         epoch_snapshot: &EpochSnapshot,
     ) -> Result<BTreeMap<IrysAddress, (RewardAmount, RollingHash)>> {
         // Required ingress proofs per publish tx (N), taken at the block's own
-        // timestamp. Block production and validation size the block's proof list
-        // by this same N, so the generator must slice with it too.
-        let number_of_ingress_proofs_total = config
-            .hardforks
-            .number_of_ingress_proofs_total_at(block_timestamp_secs);
+        // timestamp and clamped to the parent epoch's active stakes. Block
+        // production and validation size the block's proof list by this same
+        // N, so the generator must slice with it too.
+        let number_of_ingress_proofs_total = crate::block_validation::required_ingress_proofs_total(
+            &config.hardforks,
+            block_timestamp_secs,
+            epoch_snapshot,
+        );
         let mut rewards_map: BTreeMap<IrysAddress, (RewardAmount, RollingHash)> = BTreeMap::new();
 
         // Get ingress proofs if available
@@ -1053,6 +1056,26 @@ mod tests {
 
     fn test_epoch_snapshot() -> EpochSnapshot {
         EpochSnapshot::default()
+    }
+
+    /// `snapshot` plus `count` active stakes that sign no proof, so a test's
+    /// configured ingress-proof total is not clamped below what it exercises.
+    fn with_bystander_stakes(mut snapshot: EpochSnapshot, count: usize) -> EpochSnapshot {
+        use irys_domain::StakeEntry;
+        for _ in 0..count {
+            let address = IrysAddress::random();
+            snapshot.commitment_state.stake_commitments.insert(
+                address,
+                StakeEntry {
+                    id: H256::random(),
+                    commitment_status: CommitmentStatus::Active,
+                    signer: address,
+                    amount: U256::from(1000),
+                    reward_address: address,
+                },
+            );
+        }
+        snapshot
     }
 
     /// Creates an epoch snapshot with stake entries where reward_address can differ from signer.
@@ -1914,12 +1937,16 @@ mod tests {
         let reward_dest2 = IrysAddress::random(); // Different from signer2
         // signer3 keeps reward_address = signer (tests mixed scenario)
 
-        // Create epoch snapshot with reward redirection
-        let epoch_snapshot = test_epoch_snapshot_with_reward_addresses(&[
-            (proof_signer1.address(), reward_dest1),
-            (proof_signer2.address(), reward_dest2),
-            (proof_signer3.address(), proof_signer3.address()), // No redirection
-        ]);
+        // Create epoch snapshot with reward redirection. One bystander stake
+        // keeps N at 4.
+        let epoch_snapshot = with_bystander_stakes(
+            test_epoch_snapshot_with_reward_addresses(&[
+                (proof_signer1.address(), reward_dest1),
+                (proof_signer2.address(), reward_dest2),
+                (proof_signer3.address(), proof_signer3.address()), // No redirection
+            ]),
+            1,
+        );
 
         // Build expected shadow txs with redirected addresses:
         // - signer1's reward → reward_dest1
@@ -2589,7 +2616,8 @@ mod tests {
         let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000_u64);
         let solution_hash = H256::zero();
-        let epoch_snapshot = test_epoch_snapshot();
+        // Three stakes, so N stays 3 and one proof is short.
+        let epoch_snapshot = with_bystander_stakes(test_epoch_snapshot(), 3);
 
         // `accumulate_ingress_rewards_for_init` runs inside `new`, so the OOB
         // slice would panic here on pre-fix code. Post-fix it is a clean Err.
@@ -2629,6 +2657,82 @@ mod tests {
             err.to_string().contains("ingress proofs at offset"),
             "Structural error must originate at the ingress-proof slice; got: {err:?}",
         );
+    }
+
+    /// The proof list is sliced by the total clamped to the active stakes.
+    /// Configured 3, one active stake: one proof per tx is a complete list,
+    /// and that proof gets the whole reward pool.
+    #[test]
+    fn publish_ingress_slice_uses_the_stake_clamped_total() {
+        let mut config = ConsensusConfig::testing();
+        config.hardforks.frontier.number_of_ingress_proofs_total = 3;
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
+        let term_fee = U256::from(100_000_u64);
+        let perm_fee = U256::from(10_000_000_u64);
+
+        let tx_signer = IrysSigner::random_signer(&config);
+        let publish_tx = create_data_tx_header(&tx_signer, term_fee, Some(perm_fee));
+        let proof_signer = IrysSigner::random_signer(&config);
+        let proof = create_test_ingress_proof(
+            &proof_signer,
+            H256::from([31_u8; 32]),
+            H256::from([32_u8; 32]),
+        );
+        let publish_ledger = PublishLedgerWithTxs {
+            txs: vec![publish_tx],
+            proofs: Some(IngressProofsList(vec![proof])),
+        };
+        let expired_fees = LedgerExpiryBalanceDelta {
+            reward_balance_increment: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
+        };
+        let epoch_snapshot = test_epoch_snapshot_with_reward_addresses(&[(
+            proof_signer.address(),
+            proof_signer.address(),
+        )]);
+
+        let block_height = 101_u64;
+        let reward_address = IrysAddress::from([20_u8; 20]);
+        let reward_amount = U256::from(5000_u64);
+        let solution_hash = H256::zero();
+        let generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            U256::zero(),
+            block_timestamp_secs,
+            &solution_hash,
+            &config,
+            &[],
+            &[],
+            &[],
+            &[],
+            &publish_ledger,
+            U256::from(100_000_000_u64),
+            &expired_fees,
+            &[],
+            &[],
+            &epoch_snapshot,
+        )
+        .expect("one proof is the full clamped list");
+        let pool = config
+            .ingress_proof_reward_pool_at(block_timestamp_secs, term_fee)
+            .expect("pool");
+        let rewarded: Vec<_> = generator
+            .filter_map(Result::ok)
+            .filter_map(|meta| match meta.shadow_tx {
+                ShadowTransaction::V1 {
+                    packet: TransactionPacket::IngressProofReward(increment),
+                    ..
+                } => Some(increment),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rewarded.len(), 1);
+        let target: reth::revm::primitives::Address = proof_signer.address().into();
+        let amount: reth::revm::primitives::U256 = pool.into();
+        assert_eq!(rewarded[0].target, target);
+        assert_eq!(rewarded[0].amount, amount);
     }
 
     /// `ShadowTxGenError::Display` carries the message verbatim with the

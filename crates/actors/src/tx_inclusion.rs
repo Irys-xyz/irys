@@ -14,7 +14,9 @@
 //!      has migrated out of the tree window.
 
 use irys_database::DatabaseProvider;
-use irys_database::{block_header_by_hash, canonical_submit_height, tables::MigratedBlockHashes};
+use irys_database::{
+    block_header_by_hash, canonical_submit_height, tables::MigratedBlockHashes, tx_header_by_txid,
+};
 use irys_domain::{BlockTreeReadGuard, ChainState};
 use irys_types::{
     DataLedger, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange,
@@ -26,11 +28,16 @@ use std::sync::Arc;
 
 /// Returns the Submit-ledger chunk range that this tx contributed to its
 /// confirming canonical block, or `None` if the tx is not yet confirmed on
-/// canonical at or before `max_height`.
+/// canonical at or before `max_height`, or if it contributed no chunks.
+///
+/// The range is the tx's own chunks, not the block's whole Submit delta: the
+/// block's Submit txs are laid out in on-chain order, each spanning
+/// `ceil(data_size / chunk_size)` chunks.
 pub fn find_canonical_ledger_range(
     tx_id: &IrysTransactionId,
     max_height: u64,
     block_migration_depth: u32,
+    chunk_size: u64,
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<Option<LedgerChunkRange>> {
@@ -60,7 +67,14 @@ pub fn find_canonical_ledger_range(
     // — Vector B's canonical-DB fallback at the validator catches the
     // worst-case double-publish risk, so the producer-side asymmetry
     // here is bounded.
-    match lookup_via_block_tree(tx_id, max_height, block_migration_depth, block_tree, db) {
+    match lookup_via_block_tree(
+        tx_id,
+        max_height,
+        block_migration_depth,
+        chunk_size,
+        block_tree,
+        db,
+    ) {
         Ok(Some(range)) => return Ok(Some(range)),
         Ok(None) => {}
         Err(tree_err) => {
@@ -72,12 +86,13 @@ pub fn find_canonical_ledger_range(
             );
         }
     }
-    lookup_via_migrated_metadata(tx_id, max_height, db)
+    lookup_via_migrated_metadata(tx_id, max_height, chunk_size, db)
 }
 
 fn lookup_via_migrated_metadata(
     tx_id: &IrysTransactionId,
     max_height: u64,
+    chunk_size: u64,
     db: &DatabaseProvider,
 ) -> eyre::Result<Option<LedgerChunkRange>> {
     // `canonical_submit_height` enforces, inside this same MDBX snapshot:
@@ -134,7 +149,10 @@ fn lookup_via_migrated_metadata(
                 })?,
             )
         };
-        compute_submit_range(&block, prev.as_ref())
+        let block_range = compute_submit_range(&block, prev.as_ref())?;
+        tx_range_within(block_range, tx_id, chunk_size, &block, || {
+            submit_tx_sizes_from_db(tx, &block)
+        })
     })?
 }
 
@@ -142,6 +160,7 @@ fn lookup_via_block_tree(
     tx_id: &IrysTransactionId,
     max_height: u64,
     block_migration_depth: u32,
+    chunk_size: u64,
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<Option<LedgerChunkRange>> {
@@ -191,21 +210,44 @@ fn lookup_via_block_tree(
             continue;
         }
 
-        // Tree-resident parent: cheap clone, no DB I/O, guard stays held.
-        if let Some(prev) = tree.get_block(&block.previous_block_hash).cloned() {
-            return compute_submit_range(block.as_ref(), Some(&prev));
+        // A sealed tree block carries its tx headers: read the Submit sizes
+        // while the guard is held. One that does not list exactly the
+        // header's Submit txs reads them from storage below instead.
+        let sealed_sizes: Option<Vec<(IrysTransactionId, u64)>> = tree
+            .get_sealed_block(&block.block_hash)
+            .map(|sealed| {
+                sealed
+                    .transactions()
+                    .get_ledger_txs(DataLedger::Submit)
+                    .iter()
+                    .map(|header| (header.id, header.data_size))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|sizes| sizes.iter().map(|(id, _)| id).eq(submit_txs.iter()));
+
+        // Release the read guard before any MDBX read below.
+        let tree_prev = tree.get_block(&block.previous_block_hash).cloned();
+        let block = Arc::clone(block);
+        drop(tree);
+        let sizes = || match sealed_sizes {
+            Some(sizes) => Ok(sizes),
+            None => db.view(|tx| submit_tx_sizes_from_db(tx, &block))?,
+        };
+        // Tree-resident parent: cheap clone, no DB I/O.
+        if let Some(prev) = tree_prev {
+            let block_range = compute_submit_range(block.as_ref(), Some(&prev))?;
+            return tx_range_within(block_range, tx_id, chunk_size, block.as_ref(), sizes);
         }
         if block.height == 0 {
-            return compute_submit_range(block.as_ref(), None);
+            let block_range = compute_submit_range(block.as_ref(), None)?;
+            return tx_range_within(block_range, tx_id, chunk_size, block.as_ref(), sizes);
         }
-        // Parent is past the tree window — fall back to the DB.  Clone the
-        // current block (Arc bump) and release the read guard before issuing
-        // the MDBX read so we don't hold the BlockTree lock across I/O.  Same
-        // invariant as the migrated path: a non-genesis canonical block's
-        // parent must be reachable; None from both tree and DB is corruption.
-        let block = Arc::clone(block);
+        // Parent is past the tree window — fall back to the DB.  The read
+        // guard was released above so the BlockTree lock is not held across
+        // I/O.  Same invariant as the migrated path: a non-genesis canonical
+        // block's parent must be reachable; None from both tree and DB is
+        // corruption.
         let prev_hash = block.previous_block_hash;
-        drop(tree);
         let from_db = db.view(|tx| block_header_by_hash(tx, &prev_hash, false))??;
         let prev = from_db.ok_or_else(|| {
             eyre::eyre!(
@@ -215,7 +257,97 @@ fn lookup_via_block_tree(
                 block.previous_block_hash
             )
         })?;
-        return compute_submit_range(block.as_ref(), Some(&prev));
+        let block_range = compute_submit_range(block.as_ref(), Some(&prev))?;
+        return tx_range_within(block_range, tx_id, chunk_size, block.as_ref(), sizes);
+    }
+    Ok(None)
+}
+
+/// The block's Submit txs as `(tx_id, data_size)`, in on-chain order, read
+/// from stored tx headers. A missing header is local storage corruption.
+fn submit_tx_sizes_from_db(
+    tx: &impl reth_db::transaction::DbTx,
+    block: &IrysBlockHeader,
+) -> eyre::Result<Vec<(IrysTransactionId, u64)>> {
+    block.data_ledgers[DataLedger::Submit]
+        .tx_ids
+        .0
+        .iter()
+        .map(|id| {
+            let header = tx_header_by_txid(tx, id)?.ok_or_else(|| {
+                eyre::eyre!(
+                    "tx header storage inconsistent: Submit tx {} of block {} at height {} is missing",
+                    id,
+                    block.block_hash,
+                    block.height
+                )
+            })?;
+            Ok((*id, header.data_size))
+        })
+        .collect()
+}
+
+/// The part of `block_range` that `tx_id` contributed. The block's Submit txs
+/// are laid out in on-chain order, each spanning `ceil(data_size /
+/// chunk_size)` chunks. When `tx_id` is the block's only Submit tx it spans the
+/// whole range, and `sizes` is not read.
+///
+/// `sizes` returns the block's Submit txs as `(tx_id, data_size)` in on-chain
+/// order. `None` when the block added no Submit chunks, the tx is not one of
+/// its Submit txs, or the tx spans no chunks. `Err` when `sizes` does not list
+/// the header's Submit txs, or the layout runs past the block's range: both are
+/// local storage corruption, since validation checks the block's chunk total.
+fn tx_range_within(
+    block_range: Option<LedgerChunkRange>,
+    tx_id: &IrysTransactionId,
+    chunk_size: u64,
+    block: &IrysBlockHeader,
+    sizes: impl FnOnce() -> eyre::Result<Vec<(IrysTransactionId, u64)>>,
+) -> eyre::Result<Option<LedgerChunkRange>> {
+    let Some(block_range) = block_range else {
+        return Ok(None);
+    };
+    let submit_txs = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
+    if submit_txs.as_slice() == [*tx_id] {
+        return Ok(Some(block_range));
+    }
+    if !submit_txs.contains(tx_id) {
+        return Ok(None);
+    }
+    eyre::ensure!(chunk_size > 0, "chunk_size must be positive");
+    let sizes = sizes()?;
+    eyre::ensure!(
+        sizes.iter().map(|(id, _)| id).eq(submit_txs.iter()),
+        "Submit tx sizes for block {} at height {} do not list its {} Submit txs in order",
+        block.block_hash,
+        block.height,
+        submit_txs.len()
+    );
+    let block_end = u64::from(block_range.end());
+    let mut start = u64::from(block_range.start());
+    for (id, data_size) in &sizes {
+        let chunks = data_size.div_ceil(chunk_size);
+        if id != tx_id {
+            start = start.saturating_add(chunks);
+            continue;
+        }
+        if chunks == 0 {
+            return Ok(None);
+        }
+        let end = start.saturating_add(chunks - 1);
+        eyre::ensure!(
+            end <= block_end,
+            "Submit layout of block {} at height {} runs past its chunk range: tx {} ends at {} > {}",
+            block.block_hash,
+            block.height,
+            tx_id,
+            end,
+            block_end
+        );
+        return Ok(Some(LedgerChunkRange(ii(
+            LedgerChunkOffset::from(start),
+            LedgerChunkOffset::from(end),
+        ))));
     }
     Ok(None)
 }
@@ -406,6 +538,7 @@ mod tests {
             &tx_id,
             /* max_height */ 5,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )?
@@ -427,6 +560,7 @@ mod tests {
             &tx_id,
             10,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )?;
@@ -455,6 +589,7 @@ mod tests {
             &tx_id,
             /* max_height */ 5,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )
@@ -491,6 +626,7 @@ mod tests {
             &tx_id,
             /* max_height */ 5,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )
@@ -603,6 +739,7 @@ mod tests {
             &tx_id,
             /* max_height */ 1,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )?
@@ -650,6 +787,7 @@ mod tests {
             &tx_id,
             /* max_height */ 3,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )?
@@ -688,6 +826,7 @@ mod tests {
             &tx_id,
             /* max_height */ 3,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )?;
@@ -769,6 +908,7 @@ mod tests {
             &tx_id,
             /* max_height */ 1,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )?
@@ -819,6 +959,7 @@ mod tests {
             &tx_id,
             /* max_height */ 5,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )?;
@@ -852,6 +993,7 @@ mod tests {
             &tx_id,
             /* max_height */ 5,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )?
@@ -919,6 +1061,7 @@ mod tests {
             &tx_id,
             /* max_height */ 5,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )?
@@ -991,6 +1134,7 @@ mod tests {
             &tx_id,
             /* max_height */ 2,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )?
@@ -1071,6 +1215,7 @@ mod tests {
             &tx_id,
             /* max_height */ 5,
             ConsensusConfig::testing().block_migration_depth,
+            ConsensusConfig::testing().chunk_size,
             &guard,
             &db,
         )?
@@ -1083,6 +1228,161 @@ mod tests {
         // surfaced only if the orchestrator returned the tree-path result.
         assert_eq!(u64::from(range.start()), 10);
         assert_eq!(u64::from(range.end()), 24);
+        Ok(())
+    }
+
+    fn submit_tx_header(id: H256, data_size: u64) -> DataTransactionHeader {
+        DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id,
+                data_root: H256::random(),
+                data_size,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        })
+    }
+
+    /// Store a Submit tx header with `data_size`, included at `included_height`.
+    fn write_sized_submit_tx(
+        db: &DatabaseProvider,
+        header: &DataTransactionHeader,
+        included_height: u64,
+    ) -> eyre::Result<()> {
+        db.update(|tx| -> eyre::Result<()> {
+            insert_tx_header(tx, header)?;
+            set_data_tx_included_height(tx, &header.id, included_height)?;
+            Ok(())
+        })??;
+        Ok(())
+    }
+
+    fn range_of(
+        tx_id: &H256,
+        guard: &BlockTreeReadGuard,
+        db: &DatabaseProvider,
+    ) -> eyre::Result<Option<(u64, u64)>> {
+        let consensus = ConsensusConfig::testing();
+        Ok(find_canonical_ledger_range(
+            tx_id,
+            /* max_height */ 5,
+            consensus.block_migration_depth,
+            consensus.chunk_size,
+            guard,
+            db,
+        )?
+        .map(|range| (u64::from(range.start()), u64::from(range.end()))))
+    }
+
+    /// Two Submit txs in one block: [10, 24] splits into a's 5 chunks and b's
+    /// 10 (b's last chunk is partial). Each tx gets its own chunks, not the
+    /// block's whole Submit delta.
+    fn two_tx_block() -> (H256, H256, IrysBlockHeader, IrysBlockHeader, u64) {
+        let chunk = ConsensusConfig::testing().chunk_size;
+        let (a, b) = (H256::random(), H256::random());
+        let h0 = make_signed_header(0, H256::zero(), 0, 10, vec![]);
+        let h1 = make_signed_header(1, h0.block_hash, 1, 25, vec![a, b]);
+        (a, b, h0, h1, chunk)
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn migrated_multi_tx_block_returns_each_tx_range() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+        let (a, b, h0, h1, chunk) = two_tx_block();
+        put_block_header(&db, &h0)?;
+        put_block_header(&db, &h1)?;
+        mark_migrated(&db, 0, h0.block_hash)?;
+        mark_migrated(&db, 1, h1.block_hash)?;
+        write_sized_submit_tx(&db, &submit_tx_header(a, 5 * chunk), 1)?;
+        write_sized_submit_tx(&db, &submit_tx_header(b, 10 * chunk - 1), 1)?;
+
+        let guard = empty_block_tree_guard();
+        assert_eq!(range_of(&a, &guard, &db)?, Some((10, 14)));
+        assert_eq!(range_of(&b, &guard, &db)?, Some((15, 24)));
+        Ok(())
+    }
+
+    /// A tree block reads the sizes from its sealed tx bodies. No tx header
+    /// is stored, so the DB cannot be the source.
+    #[test_log::test(tokio::test)]
+    async fn tree_multi_tx_block_reads_sizes_from_the_sealed_block() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+        let (a, b, h0, h1, chunk) = two_tx_block();
+        let mut tree = BlockTree::new(&h0, ConsensusConfig::testing());
+        let mut txs = BlockTransactions::default();
+        txs.data_txs.insert(
+            DataLedger::Submit,
+            vec![
+                submit_tx_header(a, 5 * chunk),
+                submit_tx_header(b, 10 * chunk - 1),
+            ],
+        );
+        let sealed = Arc::new(SealedBlock::new_unchecked(Arc::new(h1.clone()), txs));
+        tree.add_common(
+            h1.block_hash,
+            &sealed,
+            Arc::new(CommitmentSnapshot::default()),
+            Arc::new(EpochSnapshot::default()),
+            dummy_ema_snapshot(),
+            ChainState::Onchain,
+        )?;
+        tree.mark_tip(&h1.block_hash)?;
+        let guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        assert_eq!(range_of(&a, &guard, &db)?, Some((10, 14)));
+        assert_eq!(range_of(&b, &guard, &db)?, Some((15, 24)));
+        Ok(())
+    }
+
+    /// A tree block whose sealed body does not list its Submit txs reads the
+    /// sizes from the stored headers.
+    #[test_log::test(tokio::test)]
+    async fn tree_multi_tx_block_without_bodies_reads_stored_sizes() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+        let (a, b, h0, h1, chunk) = two_tx_block();
+        write_sized_submit_tx(&db, &submit_tx_header(a, 5 * chunk), 1)?;
+        write_sized_submit_tx(&db, &submit_tx_header(b, 10 * chunk - 1), 1)?;
+        let guard = build_tree(h0, vec![h1]);
+
+        assert_eq!(range_of(&a, &guard, &db)?, Some((10, 14)));
+        assert_eq!(range_of(&b, &guard, &db)?, Some((15, 24)));
+        Ok(())
+    }
+
+    /// A multi-tx block with a missing Submit tx header is local corruption.
+    #[test_log::test(tokio::test)]
+    async fn migrated_multi_tx_block_missing_header_is_err() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+        let (a, _b, h0, h1, chunk) = two_tx_block();
+        put_block_header(&db, &h0)?;
+        put_block_header(&db, &h1)?;
+        mark_migrated(&db, 0, h0.block_hash)?;
+        mark_migrated(&db, 1, h1.block_hash)?;
+        write_sized_submit_tx(&db, &submit_tx_header(a, 5 * chunk), 1)?;
+
+        let guard = empty_block_tree_guard();
+        let err = range_of(&a, &guard, &db).expect_err("b's header is missing");
+        assert!(err.to_string().contains("is missing"), "{err}");
+        Ok(())
+    }
+
+    /// A layout that runs past the block's chunk total is local corruption.
+    #[test_log::test(tokio::test)]
+    async fn migrated_multi_tx_block_overrun_is_err() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+        let (a, b, h0, h1, chunk) = two_tx_block();
+        put_block_header(&db, &h0)?;
+        put_block_header(&db, &h1)?;
+        mark_migrated(&db, 0, h0.block_hash)?;
+        mark_migrated(&db, 1, h1.block_hash)?;
+        write_sized_submit_tx(&db, &submit_tx_header(a, 5 * chunk), 1)?;
+        write_sized_submit_tx(&db, &submit_tx_header(b, 11 * chunk), 1)?;
+
+        let guard = empty_block_tree_guard();
+        assert_eq!(range_of(&a, &guard, &db)?, Some((10, 14)));
+        let err = range_of(&b, &guard, &db).expect_err("b ends past the block");
+        assert!(err.to_string().contains("runs past"), "{err}");
         Ok(())
     }
 }

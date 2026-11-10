@@ -55,7 +55,7 @@ mod tests {
                 bind_port,
                 bind_addr,
                 cpu_packing_concurrency,
-                gpu_packing_batch_size,
+                gpu_packing_batch_size: gpu_packing_batch_size.into(),
                 max_pending,
             };
             let json = serde_json::to_string(&config).unwrap();

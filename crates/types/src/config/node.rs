@@ -1137,17 +1137,83 @@ pub struct LocalPackingConfig {
     /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,
 
-    /// Batch size for GPU-accelerated packing operations
-    pub gpu_packing_batch_size: u32,
+    /// Chunks per GPU packing batch: a number, or `"auto"` to size batches from the GPU.
+    /// `0` packs on the CPU instead.
+    pub gpu_packing_batch_size: GpuPackingBatchSize,
+
+    /// Scheduling priority of the CPU packing hash threads
+    pub cpu_packing_thread_priority: CpuPackingThreadPriority,
 }
 
 impl Default for LocalPackingConfig {
     fn default() -> Self {
         Self {
             cpu_packing_concurrency: 2, // TODO: default to something like numcpus - 4
-            gpu_packing_batch_size: 0,
+            gpu_packing_batch_size: GpuPackingBatchSize::Fixed(0),
+            cpu_packing_thread_priority: CpuPackingThreadPriority::Idle,
         }
     }
+}
+
+/// Chunks per GPU packing batch.
+///
+/// Each GPU thread packs one whole chunk, so the batch size is the number of chunks in flight and
+/// sets throughput: on an RTX 5090 at 1M iterations, 1024 chunks pack ~25x slower than ~65k.
+/// `Auto` sizes batches from the GPU's cores and memory and the host memory budget
+/// (`irys_packing::CUDAConfig::auto_batch_size`). In TOML: `"auto"` or a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuPackingBatchSize {
+    /// Size batches from the GPU when packing starts.
+    Auto,
+    /// Exactly this many chunks per batch; `0` packs on the CPU instead.
+    Fixed(u32),
+}
+
+impl From<u32> for GpuPackingBatchSize {
+    fn from(chunks: u32) -> Self {
+        Self::Fixed(chunks)
+    }
+}
+
+impl Serialize for GpuPackingBatchSize {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Fixed(chunks) => serializer.serialize_u32(*chunks),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GpuPackingBatchSize {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Chunks(u32),
+            Text(String),
+        }
+        match Repr::deserialize(deserializer)? {
+            Repr::Chunks(chunks) => Ok(Self::Fixed(chunks)),
+            Repr::Text(text) if text.eq_ignore_ascii_case("auto") => Ok(Self::Auto),
+            Repr::Text(text) => Err(serde::de::Error::custom(format!(
+                "gpu_packing_batch_size must be a number of chunks or \"auto\", got {text:?}"
+            ))),
+        }
+    }
+}
+
+/// Scheduling priority of the CPU packing hash threads.
+/// Linux applies it per thread. Other platforms keep the default priority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuPackingThreadPriority {
+    /// `SCHED_IDLE`: the threads run only when no other thread wants the CPU.
+    Idle,
+    /// Nice level, -20 (highest) to 19 (lowest); 0 is normal. The kernel
+    /// clamps values outside that range. A negative level needs
+    /// `CAP_SYS_NICE` or a matching `RLIMIT_NICE`; without it the threads
+    /// keep the default priority and the node logs a warning.
+    Nice(i8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1867,7 +1933,8 @@ impl NodeConfig {
             packing: PackingConfig {
                 local: LocalPackingConfig {
                     cpu_packing_concurrency: 4,
-                    gpu_packing_batch_size: 1024,
+                    gpu_packing_batch_size: GpuPackingBatchSize::Fixed(1024),
+                    cpu_packing_thread_priority: CpuPackingThreadPriority::Idle,
                 },
                 remote: Default::default(),
             },
@@ -2083,7 +2150,8 @@ impl NodeConfig {
             packing: PackingConfig {
                 local: LocalPackingConfig {
                     cpu_packing_concurrency: 4,
-                    gpu_packing_batch_size: 1024,
+                    gpu_packing_batch_size: GpuPackingBatchSize::Auto,
+                    cpu_packing_thread_priority: CpuPackingThreadPriority::Idle,
                 },
                 remote: Default::default(),
             },
@@ -2668,5 +2736,59 @@ mod node_mode_tests {
         let encoded = toml::to_string(&doc).expect("serializes");
         let decoded: ModeDoc = toml::from_str(&encoded).expect("deserializes");
         assert_eq!(doc, decoded);
+    }
+}
+
+#[cfg(test)]
+mod gpu_packing_batch_size_tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn parse(value: &str) -> Result<GpuPackingBatchSize, toml::de::Error> {
+        toml::from_str::<LocalPackingConfig>(&format!("gpu_packing_batch_size = {value}"))
+            .map(|c| c.gpu_packing_batch_size)
+    }
+
+    #[rstest]
+    #[case::number("1024", GpuPackingBatchSize::Fixed(1024))]
+    #[case::zero_packs_on_cpu("0", GpuPackingBatchSize::Fixed(0))]
+    #[case::auto("\"auto\"", GpuPackingBatchSize::Auto)]
+    #[case::auto_any_case("\"Auto\"", GpuPackingBatchSize::Auto)]
+    fn parses(#[case] value: &str, #[case] expected: GpuPackingBatchSize) {
+        assert_eq!(parse(value).unwrap(), expected);
+    }
+
+    #[rstest]
+    #[case::other_word("\"max\"")]
+    #[case::negative("-1")]
+    fn rejects(#[case] value: &str) {
+        assert!(parse(value).is_err(), "{value} should not parse");
+    }
+
+    #[rstest]
+    #[case(GpuPackingBatchSize::Auto)]
+    #[case(GpuPackingBatchSize::Fixed(87_040))]
+    fn round_trips(#[case] size: GpuPackingBatchSize) {
+        let config = LocalPackingConfig {
+            cpu_packing_concurrency: 2,
+            gpu_packing_batch_size: size,
+            cpu_packing_thread_priority: CpuPackingThreadPriority::Idle,
+        };
+        let text = toml::to_string(&config).unwrap();
+        assert_eq!(toml::from_str::<LocalPackingConfig>(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn templates_use_auto() {
+        for template in [
+            include_str!("../../../config/templates/mainnet_config.toml"),
+            include_str!("../../../config/templates/testnet_config.toml"),
+        ] {
+            let config = toml::from_str::<NodeConfig>(template).unwrap();
+            assert_eq!(
+                config.packing.local.gpu_packing_batch_size,
+                GpuPackingBatchSize::Auto
+            );
+        }
     }
 }

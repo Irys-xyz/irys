@@ -166,6 +166,8 @@ revm = { version = "34.0.0", default-features = false }
 revm-primitives = "22"
 
 alloy-dyn-abi = "1.5.6"
+# On upgrade: compare `EthBlockExecutor` pre- and post-block steps with
+# `IrysBlockExecutor` (crates/irys-reth/src/evm.rs). See its doc comment.
 alloy-evm = { version = "0.27.2", default-features = false }
 alloy-primitives = { version = "1.5.6", default-features = false, features = [
   "map-foldhash",
@@ -193,12 +195,15 @@ alloy-rpc-types-engine = { version = "1.7.3", default-features = false }
 alloy-rpc-types-trace = { version = "1.7.3", default-features = false }
 alloy-signer = { version = "1.7.3", default-features = false }
 alloy-signer-local = { version = "1.7.3", default-features = false }
+alloy-trie = { version = "0.9.5", default-features = false }
 
 # Same version as Reth, so tests can build Reth RPC modules
 jsonrpsee = { version = "0.26.0", default-features = false }
 
 # Reth crates
 # These point to a fork of reth with Irys-specific changes (branch: irys-changes)
+# On upgrade: compare `EthBlockExecutor` pre- and post-block steps with
+# `IrysBlockExecutor` (crates/irys-reth/src/evm.rs). See its doc comment.
 reth = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c", default-features = false }
 reth-chainspec = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
 reth-e2e-test-utils = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }

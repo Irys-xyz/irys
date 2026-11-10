@@ -1,6 +1,7 @@
 use std::num::NonZeroU8;
 
 use crate::IrysAddress;
+use crate::config::GpuPackingBatchSize;
 use serde::{Deserialize, Serialize};
 
 use crate::{H256, PartitionChunkRange};
@@ -28,8 +29,8 @@ pub struct PackingWorkerConfig {
     /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,
 
-    /// Batch size for GPU-accelerated packing operations
-    pub gpu_packing_batch_size: u32,
+    /// Chunks per GPU packing batch: a number, or `"auto"` to size batches from the GPU.
+    pub gpu_packing_batch_size: GpuPackingBatchSize,
 
     /// Max pending requests
     pub max_pending: NonZeroU8,
