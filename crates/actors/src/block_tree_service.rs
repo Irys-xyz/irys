@@ -215,6 +215,10 @@ struct TipMove {
     epoch_block: Option<Arc<IrysBlockHeader>>,
     /// The new canonical blocks after the fork point, oldest first.
     blocks_to_confirm: Vec<Arc<SealedBlock>>,
+    /// The old tip's difficulty, which the difficulty broadcast compares against.
+    old_tip_diff: irys_types::U256,
+    /// The new tip's own epoch snapshot, which drives the storage-module geometry bound.
+    new_tip_epoch_snapshot: Arc<irys_domain::EpochSnapshot>,
 }
 
 /// Capacity of [`BlockTreeServiceInner::recent_soft_internal_discards`].
@@ -1128,16 +1132,22 @@ impl BlockTreeServiceInner {
         cache: &mut BlockTree,
         candidate: BlockHash,
     ) -> eyre::Result<Option<TipMove>> {
-        let new_tip = cache
+        let (new_tip, new_tip_epoch_snapshot) = cache
             .blocks
             .get(&candidate)
-            .map(|entry| Arc::clone(entry.block.header()))
+            .map(|entry| {
+                (
+                    Arc::clone(entry.block.header()),
+                    Arc::clone(&entry.epoch_snapshot),
+                )
+            })
             .ok_or_else(|| eyre::eyre!("tip candidate {candidate} not found in cache"))?;
         let old_tip_block = cache
             .get_block(&cache.tip)
             .ok_or_eyre("tip block must always be present")?;
         let old_tip_hash = old_tip_block.block_hash;
         let old_tip_height = old_tip_block.height;
+        let old_tip_diff = old_tip_block.diff;
 
         // only mark the tip if the new tip has higher cumulative difficulty than the old one
         if old_tip_block.cumulative_diff >= new_tip.cumulative_diff {
@@ -1348,6 +1358,8 @@ impl BlockTreeServiceInner {
             reorg_event,
             epoch_block,
             blocks_to_confirm,
+            old_tip_diff,
+            new_tip_epoch_snapshot,
         }))
     }
 
@@ -1362,6 +1374,8 @@ impl BlockTreeServiceInner {
             reorg_event,
             epoch_block,
             blocks_to_confirm,
+            old_tip_diff,
+            new_tip_epoch_snapshot,
         } = tip_move;
 
         // Send epoch events which require a Read lock
@@ -1392,6 +1406,12 @@ impl BlockTreeServiceInner {
             self.block_migration_service
                 .persist_metadata(old_fork, &blocks_to_confirm, stream)?
         };
+
+        // The storage-module bound follows the validated tip, the same block the
+        // miner and block producer build on, not the longest-chain head, which
+        // can run ahead of the tip while its blocks are still being validated.
+        self.block_migration_service
+            .update_partition_geometry(&new_tip_epoch_snapshot)?;
 
         // Broadcast reorg event if applicable
         let reorg_occurred = reorg_event.is_some();
@@ -1460,30 +1480,11 @@ impl BlockTreeServiceInner {
 
         self.migrate_block(&fcu_markers.migration_block)?;
 
-        // Broadcast difficulty update to miners if tip difficulty changed from parent.
-        // On either lock poisoning or missing parent (the latter is a strong invariant
-        // — the tip just changed so the parent must be present — but a panic here
-        // would take the node down for a non-critical broadcast), skip the diff check
-        // and log instead. The downstream miners will pick up the difficulty on the
-        // next canonical update.
-        let parent_diff_changed = match self.cache.read() {
-            Ok(cache) => match cache.get_block(&new_tip.previous_block_hash) {
-                Some(parent_block) => parent_block.diff != new_tip.diff,
-                None => {
-                    error!(
-                        parent_hash = %new_tip.previous_block_hash,
-                        block.hash = %new_tip.block_hash,
-                        "parent block missing from cache while broadcasting difficulty update; skipping"
-                    );
-                    false
-                }
-            },
-            Err(_) => {
-                error!("block tree cache read lock poisoned during difficulty broadcast; skipping");
-                false
-            }
-        };
-        if parent_diff_changed {
+        // Broadcast difficulty update to miners if the tip's difficulty differs
+        // from the previous tip's. Comparing against the parent instead misses a
+        // reorg onto a branch whose new tip did not itself adjust, leaving miners
+        // on the old target until the next adjustment.
+        if old_tip_diff != new_tip.diff {
             self.service_senders
                 .send_mining_difficulty(BroadcastDifficultyUpdate(new_tip.clone()));
         }

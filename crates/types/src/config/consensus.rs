@@ -913,6 +913,8 @@ impl ConsensusConfig {
                 echo: Some(Echo {
                     activation_height: 2779313,
                 }),
+                // Fission hardfork (partition resize) - not scheduled yet
+                fission: None,
             },
         }
     }
@@ -1059,6 +1061,8 @@ impl ConsensusConfig {
                 echo: Some(Echo {
                     activation_height: 0,
                 }),
+                // Fission hardfork (partition resize) - not scheduled yet
+                fission: None,
             },
         }
     }
@@ -1199,6 +1203,8 @@ impl ConsensusConfig {
                 echo: Some(Echo {
                     activation_height: 0,
                 }),
+                // Fission hardfork (partition resize) - not scheduled yet
+                fission: None,
             },
         }
     }
@@ -1415,6 +1421,12 @@ mod tests {
             config.hardforks.delta.is_none(),
             "mainnet Delta is unscheduled"
         );
+        // Fission (partition resize) — unscheduled, like Delta: scheduling it moves the
+        // canonical config hash too.
+        assert!(
+            config.hardforks.fission.is_none(),
+            "mainnet Fission is unscheduled"
+        );
     }
 
     /// Pins the testnet hardfork schedule: the Borealis activation time
@@ -1439,6 +1451,12 @@ mod tests {
         assert!(
             config.hardforks.delta.is_none(),
             "testnet Delta is unscheduled"
+        );
+        // Fission (partition resize) — unscheduled, like Delta: scheduling it moves the
+        // canonical config hash too.
+        assert!(
+            config.hardforks.fission.is_none(),
+            "testnet Fission is unscheduled"
         );
     }
 

@@ -168,7 +168,7 @@ pub(crate) fn assess_submit_ingress_proofs(
     // assignee gate clamps to the number of such miners.
     let assignees = block_range
         .as_ref()
-        .map(|range| submit_assignees_for_range(range, query.config, query.epoch_snapshot))
+        .map(|range| submit_assignees_for_range(range, query.epoch_snapshot))
         .unwrap_or_default();
     let assigned_miners = assignees.len();
     let candidate_assigned: HashMap<IrysAddress, bool> = candidates
