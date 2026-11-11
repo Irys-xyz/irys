@@ -6,11 +6,11 @@ use irys_reth::shadow_tx::{
 use irys_types::{
     BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, H256,
     IngressProofsList, IrysAddress, U256, UnixTimestamp,
-    hardfork_config::Activation,
+    hardfork_config::{Activation, Fission},
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
 };
 use reth::revm::primitives::ruint::Uint;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::block_producer::ledger_expiry::LedgerExpiryBalanceDelta;
 use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
@@ -458,6 +458,14 @@ impl<'a> ShadowTxGenerator<'a> {
             block_timestamp_secs,
             epoch_snapshot,
         );
+        // Fission is active for children of an epoch snapshot that has
+        // activated it. Producer and validator both pass the parent epoch
+        // snapshot, so both resolve the same state.
+        let fission: Activation<Fission> = epoch_snapshot
+            .consensus_context()
+            .resize()
+            .map(|resize| resize.params)
+            .into();
         let mut rewards_map: BTreeMap<IrysAddress, (RewardAmount, RollingHash)> = BTreeMap::new();
 
         // Get ingress proofs if available
@@ -526,6 +534,9 @@ impl<'a> ShadowTxGenerator<'a> {
                 .ingress_proof_rewards(ingress_proofs)
                 .map_err(|e| ShadowTxGenError::Structural(e.to_string()))?;
 
+            // Reward addresses whose rolling hash already holds this tx id.
+            let mut reward_addresses_hashed_for_tx = BTreeSet::new();
+
             // Aggregate rewards by address and update rolling hash
             for charge in fee_charges {
                 // Resolve to reward_address (falls back to miner address if no stake entry)
@@ -535,8 +546,17 @@ impl<'a> ShadowTxGenerator<'a> {
                     .entry(reward_addr)
                     .or_insert((RewardAmount::zero(), RollingHash::zero()));
                 entry.0.add_assign(charge.amount); // Add to total amount
-                // XOR the rolling hash with the transaction ID
-                entry.1.xor_assign(U256::from_be_bytes(tx.id.0));
+                // XOR the rolling hash with the transaction ID. Before Fission
+                // every charge does this, so an even number of charges to one
+                // reward address for one tx cancels the tx id. From Fission
+                // the tx id goes in once per (reward address, tx).
+                let add_tx_id_to_hash = match fission {
+                    Activation::Active(_) => reward_addresses_hashed_for_tx.insert(reward_addr),
+                    Activation::Inactive => true,
+                };
+                if add_tx_id_to_hash {
+                    entry.1.xor_assign(U256::from_be_bytes(tx.id.0));
+                }
             }
         }
 
@@ -2733,6 +2753,183 @@ mod tests {
         let amount: reth::revm::primitives::U256 = pool.into();
         assert_eq!(rewarded[0].target, target);
         assert_eq!(rewarded[0].amount, amount);
+    }
+
+    /// `snapshot` with Fission activated on its branch.
+    fn with_fission_activated(mut snapshot: EpochSnapshot) -> EpochSnapshot {
+        use irys_types::partition_resize::PartitionResizeState;
+        let consensus = &snapshot.config.consensus;
+        snapshot.partition_resize = Some(PartitionResizeState {
+            params: Fission::proposed(UnixTimestamp::from_secs(0)),
+            activation_height: consensus.epoch.num_blocks_in_epoch,
+            activation_hash: H256::repeat_byte(3),
+            sampling_origin: 0,
+            preserved_id_floor: 0,
+            reference_partition_chunks: consensus.num_chunks_in_partition,
+        });
+        snapshot
+    }
+
+    /// Runs the generator over one publish tx with one ingress proof per
+    /// signer in `proof_signers`, and returns the tx, the ingress proof reward
+    /// pool and the ingress proof reward packets. The tx id is nonzero, so the
+    /// rolling hash is visible.
+    fn ingress_proof_reward_increments(
+        mut config: ConsensusConfig,
+        proof_signers: &[&IrysSigner],
+        epoch_snapshot: &EpochSnapshot,
+    ) -> (DataTransactionHeader, U256, Vec<BalanceIncrement>) {
+        config.hardforks.frontier.number_of_ingress_proofs_total =
+            u8::try_from(proof_signers.len()).expect("few signers");
+        let block_timestamp_secs = UnixTimestamp::from_secs(0);
+        let term_fee = U256::from(100_000_u64);
+        let perm_fee = U256::from(10_000_000_u64);
+
+        let tx_signer = IrysSigner::random_signer(&config);
+        let mut publish_tx = create_data_tx_header(&tx_signer, term_fee, Some(perm_fee));
+        publish_tx.id = H256::repeat_byte(0xAB);
+        let proofs = proof_signers
+            .iter()
+            .enumerate()
+            .map(|(index, signer)| {
+                let index = u8::try_from(index).expect("few signers");
+                create_test_ingress_proof(
+                    signer,
+                    H256::repeat_byte(40 + index),
+                    H256::repeat_byte(60 + index),
+                )
+            })
+            .collect();
+        let publish_ledger = PublishLedgerWithTxs {
+            txs: vec![publish_tx.clone()],
+            proofs: Some(IngressProofsList(proofs)),
+        };
+        let expired_fees = LedgerExpiryBalanceDelta {
+            reward_balance_increment: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
+        };
+
+        let block_height = 101_u64;
+        let reward_address = IrysAddress::from([20_u8; 20]);
+        let reward_amount = U256::from(5000_u64);
+        let solution_hash = H256::zero();
+        let generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            U256::zero(),
+            block_timestamp_secs,
+            &solution_hash,
+            &config,
+            &[],
+            &[],
+            &[],
+            &[],
+            &publish_ledger,
+            U256::from(100_000_000_u64),
+            &expired_fees,
+            &[],
+            &[],
+            epoch_snapshot,
+        )
+        .expect("generator");
+        let reward_pool = config
+            .ingress_proof_reward_pool_at(block_timestamp_secs, term_fee)
+            .expect("pool");
+        let increments = generator
+            .map(|result| result.expect("shadow tx"))
+            .filter_map(|meta| match meta.shadow_tx {
+                ShadowTransaction::V1 {
+                    packet: TransactionPacket::IngressProofReward(increment),
+                    ..
+                } => Some(increment),
+                _ => None,
+            })
+            .collect();
+        (publish_tx, reward_pool, increments)
+    }
+
+    /// After Fission, two signers that share one reward address and are both
+    /// paid for one tx put the tx id once into that address's rolling hash.
+    #[test]
+    fn fission_hashes_each_tx_once_per_shared_reward_address() {
+        let config = ConsensusConfig::testing();
+        let first_signer = IrysSigner::random_signer(&config);
+        let second_signer = IrysSigner::random_signer(&config);
+        let shared_reward_address = IrysAddress::random();
+        let epoch_snapshot = with_fission_activated(test_epoch_snapshot_with_reward_addresses(&[
+            (first_signer.address(), shared_reward_address),
+            (second_signer.address(), shared_reward_address),
+        ]));
+
+        let (publish_tx, reward_pool, increments) = ingress_proof_reward_increments(
+            config,
+            &[&first_signer, &second_signer],
+            &epoch_snapshot,
+        );
+
+        assert_eq!(increments.len(), 1);
+        let target: reth::revm::primitives::Address = shared_reward_address.into();
+        let amount: reth::revm::primitives::U256 = reward_pool.into();
+        assert_eq!(increments[0].target, target);
+        assert_eq!(increments[0].amount, amount);
+        let tx_id_ref: reth::revm::primitives::B256 = publish_tx.id.into();
+        assert_eq!(increments[0].irys_ref, tx_id_ref);
+    }
+
+    /// Before Fission (unscheduled, or scheduled but not activated on the
+    /// branch of the parent epoch), each charge XORs the tx id, so two charges
+    /// to one reward address cancel it.
+    #[rstest::rstest]
+    #[case::fission_unscheduled(false)]
+    #[case::fission_pending(true)]
+    fn before_fission_shared_reward_address_hash_cancels_the_tx(#[case] fission_scheduled: bool) {
+        let mut config = ConsensusConfig::testing();
+        if fission_scheduled {
+            config.hardforks.fission = Some(Fission::proposed(UnixTimestamp::from_secs(0)));
+        }
+        let first_signer = IrysSigner::random_signer(&config);
+        let second_signer = IrysSigner::random_signer(&config);
+        let shared_reward_address = IrysAddress::random();
+        let epoch_snapshot = test_epoch_snapshot_with_reward_addresses(&[
+            (first_signer.address(), shared_reward_address),
+            (second_signer.address(), shared_reward_address),
+        ]);
+
+        let (_, reward_pool, increments) = ingress_proof_reward_increments(
+            config,
+            &[&first_signer, &second_signer],
+            &epoch_snapshot,
+        );
+
+        assert_eq!(increments.len(), 1);
+        let amount: reth::revm::primitives::U256 = reward_pool.into();
+        assert_eq!(increments[0].amount, amount);
+        assert_eq!(increments[0].irys_ref, reth::revm::primitives::B256::ZERO);
+    }
+
+    /// One signer paid once for one tx: Fission does not change the packet.
+    #[test]
+    fn fission_keeps_the_single_signer_reward_packet() {
+        let config = ConsensusConfig::testing();
+        let proof_signer = IrysSigner::random_signer(&config);
+        let epoch_snapshot = test_epoch_snapshot_with_reward_addresses(&[(
+            proof_signer.address(),
+            proof_signer.address(),
+        )]);
+
+        let (publish_tx, _, before_fission) =
+            ingress_proof_reward_increments(config.clone(), &[&proof_signer], &epoch_snapshot);
+        let (_, _, after_fission) = ingress_proof_reward_increments(
+            config,
+            &[&proof_signer],
+            &with_fission_activated(epoch_snapshot),
+        );
+
+        assert_eq!(before_fission.len(), 1);
+        let tx_id_ref: reth::revm::primitives::B256 = publish_tx.id.into();
+        assert_eq!(before_fission[0].irys_ref, tx_id_ref);
+        assert_eq!(after_fission, before_fission);
     }
 
     /// `ShadowTxGenError::Display` carries the message verbatim with the
