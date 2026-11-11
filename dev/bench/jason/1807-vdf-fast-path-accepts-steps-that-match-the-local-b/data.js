@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794345050683,
+  "lastUpdate": 1794411703980,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -22939,6 +22939,146 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "406e964d6c19dc30991c5c4ff80aa3e1ab69e815",
+          "message": "fix(vdf): hash claimed steps from the block's own prev_output",
+          "timestamp": "2026-11-10T22:01:29Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1821/commits/406e964d6c19dc30991c5c4ff80aa3e1ab69e815"
+        },
+        "date": 1794411702519,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011909,
+            "range": "± 0.000008",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119397,
+            "range": "± 0.000411",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.207905,
+            "range": "± 0.001614",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.884957,
+            "range": "± 0.064975",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.065407,
+            "range": "± 0.00008",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 650.99319,
+            "range": "± 0.42456",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 846.465763,
+            "range": "± 0.244555",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119734,
+            "range": "± 0.000688",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1194.054002,
+            "range": "± 0.333843",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1604.384412,
+            "range": "± 80.058807",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.030189,
+            "range": "± 0.001674",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 168.441733,
+            "range": "± 18.464784",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 188.481464,
+            "range": "± 21.840839",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000119,
+            "range": "± 0.000012",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_step_batch_is_valid/testing_1t",
+            "value": 0.152687,
+            "range": "± 0.019263",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_step_batch_is_valid/testing_4t",
+            "value": 0.118939,
+            "range": "± 0.006584",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_step_batch_is_valid/testnet_1t",
+            "value": 939.30899,
+            "range": "± 71.712201",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_step_batch_is_valid/testnet_4t",
+            "value": 937.769954,
+            "range": "± 24.532601",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_step_batch_is_valid/mainnet_1t",
+            "value": 1198.739371,
+            "range": "± 4.569993",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_step_batch_is_valid/mainnet_4t",
+            "value": 1206.272313,
+            "range": "± 24.858452",
             "unit": "ms/iter"
           }
         ]
