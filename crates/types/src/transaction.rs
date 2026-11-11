@@ -44,6 +44,9 @@ pub enum CommitmentValidationError {
         expected: U256,
         pledge_count: u64,
     },
+    /// Pledge count with no successor; the fee formula prices pledge number `count + 1`
+    #[error("Invalid pledge: pledge_count_before_executing {pledge_count} is too large to price")]
+    PledgeCountOverflow { pledge_count: u64 },
     /// Invalid unpledge value
     #[error(
         "Invalid unpledge value: {provided} != expected {expected} (pledge_count: {pledge_count})"
