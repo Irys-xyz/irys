@@ -267,6 +267,22 @@ pub struct EmaRules {
     /// Number of blocks in an EMA price interval.
     pub price_adjustment_interval: u64,
     pub sampling: EmaSampling,
+    /// Number of blocks from genesis that recalculate the EMA on every block:
+    /// two base intervals (`EmaConfig::price_adjustment_interval`). It does not
+    /// change at Delta, so a longer Delta interval cannot restart the bootstrap
+    /// on a chain that already finished it.
+    pub bootstrap_blocks: u64,
+}
+
+impl EmaRules {
+    /// True when the block at `height` recalculates the EMA: every block of the
+    /// bootstrap, then the last block of each interval.
+    pub fn is_ema_recalculation_block(&self, height: u64) -> bool {
+        height < self.bootstrap_blocks
+            || height
+                .saturating_add(1)
+                .is_multiple_of(self.price_adjustment_interval)
+    }
 }
 
 impl Delta {

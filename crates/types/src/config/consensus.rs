@@ -687,18 +687,21 @@ impl ConsensusConfig {
     /// From Delta the oracle price bound, the EMA interval length and the EMA
     /// sampling rule come from the fork. Before it they are
     /// `token_price_safe_range`, `ema.price_adjustment_interval` and the single
-    /// earlier block.
+    /// earlier block. The bootstrap is two base intervals on either side of it.
     pub fn ema_rules_at(&self, timestamp: UnixTimestamp) -> EmaRules {
+        let bootstrap_blocks = self.ema.price_adjustment_interval.saturating_mul(2);
         match self.hardforks.delta_for_block(timestamp) {
             Activation::Active(delta) => EmaRules {
                 token_price_safe_range: delta.token_price_safe_range,
                 price_adjustment_interval: delta.ema_price_adjustment_interval,
                 sampling: EmaSampling::IntervalMedian,
+                bootstrap_blocks,
             },
             Activation::Inactive => EmaRules {
                 token_price_safe_range: self.token_price_safe_range,
                 price_adjustment_interval: self.ema.price_adjustment_interval,
                 sampling: EmaSampling::PreviousIntervalBlock,
+                bootstrap_blocks,
             },
         }
     }
@@ -1514,6 +1517,7 @@ mod tests {
             token_price_safe_range: Amount::percentage(dec!(1)).unwrap(),
             price_adjustment_interval: 10,
             sampling: EmaSampling::PreviousIntervalBlock,
+            bootstrap_blocks: 20,
         };
         config.hardforks.delta = None;
         assert_eq!(
@@ -1540,6 +1544,8 @@ mod tests {
                 token_price_safe_range: Amount::percentage(dec!(0.1)).unwrap(),
                 price_adjustment_interval: 20,
                 sampling: EmaSampling::IntervalMedian,
+                // Still two base intervals: Delta does not restart the bootstrap.
+                bootstrap_blocks: 20,
             }
         );
         // Boundaries across activation are up to 10 + 20 blocks apart.

@@ -65,6 +65,9 @@
 //!   18 for the update at block 29), so that block's producer decides the update.
 //!   With the median, the producers of fewer than half of the interval's blocks
 //!   cannot move the update outside the prices the other producers reported.
+//! - **Bootstrap**: stays two base intervals (blocks 0-19), also when Delta is
+//!   active from genesis. A chain that finished it does not start it again when
+//!   Delta lengthens the interval.
 
 use eyre::{Result, ensure};
 use irys_types::{
@@ -191,7 +194,7 @@ impl EmaSnapshot {
 
         // Update oracle_price_for_ema_predecessor and ema_price_last_interval when we hit an EMA recalculation block
         // During the first 2 intervals, every block is an EMA recalculation block
-        if new_block.is_ema_recalculation_block(blocks_in_interval) {
+        if rules.is_ema_recalculation_block(new_block.height) {
             Ok(Arc::new(Self {
                 ema_price_2_intervals_ago,
                 ema_price_1_interval_ago,
@@ -300,9 +303,7 @@ impl EmaSnapshot {
         //    which will be reported to other systems querying for EMA prices.
         //
         // From Delta step 1 takes the median oracle price of the interval instead.
-        let oracle_price_for_calculation = if parent_block.height
-            < blocks_in_interval.saturating_mul(2)
-        {
+        let oracle_price_for_calculation = if parent_block.height < rules.bootstrap_blocks {
             oracle_price_for_block_inclusion
         } else {
             match rules.sampling {
@@ -503,8 +504,11 @@ pub fn create_ema_snapshot_from_chain_history(
     };
     let crosses_boundary =
         |block: &IrysBlockHeader| crosses_ema_interval_boundary(block.height, interval_of(block));
-    let recalculates_ema =
-        |block: &IrysBlockHeader| block.is_ema_recalculation_block(interval_of(block));
+    let recalculates_ema = |block: &IrysBlockHeader| {
+        consensus_config
+            .ema_rules_at(block.timestamp_secs())
+            .is_ema_recalculation_block(block.height)
+    };
     let not_enough_history = |what: &str| {
         eyre::eyre!(
             "Chain history starting at height {} is too short to find {what}",
@@ -1117,6 +1121,42 @@ mod test {
             .unwrap();
         assert_eq!(recalculation_block.ema_irys_price, expected_ema);
         assert_eq!(snapshot.ema_price_current_interval, expected_ema);
+    }
+
+    /// The bootstrap is two base intervals (blocks 0-19) and does not start again
+    /// when Delta lengthens the interval to 20 blocks. The first Delta update, at
+    /// block 39, takes the median of blocks 20..=39 and the EMA of block 19,
+    /// whether Delta is active from genesis or from a block up to 29.
+    #[rstest]
+    #[case::delta_from_genesis(0)]
+    #[case::delta_inside_second_bootstrap_interval(15)]
+    #[case::delta_right_after_bootstrap(20)]
+    #[case::delta_mid_interval(25)]
+    // Block 29 is the last one that could still update under the 10-block rule.
+    #[case::delta_on_last_ten_block_update(29)]
+    fn delta_does_not_restart_bootstrap(#[case] activation_height: u64) {
+        let config = config_with_delta_at(activation_height);
+        let blocks_and_snapshots = build_blocks_with_snapshots(39, &config);
+
+        // No block of 20..=38 recalculates the EMA.
+        for (block, snapshot) in &blocks_and_snapshots[20..=38] {
+            assert_eq!(
+                snapshot.ema_price_current_interval, blocks_and_snapshots[19].0.ema_irys_price,
+                "block {} must keep the EMA of block 19",
+                block.height
+            );
+        }
+
+        // Prices rise with the height: the lower middle of blocks 20..=39 is block 29's.
+        let median = blocks_and_snapshots[29].0.oracle_irys_price;
+        let expected_ema = median
+            .calculate_ema(20, blocks_and_snapshots[19].0.ema_irys_price)
+            .unwrap();
+        assert_eq!(blocks_and_snapshots[39].0.ema_irys_price, expected_ema);
+        assert_eq!(
+            blocks_and_snapshots[39].1.ema_price_current_interval,
+            expected_ema
+        );
     }
 
     /// One producer reporting the lowest allowed price cannot move the Delta EMA

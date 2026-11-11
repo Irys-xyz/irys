@@ -211,7 +211,8 @@ async fn heavy_test_delta_ema_uses_interval_median_and_narrow_oracle_bound() -> 
     let mut config = NodeConfig::testing();
     {
         let consensus = config.consensus.get_mut();
-        // The base values must not apply once Delta is active.
+        // The base bound and interval length must not apply once Delta is active.
+        // The base interval still sets the bootstrap: two of them, blocks 0..=9.
         consensus.ema.price_adjustment_interval = 5;
         consensus.token_price_safe_range = Amount::percentage(dec!(1)).unwrap();
         consensus.hardforks.delta = Some(Delta {
@@ -233,7 +234,7 @@ async fn heavy_test_delta_ema_uses_interval_median_and_narrow_oracle_bound() -> 
     }];
     let ctx = IrysNodeTest::new_genesis(config).start().await;
 
-    // action -- mine four intervals; the two bootstrap intervals end at height 5
+    // action -- mine four Delta intervals; the bootstrap ends at height 9
     let last_height = delta_interval * 4;
     let mut headers = vec![ctx.get_block_by_height(0).await?];
     for expected_height in 1..=last_height {
@@ -255,13 +256,14 @@ async fn heavy_test_delta_ema_uses_interval_median_and_narrow_oracle_bound() -> 
         );
     }
 
-    // assert -- the update at the end of interval 6..=8 takes the median of its
-    // three oracle prices (block 7's) and the EMA of block 5
-    let median: IrysTokenPrice = headers[7].oracle_irys_price;
+    // assert -- the first update after the bootstrap, at the end of interval
+    // 9..=11, takes the median of its three oracle prices (block 10's) and the
+    // EMA of block 9, the last bootstrap block
+    let median: IrysTokenPrice = headers[10].oracle_irys_price;
     assert_eq!(
-        headers[8].ema_irys_price,
-        median.calculate_ema(delta_interval, headers[5].ema_irys_price)?,
-        "block 8 must compute its EMA from the median oracle price of blocks 6..=8"
+        headers[11].ema_irys_price,
+        median.calculate_ema(delta_interval, headers[9].ema_irys_price)?,
+        "block 11 must compute its EMA from the median oracle price of blocks 9..=11"
     );
 
     // assert -- pricing lags two 3-block intervals: block 12 opens the interval
