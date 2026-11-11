@@ -73,7 +73,7 @@ use irys_types::{
     BlockHeight, BlockIndexItem, Config, DataLedger, DataTransactionHeader, H256, IrysAddress,
     IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, SealedBlock, U256,
     fee_distribution::TermFeeCharges,
-    hardfork_config::{Cascade, ForBlock, ForEpoch},
+    hardfork_config::{Activation, Cascade, Fission, ForBlock, ForEpoch},
     ledger_chunk_offset_ii,
 };
 use nodit::{InclusiveInterval as _, interval::ii};
@@ -326,7 +326,7 @@ pub async fn calculate_all_expired_ledger_fees(
                 cascade_for_block,
             )
             .await?;
-            result.merge(delta);
+            result.merge(delta)?;
         }
     }
 
@@ -1825,18 +1825,21 @@ pub struct LedgerExpiryBalanceDelta {
 
 impl LedgerExpiryBalanceDelta {
     /// Merge another delta into this one, combining reward increments and refund lists.
-    pub fn merge(&mut self, other: Self) {
+    /// Fails if a reward address's summed fee overflows.
+    pub fn merge(&mut self, other: Self) -> eyre::Result<()> {
         for (addr, (fee, hash)) in other.reward_balance_increment {
-            self.reward_balance_increment
+            let (current_fee, current_hash) = self
+                .reward_balance_increment
                 .entry(addr)
-                .and_modify(|(current_fee, current_hash)| {
-                    *current_fee = current_fee.saturating_add(fee);
-                    current_hash.xor_assign(hash.0);
-                })
-                .or_insert((fee, hash));
+                .or_insert((U256::zero(), RollingHash(U256::zero())));
+            *current_fee = current_fee
+                .checked_add(fee)
+                .ok_or_else(|| eyre!("expiry reward sum overflow for {addr}"))?;
+            current_hash.xor_assign(hash.0);
         }
         self.user_perm_fee_refunds
             .extend(other.user_perm_fee_refunds);
+        Ok(())
     }
 }
 
@@ -1861,6 +1864,14 @@ fn aggregate_balance_deltas(
     expect_txs_to_be_promoted: bool,
     promoted_on_branch: &BTreeSet<IrysTransactionId>,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
+    // Fission is active for children of an epoch snapshot that has activated
+    // it. Producer and validator both pass the parent epoch snapshot, so both
+    // resolve the same state.
+    let fission: Activation<Fission> = epoch_snapshot
+        .consensus_context()
+        .resize()
+        .map(|resize| resize.params)
+        .into();
     let mut balance_delta = LedgerExpiryBalanceDelta::default();
     transactions.sort_by(irys_types::DataTransactionHeader::compare_tx); // This ensures refunds will be sorted by tx_id
 
@@ -1888,19 +1899,41 @@ fn aggregate_balance_deltas(
             let fee_charges = TermFeeCharges::new(data_tx.term_fee, &config.consensus)?;
             let fee_distribution_per_miner = fee_charges.distribution_on_expiry(&unique_miners)?;
 
+            // Reward addresses whose rolling hash already holds this tx id.
+            let mut reward_addresses_hashed_for_tx = BTreeSet::new();
+
             for (miner, fee) in unique_miners.iter().zip(fee_distribution_per_miner) {
                 // Resolve miner_address to reward_address at payout time.
                 // This ensures pooled miners (multiple miner addresses sharing a reward address)
                 // are counted individually for fee splitting, then aggregated at payout.
                 let reward_addr = epoch_snapshot.resolve_reward_address(*miner);
-                balance_delta
+                let (current_fee, hash) = balance_delta
                     .reward_balance_increment
                     .entry(reward_addr)
-                    .and_modify(|(current_fee, hash)| {
-                        *current_fee = current_fee.saturating_add(fee);
-                        hash.xor_assign(U256::from_le_bytes(data_tx.id.0));
-                    })
-                    .or_insert((fee, RollingHash(U256::from_le_bytes(data_tx.id.0))));
+                    .or_insert((U256::zero(), RollingHash(U256::zero())));
+                *current_fee = current_fee
+                    .checked_add(fee)
+                    .ok_or_else(|| eyre!("expiry reward sum overflow for {reward_addr}"))?;
+                // XOR the rolling hash with the transaction ID. Before Fission
+                // every miner's share does this, so an even number of miners
+                // with one reward address cancels the tx id. From Fission the
+                // tx id goes in once per (reward address, tx).
+                //
+                // The hash is written out big-endian (`RollingHash::to_bytes`).
+                // Before Fission the tx id is read little-endian, so a single
+                // tx's `irys_ref` is the tx id byte-reversed. From Fission it
+                // is read big-endian, as the ingress proof reward hash does, so
+                // `irys_ref` is a plain XOR of the tx ids.
+                let (add_tx_id_to_hash, tx_id_in_hash) = match fission {
+                    Activation::Active(_) => (
+                        reward_addresses_hashed_for_tx.insert(reward_addr),
+                        U256::from_be_bytes(data_tx.id.0),
+                    ),
+                    Activation::Inactive => (true, U256::from_le_bytes(data_tx.id.0)),
+                };
+                if add_tx_id_to_hash {
+                    hash.xor_assign(tx_id_in_hash);
+                }
             }
         }
 
@@ -2289,6 +2322,162 @@ mod tests {
         );
     }
 
+    /// `snapshot` with Fission activated on its branch.
+    fn with_fission_activated(mut snapshot: EpochSnapshot) -> EpochSnapshot {
+        use irys_types::partition_resize::PartitionResizeState;
+        let consensus = &snapshot.config.consensus;
+        snapshot.partition_resize = Some(PartitionResizeState {
+            params: Fission::proposed(UnixTimestamp::from_secs(0)),
+            activation_height: consensus.epoch.num_blocks_in_epoch,
+            activation_hash: H256::repeat_byte(3),
+            sampling_origin: 0,
+            preserved_id_floor: 0,
+            reference_partition_chunks: consensus.num_chunks_in_partition,
+        });
+        snapshot
+    }
+
+    /// Runs `aggregate_balance_deltas` over one expired tx stored by each
+    /// miner in `miner_reward_addresses`, staked with its paired reward
+    /// address. Returns the tx id, the treasury slice of its term fee and the
+    /// deltas. The tx id is nonzero, so the rolling hash is visible, and its
+    /// bytes all differ, so a byte-order change is visible.
+    fn term_fee_reward_deltas(
+        config: &Config,
+        miner_reward_addresses: &[(IrysAddress, IrysAddress)],
+        fission_activated: bool,
+    ) -> (H256, U256, LedgerExpiryBalanceDelta) {
+        let term_fee = U256::from(3000);
+        let expired_tx =
+            DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: H256(std::array::from_fn(|index| {
+                        u8::try_from(index + 1).expect("32 bytes")
+                    })),
+                    term_fee: term_fee.into(),
+                    data_size: 100,
+                    ..Default::default()
+                },
+                metadata: irys_types::DataTransactionMetadata::new(),
+            });
+        let mut epoch_snapshot = empty_epoch_snapshot(config);
+        for (miner, reward_address) in miner_reward_addresses {
+            epoch_snapshot.commitment_state.stake_commitments.insert(
+                *miner,
+                StakeEntry {
+                    id: H256::random(),
+                    commitment_status: CommitmentStatus::Active,
+                    signer: *miner,
+                    amount: U256::from(10_000_u64),
+                    reward_address: *reward_address,
+                },
+            );
+        }
+        if fission_activated {
+            epoch_snapshot = with_fission_activated(epoch_snapshot);
+        }
+        let miners: Vec<IrysAddress> = miner_reward_addresses
+            .iter()
+            .map(|(miner, _)| *miner)
+            .collect();
+        let treasury_slice = TermFeeCharges::new(term_fee.into(), &config.consensus)
+            .unwrap()
+            .distribution_on_expiry(&miners)
+            .unwrap()
+            .into_iter()
+            .fold(U256::zero(), |sum, fee| sum + fee);
+        let tx_to_miners = BTreeMap::from([(expired_tx.id, Arc::new(miners))]);
+
+        let deltas = aggregate_balance_deltas(
+            vec![expired_tx.clone()],
+            &tx_to_miners,
+            &epoch_snapshot,
+            config,
+            false,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        (expired_tx.id, treasury_slice, deltas)
+    }
+
+    /// After Fission, two miners that share one reward address and both stored
+    /// one expired tx put the tx id once, in its own byte order, into that
+    /// address's rolling hash.
+    #[test]
+    fn fission_hashes_each_expired_tx_once_per_shared_reward_address() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let shared_reward_address = IrysAddress::repeat_byte(0xCC);
+        let (tx_id, treasury_slice, deltas) = term_fee_reward_deltas(
+            &config,
+            &[
+                (IrysAddress::repeat_byte(0xAA), shared_reward_address),
+                (IrysAddress::repeat_byte(0xBB), shared_reward_address),
+            ],
+            true,
+        );
+
+        assert_eq!(deltas.reward_balance_increment.len(), 1);
+        let (amount, hash) = deltas.reward_balance_increment[&shared_reward_address];
+        assert_eq!(amount, treasury_slice);
+        assert_eq!(H256(hash.to_bytes()), tx_id);
+    }
+
+    /// Before Fission (unscheduled, or scheduled but not activated on the
+    /// branch of the parent epoch), each miner's share XORs the tx id, so two
+    /// shares to one reward address cancel it.
+    #[rstest::rstest]
+    #[case::fission_unscheduled(false)]
+    #[case::fission_pending(true)]
+    fn before_fission_shared_reward_address_term_fee_hash_cancels_the_tx(
+        #[case] fission_scheduled: bool,
+    ) {
+        let mut node_config = NodeConfig::testing();
+        if fission_scheduled {
+            node_config.consensus.get_mut().hardforks.fission =
+                Some(Fission::proposed(UnixTimestamp::from_secs(0)));
+        }
+        let config = Config::new_with_random_peer_id(node_config);
+        let shared_reward_address = IrysAddress::repeat_byte(0xCC);
+        let (_, treasury_slice, deltas) = term_fee_reward_deltas(
+            &config,
+            &[
+                (IrysAddress::repeat_byte(0xAA), shared_reward_address),
+                (IrysAddress::repeat_byte(0xBB), shared_reward_address),
+            ],
+            false,
+        );
+
+        assert_eq!(deltas.reward_balance_increment.len(), 1);
+        let (amount, hash) = deltas.reward_balance_increment[&shared_reward_address];
+        assert_eq!(amount, treasury_slice);
+        assert_eq!(hash.0, U256::zero());
+    }
+
+    /// One miner paid once for one expired tx: the reward does not change.
+    /// The reward packet's `irys_ref` (the rolling hash bytes) is the tx id
+    /// from Fission, the same byte order as the ingress proof reward hash, and
+    /// the tx id byte-reversed before Fission.
+    #[rstest::rstest]
+    #[case::fission_active(true)]
+    #[case::fission_inactive(false)]
+    fn single_miner_term_fee_reward_keeps_tx_id_byte_order_after_fission(
+        #[case] fission_activated: bool,
+    ) {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let miner = IrysAddress::repeat_byte(0xAA);
+        let (tx_id, treasury_slice, deltas) =
+            term_fee_reward_deltas(&config, &[(miner, miner)], fission_activated);
+
+        assert_eq!(deltas.reward_balance_increment.len(), 1);
+        let (amount, hash) = deltas.reward_balance_increment[&miner];
+        assert_eq!(amount, treasury_slice);
+        let mut expected_irys_ref = tx_id.0;
+        if !fission_activated {
+            expected_irys_ref.reverse();
+        }
+        assert_eq!(hash.to_bytes(), expected_irys_ref);
+    }
+
     #[test]
     fn test_ledger_expiry_balance_delta_merge_combines_rewards() {
         use crate::shadow_tx_generator::RollingHash;
@@ -2309,7 +2498,7 @@ mod tests {
             .reward_balance_increment
             .insert(addr2, (U256::from(200), RollingHash(U256::from(3))));
 
-        delta1.merge(delta2);
+        delta1.merge(delta2).unwrap();
 
         // addr1: fees are summed
         let (fee, _) = delta1.reward_balance_increment.get(&addr1).unwrap();
@@ -2318,6 +2507,23 @@ mod tests {
         // addr2: added from delta2
         let (fee, _) = delta1.reward_balance_increment.get(&addr2).unwrap();
         assert_eq!(*fee, U256::from(200));
+    }
+
+    /// A reward sum that overflows while merging is an error, not a silent
+    /// saturation.
+    #[test]
+    fn merge_rejects_an_overflowing_reward_sum() {
+        let reward_address = IrysAddress::repeat_byte(0xAA);
+        let mut delta1 = LedgerExpiryBalanceDelta::default();
+        delta1
+            .reward_balance_increment
+            .insert(reward_address, (U256::MAX, RollingHash(U256::from(1))));
+        let mut delta2 = LedgerExpiryBalanceDelta::default();
+        delta2
+            .reward_balance_increment
+            .insert(reward_address, (U256::one(), RollingHash(U256::from(2))));
+
+        assert!(delta1.merge(delta2).is_err());
     }
 
     #[test]
@@ -2332,7 +2538,7 @@ mod tests {
             .user_perm_fee_refunds
             .push((H256::random(), U256::from(2), IrysAddress::random()));
 
-        delta1.merge(delta2);
+        delta1.merge(delta2).unwrap();
         assert_eq!(delta1.user_perm_fee_refunds.len(), 2);
     }
 
@@ -2340,7 +2546,7 @@ mod tests {
     fn test_ledger_expiry_balance_delta_merge_empty() {
         let mut delta1 = LedgerExpiryBalanceDelta::default();
         let delta2 = LedgerExpiryBalanceDelta::default();
-        delta1.merge(delta2);
+        delta1.merge(delta2).unwrap();
         assert!(delta1.reward_balance_increment.is_empty());
         assert!(delta1.user_perm_fee_refunds.is_empty());
     }
