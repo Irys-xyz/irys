@@ -194,24 +194,23 @@ impl EmaSnapshot {
 
         // Update oracle_price_for_ema_predecessor and ema_price_last_interval when we hit an EMA recalculation block
         // During the first 2 intervals, every block is an EMA recalculation block
-        if rules.is_ema_recalculation_block(new_block.height) {
-            Ok(Arc::new(Self {
-                ema_price_2_intervals_ago,
-                ema_price_1_interval_ago,
-                oracle_price_for_current_ema_predecessor: parent_block.oracle_irys_price,
-                ema_price_current_interval: new_block.ema_irys_price,
-                interval_oracle_prices,
-            }))
-        } else {
-            Ok(Arc::new(Self {
-                ema_price_2_intervals_ago,
-                ema_price_1_interval_ago,
-                ema_price_current_interval: self.ema_price_current_interval,
-                oracle_price_for_current_ema_predecessor: self
-                    .oracle_price_for_current_ema_predecessor,
-                interval_oracle_prices,
-            }))
-        }
+        let (oracle_price_for_current_ema_predecessor, ema_price_current_interval) =
+            if rules.is_ema_recalculation_block(new_block.height) {
+                (parent_block.oracle_irys_price, new_block.ema_irys_price)
+            } else {
+                (
+                    self.oracle_price_for_current_ema_predecessor,
+                    self.ema_price_current_interval,
+                )
+            };
+
+        Ok(Arc::new(Self {
+            ema_price_2_intervals_ago,
+            ema_price_1_interval_ago,
+            oracle_price_for_current_ema_predecessor,
+            ema_price_current_interval,
+            interval_oracle_prices,
+        }))
     }
 
     /// The oracle prices of the interval of the block at `new_block_height`, built
