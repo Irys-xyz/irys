@@ -326,7 +326,7 @@ pub async fn calculate_all_expired_ledger_fees(
                 cascade_for_block,
             )
             .await?;
-            result.merge(delta);
+            result.merge(delta)?;
         }
     }
 
@@ -1825,18 +1825,21 @@ pub struct LedgerExpiryBalanceDelta {
 
 impl LedgerExpiryBalanceDelta {
     /// Merge another delta into this one, combining reward increments and refund lists.
-    pub fn merge(&mut self, other: Self) {
+    /// Fails if a reward address's summed fee overflows.
+    pub fn merge(&mut self, other: Self) -> eyre::Result<()> {
         for (addr, (fee, hash)) in other.reward_balance_increment {
-            self.reward_balance_increment
+            let (current_fee, current_hash) = self
+                .reward_balance_increment
                 .entry(addr)
-                .and_modify(|(current_fee, current_hash)| {
-                    *current_fee = current_fee.saturating_add(fee);
-                    current_hash.xor_assign(hash.0);
-                })
-                .or_insert((fee, hash));
+                .or_insert((U256::zero(), RollingHash(U256::zero())));
+            *current_fee = current_fee
+                .checked_add(fee)
+                .ok_or_else(|| eyre!("expiry reward sum overflow for {addr}"))?;
+            current_hash.xor_assign(hash.0);
         }
         self.user_perm_fee_refunds
             .extend(other.user_perm_fee_refunds);
+        Ok(())
     }
 }
 
@@ -1908,7 +1911,9 @@ fn aggregate_balance_deltas(
                     .reward_balance_increment
                     .entry(reward_addr)
                     .or_insert((U256::zero(), RollingHash(U256::zero())));
-                *current_fee = current_fee.saturating_add(fee);
+                *current_fee = current_fee
+                    .checked_add(fee)
+                    .ok_or_else(|| eyre!("expiry reward sum overflow for {reward_addr}"))?;
                 // XOR the rolling hash with the transaction ID. Before Fission
                 // every miner's share does this, so an even number of miners
                 // with one reward address cancels the tx id. From Fission the
@@ -2475,7 +2480,7 @@ mod tests {
             .reward_balance_increment
             .insert(addr2, (U256::from(200), RollingHash(U256::from(3))));
 
-        delta1.merge(delta2);
+        delta1.merge(delta2).unwrap();
 
         // addr1: fees are summed
         let (fee, _) = delta1.reward_balance_increment.get(&addr1).unwrap();
@@ -2484,6 +2489,23 @@ mod tests {
         // addr2: added from delta2
         let (fee, _) = delta1.reward_balance_increment.get(&addr2).unwrap();
         assert_eq!(*fee, U256::from(200));
+    }
+
+    /// A reward sum that overflows while merging is an error, not a silent
+    /// saturation.
+    #[test]
+    fn merge_rejects_an_overflowing_reward_sum() {
+        let reward_address = IrysAddress::repeat_byte(0xAA);
+        let mut delta1 = LedgerExpiryBalanceDelta::default();
+        delta1
+            .reward_balance_increment
+            .insert(reward_address, (U256::MAX, RollingHash(U256::from(1))));
+        let mut delta2 = LedgerExpiryBalanceDelta::default();
+        delta2
+            .reward_balance_increment
+            .insert(reward_address, (U256::one(), RollingHash(U256::from(2))));
+
+        assert!(delta1.merge(delta2).is_err());
     }
 
     #[test]
@@ -2498,7 +2520,7 @@ mod tests {
             .user_perm_fee_refunds
             .push((H256::random(), U256::from(2), IrysAddress::random()));
 
-        delta1.merge(delta2);
+        delta1.merge(delta2).unwrap();
         assert_eq!(delta1.user_perm_fee_refunds.len(), 2);
     }
 
@@ -2506,7 +2528,7 @@ mod tests {
     fn test_ledger_expiry_balance_delta_merge_empty() {
         let mut delta1 = LedgerExpiryBalanceDelta::default();
         let delta2 = LedgerExpiryBalanceDelta::default();
-        delta1.merge(delta2);
+        delta1.merge(delta2).unwrap();
         assert!(delta1.reward_balance_increment.is_empty());
         assert!(delta1.user_perm_fee_refunds.is_empty());
     }

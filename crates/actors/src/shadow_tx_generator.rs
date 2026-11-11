@@ -545,7 +545,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 let entry = rewards_map
                     .entry(reward_addr)
                     .or_insert((RewardAmount::zero(), RollingHash::zero()));
-                entry.0.add_assign(charge.amount); // Add to total amount
+                entry.0.checked_add_assign(charge.amount)?; // Add to total amount
                 // XOR the rolling hash with the transaction ID. Before Fission
                 // every charge does this, so an even number of charges to one
                 // reward address for one tx cancels the tx id. From Fission
@@ -1037,8 +1037,17 @@ impl RewardAmount {
         Self(U256::zero())
     }
 
-    fn add_assign(&mut self, amount: U256) {
-        self.0 += amount;
+    /// Adds `amount`. The summed amounts come from peer-supplied publish tx
+    /// fees, so an overflow is a fault of the block: `TreasuryArithmetic`
+    /// (consensus rejection), and the sum stays unchanged.
+    fn checked_add_assign(&mut self, amount: U256) -> Result<()> {
+        self.0 = self.0.checked_add(amount).ok_or_else(|| {
+            ShadowTxGenError::TreasuryArithmetic(format!(
+                "ingress proof reward sum overflow: {} + {}",
+                self.0, amount
+            ))
+        })?;
+        Ok(())
     }
 
     fn into_inner(self) -> U256 {
@@ -2930,6 +2939,23 @@ mod tests {
         let tx_id_ref: reth::revm::primitives::B256 = publish_tx.id.into();
         assert_eq!(before_fission[0].irys_ref, tx_id_ref);
         assert_eq!(after_fission, before_fission);
+    }
+
+    /// An ingress proof reward sum that overflows is a `TreasuryArithmetic`
+    /// error (consensus rejection), not a panic, and leaves the sum unchanged.
+    #[test]
+    fn ingress_reward_sum_overflow_is_treasury_arithmetic() {
+        let mut reward_sum = RewardAmount(U256::MAX);
+
+        let err = reward_sum
+            .checked_add_assign(U256::one())
+            .expect_err("sum overflows");
+
+        assert!(
+            matches!(err, ShadowTxGenError::TreasuryArithmetic(_)),
+            "got: {err:?}"
+        );
+        assert_eq!(reward_sum.into_inner(), U256::MAX);
     }
 
     /// `ShadowTxGenError::Display` carries the message verbatim with the
