@@ -1029,10 +1029,11 @@ pub enum ValidationError {
     #[error("Recall range validation failed: {0}")]
     RecallRangeInvalid(String),
 
-    /// Local VDF state did not yet contain the steps required for recall-range
-    /// validation. The block's validity is unknown — the node simply hasn't
-    /// caught up to the block's VDF position yet. Classified as SoftInternal
-    /// (block parks in cache; re-validate once VDF state advances).
+    /// The recall window could not be rebuilt from the block's ancestry: a
+    /// header inside the window resolved in neither the block tree nor the DB
+    /// (a DB read failure counts as missing), or the resolved ancestry was not
+    /// step-contiguous. The block's validity is unknown. Classified as
+    /// SoftInternal (block parks in cache for retry).
     #[error("Recall range VDF steps unavailable: {0}")]
     RecallRangeStepsUnavailable(String),
 
@@ -1273,9 +1274,10 @@ impl ValidationError {
             // saturated. Block parks in cache for retry. See the variant
             // doc for the full rationale.
             Self::ExecutionPayloadCacheEvicted { .. } => ErrorClass::SoftInternal,
-            // Local VDF state hasn't caught up to the block's step position.
-            // Not peer-attributable — the block may be valid once VDF catches
-            // up. Block parks in cache for passive retry.
+            // The recall window could not be rebuilt from the block's ancestry
+            // (a header missing from both the block tree and the DB). Not
+            // peer-attributable — the block's validity is undecided. Block
+            // parks in cache for passive retry.
             Self::RecallRangeStepsUnavailable(_) => ErrorClass::SoftInternal,
 
             // Consensus rejections — peer's block is genuinely bad.
@@ -3898,12 +3900,12 @@ mod perm_fee_threshold_tests {
 }
 
 /// Inner error type for [`recall_recall_range_is_valid`], distinguishing a
-/// local VDF-state gap from a genuine consensus mismatch.
+/// local ancestry gap from a genuine consensus mismatch.
 #[derive(Debug, Error)]
 pub enum RecallRangeError {
-    /// Local VDF state doesn't yet contain the requested steps.
-    /// Local-state issue — re-validate after VDF catches up.
-    #[error("local VDF steps unavailable: {0}")]
+    /// The recall window could not be rebuilt from the block's ancestry
+    /// (tree, then DB). Local-state issue — the block's validity is undecided.
+    #[error("recall window unavailable from block ancestry: {0}")]
     StepsUnavailable(eyre::Report),
     /// Recall range in the block does not match the computed range.
     /// Consensus mismatch — peer-attributable.
@@ -3913,7 +3915,8 @@ pub enum RecallRangeError {
 
 impl RecallRangeError {
     /// Returns `true` when the error reflects a local node-side condition
-    /// (VDF state hasn't caught up) rather than a peer-attributable defect.
+    /// (the ancestry window could not be rebuilt) rather than a
+    /// peer-attributable defect.
     pub fn is_internal(&self) -> bool {
         matches!(self, Self::StepsUnavailable(_))
     }

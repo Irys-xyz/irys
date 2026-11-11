@@ -123,8 +123,9 @@ pub struct ServiceSendersInner {
     /// Shared re-anchor signals (heal generation + buffer-suspect flag, see
     /// [`irys_vdf::ReanchorSignals`]): `run_vdf` bumps the generation on each
     /// applied heal so stamped steps in flight across it are dropped, and the
-    /// block-tree gate marks the buffer suspect so recall-range validation
-    /// stops trusting it until the heal lands.
+    /// block-tree gate marks the buffer suspect so `run_vdf` pauses free-run,
+    /// VDF step waits hold their stall timer open, and the gate re-sends the
+    /// re-anchor until the heal lands.
     pub vdf_reanchor_signals: ReanchorSignals,
     pub storage_modules: UnboundedSender<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,

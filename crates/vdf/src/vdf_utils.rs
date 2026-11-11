@@ -15,7 +15,7 @@ use tokio::time::{Duration, timeout};
 pub const VDF_FAST_FORWARD_CHANNEL_CAPACITY: usize = 4_096;
 
 /// Shared re-anchor generation + buffer-suspect flag (FF senders, `run_vdf`,
-/// block-tree gate, recall-range validation). Generation bumps on applied heal;
+/// block-tree gate, VDF step waits). Generation bumps on applied heal;
 /// suspect is set while a heal is pending/running. Also records whether
 /// `run_vdf` stopped because the node is shutting down.
 #[derive(Debug, Clone)]

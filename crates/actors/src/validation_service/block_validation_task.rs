@@ -665,7 +665,7 @@ impl BlockValidationTask {
                 Err(RecallRangeError::StepsUnavailable(err)) => {
                     tracing::warn!(
                         custom.error = ?err,
-                        "recall range validation: local VDF steps unavailable (soft internal)"
+                        "recall range validation: recall window unavailable from block ancestry (soft internal)"
                     );
                     ValidationError::RecallRangeStepsUnavailable(err.to_string()).into()
                 }
