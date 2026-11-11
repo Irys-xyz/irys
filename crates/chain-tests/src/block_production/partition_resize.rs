@@ -87,10 +87,8 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
     irys_actors::block_validation::recall_recall_range_is_valid(
         &activation,
         parent.geometry(),
-        &node.node_ctx.vdf_steps_guard,
         &node.node_ctx.block_tree_guard,
         &node.node_ctx.db,
-        false,
     )
     .await?;
     let child = node.mine_block().await?;
