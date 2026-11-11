@@ -253,7 +253,7 @@ pub enum EmaSampling {
     /// EMA recalculation block. Its producer decides the whole update.
     PreviousIntervalBlock,
     /// From Delta: the median of the oracle prices of every block in the interval,
-    /// the new block included. A minority of producers cannot move it outside the
+    /// the new block included (the lower middle price for an even count). A minority of producers cannot move it outside the
     /// prices the other producers reported.
     IntervalMedian,
 }
