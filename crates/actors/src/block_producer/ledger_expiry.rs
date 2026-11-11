@@ -1918,12 +1918,21 @@ fn aggregate_balance_deltas(
                 // every miner's share does this, so an even number of miners
                 // with one reward address cancels the tx id. From Fission the
                 // tx id goes in once per (reward address, tx).
-                let add_tx_id_to_hash = match fission {
-                    Activation::Active(_) => reward_addresses_hashed_for_tx.insert(reward_addr),
-                    Activation::Inactive => true,
+                //
+                // The hash is written out big-endian (`RollingHash::to_bytes`).
+                // Before Fission the tx id is read little-endian, so a single
+                // tx's `irys_ref` is the tx id byte-reversed. From Fission it
+                // is read big-endian, as the ingress proof reward hash does, so
+                // `irys_ref` is a plain XOR of the tx ids.
+                let (add_tx_id_to_hash, tx_id_in_hash) = match fission {
+                    Activation::Active(_) => (
+                        reward_addresses_hashed_for_tx.insert(reward_addr),
+                        U256::from_be_bytes(data_tx.id.0),
+                    ),
+                    Activation::Inactive => (true, U256::from_le_bytes(data_tx.id.0)),
                 };
                 if add_tx_id_to_hash {
-                    hash.xor_assign(U256::from_le_bytes(data_tx.id.0));
+                    hash.xor_assign(tx_id_in_hash);
                 }
             }
         }
@@ -2331,7 +2340,8 @@ mod tests {
     /// Runs `aggregate_balance_deltas` over one expired tx stored by each
     /// miner in `miner_reward_addresses`, staked with its paired reward
     /// address. Returns the tx id, the treasury slice of its term fee and the
-    /// deltas. The tx id is nonzero, so the rolling hash is visible.
+    /// deltas. The tx id is nonzero, so the rolling hash is visible, and its
+    /// bytes all differ, so a byte-order change is visible.
     fn term_fee_reward_deltas(
         config: &Config,
         miner_reward_addresses: &[(IrysAddress, IrysAddress)],
@@ -2341,7 +2351,9 @@ mod tests {
         let expired_tx =
             DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
                 tx: DataTransactionHeaderV1 {
-                    id: H256::repeat_byte(0xAB),
+                    id: H256(std::array::from_fn(|index| {
+                        u8::try_from(index + 1).expect("32 bytes")
+                    })),
                     term_fee: term_fee.into(),
                     data_size: 100,
                     ..Default::default()
@@ -2389,7 +2401,8 @@ mod tests {
     }
 
     /// After Fission, two miners that share one reward address and both stored
-    /// one expired tx put the tx id once into that address's rolling hash.
+    /// one expired tx put the tx id once, in its own byte order, into that
+    /// address's rolling hash.
     #[test]
     fn fission_hashes_each_expired_tx_once_per_shared_reward_address() {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
@@ -2406,7 +2419,7 @@ mod tests {
         assert_eq!(deltas.reward_balance_increment.len(), 1);
         let (amount, hash) = deltas.reward_balance_increment[&shared_reward_address];
         assert_eq!(amount, treasury_slice);
-        assert_eq!(hash.0, U256::from_le_bytes(tx_id.0));
+        assert_eq!(H256(hash.to_bytes()), tx_id);
     }
 
     /// Before Fission (unscheduled, or scheduled but not activated on the
@@ -2440,24 +2453,29 @@ mod tests {
         assert_eq!(hash.0, U256::zero());
     }
 
-    /// One miner paid once for one expired tx: Fission does not change the
-    /// reward or the rolling hash.
-    #[test]
-    fn fission_keeps_the_single_miner_term_fee_reward() {
+    /// One miner paid once for one expired tx: the reward does not change.
+    /// The reward packet's `irys_ref` (the rolling hash bytes) is the tx id
+    /// from Fission, the same byte order as the ingress proof reward hash, and
+    /// the tx id byte-reversed before Fission.
+    #[rstest::rstest]
+    #[case::fission_active(true)]
+    #[case::fission_inactive(false)]
+    fn single_miner_term_fee_reward_keeps_tx_id_byte_order_after_fission(
+        #[case] fission_activated: bool,
+    ) {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let miner = IrysAddress::repeat_byte(0xAA);
-        let (tx_id, treasury_slice, before_fission) =
-            term_fee_reward_deltas(&config, &[(miner, miner)], false);
-        let (_, _, after_fission) = term_fee_reward_deltas(&config, &[(miner, miner)], true);
+        let (tx_id, treasury_slice, deltas) =
+            term_fee_reward_deltas(&config, &[(miner, miner)], fission_activated);
 
-        let (amount, hash) = before_fission.reward_balance_increment[&miner];
+        assert_eq!(deltas.reward_balance_increment.len(), 1);
+        let (amount, hash) = deltas.reward_balance_increment[&miner];
         assert_eq!(amount, treasury_slice);
-        assert_eq!(hash.0, U256::from_le_bytes(tx_id.0));
-        assert_eq!(after_fission.reward_balance_increment.len(), 1);
-        let (amount_after_fission, hash_after_fission) =
-            after_fission.reward_balance_increment[&miner];
-        assert_eq!(amount_after_fission, amount);
-        assert_eq!(hash_after_fission.0, hash.0);
+        let mut expected_irys_ref = tx_id.0;
+        if !fission_activated {
+            expected_irys_ref.reverse();
+        }
+        assert_eq!(hash.to_bytes(), expected_irys_ref);
     }
 
     #[test]
