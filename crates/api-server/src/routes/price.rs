@@ -95,7 +95,11 @@ pub async fn get_price(
             //   Note: lower USD price -> higher IRYS required
             let pricing_ema = ema.ema_for_public_quote(
                 tip_height,
-                state.config.consensus.ema.price_adjustment_interval,
+                state
+                    .config
+                    .consensus
+                    .ema_rules_at(latest_block_timestamp_secs)
+                    .price_adjustment_interval,
             );
 
             // From Delta the term fee pays for the full term; before, for the epochs left in the cycle
@@ -195,7 +199,11 @@ pub async fn get_price(
             let next_block_height = tip_height + 1;
             let pricing_ema = ema.ema_for_public_quote(
                 tip_height,
-                state.config.consensus.ema.price_adjustment_interval,
+                state
+                    .config
+                    .consensus
+                    .ema_rules_at(latest_block_timestamp_secs)
+                    .price_adjustment_interval,
             );
 
             let term_fee = state

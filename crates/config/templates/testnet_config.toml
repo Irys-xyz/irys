@@ -252,6 +252,12 @@ number_of_ingress_proofs_from_assignees = 0
 # - the required perm_fee covers proof rewards on the tx's own term_fee;
 # - the ingress proofs of a Publish tx share one reward pool
 #   (ingress_proof_reward_pool_percent x term_fee), not one inclusion reward each.
+# - a block's oracle price may move token_price_safe_range (10%) from its parent's,
+#   replacing consensus token_price_safe_range;
+# - an EMA price interval is ema_price_adjustment_interval (20) blocks, replacing
+#   ema.price_adjustment_interval;
+# - an EMA update takes the median oracle price of its interval, not the oracle
+#   price of one earlier block.
 # Block-level changes apply from the first block at/after activation; ledger
 # seeding acts at the first epoch block at/after activation.
 # Uncomment to enable:
@@ -260,6 +266,8 @@ number_of_ingress_proofs_from_assignees = 0
 # initial_slots_per_new_ledger = 1   # slots seeded per newly activated ledger (default: 1)
 # capacity_chunk_reward_percent = 0.5   # miner share of the reward for a capacity PoA (default: 0.5)
 # ingress_proof_reward_pool_percent = 0.05   # share of term_fee that the ingress proofs of a Publish tx split (default: 0.05)
+# token_price_safe_range = 0.1   # largest oracle price change between consecutive blocks (default: 0.1)
+# ema_price_adjustment_interval = 20   # blocks in an EMA price interval (default: 20)
 
 # Echo (the PoA partition must belong to the block miner) is enabled from genesis
 # when this section is absent. To activate it at a later height instead, uncomment:

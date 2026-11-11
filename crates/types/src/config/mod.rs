@@ -383,6 +383,15 @@ impl Config {
                     <= crate::storage_pricing::PRECISION_SCALE,
                 "hardforks.delta.ingress_proof_reward_pool_percent must be <= 1.0 (100%)"
             );
+            ensure!(
+                delta.token_price_safe_range.amount <= crate::storage_pricing::PRECISION_SCALE,
+                "hardforks.delta.token_price_safe_range must be <= 1.0 (100%)"
+            );
+            // Divisor of the EMA interval-boundary computation (`height % interval`).
+            ensure!(
+                delta.ema_price_adjustment_interval > 0,
+                "hardforks.delta.ema_price_adjustment_interval must be > 0: EMA block selection takes the height modulo it"
+            );
         }
         // Entropy packing emits whole SHA-256 hashes, so a chunk size that is
         // not a multiple of the hash size leaves the chunk's tail unpacked.
@@ -1364,6 +1373,8 @@ mod tests {
             capacity_chunk_reward_percent: Amount::percentage(rust_decimal_macros::dec!(0.5))
                 .unwrap(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
 
@@ -1397,6 +1408,8 @@ mod tests {
                 .unwrap(),
             ingress_proof_reward_pool_percent: Amount::percentage(rust_decimal_macros::dec!(0.02))
                 .unwrap(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let term_fee = U256::from(1_000);
@@ -2857,12 +2870,55 @@ mod validate_tests {
                     rust_decimal_macros::dec!(1.01),
                 )
                 .unwrap(),
+                token_price_safe_range:
+                    crate::hardfork_config::Delta::default_token_price_safe_range(),
+                ema_price_adjustment_interval:
+                    crate::hardfork_config::Delta::default_ema_price_adjustment_interval(),
             });
         });
         let err = cfg.validate().unwrap_err();
         assert!(
             err.to_string()
                 .contains("ingress_proof_reward_pool_percent must be <= 1.0"),
+            "unexpected validation error: {err}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::safe_range_above_full_price(
+        |delta: &mut crate::hardfork_config::Delta| {
+            delta.token_price_safe_range =
+                crate::storage_pricing::Amount::percentage(rust_decimal_macros::dec!(1.01)).unwrap();
+        },
+        "hardforks.delta.token_price_safe_range must be <= 1.0"
+    )]
+    #[case::zero_ema_interval(
+        |delta: &mut crate::hardfork_config::Delta| {
+            delta.ema_price_adjustment_interval = 0;
+        },
+        "hardforks.delta.ema_price_adjustment_interval must be > 0"
+    )]
+    fn validate_rejects_bad_delta_oracle_params(
+        #[case] mutate: fn(&mut crate::hardfork_config::Delta),
+        #[case] expected_error: &str,
+    ) {
+        use crate::hardfork_config::Delta;
+        let cfg = config_with_consensus(|c| {
+            let mut delta = Delta {
+                activation_timestamp: crate::UnixTimestamp::from_secs(1500),
+                initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+                capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+                ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(
+                ),
+                token_price_safe_range: Delta::default_token_price_safe_range(),
+                ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
+            };
+            mutate(&mut delta);
+            c.hardforks.delta = Some(delta);
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains(expected_error),
             "unexpected validation error: {err}"
         );
     }
@@ -2880,6 +2936,10 @@ mod validate_tests {
                 .unwrap(),
                 ingress_proof_reward_pool_percent:
                     crate::hardfork_config::Delta::default_ingress_proof_reward_pool_percent(),
+                token_price_safe_range:
+                    crate::hardfork_config::Delta::default_token_price_safe_range(),
+                ema_price_adjustment_interval:
+                    crate::hardfork_config::Delta::default_ema_price_adjustment_interval(),
             });
         });
         let err = cfg.validate().unwrap_err();
@@ -3373,6 +3433,8 @@ mod validate_tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
@@ -3412,6 +3474,8 @@ mod validate_tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         if !cascade {
             consensus.hardforks.cascade = None;

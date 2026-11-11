@@ -1,5 +1,6 @@
 use crate::hardfork_config::{
-    Activation, Aurora, Borealis, Cascade, Echo, FrontierParams, IrysHardforkConfig,
+    Activation, Aurora, Borealis, Cascade, Echo, EmaRules, EmaSampling, FrontierParams,
+    IrysHardforkConfig,
 };
 use crate::storage_pricing::{PRECISION_SCALE, ReplicaCount, mul_div};
 use crate::{
@@ -681,6 +682,42 @@ impl ConsensusConfig {
         })
     }
 
+    /// The oracle price and EMA rules for a block with the given timestamp.
+    ///
+    /// From Delta the oracle price bound, the EMA interval length and the EMA
+    /// sampling rule come from the fork. Before it they are
+    /// `token_price_safe_range`, `ema.price_adjustment_interval` and the single
+    /// earlier block.
+    pub fn ema_rules_at(&self, timestamp: UnixTimestamp) -> EmaRules {
+        match self.hardforks.delta_for_block(timestamp) {
+            Activation::Active(delta) => EmaRules {
+                token_price_safe_range: delta.token_price_safe_range,
+                price_adjustment_interval: delta.ema_price_adjustment_interval,
+                sampling: EmaSampling::IntervalMedian,
+            },
+            Activation::Inactive => EmaRules {
+                token_price_safe_range: self.token_price_safe_range,
+                price_adjustment_interval: self.ema.price_adjustment_interval,
+                sampling: EmaSampling::PreviousIntervalBlock,
+            },
+        }
+    }
+
+    /// Number of latest blocks that always suffice to rebuild the EMA snapshot of
+    /// the latest one (`create_ema_snapshot_from_chain_history`).
+    ///
+    /// The rebuild looks back over two interval boundaries and to the EMA
+    /// recalculation block before the older one. Consecutive boundaries are one
+    /// interval apart. Across Delta activation, where the interval length
+    /// changes, they are less than the two lengths added together apart.
+    pub fn ema_snapshot_history_depth(&self) -> u64 {
+        let base_interval = self.ema.price_adjustment_interval;
+        let longest_boundary_gap = self.hardforks.delta.map_or(base_interval, |delta| {
+            base_interval.saturating_add(delta.ema_price_adjustment_interval)
+        });
+        longest_boundary_gap.saturating_mul(3)
+    }
+
     /// Returns the effective annual cost per GB at a given timestamp.
     /// If Cascade is active at this timestamp, returns the Cascade override; otherwise the base value.
     pub fn effective_annual_cost_per_gb(
@@ -1236,6 +1273,8 @@ mod tests {
                 capacity_chunk_reward_percent: Amount::percentage(percent).unwrap(),
                 ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(
                 ),
+                token_price_safe_range: Delta::default_token_price_safe_range(),
+                ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
             })
         };
         let mut config_a = ConsensusConfig::testing();
@@ -1254,6 +1293,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         assert_eq!(without_delta.hardforks.delta, None);
         assert_ne!(without_delta.keccak256_hash(), with_delta.keccak256_hash());
@@ -1458,6 +1499,51 @@ mod tests {
             config.hardforks.fission.is_none(),
             "testnet Fission is unscheduled"
         );
+    }
+
+    /// Delta carries the oracle price bound, the EMA interval length and the EMA
+    /// sampling rule. They apply from the first block whose timestamp meets the
+    /// activation timestamp.
+    #[test]
+    fn test_ema_rules_switch_at_delta() {
+        let mut config = ConsensusConfig::testing();
+        config.token_price_safe_range = Amount::percentage(dec!(1)).unwrap();
+        config.ema.price_adjustment_interval = 10;
+
+        let base_rules = EmaRules {
+            token_price_safe_range: Amount::percentage(dec!(1)).unwrap(),
+            price_adjustment_interval: 10,
+            sampling: EmaSampling::PreviousIntervalBlock,
+        };
+        config.hardforks.delta = None;
+        assert_eq!(
+            config.ema_rules_at(UnixTimestamp::from_secs(u64::MAX)),
+            base_rules
+        );
+        assert_eq!(config.ema_snapshot_history_depth(), 30);
+
+        config.hardforks.delta = Some(Delta {
+            activation_timestamp: UnixTimestamp::from_secs(1_000),
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
+        });
+        assert_eq!(
+            config.ema_rules_at(UnixTimestamp::from_secs(999)),
+            base_rules
+        );
+        assert_eq!(
+            config.ema_rules_at(UnixTimestamp::from_secs(1_000)),
+            EmaRules {
+                token_price_safe_range: Amount::percentage(dec!(0.1)).unwrap(),
+                price_adjustment_interval: 20,
+                sampling: EmaSampling::IntervalMedian,
+            }
+        );
+        // Boundaries across activation are up to 10 + 20 blocks apart.
+        assert_eq!(config.ema_snapshot_history_depth(), 90);
     }
 
     #[test]

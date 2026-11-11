@@ -1616,7 +1616,7 @@ fn build_current_ema_snapshot_from_index(
 
     // Collect blocks by walking up the chain
     let mut chain_blocks = vec![current_block.clone()];
-    let blocks_to_collect = config.ema.price_adjustment_interval * 3;
+    let blocks_to_collect = config.ema_snapshot_history_depth();
 
     // Walk backwards through the chain, collecting blocks
     while chain_blocks.len() < blocks_to_collect as usize && current_block.height > 0 {

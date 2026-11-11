@@ -2017,11 +2017,15 @@ pub async fn prevalidate_block(
     })?
     .map_err(|e| PreValidationError::VDFCheckpointsInvalid(e.to_string()))?;
 
+    // The oracle price bound and the EMA rules change at Delta, resolved at the
+    // block's own timestamp.
+    let ema_rules = config.consensus.ema_rules_at(block.timestamp_secs());
+
     // Check that the oracle price does not exceed the EMA pricing parameters
     let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
         block.oracle_irys_price,
         previous_block.oracle_irys_price,
-        config.consensus.token_price_safe_range,
+        ema_rules.token_price_safe_range,
     );
     if !oracle_price_valid {
         return Err(PreValidationError::OraclePriceInvalid);
@@ -2030,12 +2034,7 @@ pub async fn prevalidate_block(
     // Check that the EMA has been correctly calculated
     let ema_valid = {
         let res = parent_ema_snapshot
-            .calculate_ema_for_new_block(
-                previous_block,
-                block.oracle_irys_price,
-                config.consensus.token_price_safe_range,
-                config.consensus.ema.price_adjustment_interval,
-            )
+            .calculate_ema_for_new_block(previous_block, block.oracle_irys_price, &ema_rules)
             .ema;
         res == block.ema_irys_price
     };
@@ -8267,6 +8266,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let cascade = config.consensus.hardforks.cascade.as_ref().unwrap();
@@ -8336,6 +8337,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);
@@ -8413,6 +8416,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);
@@ -8494,6 +8499,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);
@@ -8556,6 +8563,8 @@ mod tests {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
         let config = Config::new_with_random_peer_id(node_config);
         let ema = EmaSnapshot::genesis(&header);

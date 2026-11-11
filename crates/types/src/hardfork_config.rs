@@ -225,9 +225,59 @@ pub struct Delta {
         serialize_with = "crate::serde_utils::serializes_percentage_amount"
     )]
     pub ingress_proof_reward_pool_percent: Amount<Percentage>,
+    /// Largest change of a block's oracle price against its parent's oracle price
+    /// (default: 0.1, i.e. ±10%). Replaces `ConsensusConfig::token_price_safe_range`
+    /// from the first block whose timestamp meets `activation_timestamp`.
+    /// Must be <= 1.0.
+    #[serde(
+        default = "Delta::default_token_price_safe_range",
+        deserialize_with = "crate::serde_utils::percentage_amount",
+        serialize_with = "crate::serde_utils::serializes_percentage_amount"
+    )]
+    pub token_price_safe_range: Amount<Percentage>,
+    /// Number of blocks in an EMA price interval (default: 20). Replaces
+    /// `EmaConfig::price_adjustment_interval` from the first block whose timestamp
+    /// meets `activation_timestamp`. Must be > 0.
+    ///
+    /// From Delta the EMA update also uses the median of every oracle price in the
+    /// interval, not the oracle price of one earlier block. See
+    /// [`EmaSampling`].
+    #[serde(default = "Delta::default_ema_price_adjustment_interval")]
+    pub ema_price_adjustment_interval: u64,
+}
+
+/// Which oracle price an EMA update takes once the two bootstrap intervals are over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmaSampling {
+    /// Before Delta: the oracle price of one block, the predecessor of the previous
+    /// EMA recalculation block. Its producer decides the whole update.
+    PreviousIntervalBlock,
+    /// From Delta: the median of the oracle prices of every block in the interval,
+    /// the new block included. A minority of producers cannot move it outside the
+    /// prices the other producers reported.
+    IntervalMedian,
+}
+
+/// The oracle price and EMA rules in force for one block, resolved at that block's
+/// own timestamp. See [`crate::ConsensusConfig::ema_rules_at`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmaRules {
+    /// Largest change of the block's oracle price against its parent's.
+    pub token_price_safe_range: Amount<Percentage>,
+    /// Number of blocks in an EMA price interval.
+    pub price_adjustment_interval: u64,
+    pub sampling: EmaSampling,
 }
 
 impl Delta {
+    pub fn default_token_price_safe_range() -> Amount<Percentage> {
+        Amount::percentage(dec!(0.1)).expect("valid percentage")
+    }
+
+    pub const fn default_ema_price_adjustment_interval() -> u64 {
+        20
+    }
+
     pub fn default_capacity_chunk_reward_percent() -> Amount<Percentage> {
         Amount::percentage(dec!(0.5)).expect("valid percentage")
     }
@@ -771,6 +821,8 @@ mod tests {
                 capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
                 ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(
                 ),
+                token_price_safe_range: Delta::default_token_price_safe_range(),
+                ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
             }),
             echo: None,
             fission: None,
@@ -833,6 +885,12 @@ mod tests {
             delta.ingress_proof_reward_pool_percent,
             Delta::default_ingress_proof_reward_pool_percent()
         );
+        // The oracle price bound narrows to 10% and the EMA interval doubles to 20 blocks.
+        assert_eq!(
+            delta.token_price_safe_range,
+            Amount::percentage(dec!(0.1)).unwrap()
+        );
+        assert_eq!(delta.ema_price_adjustment_interval, 20);
     }
 
     /// The table documented in docs/partition-resize-operations.md parses, and

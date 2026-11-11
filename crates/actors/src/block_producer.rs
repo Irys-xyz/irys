@@ -1780,7 +1780,11 @@ pub trait BlockProdStrategy {
         // From here on each step is a local computation over inputs already in
         // hand, so a failure repeats on every attempt.
         let ema_calculation = self
-            .get_ema_price(prev_block_header, perv_block_ema_snapshot)
+            .get_ema_price(
+                prev_block_header,
+                perv_block_ema_snapshot,
+                current_timestamp,
+            )
             .await
             .map_err(BlockProductionError::irrecoverable)?;
 
@@ -2123,6 +2127,7 @@ pub trait BlockProdStrategy {
         &self,
         parent_block: &IrysBlockHeader,
         parent_block_ema_snapshot: &EmaSnapshot,
+        block_timestamp: UnixTimestampMs,
     ) -> eyre::Result<ExponentialMarketAvgCalculation> {
         let oracle_irys_price = match self.inner().price_oracle.current_snapshot() {
             Ok((fresh_price, oracle_updated_at)) => choose_oracle_price(
@@ -2142,11 +2147,17 @@ pub trait BlockProdStrategy {
             }
         };
 
+        // The rules of the block being produced, which can be on the other side
+        // of Delta activation from its parent.
+        let ema_rules = self
+            .inner()
+            .config
+            .consensus
+            .ema_rules_at(block_timestamp.to_secs());
         let ema_calculation = parent_block_ema_snapshot.calculate_ema_for_new_block(
             parent_block,
             oracle_irys_price,
-            self.inner().config.consensus.token_price_safe_range,
-            self.inner().config.consensus.ema.price_adjustment_interval,
+            &ema_rules,
         );
 
         Ok(ema_calculation)
