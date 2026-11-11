@@ -62,6 +62,20 @@ pub enum DatabaseVersion {
     /// `DataTransactionHeaderV1` with `metadata_format: u8`.
     V3 = 3,
 
+    /// Cache DB split migration.
+    ///
+    /// Splits the five cache tables (`CachedDataRoots`, `CachedChunksIndex`,
+    /// `CachedChunks`, `CachedIngressLeaves`, `IngressProofs`) out of the single MDBX environment at
+    /// `<base>/irys_consensus_data/` into a sibling environment at
+    /// `<base>/irys_cache_data/`. The cache environment carries its own
+    /// `CacheMetadata` table with an independent `DBSchemaVersion` stamp.
+    ///
+    /// The migration is idempotent and resumable: each cache table is copied
+    /// row-by-row into the cache env (skipping rows already present), then the
+    /// consensus copy is cleared. A crash mid-migration replays cleanly on
+    /// next startup.
+    V4 = 4,
+
     /// Data keyed by `data_commitment` migration.
     ///
     /// The data cache tables (`CachedDataRoots`, `CachedChunksIndex`,
@@ -69,12 +83,12 @@ pub enum DatabaseVersion {
     /// the `data_commitment` instead of the data root, and `CachedDataRoot`
     /// stores the `data_tree_root`. The migration clears those tables, because
     /// their rows use the old keys. It touches no other table.
-    V4 = 4,
+    V5 = 5,
 }
 
 impl DatabaseVersion {
     /// The current schema version that this binary expects.
-    pub const CURRENT: Self = Self::V4;
+    pub const CURRENT: Self = Self::V5;
 
     /// Returns `Some(version)` if the raw value corresponds to a known variant,
     /// or `None` if the value was written by a newer binary.
@@ -85,6 +99,7 @@ impl DatabaseVersion {
             2 => Some(Self::V2),
             3 => Some(Self::V3),
             4 => Some(Self::V4),
+            5 => Some(Self::V5),
             _ => None,
         }
     }

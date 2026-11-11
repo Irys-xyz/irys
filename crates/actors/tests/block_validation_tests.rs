@@ -2,14 +2,14 @@ use irys_actors::block_validation::{
     PreValidationError, poa_is_valid, poa_ledger_matches_assignment,
     poa_partition_is_owned_by_miner, previous_solution_hash_is_valid, solution_hash_link_is_valid,
 };
-use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
+use irys_database::DatabaseProvider;
+use irys_database::DatabaseProviderTestExt as _;
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, EpochSnapshot};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_testing_utils::new_mock_signed_header;
 use irys_types::{
-    Base64, BlockIndexItem, ConsensusConfig, DataLedger, DatabaseProvider, H256, IrysAddress,
-    IrysBlockHeader, LedgerIndexItem, PoaData, UnixTimestamp, UnixTimestampMs,
-    compute_solution_hash,
+    Base64, BlockIndexItem, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader,
+    LedgerIndexItem, PoaData, UnixTimestamp, UnixTimestampMs, compute_solution_hash,
     hardfork_config::{Activation, Delta},
     partition::PartitionAssignment,
 };
@@ -89,13 +89,8 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
     ];
 
     let _tmp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-    let db_env = open_or_create_db(
-        _tmp_dir.path(),
-        irys_database::tables::IrysTables::ALL,
-        reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-    )
-    .unwrap();
-    let db = DatabaseProvider(Arc::new(db_env));
+    let db =
+        DatabaseProvider::for_testing(_tmp_dir.path(), &_tmp_dir.path().join("cache")).unwrap();
     let block_index = BlockIndex::new_for_testing(db.clone());
     for (height, item) in block_index_items.iter().enumerate() {
         block_index.push_item(item, height as u64).unwrap();
@@ -114,8 +109,8 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         },
     );
 
-    let poa = PoaData {
-        partition_chunk_offset: 10,
+    let mut poa = PoaData {
+        partition_chunk_offset: 5,
         partition_hash,
         chunk: Some(Base64(vec![0; config.chunk_size as usize])),
         ledger_id: Some(DataLedger::Publish as u32),
@@ -124,9 +119,10 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
     };
 
     // The test indexes three blocks at heights 0/1/2 with Publish
-    // total_chunks of [0, 10, 20]. With offset=10, anchoring on the
-    // top block (height=2) keeps the offset in range (10 < 20) so the
-    // pre-check passes and the merkle proof is the failure source.
+    // total_chunks of [0, 10, 20]. With offset=5 (inside the 10-chunk
+    // testing partition), anchoring on the top block (height=2) keeps the
+    // ledger offset in range (5 < 20) so the pre-checks pass and the
+    // merkle proof is the failure source.
     //
     // The fast-path block_index lookup is exercised here; block_tree is
     // populated with a signed mock genesis solely to satisfy the
@@ -155,6 +151,26 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         res,
         Err(PreValidationError::MerkleProofInvalid(_))
     ));
+
+    // An offset at or past the active partition size is rejected before any
+    // ledger or merkle work.
+    poa.partition_chunk_offset = config.num_chunks_in_partition as u32;
+    let res = poa_is_valid(
+        &poa,
+        &block_index_guard,
+        &block_tree_guard,
+        &db,
+        H256::zero(),
+        2,
+        &epoch_snapshot,
+        &config,
+        &IrysAddress::ZERO,
+        3,
+    );
+    assert!(matches!(
+        res,
+        Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds)
+    ));
 }
 
 #[test_log::test(test)]
@@ -162,13 +178,8 @@ fn poa_chunk_longer_than_chunk_size_is_too_long() {
     let config = ConsensusConfig::testing();
     let chunk_size = usize::try_from(config.chunk_size).unwrap();
     let _tmp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-    let db_env = open_or_create_db(
-        _tmp_dir.path(),
-        irys_database::tables::IrysTables::ALL,
-        reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-    )
-    .unwrap();
-    let db = DatabaseProvider(Arc::new(db_env));
+    let db =
+        DatabaseProvider::for_testing(_tmp_dir.path(), &_tmp_dir.path().join("cache")).unwrap();
     let block_index_guard = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db.clone()));
     let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
         &new_mock_signed_header(),
@@ -278,6 +289,7 @@ fn solution_hash_link_follows_delta_activation(
         activation_timestamp: UnixTimestamp::from_secs(1_500),
         initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
         capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
     };
     consensus.hardforks.delta = Some(delta);
 
@@ -435,13 +447,7 @@ fn empty_poa_guards(
     config: &ConsensusConfig,
     db_dir: &std::path::Path,
 ) -> (DatabaseProvider, BlockIndexReadGuard, BlockTreeReadGuard) {
-    let db_env = open_or_create_db(
-        db_dir,
-        irys_database::tables::IrysTables::ALL,
-        reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-    )
-    .unwrap();
-    let db = DatabaseProvider(Arc::new(db_env));
+    let db = DatabaseProvider::for_testing(db_dir, &db_dir.join("cache")).unwrap();
     let block_index_guard = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db.clone()));
     let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
         &new_mock_signed_header(),

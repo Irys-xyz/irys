@@ -4975,10 +4975,12 @@ dependencies = [
  "itertools 0.13.0",
  "jsonrpsee-core",
  "jsonrpsee-http-client",
+ "libc",
  "lru 0.14.0",
  "nodit",
  "openssl",
  "opentelemetry",
+ "opentelemetry_sdk",
  "priority-queue",
  "proptest",
  "rand 0.8.5",
@@ -5279,6 +5281,7 @@ dependencies = [
  "rocksdb",
  "rstest",
  "serde",
+ "static_assertions",
  "strum 0.27.2",
  "tempfile",
  "test-fuzz",
@@ -5539,6 +5542,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-rpc-types-trace",
  "alloy-signer-local",
+ "alloy-trie",
  "arbitrary",
  "borsh",
  "bytes",
@@ -12160,6 +12164,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest 0.10.7",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

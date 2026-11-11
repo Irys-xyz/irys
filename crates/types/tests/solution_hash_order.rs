@@ -23,6 +23,7 @@ fn solution_hash_order_follows_delta() {
         activation_timestamp: UnixTimestamp::from_secs(0),
         initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
         capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+        ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
     };
 
     assert_eq!(

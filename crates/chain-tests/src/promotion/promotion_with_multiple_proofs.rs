@@ -33,7 +33,7 @@ async fn slow_heavy4_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
                 .hardforks
                 .frontier
                 .number_of_ingress_proofs_from_assignees = 0;
-            consensus.num_partitions_per_slot = 3;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(3);
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;
         })

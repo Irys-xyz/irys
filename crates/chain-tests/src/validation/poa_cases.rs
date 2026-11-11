@@ -28,7 +28,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
 
     let node_config = NodeConfig::testing().with_consensus(|consensus| {
         consensus.chunk_size = chunk_size as u64;
-        consensus.num_partitions_per_slot = 3;
+        consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(3);
         consensus.epoch.num_blocks_in_epoch = 2;
         consensus.num_chunks_in_partition = 6;
         consensus.num_chunks_in_recall_range = 2;
@@ -279,7 +279,7 @@ async fn data_poa_at_tip_validates_via_block_tree_fallback() -> eyre::Result<()>
     // exercises the `block_tree` fallback never fires.
     let node_config = NodeConfig::testing().with_consensus(|consensus| {
         consensus.chunk_size = chunk_size as u64;
-        consensus.num_partitions_per_slot = 3;
+        consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(3);
         consensus.epoch.num_blocks_in_epoch = 2;
         consensus.num_chunks_in_partition = 6;
         consensus.num_chunks_in_recall_range = 2;

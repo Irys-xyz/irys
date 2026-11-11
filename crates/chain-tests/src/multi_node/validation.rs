@@ -575,7 +575,7 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
     let mut config = NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = 32;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;
             consensus.mempool.tx_anchor_expiry_depth = 3;

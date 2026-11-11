@@ -94,7 +94,14 @@ max_pending_chunk_requests = 100
 
 [packing.local]
 cpu_packing_concurrency = 4
-gpu_packing_batch_size = 1024
+# Chunks per GPU packing batch, or "auto" to size batches from the GPU (4 per CUDA core, capped
+# by free GPU memory shared between concurrent batches). 0 packs on the CPU.
+gpu_packing_batch_size = "auto"
+# Scheduling priority of the CPU packing hash threads (Linux only).
+# "idle" (default) runs them only when no other thread wants the CPU.
+# { nice = N } sets nice level N, -20 (highest) to 19 (lowest); 0 is normal.
+# A negative N needs CAP_SYS_NICE or a matching RLIMIT_NICE.
+# cpu_packing_thread_priority = "idle"
 
 [cache]
 cache_clean_lag = 2
@@ -158,7 +165,6 @@ block_tree_depth = 50
 num_chunks_in_partition = 51872000
 num_chunks_in_recall_range = 800
 num_partitions_per_slot = 1
-num_partitions_per_term_ledger_slot = 1
 entropy_packing_iterations = 1000
 # Target storage duration in years
 safe_minimum_number_of_years = 200
@@ -227,12 +233,6 @@ price_adjustment_interval = 10
 number_of_ingress_proofs_total = 1
 number_of_ingress_proofs_from_assignees = 0
 
-# To enable the next hardfork at a specific block, uncomment:
-# [consensus.Custom.hardforks.next_name_tbd]
-# activation_block = 1000000
-# number_of_ingress_proofs_total = 4
-# number_of_ingress_proofs_from_assignees = 2
-
 # To enable Cascade (OneYear/ThirtyDay term ledgers), uncomment:
 # [consensus.Custom.hardforks.cascade]
 # activation_timestamp = "2026-07-01T00:00:00+00:00"
@@ -243,14 +243,24 @@ number_of_ingress_proofs_from_assignees = 0
 # annual_cost_per_gb = 0.028        # USD/GB/year override (default: 0.028)
 
 # Delta is a WIP hardfork and is not deployed. It accumulates changes that
-# need a hardfork. Changes it carries now: a ledger activated mid-chain
-# gets its first slots in the activating epoch, and a capacity (entropy) PoA
-# earns a reduced block reward from the first block at/after activation.
+# need a hardfork. Changes it carries now:
+# - a ledger activated mid-chain gets its first slots in the activating epoch;
+# - a capacity (entropy) PoA earns a reduced block reward;
+# - the solution hash puts the VDF seed before the chunk;
+# - Publish storage fees pay for num_partitions_per_slot replicas;
+# - a Publish tx credits the treasury its full perm_fee at inclusion;
+# - term fees pay for the full ledger term;
+# - the required perm_fee covers proof rewards on the tx's own term_fee;
+# - the ingress proofs of a Publish tx share one reward pool
+#   (ingress_proof_reward_pool_percent x term_fee), not one inclusion reward each.
+# Block-level changes apply from the first block at/after activation; ledger
+# seeding acts at the first epoch block at/after activation.
 # Uncomment to enable:
 # [consensus.Custom.hardforks.delta]
 # activation_timestamp = "2026-09-01T00:00:00+00:00"
 # initial_slots_per_new_ledger = 1   # slots seeded per newly activated ledger (default: 1)
 # capacity_chunk_reward_percent = 0.5   # miner share of the reward for a capacity PoA (default: 0.5)
+# ingress_proof_reward_pool_percent = 0.05   # share of term_fee that the ingress proofs of a Publish tx split (default: 0.05)
 
 # Echo (the PoA partition must belong to the block miner) is enabled from genesis
 # when this section is absent. To activate it at a later height instead, uncomment:

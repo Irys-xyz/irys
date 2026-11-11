@@ -41,7 +41,6 @@ poll_interval_ms = 10000
 # the genesis already knows about (chain_id, genesis block, vdf, etc) is
 # left to the harness to fill in from the running genesis at upgrade time.
 [consensus.Custom]
-num_partitions_per_term_ledger_slot = 1
 
 [consensus.Custom.hardforks.aurora]
 activation_timestamp = "2099-01-01T00:00:00+00:00"

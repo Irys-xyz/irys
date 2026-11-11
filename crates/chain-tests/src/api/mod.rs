@@ -5,6 +5,7 @@ mod commitment_anchor_window;
 mod epoch_partition_assignments_endpoint;
 mod external_api;
 mod hardfork_tests;
+mod ingress_status;
 mod ledger_offset_endpoint;
 mod mempool_txs;
 mod partition_intervals_endpoint;

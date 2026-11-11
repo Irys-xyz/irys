@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use irys_domain::{EntropyRejection, EntropyWrite, StorageModule};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_types::IrysAddress;
-use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, partition::PartitionHash};
+use irys_types::{
+    Config, CpuPackingThreadPriority, PartitionChunkOffset, PartitionChunkRange,
+    partition::PartitionHash,
+};
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::{JoinHandle, yield_now};
 use tracing::{debug, trace, warn};
@@ -87,6 +90,32 @@ impl WriteGate {
     }
 }
 
+/// Sets the scheduling priority of the calling thread. Linux keeps the
+/// scheduling class and the nice level per thread, so other node threads keep
+/// their priority. A thread without `CAP_SYS_NICE` cannot raise its priority
+/// again, so call this only on threads that do nothing but packing.
+#[cfg(target_os = "linux")]
+fn set_current_thread_priority(priority: CpuPackingThreadPriority) {
+    let result = match priority {
+        CpuPackingThreadPriority::Idle => {
+            let param = libc::sched_param { sched_priority: 0 };
+            // SAFETY: pid 0 is the calling thread; `param` outlives the call.
+            unsafe { libc::sched_setscheduler(0, libc::SCHED_IDLE, &param) }
+        }
+        // SAFETY: who 0 is the calling thread; no pointers are passed.
+        CpuPackingThreadPriority::Nice(level) => unsafe {
+            libc::setpriority(libc::PRIO_PROCESS, 0, level.into())
+        },
+    };
+    if result != 0 {
+        warn!(
+            ?priority,
+            error = %std::io::Error::last_os_error(),
+            "Could not set the CPU packing thread priority"
+        );
+    }
+}
+
 /// CPU-based packing strategy
 pub(crate) struct CpuPackingStrategy {
     chunk_size: usize,
@@ -94,6 +123,11 @@ pub(crate) struct CpuPackingStrategy {
     semaphore: Arc<Semaphore>,
     notify: Arc<Notify>,
     runtime_handle: tokio::runtime::Handle,
+    /// Runs only the entropy hash, at `cpu_packing_thread_priority`. The
+    /// storage-module write stays on the caller thread at normal priority: it
+    /// takes locks that mining and sync also take, and a starved low-priority
+    /// thread must not hold them.
+    hash_pool: Arc<rayon::ThreadPool>,
     chain_id: u64,
     /// Same width as the packing semaphore. Join handles stay inside this cap.
     /// A full partition is tens of millions of chunks; retaining one handle per
@@ -119,12 +153,31 @@ impl CpuPackingStrategy {
         concurrency: u16,
         #[cfg(test)] pack_pause: Arc<Mutex<Option<Arc<PackPause>>>>,
     ) -> Self {
+        let priority = config.node_config.packing.local.cpu_packing_thread_priority;
+        // Rayon reads 0 threads as one per CPU. A node with no local packing
+        // (concurrency 0) needs only one thread.
+        let hash_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(usize::from(concurrency).max(1))
+            .thread_name(|index| format!("cpu-packing-{index}"))
+            .start_handler(move |_| {
+                #[cfg(target_os = "linux")]
+                set_current_thread_priority(priority);
+            })
+            .build()
+            .expect("Failure building the CPU packing thread pool");
+        let hash_pool = Arc::new(hash_pool);
+        #[cfg(not(target_os = "linux"))]
+        warn!(
+            ?priority,
+            "CPU packing thread priority is supported only on Linux; using the default priority"
+        );
         Self {
             chunk_size: config.consensus.chunk_size as usize,
             entropy_iterations: config.consensus.entropy_packing_iterations,
             semaphore,
             notify,
             runtime_handle,
+            hash_pool,
             chain_id,
             concurrency,
             #[cfg(test)]
@@ -228,6 +281,10 @@ impl super::PackingStrategy for CpuPackingStrategy {
 
         'spans: for span in gaps {
             for i in span.start().0..=span.end().0 {
+                // Gaps ascend, so nothing past the logical partition end is left to pack.
+                if u64::from(i) >= storage_module.partition_chunks() {
+                    break 'spans;
+                }
                 #[cfg(test)]
                 {
                     self.chunks_started
@@ -260,6 +317,7 @@ impl super::PackingStrategy for CpuPackingStrategy {
                 let storage_module_clone = storage_module.clone();
                 let chain_id = self.chain_id;
                 let notify = self.notify.clone();
+                let hash_pool = self.hash_pool.clone();
                 #[cfg(test)]
                 let write_gate = write_gate.clone();
 
@@ -267,16 +325,19 @@ impl super::PackingStrategy for CpuPackingStrategy {
                 let handle = self.runtime_handle
                 .clone()
                 .spawn_blocking(move || {
+                    if u64::from(i) >= storage_module_clone.partition_chunks() { return Ok(()); }
                     let mut out = Vec::with_capacity(chunk_size);
-                    compute_entropy_chunk(
-                        mining_address,
-                        i as u64,
-                        partition_hash.0,
-                        entropy_iterations,
-                        chunk_size,
-                        &mut out,
-                        chain_id,
-                    );
+                    hash_pool.install(|| {
+                        compute_entropy_chunk(
+                            mining_address,
+                            i as u64,
+                            partition_hash.0,
+                            entropy_iterations,
+                            chunk_size,
+                            &mut out,
+                            chain_id,
+                        );
+                    });
 
                     debug!(
                         target: "irys::packing::progress",
@@ -435,6 +496,46 @@ mod tests {
             CONCURRENCY,
             Arc::new(std::sync::Mutex::new(None)),
         )
+    }
+
+    /// Hash threads take the configured priority. The caller thread keeps its
+    /// priority, because the storage-module write runs there. The test process
+    /// may start niced or idle, so the cases use values that any thread may set.
+    #[cfg(target_os = "linux")]
+    #[rstest::rstest]
+    #[case::idle(irys_types::CpuPackingThreadPriority::Idle)]
+    #[case::nice(irys_types::CpuPackingThreadPriority::Nice(19))]
+    #[tokio::test]
+    async fn hash_pool_threads_take_the_configured_priority(
+        #[case] priority: irys_types::CpuPackingThreadPriority,
+    ) {
+        fn current_thread_policy_and_nice() -> (libc::c_int, libc::c_int) {
+            // SAFETY: both calls only read the calling thread's attributes.
+            unsafe {
+                (
+                    libc::sched_getscheduler(0),
+                    libc::getpriority(libc::PRIO_PROCESS, 0),
+                )
+            }
+        }
+        let caller_before = current_thread_policy_and_nice();
+        let mut node_config = NodeConfig::testing();
+        node_config.packing.local.cpu_packing_thread_priority = priority;
+        let config = Arc::new(irys_types::Config::new_with_random_peer_id(node_config));
+        let packer = strategy(config);
+
+        let (hash_policy, hash_nice) = packer.hash_pool.install(current_thread_policy_and_nice);
+
+        match priority {
+            irys_types::CpuPackingThreadPriority::Idle => {
+                assert_eq!(hash_policy, libc::SCHED_IDLE);
+            }
+            irys_types::CpuPackingThreadPriority::Nice(level) => {
+                assert_eq!(hash_policy, caller_before.0);
+                assert_eq!(hash_nice, libc::c_int::from(level));
+            }
+        }
+        assert_eq!(current_thread_policy_and_nice(), caller_before);
     }
 
     /// A refused write fails the range. The loop must not hash every later chunk.

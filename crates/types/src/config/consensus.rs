@@ -1,4 +1,7 @@
-use crate::hardfork_config::{Aurora, Borealis, Cascade, Echo, FrontierParams, IrysHardforkConfig};
+use crate::hardfork_config::{
+    Activation, Aurora, Borealis, Cascade, Echo, FrontierParams, IrysHardforkConfig,
+};
+use crate::storage_pricing::{PRECISION_SCALE, ReplicaCount, mul_div};
 use crate::{
     H256, IrysAddress,
     storage_pricing::{
@@ -96,12 +99,8 @@ pub struct ConsensusConfig {
     /// Number of chunks that can be recalled in each partition by a mining step
     pub num_chunks_in_recall_range: u64,
 
-    /// Number of replica partitions in each storage slot (Publish/Submit ledgers)
-    pub num_partitions_per_slot: u64,
-
-    /// Number of replica partitions in each term ledger slot (OneYear/ThirtyDay).
-    /// Independently configurable from `num_partitions_per_slot`.
-    pub num_partitions_per_term_ledger_slot: u64,
+    /// Number of replica partitions in each storage slot (all data ledgers)
+    pub num_partitions_per_slot: ReplicaCount,
 
     /// Number of iterations for entropy packing algorithm
     pub entropy_packing_iterations: u32,
@@ -127,6 +126,12 @@ pub struct ConsensusConfig {
     pub safe_minimum_number_of_years: u64,
 
     /// Fee required to stake a mining address in Irys tokens
+    ///
+    /// Changing `stake_value`, `pledge_base_value` or `pledge_decay` on a live chain
+    /// needs a hardfork gate. Validation prices every commitment with the current
+    /// values, including the copy an epoch block must list again, and refunds use
+    /// them too. An ungated change rejects old blocks on replay, can leave no valid
+    /// epoch block, and refunds a different amount than the user paid.
     #[serde(
         deserialize_with = "serde_utils::token_amount",
         serialize_with = "serde_utils::serializes_token_amount"
@@ -150,8 +155,9 @@ pub struct ConsensusConfig {
     /// This is the fee that is used for immediate tx inclusion fees:
     /// miner receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
     ///
-    /// This field is also used for immediate ingress proof rewards:
-    /// ingress proof producer receives: `tx.term_fee * immediate_tx_inclusion_reward_percent`
+    /// Before Delta each ingress proof also gets this share of `tx.term_fee`. From Delta the
+    /// ingress proofs share a pool of `tx.term_fee * Delta::ingress_proof_reward_pool_percent`.
+    /// See `ingress_proof_reward_pool_at`.
     ///
     /// Both of these reward distribution mechanisms are opaque to the user,
     /// the user will only ever see `term_fee` and `perm_fee`.
@@ -251,6 +257,13 @@ pub struct BlockRewardConfig {
 /// `Alloc` and `StateRoot` are mutually exclusive *by construction*: a network's
 /// genesis EVM state is described **either** by an inline account allocation
 /// **or** by a pinned state root — never both.
+///
+/// Rule for both variants: the genesis state must not hold an empty account (nonce 0, balance 0,
+/// no code) at the EIP-7002 or EIP-7251 request predeploy address
+/// (`0x00000961Ef480Eb55e80D19ad83579A64c007002`, `0x0000BBdDc7CE488642fb579F8B00f3a590007251`).
+/// Irys makes no post-block system call to those addresses, so such an account stays in state. An
+/// executor that makes the Ethereum system calls deletes it at block 1 (EIP-161) and gets a
+/// different state root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GenesisEvmState {
@@ -660,6 +673,33 @@ impl ConsensusConfig {
         Self::compute_cost_per_chunk_per_epoch(annual_cost, self.chunk_size, self.epochs_per_year())
     }
 
+    /// Total ingress proof reward of a Publish tx at a given timestamp. Promotion splits it into
+    /// equal shares across the tx's ingress proofs; the remainder goes to the first proof. From
+    /// Delta it is `term_fee` x `Delta::ingress_proof_reward_pool_percent`. Before Delta it is
+    /// one `immediate_tx_inclusion_reward_percent` share of `term_fee` for each required ingress
+    /// proof.
+    pub fn ingress_proof_reward_pool_at(
+        &self,
+        timestamp: UnixTimestamp,
+        term_fee: crate::U256,
+    ) -> Result<crate::U256> {
+        Ok(match self.hardforks.delta_for_block(timestamp) {
+            Activation::Active(delta) => mul_div(
+                term_fee,
+                delta.ingress_proof_reward_pool_percent.amount,
+                PRECISION_SCALE,
+            )?,
+            Activation::Inactive => mul_div(
+                term_fee,
+                self.immediate_tx_inclusion_reward_percent.amount,
+                PRECISION_SCALE,
+            )?
+            .saturating_mul(crate::U256::from(
+                self.hardforks.number_of_ingress_proofs_total_at(timestamp),
+            )),
+        })
+    }
+
     /// Returns the effective annual cost per GB at a given timestamp.
     /// If Cascade is active at this timestamp, returns the Cascade override; otherwise the base value.
     pub fn effective_annual_cost_per_gb(
@@ -830,8 +870,7 @@ impl ConsensusConfig {
             // Number of chunks that can be recalled in each partition by a mining step
             num_chunks_in_recall_range: 400,
             // Number of replica partitions in each storage slot
-            num_partitions_per_slot: 10,
-            num_partitions_per_term_ledger_slot: 10,
+            num_partitions_per_slot: ReplicaCount::new(10),
             // Number of iterations for Matrix (entropy) packing algorithm
             entropy_packing_iterations: 1_000_000,
             // Toggles full ingress proof validation on or off
@@ -859,7 +898,6 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_total: 10,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 // Aurora hardfork - deprecates V1 commitment transactions
                 aurora: Some(Aurora {
                     activation_timestamp: unix_timestamp_string_serde::deserialize(
@@ -896,6 +934,8 @@ impl ConsensusConfig {
                 echo: Some(Echo {
                     activation_height: 2779313,
                 }),
+                // Fission hardfork (partition resize) - not scheduled yet
+                fission: None,
             },
         }
     }
@@ -933,8 +973,7 @@ impl ConsensusConfig {
             segments_per_chunk: 4,
             num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
             num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
-            num_partitions_per_slot: 1,
-            num_partitions_per_term_ledger_slot: 1,
+            num_partitions_per_slot: ReplicaCount::new(1),
             block_migration_depth: 6,
             block_tree_depth: 50,
             entropy_packing_iterations: 1000,
@@ -1027,7 +1066,6 @@ impl ConsensusConfig {
                     activation_timestamp: UnixTimestamp::from_secs(1768476600),
                     minimum_commitment_tx_version: 2,
                 }),
-                next_name_tbd: None,
                 // Borealis hardfork - enabled from genesis for testing
                 borealis: Some(Borealis {
                     activation_timestamp: UnixTimestamp::from_secs(0),
@@ -1046,6 +1084,8 @@ impl ConsensusConfig {
                 echo: Some(Echo {
                     activation_height: 0,
                 }),
+                // Fission hardfork (partition resize) - not scheduled yet
+                fission: None,
             },
         }
     }
@@ -1071,8 +1111,7 @@ impl ConsensusConfig {
             segments_per_chunk: 64,
             num_chunks_in_partition: Self::CHUNKS_PER_PARTITION_20TB,
             num_chunks_in_recall_range: 400,
-            num_partitions_per_slot: 10,
-            num_partitions_per_term_ledger_slot: 10,
+            num_partitions_per_slot: ReplicaCount::new(10),
             block_migration_depth: 6,
             block_tree_depth: 50,
             entropy_packing_iterations: 1000,
@@ -1162,7 +1201,6 @@ impl ConsensusConfig {
                     .unwrap(),
                     minimum_commitment_tx_version: 2,
                 }),
-                next_name_tbd: None,
                 // Borealis hardfork - controlled activation on testnet
                 borealis: Some(Borealis {
                     activation_timestamp: unix_timestamp_string_serde::deserialize(
@@ -1190,6 +1228,8 @@ impl ConsensusConfig {
                 echo: Some(Echo {
                     activation_height: 0,
                 }),
+                // Fission hardfork (partition resize) - not scheduled yet
+                fission: None,
             },
         }
     }
@@ -1219,6 +1259,8 @@ mod tests {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
                 initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
                 capacity_chunk_reward_percent: Amount::percentage(percent).unwrap(),
+                ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(
+                ),
             })
         };
         let mut config_a = ConsensusConfig::testing();
@@ -1236,6 +1278,7 @@ mod tests {
             activation_timestamp: UnixTimestamp::from_secs(1500),
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
         });
         assert_eq!(without_delta.hardforks.delta, None);
         assert_ne!(without_delta.keccak256_hash(), with_delta.keccak256_hash());
@@ -1306,7 +1349,7 @@ mod tests {
         // update this snapshot.
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("AMF9ngfwXWudnVHhJrXbR1yHsC1CtijiqJfJYgTGMmMf"), // spellchecker:disable-line
+            H256::from_base58("3ZnzYLzHfY1qtQtvsQTX53KRtXZYjYvaTwjQvZbAan8q"), // spellchecker:disable-line
             "mainnet consensus-config hash snapshot changed"
         );
     }
@@ -1324,7 +1367,7 @@ mod tests {
         );
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("56LYi5SnMa5w6uhdafWeUwMdCQzUJLevpsKDAH92wMUT"), // spellchecker:disable-line
+            H256::from_base58("CvqzPcKRBrbxcEdEJVxkAqhL8CAtqRdu7FLs54SidsRo"), // spellchecker:disable-line
             "testnet consensus-config hash snapshot changed"
         );
     }
@@ -1403,6 +1446,12 @@ mod tests {
             config.hardforks.delta.is_none(),
             "mainnet Delta is unscheduled"
         );
+        // Fission (partition resize) — unscheduled, like Delta: scheduling it moves the
+        // canonical config hash too.
+        assert!(
+            config.hardforks.fission.is_none(),
+            "mainnet Fission is unscheduled"
+        );
     }
 
     /// Pins the testnet hardfork schedule: the Borealis activation time
@@ -1427,6 +1476,12 @@ mod tests {
         assert!(
             config.hardforks.delta.is_none(),
             "testnet Delta is unscheduled"
+        );
+        // Fission (partition resize) — unscheduled, like Delta: scheduling it moves the
+        // canonical config hash too.
+        assert!(
+            config.hardforks.fission.is_none(),
+            "testnet Fission is unscheduled"
         );
     }
 
@@ -1542,7 +1597,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("2J9DToYDRNSr3wQVexPvz74Z8CrZSE1L1fG5iMK8YFrK");
+        let expected_hash = H256::from_base58("C4YAwq2DNdfj6BejAXAdKiCBzdC31M8nbKCunPRZTpYm");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,

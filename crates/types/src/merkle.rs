@@ -53,6 +53,30 @@ pub fn expected_chunk_byte_range(
     Ok((min, max))
 }
 
+/// Check that an unpacked chunk is self-consistent: its data path opens
+/// chunk `tx_offset` of the commitment its own `data_tree_root` and
+/// `data_size` give under `geometry`. Ingress can return `Ok` without this
+/// check (a recent-chunk hit keys only the chunk key, not the body), so
+/// peer-supplied bodies must pass it first.
+///
+/// The commitment comes from the chunk message, so a pass is only a filter:
+/// an anchored check against a signature-checked header must follow before
+/// the chunk is trusted.
+pub fn validate_unpacked_chunk(
+    chunk: &crate::UnpackedChunk,
+    geometry: &crate::data_tree::Geometry,
+) -> eyre::Result<()> {
+    crate::data_tree::verify_data_chunk(
+        geometry,
+        chunk.data_commitment(geometry),
+        chunk.data_size,
+        chunk.tx_offset,
+        &chunk.bytes.0,
+        &chunk.data_path.0,
+    )
+    .map_err(|error| eyre!("peer chunk failed verification: {error}"))
+}
+
 /// Concatenated ids and max byte ranges for full set of nodes for an original data chunk, starting with the root.
 #[derive(Debug, PartialEq, Clone)]
 pub struct Proof {
@@ -856,6 +880,42 @@ mod tests {
             err.contains("At least one data node is required"),
             "unexpected error: {err}"
         );
+    }
+
+    fn single_chunk(bytes: Vec<u8>) -> (crate::UnpackedChunk, crate::data_tree::Geometry) {
+        let config = crate::ConsensusConfig::testing();
+        let geometry = config.data_tree_geometry().expect("testing geometry");
+        let signer = crate::irys::IrysSigner::random_signer(&config);
+        let tx = signer
+            .create_transaction(bytes, H256::zero())
+            .expect("transaction");
+        let chunk = tx
+            .data_chunks()
+            .expect("chunks")
+            .into_iter()
+            .next()
+            .expect("one chunk");
+        (chunk, geometry)
+    }
+
+    #[test]
+    fn validate_unpacked_chunk_accepts_a_consistent_chunk() {
+        let (chunk, geometry) = single_chunk(vec![7_u8; 32]);
+        validate_unpacked_chunk(&chunk, &geometry).expect("valid chunk");
+    }
+
+    #[test]
+    fn validate_unpacked_chunk_rejects_a_wrong_length_body() {
+        let (mut chunk, geometry) = single_chunk(vec![7_u8; 32]);
+        chunk.bytes = vec![7_u8; 31].into();
+        assert!(validate_unpacked_chunk(&chunk, &geometry).is_err());
+    }
+
+    #[test]
+    fn validate_unpacked_chunk_rejects_a_body_that_does_not_hash_to_the_leaf() {
+        let (mut chunk, geometry) = single_chunk(vec![7_u8; 32]);
+        chunk.bytes = vec![8_u8; 32].into();
+        assert!(validate_unpacked_chunk(&chunk, &geometry).is_err());
     }
 }
 

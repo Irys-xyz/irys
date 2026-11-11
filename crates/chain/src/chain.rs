@@ -14,7 +14,12 @@ use irys_actors::{
     block_migration_service::BlockMigrationService,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockTreeLifecycleTimestamps, BlockTreeService, BlockTreeServiceMessage},
-    cache_service::ChunkCacheService,
+    cache_service::{
+        ChunkCacheService,
+        replica_custody::{
+            ChainCustodyTopology, CoverageLimits, HttpReplicaCoverage, ReplicaCustody,
+        },
+    },
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
     mempool_guard::MempoolReadGuard,
@@ -31,6 +36,7 @@ use irys_actors::{
 };
 use irys_api_server::{API_VERSION, ApiState, create_listener, run_server};
 use irys_config::submodules::StorageSubmodulesConfig;
+use irys_database::DatabaseProvider;
 use irys_database::database;
 use irys_database::db::{IrysDatabaseExt as _, RethDbWrapper};
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -52,7 +58,9 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reward_curve::HalvingCurve;
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db_with_args;
+use irys_storage::irys_consensus_data_db::{
+    open_or_create_irys_cache_data_db_with_args, open_or_create_irys_consensus_data_db_with_args,
+};
 use irys_types::BlockHash;
 use irys_types::ToBase58 as _;
 use irys_types::chainspec::irys_chain_spec;
@@ -60,7 +68,7 @@ use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
     IrysPeerId, NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
     PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
-    SystemLedger, TokioServiceHandle, Traced, U256, VdfFreeRun, app_state::DatabaseProvider,
+    SystemLedger, TokioServiceHandle, Traced, U256, VdfFreeRun,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
@@ -150,6 +158,7 @@ pub struct IrysNodeCtx {
     pub http_chunk_admission: Arc<Semaphore>,
     pub http_chunk_waiters: Arc<Semaphore>,
     pub tx_ingress_admission: Arc<Semaphore>,
+    pub persisted_query_admission: Arc<Semaphore>,
     /// Atomic timestamps tracking the last canonical advance / last reorg
     /// observed by [`BlockTreeService`]; same `Arc` is shared with the
     /// service worker and with [`ApiState`] so `/v1/tip` does not have to
@@ -179,6 +188,7 @@ impl IrysNodeCtx {
             http_chunk_admission: Arc::clone(&self.http_chunk_admission),
             http_chunk_waiters: Arc::clone(&self.http_chunk_waiters),
             tx_ingress_admission: Arc::clone(&self.tx_ingress_admission),
+            persisted_query_admission: Arc::clone(&self.persisted_query_admission),
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
             block_tree_lifecycle: self.block_tree_lifecycle.clone(),
@@ -823,6 +833,9 @@ impl IrysNode {
     pub async fn start(mut self) -> eyre::Result<IrysNodeCtx> {
         // Determine node startup mode (Copy, avoids borrowing self.config)
         let node_mode = self.config.node_config.node_mode;
+        // Resolved before any service starts: once the lifecycle is running, a
+        // failed startup must stop the node rather than return early.
+        let api_probe_addr = Self::api_probe_addr(&self.config.node_config)?;
 
         // Use the irys_db already initialized in new()
         let irys_db = self.irys_db.clone();
@@ -897,8 +910,8 @@ impl IrysNode {
             info!("Found 1 CUDA GPUs - {}", &gpu_info.device_name);
             let gpu_config = CUDAConfig::from_device_default()?;
             info!(
-                "Using blocks: {}, threads per block: {}",
-                &gpu_config.blocks, &gpu_config.threads_per_block
+                "GPU packing: {} SMs x {} cores, {} threads per block",
+                &gpu_config.sm_count, &gpu_config.cores_per_sm, &gpu_config.threads_per_block
             );
         }
 
@@ -1144,9 +1157,14 @@ impl IrysNode {
 
         // This is going to resolve instantly for a genesis node with 0 blocks,
         //  going to wait for sync otherwise.
-        ctx.sync_service_facade.initial_sync().await?;
+        if let Err(err) = ctx.sync_service_facade.initial_sync().await {
+            // Stop before returning: dropping the context instead leaves the API
+            // and gossip servers answering while the services behind them go away.
+            error!(error = ?err, "Initial sync failed during startup");
+            ctx.stop(ShutdownReason::InitialSyncFailed).await;
+            return Err(eyre::Report::new(err).wrap_err("initial sync failed during node startup"));
+        }
 
-        let api_probe_addr = Self::api_probe_addr(&ctx.config.node_config)?;
         info!(
             startup.phase = "api_ready_wait",
             api.addr = %api_probe_addr,
@@ -1255,10 +1273,21 @@ impl IrysNode {
             let chain_id = ctx.config.consensus.chain_id;
             // let mempool_tx = ctx.service_senders.mempool.clone();
             let (tx, rx) = oneshot::channel();
-            ctx.service_senders
-                .mempool
-                .send_traced(MempoolServiceMessage::GetState(tx))?;
-            let mempool = rx.await?;
+            let mempool = async {
+                ctx.service_senders
+                    .mempool
+                    .send_traced(MempoolServiceMessage::GetState(tx))?;
+                eyre::Ok(rx.await?)
+            }
+            .await;
+            let mempool = match mempool {
+                Ok(mempool) => mempool,
+                Err(err) => {
+                    error!(error = ?err, "Mempool service unavailable during startup");
+                    ctx.stop(ShutdownReason::ServiceExited).await;
+                    return Err(err.wrap_err("mempool service unavailable during node startup"));
+                }
+            };
             let config = ctx.config.clone();
             let vdf_controller = ctx.vdf_controller.clone();
             let storage_modules_guard = ctx.storage_modules_guard.clone();
@@ -1330,10 +1359,12 @@ impl IrysNode {
                     // report_metrics() — that hook only covers Reth's DB.
                     // Surfaces freelist, table sizes, and timed-out-reader
                     // gauges so MDBX contention shows up alongside the per-tx
-                    // commit-latency histograms.
-                    irys_database::db_metrics::report_irys_consensus_db_gauges(
-                        irys_db_for_metrics.0.as_ref(),
-                    );
+                    // commit-latency histograms. Run for both Irys envs so the
+                    // cache DB (added in V4) gets the same observability.
+                    use irys_database::db_metrics::report_db_gauges;
+                    use irys_database::scoped_tx::{Cache, Consensus};
+                    report_db_gauges::<Consensus>(irys_db_for_metrics.consensus().as_ref());
+                    report_db_gauges::<Cache>(irys_db_for_metrics.cache().as_ref());
                 }
             });
         }
@@ -1941,28 +1972,41 @@ impl IrysNode {
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
 
         let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+        // Fission can only activate on a chain whose data ledgers are empty;
+        // fail here instead of at the first epoch block past its timestamp.
+        if epoch_snapshot.consensus_context().pending_activation()
+            && let Some(ledger) = latest_block
+                .data_ledgers
+                .iter()
+                .find(|l| l.total_chunks != 0)
+        {
+            eyre::bail!(
+                "Fission is scheduled but ledger {} already holds {} chunks, so its activation block could never be valid; remove [hardforks.fission] or start from an empty chain",
+                ledger.ledger_id,
+                ledger.total_chunks
+            );
+        }
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
 
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos).await?;
+        let logical_chunks = epoch_snapshot.partition_chunks();
+        for module in storage_modules.read().unwrap().iter() {
+            module.set_partition_chunks(logical_chunks)?;
+            // Drives already carry a finalized resize the chain view has not
+            // reached (DB restored or wiped): mine and pack the retained prefix
+            // until the resync passes the activation.
+            if module.partition_chunks() < logical_chunks {
+                tracing::warn!(
+                    storage_module.id = module.id,
+                    retained = module.partition_chunks(),
+                    canonical = logical_chunks,
+                    "storage module is truncated beyond the canonical partition size; bounded to the retained prefix until the chain passes the activation"
+                );
+            }
+        }
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
         let ingress_proof_generation_state =
             irys_actors::chunk_ingress_service::IngressProofGenerationState::default();
-
-        // Spawned after the storage modules: capacity pruning asks them which
-        // cached bodies are already fsynced before reclaiming any.
-        let chunk_cache_handle = ChunkCacheService::spawn_service(
-            block_index_guard.clone(),
-            block_tree_guard.clone(),
-            irys_db.clone(),
-            receivers.chunk_cache,
-            config.clone(),
-            service_senders.gossip_broadcast.clone(),
-            service_senders.chunk_cache.clone(),
-            storage_modules_guard.clone(),
-            ingress_proof_generation_state.clone(),
-            runtime_handle.clone(),
-        );
-        debug!("Chunk cache initialized");
 
         // Provide storage modules guard to block migration service for partition recovery
         service_senders
@@ -1982,6 +2026,35 @@ impl IrysNode {
             runtime_handle.clone(),
             gossip_circuit_breaker,
         );
+
+        // Spawned after the storage modules: capacity pruning asks them which
+        // cached bodies are already fsynced before reclaiming any. Spawned
+        // after the peer list: a body this node alone holds is released only
+        // once a remote assignee attests a persisted copy.
+        let replica_custody = ReplicaCustody::new(Arc::new(HttpReplicaCoverage::new(
+            Arc::new(ChainCustodyTopology::new(
+                block_tree_guard.clone(),
+                peer_list_guard.clone(),
+            )),
+            config.irys_signer().address(),
+            HttpReplicaCoverage::http_fetchers(config.node_config.max_peer_response_bytes),
+            CoverageLimits::default(),
+            runtime_handle.clone(),
+        )));
+        let chunk_cache_handle = ChunkCacheService::spawn_service(
+            block_index_guard.clone(),
+            block_tree_guard.clone(),
+            irys_db.clone(),
+            receivers.chunk_cache,
+            config.clone(),
+            service_senders.gossip_broadcast.clone(),
+            service_senders.chunk_cache.clone(),
+            storage_modules_guard.clone(),
+            replica_custody,
+            ingress_proof_generation_state.clone(),
+            runtime_handle.clone(),
+        );
+        debug!("Chunk cache initialized");
 
         let execution_payload_cache = ExecutionPayloadCache::new(
             peer_list_guard.clone(),
@@ -2164,6 +2237,7 @@ impl IrysNode {
         // counter through the VDF handle (current_step()).
         let (partition_controllers, partition_handles) = Self::init_partition_mining_services(
             &config,
+            &block_tree_guard,
             &storage_modules_guard,
             &vdf_state_readonly,
             &service_senders,
@@ -2286,6 +2360,9 @@ impl IrysNode {
             tx_ingress_admission: Arc::new(Semaphore::new(
                 irys_api_server::routes::tx_ingress::MAX_IN_FLIGHT_TX_INGRESS,
             )),
+            persisted_query_admission: Arc::new(Semaphore::new(
+                irys_api_server::routes::storage::MAX_IN_FLIGHT_PERSISTED_QUERIES,
+            )),
             block_tree_lifecycle: block_tree_lifecycle.clone(),
             backfill_complete,
         };
@@ -2388,6 +2465,7 @@ impl IrysNode {
                 http_chunk_admission: Arc::clone(&irys_node_ctx.http_chunk_admission),
                 http_chunk_waiters: Arc::clone(&irys_node_ctx.http_chunk_waiters),
                 tx_ingress_admission: Arc::clone(&irys_node_ctx.tx_ingress_admission),
+                persisted_query_admission: Arc::clone(&irys_node_ctx.persisted_query_admission),
                 started_at: irys_node_ctx.started_at,
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
                 block_tree_lifecycle: irys_node_ctx.block_tree_lifecycle.clone(),
@@ -2400,6 +2478,7 @@ impl IrysNode {
             gossip_server,
             gossip_server_handle,
             broadcast_task_handle,
+            Arc::clone(&irys_node_ctx.gossip_data_handler.chunk_announce),
             task_exec,
         );
 
@@ -2532,6 +2611,7 @@ impl IrysNode {
 
     fn init_partition_mining_services(
         config: &Config,
+        block_tree: &irys_domain::BlockTreeReadGuard,
         storage_modules_guard: &StorageModulesReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         service_senders: &ServiceSenders,
@@ -2570,7 +2650,8 @@ impl IrysNode {
                 initial_difficulty,
                 Some(irys_db.clone()),
                 Some(Arc::clone(&tx_path_pool)),
-            );
+            )
+            .with_block_tree(block_tree.clone());
             let (controller, handle) =
                 PartitionMiningService::spawn_service(inner, runtime_handle.clone());
             controllers.push(controller);
@@ -2597,9 +2678,18 @@ impl IrysNode {
             // note: once we support submodules, this will probably need to change
             runtime_handle.spawn(async move {
                 for interval in uninitialized {
-                    if let Ok(req) = PackingRequest::new(sm.clone(), PartitionChunkRange(interval))
-                        && let Err(e) = sender.send(req).await
-                    {
+                    let req = match PackingRequest::new(sm.clone(), PartitionChunkRange(interval)) {
+                        Ok(req) => req,
+                        Err(e) => {
+                            tracing::warn!(
+                                storage_module.id = %sm.id,
+                                packing.interval = ?interval,
+                                "Skipping repacking request: {e:?}"
+                            );
+                            continue;
+                        }
+                    };
+                    if let Err(e) = sender.send(req).await {
                         tracing::event!(
                             target: "irys::packing",
                             tracing::Level::ERROR,
@@ -2921,15 +3011,20 @@ fn init_reth_db(
 
 #[tracing::instrument(level = "trace", skip_all)]
 fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Error> {
-    let irys_db_env = open_or_create_irys_consensus_data_db_with_args(
+    let consensus = open_or_create_irys_consensus_data_db_with_args(
         node_config.irys_consensus_data_dir(),
         // Args (incl. the test geometry cap) derived from the node's DatabaseConfig.
         irys_database::consensus_db_args(&node_config.database)?,
     )?;
-    irys_database::migration::ensure_db_version_compatible(&irys_db_env)?;
-    let irys_db = DatabaseProvider(Arc::new(irys_db_env));
-    debug!("Irys DB initialized");
-    Ok(irys_db)
+    let cache = open_or_create_irys_cache_data_db_with_args(
+        node_config.irys_cache_data_dir(),
+        // Cache env: `cache_sync_mode` plus the same geometry cap.
+        irys_database::cache_db_args(&node_config.database)?,
+    )?;
+    irys_database::migration::ensure_db_version_compatible(&consensus, &cache)?;
+    let db = DatabaseProvider::new(Arc::new(consensus), Arc::new(cache));
+    debug!("Irys DB initialized (consensus + cache)");
+    Ok(db)
 }
 
 /// Gets the peer_id from the peer key file, or generates a new keypair and stores it.

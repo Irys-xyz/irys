@@ -13,6 +13,7 @@ use crate::{
     validation_service::ValidationServiceMessage,
 };
 use eyre::OptionExt as _;
+use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::StorageModulesReadGuard;
 use irys_domain::{
@@ -22,8 +23,8 @@ use irys_domain::{
     forkchoice_markers::ForkChoiceMarkers,
 };
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
-    SendTraced as _, SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
+    BlockHash, Config, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock, SendTraced as _,
+    SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
 };
 use irys_vdf::{
     ReanchorRequest, first_divergent_boundary, reorg_crossed_divergent_boundary,
@@ -214,6 +215,10 @@ struct TipMove {
     epoch_block: Option<Arc<IrysBlockHeader>>,
     /// The new canonical blocks after the fork point, oldest first.
     blocks_to_confirm: Vec<Arc<SealedBlock>>,
+    /// The old tip's difficulty, which the difficulty broadcast compares against.
+    old_tip_diff: irys_types::U256,
+    /// The new tip's own epoch snapshot, which drives the storage-module geometry bound.
+    new_tip_epoch_snapshot: Arc<irys_domain::EpochSnapshot>,
 }
 
 /// Capacity of [`BlockTreeServiceInner::recent_soft_internal_discards`].
@@ -331,6 +336,7 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         | VE::RecallRangeInvalid(_)
         | VE::ShadowTransactionInvalid(_)
         | VE::CommitmentValueInvalid { .. }
+        | VE::CommitmentFeeInsufficient { .. }
         | VE::CommitmentVersionInvalid { .. }
         | VE::CommitmentTypeNotAllowed { .. }
         | VE::CommitmentOrderingFailed(_)
@@ -1126,16 +1132,22 @@ impl BlockTreeServiceInner {
         cache: &mut BlockTree,
         candidate: BlockHash,
     ) -> eyre::Result<Option<TipMove>> {
-        let new_tip = cache
+        let (new_tip, new_tip_epoch_snapshot) = cache
             .blocks
             .get(&candidate)
-            .map(|entry| Arc::clone(entry.block.header()))
+            .map(|entry| {
+                (
+                    Arc::clone(entry.block.header()),
+                    Arc::clone(&entry.epoch_snapshot),
+                )
+            })
             .ok_or_else(|| eyre::eyre!("tip candidate {candidate} not found in cache"))?;
         let old_tip_block = cache
             .get_block(&cache.tip)
             .ok_or_eyre("tip block must always be present")?;
         let old_tip_hash = old_tip_block.block_hash;
         let old_tip_height = old_tip_block.height;
+        let old_tip_diff = old_tip_block.diff;
 
         // only mark the tip if the new tip has higher cumulative difficulty than the old one
         if old_tip_block.cumulative_diff >= new_tip.cumulative_diff {
@@ -1346,6 +1358,8 @@ impl BlockTreeServiceInner {
             reorg_event,
             epoch_block,
             blocks_to_confirm,
+            old_tip_diff,
+            new_tip_epoch_snapshot,
         }))
     }
 
@@ -1360,6 +1374,8 @@ impl BlockTreeServiceInner {
             reorg_event,
             epoch_block,
             blocks_to_confirm,
+            old_tip_diff,
+            new_tip_epoch_snapshot,
         } = tip_move;
 
         // Send epoch events which require a Read lock
@@ -1390,6 +1406,12 @@ impl BlockTreeServiceInner {
             self.block_migration_service
                 .persist_metadata(old_fork, &blocks_to_confirm, stream)?
         };
+
+        // The storage-module bound follows the validated tip, the same block the
+        // miner and block producer build on, not the longest-chain head, which
+        // can run ahead of the tip while its blocks are still being validated.
+        self.block_migration_service
+            .update_partition_geometry(&new_tip_epoch_snapshot)?;
 
         // Broadcast reorg event if applicable
         let reorg_occurred = reorg_event.is_some();
@@ -1458,30 +1480,11 @@ impl BlockTreeServiceInner {
 
         self.migrate_block(&fcu_markers.migration_block)?;
 
-        // Broadcast difficulty update to miners if tip difficulty changed from parent.
-        // On either lock poisoning or missing parent (the latter is a strong invariant
-        // — the tip just changed so the parent must be present — but a panic here
-        // would take the node down for a non-critical broadcast), skip the diff check
-        // and log instead. The downstream miners will pick up the difficulty on the
-        // next canonical update.
-        let parent_diff_changed = match self.cache.read() {
-            Ok(cache) => match cache.get_block(&new_tip.previous_block_hash) {
-                Some(parent_block) => parent_block.diff != new_tip.diff,
-                None => {
-                    error!(
-                        parent_hash = %new_tip.previous_block_hash,
-                        block.hash = %new_tip.block_hash,
-                        "parent block missing from cache while broadcasting difficulty update; skipping"
-                    );
-                    false
-                }
-            },
-            Err(_) => {
-                error!("block tree cache read lock poisoned during difficulty broadcast; skipping");
-                false
-            }
-        };
-        if parent_diff_changed {
+        // Broadcast difficulty update to miners if the tip's difficulty differs
+        // from the previous tip's. Comparing against the parent instead misses a
+        // reorg onto a branch whose new tip did not itself adjust, leaving miners
+        // on the old target until the next adjustment.
+        if old_tip_diff != new_tip.diff {
             self.service_senders
                 .send_mining_difficulty(BroadcastDifficultyUpdate(new_tip.clone()));
         }
@@ -1862,21 +1865,23 @@ impl BlockTreeServiceInner {
                     partition_hashes: H256List(expired_partition_hashes),
                     update_height: epoch_block.height,
                 });
+        }
 
-            // Let the cache service know some term ledger slots expired
-            if let Err(e) = self.service_senders.chunk_cache.send_traced(
-                crate::cache_service::CacheServiceAction::OnEpochProcessed(
-                    epoch_snapshot.clone(),
-                    None,
-                ),
-            ) {
-                error!(
-                    "Failed to send EpochProcessed event to CacheService for block {} (height {}): {}",
-                    block_hash,
-                    epoch_block.height(),
-                    e
-                );
-            }
+        // Prune the data-root cache on every epoch block, not only when partitions expire: the
+        // prune height moves as Submit slots expire, and a run that hit the per-run eviction cap
+        // continues.
+        if let Err(e) = self.service_senders.chunk_cache.send_traced(
+            crate::cache_service::CacheServiceAction::OnEpochProcessed(
+                epoch_snapshot.clone(),
+                None,
+            ),
+        ) {
+            error!(
+                "Failed to send EpochProcessed event to CacheService for block {} (height {}): {}",
+                block_hash,
+                epoch_block.height(),
+                e
+            );
         }
 
         // Let the node know about any newly assigned partition hashes to local storage modules
@@ -2082,6 +2087,7 @@ pub fn get_block_header(
 mod tests {
     use super::*;
     use crate::block_validation::PreValidationError;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_types::BlockTransactions;
     use rstest::rstest;
     use std::sync::Mutex;
@@ -2340,20 +2346,13 @@ mod tests {
             configure: impl FnOnce(&mut irys_types::NodeConfig),
             live_step: u64,
         ) -> Self {
-            use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
             use irys_domain::BlockIndex;
             use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
             use irys_types::{ConsensusConfig, NodeConfig};
-            use reth_db::mdbx::DatabaseArguments;
 
             let tmp = TempDirBuilder::new().build();
-            let db_env = open_or_create_db(
-                tmp.path(),
-                IrysTables::ALL,
-                DatabaseArguments::irys_testing().expect("irys_testing db args"),
-            )
-            .expect("open temp MDBX env");
-            let db = DatabaseProvider(Arc::new(db_env));
+            let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))
+                .expect("open temp MDBX env");
 
             let block_index = BlockIndex::new_for_testing(db.clone());
             let block_index_guard = BlockIndexReadGuard::new(block_index);

@@ -8,6 +8,8 @@ use crate::{
         phantoms::{CostPerGb, Percentage, Usd},
     },
 };
+// Fission's parameters live beside the partition-resize arithmetic they drive.
+pub use crate::partition_resize::Fission;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
@@ -18,10 +20,6 @@ use std::num::NonZeroU64;
 pub struct IrysHardforkConfig {
     /// Frontier parameters (always active from genesis)
     pub frontier: FrontierParams,
-
-    /// NextNameTBD hardfork - None means disabled
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_name_tbd: Option<NextNameTBD>,
 
     /// Aurora hardfork - enables canonical RLP encoding on Commitment tx. None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -39,19 +37,8 @@ pub struct IrysHardforkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cascade: Option<Cascade>,
 
-    /// Delta hardfork. WIP and not deployed: every preset leaves it unset, and
-    /// it accumulates consensus changes that need a hardfork. Resolved at each
-    /// block's own timestamp. It carries two changes:
-    /// - Ledger seeding (slots for a data ledger that activates mid-chain) can
-    ///   only act on an epoch block. It acts at the first epoch block whose
-    ///   timestamp is >= `activation_timestamp`.
-    /// - The capacity PoA reward reduction acts on every block. It applies from
-    ///   the first block whose timestamp is >= `activation_timestamp`. The miner
-    ///   share is `Delta::capacity_chunk_reward_percent`.
-    /// - The solution hash puts the VDF seed before the chunk, from the first
-    ///   block whose timestamp is >= `activation_timestamp`.
-    ///
-    /// None means disabled.
+    /// Delta hardfork. WIP: unset in every preset. Resolved at each block's own
+    /// timestamp. See [`Delta`] for the changes it carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
 
@@ -63,6 +50,14 @@ pub struct IrysHardforkConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub echo: Option<Echo>,
+    /// Fission hardfork (partition resize) - shrinks partitions and the HDD recall range,
+    /// switches slot allocation to a target-based rule, and expands the
+    /// partition-ID supply byte-preservingly. Activation block E is the first
+    /// positive-height epoch block whose timestamp meets `activation_timestamp`
+    /// (Cascade's convention); E is mined under the old geometry and its children
+    /// under the new one. Scheduled independently of Delta. None means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fission: Option<Fission>,
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
@@ -70,27 +65,16 @@ pub struct IrysHardforkConfig {
 /// These are the parameters active from block 0.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FrontierParams {
-    /// Number of ingress proofs required for promotion
-    pub number_of_ingress_proofs_total: u64,
+    /// Number of ingress proofs required for promotion. Each promoted tx
+    /// carries this many, clamped to the number of `Active` stakes in the
+    /// parent epoch snapshot (at least 1): proof signers are distinct stakers,
+    /// so a network with fewer stakes could never promote. The clamp applies to
+    /// every block; no hardfork gates it. The reward pool is split across the
+    /// proofs carried, so the clamp does not change fees.
+    pub number_of_ingress_proofs_total: u8,
 
     /// Number of ingress proofs required from assignees
-    pub number_of_ingress_proofs_from_assignees: u64,
-}
-
-/// A hardfork activation with its parameters.
-///
-/// When this fork activates, the contained parameters take effect.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NextNameTBD {
-    /// Times (seconds since epoch) at which this hardfork activates
-    #[serde(with = "unix_timestamp_string_serde")]
-    pub activation_timestamp: UnixTimestamp,
-
-    /// Number of total ingress proofs required
-    pub number_of_ingress_proofs_total: u64,
-
-    /// Number of ingress proofs from assignees
-    pub number_of_ingress_proofs_from_assignees: u64,
+    pub number_of_ingress_proofs_from_assignees: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -179,6 +163,22 @@ impl Cascade {
 /// - The solution hash is `sha256(seed || offset_le || poa_chunk)`, not
 ///   `sha256(poa_chunk || offset_le || seed)`. See
 ///   [`crate::compute_solution_hash`].
+/// - Publish storage fees (term and perm) pay for `num_partitions_per_slot`
+///   replicas, not `number_of_ingress_proofs_total`. See
+///   `Config::publish_replica_count_at`.
+/// - The treasury is credited the full `perm_fee` of a Publish tx at inclusion, not
+///   `perm_fee` minus the ingress proof reward. Promotion and refund later pay out
+///   of that credit.
+/// - Term fees (Publish, Submit, OneYear, ThirtyDay) pay for the full ledger `epoch_length`,
+///   not the epochs left in the current height cycle. Publish uses the Submit epoch length.
+/// - The required `perm_fee` of a Publish tx adds the ingress proof rewards on the
+///   tx's own `term_fee`, not on the expected term fee. The fee split takes the
+///   rewards from the tx's own `term_fee`, so this keeps the storage share funded.
+/// - The ingress proofs of a Publish tx share one reward pool of
+///   `ingress_proof_reward_pool_percent` x `term_fee`, not
+///   `immediate_tx_inclusion_reward_percent` x `term_fee` for each proof. The required
+///   `perm_fee` and the fee split use this pool. See
+///   `ConsensusConfig::ingress_proof_reward_pool_at`.
 ///
 /// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
 /// but the epoch block's own header cannot list it: the producer derives the
@@ -187,16 +187,20 @@ impl Cascade {
 /// without this fork the ledger stays slotless — and therefore unassigned and
 /// unstorable — until the following epoch.
 ///
-/// Resolved at each block's own timestamp. The first epoch block whose timestamp
-/// meets `activation_timestamp` seeds new ledgers; every block from the boundary
-/// onward applies the capacity-PoA reward adjustment and the new solution hash
-/// order. None means disabled.
+/// Resolved at each block's own timestamp. Every change except ledger seeding
+/// acts from the first block, of any kind, whose timestamp is >=
+/// `activation_timestamp`. Ledger seeding waits for the first epoch block whose
+/// timestamp is >= `activation_timestamp`. None means disabled.
+///
+/// The treasury rules assume Delta is active from genesis. A Publish tx included
+/// before activation and promoted or refunded after it keeps the pre-Delta
+/// treasury shortfall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Delta {
     /// Timestamp (seconds since epoch) at which this hardfork activates.
-    /// Ledger changes happen at the first epoch block whose timestamp meets or
-    /// exceeds this value. The reward and solution hash changes happen at the
-    /// first block of any kind whose timestamp meets or exceeds this value.
+    /// Ledger seeding happens at the first epoch block whose timestamp meets or
+    /// exceeds this value. Every other change happens at the first block of any
+    /// kind whose timestamp meets or exceeds this value.
     #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
     /// Slots allocated to a data ledger in the epoch it becomes active
@@ -213,11 +217,23 @@ pub struct Delta {
         serialize_with = "crate::serde_utils::serializes_percentage_amount"
     )]
     pub capacity_chunk_reward_percent: Amount<Percentage>,
+    /// The ingress proofs of a Publish tx share one reward pool. The pool is this percent
+    /// of the tx's `term_fee`, split across its proofs (default: 0.05). Must be <= 1.0.
+    #[serde(
+        default = "Delta::default_ingress_proof_reward_pool_percent",
+        deserialize_with = "crate::serde_utils::percentage_amount",
+        serialize_with = "crate::serde_utils::serializes_percentage_amount"
+    )]
+    pub ingress_proof_reward_pool_percent: Amount<Percentage>,
 }
 
 impl Delta {
     pub fn default_capacity_chunk_reward_percent() -> Amount<Percentage> {
         Amount::percentage(dec!(0.5)).expect("valid percentage")
+    }
+
+    pub fn default_ingress_proof_reward_pool_percent() -> Amount<Percentage> {
+        Amount::percentage(dec!(0.05)).expect("valid percentage")
     }
 
     pub const fn default_initial_slots_per_new_ledger() -> NonZeroU64 {
@@ -337,35 +353,15 @@ pub enum DataLedgerLookup<'a> {
 }
 
 impl IrysHardforkConfig {
-    /// Check if the NextNameTBD hardfork is active at a given timestamp (in seconds).
-    pub fn is_next_name_tbd_active(&self, timestamp: UnixTimestamp) -> bool {
-        self.next_name_tbd
-            .as_ref()
-            .is_some_and(|f| timestamp >= f.activation_timestamp)
-    }
-
-    /// Get the activation timestamp for NextNameTBD hardfork, if configured.
-    pub fn next_name_tbd_activation_timestamp(&self) -> Option<UnixTimestamp> {
-        self.next_name_tbd.as_ref().map(|f| f.activation_timestamp)
-    }
-
     /// Get the number of ingress proofs required at a specific timestamp (in seconds).
-    pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u64 {
-        if let Some(ref fork) = self.next_name_tbd
-            && timestamp >= fork.activation_timestamp
-        {
-            return fork.number_of_ingress_proofs_total;
-        }
+    /// Only Frontier sets this value, so the timestamp does not change the result.
+    pub fn number_of_ingress_proofs_total_at(&self, _timestamp: UnixTimestamp) -> u8 {
         self.frontier.number_of_ingress_proofs_total
     }
 
     /// Get the number of ingress proofs from assignees required at a specific timestamp (in seconds).
-    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u64 {
-        if let Some(ref fork) = self.next_name_tbd
-            && timestamp >= fork.activation_timestamp
-        {
-            return fork.number_of_ingress_proofs_from_assignees;
-        }
+    /// Only Frontier sets this value, so the timestamp does not change the result.
+    pub fn number_of_ingress_proofs_from_assignees_at(&self, _timestamp: UnixTimestamp) -> u8 {
         self.frontier.number_of_ingress_proofs_from_assignees
     }
 
@@ -533,12 +529,12 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: None,
             cascade: None,
             delta: None,
             echo: None,
+            fission: None,
         };
 
         assert_eq!(
@@ -564,7 +560,6 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: Some(Aurora {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
                 minimum_commitment_tx_version: 2,
@@ -573,6 +568,7 @@ mod tests {
             cascade: None,
             delta: None,
             echo: None,
+            fission: None,
         };
 
         // Before activation timestamp
@@ -595,7 +591,6 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: None,
             cascade: Some(Cascade {
@@ -606,6 +601,7 @@ mod tests {
             }),
             delta: None,
             echo: None,
+            fission: None,
         };
 
         // Before activation timestamp
@@ -630,6 +626,7 @@ mod tests {
         let no_cascade = IrysHardforkConfig {
             cascade: None,
             delta: None,
+            fission: None,
             ..config
         };
         assert!(
@@ -647,7 +644,6 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: None,
             cascade: Some(Cascade {
@@ -658,6 +654,7 @@ mod tests {
             }),
             delta: None,
             echo: None,
+            fission: None,
         };
 
         let before = UnixTimestamp::from_secs(1499);
@@ -678,6 +675,7 @@ mod tests {
         let no_cascade = IrysHardforkConfig {
             cascade: None,
             delta: None,
+            fission: None,
             ..config
         };
         assert!(no_cascade.ledger_absence_expected(DataLedger::OneYear as u32, at));
@@ -695,7 +693,6 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: None,
             cascade: Some(Cascade {
@@ -706,6 +703,7 @@ mod tests {
             }),
             delta: None,
             echo: None,
+            fission: None,
         };
 
         // Cascade active at the block's timestamp.
@@ -736,7 +734,6 @@ mod tests {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 2,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: Some(Borealis {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
@@ -744,6 +741,7 @@ mod tests {
             cascade: None,
             delta: None,
             echo: None,
+            fission: None,
         };
 
         assert!(!config.is_borealis_active_at(UnixTimestamp::from_secs(1499)));
@@ -758,65 +756,12 @@ mod tests {
     }
 
     #[test]
-    fn test_fork_activation() {
-        let config = IrysHardforkConfig {
-            frontier: FrontierParams {
-                number_of_ingress_proofs_total: 10,
-                number_of_ingress_proofs_from_assignees: 0,
-            },
-            next_name_tbd: Some(NextNameTBD {
-                activation_timestamp: UnixTimestamp::from_secs(1000),
-                number_of_ingress_proofs_total: 4,
-                number_of_ingress_proofs_from_assignees: 2,
-            }),
-            aurora: None,
-            borealis: None,
-            cascade: None,
-            delta: None,
-            echo: None,
-        };
-
-        // Before activation timestamp
-        assert_eq!(
-            config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(999)),
-            10
-        );
-        assert_eq!(
-            config.number_of_ingress_proofs_from_assignees_at(UnixTimestamp::from_secs(999)),
-            0
-        );
-        assert!(!config.is_next_name_tbd_active(UnixTimestamp::from_secs(999)));
-
-        // At activation timestamp
-        assert_eq!(
-            config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(1000)),
-            4
-        );
-        assert_eq!(
-            config.number_of_ingress_proofs_from_assignees_at(UnixTimestamp::from_secs(1000)),
-            2
-        );
-        assert!(config.is_next_name_tbd_active(UnixTimestamp::from_secs(1000)));
-
-        // After activation timestamp
-        assert_eq!(
-            config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(1001)),
-            4
-        );
-        assert_eq!(
-            config.number_of_ingress_proofs_from_assignees_at(UnixTimestamp::from_secs(1001)),
-            2
-        );
-    }
-
-    #[test]
     fn test_delta_for_block_activation_boundary() {
         let config = IrysHardforkConfig {
             frontier: FrontierParams {
                 number_of_ingress_proofs_total: 5,
                 number_of_ingress_proofs_from_assignees: 0,
             },
-            next_name_tbd: None,
             aurora: None,
             borealis: None,
             cascade: None,
@@ -824,8 +769,11 @@ mod tests {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
                 initial_slots_per_new_ledger: NonZeroU64::new(2).expect("non-zero"),
                 capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+                ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(
+                ),
             }),
             echo: None,
+            fission: None,
         };
 
         assert_eq!(
@@ -845,6 +793,7 @@ mod tests {
         // Unconfigured means never active.
         let no_delta = IrysHardforkConfig {
             delta: None,
+            fission: None,
             ..config
         };
         assert_eq!(
@@ -880,6 +829,35 @@ mod tests {
         let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
         let delta = config.delta.expect("delta must parse");
         assert_eq!(delta.initial_slots_per_new_ledger.get(), 1);
+        assert_eq!(
+            delta.ingress_proof_reward_pool_percent,
+            Delta::default_ingress_proof_reward_pool_percent()
+        );
+    }
+
+    /// The table documented in docs/partition-resize-operations.md parses, and
+    /// Fission is independent of Delta.
+    #[test]
+    fn test_fission_toml_parses_without_delta() {
+        let toml_str = "
+            [frontier]
+            number_of_ingress_proofs_total = 5
+            number_of_ingress_proofs_from_assignees = 0
+
+            [fission]
+            activation_timestamp = \"2027-01-01T00:00:00+00:00\"
+            partition_chunks = 14500000
+            recall_chunks = 80
+            target_ingress_bytes_per_second = 20000000
+            minimum_partition_ids = 0
+        ";
+        let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.delta.is_none());
+        let fission = config.fission.expect("fission must parse");
+        assert_eq!(
+            fission,
+            Fission::proposed(UnixTimestamp::from_secs(1_798_761_600))
+        );
     }
 
     #[test]
@@ -889,16 +867,12 @@ mod tests {
                 number_of_ingress_proofs_total: 1,
                 number_of_ingress_proofs_from_assignees: 0,
             },
-            next_name_tbd: Some(NextNameTBD {
-                activation_timestamp: UnixTimestamp::from_secs(5000),
-                number_of_ingress_proofs_total: 4,
-                number_of_ingress_proofs_from_assignees: 2,
-            }),
             aurora: None,
             borealis: None,
             cascade: None,
             delta: None,
             echo: Echo::from_genesis(),
+            fission: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -918,7 +892,6 @@ mod tests {
 
         assert_eq!(config.frontier.number_of_ingress_proofs_total, 5);
         assert_eq!(config.frontier.number_of_ingress_proofs_from_assignees, 2);
-        assert!(config.next_name_tbd.is_none());
         assert!(config.delta.is_none());
         // A config file without [echo] gets Echo from genesis.
         assert_eq!(config.echo, Echo::from_genesis());
@@ -960,7 +933,6 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
@@ -969,6 +941,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -988,7 +961,6 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
@@ -997,6 +969,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             };
 
             let result = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -1012,12 +985,12 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: None,
                 borealis: None,
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -1043,7 +1016,6 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
@@ -1052,6 +1024,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             };
 
             let aurora = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -1077,7 +1050,6 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(activation_secs),
                     minimum_commitment_tx_version: min_version,
@@ -1086,6 +1058,7 @@ mod tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             }
         }
 
@@ -1095,12 +1068,12 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: None,
                 borealis: None,
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             }
         }
 
@@ -1188,12 +1161,12 @@ mod tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: None,
                 borealis: None,
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             }
         }
 
@@ -1208,6 +1181,7 @@ mod tests {
                 }),
                 delta: None,
                 echo: Echo::from_genesis(),
+                fission: None,
                 ..base_config()
             };
             let toml_str = toml::to_string_pretty(&config).unwrap();

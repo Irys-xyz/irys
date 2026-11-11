@@ -7,7 +7,10 @@ use either::Either;
 use alloy_consensus::{Block, Header};
 use alloy_dyn_abi::DynSolValue;
 use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
-use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
+use alloy_eips::eip7685::Requests;
+use alloy_evm::block::{
+    BlockExecutionError, BlockExecutor, BlockValidationError, ExecutableTx, OnStateHook,
+};
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
 use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256};
@@ -53,6 +56,12 @@ mod constants {
 }
 
 /// Irys block executor that handles execution of both regular and shadow transactions.
+///
+/// Irys runs the Ethereum pre-block steps (`apply_pre_execution_changes` rejects withdrawals, then
+/// delegates) and no Ethereum post-block step (`finish` replaces the `EthBlockExecutor` version).
+/// At each reth / alloy-evm upgrade, compare both functions upstream: adopt the new post-block
+/// steps that Irys wants, and check that every new pre-block step is wanted, because it runs
+/// without a change here.
 #[derive(Debug)]
 pub struct IrysBlockExecutor<'a, Evm> {
     inner: EthBlockExecutor<'a, Evm, &'a Arc<ChainSpec>, &'a RethReceiptBuilder>,
@@ -87,7 +96,18 @@ where
     type Evm = E;
     type Result = alloy_evm::eth::EthTxResult<E::HaltReason, alloy_consensus::TxType>;
 
+    /// Irys has no withdrawals: a block with any withdrawal is invalid. It is rejected here,
+    /// before any transaction runs. The other pre-block steps are the Ethereum ones.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+        if self
+            .inner
+            .ctx
+            .withdrawals
+            .as_ref()
+            .is_some_and(|withdrawals| !withdrawals.is_empty())
+        {
+            return Err(BlockValidationError::msg("Irys blocks have no withdrawals").into());
+        }
         self.inner.apply_pre_execution_changes()
     }
 
@@ -99,8 +119,26 @@ where
         self.inner.execute_transaction_with_result_closure(tx, f)
     }
 
+    /// Irys has no post-block steps. None of the steps in `EthBlockExecutor::finish` applies:
+    /// - EIP-7685 requests (deposit logs, EIP-7002 / EIP-7251 system calls): Irys has no
+    ///   requests. Every block's requests are empty, so its header carries `EMPTY_REQUESTS_HASH`.
+    /// - Block and ommer rewards: Ethereum pays them only before the Merge, and Irys starts after
+    ///   it.
+    /// - Withdrawal credits: Irys has no withdrawals; `apply_pre_execution_changes` rejects a block
+    ///   with any.
+    /// - DAO-fork drain: it runs only at the activation block, which for Irys is genesis, and
+    ///   genesis is never executed.
     fn finish(self) -> Result<(Self::Evm, BlockExecutionResult<Receipt>), BlockExecutionError> {
-        self.inner.finish()
+        let inner = self.inner;
+        Ok((
+            inner.evm,
+            BlockExecutionResult {
+                receipts: inner.receipts,
+                requests: Requests::default(),
+                gas_used: inner.gas_used,
+                blob_gas_used: inner.blob_gas_used,
+            },
+        ))
     }
 
     fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
@@ -653,6 +691,11 @@ where
 {
     // type Error = <Self as Evm>::Error; unstable :c
 
+    /// Use only for a local invariant break, never for a fault that the block content causes.
+    /// Reth maps `EVMError::Custom` to an internal execution error: the engine API returns an
+    /// RPC error and does not mark the block invalid. A fault that the block content causes
+    /// (for example an unpayable shadow tx) must be `EVMError::Transaction`, which reth maps to
+    /// `BlockValidationError::InvalidTx` and reports as payload status `INVALID`.
     pub fn create_internal_error(msg: String) -> <Self as Evm>::Error {
         <Self as Evm>::Error::Custom(msg)
     }
@@ -689,8 +732,8 @@ where
                 return Ok(Either::Right(tx));
             }
             Err(e) => {
-                return Err(Self::create_internal_error(format!(
-                    "failed to decode shadow tx: {e}"
+                return Err(<Self as Evm>::Error::Transaction(InvalidTransaction::Str(
+                    format!("failed to decode shadow tx: {e}").into(),
                 )));
             }
         };
@@ -746,10 +789,18 @@ where
             )));
         }
 
-        self.distribute_priority_fee(total_fee, fee_payer_address, beneficiary)?;
-
-        let (new_account_state, target) =
-            self.process_shadow_transaction(&shadow_tx, tx_hash, beneficiary)?;
+        let processed = self
+            .distribute_priority_fee(total_fee, fee_payer_address, beneficiary)
+            .and_then(|()| self.process_shadow_transaction(&shadow_tx, tx_hash, beneficiary));
+        let (new_account_state, target) = match processed {
+            Ok(processed) => processed,
+            Err(err) => {
+                // A failed shadow tx must leave no state behind: the payload builder skips an
+                // invalid transaction and executes the next one on this EVM.
+                self.state.clear();
+                return Err(err);
+            }
+        };
 
         // at this point, the shadow tx has been processed, and it was valid *enough*
         // that we should generate a receipt for it even in a failure state
@@ -920,9 +971,17 @@ where
             // Validate account exists (but don't check balance since no transfer occurs)
             let account_state = self.load_account(target)?;
             if account_state.is_none() {
-                return Err(Self::create_internal_error(format!(
-                    "Shadow transaction priority fee failed: target account does not exist for same-address transfer. Target: {target}, Fee: {total_fee}"
-                )));
+                tracing::warn!(
+                    fee.target = %target,
+                    fee.total_fee = %total_fee,
+                    "Shadow transaction priority fee failed: target account does not exist for same-address transfer"
+                );
+                return Err(<Self as Evm>::Error::Transaction(
+                    InvalidTransaction::LackOfFundForMaxFee {
+                        fee: Box::new(total_fee),
+                        balance: Box::new(U256::ZERO),
+                    },
+                ));
             }
 
             tracing::trace!(
@@ -1002,8 +1061,8 @@ where
     /// Deducts the fee from the target account after validating sufficient balance.
     ///
     /// # Errors
-    /// - Returns an internal error if target account doesn't exist
-    /// - Returns an internal error if insufficient balance
+    /// - Returns an invalid transaction error if target account doesn't exist
+    /// - Returns an invalid transaction error if insufficient balance
     fn deduct_fee_from_target(
         &mut self,
         target: Address,
@@ -1018,9 +1077,12 @@ where
                 fee.target = %target,
                 "Target account does not exist, cannot deduct priority fee"
             );
-            return Err(Self::create_internal_error(format!(
-                "Shadow transaction priority fee failed: target account does not exist. Target: {target}, Required fee: {fee}"
-            )));
+            return Err(<Self as Evm>::Error::Transaction(
+                InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(fee),
+                    balance: Box::new(U256::ZERO),
+                },
+            ));
         };
 
         // Validate sufficient balance
@@ -1031,10 +1093,12 @@ where
                 fee.required = %fee,
                 "Target has insufficient balance for priority fee"
             );
-            return Err(Self::create_internal_error(format!(
-                "Shadow transaction priority fee failed: insufficient balance. Target: {}, Required fee: {}, Available balance: {}",
-                target, fee, account.info.balance
-            )));
+            return Err(<Self as Evm>::Error::Transaction(
+                InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(fee),
+                    balance: Box::new(account.info.balance),
+                },
+            ));
         }
 
         // Deduct fee
@@ -1064,7 +1128,12 @@ where
         if let Some(mut account) = beneficiary_state {
             // Update existing account
             let original_balance = account.info.balance;
-            account.info.balance = account.info.balance.saturating_add(fee);
+            account.info.balance =
+                original_balance
+                    .checked_add(fee)
+                    .ok_or(<Self as Evm>::Error::Transaction(
+                        InvalidTransaction::OverflowPaymentInTransaction,
+                    ))?;
 
             tracing::trace!(
                 fee.beneficiary = %beneficiary,
@@ -1249,10 +1318,11 @@ where
         let account_info = if let Some(mut account) = account {
             let original_balance = account.info.balance;
             // Add the incremented amount to the balance
-            account.info.balance = account
-                .info
-                .balance
-                .saturating_add(balance_increment.amount);
+            account.info.balance = original_balance
+                .checked_add(balance_increment.amount)
+                .ok_or(<Self as Evm>::Error::Transaction(
+                    InvalidTransaction::OverflowPaymentInTransaction,
+                ))?;
 
             tracing::trace!(
                 account.target_address = %balance_increment.target,
@@ -1313,13 +1383,20 @@ where
             ));
         };
         if new_account_info.info.balance < balance_decrement.amount {
-            return Err(Self::create_internal_error(format!(
-                "Shadow transaction failed: insufficient balance for decrement. Target: {}, Required: {}, Available: {}, Reference: {:?}",
-                balance_decrement.target,
-                balance_decrement.amount,
-                new_account_info.info.balance,
-                balance_decrement.irys_ref
-            )));
+            tracing::warn!(
+                account.target_address = %balance_decrement.target,
+                account.required = %balance_decrement.amount,
+                account.balance = %new_account_info.info.balance,
+                account.irys_ref = ?balance_decrement.irys_ref,
+                "Shadow transaction failed: insufficient balance for decrement"
+            );
+            return Err(Self::create_invalid_tx_error(
+                *tx_hash,
+                InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(balance_decrement.amount),
+                    balance: Box::new(new_account_info.info.balance),
+                },
+            ));
         }
         // Apply the decrement amount to the balance
         new_account_info.info.balance = new_account_info
@@ -1429,5 +1506,591 @@ mod tests {
         assert!(res.is_ok(), "expected Ok, got: {:?}", res);
         let result = res.unwrap().result;
         assert!(result.is_success(), "expected success, got: {:?}", result);
+    }
+
+    mod shadow_tx_errors {
+        use super::*;
+        use crate::shadow_tx::{
+            BalanceDecrement, BalanceIncrement, IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR,
+            TransactionPacket, UnstakeDebit, encode_prefixed_input,
+        };
+        use revm::database::CacheDB;
+        use revm::state::AccountInfo;
+
+        const BENEFICIARY: Address = Address::repeat_byte(0xBE);
+        const TARGET: Address = Address::repeat_byte(0x7A);
+
+        fn evm_with_balances(
+            balances: &[(Address, U256)],
+        ) -> IrysEvm<CacheDB<EmptyDB>, NoOpInspector, PrecompilesMap> {
+            let mut db = CacheDB::new(EmptyDB::default());
+            for (address, balance) in balances {
+                db.insert_account_info(
+                    *address,
+                    AccountInfo {
+                        balance: *balance,
+                        ..Default::default()
+                    },
+                );
+            }
+            let mut cfg_env = CfgEnv::default();
+            cfg_env.spec = SpecId::CANCUN;
+            cfg_env.chain_id = 1;
+            let block_env = BlockEnv {
+                beneficiary: BENEFICIARY,
+                ..Default::default()
+            };
+            IrysEvmFactory::new().create_evm(db, EvmEnv { cfg_env, block_env })
+        }
+
+        fn shadow_tx_env(input: Bytes, priority_fee: u128) -> TxEnv {
+            TxEnv {
+                caller: Address::random(),
+                kind: TxKind::Call(*SHADOW_TX_DESTINATION_ADDR),
+                data: input,
+                gas_priority_fee: Some(priority_fee),
+                chain_id: Some(1),
+                ..TxEnv::default()
+            }
+        }
+
+        fn packet_tx_env(packet: TransactionPacket, priority_fee: u128) -> TxEnv {
+            let shadow_tx = ShadowTransaction::new_v1(packet, FixedBytes::ZERO);
+            shadow_tx_env(encode_prefixed_input(&shadow_tx), priority_fee)
+        }
+
+        fn stake(amount: U256) -> TransactionPacket {
+            TransactionPacket::Stake(BalanceDecrement {
+                amount,
+                target: TARGET,
+                irys_ref: FixedBytes::ZERO,
+            })
+        }
+
+        fn unstake_debit(target: Address) -> TransactionPacket {
+            TransactionPacket::UnstakeDebit(UnstakeDebit {
+                target,
+                irys_ref: FixedBytes::ZERO,
+            })
+        }
+
+        fn lack_of_funds(fee: U256, balance: U256) -> InvalidTransaction {
+            InvalidTransaction::LackOfFundForMaxFee {
+                fee: Box::new(fee),
+                balance: Box::new(balance),
+            }
+        }
+
+        fn assert_invalid_tx(
+            balances: &[(Address, U256)],
+            tx: TxEnv,
+            expected: InvalidTransaction,
+        ) {
+            let res = evm_with_balances(balances).transact_raw(tx);
+            match res {
+                Err(EVMError::Transaction(err)) => assert_eq!(err, expected),
+                other => panic!("expected EVMError::Transaction({expected:?}), got: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn decrement_with_insufficient_balance_is_invalid_tx() {
+            assert_invalid_tx(
+                &[(TARGET, U256::from(10))],
+                packet_tx_env(stake(U256::from(11)), 0),
+                lack_of_funds(U256::from(11), U256::from(10)),
+            );
+        }
+
+        #[test]
+        fn priority_fee_with_insufficient_balance_is_invalid_tx() {
+            assert_invalid_tx(
+                &[(TARGET, U256::from(10))],
+                packet_tx_env(unstake_debit(TARGET), 11),
+                lack_of_funds(U256::from(11), U256::from(10)),
+            );
+        }
+
+        #[test]
+        fn priority_fee_from_missing_account_is_invalid_tx() {
+            assert_invalid_tx(
+                &[],
+                packet_tx_env(unstake_debit(TARGET), 11),
+                lack_of_funds(U256::from(11), U256::ZERO),
+            );
+        }
+
+        #[test]
+        fn priority_fee_from_missing_beneficiary_account_is_invalid_tx() {
+            assert_invalid_tx(
+                &[],
+                packet_tx_env(unstake_debit(BENEFICIARY), 11),
+                lack_of_funds(U256::from(11), U256::ZERO),
+            );
+        }
+
+        #[test]
+        fn priority_fee_credit_overflow_is_invalid_tx() {
+            assert_invalid_tx(
+                &[(TARGET, U256::from(10)), (BENEFICIARY, U256::MAX)],
+                packet_tx_env(unstake_debit(TARGET), 1),
+                InvalidTransaction::OverflowPaymentInTransaction,
+            );
+        }
+
+        #[test]
+        fn balance_increment_overflow_is_invalid_tx() {
+            let packet = TransactionPacket::TermFeeReward(BalanceIncrement {
+                amount: U256::ONE,
+                target: TARGET,
+                irys_ref: FixedBytes::ZERO,
+            });
+            assert_invalid_tx(
+                &[(TARGET, U256::MAX)],
+                packet_tx_env(packet, 0),
+                InvalidTransaction::OverflowPaymentInTransaction,
+            );
+        }
+
+        #[test]
+        fn failed_shadow_tx_leaves_no_state() {
+            let mut evm = evm_with_balances(&[(TARGET, U256::from(10))]);
+            // The priority fee is paid, then the decrement fails.
+            let res = evm.transact_raw(packet_tx_env(stake(U256::from(10)), 1));
+            assert!(
+                matches!(res, Err(EVMError::Transaction(_))),
+                "expected EVMError::Transaction, got: {res:?}"
+            );
+            assert!(evm.state.is_empty(), "state left after failed shadow tx");
+
+            let res = evm.transact_raw(packet_tx_env(stake(U256::from(9)), 1));
+            assert!(res.is_ok(), "expected Ok, got: {res:?}");
+        }
+
+        #[test]
+        fn undecodable_shadow_tx_is_invalid_tx() {
+            let mut input = IRYS_SHADOW_EXEC.to_vec();
+            input.push(0xFF);
+            let res = evm_with_balances(&[]).transact_raw(shadow_tx_env(input.into(), 0));
+            assert!(
+                matches!(res, Err(EVMError::Transaction(InvalidTransaction::Str(_)))),
+                "expected EVMError::Transaction(Str(..)), got: {res:?}"
+            );
+        }
+    }
+
+    /// Irys and Ethereum (`EthBlockExecutor`) execution of the same block. Irys runs no
+    /// post-block step: no EIP-7002 / EIP-7251 system calls, no EIP-7685 requests, and no
+    /// withdrawal credits.
+    mod post_block_steps {
+        use super::*;
+        use alloy_consensus::{SignableTransaction as _, TxEip1559};
+        use alloy_eips::eip4895::{Withdrawal, Withdrawals};
+        use alloy_eips::eip6110::MAINNET_DEPOSIT_CONTRACT_ADDRESS;
+        use alloy_eips::eip7002::{
+            WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_PREDEPLOY_CODE,
+        };
+        use alloy_eips::eip7251::{
+            CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS, CONSOLIDATION_REQUEST_PREDEPLOY_CODE,
+        };
+        use alloy_network::TxSignerSync as _;
+        use alloy_primitives::{b256, keccak256};
+        use alloy_signer_local::PrivateKeySigner;
+        use alloy_trie::TrieAccount;
+        use alloy_trie::root::{state_root_unhashed, storage_root_unhashed};
+        use reth_chainspec::{Chain, ChainSpecBuilder};
+        use reth_primitives_traits::SignerRecoverable as _;
+        use revm::database::{BundleState, CacheDB, states::bundle_state::BundleRetention};
+        use revm::state::{AccountInfo, Bytecode};
+        use std::borrow::Cow;
+        use std::collections::BTreeMap;
+
+        type Recovered = reth_primitives_traits::Recovered<TransactionSigned>;
+
+        const CHAIN_ID: u64 = 1;
+
+        /// `PUSH1 1, PUSH0, SSTORE, STOP`: writes 1 to slot 0 when called.
+        const WRITE_SLOT_ZERO_CODE: [u8; 5] = [0x60, 0x01, 0x5f, 0x55, 0x00];
+
+        enum Executor {
+            /// `EthBlockExecutor`: all Ethereum pre- and post-block steps.
+            Ethereum,
+            Irys,
+        }
+
+        struct Outcome {
+            result: Result<BlockExecutionResult<Receipt>, BlockExecutionError>,
+            bundle: BundleState,
+            state_root: B256,
+        }
+
+        fn prague_chain_spec() -> Arc<ChainSpec> {
+            Arc::new(
+                ChainSpecBuilder::default()
+                    .chain(Chain::from_id(CHAIN_ID))
+                    .genesis(Default::default())
+                    .prague_activated()
+                    .build(),
+            )
+        }
+
+        fn contract(code: &[u8]) -> AccountInfo {
+            AccountInfo {
+                nonce: 1,
+                code_hash: keccak256(code),
+                code: Some(Bytecode::new_raw(Bytes::copy_from_slice(code))),
+                ..Default::default()
+            }
+        }
+
+        fn signed_call(signer: &PrivateKeySigner, to: Address, input: Bytes) -> Recovered {
+            let mut tx = TxEip1559 {
+                chain_id: CHAIN_ID,
+                nonce: 0,
+                gas_limit: 1_000_000,
+                max_fee_per_gas: 1_000_000_000,
+                max_priority_fee_per_gas: 0,
+                to: TxKind::Call(to),
+                // 1 wei: the minimum request fee of the request predeploys (the excess is zero).
+                value: U256::from(1),
+                access_list: Default::default(),
+                input,
+            };
+            let signature = signer.sign_transaction_sync(&mut tx).unwrap();
+            TransactionSigned::Eip1559(tx.into_signed(signature))
+                .try_into_recovered()
+                .unwrap()
+        }
+
+        /// Executes one block with `tx` on a fresh state and returns the execution result, the
+        /// state changes and the state root. `account` is put into the state before the block.
+        fn execute(
+            executor: Executor,
+            account: Option<(Address, AccountInfo)>,
+            withdrawals: Option<&Withdrawals>,
+            sender: Address,
+            tx: &Recovered,
+        ) -> Outcome {
+            let factory = IrysBlockExecutorFactory::new(
+                RethReceiptBuilder::default(),
+                prague_chain_spec(),
+                IrysEvmFactory::new(),
+            );
+
+            let mut initial_accounts = vec![(
+                sender,
+                AccountInfo {
+                    balance: U256::from(10_u128.pow(20)),
+                    ..Default::default()
+                },
+            )];
+            initial_accounts.extend(account);
+            let mut cache = CacheDB::new(revm::database_interface::EmptyDB::default());
+            for (address, info) in &initial_accounts {
+                cache.insert_account_info(*address, info.clone());
+            }
+            let mut state = State::builder()
+                .with_database(cache)
+                .with_bundle_update()
+                .build();
+
+            let mut cfg_env = CfgEnv::new_with_spec(SpecId::PRAGUE);
+            cfg_env.chain_id = CHAIN_ID;
+            let block_env = BlockEnv {
+                number: U256::from(1),
+                timestamp: U256::from(1),
+                gas_limit: 30_000_000,
+                basefee: 0,
+                ..Default::default()
+            };
+            let evm = factory
+                .evm_factory()
+                .create_evm(&mut state, EvmEnv { cfg_env, block_env });
+            let ctx = EthBlockExecutionCtx {
+                parent_hash: B256::ZERO,
+                parent_beacon_block_root: Some(B256::ZERO),
+                ommers: &[],
+                withdrawals: withdrawals.map(Cow::Borrowed),
+                extra_data: Bytes::new(),
+                tx_count_hint: None,
+            };
+            let inner = EthBlockExecutor::new(evm, ctx, factory.spec(), factory.receipt_builder());
+
+            let result = match executor {
+                Executor::Ethereum => run(inner, tx),
+                Executor::Irys => run(IrysBlockExecutor { inner }, tx),
+            };
+
+            state.merge_transitions(BundleRetention::Reverts);
+            let bundle = state.take_bundle();
+            Outcome {
+                result,
+                state_root: state_root(&initial_accounts, &bundle),
+                bundle,
+            }
+        }
+
+        /// State root after the block: the initial accounts (no storage) with the bundle's changes
+        /// applied, hashed into the Ethereum state trie.
+        fn state_root(initial_accounts: &[(Address, AccountInfo)], bundle: &BundleState) -> B256 {
+            let mut accounts: BTreeMap<Address, (AccountInfo, BTreeMap<U256, U256>)> =
+                initial_accounts
+                    .iter()
+                    .map(|(address, info)| (*address, (info.clone(), BTreeMap::new())))
+                    .collect();
+            for (address, account) in &bundle.state {
+                let Some(info) = &account.info else {
+                    accounts.remove(address);
+                    continue;
+                };
+                let entry = accounts
+                    .entry(*address)
+                    .or_insert_with(|| (info.clone(), BTreeMap::new()));
+                if account.was_destroyed() {
+                    entry.1.clear();
+                }
+                entry.0 = info.clone();
+                for (slot, value) in &account.storage {
+                    entry.1.insert(*slot, value.present_value);
+                }
+            }
+            state_root_unhashed(accounts.into_iter().map(|(address, (info, storage))| {
+                let storage_root = storage_root_unhashed(
+                    storage
+                        .into_iter()
+                        .filter(|(_, value)| !value.is_zero())
+                        .map(|(slot, value)| (B256::from(slot), value)),
+                );
+                let account = TrieAccount {
+                    nonce: info.nonce,
+                    balance: info.balance,
+                    storage_root,
+                    code_hash: info.code_hash,
+                };
+                (address, account)
+            }))
+        }
+
+        fn run<E>(
+            mut executor: E,
+            tx: &Recovered,
+        ) -> Result<BlockExecutionResult<Receipt>, BlockExecutionError>
+        where
+            E: BlockExecutor<Transaction = TransactionSigned, Receipt = Receipt>,
+        {
+            executor.apply_pre_execution_changes()?;
+            executor.execute_transaction(tx)?;
+            Ok(executor.finish()?.1)
+        }
+
+        /// Executes the same block with the Ethereum and the Irys executor. Both must succeed with
+        /// the same receipts and gas, and Irys must return no requests.
+        fn execute_both(
+            account: Option<(Address, AccountInfo)>,
+            to: Address,
+            input: Bytes,
+        ) -> (Outcome, Outcome) {
+            let signer = PrivateKeySigner::random();
+            let tx = signed_call(&signer, to, input);
+            let ethereum = execute(
+                Executor::Ethereum,
+                account.clone(),
+                None,
+                signer.address(),
+                &tx,
+            );
+            let irys = execute(Executor::Irys, account, None, signer.address(), &tx);
+
+            let ethereum_result = ethereum.result.as_ref().unwrap();
+            let irys_result = irys.result.as_ref().unwrap();
+            assert!(
+                ethereum_result.receipts.iter().all(|r| r.success),
+                "tx must succeed"
+            );
+            assert_eq!(irys_result.receipts, ethereum_result.receipts);
+            assert_eq!(irys_result.gas_used, ethereum_result.gas_used);
+            assert_eq!(irys_result.blob_gas_used, ethereum_result.blob_gas_used);
+            assert!(
+                irys_result.requests.is_empty(),
+                "Irys block must have no requests, got {:?}",
+                irys_result.requests
+            );
+            (ethereum, irys)
+        }
+
+        fn storage_value(bundle: &BundleState, address: Address, slot: U256) -> U256 {
+            bundle
+                .state
+                .get(&address)
+                .and_then(|account| account.storage.get(&slot))
+                .map_or(U256::ZERO, |slot| slot.present_value)
+        }
+
+        /// No account at the request predeploy addresses: skipping the system calls changes no
+        /// state.
+        #[test]
+        fn no_system_contract_accounts_give_same_state() {
+            let (ethereum, irys) = execute_both(None, Address::repeat_byte(0x11), Bytes::new());
+            assert!(ethereum.result.unwrap().requests.is_empty());
+            assert_eq!(irys.state_root, ethereum.state_root);
+        }
+
+        /// An account with a balance but no code at a system contract address: the system call
+        /// only touches it, so skipping the call does not change the state root.
+        #[rstest::rstest]
+        #[case::withdrawal_requests(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS)]
+        #[case::consolidation_requests(CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS)]
+        fn system_contract_address_without_code_gives_same_state(#[case] address: Address) {
+            let funded = AccountInfo {
+                balance: U256::from(1_000),
+                ..Default::default()
+            };
+            let (ethereum, irys) = execute_both(
+                Some((address, funded)),
+                Address::repeat_byte(0x11),
+                Bytes::new(),
+            );
+            assert_eq!(irys.state_root, ethereum.state_root);
+        }
+
+        /// Code at a system contract address: Ethereum calls it, Irys does not.
+        #[rstest::rstest]
+        #[case::withdrawal_requests(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS)]
+        #[case::consolidation_requests(CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS)]
+        fn system_contract_is_not_called(#[case] address: Address) {
+            let (ethereum, irys) = execute_both(
+                Some((address, contract(&WRITE_SLOT_ZERO_CODE))),
+                Address::repeat_byte(0x11),
+                Bytes::new(),
+            );
+            assert_eq!(
+                storage_value(&ethereum.bundle, address, U256::ZERO),
+                U256::from(1),
+                "test setup: Ethereum execution must call the contract"
+            );
+            assert_eq!(storage_value(&irys.bundle, address, U256::ZERO), U256::ZERO);
+            assert_ne!(irys.state_root, ethereum.state_root);
+        }
+
+        /// A request predeploy with its real code is called by a user tx: Ethereum execution
+        /// produces a request, Irys execution does not.
+        #[rstest::rstest]
+        #[case::withdrawal(
+            WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS,
+            &WITHDRAWAL_REQUEST_PREDEPLOY_CODE,
+            // validator pubkey (48 bytes) + amount (8 bytes)
+            56
+        )]
+        #[case::consolidation(
+            CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS,
+            &CONSOLIDATION_REQUEST_PREDEPLOY_CODE,
+            // source pubkey (48 bytes) + target pubkey (48 bytes)
+            96
+        )]
+        fn request_predeploy_call_gives_no_requests(
+            #[case] address: Address,
+            #[case] code: &Bytes,
+            #[case] input_len: usize,
+        ) {
+            let input = Bytes::from(vec![0xab; input_len]);
+            let (ethereum, _irys) = execute_both(Some((address, contract(code))), address, input);
+            assert!(
+                !ethereum.result.unwrap().requests.is_empty(),
+                "test setup: Ethereum execution must produce a request"
+            );
+        }
+
+        /// Irys execution does not parse deposit logs. The Ethereum run checks the test setup.
+        #[test]
+        fn deposit_log_is_not_parsed() {
+            // The chain spec has no deposit contract (as for Irys), so Ethereum execution reads
+            // deposit logs from the mainnet address.
+            let address = MAINNET_DEPOSIT_CONTRACT_ADDRESS;
+            // `PUSH32 DepositEvent topic, PUSH0, PUSH0, LOG1, STOP`: a log with no data.
+            let mut code = vec![0x7f];
+            code.extend_from_slice(
+                b256!("0x649bbc62d0e31342afea4e5cd82d4049e7e1ee912fc0889aa790803be39038c5")
+                    .as_slice(),
+            );
+            code.extend_from_slice(&[0x5f, 0x5f, 0xa1, 0x00]);
+            let account = Some((address, contract(&code)));
+            let signer = PrivateKeySigner::random();
+            let tx = signed_call(&signer, address, Bytes::new());
+
+            let ethereum = execute(
+                Executor::Ethereum,
+                account.clone(),
+                None,
+                signer.address(),
+                &tx,
+            );
+            let irys = execute(Executor::Irys, account, None, signer.address(), &tx);
+
+            assert!(
+                matches!(
+                    ethereum.result,
+                    Err(BlockExecutionError::Validation(
+                        BlockValidationError::DepositRequestDecode(_)
+                    ))
+                ),
+                "test setup: Ethereum execution must parse the deposit log, got {:?}",
+                ethereum.result.map(|_| ())
+            );
+            let irys_result = irys.result.unwrap();
+            assert_eq!(irys_result.receipts[0].logs.len(), 1);
+            assert!(irys_result.requests.is_empty());
+            assert_eq!(irys.state_root, ethereum.state_root);
+        }
+
+        /// A block with a withdrawal: Ethereum credits it, Irys rejects the block as invalid.
+        #[test]
+        fn block_with_withdrawals_is_invalid() {
+            let signer = PrivateKeySigner::random();
+            let tx = signed_call(&signer, Address::repeat_byte(0x11), Bytes::new());
+            let withdrawals = Withdrawals::new(vec![Withdrawal {
+                index: 0,
+                validator_index: 0,
+                address: Address::repeat_byte(0x22),
+                amount: 1,
+            }]);
+
+            let ethereum = execute(
+                Executor::Ethereum,
+                None,
+                Some(&withdrawals),
+                signer.address(),
+                &tx,
+            );
+            let irys = execute(
+                Executor::Irys,
+                None,
+                Some(&withdrawals),
+                signer.address(),
+                &tx,
+            );
+
+            assert!(
+                ethereum.result.is_ok(),
+                "test setup: Ethereum accepts withdrawals"
+            );
+            assert!(
+                matches!(irys.result, Err(BlockExecutionError::Validation(_))),
+                "expected an invalid-block error, got {:?}",
+                irys.result.map(|_| ())
+            );
+
+            let no_withdrawals = execute(
+                Executor::Irys,
+                None,
+                Some(&Withdrawals::default()),
+                signer.address(),
+                &tx,
+            );
+            assert!(
+                no_withdrawals.result.is_ok(),
+                "an empty withdrawal list must be valid, got {:?}",
+                no_withdrawals.result.map(|_| ())
+            );
+        }
     }
 }

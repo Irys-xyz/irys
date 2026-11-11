@@ -1,3 +1,6 @@
+#[path = "partition_resize.rs"]
+mod partition_resize;
+
 use super::{CommitmentState, PartitionAssignments, PledgeEntry, StakeEntry};
 use crate::{EpochBlockData, PACKING_PARAMS_FILE_NAME, PackingParams, StorageModuleInfo};
 use eyre::{Error, Result};
@@ -21,6 +24,8 @@ use tracing::{debug, error, trace, warn};
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug, Clone)]
 pub struct EpochSnapshot {
+    /// Branch-local Fission (partition-resize) activation, reconstructed during epoch replay.
+    pub partition_resize: Option<irys_types::partition_resize::PartitionResizeState>,
     /// Protocol-managed data ledgers (one permanent, N term)
     pub ledgers: Ledgers,
     /// Tracks active mining assignments for partitions (by hash)
@@ -59,6 +64,7 @@ impl Default for EpochSnapshot {
             commitment_state: CommitmentState::default(),
             epoch_block: IrysBlockHeader::default(),
             previous_epoch_block: None,
+            partition_resize: None,
             expired_partition_infos: None,
             epoch_height: IrysBlockHeader::default().height,
         }
@@ -71,6 +77,9 @@ pub enum EpochSnapshotError {
     /// Catchall error until more detailed errors are added
     #[error("internal epoch snapshot error")]
     InternalError,
+    /// The partition-resize transition at this epoch is invalid
+    #[error(transparent)]
+    PartitionResize(#[from] irys_types::partition_resize::PartitionResizeError),
     /// Attempted to do epoch tasks on a block that was not an epoch block
     #[error("target block is not an epoch boundary")]
     NotAnEpochBlock,
@@ -133,6 +142,7 @@ impl EpochSnapshot {
             commitment_state: Default::default(),
             epoch_block: genesis_block.clone(),
             previous_epoch_block: None,
+            partition_resize: None,
             expired_partition_infos: None,
             epoch_height: genesis_block.height,
         };
@@ -300,6 +310,7 @@ impl EpochSnapshot {
             "\u{001b}[32mProcessing epoch block\u{001b}[0m"
         );
 
+        self.activate_partition_resize(new_epoch_block)?;
         self.epoch_block = new_epoch_block.clone();
         self.previous_epoch_block = previous_epoch_block.clone();
 
@@ -322,15 +333,20 @@ impl EpochSnapshot {
 
         self.try_genesis_init(new_epoch_block);
 
-        // Epoch-aligned, like the Cascade gate above: the epoch block's own
-        // timestamp decides Delta for every block in this epoch.
+        // Epoch-aligned, like the Cascade gate above, but only for slot seeding:
+        // the epoch block's own timestamp gates `allocate_additional_ledger_slots`.
+        // Other Delta changes resolve at each block's own timestamp.
         let delta = self
             .config
             .consensus
             .hardforks
             .delta_for_block(new_epoch_block.timestamp_secs());
 
-        self.allocate_additional_ledger_slots(previous_epoch_block, new_epoch_block, delta);
+        if self.partition_resize.is_some() {
+            self.allocate_resize_slots(new_epoch_block)?;
+        } else {
+            self.allocate_additional_ledger_slots(previous_epoch_block, new_epoch_block, delta);
+        }
 
         // Update the canonical write window AFTER allocation (so this epoch's
         // new slots exist) and BEFORE expiry (so freshly-written slots aren't
@@ -358,7 +374,11 @@ impl EpochSnapshot {
 
         self.backfill_missing_partitions();
 
-        self.allocate_additional_capacity();
+        if self.partition_resize.is_some() {
+            self.allocate_resize_capacity()?;
+        } else {
+            self.allocate_additional_capacity();
+        }
 
         self.assign_partition_hashes_to_pledges();
 
@@ -526,11 +546,13 @@ impl EpochSnapshot {
             epoch_height,
             cascade,
             |ledger| new_epoch_block.ledger_total_chunks(ledger),
-            self.config.consensus.num_chunks_in_partition,
+            self.partition_chunks(),
         );
 
-        // Return early if there's no more work to do
+        // The list describes this epoch only. The snapshot is cloned from the previous
+        // epoch, so clear it, or the previous epoch's expiries are broadcast again.
         if expired_partitions.is_empty() {
+            self.expired_partition_infos = None;
             return;
         }
 
@@ -613,7 +635,7 @@ impl EpochSnapshot {
         new_epoch_block: &IrysBlockHeader,
         refresh_last_height: ForBlock<Cascade>,
     ) {
-        let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
+        let chunks_per_slot = self.partition_chunks();
         for ledger in self.ledgers.active_ledgers() {
             let new_total = new_epoch_block.ledger_total_chunks(ledger);
             let prev_total = previous_epoch_block
@@ -766,14 +788,33 @@ impl EpochSnapshot {
         config: &ConsensusConfig,
         num_active_ledgers: u64,
     ) -> u64 {
+        // Every active ledger needs at least one slot filled with data partitions
+        let min_count = num_active_ledgers * config.num_partitions_per_slot.get();
+        Self::capacity_partitions_for_demand(
+            num_bigfloat::BigFloat::from_u64(num_data_partitions),
+            min_count,
+            config,
+        )
+        .expect("ceiled value must be in 0..=u64::MAX")
+    }
+
+    /// The capacity reserve rounding pipeline, shared by the legacy policy above
+    /// and the partition-resize reserve (`resize_capacity_reserve`), which feeds
+    /// it a fractional demand measured in original-size partitions. Floors
+    /// `demand` at `min_count`, then `ceil(trunc3(trunc3(log10(base)) * scalar))`.
+    /// Consensus-critical: every truncation happens here exactly once, in this
+    /// order. `None` only if the ceiled value does not fit a `u64`.
+    fn capacity_partitions_for_demand(
+        demand: num_bigfloat::BigFloat,
+        min_count: u64,
+        config: &ConsensusConfig,
+    ) -> Option<u64> {
         use num_bigfloat::BigFloat;
 
-        // Every active ledger needs at least one slot filled with data partitions
-        let min_count = num_active_ledgers * config.num_partitions_per_slot;
-        let base_count = std::cmp::max(num_data_partitions, min_count);
-
-        // Deterministic computation using num-bigfloat (pure Rust, ~40 decimal digits)
-        let base_f = BigFloat::from_u64(base_count);
+        // Deterministic computation using num-bigfloat (pure Rust, ~40 decimal digits).
+        // Integers convert exactly, so this is the legacy integer `max` for whole demands.
+        let minimum = BigFloat::from_u64(min_count);
+        let base_f = if demand > minimum { demand } else { minimum };
         let log10 = base_f.log10();
         let trunc = bigfloat_truncate_to_3_decimals(&log10);
 
@@ -782,10 +823,7 @@ impl EpochSnapshot {
         let scaled_trunc = bigfloat_truncate_to_3_decimals(&scaled);
 
         // Deterministic ceil to integer, then convert to u64
-        scaled_trunc
-            .ceil()
-            .to_u64()
-            .expect("ceiled value must be in 0..=u64::MAX")
+        scaled_trunc.ceil().to_u64()
     }
 
     /// Adds new capacity partition hashes to the protocols pool of active partition hashes. This
@@ -884,7 +922,7 @@ impl EpochSnapshot {
         let data_ledger = &self.ledgers[ledger];
         let num_slots = data_ledger.slot_count() as u64;
 
-        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
+        let num_chunks_in_partition = self.partition_chunks();
 
         // Ledger Partitioning Model:
         //
@@ -1332,6 +1370,8 @@ impl EpochSnapshot {
     ) -> eyre::Result<Vec<StorageModuleInfo>> {
         let miner = self.config.node_config.miner_address();
         let assignments = self.get_partition_assignments(miner);
+        // Existing module paths retain their physical layout; logical bounds are
+        // resolved separately and the finalized migration removes their suffix.
         let num_chunks = self.config.consensus.num_chunks_in_partition as u32;
         let paths = &self
             .storage_submodules_config
@@ -1481,7 +1521,7 @@ impl EpochSnapshot {
         new_total_chunks: u64,
         cascade: ForBlock<Cascade>,
     ) -> Vec<(usize, Vec<PartitionHash>)> {
-        let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
+        let chunks_per_slot = self.partition_chunks();
         let prev_total_chunks = self.epoch_block.ledger_total_chunks(ledger);
 
         // A slot that received data this epoch is rescued by the touch, not
@@ -1552,7 +1592,7 @@ impl EpochSnapshot {
             epoch_height,
             cascade,
             total_chunks,
-            self.config.consensus.num_chunks_in_partition,
+            self.partition_chunks(),
         )
     }
 
@@ -1681,6 +1721,11 @@ impl EpochSnapshot {
         self.commitment_state.is_staked(miner_address)
     }
 
+    /// Number of addresses with an `Active` stake in this epoch.
+    pub fn active_stake_count(&self) -> usize {
+        self.commitment_state.active_stake_count()
+    }
+
     // NON CANONICAL HASH
     // SHOULD BE USED FOR DEBUGGING ONLY
     pub fn get_hash(&self) -> String {
@@ -1744,7 +1789,7 @@ mod tests {
         // slot can hold two partitions
         let mut node_config = NodeConfig::testing();
         node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
-            num_partitions_per_slot: 2,
+            num_partitions_per_slot: irys_types::ReplicaCount::new(2),
             ..node_config.consensus_config()
         });
         let config = Config::new_with_random_peer_id(node_config);
@@ -1758,6 +1803,7 @@ mod tests {
             commitment_state: CommitmentState::default(),
             epoch_block: IrysBlockHeader::default(),
             previous_epoch_block: None,
+            partition_resize: None,
             expired_partition_infos: None,
             epoch_height: 0,
         };
@@ -1798,6 +1844,36 @@ mod tests {
         }
     }
 
+    /// An epoch with no expiries clears the list it inherited from the previous epoch.
+    #[test]
+    fn epoch_without_expiries_clears_expired_partition_infos() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let mut snapshot = EpochSnapshot {
+            ledgers: Ledgers::new(&config.consensus, ForBlock::inactive()),
+            partition_assignments: PartitionAssignments::new(),
+            all_active_partitions: Vec::new(),
+            unassigned_partitions: Vec::new(),
+            storage_submodules_config: None,
+            config: config.clone(),
+            commitment_state: CommitmentState::default(),
+            epoch_block: IrysBlockHeader::default(),
+            previous_epoch_block: None,
+            expired_partition_infos: Some(vec![ExpiringPartitionInfo {
+                partition_hash: H256::random(),
+                ledger_id: DataLedger::Submit,
+                slot_index: 0,
+            }]),
+            epoch_height: 0,
+            partition_resize: None,
+        };
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = config.consensus.epoch.num_blocks_in_epoch;
+
+        snapshot.expire_ledger_slots(&header, ForBlock::inactive());
+
+        assert!(snapshot.expired_partition_infos.is_none());
+    }
+
     fn snapshot_with_submodules(config: Config, submodule_paths: Vec<PathBuf>) -> EpochSnapshot {
         EpochSnapshot {
             ledgers: Ledgers::new(&config.consensus, ForBlock::inactive()),
@@ -1814,6 +1890,7 @@ mod tests {
             previous_epoch_block: None,
             expired_partition_infos: None,
             epoch_height: 0,
+            partition_resize: None,
         }
     }
 

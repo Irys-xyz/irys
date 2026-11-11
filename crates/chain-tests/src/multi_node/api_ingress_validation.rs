@@ -645,14 +645,14 @@ async fn heavy_cascade_mempool_rejects_publish_tx_with_pre_cascade_pricing() -> 
     let data_size = ctx.node_ctx.config.consensus.chunk_size * 100;
 
     // Compute the correct Cascade term fee
-    let number_of_ingress_proofs_total = ctx
+    let replica_count = ctx
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+        .publish_replica_count_at(UnixTimestamp::from_secs(0));
     let post_cascade_term_fee = calculate_term_fee_from_config(
         data_size,
         &ctx.node_ctx.config.consensus,
-        number_of_ingress_proofs_total,
+        replica_count,
         ctx.node_ctx.config.consensus.genesis.genesis_price,
         UnixTimestamp::from_secs(0),
     )?;

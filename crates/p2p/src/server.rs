@@ -102,6 +102,33 @@ fn rejection_response(wire: ProtocolVersion, reason: RejectionReason) -> HttpRes
     }
 }
 
+/// A cache miss is `Accepted(None)`. A local failure is not: the fetcher
+/// would treat that as the peer no longer holding the chunk.
+fn chunk_fetch_response(
+    result: GossipResult<Option<UnpackedChunk>>,
+) -> GossipResponse<Option<wire_types::UnpackedChunk>> {
+    match result {
+        Ok(maybe) => GossipResponse::Accepted(maybe.map(wire_types::UnpackedChunk::from)),
+        Err(GossipError::RateLimited) => GossipResponse::Rejected(RejectionReason::RateLimited),
+        Err(error) => {
+            warn!(%error, "chunk fetch failed");
+            GossipResponse::Rejected(RejectionReason::InvalidData)
+        }
+    }
+}
+
+/// A local failure is a server error, not an empty whitelist: an empty list
+/// would replace the caller's whitelist. The fetcher moves on to its next peer.
+fn stake_and_pledge_whitelist_response(result: GossipResult<Vec<IrysAddress>>) -> HttpResponse {
+    match result {
+        Ok(whitelist) => HttpResponse::Ok().json(GossipResponse::Accepted(whitelist)),
+        Err(error) => {
+            tracing::error!("Failed to get the stake and pledge whitelist: {error}");
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
 impl<M, B> GossipServer<M, B>
 where
     M: MempoolFacade,
@@ -1175,11 +1202,12 @@ where
     }
 
     async fn handle_stake_and_pledge_whitelist(server: Data<Self>) -> HttpResponse {
-        let whitelist = server
-            .data_handler
-            .handle_get_stake_and_pledge_whitelist()
-            .await;
-        HttpResponse::Ok().json(GossipResponse::Accepted(whitelist))
+        stake_and_pledge_whitelist_response(
+            server
+                .data_handler
+                .handle_get_stake_and_pledge_whitelist()
+                .await,
+        )
     }
 
     async fn fetch_node_info(server: &Data<Self>) -> Result<NodeInfo, HttpResponse> {
@@ -1898,6 +1926,70 @@ where
         }
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_chunk_announce_v2(
+        server: Data<Self>,
+        request: web::Json<wire_types::GossipRequestV2<wire_types::ChunkAnnouncement>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let request = request.into_inner();
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
+        if let Err(error_response) = Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            request.peer_id,
+            request.miner_address,
+        ) {
+            return error_response;
+        }
+        server.peer_list.set_is_online(&request.miner_address, true);
+        match server
+            .data_handler
+            .handle_chunk_announcement(request.peer_id, request.data)
+        {
+            Ok(()) => HttpResponse::Ok().json(GossipResponse::Accepted(())),
+            Err(GossipError::RateLimited) => HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited)),
+            Err(error) => {
+                // Only `record_seen` fails here. The chunk is held, or its
+                // claim already has a fetch task, so the announcement is
+                // still accepted.
+                warn!(%error, "chunk announcement bookkeeping failed");
+                HttpResponse::Ok().json(GossipResponse::Accepted(()))
+            }
+        }
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_chunk_fetch_v2(
+        server: Data<Self>,
+        request: web::Json<wire_types::GossipRequestV2<wire_types::ChunkAnnouncement>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let request = request.into_inner();
+        if let Err(error_response) = Self::check_peer_v2(
+            &server.peer_list,
+            &req,
+            request.peer_id,
+            request.miner_address,
+        ) {
+            return error_response;
+        }
+        HttpResponse::Ok().json(chunk_fetch_response(
+            server.data_handler.handle_chunk_fetch(&request.data),
+        ))
+    }
+
     pub fn routes() -> impl HttpServiceFactory {
         web::scope("/gossip")
             .service(
@@ -1937,6 +2029,14 @@ where
                     .route(
                         GossipRoutes::PullData.as_str(),
                         web::post().to(Self::handle_pull_data),
+                    )
+                    .route(
+                        GossipRoutes::ChunkFetch.as_str(),
+                        web::post().to(Self::handle_chunk_fetch_v2),
+                    )
+                    .route(
+                        GossipRoutes::ChunkAnnounce.as_str(),
+                        web::post().to(Self::handle_chunk_announce_v2),
                     )
                     .route(
                         GossipRoutes::Handshake.as_str(),
@@ -2077,14 +2177,12 @@ where
 mod tests {
     use super::*;
     use crate::tests::util::{BlockDiscoveryStub, MempoolStub};
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        Config, DatabaseProvider, DbSyncMode, IrysPeerId, NodeConfig, PeerAddress,
-        PeerNetworkSender, PeerScore, RethPeerInfo,
+        Config, IrysPeerId, NodeConfig, PeerAddress, PeerNetworkSender, PeerScore, RethPeerInfo,
     };
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-    use std::sync::Arc;
     use tokio::sync::mpsc;
 
     /// The v2-routed-but-v1-shaped data handlers (`get_data`/`pull_data`) must
@@ -2124,6 +2222,45 @@ mod tests {
     }
 
     #[test]
+    fn chunk_fetch_database_error_is_not_a_miss() {
+        assert!(matches!(
+            chunk_fetch_response(Ok(None)),
+            GossipResponse::Accepted(None)
+        ));
+        assert!(matches!(
+            chunk_fetch_response(Err(GossipError::RateLimited)),
+            GossipResponse::Rejected(RejectionReason::RateLimited)
+        ));
+        assert!(matches!(
+            chunk_fetch_response(Err(GossipError::Internal(InternalGossipError::Database(
+                "read failed".into(),
+            )))),
+            GossipResponse::Rejected(RejectionReason::InvalidData)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stake_and_pledge_whitelist_failure_is_not_an_empty_list() {
+        let address = IrysAddress::repeat_byte(7);
+        let accepted = stake_and_pledge_whitelist_response(Ok(vec![address]));
+        assert_eq!(accepted.status(), actix_web::http::StatusCode::OK);
+        let body = actix_web::body::to_bytes(accepted.into_body())
+            .await
+            .expect("whitelist body");
+        let response: GossipResponse<Vec<IrysAddress>> =
+            serde_json::from_slice(&body).expect("whitelist json");
+        assert!(matches!(response, GossipResponse::Accepted(list) if list == vec![address]));
+
+        let failed = stake_and_pledge_whitelist_response(Err(GossipError::Internal(
+            InternalGossipError::Unknown("mempool stopped".into()),
+        )));
+        assert_eq!(
+            failed.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
     fn handshake_peer_payload_is_unique_then_capped() {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -2159,14 +2296,18 @@ mod tests {
         assert_eq!(list.all_known_peers().len(), 5);
     }
 
-    fn setup_peer_list() -> (IrysAddress, PeerList, tempfile::TempDir) {
+    fn setup_peer_list() -> (
+        IrysAddress,
+        PeerList,
+        irys_testing_utils::tempfile::TempDir,
+        irys_testing_utils::tempfile::TempDir,
+    ) {
         let temp_dir = TempDirBuilder::new().with_tracing().build();
+        let cache_dir = TempDirBuilder::new().build();
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
-        let db_env =
-            open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
-                .expect("db");
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = irys_database::DatabaseProvider::for_testing(temp_dir.path(), cache_dir.path())
+            .expect("test db setup");
         let (tx, _rx) = mpsc::unbounded_channel();
         let peer_network_sender = PeerNetworkSender::new(tx);
         let peer_list = PeerList::new(
@@ -2197,13 +2338,13 @@ mod tests {
             ..Default::default()
         };
         peer_list.add_or_update_peer(test_peer, true);
-        (miner, peer_list, temp_dir)
+        (miner, peer_list, temp_dir, cache_dir)
     }
 
     #[test]
     // test that handle_invalid_data subtracts from peerscore in the case of GossipError::BlockPool(BlockPoolError::BlockError(_)))
     fn handle_invalid_block_penalizes_peer() {
-        let (miner, peer_list, _dir) = setup_peer_list();
+        let (miner, peer_list, _dir, _cache_dir) = setup_peer_list();
         let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));
         let shutdown_token = CancellationToken::new();
         GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
@@ -2230,7 +2371,7 @@ mod tests {
     /// the block on the next gossip round if it is still relevant).
     #[test]
     fn handle_parent_not_in_cache_does_not_penalize_peer() {
-        let (miner, peer_list, _dir) = setup_peer_list();
+        let (miner, peer_list, _dir, _cache_dir) = setup_peer_list();
         let initial_score = peer_list
             .peer_by_mining_address(&miner)
             .unwrap()
@@ -2267,7 +2408,7 @@ mod tests {
     /// running on with a poisoned block-tree cache.
     #[test]
     fn handle_fatal_cache_corruption_triggers_shutdown_without_penalty() {
-        let (miner, peer_list, _dir) = setup_peer_list();
+        let (miner, peer_list, _dir, _cache_dir) = setup_peer_list();
         let initial_score = peer_list
             .peer_by_mining_address(&miner)
             .unwrap()
@@ -2332,7 +2473,7 @@ mod tests {
         #[case] is_syncing: bool,
         #[case] expected_score: u16,
     ) {
-        let (miner, peer_list, _dir) = setup_peer_list();
+        let (miner, peer_list, _dir, _cache_dir) = setup_peer_list();
         let shutdown_token = CancellationToken::new();
         GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
             &miner,
@@ -2357,7 +2498,7 @@ mod tests {
         #[case] activation_offset_secs: i64,
         #[case] expected_score: u16,
     ) {
-        let (miner, peer_list, _dir) = setup_peer_list();
+        let (miner, peer_list, _dir, _cache_dir) = setup_peer_list();
         let mut consensus_config = ConsensusConfig::testing();
         let now = UnixTimestamp::now().unwrap().as_secs();
         consensus_config

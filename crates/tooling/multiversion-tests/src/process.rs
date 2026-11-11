@@ -348,7 +348,10 @@ mod tests {
     static SHARED_STUB: LazyLock<StubBinary> = LazyLock::new(|| {
         let dir = TempDirBuilder::new().prefix("stub-bin-").build();
         let script_path = dir.path().join("stub-node");
-        std::fs::write(&script_path, "#!/bin/sh\nsleep 3600\n").unwrap();
+        // `exec` makes `sleep` the child process. Without it, some shells fork
+        // `sleep`, and a SIGKILL to the shell leaves `sleep` holding the
+        // stdout/stderr pipes open, so the log drain in `respawn` never ends.
+        std::fs::write(&script_path, "#!/bin/sh\nexec sleep 3600\n").unwrap();
         std::fs::set_permissions(&script_path, PermissionsExt::from_mode(0o755)).unwrap();
         StubBinary {
             _dir: dir,
@@ -424,6 +427,8 @@ mod tests {
         assert!(matches!(proc.pid(), Err(ProcessError::NoPid)));
     }
 
+    // Linux only: the readiness check reads `/proc/<pid>/comm`.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn respawn_replaces_child_process() {
         if !can_exec_in_tmp() {
@@ -433,7 +438,21 @@ mod tests {
         let (config, _dir) = stub_config("respawn-test", stub_path());
         let mut proc = NodeProcess::spawn(config, Vec::new()).unwrap();
         let first_pid = proc.pid().unwrap();
-        proc.respawn().await.unwrap();
+        // Respawn only after `sleep` runs as the child. A kill that lands
+        // while the shell still starts up passes even when `sleep` would
+        // outlive the shell and hold the log pipes open.
+        let comm_path = format!("/proc/{first_pid}/comm");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !std::fs::read_to_string(&comm_path).is_ok_and(|comm| comm.trim() == "sleep") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("stub did not exec `sleep` within 10s");
+        tokio::time::timeout(Duration::from_secs(30), proc.respawn())
+            .await
+            .expect("respawn did not finish within 30s")
+            .unwrap();
         let second_pid = proc.pid().unwrap();
         assert_ne!(first_pid, second_pid);
         proc.kill().await.unwrap();

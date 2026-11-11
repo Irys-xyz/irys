@@ -61,15 +61,13 @@ mod tests {
         BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, CommitmentSnapshot,
         EmaSnapshot, EpochSnapshot, PeerList, chain_sync_state::ChainSyncState,
     };
-    use irys_database::tables::IrysTables;
-    use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
+    use irys_database::{DatabaseProvider, DatabaseProviderTestExt as _};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        BlockIndexItem, BlockTransactions, ConsensusConfig, DatabaseProvider, H256, IrysAddress,
-        IrysBlockHeader, SealedBlock, U256,
+        BlockIndexItem, BlockTransactions, ConsensusConfig, H256, IrysAddress, IrysBlockHeader,
+        SealedBlock, U256,
     };
-    use reth_db::mdbx::DatabaseArguments;
     use std::sync::{Arc, RwLock};
 
     /// Node info reports the tip: a heavier block that still waits for validation does
@@ -103,11 +101,7 @@ mod tests {
         );
 
         let tmp = TempDirBuilder::new().prefix("node-info-tip").build();
-        let db = DatabaseProvider(Arc::new(open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
         let index = BlockIndex::new_for_testing(db);
         index.push_item(
             &BlockIndexItem {

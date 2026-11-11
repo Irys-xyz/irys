@@ -777,7 +777,7 @@ async fn internal_chunks_serves_unpacked_proven_range_with_short_reads() -> eyre
         c.chunk_size = chunk_size;
         c.num_chunks_in_partition = 10;
         c.num_chunks_in_recall_range = 2;
-        c.num_partitions_per_slot = 1;
+        c.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
         c.entropy_packing_iterations = 1_000;
         c.block_migration_depth = 1;
     });

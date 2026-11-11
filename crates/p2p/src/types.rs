@@ -571,6 +571,8 @@ pub enum GossipRoutes {
     Transaction,
     CommitmentTx,
     Chunk,
+    ChunkAnnounce,
+    ChunkFetch,
     Block,
     BlockBody,
     IngressProof,
@@ -593,6 +595,8 @@ impl GossipRoutes {
             Self::Transaction => "/transaction",
             Self::CommitmentTx => "/commitment_tx",
             Self::Chunk => "/chunk",
+            Self::ChunkAnnounce => "/chunk_announce",
+            Self::ChunkFetch => "/chunk_fetch",
             Self::Block => "/block",
             Self::BlockBody => "/block_body",
             Self::IngressProof => "/ingress_proof",
@@ -627,6 +631,8 @@ mod tests {
     #[case(GossipRoutes::Transaction, "/transaction")]
     #[case(GossipRoutes::CommitmentTx, "/commitment_tx")]
     #[case(GossipRoutes::Chunk, "/chunk")]
+    #[case(GossipRoutes::ChunkAnnounce, "/chunk_announce")]
+    #[case(GossipRoutes::ChunkFetch, "/chunk_fetch")]
     #[case(GossipRoutes::Block, "/block")]
     #[case(GossipRoutes::BlockBody, "/block_body")]
     #[case(GossipRoutes::IngressProof, "/ingress_proof")]

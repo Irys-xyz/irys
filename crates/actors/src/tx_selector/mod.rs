@@ -2,15 +2,22 @@ pub(crate) mod helpers;
 
 use crate::block_discovery::{TxLookupResult, get_data_tx_in_parallel_inner};
 use crate::block_producer::ledger_expiry::LedgerExpiryError;
-use crate::block_validation::get_assigned_ingress_proofs;
-use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
+use crate::block_validation::{
+    clamped_assigned_requirement, get_assigned_ingress_proofs, required_ingress_proofs_total,
+};
+use crate::chunk_ingress_service::ChunkIngressState;
 use crate::data_tx_validation::data_tx_structural_defect;
 use crate::mempool_guard::MempoolReadGuard;
 use crate::mempool_service::{AtomicMempoolState, MempoolTxs, validate_commitment_transaction};
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{OptionExt as _, eyre};
 use futures::FutureExt as _;
-use irys_database::db::IrysDatabaseExt as _;
+use helpers::{
+    anchor_valid_ingress_proofs, dedup_ingress_proofs_by_signer, min_ingress_proof_anchor_height,
+    unexpired_ingress_proofs,
+};
+use irys_database::DatabaseProvider;
+use irys_database::db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _};
 use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_commitment, canonical_commitment_included_height, canonical_submit_height,
@@ -21,13 +28,13 @@ use irys_domain::{
     HardforkConfigExt as _,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::ingress::{CachedIngressProof, IngressProof};
+use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     BlockHash, BoundedFee, CommitmentTypeV2, DataLedger, DataTransactionHeader, IngressProofsList,
     IrysTransactionId,
 };
-use irys_types::{Config, H256, IrysTransactionCommon as _, U256, app_state::DatabaseProvider};
+use irys_types::{Config, H256, IrysTransactionCommon as _, U256};
 use irys_types::{IrysAddress, SystemLedger, UnixTimestamp};
 use reth::rpc::types::BlockId;
 use reth_db::Database as _;
@@ -578,12 +585,12 @@ pub async fn select_best_txs(
             irys_types::DataLedger::Publish => {
                 // For Publish ledger, validate both term and perm fees
                 // Calculate expected fees based on current EMA for the next block height
-                let Ok(expected_term_fee) = helpers::calculate_term_storage_fee(
-                    ctx.config,
-                    tx.data_size,
-                    &parent_ema_snapshot,
-                    next_block_height,
+                let Ok(expected_term_fee) = ctx.config.required_term_fee_at(
+                    ledger,
                     current_timestamp,
+                    next_block_height,
+                    tx.data_size,
+                    parent_ema_snapshot.ema_for_public_pricing(),
                 ) else {
                     debug!(
                         tx.id = ?tx.id,
@@ -593,12 +600,12 @@ pub async fn select_best_txs(
                     continue;
                 };
 
-                let Ok(expected_perm_fee) = helpers::calculate_perm_storage_fee(
-                    ctx.config,
-                    tx.data_size,
-                    expected_term_fee,
-                    &parent_ema_snapshot,
+                let Ok(expected_perm_fee) = ctx.config.required_publish_perm_fee_at(
                     current_timestamp,
+                    tx.data_size,
+                    parent_ema_snapshot.ema_for_public_pricing(),
+                    tx.term_fee.get(),
+                    expected_term_fee,
                 ) else {
                     debug!(
                         tx.id = ?tx.id,
@@ -652,16 +659,11 @@ pub async fn select_best_txs(
                     continue;
                 }
 
-                let number_of_ingress_proofs_total = ctx
+                if ctx
                     .config
-                    .number_of_ingress_proofs_total_at(current_timestamp);
-                if PublishFeeCharges::new(
-                    perm_fee,
-                    tx.term_fee,
-                    &ctx.config.node_config.consensus_config(),
-                    number_of_ingress_proofs_total,
-                )
-                .is_err()
+                    .ingress_proof_reward_pool_at(current_timestamp, tx.term_fee.get())
+                    .and_then(|pool| PublishFeeCharges::new(perm_fee, pool))
+                    .is_err()
                 {
                     debug!(
                         tx.id = ?tx.id,
@@ -673,11 +675,15 @@ pub async fn select_best_txs(
                 }
             }
             irys_types::DataLedger::Submit => {
-                debug!(
+                // Ingress rejects `ledger_id == Submit`, and block validation rejects it in
+                // every ledger list (the Submit list requires `ledger_id == Publish`). Skip it,
+                // so a tx that got past ingress cannot make this producer build an invalid block.
+                warn!(
                     tx.id = ?tx.id,
                     tx.signer = ?tx.signer(),
-                    "Processing Submit ledger tx for single-block promotion"
+                    "Skipping tx with ledger_id Submit: never valid in a block"
                 );
+                continue;
             }
             DataLedger::OneYear | DataLedger::ThirtyDay => {
                 // Term-only ledgers: validate cascade is active, term fee, and fee structure
@@ -721,29 +727,12 @@ pub async fn select_best_txs(
                 }
 
                 // Validate term fee amount against EMA pricing
-                let cascade = consensus
-                    .hardforks
-                    .cascade
-                    .as_ref()
-                    .expect("cascade config must exist when cascade is active");
-                let epoch_length = match ledger {
-                    DataLedger::OneYear => cascade.one_year_epoch_length,
-                    DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-                    DataLedger::Publish | DataLedger::Submit => unreachable!(),
-                };
-                let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-                    next_block_height,
-                    consensus.epoch.num_blocks_in_epoch,
-                    epoch_length,
-                );
-                let replica_count = consensus.num_partitions_per_term_ledger_slot;
-                let Ok(expected_term_fee) = irys_types::storage_pricing::calculate_term_fee(
-                    tx.data_size,
-                    epochs_for_storage,
-                    &consensus,
-                    replica_count,
-                    parent_ema_snapshot.ema_for_public_pricing(),
+                let Ok(expected_term_fee) = ctx.config.required_term_fee_at(
+                    ledger,
                     current_timestamp,
+                    next_block_height,
+                    tx.data_size,
+                    parent_ema_snapshot.ema_for_public_pricing(),
                 ) else {
                     debug!(
                         tx.id = ?tx.id,
@@ -918,19 +907,15 @@ async fn get_publish_txs_and_proofs(
         .header();
 
     // only max anchor age is constrained for ingress proofs
-    let min_ingress_proof_anchor_height = next_block_height.saturating_sub(
-        ctx.config
-            .consensus
-            .mempool
-            .ingress_proof_anchor_expiry_depth as u64,
-    );
+    let min_ingress_proof_anchor_height =
+        min_ingress_proof_anchor_height(next_block_height, ctx.config);
 
     {
         let publish_txids = ctx
             .db
-            .view_eyre(|tx| {
+            .view_cache_eyre(|tx| {
                 let mut read_cursor = tx
-                    .new_cursor::<IngressProofs>()
+                    .cursor_read::<IngressProofs>()
                     .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
 
                 let walker = read_cursor
@@ -1039,7 +1024,6 @@ async fn get_publish_txs_and_proofs(
             next_block_height,
             epoch_snapshot,
             parent_block_header,
-            ctx.config,
             cascade_for_block,
         )?;
 
@@ -1176,46 +1160,38 @@ async fn get_publish_txs_and_proofs(
             // If it's not promoted, validate the proofs
 
             // Get all the proofs for this tx
-            let mut all_proofs = ctx
+            let stored_proofs = ctx
                 .db
-                .view_eyre(|read_tx| {
+                .view_cache_eyre(|read_tx| {
                     ingress_proofs_by_commitment(
                         read_tx,
                         tx_header.data_commitment(&ctx.config.data_tree_geometry()),
                     )
                 })?
                 .into_iter()
-                .filter(|(_root, cached_proof)| {
-                    let expired = ChunkIngressServiceInner::is_ingress_proof_expired_static(
-                        ctx.block_tree,
-                        ctx.db,
-                        ctx.config,
-                        &cached_proof.proof,
-                    )
-                    .expired_or_invalid;
-                    !expired
-                })
+                .map(|(_root, cached_proof)| cached_proof)
                 .collect::<Vec<_>>();
-
-            // Dedup by signer address in-place, keeping first proof per address
-            let pre_dedup_len = all_proofs.len();
-            let mut seen_addresses = HashSet::new();
-            all_proofs.retain(|(_, cached_proof)| seen_addresses.insert(cached_proof.0.address));
-            if all_proofs.len() < pre_dedup_len {
+            let non_expired =
+                unexpired_ingress_proofs(stored_proofs, ctx.block_tree, ctx.db, ctx.config);
+            // Dedup by signer address, keeping the first proof per address.
+            let (all_proofs, dropped) = dedup_ingress_proofs_by_signer(non_expired);
+            if dropped > 0 {
                 warn!(
                     tx.id = ?tx_header.id,
                     tx.data_root = ?tx_header.data_tree_root,
-                    before = pre_dedup_len,
+                    before = all_proofs.len() + dropped,
                     after = all_proofs.len(),
                     "Duplicate ingress proof signers detected for data root, deduplicating"
                 );
             }
 
             // Check for minimum number of ingress proofs
-            let number_of_ingress_proofs_total = ctx
-                .config
-                .number_of_ingress_proofs_total_at(current_timestamp);
-            let proofs_per_tx = number_of_ingress_proofs_total as usize;
+            let number_of_ingress_proofs_total = required_ingress_proofs_total(
+                &ctx.config.consensus.hardforks,
+                current_timestamp,
+                epoch_snapshot,
+            );
+            let proofs_per_tx = usize::from(number_of_ingress_proofs_total);
 
             if all_proofs.len() < proofs_per_tx {
                 info!(
@@ -1227,24 +1203,14 @@ async fn get_publish_txs_and_proofs(
                 continue;
             }
 
-            let mut all_tx_proofs: Vec<CachedIngressProof> = Vec::with_capacity(all_proofs.len());
-
-            //filter all these ingress proofs by their anchor validity
-            for (_hash, cached) in all_proofs {
-                let cached_proof = cached.0;
-                // validate the anchor is still valid
-                let anchor_is_valid =
-                    crate::anchor_validation::validate_ingress_proof_anchor_for_inclusion(
-                        ctx.block_tree,
-                        ctx.db,
-                        min_ingress_proof_anchor_height,
-                        &cached_proof.proof,
-                    )?;
-                if anchor_is_valid {
-                    all_tx_proofs.push(cached_proof)
-                }
-                // note: data root lifecycle work includes code to handle ingress proofs we find as invalid
-            }
+            // Filter these ingress proofs by anchor validity.
+            // note: data root lifecycle work includes code to handle ingress proofs we find as invalid
+            let all_tx_proofs = anchor_valid_ingress_proofs(
+                all_proofs,
+                ctx.block_tree,
+                ctx.db,
+                min_ingress_proof_anchor_height,
+            )?;
 
             // Extract IngressProofs for get_assigned_ingress_proofs API
             let proofs_only: Vec<IngressProof> =
@@ -1286,14 +1252,14 @@ async fn get_publish_txs_and_proofs(
             let number_of_ingress_proofs_from_assignees = ctx
                 .config
                 .number_of_ingress_proofs_from_assignees_at(current_timestamp);
-            let mut expected_assigned_proofs = number_of_ingress_proofs_from_assignees as usize;
-
-            if assigned_miners < expected_assigned_proofs {
+            let configured_assigned_proofs = usize::from(number_of_ingress_proofs_from_assignees);
+            let expected_assigned_proofs =
+                clamped_assigned_requirement(configured_assigned_proofs, assigned_miners);
+            if expected_assigned_proofs < configured_assigned_proofs {
                 warn!(
                     "Clamping expected_assigned_proofs from {} to {} for tx {}",
-                    expected_assigned_proofs, assigned_miners, &tx_header.id
+                    configured_assigned_proofs, expected_assigned_proofs, &tx_header.id
                 );
-                expected_assigned_proofs = assigned_miners;
             }
 
             // Check if we have enough assigned proofs

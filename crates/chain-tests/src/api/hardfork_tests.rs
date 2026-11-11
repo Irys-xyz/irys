@@ -105,12 +105,12 @@ fn create_test_config(aurora: Option<Aurora>) -> NodeConfig {
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().hardforks = IrysHardforkConfig {
         frontier: default_test_frontier(),
-        next_name_tbd: None,
         aurora,
         borealis: None,
         cascade: None,
         delta: None,
         echo: None,
+        fission: None,
     };
     config
 }
@@ -601,12 +601,12 @@ mod epoch_block_filtering {
         };
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
-            next_name_tbd: None,
             aurora,
             borealis: None,
             cascade: None,
             delta: None,
             echo: None,
+            fission: None,
         };
         config
     }
@@ -710,7 +710,6 @@ mod epoch_block_filtering {
         let mut config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
-            next_name_tbd: None,
             aurora: Some(Aurora {
                 activation_timestamp: UnixTimestamp::from_secs(aurora_activation),
                 minimum_commitment_tx_version: AURORA_MIN_VERSION,
@@ -719,6 +718,7 @@ mod epoch_block_filtering {
             cascade: None,
             delta: None,
             echo: None,
+            fission: None,
         };
         let [signer1, signer2] = create_funded_signers(&mut config);
         let node = IrysNodeTest::new_genesis(config)
@@ -789,12 +789,12 @@ mod borealis_hardfork {
         let mut config = NodeConfig::testing();
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
-            next_name_tbd: None,
             aurora,
             borealis,
             cascade: None,
             delta: None,
             echo: None,
+            fission: None,
         };
         config
     }
@@ -882,7 +882,6 @@ mod borealis_hardfork {
         // Set up Aurora (already active) and Borealis (activating soon)
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
-            next_name_tbd: None,
             aurora: Some(Aurora {
                 activation_timestamp: UnixTimestamp::from_secs(0),
                 minimum_commitment_tx_version: AURORA_MIN_VERSION,
@@ -893,6 +892,7 @@ mod borealis_hardfork {
             cascade: None,
             delta: None,
             echo: None,
+            fission: None,
         };
 
         let signer = create_funded_signer(&mut config);
@@ -1011,11 +1011,11 @@ mod peer_sync_recovery {
         genesis_config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
             aurora: None, // Disabled initially
-            next_name_tbd: None,
             borealis: None,
             cascade: None,
             delta: None,
             echo: None,
+            fission: None,
         };
 
         // Fund signers: 9 for V1 (3 epochs * 3 blocks), 9 for V2 (3 epochs * 3 blocks), 1 for peer

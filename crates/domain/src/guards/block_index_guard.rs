@@ -1,5 +1,5 @@
-use irys_database::block_header_by_hash;
-use irys_types::{BlockIndexItem, DatabaseProvider};
+use irys_database::{DatabaseProvider, block_header_by_hash};
+use irys_types::BlockIndexItem;
 use reth_db::Database as _;
 use tracing::{debug, error};
 

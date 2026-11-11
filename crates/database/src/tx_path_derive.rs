@@ -36,7 +36,7 @@ use crate::{
 /// Whether this binary can decode `IrysDataTxHeaders` for a schema stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxHeaderSchema {
-    /// `true` only for schema V3, the layout this binary decodes.
+    /// `true` for schemas V3, V4 and V5, which share the tx-header layout this binary decodes.
     pub readable: bool,
     /// Why the stamp is accepted or refused.
     pub message: String,
@@ -98,21 +98,22 @@ pub struct LedgerSpan {
 
 /// Classify a consensus schema stamp without reading a tx header.
 ///
-/// V3 and V4 are the readable layouts: V4 changes only the data cache tables,
-/// not the tx header bytes. Older stamps still use `bundle_format` or an
-/// inline `promoted_height`. Decoding those bytes with this binary panics.
+/// V3, V4 and V5 share the readable tx-header layout: V4 moves the data cache
+/// tables to the cache environment and V5 re-keys them, but neither changes the
+/// tx header bytes. Older stamps still use `bundle_format` or an inline
+/// `promoted_height`. Decoding those bytes with this binary panics.
 pub fn tx_header_schema(version: Option<u32>) -> TxHeaderSchema {
     match version {
-        Some(version @ (3 | 4)) => TxHeaderSchema {
+        Some(version @ (3..=5)) => TxHeaderSchema {
             readable: true,
             message: format!(
                 "schema V{version}: tx headers use metadata_format and decode with this binary"
             ),
         },
-        Some(version) if version > 4 => TxHeaderSchema {
+        Some(version) if version > 5 => TxHeaderSchema {
             readable: false,
             message: format!(
-                "schema {version} is newer than V4. This binary refuses it. A read-only open does not migrate."
+                "schema {version} is newer than V5. This binary refuses it. A read-only open does not migrate."
             ),
         },
         other => {
@@ -972,7 +973,7 @@ mod tests {
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::{SubmoduleIndex, SubmoduleStore as _};
-    use crate::tables::IrysTables;
+    use crate::tables::ConsensusTables;
     use crate::{
         IrysDatabaseArgs as _, insert_block_header, insert_block_index_items_for_block,
         insert_tx_header, open_or_create_db,
@@ -1058,7 +1059,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");
@@ -1508,7 +1509,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");
@@ -1655,7 +1656,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");
@@ -1684,7 +1685,7 @@ mod tests {
     }
 
     #[test]
-    fn tx_header_schema_gates_v3() {
+    fn tx_header_schema_accepts_v3_to_v5() {
         for version in [None, Some(0), Some(1), Some(2)] {
             let schema = tx_header_schema(version);
             assert!(!schema.readable);
@@ -1699,10 +1700,11 @@ mod tests {
                 schema.message
             );
         }
-        assert!(tx_header_schema(Some(3)).readable);
-        let current = tx_header_schema(Some(4));
-        assert!(current.readable);
-        let newer = tx_header_schema(Some(5));
+        for version in [3, 4, 5] {
+            let schema = tx_header_schema(Some(version));
+            assert!(schema.readable);
+        }
+        let newer = tx_header_schema(Some(6));
         assert!(!newer.readable);
         assert!(newer.message.contains("newer"));
     }
@@ -1712,7 +1714,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");
@@ -1747,7 +1749,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");
@@ -1801,7 +1803,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");

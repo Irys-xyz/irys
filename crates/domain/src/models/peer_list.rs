@@ -1,13 +1,13 @@
 use crate::models::PeerEvent;
 use alloy_core::primitives::B256;
+use irys_database::DatabaseProvider;
 use irys_database::reth_db::Database as _;
 use irys_database::reth_db::DatabaseError;
 use irys_database::reth_db::cursor::DbCursorRO as _;
 use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::tables::PeerListItems;
 use irys_types::{
-    Config, DatabaseProvider, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError,
-    PeerNetworkSender,
+    Config, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError, PeerNetworkSender,
 };
 use irys_types::{IrysAddress, IrysPeerId, ProtocolVersion};
 use lru::LruCache;
@@ -1697,10 +1697,8 @@ mod tests {
     /// blocker: the peer is rediscovered from the network.
     #[test]
     fn new_skips_a_peer_row_that_does_not_decode() {
-        use irys_database::tables::IrysTables;
-        use irys_database::{IrysDatabaseArgs as _, insert_peer_list_item, open_or_create_db};
+        use irys_database::{DatabaseProviderTestExt as _, insert_peer_list_item};
         use irys_testing_utils::utils::TempDirBuilder;
-        use reth_db::mdbx::DatabaseArguments;
         use reth_db::table::Table;
         use reth_db::transaction::DbTxMut as _;
 
@@ -1721,14 +1719,11 @@ mod tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("peer_list_malformed_row")
             .build();
-        let db = DatabaseProvider(Arc::new(
-            open_or_create_db(
-                tmp_dir.path().join("db"),
-                IrysTables::ALL,
-                DatabaseArguments::irys_testing().unwrap(),
-            )
-            .unwrap(),
-        ));
+        let db = DatabaseProvider::for_testing(
+            &tmp_dir.path().join("db"),
+            &tmp_dir.path().join("cache"),
+        )
+        .unwrap();
 
         let (_, peer_id, peer) = create_test_peer(1);
         // The malformed key sorts before the valid one, so the walk must continue

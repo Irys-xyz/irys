@@ -2,18 +2,17 @@ use crate::utils::IrysNodeTest;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use irys_chain::IrysNodeCtx;
-use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
+use irys_database::DatabaseProvider;
+use irys_database::db::{DatabaseProviderCacheExt as _, IrysDupCursorExt as _};
 use irys_database::tables::{CachedChunksIndex, CompactCachedIngressProof};
 use irys_testing_utils::initialize_tracing;
-use irys_types::{
-    DataCommitment, DataLedger, DatabaseProvider, H256, IrysAddress, NodeConfig, irys::IrysSigner,
-};
+use irys_types::{DataCommitment, DataLedger, H256, IrysAddress, NodeConfig, irys::IrysSigner};
 use reth_db::transaction::DbTx as _;
 use std::time::Duration;
 
 fn cached_chunk_count(db: &DatabaseProvider, data_commitment: DataCommitment) -> eyre::Result<u32> {
-    db.view_eyre(|tx| {
-        let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+    db.view_cache_eyre(|tx| {
+        let mut cursor = tx.inner().cursor_dup_read::<CachedChunksIndex>()?;
         Ok(cursor.dup_count(data_commitment)?.unwrap_or(0))
     })
 }
@@ -23,7 +22,7 @@ fn local_proof(
     data_commitment: DataCommitment,
     address: IrysAddress,
 ) -> eyre::Result<Option<CompactCachedIngressProof>> {
-    db.view_eyre(|tx| {
+    db.view_cache_eyre(|tx| {
         irys_database::ingress_proof_by_commitment_address(tx, data_commitment, address)
     })
 }
@@ -59,15 +58,17 @@ async fn mine_until(
 /// Regression: an assigned Submit miner keeps re-signing its ingress proof
 /// after its chunk bodies have left the capped chunk cache.
 ///
-/// The cache is always at capacity (`max_cache_size_bytes = 0`) and promotion
-/// needs two proofs, so this single node's tx stays unpromoted. Once the
-/// bodies are persisted to the Submit module and reclaimed from the cache, the
-/// proof anchor expires. Before the fix the at-capacity prune deleted that
-/// proof, because no cached body was left to fence, and nothing generated it
-/// again.
+/// HTTP admission rejects when `cached_bytes >= max_cache_size_bytes`. A max
+/// of 0 503s the three POSTs (empty cache is `0 >= 0`). The cap is the
+/// 3-chunk body so those POSTs land, then the cache sits at the mark and
+/// capacity prune reclaims the bodies once they are durable. Promotion needs
+/// two proofs, so this single node's tx stays unpromoted.
 ///
-/// Then the row is deleted by hand, as a node that already lost it would be.
-/// The restore sweep regenerates it from the persisted compact leaves.
+/// Once the bodies are persisted to the Submit module and reclaimed, the
+/// proof anchor expires. A live Submit copy must keep that proof (reanchor,
+/// not delete). Then the row is deleted by hand, as a node that already lost
+/// it would be. The restore sweep regenerates it from the persisted compact
+/// leaves.
 #[test_log::test(tokio::test)]
 async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()> {
     initialize_tracing();
@@ -79,7 +80,7 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
         c.chunk_size = 32;
         c.num_chunks_in_partition = 10;
         c.num_chunks_in_recall_range = 2;
-        c.num_partitions_per_slot = 1;
+        c.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
         c.block_migration_depth = 1;
         c.mempool.tx_anchor_expiry_depth = 3;
         c.mempool.ingress_proof_anchor_expiry_depth = anchor_expiry_depth;
@@ -88,8 +89,9 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
         c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 0;
     }
     config.storage.num_writes_before_sync = 2;
-    // 0 >= 0: every prune pass runs the at-capacity arm.
-    config.cache.max_cache_size_bytes = 0;
+    // HTTP watermark is `cached_bytes >= max`. Zero makes an empty cache
+    // look full. Three bodies fill this cap, then capacity prune reclaims.
+    config.cache.max_cache_size_bytes = 3 * config.consensus_config().chunk_size;
     config.cache.cache_clean_lag = 0;
 
     let signer = IrysSigner::random_signer(&config.consensus_config());
@@ -100,6 +102,12 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
             ..Default::default()
         },
     )]);
+
+    // The required total is clamped to the active stakes. This signer runs no
+    // node and signs no proof: staking it keeps the total at 2, so the tx stays
+    // unpromoted.
+    let bystander = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&bystander]);
 
     // min_chunk_age = (block_migration_depth + cache_clean_lag) * block_time
     let consensus = config.consensus_config();
@@ -114,6 +122,17 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
         .packing_waiter
         .wait_for_idle(Some(Duration::from_secs(10)))
         .await?;
+    node.post_stake_commitment_with_signer(&bystander).await?;
+    node.mine_until_next_epoch().await?;
+    assert_eq!(
+        node.node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .active_stake_count(),
+        2,
+        "the bystander's stake must be active before the tx"
+    );
 
     // A 3-chunk Publish tx, confirmed on Submit.
     let data_chunks: [[u8; 32]; 3] = [[10; 32], [20; 32], [30; 32]];
@@ -180,7 +199,7 @@ async fn heavy_test_submit_ingress_proof_survives_cache_cap() -> eyre::Result<()
 
     // A node that already lost the row gets it back from the restore sweep.
     let current = local_proof(&db, data_commitment, local_address)?.expect("reanchored proof");
-    let deleted = db.update_eyre(|tx| {
+    let deleted = db.update_cache_eyre(|tx| {
         irys_database::delete_ingress_proof_if_unchanged(tx, data_commitment, current)
     })?;
     assert!(deleted);

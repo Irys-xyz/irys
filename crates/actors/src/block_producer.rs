@@ -20,6 +20,7 @@ use alloy_rpc_types_engine::{
 };
 use alloy_signer_local::LocalSigner;
 use eyre::{OptionExt as _, eyre};
+use irys_database::DatabaseProvider;
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
     ExponentialMarketAvgCalculation, HardforkConfigExt as _,
@@ -38,9 +39,8 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, H256, H256List, IrysAddress, IrysBlockHeader,
     IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, SendTraced as _, Signature,
     SystemTransactionLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
-    VDFLimiterInfo, app_state::DatabaseProvider, block_production::SolutionContext,
-    calculate_difficulty, compute_solution_hash, next_cumulative_diff, storage_pricing::Amount,
-    u256_from_le_bytes as hash_to_number,
+    VDFLimiterInfo, block_production::SolutionContext, compute_solution_hash,
+    storage_pricing::Amount, u256_from_le_bytes as hash_to_number,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -309,6 +309,7 @@ fn own_block_rejection_cause(err: &PreValidationError) -> OwnBlockRejectionCause
         // builds from the same tx lists.
         PreValidationError::BlockSignatureInvalid
         | PreValidationError::CumulativeDifficultyMismatch { .. }
+        | PreValidationError::DataLedgersNotEmptyWhilePendingResize { .. }
         | PreValidationError::DifficultyMismatch { .. }
         | PreValidationError::EmaMismatch
         | PreValidationError::HeightInvalid { .. }
@@ -954,6 +955,88 @@ pub trait BlockProdStrategy {
         }
     }
 
+    /// A solution read with stale sampling geometry (a miner that has not yet
+    /// adopted the parent epoch's resize) must not be sealed. Every rejection
+    /// is logged: a silent drop hides a miner stuck on the old geometry.
+    fn solution_fits_partition_geometry(
+        &self,
+        solution: &SolutionContext,
+        prev_block_header: &IrysBlockHeader,
+    ) -> eyre::Result<bool> {
+        let consensus_context = {
+            let tree = self.inner().block_tree_guard.read();
+            tree.get_epoch_snapshot(&prev_block_header.block_hash)
+                .ok_or_else(|| {
+                    eyre!(
+                        "parent epoch snapshot missing for {}",
+                        prev_block_header.block_hash
+                    )
+                })?
+                .consensus_context()
+        };
+        if !consensus_context.resize_configured() {
+            return Ok(true);
+        }
+        let geometry = consensus_context.geometry();
+        let origin = geometry.sampling_origin;
+        if solution.vdf_step < origin
+            || u64::from(solution.chunk_offset) >= geometry.partition_chunks
+        {
+            warn!(
+                solution.vdf_step = solution.vdf_step,
+                solution.chunk_offset = solution.chunk_offset,
+                geometry.sampling_origin = origin,
+                geometry.partition_chunks = geometry.partition_chunks,
+                "dropping solution outside the active partition geometry"
+            );
+            return Ok(false);
+        }
+        let count = geometry.recall_ranges();
+        let start =
+            irys_efficient_sampling::reset_step_from_origin(solution.vdf_step, count, origin)?;
+        let mut seeds = if start < solution.vdf_step {
+            match self
+                .inner()
+                .vdf_steps_guard
+                .get_steps(ii(start, solution.vdf_step - 1))
+            {
+                Ok(seeds) => seeds,
+                // A gap in the local seed buffer says nothing about the
+                // solution; drop it rather than abort production.
+                Err(err) => {
+                    warn!(
+                        solution.vdf_step = solution.vdf_step,
+                        window.start = start,
+                        "recall-range window unavailable; dropping solution: {err:?}"
+                    );
+                    return Ok(false);
+                }
+            }
+        } else {
+            H256List::new()
+        };
+        seeds.push(solution.seed.0);
+        let expected = irys_efficient_sampling::get_recall_range(
+            usize::try_from(count).map_err(|_| eyre!("recall range count exceeds usize"))?,
+            &seeds,
+            &solution.partition_hash,
+        )?;
+        let expected =
+            u64::try_from(expected).map_err(|_| eyre!("recall range index exceeds u64"))?;
+        let actual = u64::from(solution.chunk_offset) / geometry.recall_chunks;
+        if actual != expected {
+            warn!(
+                solution.vdf_step = solution.vdf_step,
+                solution.chunk_offset = solution.chunk_offset,
+                recall_range.expected = expected,
+                recall_range.actual = actual,
+                "dropping solution from the wrong recall range for the active geometry"
+            );
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     /// Core block production logic that can be used for both initial production and rebuilds.
     async fn produce_block_with_parent(
         &self,
@@ -1026,6 +1109,15 @@ pub trait BlockProdStrategy {
                 "Skipping solution {} on parent {}: {err}",
                 solution.solution_hash, prev_block_header.block_hash
             );
+            return Ok(None);
+        }
+
+        // After Fission the parent epoch's geometry decides which recall range
+        // the solution may come from. Checked before the Reth payload is built.
+        if !self
+            .solution_fits_partition_geometry(solution, &prev_block_header)
+            .map_err(BlockProductionError::recoverable("partition_geometry"))?
+        {
             return Ok(None);
         }
 
@@ -1629,24 +1721,6 @@ pub trait BlockProdStrategy {
         let opt_proofs = mempool_bundle.publish_txs.proofs.clone();
 
         // Difficulty adjustment logic
-        let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
-        let current_difficulty = prev_block_header.diff;
-        let (diff, stats) = calculate_difficulty(
-            block_height,
-            last_diff_timestamp,
-            current_timestamp,
-            current_difficulty,
-            &self.inner().config.consensus.difficulty_adjustment,
-        );
-
-        // Did an adjustment happen?
-        if stats.is_some() {
-            last_diff_timestamp = current_timestamp;
-        }
-
-        let cumulative_difficulty = next_cumulative_diff(prev_block_header.cumulative_diff, diff);
-
-        // Use the partition hash to figure out what ledger it belongs to
         let epoch_snapshot = self
             .inner()
             .block_tree_guard
@@ -1657,7 +1731,24 @@ pub trait BlockProdStrategy {
             .map_err(BlockProductionError::recoverable(
                 "parent_state_unavailable",
             ))?;
+        let consensus_context = epoch_snapshot.consensus_context();
+        let (diff, stats) =
+            consensus_context.child_difficulty(block_height, current_timestamp, prev_block_header);
 
+        let last_diff_timestamp = consensus_context.child_last_diff_timestamp(
+            block_height,
+            current_timestamp,
+            prev_block_header,
+        );
+
+        let cumulative_difficulty = consensus_context.child_cumulative_diff(
+            block_height,
+            current_timestamp,
+            prev_block_header,
+            diff,
+        );
+
+        // Use the partition hash to figure out what ledger it belongs to
         let ledger_id = epoch_snapshot
             .get_data_partition_assignment(solution.partition_hash)
             .and_then(|pa| pa.ledger_id);
@@ -1780,12 +1871,14 @@ pub trait BlockProdStrategy {
                         total_chunks: publish_total_chunks,
                         expires: None,
                         proofs: opt_proofs,
+                        // Same N the selector sized the proofs with: the
+                        // configured total clamped to the parent epoch's stakes.
                         required_proof_count: Some(
-                            self.inner()
-                                .config
-                                .number_of_ingress_proofs_total_at(current_timestamp.to_secs())
-                                .try_into()
-                                .map_err(BlockProductionError::irrecoverable)?,
+                            crate::block_validation::required_ingress_proofs_total(
+                                &self.inner().config.consensus.hardforks,
+                                current_timestamp.to_secs(),
+                                &epoch_snapshot,
+                            ),
                         ),
                     },
                     // Term Submit Ledger
@@ -2086,6 +2179,20 @@ pub trait BlockProdStrategy {
         // Fetch epoch snapshot (needed for reward address resolution)
         let (parent_epoch_snapshot, parent_commitment_snapshot) =
             self.fetch_parent_snapshots(prev_block_header)?;
+
+        // While Fission is scheduled but not yet active on this branch, blocks
+        // must keep the data ledgers empty (validators enforce the same rule),
+        // so activation block E can never fail `NonEmptyLedgers`. The
+        // transactions stay in the mempool until activation.
+        if parent_epoch_snapshot
+            .consensus_context()
+            .pending_activation()
+        {
+            mempool_txs.submit_tx.clear();
+            mempool_txs.one_year_tx.clear();
+            mempool_txs.thirty_day_tx.clear();
+            mempool_txs.publish_tx = PublishLedgerWithTxs::default();
+        }
 
         if !is_epoch {
             // Filter commitments by version using block timestamp
@@ -2434,6 +2541,19 @@ fn choose_oracle_price(
         (parent_price, "parent_fallback")
     };
 
+    // `oracle_price_is_valid` rejects zero. A 100% safe range would otherwise
+    // bound 0 to 0 and the producer would include a price it then rejects.
+    let (chosen, source) = if chosen.amount.is_zero() {
+        tracing::warn!(
+            parent_price = %parent_price,
+            oracle_price = %oracle_price,
+            "oracle price is zero; using parent price so the block passes prevalidation"
+        );
+        (parent_price, "parent_zero_oracle")
+    } else {
+        (chosen, source)
+    };
+
     tracing::debug!(
         parent_secs = parent_ts.as_secs(),
         oracle_secs = oracle_updated_at.as_secs(),
@@ -2637,6 +2757,22 @@ mod oracle_choice_tests {
             oracle_price
         };
         assert_eq!(chosen, expected);
+    }
+
+    #[test]
+    fn fresh_zero_oracle_price_uses_parent() {
+        let parent_price = Amount::token(dec!(0.05)).unwrap();
+        let oracle_price = Amount::token(dec!(0.0)).unwrap();
+
+        let chosen = choose_oracle_price(
+            UnixTimestamp::from_secs(1000),
+            parent_price,
+            oracle_price,
+            UnixTimestamp::from_secs(1000),
+        );
+
+        assert_eq!(chosen, parent_price);
+        assert!(!chosen.amount.is_zero());
     }
 }
 

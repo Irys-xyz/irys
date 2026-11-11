@@ -1,12 +1,12 @@
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::DatabaseProvider;
+use irys_database::cached_unpacked_chunk;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::submodule::tables::DataRootInfo;
-use irys_database::{cached_chunk_by_chunk_offset, cached_data_root_by_commitment};
 use irys_types::data_tree::data_commitment;
 use irys_types::{
     ChunkFormat, Config, DataCommitment, DataLedger, LedgerChunkOffset, LedgerChunkRange,
     PackedChunk, PartitionChunkOffset, RelativeChunkOffset, TxChunkOffset, UnpackedChunk,
-    app_state::DatabaseProvider,
 };
 use nodit::interval::ii;
 use opentelemetry::{KeyValue, global, metrics::Counter};
@@ -450,7 +450,6 @@ impl ChunkProvider {
             &ledger, &requested_commitment, &data_tx_offset
         );
         let chunk_size = self.config.consensus.chunk_size;
-        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
         let geometry = self.config.data_tree_geometry();
         let mut found: Option<ChunkFormat> = None;
         // map hashes to SMs
@@ -488,7 +487,7 @@ impl ChunkProvider {
                 let Some(partition_offset) = partition_offset_for_placement(
                     info.start_offset,
                     data_tx_offset,
-                    num_chunks_in_partition,
+                    sm.partition_chunks(),
                 ) else {
                     continue;
                 };
@@ -560,43 +559,12 @@ impl ChunkProvider {
         if CACHE_READ_FAULT.with(std::cell::Cell::get) == Some(*data_tx_offset) {
             return Err(eyre::eyre!("injected cache read error"));
         }
-        let chunk_size = self.config.consensus.chunk_size;
-        self.db.view_eyre(|tx| {
-            let Some(cdr) = cached_data_root_by_commitment(tx, data_commitment)? else {
-                return Ok(None);
-            };
-            if !tx_offset_within_data_size(data_tx_offset, cdr.data_size, chunk_size) {
-                debug!(
-                    data_commitment = %data_commitment,
-                    tx_offset = %data_tx_offset,
-                    data_size = cdr.data_size,
-                    "data_root offset is past the cached data size"
-                );
-                return Ok(None);
-            }
-            let Some((_meta, cached)) =
-                cached_chunk_by_chunk_offset(tx, data_commitment, data_tx_offset)?
-            else {
-                return Ok(None);
-            };
-            // Index-only rows (body pruned / stored only in a partition) cannot be served.
-            let Some(bytes) = cached.chunk else {
-                debug!(
-                    data_commitment = %data_commitment,
-                    tx_offset = %data_tx_offset,
-                    "cache index hit but chunk body missing; cannot serve data_root fetch"
-                );
-                return Ok(None);
-            };
-
-            Ok(Some(ChunkFormat::Unpacked(UnpackedChunk {
-                data_tree_root: cdr.data_tree_root,
-                data_size: cdr.data_size,
-                data_path: cached.data_path,
-                bytes,
-                tx_offset: data_tx_offset,
-            })))
-        })
+        let geometry = self.config.data_tree_geometry();
+        self.db
+            .view_cache_eyre(|tx| {
+                cached_unpacked_chunk(tx, data_commitment, data_tx_offset, &geometry)
+            })
+            .map(|maybe| maybe.map(ChunkFormat::Unpacked))
     }
 
     /// Ledger start offsets of the placements of `data_commitment`, from the
@@ -859,7 +827,7 @@ mod tests {
 
         let db = create_test_db(&tmp_dir.path().join("irys_db"));
         cache_chunks(&db, &config, &short_tx, &short_chunks);
-        db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             cache_data_root(wtx, &long_header, None, &geometry)?;
             for chunk in &long_chunks {
                 cache_chunk(wtx, chunk, &geometry)?;
@@ -1156,7 +1124,7 @@ mod tests {
         cache_chunks(&db, &config, &tx, &chunks);
         // Distinct data_path so the cache does not treat this as a duplicate
         // of a real chunk and skip the out-of-range index entry.
-        db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             cache_chunk(
                 wtx,
                 &UnpackedChunk {
@@ -1353,16 +1321,9 @@ mod tests {
     }
 
     fn create_test_db(path: &std::path::Path) -> DatabaseProvider {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
-        use reth_db::mdbx::DatabaseArguments;
+        use irys_database::DatabaseProviderTestExt as _;
 
-        let db = open_or_create_db(
-            path,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().unwrap(),
-        )
-        .unwrap();
-        DatabaseProvider(Arc::new(db))
+        DatabaseProvider::for_testing(path, &path.join("cache")).unwrap()
     }
 
     fn testing_config(base: std::path::PathBuf, num_chunks: u64) -> Config {
@@ -1427,7 +1388,7 @@ mod tests {
         chunks: &[UnpackedChunk],
     ) {
         let geometry = config.data_tree_geometry();
-        db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             cache_data_root(wtx, &tx.header, None, &geometry)?;
             for chunk in chunks {
                 cache_chunk(wtx, chunk, &geometry)?;

@@ -21,7 +21,7 @@ fn single_node_config() -> NodeConfig {
     NodeConfig::testing()
         .with_consensus(|consensus| {
             consensus.chunk_size = CHUNK_SIZE as u64;
-            consensus.num_partitions_per_slot = 1;
+            consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
             consensus.num_chunks_in_partition = 10;
             consensus.num_chunks_in_recall_range = 2;
             consensus.entropy_packing_iterations = 1_000;
@@ -104,7 +104,7 @@ async fn slow_heavy_two_nodes_upload_promote_migrate_sync_and_mine_v2_data() -> 
     initialize_tracing();
     let mut config = single_node_config().with_consensus(|consensus| {
         // Two replicas per slot: the peer gets a replica of the slot with the data.
-        consensus.num_partitions_per_slot = 2;
+        consensus.num_partitions_per_slot = irys_types::ReplicaCount::new(2);
         // The 4-chunk upload fills the partition, so every recall range holds data.
         consensus.num_chunks_in_partition = 4;
         consensus.epoch.num_blocks_in_epoch = 4;

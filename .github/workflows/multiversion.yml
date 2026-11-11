@@ -53,6 +53,16 @@ jobs:
           OLD_REF: ${{ steps.refs.outputs.old_ref }}
         run: cargo xtask multiversion-test --profile dev --old-ref "$OLD_REF" --new-ref HEAD --clean -- --no-fail-fast
 
+      # The next run's --clean deletes the test data on this self-hosted runner,
+      # so keep the node logs of a failed run.
+      - name: Upload node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multiversion-node-logs-${{ github.run_number }}
+          path: target/multiversion/test-data/**/logs/
+          retention-days: 7
+
       - name: sccache stats
         if: always()
         continue-on-error: true

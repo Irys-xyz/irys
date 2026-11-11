@@ -76,12 +76,15 @@ impl MockOracle {
                     .saturating_add(self.incremental_change.amount),
             );
         } else {
-            guard.price = Amount::new(
-                guard
-                    .price
-                    .amount
-                    .saturating_sub(self.incremental_change.amount),
-            );
+            let next = guard
+                .price
+                .amount
+                .saturating_sub(self.incremental_change.amount);
+            // Prevalidation rejects a zero oracle price. Stop one increment
+            // above zero instead of saturating to 0.
+            if !next.is_zero() {
+                guard.price = Amount::new(next);
+            }
         }
 
         Ok(Amount::new(guard.price.amount))
@@ -146,6 +149,28 @@ mod tests {
         let price_after_second = oracle.current_price().unwrap();
         assert_eq!(price_after_second.token_to_decimal().unwrap(), dec!(1.00));
     }
+
+    #[test_log::test(tokio::test)]
+    async fn falling_price_stops_above_zero() {
+        let increment = Amount::token(dec!(0.05)).unwrap();
+        let oracle = MockOracle::new(
+            Amount::token(dec!(0.10)).unwrap(),
+            increment,
+            999_999,
+            false,
+        );
+
+        let mut last = None;
+        for _ in 0..50 {
+            let price = oracle.current_price().unwrap();
+            assert!(
+                !price.amount.is_zero(),
+                "mock oracle must not return a zero price"
+            );
+            last = Some(price);
+        }
+        assert_eq!(last, Some(increment));
+    }
 }
 
 #[cfg(test)]
@@ -156,10 +181,14 @@ mod prop_tests {
 
     proptest! {
         #[test]
-        fn prop_mock_oracle_price_always_positive(num_updates in 1_u32..200) {
+        fn prop_mock_oracle_price_always_positive(
+            num_updates in 1_u32..400,
+            going_up in any::<bool>(),
+            smoothing in 1_u64..=500,
+        ) {
             let initial_price = Amount::new(U256::from(1_000_000_000_000_000_000_u64));
             let increment = Amount::new(U256::from(10_000_000_000_000_000_u64));
-            let oracle = MockOracle::new(initial_price, increment, 5, true);
+            let oracle = MockOracle::new(initial_price, increment, smoothing, going_up);
 
             for _ in 0..num_updates {
                 let price = oracle.current_price().expect("should not fail");

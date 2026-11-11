@@ -8,6 +8,7 @@ use crate::{
 use crate::metrics;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
+use irys_database::DatabaseProvider;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
 };
@@ -17,9 +18,9 @@ use irys_domain::{
 use irys_reward_curve::HalvingCurve;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
-    DatabaseProvider, H256, IrysBlockHeader, IrysTransactionId, SealedBlock, SendTraced as _,
-    SystemLedger, TokioServiceHandle, Traced, get_ingress_proofs,
+    BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader, H256,
+    IrysBlockHeader, IrysTransactionId, SealedBlock, SendTraced as _, SystemLedger,
+    TokioServiceHandle, Traced, get_ingress_proofs,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -1242,6 +1243,7 @@ where
 #[cfg(test)]
 mod data_tx_lookup_tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_database::insert_tx_header;
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{ConsensusConfig, H256};
@@ -1249,12 +1251,7 @@ mod data_tx_lookup_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn db_lookup_finds_stored_txs_and_reports_missing() -> eyre::Result<()> {
         let tmp_dir = TempDirBuilder::new().prefix("data_tx_lookup").build();
-        let db = DatabaseProvider(Arc::new(
-            irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
-                tmp_dir.path(),
-                irys_types::DbSyncMode::UtterlyNoSync,
-            )?,
-        ));
+        let db = DatabaseProvider::for_testing(tmp_dir.path(), &tmp_dir.path().join("cache"))?;
         let mut stored = DataTransactionHeader::new(&ConsensusConfig::testing());
         stored.id = H256::repeat_byte(1);
         db.update_eyre(|tx| insert_tx_header(tx, &stored))?;

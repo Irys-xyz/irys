@@ -1,8 +1,9 @@
 use crate::metrics::record_reth_fcu_head_height;
 use eyre::eyre;
+use irys_database::DatabaseProvider;
 use irys_domain::BlockTreeReadGuard;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{BlockHash, DatabaseProvider, H256, RethPeerInfo, TokioServiceHandle, Traced};
+use irys_types::{BlockHash, H256, RethPeerInfo, TokioServiceHandle, Traced};
 use reth::{
     network::{NetworkInfo as _, Peers as _},
     revm::primitives::B256,

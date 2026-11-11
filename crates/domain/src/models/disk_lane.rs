@@ -469,7 +469,7 @@ pub(super) struct DiskGate {
     #[cfg(test)]
     pub(super) span_walk_slots: AtomicU64,
     /// One armed pause in the entropy-copy windows. Production builds omit it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     entropy_pack_pause: super::PauseGate<EntropyPackPause>,
     /// Instants `finish_span_read` uses as the pread return, one per span.
     #[cfg(test)]
@@ -502,7 +502,7 @@ pub(super) struct DiskGate {
 
 /// Test barrier around a copied entropy pad. The slot is not in the sweep
 /// queue at either point, so `fail_sweep_offset` cannot see it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EntropyPackPause {
     /// The pad or pending entropy is copied. `push_occupied` has not run.
@@ -813,7 +813,7 @@ impl DiskGate {
             enqueue_notifies: AtomicU64::new(0),
             #[cfg(test)]
             span_walk_slots: AtomicU64::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             entropy_pack_pause: super::PauseGate::new(),
             #[cfg(test)]
             span_read_done: Mutex::new(Vec::new()),
@@ -832,6 +832,26 @@ impl DiskGate {
             #[cfg(test)]
             pwrite_fail_remaining: AtomicU64::new(0),
         }
+    }
+
+    /// Park the next occupy after the offset is reserved. The sweep has not
+    /// taken the slot, so `has_in_flight_index_for` stays true.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn hold_after_entropy_copied(&self) {
+        self.entropy_pack_pause
+            .arm(EntropyPackPause::AfterEntropyCopied);
+    }
+
+    /// `true` once [`Self::hold_after_entropy_copied`] has stopped a writer.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn after_entropy_copied_arrived(&self, timeout: Duration) -> bool {
+        self.entropy_pack_pause.wait_arrived(timeout)
+    }
+
+    /// Release whichever entropy-copy pause is armed.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn release_entropy_pack_pause(&self) {
+        self.entropy_pack_pause.release();
     }
 
     /// Test drain bound. Production uses `SWEEP_WAIT`.
@@ -1567,7 +1587,7 @@ impl StorageModule {
                 .collect()
         };
         let chunk_size = self.config.consensus.chunk_size;
-        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
+        let num_chunks_in_partition = self.partition_chunks();
 
         let mut selected: Vec<SelectedOffset> = Vec::new();
         {
@@ -1686,7 +1706,7 @@ impl StorageModule {
         }
 
         // Not queued yet. A newer entropy write can durable-point in this gap.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-utils"))]
         self.disk
             .entropy_pack_pause
             .wait_if(EntropyPackPause::AfterEntropyCopied);
@@ -2504,13 +2524,8 @@ impl StorageModule {
         let last_tx = u32::try_from(chunks - 1).ok()?;
         let start = offset.0.checked_sub(u32::from(tx_offset))?;
         let tx_last = start.checked_add(last_tx)?;
-        let partition_last = u32::try_from(
-            self.config
-                .consensus
-                .num_chunks_in_partition
-                .saturating_sub(1),
-        )
-        .unwrap_or(u32::MAX);
+        let partition_last =
+            u32::try_from(self.partition_chunks().saturating_sub(1)).unwrap_or(u32::MAX);
         Some(tx_last.min(partition_last))
     }
 
@@ -2831,7 +2846,7 @@ impl StorageModule {
             return;
         }
         // Off the queue. A newer entropy write can land during the XOR.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-utils"))]
         self.disk
             .entropy_pack_pause
             .wait_if(EntropyPackPause::BeforePackXor);
@@ -2933,6 +2948,7 @@ impl StorageModule {
         pread: Option<&[u8]>,
     ) -> Result<(), WriteDataChunkError> {
         if self.data_writes_paused()
+            || !self.offset_in_partition(slot.offset)
             || self.index_write_generation.load(Ordering::SeqCst) != slot.generation
         {
             return Err(WriteDataChunkError::WritesPaused);
@@ -3142,6 +3158,7 @@ impl StorageModule {
             }
             pending.occupancy.remove(&offset);
             if self.data_writes_paused()
+                || !self.offset_in_partition(offset)
                 || self.index_write_generation.load(Ordering::SeqCst) != generation
             {
                 return Err(WriteDataChunkError::WritesPaused);
@@ -5148,9 +5165,11 @@ mod tests {
                     .expect("a pending retry has time left");
             }
             // The injected error builds a backtrace before the commit returns.
-            // The tight retry is a second commit after that return, not a
-            // commit that is still inside the first failure.
-            if started.elapsed() > Duration::from_secs(10) {
+            // A full nextest run can spend more than 10s inside that backtrace
+            // while the retry is still unarmed. The tight retry is a second
+            // commit after that return, not a commit that is still inside the
+            // first failure.
+            if started.elapsed() > Duration::from_secs(30) {
                 panic!(
                     "failed pwrite did not arm a retry: calls={calls} durable={} idle={} ready={}",
                     module.is_data_chunk_durable_at(PartitionChunkOffset::from(0)),
@@ -5333,6 +5352,14 @@ mod tests {
         );
     }
 
+    /// The lane can pwrite and durable-point the packed bytes before this
+    /// thread reads the pending map. Force the durable point, then check the
+    /// file.
+    fn assert_lane_packed_fresh_pad(module: &super::super::StorageModule) -> eyre::Result<()> {
+        module.force_sync_pending_chunks()?;
+        assert_data_byte_durable(module, 0, 0x10)
+    }
+
     /// The cache still holds the pread pad after the epoch moves. The file
     /// already has the replacement bytes: the bump is published before the
     /// cache invalidate. Occupy must not pack the old pad.
@@ -5496,7 +5523,7 @@ mod tests {
             module.disk.entropy_readahead_hits.load(Ordering::SeqCst) > hits,
             "the lane pack did not use the cached pad"
         );
-        assert_fresh_pad_packed(&module);
+        assert_lane_packed_fresh_pad(&module)?;
         drop(lane);
         Ok(())
     }
@@ -5608,17 +5635,22 @@ mod tests {
     }
 
     /// The lane commits the replacement while the clone is still off the queue.
+    /// The lane starts after occupy copies `0x11`, for the reason given on
+    /// `pending_entropy_is_not_packed_over_a_newer_write_on_the_lane`.
     #[test]
     fn pending_entropy_is_not_packed_after_a_durable_point_on_the_lane() -> eyre::Result<()> {
         let (_tmp, module, chunk) = cache_module("pending_durable_lane")?;
         queue_entropy(&module, 0x11);
         let module = Arc::new(module);
-        let lane = StopLane::start(Arc::clone(&module))?;
+        let mut lane = None;
         let wrote = ingress_during_pause(
             &module,
             &chunk,
             super::EntropyPackPause::AfterEntropyCopied,
-            || replace_entropy(&module, true),
+            || {
+                lane = Some(StopLane::start(Arc::clone(&module)).expect("lane start"));
+                replace_entropy(&module, true);
+            },
         );
         assert_old_pad_not_packed(wrote, &module, "durable point before push, lane up");
         assert!(pending_head(&module).is_none());
@@ -5629,26 +5661,35 @@ mod tests {
     /// The lane is up and the replacement stays unsynced until the lane pass.
     /// That pass may durable-point the new bytes before the fold, or the fold
     /// may see them still pending. Neither order may pack the old clone.
+    /// The lane starts after occupy copies `0x11`. A lane that starts earlier
+    /// can durable-point `0x11` before occupy. Occupy then copies no pad, and
+    /// the disk read packs the replacement: correct, but not this case.
     #[test]
     fn pending_entropy_is_not_packed_over_a_newer_write_on_the_lane() -> eyre::Result<()> {
         let (_tmp, module, chunk) = cache_module("pending_newer_lane")?;
         queue_entropy(&module, 0x11);
         let module = Arc::new(module);
-        let lane = StopLane::start(Arc::clone(&module))?;
+        let mut lane = None;
         let wrote = ingress_during_pause(
             &module,
             &chunk,
             super::EntropyPackPause::AfterEntropyCopied,
-            || replace_entropy(&module, false),
+            || {
+                lane = Some(StopLane::start(Arc::clone(&module)).expect("lane start"));
+                replace_entropy(&module, false);
+            },
         );
         assert_old_pad_not_packed(wrote, &module, "newer pending entropy, lane up");
-        let head = pending_head(&module);
-        assert_ne!(
-            head,
-            Some((super::super::ChunkType::Data, Some(0x10))),
-            "packed the entropy copied before the replacement"
-        );
+        // The lane may already have written the replacement, so check the
+        // file after the lane stop flushes every pending chunk.
         drop(lane);
+        let head = pending_head(&module);
+        assert!(head.is_none(), "lane stop left {head:?} pending");
+        assert_eq!(
+            chunk_file_byte(&module, PartitionChunkOffset::from(0))?,
+            0x22,
+            "the replacement entropy is not on disk"
+        );
         Ok(())
     }
 
@@ -5677,7 +5718,7 @@ mod tests {
         } else {
             first?;
         }
-        assert_fresh_pad_packed(&module);
+        assert_lane_packed_fresh_pad(&module)?;
         drop(lane);
         Ok(())
     }

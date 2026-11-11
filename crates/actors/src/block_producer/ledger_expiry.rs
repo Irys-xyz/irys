@@ -62,15 +62,16 @@ use crate::block_discovery::get_data_tx_in_parallel;
 use crate::mempool_guard::MempoolReadGuard;
 use crate::shadow_tx_generator::RollingHash;
 use eyre::{OptionExt as _, ensure, eyre};
+use irys_database::DatabaseProvider;
 use irys_database::{
     canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
     reth_db::transaction::DbTx as _, tables::MigratedBlockHashes,
 };
 use irys_domain::{BlockIndex, BlockTreeReadGuard, EpochSnapshot};
+use irys_types::partition_resize::PartitionGeometry;
 use irys_types::{
     BlockHeight, BlockIndexItem, Config, DataLedger, DataTransactionHeader, H256, IrysAddress,
     IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, SealedBlock, U256,
-    app_state::DatabaseProvider,
     fee_distribution::TermFeeCharges,
     hardfork_config::{Cascade, ForBlock, ForEpoch},
     ledger_chunk_offset_ii,
@@ -161,9 +162,10 @@ pub async fn calculate_expired_ledger_fees(
     }
 
     // Step 2: Find block ranges
+    let geometry = parent_epoch_snapshot.geometry();
     let block_range = match find_block_range(
         expired_slots,
-        config,
+        geometry,
         &block_index,
         ledger_type,
         parent_block_header.ledger_total_chunks(ledger_type),
@@ -183,7 +185,8 @@ pub async fn calculate_expired_ledger_fees(
     let (tx_to_miners, tx_headers) = collect_tx_to_miners_from_range(
         block_range,
         ledger_type,
-        config,
+        config.consensus.chunk_size,
+        geometry,
         block_tree_guard,
         mempool_guard,
         db,
@@ -343,7 +346,8 @@ pub async fn calculate_all_expired_ledger_fees(
 async fn collect_tx_to_miners_from_range(
     block_range: BlockRange,
     ledger_type: DataLedger,
-    config: &Config,
+    chunk_size: u64,
+    geometry: PartitionGeometry,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
@@ -376,7 +380,8 @@ async fn collect_tx_to_miners_from_range(
         true,       // is_earliest
         same_block, // is_latest only when this is also the sole (max) block
         ledger_type,
-        config,
+        chunk_size,
+        geometry,
         slot_miners,
         block_tree_guard,
         mempool_guard,
@@ -392,7 +397,8 @@ async fn collect_tx_to_miners_from_range(
         &block_range.middle_blocks,
         block_range.min_block.chunk_range,
         ledger_type,
-        config,
+        chunk_size,
+        geometry,
         slot_miners,
         block_tree_guard,
         mempool_guard,
@@ -412,7 +418,8 @@ async fn collect_tx_to_miners_from_range(
             false, // is_earliest
             true,  // is_latest — max block trims only the end
             ledger_type,
-            config,
+            chunk_size,
+            geometry,
             slot_miners,
             block_tree_guard,
             mempool_guard,
@@ -517,9 +524,10 @@ pub async fn expired_submit_tx_ids(
         .map(|i| (SlotIndex::new(i as u64), vec![IrysAddress::ZERO]))
         .collect();
 
+    let geometry = parent_epoch_snapshot.geometry();
     let block_range = match find_block_range(
         expired_slots,
-        config,
+        geometry,
         &block_index,
         DataLedger::Submit,
         parent_block_header.ledger_total_chunks(DataLedger::Submit),
@@ -535,7 +543,8 @@ pub async fn expired_submit_tx_ids(
     let (tx_to_miners, _) = collect_tx_to_miners_from_range(
         block_range,
         DataLedger::Submit,
-        config,
+        config.consensus.chunk_size,
+        geometry,
         block_tree_guard,
         mempool_guard,
         db,
@@ -572,7 +581,6 @@ pub async fn is_submit_storage_expired(
         block_height,
         parent_epoch_snapshot,
         parent_block_header,
-        config,
         cascade_for_block,
     )?
     else {
@@ -622,7 +630,6 @@ pub fn expired_submit_range(
     block_height: u64,
     parent_epoch_snapshot: &EpochSnapshot,
     parent_block_header: &IrysBlockHeader,
-    config: &Config,
     cascade_for_block: ForBlock<Cascade>,
 ) -> eyre::Result<Option<ExpiredSubmitRange>> {
     let parent_total = parent_block_header.ledger_total_chunks(DataLedger::Submit);
@@ -660,7 +667,7 @@ pub fn expired_submit_range(
     // from slot 0, so the range is `[0, range_end)`. Bounding by the parent
     // header (not this node's block-index tip) is what makes the verdict
     // branch-deterministic.
-    let p = config.consensus.num_chunks_in_partition;
+    let p = parent_epoch_snapshot.partition_chunks();
     // Fail loud on a zero partition size rather than silently disabling the
     // §4b/§4c filter: with `p == 0`, `range_end` would collapse to 0 and this
     // function would return `Ok(None)` (no candidate filtered), while the refund
@@ -986,16 +993,38 @@ pub(crate) fn resolve_promoted_on_branch(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeSet<IrysTransactionId>> {
+    Ok(resolve_promotion_heights_on_branch(
+        candidate_txids,
+        parent_block_hash,
+        block_height,
+        config,
+        block_tree_guard,
+        db,
+    )?
+    .into_keys()
+    .collect())
+}
+
+/// [`resolve_promoted_on_branch`], keeping the height of the Publish block
+/// that promoted each tx.
+pub(crate) fn resolve_promotion_heights_on_branch(
+    candidate_txids: &[IrysTransactionId],
+    parent_block_hash: H256,
+    block_height: u64,
+    config: &Config,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<BTreeMap<IrysTransactionId, u64>> {
     // No candidates → nothing to resolve; skip the tree/DB ancestry walk entirely.
     if candidate_txids.is_empty() {
-        return Ok(BTreeSet::new());
+        return Ok(BTreeMap::new());
     }
 
     let walk_depth = crate::block_validation::prior_inclusion_walk_depth(config);
     let walk_min_height = block_height.saturating_sub(walk_depth);
 
     let mut remaining: BTreeSet<IrysTransactionId> = candidate_txids.iter().copied().collect();
-    let mut promoted: BTreeSet<IrysTransactionId> = BTreeSet::new();
+    let mut promoted: BTreeMap<IrysTransactionId, u64> = BTreeMap::new();
 
     // Primary path: by-hash parent walk over the reorg window. An in-window
     // ancestor missing from BOTH the tree and the DB is a local inconsistency
@@ -1009,7 +1038,7 @@ pub(crate) fn resolve_promoted_on_branch(
         |header| {
             remaining.retain(|txid| {
                 if block_includes_ledger_tx(header, DataLedger::Publish, txid) {
-                    promoted.insert(*txid);
+                    promoted.insert(*txid, header.height);
                     false
                 } else {
                     true
@@ -1041,8 +1070,8 @@ pub(crate) fn resolve_promoted_on_branch(
         let max_height = walk_min_height.saturating_sub(1);
         db.view_eyre(|tx| {
             for txid in &remaining {
-                if canonical_promoted_height(tx, txid, max_height)?.is_some() {
-                    promoted.insert(*txid);
+                if let Some(height) = canonical_promoted_height(tx, txid, max_height)? {
+                    promoted.insert(*txid, height);
                 }
             }
             Ok(())
@@ -1369,7 +1398,7 @@ fn collect_expired_partitions(
 /// Finds all blocks containing data in the expired chunk ranges
 fn find_block_range(
     expired_slots: BTreeMap<SlotIndex, Vec<IrysAddress>>,
-    config: &Config,
+    geometry: PartitionGeometry,
     block_index: &BlockIndex,
     ledger_type: DataLedger,
     parent_total_chunks: u64,
@@ -1416,7 +1445,7 @@ fn find_block_range(
         // offset's slot, instead of a per-block union (NC-0042 R4).
         slot_miners.insert(slot_index, Arc::new(miners));
         let chunk_range = slot_index.compute_chunk_range(
-            config.consensus.num_chunks_in_partition,
+            geometry.partition_chunks,
             max_chunk_offset_across_all_partitions,
         );
         global_start =
@@ -1540,7 +1569,8 @@ async fn process_boundary_block(
     is_earliest: bool,
     is_latest: bool,
     ledger_type: DataLedger,
-    config: &Config,
+    chunk_size: u64,
+    geometry: PartitionGeometry,
     slot_miners: &BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>>,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
@@ -1574,8 +1604,8 @@ async fn process_boundary_block(
         boundary.chunk_range,
         is_earliest,
         is_latest,
-        config.consensus.chunk_size,
-        config.consensus.num_chunks_in_partition,
+        chunk_size,
+        geometry.partition_chunks,
         slot_miners,
     )?;
     let filtered_headers = ledger_data_txs
@@ -1730,7 +1760,8 @@ async fn process_middle_blocks(
     middle_blocks: &BTreeMap<H256, u64>,
     global_range: LedgerChunkRange,
     ledger_type: DataLedger,
-    config: &Config,
+    chunk_size: u64,
+    geometry: PartitionGeometry,
     slot_miners: &BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>>,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
@@ -1761,8 +1792,8 @@ async fn process_middle_blocks(
             global_range,
             false,
             false,
-            config.consensus.chunk_size,
-            config.consensus.num_chunks_in_partition,
+            chunk_size,
+            geometry.partition_chunks,
             slot_miners,
         )?;
         tx_headers.extend(
@@ -1964,6 +1995,7 @@ struct BlockRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{CommitmentState, PartitionAssignments, StakeEntry};
     use irys_types::{
         CommitmentStatus, DataTransactionHeaderV1, H256List, NodeConfig, UnixTimestamp,
@@ -1973,6 +2005,7 @@ mod tests {
     /// Shared fixture: an otherwise-empty `EpochSnapshot` seeded from `config`.
     fn empty_epoch_snapshot(config: &Config) -> EpochSnapshot {
         EpochSnapshot {
+            partition_resize: None,
             ledgers: irys_database::Ledgers::new(&config.consensus, ForBlock::inactive()),
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
@@ -2546,10 +2579,8 @@ mod tests {
     /// it (live vs. catching up) — a consensus divergence.
     #[test]
     fn find_block_range_bounds_by_parent_not_index_tip() -> eyre::Result<()> {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         let mut node_config = irys_types::NodeConfig::testing();
@@ -2560,12 +2591,7 @@ mod tests {
         // chunks [0,10). At height 2 (the "parent") slot 0 is only 7/10 full;
         // heights 3-4 grew the index past the slot boundary into slot 1.
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let block_index = BlockIndex::new_for_testing(db.clone());
         for (height, submit_total) in [0_u64, 4, 7, 12, 15].into_iter().enumerate() {
             block_index.push_item(
@@ -2614,7 +2640,7 @@ mod tests {
         // covers slot 0's full [0,10) range.
         let range = find_block_range(
             expired_slot_0(),
-            &config,
+            PartitionGeometry::legacy(&config.consensus),
             &block_index,
             DataLedger::Submit,
             7,
@@ -2633,7 +2659,7 @@ mod tests {
         // at the partition end 10 → chunk 9 lands at height 3).
         let range = find_block_range(
             expired_slot_0(),
-            &config,
+            PartitionGeometry::legacy(&config.consensus),
             &block_index,
             DataLedger::Submit,
             15,
@@ -2649,7 +2675,7 @@ mod tests {
         // parent == tip, no out-of-range error.
         let range = find_block_range(
             expired_slot_0(),
-            &config,
+            PartitionGeometry::legacy(&config.consensus),
             &block_index,
             DataLedger::Submit,
             20,
@@ -2679,10 +2705,8 @@ mod tests {
     #[test]
     fn find_block_range_resolves_term_ledger_offset_across_preactivation_index() -> eyre::Result<()>
     {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         let mut node_config = irys_types::NodeConfig::testing();
@@ -2690,12 +2714,7 @@ mod tests {
         let config = Config::new_with_random_peer_id(node_config);
 
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let block_index = BlockIndex::new_for_testing(db.clone());
 
         // Heights 0-2: PRE-Cascade — only Publish + Submit, no OneYear entry.
@@ -2773,7 +2792,7 @@ mod tests {
 
         let range = find_block_range(
             expired,
-            &config,
+            PartitionGeometry::legacy(&config.consensus),
             &block_index,
             DataLedger::OneYear,
             18, // parent's OneYear total
@@ -2812,13 +2831,11 @@ mod tests {
     /// un-migrated height 3 and errored "previous block must exist".
     #[tokio::test]
     async fn find_block_range_resolves_unmigrated_tail() -> eyre::Result<()> {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{
             BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
         };
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_types::{BlockTransactions, SealedBlock};
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         let mut node_config = irys_types::NodeConfig::testing();
@@ -2881,12 +2898,7 @@ mod tests {
 
         // Migrated index: heights 0..=2 only (Submit totals 0,8,14).
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let block_index = BlockIndex::new_for_testing(db.clone());
         for (height, submit_total) in [0_u64, 8, 14].into_iter().enumerate() {
             block_index.push_item(
@@ -2917,7 +2929,7 @@ mod tests {
         expired.insert(SlotIndex::new(1), vec![IrysAddress::ZERO]);
         let range = find_block_range(
             expired,
-            &config,
+            PartitionGeometry::legacy(&config.consensus),
             &block_index,
             DataLedger::Submit,
             22, // parent_total — slot 1's tail (chunks 14-19) is past the index tip 14
@@ -2965,7 +2977,8 @@ mod tests {
         let (tx_to_miners, _) = collect_tx_to_miners_from_range(
             range,
             DataLedger::Submit,
-            &config,
+            config.consensus.chunk_size,
+            PartitionGeometry::legacy(&config.consensus),
             &guard,
             &MempoolReadGuard::stub(),
             &db,
@@ -2989,15 +3002,12 @@ mod tests {
     /// fee-accounting bug invisible to the single-miner heavy fixtures.
     #[tokio::test]
     async fn collect_attributes_each_tx_to_its_start_offset_slot_miners() -> eyre::Result<()> {
-        use irys_database::{
-            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db, tables::IrysTables,
-        };
+        use irys_database::insert_tx_header;
         use irys_domain::{
             BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
         };
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_types::{BlockTransactions, DataTransactionHeaderV1, H256List, SealedBlock};
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         // chunk_size = 1 ⇒ data_size N occupies N chunks. Partition = 4 chunks, so
@@ -3072,12 +3082,7 @@ mod tests {
 
         // DB: seeded tx headers + a migrated index agreeing with the tree.
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         db.update_eyre(|wtx| {
             for t in &txs {
                 insert_tx_header(wtx, t)?;
@@ -3119,7 +3124,7 @@ mod tests {
 
         let range = find_block_range(
             expired,
-            &config,
+            PartitionGeometry::legacy(&config.consensus),
             &block_index,
             DataLedger::Submit,
             8, // parent_total
@@ -3132,7 +3137,8 @@ mod tests {
         let (tx_to_miners, _) = collect_tx_to_miners_from_range(
             range,
             DataLedger::Submit,
-            &config,
+            config.consensus.chunk_size,
+            PartitionGeometry::legacy(&config.consensus),
             &guard,
             &MempoolReadGuard::stub(),
             &db,
@@ -3179,13 +3185,11 @@ mod tests {
     /// tests, which need no heavy tree fixture.)
     #[test]
     fn resolve_submit_inclusion_slow_path_walks_untracked_tree() -> eyre::Result<()> {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{
             BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
         };
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_types::{BlockTransactions, SealedBlock};
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         // A header with one Submit ledger entry: cumulative chunk total + tx_ids.
@@ -3250,12 +3254,7 @@ mod tests {
 
         // Empty db ⇒ canonical_submit_height returns None ⇒ the SLOW path runs.
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let block_index = BlockIndex::new_for_testing(db.clone());
         let config = Config::new_with_random_peer_id(irys_types::NodeConfig::testing());
 
@@ -3306,11 +3305,9 @@ mod tests {
     }
 
     fn unmigrated_inclusion_fixture() -> eyre::Result<UnmigratedInclusionFixture> {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{BlockTree, CommitmentSnapshot, dummy_ema_snapshot};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_types::{BlockBody, IrysTransactionCommon as _, irys::IrysSigner};
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         let mut node_config = NodeConfig::testing();
@@ -3381,13 +3378,12 @@ mod tests {
         }
 
         let db_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env =
-            open_or_create_db(&db_dir, IrysTables::ALL, DatabaseArguments::irys_testing()?)?;
+        let db = DatabaseProvider::for_testing(db_dir.path(), &db_dir.path().join("cache"))?;
 
         Ok(UnmigratedInclusionFixture {
             config,
             guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(tree))),
-            db: DatabaseProvider(Arc::new(db_env)),
+            db,
             _db_dir: db_dir,
             sealed_inclusion_block,
             parent_hash: parent.block_hash,
@@ -3532,13 +3528,11 @@ mod tests {
     /// matching (branch-determined) refund sets regardless of any local hint.
     #[test]
     fn resolve_promoted_on_branch_reads_only_the_blocks_own_branch() -> eyre::Result<()> {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{
             BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
         };
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_types::{BlockTransactions, SealedBlock};
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         // A header carrying `publish_tx_ids` in its Publish ledger (the promotion
@@ -3611,12 +3605,7 @@ mod tests {
         // Empty db ⇒ the finalized `canonical_promoted_height` fallback finds
         // nothing; the by-hash branch walk is the sole decider.
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let config = Config::new_with_random_peer_id(irys_types::NodeConfig::testing());
 
         // Walking the promoting fork → `target` IS promoted (refund suppressed).
@@ -3653,9 +3642,8 @@ mod tests {
     #[test]
     fn resolve_promoted_on_branch_ignores_in_window_node_local_hint() -> eyre::Result<()> {
         use irys_database::{
-            IrysDatabaseArgs as _, canonical_promoted_height, insert_block_header,
-            insert_tx_header, open_or_create_db, set_data_tx_included_height,
-            set_data_tx_promoted_height, tables::IrysTables, tables::MigratedBlockHashes,
+            canonical_promoted_height, insert_block_header, insert_tx_header,
+            set_data_tx_included_height, set_data_tx_promoted_height, tables::MigratedBlockHashes,
         };
         use irys_domain::{BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
@@ -3663,7 +3651,7 @@ mod tests {
             BlockTransactions, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
             DataTransactionLedger, DataTransactionMetadata, H256List, SealedBlock,
         };
-        use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+        use reth_db::transaction::DbTxMut as _;
         use std::sync::RwLock;
 
         // Submit-only headers ⇒ `target` is NEVER in a Publish ledger on this
@@ -3716,12 +3704,7 @@ mod tests {
         };
 
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
 
         // Divergent sibling at height 1: `h1_alt` is a *second* child of h0 that
         // DOES carry `target` in its Publish ledger, and is the node-local
@@ -3863,17 +3846,15 @@ mod tests {
     /// never held canonical data at all.
     #[tokio::test]
     async fn submit_expiry_skips_canonical_unwritten_slots() -> eyre::Result<()> {
-        use irys_database::{
-            IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
-            set_data_tx_included_height, tables::IrysTables,
-        };
+        use irys_database::DatabaseProvider;
+        use irys_database::{insert_block_header, insert_tx_header, set_data_tx_included_height};
         use irys_domain::{BlockIndex, BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
         use irys_types::{
             ConsensusConfig, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-            DataTransactionMetadata, H256List, LedgerIndexItem, app_state::DatabaseProvider,
+            DataTransactionMetadata, H256List, LedgerIndexItem,
         };
-        use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+        use reth_db::transaction::DbTxMut as _;
         use std::sync::{Arc, RwLock};
 
         fn submit_chain_header(
@@ -3963,12 +3944,7 @@ mod tests {
         inclusion_block.test_sign();
 
         let temp_dir = TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         db.update_eyre(|wtx| {
             insert_tx_header(wtx, &tx_slot_0)?;
             insert_tx_header(wtx, &tx_slot_1)?;
@@ -4013,14 +3989,8 @@ mod tests {
         let tree = BlockTree::new(&inclusion_genesis, ConsensusConfig::testing());
         let guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
 
-        let range = expired_submit_range(
-            probe_height,
-            &epoch,
-            &prev_epoch,
-            &config,
-            ForBlock::active(),
-        )?
-        .expect("expired Submit slots must produce a range");
+        let range = expired_submit_range(probe_height, &epoch, &prev_epoch, ForBlock::active())?
+            .expect("expired Submit slots must produce a range");
         assert!(
             submit_tx_expired(
                 tx_slot_0.id,
@@ -4204,7 +4174,7 @@ mod tests {
         let mut parent = IrysBlockHeader::new_mock_header();
         parent.data_ledgers[DataLedger::Submit].total_chunks = 3 * chunks_per_slot;
 
-        let err = expired_submit_range(block_height, &epoch, &parent, &config, ForBlock::active())
+        let err = expired_submit_range(block_height, &epoch, &parent, ForBlock::active())
             .expect_err("a non-prefix expired set must fail loud, not over-approximate");
         assert!(
             err.to_string().contains("not a contiguous prefix"),
@@ -4273,9 +4243,8 @@ mod tests {
         // append (offset 18) lies outside it and stays promotable/settleable.
         let mut parent = IrysBlockHeader::new_mock_header();
         parent.data_ledgers[DataLedger::Submit].total_chunks = 18;
-        let range =
-            expired_submit_range(probe_height, &epoch, &parent, &config, ForBlock::active())?
-                .expect("slot 0 expired, so a range must exist");
+        let range = expired_submit_range(probe_height, &epoch, &parent, ForBlock::active())?
+            .expect("slot 0 expired, so a range must exist");
         assert_eq!(
             range.range_end, 10,
             "expired range must end at the last full slot's boundary, not the frontier"
@@ -4316,17 +4285,15 @@ mod tests {
     /// users charged, non-promotable, and unsettled.
     #[test_log::test(tokio::test)]
     async fn empty_partition_expired_slot_still_refunds_unpromoted_txs() -> eyre::Result<()> {
-        use irys_database::{
-            IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
-            tables::IrysTables,
-        };
+        use irys_database::DatabaseProvider;
+        use irys_database::{insert_block_header, insert_tx_header};
         use irys_domain::{BlockIndex, BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
         use irys_types::{
             ConsensusConfig, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-            DataTransactionMetadata, H256List, LedgerIndexItem, app_state::DatabaseProvider,
+            DataTransactionMetadata, H256List, LedgerIndexItem,
         };
-        use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+        use reth_db::transaction::DbTxMut as _;
         use std::sync::{Arc, RwLock};
 
         fn submit_chain_header(
@@ -4433,12 +4400,7 @@ mod tests {
         inclusion_block.test_sign();
 
         let temp_dir = TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         db.update_eyre(|wtx| {
             insert_tx_header(wtx, &tx_a)?;
             insert_tx_header(wtx, &tx_b)?;
@@ -4599,13 +4561,7 @@ mod tests {
         // chunk range at all.
         let mut parent = IrysBlockHeader::new_mock_header();
         parent.data_ledgers[DataLedger::Submit].total_chunks = 0;
-        let range = expired_submit_range(
-            expiry_epoch + 1,
-            &epoch,
-            &parent,
-            &config,
-            ForBlock::inactive(),
-        )?;
+        let range = expired_submit_range(expiry_epoch + 1, &epoch, &parent, ForBlock::inactive())?;
         assert!(
             range.is_none(),
             "an expired-but-never-written slot yields no expired chunk range"
@@ -4621,10 +4577,7 @@ mod tests {
     /// branch-invariant).
     #[test]
     fn resolve_promoted_below_walk_window_uses_finalized_fallback() -> eyre::Result<()> {
-        use irys_database::{
-            IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
-            tables::IrysTables,
-        };
+        use irys_database::{insert_block_header, insert_tx_header};
         use irys_domain::{
             BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
         };
@@ -4633,7 +4586,7 @@ mod tests {
             BlockTransactions, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
             DataTransactionMetadata, SealedBlock,
         };
-        use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+        use reth_db::transaction::DbTxMut as _;
         use std::sync::RwLock;
 
         fn with_publish(height: u64, publish_tx_ids: Vec<H256>) -> IrysBlockHeader {
@@ -4722,12 +4675,7 @@ mod tests {
             metadata: DataTransactionMetadata::new(),
         });
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         db.update_eyre(|wtx| {
             insert_tx_header(wtx, &tx_header)?;
             // promoted_height requires the Submit inclusion height to exist first.

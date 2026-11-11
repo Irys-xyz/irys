@@ -2,8 +2,10 @@ use crate::block_reward::block_emission;
 use crate::chunk_migration_service::ChunkMigrationServiceMessage;
 use crate::packing_service::{PackingRequest, PackingSender};
 use eyre::{OptionExt as _, ensure};
+use irys_database::DatabaseProvider;
 use irys_database::{
-    append_block_stream_event, block_header_by_hash, db::IrysDatabaseExt as _,
+    append_block_stream_event, block_header_by_hash,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
     insert_commitment_tx, insert_tx_header, prune_block_stream_below, tx_header_by_txid,
 };
 use irys_domain::{
@@ -18,7 +20,7 @@ use irys_types::data_tree::Geometry;
 use irys_types::{
     DataCommitment, DataLedger, DataTransactionHeader, H256, IrysBlockHeader, LedgerChunkOffset,
     LedgerChunkRange, PartitionChunkOffset, PartitionChunkRange, SealedBlock, SendTraced as _,
-    SystemLedger, Traced, U256, app_state::DatabaseProvider,
+    SystemLedger, Traced, U256,
 };
 use lru::LruCache;
 use std::{
@@ -318,6 +320,29 @@ impl BlockMigrationService {
         Ok(())
     }
 
+    /// Update logical ledger geometry on canonical adoption, including reorgs.
+    /// Destructive truncation is separately gated on finality by the storage service.
+    ///
+    /// Hot path: runs on every tip change for every module; the no-growth
+    /// case is an atomic load and swap.
+    pub fn update_partition_geometry(
+        &self,
+        epoch: &irys_domain::EpochSnapshot,
+    ) -> eyre::Result<()> {
+        let Some(modules) = &self.storage_modules_guard else {
+            return Ok(());
+        };
+        let chunks = epoch.partition_chunks();
+        for module in modules.read().iter() {
+            // A growing bound (a branch without the activation became
+            // canonical) re-exposes a suffix that was never packed. The module
+            // records it and the storage-module service packs it on its next
+            // tick, keeping it across a full packing channel.
+            module.set_partition_chunks(chunks)?;
+        }
+        Ok(())
+    }
+
     pub fn set_storage_modules_guard(&mut self, guard: StorageModulesReadGuard) {
         self.storage_modules_guard = Some(guard);
     }
@@ -336,10 +361,12 @@ impl BlockMigrationService {
     ///
     /// For normal blocks: `blocks_to_clear` is empty, `blocks_to_confirm` contains just the tip.
     /// For reorgs: `blocks_to_clear` contains orphaned fork blocks, `blocks_to_confirm` contains
-    /// the new canonical fork blocks. Both operations happen in a single DB transaction to
-    /// prevent inconsistent hint state.
+    /// the new canonical fork blocks. Hint removals and additions share one cache
+    /// transaction, after the consensus metadata and stream transaction commits.
+    /// A cache-write failure is logged; the function still returns the committed
+    /// stream frames so live fan-out is not suppressed.
     ///
-    /// Invariant established at every commit boundary: if a Submit-ledger tx
+    /// Invariant established at every cache commit boundary: if a Submit-ledger tx
     /// in `blocks_to_confirm` has a [`CachedDataRoot`] entry, its `block_set`
     /// contains the confirming block hash and `expiry_height` is `None`.
     /// Orphan block hashes from `blocks_to_clear` are scrubbed from any
@@ -356,9 +383,9 @@ impl BlockMigrationService {
     ///     populated `block_set` and proceeds.  It may fabricate a CDR row
     ///     for a data_root the node has no chunks for yet; the entry is
     ///     harmless until either chunks arrive or the prune pass evicts it.
-    ///   - `persist_metadata` (this function) runs at confirmation: Phase 1
+    ///   - `persist_metadata` (this function) runs at confirmation: it
     ///     scrubs orphan block_hashes from any retained `block_set`, and
-    ///     Phase 3's `update_data_root_block_set` is update-only — it never
+    ///     `update_data_root_block_set` is update-only — it never
     ///     fabricates, because by confirmation any data_root the node cares
     ///     about already has a CDR (either chunks have arrived, or the mempool
     ///     BlockConfirmed path put one there).
@@ -371,7 +398,7 @@ impl BlockMigrationService {
     /// Reorg invariant: if a Publish-promotion remains canonical, the
     /// underlying Submit inclusion must also be present in `blocks_to_confirm`
     /// — otherwise the Publish block itself would be in `blocks_to_clear`.
-    /// Phase 1's clears only ever hit rows for orphaned blocks that had already
+    /// Metadata clears only ever hit rows for orphaned blocks that had already
     /// *migrated* (a deep reorg past `block_migration_depth`); orphaned
     /// unmigrated blocks never wrote canonical metadata, so the clears are a
     /// no-op for them. Re-canonical blocks on the new fork get their metadata
@@ -385,13 +412,13 @@ impl BlockMigrationService {
         blocks_to_confirm: &[Arc<SealedBlock>],
         stream: StreamEmission<'_>,
     ) -> eyre::Result<Vec<StreamFrame>> {
-        // Phase 1 scrub and Phase 3 append both iterate
+        // Hint removals and additions both iterate
         // `block.transactions().get_ledger_txs(Submit)`.  The in-memory
         // block-tree path always carries full transactions, but future code
         // paths (e.g. blocks hydrated from disk without their body) could
         // regress this without any error.  Surface the divergence in every
         // build so the caller fails loudly rather than committing partial
-        // state.  Checked across all data ledgers because Phase 1 clears
+        // state.  Checked across all data ledgers because metadata cleanup clears
         // orphaned metadata from `header.data_ledgers` for every ledger.
         for block in blocks_to_clear.iter().chain(blocks_to_confirm.iter()) {
             ensure_header_body_consistent(block)?;
@@ -495,9 +522,6 @@ impl BlockMigrationService {
 
         let (stream_frames, prune_interval_reached) =
             self.db.update_eyre_at("persist_metadata", |tx| {
-                // Phase 1: Clear orphaned tx metadata, and scrub the orphaned
-                // block_hash from any CachedDataRoot.block_set that retained it.
-                //
                 // Per-ledger semantics:
                 //   - Term-ledger (Submit, OneYear, ThirtyDay): delete the row.
                 //     The reorg invariant guarantees the matching Publish block is
@@ -509,8 +533,6 @@ impl BlockMigrationService {
                 //     `{Some, None}`).
                 for block in blocks_to_clear {
                     let header = block.header();
-                    let orphan_block_hash = header.block_hash;
-
                     for dl in &header.data_ledgers {
                         let tx_ids = &dl.tx_ids.0;
                         if tx_ids.is_empty() {
@@ -524,47 +546,7 @@ impl BlockMigrationService {
                         }
                     }
                     self.clear_commitment_inclusions(tx, header)?;
-
-                    for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
-                        irys_database::remove_data_root_block_set_entry(
-                            tx,
-                            submit_tx.data_commitment(&self.data_tree_geometry),
-                            orphan_block_hash,
-                        )?;
-                    }
                 }
-                // Phase 3: Maintain the CachedDataRoot.block_set hint for the
-                //          canonical Submit-ledger txs we just confirmed (update-only,
-                //          does not create cache entries for data_roots the node
-                //          never tracked chunks for).
-                //
-                // Canonical tx metadata (`IrysDataTxMetadata` / `IrysCommitmentTxMetadata`)
-                // is deliberately NOT written here. It is written only at migration
-                // (`persist_block`), atomically with `MigratedBlockHashes` and the
-                // block header — so a metadata row can never exist without its MBH
-                // entry naming the same canonical block. Writing it here (at
-                // confirmation, depth 0) previously let an orphaned tip strand a
-                // metadata row that a later block migrating at the same height would
-                // read as canonical. Unmigrated blocks are served branch-correctly
-                // from the in-memory block tree (see `tx_inclusion` / the validator's
-                // by-hash walk), so the DB metadata is only ever consulted for
-                // migrated heights, where `MigratedBlockHashes` is branch-stable.
-                // `block_set` is only a non-consensus hint (never read by
-                // `find_canonical_ledger_range` / `canonical_*_height`), and the
-                // ingress-proof pipeline needs it populated at confirmation, so it
-                // stays here.
-                for block in blocks_to_confirm {
-                    let block_hash = block.header().block_hash;
-                    for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
-                        irys_database::update_data_root_block_set(
-                            tx,
-                            submit_tx.data_commitment(&self.data_tree_geometry),
-                            block_hash,
-                        )?;
-                    }
-                }
-
-                // Phase 4: append pre-serialized durable stream frames in this same RW txn.
                 let mut frames = Vec::with_capacity(prepared_stream.len());
                 for (event, payload) in prepared_stream {
                     let seq = append_block_stream_event(tx, payload)?;
@@ -587,6 +569,57 @@ impl BlockMigrationService {
             u64::try_from(stream_frames.len()).unwrap_or(u64::MAX),
             prune_interval_reached,
         );
+
+        // Cache hints may lag consensus across a crash. Canonical metadata and
+        // durable stream frames have already committed together; note that commit
+        // before the cache write so a cache failure cannot lose stream dedup
+        // state or skip live stream fan-out. Hint write is best-effort.
+        if let Err(error) = self
+            .db
+            .update_cache_eyre_at("persist_metadata", |cache_tx| {
+                for block in blocks_to_clear {
+                    let orphan_block_hash = block.header().block_hash;
+                    for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
+                        irys_database::remove_data_root_block_set_entry(
+                            cache_tx,
+                            submit_tx.data_commitment(&self.data_tree_geometry),
+                            orphan_block_hash,
+                        )?;
+                    }
+                }
+                // Canonical tx metadata (`IrysDataTxMetadata` / `IrysCommitmentTxMetadata`)
+                // is deliberately NOT written here. It is written only at migration
+                // (`persist_block`), atomically with `MigratedBlockHashes` and the
+                // block header — so a metadata row can never exist without its MBH
+                // entry naming the same canonical block. Writing it here (at
+                // confirmation, depth 0) previously let an orphaned tip strand a
+                // metadata row that a later block migrating at the same height would
+                // read as canonical. Unmigrated blocks are served branch-correctly
+                // from the in-memory block tree (see `tx_inclusion` / the validator's
+                // by-hash walk), so the DB metadata is only ever consulted for
+                // migrated heights, where `MigratedBlockHashes` is branch-stable.
+                // `block_set` is only a non-consensus hint (never read by
+                // `find_canonical_ledger_range` / `canonical_*_height`), and the
+                // ingress-proof pipeline needs it populated at confirmation, so it
+                // stays here.
+                for block in blocks_to_confirm {
+                    let block_hash = block.header().block_hash;
+                    for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
+                        irys_database::update_data_root_block_set(
+                            cache_tx,
+                            submit_tx.data_commitment(&self.data_tree_geometry),
+                            block_hash,
+                        )?;
+                    }
+                }
+                Ok(())
+            })
+        {
+            warn!(
+                error = %error,
+                "persist_metadata cache hint write failed; consensus metadata and stream frames already committed"
+            );
+        }
 
         info!(
             cleared_blocks = blocks_to_clear.len(),
@@ -1292,8 +1325,8 @@ mod tests {
     use super::*;
     use crate::block_reward::reward_curve_from_config;
     use irys_database::{
-        IrysDatabaseArgs as _, cache_data_root, open_or_create_db, read_block_stream_from,
-        tables::{CachedDataRoots, IrysTables},
+        DatabaseProviderTestExt as _, cache_data_root, read_block_stream_from,
+        tables::CachedDataRoots,
     };
     use irys_domain::{BlockTree, ChunkType, StorageModuleInfo};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
@@ -1306,8 +1339,6 @@ mod tests {
         partition_chunk_offset_ii,
     };
     use reth_db::Database as _;
-    use reth_db::mdbx::DatabaseArguments;
-    use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
     /// Build a `BlockMigrationService` whose only meaningful field is `db`.
     /// All other dependencies are placeholders sufficient to construct but
@@ -1381,12 +1412,8 @@ mod tests {
         irys_testing_utils::utils::tempfile::TempDir,
     )> {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        Ok((DatabaseProvider(Arc::new(env)), tmp))
+        let env = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
+        Ok((env, tmp))
     }
 
     /// Build a signed block header with the given Submit-ledger `tx_ids`
@@ -1465,7 +1492,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|tx| -> eyre::Result<()> {
+        db.update_cache_eyre(|tx| {
             cache_data_root(
                 tx,
                 &tx_header,
@@ -1480,7 +1507,6 @@ mod tests {
             tx.put::<CachedDataRoots>(commitment_of(data_root), cdr)?;
             Ok(())
         })
-        .unwrap()
         .unwrap();
     }
 
@@ -1488,7 +1514,7 @@ mod tests {
         db: &DatabaseProvider,
         data_root: H256,
     ) -> Option<irys_database::db_cache::CachedDataRoot> {
-        db.view(|tx| tx.get::<CachedDataRoots>(commitment_of(data_root)))
+        db.view_cache(|tx| tx.get::<CachedDataRoots>(commitment_of(data_root)))
             .unwrap()
             .unwrap()
     }

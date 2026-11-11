@@ -68,6 +68,7 @@ rstest.workspace = true
 proptest.workspace = true
 futures.workspace = true
 alloy-signer-local.workspace = true
+alloy-trie = { workspace = true, features = ["ethereum"] }
 reth-db = { workspace = true, features = ["test-utils"] }
 alloy-rpc-types-trace.workspace = true
 

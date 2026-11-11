@@ -809,7 +809,7 @@ async fn slow_heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
     // 1 partition per slot makes recycling deterministic: each expired slot yields exactly
     // 1 capacity partition, and each new Publish slot needs exactly 1. Publish is processed
     // first in backfill, so the expired partition must land back in Publish.
-    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.consensus.get_mut().num_partitions_per_slot = irys_types::ReplicaCount::new(1);
     config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
     config.consensus.get_mut().epoch.publish_ledger_epoch_length =
         Some(PUBLISH_LEDGER_EPOCH_LENGTH);
@@ -1059,7 +1059,7 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
     config.consensus.get_mut().chunk_size = CHUNK_SIZE;
     config.consensus.get_mut().num_chunks_in_partition = 4;
     config.consensus.get_mut().num_chunks_in_recall_range = 1;
-    config.consensus.get_mut().num_partitions_per_slot = 1;
+    config.consensus.get_mut().num_partitions_per_slot = irys_types::ReplicaCount::new(1);
     config.consensus.get_mut().epoch.num_blocks_in_epoch = BLOCKS_PER_EPOCH;
     // Mainnet config: perm expiry disabled
     config.consensus.get_mut().epoch.publish_ledger_epoch_length = None;
@@ -1226,7 +1226,7 @@ async fn slow_heavy_perm_partial_frontier_survives_cascade() -> eyre::Result<()>
         c.num_chunks_in_recall_range = 1;
         // 1 partition per slot keeps partition demand low so the partial frontier
         // slot deterministically retains its assignment across recycles.
-        c.num_partitions_per_slot = 1;
+        c.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
         c.hardforks.cascade = Some(Cascade {
             activation_timestamp: UnixTimestamp::from_secs(0),
             one_year_epoch_length: 8,

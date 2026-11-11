@@ -197,9 +197,8 @@ checked against the epoch block's timestamp exactly as `cascade_active` is (`:31
 `is_cascade_active_at` at `hardfork_config.rs:198`), converts an externally triggered split into a
 scheduled one. Naming is deferred to the maintainers.
 
-The fork should be its own entry rather than an extension of `next_name_tbd` (`:22`), which already
-carries unrelated ingress-proof parameters. There is no pending entry to attach to: `next_name_tbd` is
-`None` and `cascade` activates `2026-08-03T12:00:00+00:00` (`crates/types/src/config/consensus.rs:809`-`:843`).
+The fork needs its own `IrysHardforkConfig` entry and `hardfork!` variant. There is no pending entry to
+attach to: `cascade` activates `2026-08-03T12:00:00+00:00` (`crates/types/src/config/consensus.rs:809`-`:843`).
 
 If gated, the pre-activation path is `sort_unstable_by_key(|a| a.id)` with no truncation. Note that
 `try_genesis_init` (`:458`) also calls `assign_partition_hashes_to_pledges` (`:498`); a timestamp gate

@@ -1,18 +1,17 @@
 use crate::utils::IrysNodeTest;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
+use irys_database::DatabaseProvider;
+use irys_database::db::{DatabaseProviderCacheExt as _, IrysDupCursorExt as _};
 use irys_database::tables::CachedChunksIndex;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{
-    DataCommitment, DataLedger, DatabaseProvider, IrysAddress, NodeConfig, irys::IrysSigner,
-};
+use irys_types::{DataCommitment, DataLedger, IrysAddress, NodeConfig, irys::IrysSigner};
 use reth_db::transaction::DbTx as _;
 use std::time::Duration;
 
 fn cached_chunk_count(db: &DatabaseProvider, data_commitment: DataCommitment) -> eyre::Result<u32> {
-    db.view_eyre(|tx| {
-        let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+    db.view_cache_eyre(|tx| {
+        let mut cursor = tx.inner().cursor_dup_read::<CachedChunksIndex>()?;
         Ok(cursor.dup_count(data_commitment)?.unwrap_or(0))
     })
 }
@@ -23,12 +22,12 @@ fn ingress_leaf_count(
     address: IrysAddress,
     expected_chunks: u32,
 ) -> eyre::Result<usize> {
-    db.view_eyre(|tx| {
+    db.view_cache_eyre(|tx| {
         (0..expected_chunks).try_fold(0_usize, |count, offset| {
             Ok(count
                 + usize::from(
                     irys_database::cached_ingress_leaf(
-                        tx,
+                        tx.inner(),
                         data_commitment,
                         address,
                         offset.into(),
@@ -56,7 +55,7 @@ async fn heavy_test_oversized_tx_cache_eviction_allows_promotion() -> eyre::Resu
         c.chunk_size = 32;
         c.num_chunks_in_partition = 10;
         c.num_chunks_in_recall_range = 2;
-        c.num_partitions_per_slot = 1;
+        c.num_partitions_per_slot = irys_types::ReplicaCount::new(1);
         c.block_migration_depth = 1;
         // Single node self-promotes with a single proof.
         c.hardforks.frontier.number_of_ingress_proofs_total = 1;
@@ -64,8 +63,8 @@ async fn heavy_test_oversized_tx_cache_eviction_allows_promotion() -> eyre::Resu
     // Keep batching enabled: chunks stripe together and the tail is flushed by
     // the storage module's idle drain, so nothing on the write path force-syncs.
     config.storage.num_writes_before_sync = 2;
-    // Cache far below the 3-chunk (96 B) tx, and prune eagerly.
-    config.cache.max_cache_size_bytes = 32;
+    // Admit the first two chunks, but keep the cache below the 3-chunk (96 B) tx.
+    config.cache.max_cache_size_bytes = 64;
     config.cache.cache_clean_lag = 0;
 
     let signer = IrysSigner::random_signer(&config.consensus_config());

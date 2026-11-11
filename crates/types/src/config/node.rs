@@ -112,11 +112,11 @@ pub struct DatabaseConfig {
 
     /// Optional override for the MDBX geometry upper bound — the max DB size
     /// *and* the virtual address-space reservation made at open — of irys-owned
-    /// databases (consensus + storage submodules). `None` = production defaults
-    /// (consensus inherits reth's 8 TiB; submodules use 2 TiB), harmless as sparse
-    /// reservations on real disks. Test configs set a small value so many
-    /// concurrent node databases don't exhaust the process's ~128 TiB user
-    /// address space. See `TEST_DB_GEOMETRY_MAX_SIZE`.
+    /// databases (consensus, cache and storage submodules). `None` = production
+    /// defaults (consensus and cache inherit reth's 8 TiB; submodules use 2 TiB),
+    /// harmless as sparse reservations on real disks. Test configs set a small
+    /// value so many concurrent node databases don't exhaust the process's
+    /// ~128 TiB user address space. See `TEST_DB_GEOMETRY_MAX_SIZE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_max_size: Option<usize>,
 
@@ -1137,17 +1137,83 @@ pub struct LocalPackingConfig {
     /// Number of CPU threads to use for data packing operations
     pub cpu_packing_concurrency: u16,
 
-    /// Batch size for GPU-accelerated packing operations
-    pub gpu_packing_batch_size: u32,
+    /// Chunks per GPU packing batch: a number, or `"auto"` to size batches from the GPU.
+    /// `0` packs on the CPU instead.
+    pub gpu_packing_batch_size: GpuPackingBatchSize,
+
+    /// Scheduling priority of the CPU packing hash threads
+    pub cpu_packing_thread_priority: CpuPackingThreadPriority,
 }
 
 impl Default for LocalPackingConfig {
     fn default() -> Self {
         Self {
             cpu_packing_concurrency: 2, // TODO: default to something like numcpus - 4
-            gpu_packing_batch_size: 0,
+            gpu_packing_batch_size: GpuPackingBatchSize::Fixed(0),
+            cpu_packing_thread_priority: CpuPackingThreadPriority::Idle,
         }
     }
+}
+
+/// Chunks per GPU packing batch.
+///
+/// Each GPU thread packs one whole chunk, so the batch size is the number of chunks in flight and
+/// sets throughput: on an RTX 5090 at 1M iterations, 1024 chunks pack ~25x slower than ~65k.
+/// `Auto` sizes batches from the GPU's cores and memory and the host memory budget
+/// (`irys_packing::CUDAConfig::auto_batch_size`). In TOML: `"auto"` or a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuPackingBatchSize {
+    /// Size batches from the GPU when packing starts.
+    Auto,
+    /// Exactly this many chunks per batch; `0` packs on the CPU instead.
+    Fixed(u32),
+}
+
+impl From<u32> for GpuPackingBatchSize {
+    fn from(chunks: u32) -> Self {
+        Self::Fixed(chunks)
+    }
+}
+
+impl Serialize for GpuPackingBatchSize {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Fixed(chunks) => serializer.serialize_u32(*chunks),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GpuPackingBatchSize {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Chunks(u32),
+            Text(String),
+        }
+        match Repr::deserialize(deserializer)? {
+            Repr::Chunks(chunks) => Ok(Self::Fixed(chunks)),
+            Repr::Text(text) if text.eq_ignore_ascii_case("auto") => Ok(Self::Auto),
+            Repr::Text(text) => Err(serde::de::Error::custom(format!(
+                "gpu_packing_batch_size must be a number of chunks or \"auto\", got {text:?}"
+            ))),
+        }
+    }
+}
+
+/// Scheduling priority of the CPU packing hash threads.
+/// Linux applies it per thread. Other platforms keep the default priority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuPackingThreadPriority {
+    /// `SCHED_IDLE`: the threads run only when no other thread wants the CPU.
+    Idle,
+    /// Nice level, -20 (highest) to 19 (lowest); 0 is normal. The kernel
+    /// clamps values outside that range. A negative level needs
+    /// `CAP_SYS_NICE` or a matching `RLIMIT_NICE`; without it the threads
+    /// keep the default priority and the node logs a warning.
+    Nice(i8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1268,6 +1334,12 @@ pub struct P2PGossipConfig {
     /// Limits database reconstruction of historical bodies.
     /// `0` means unlimited.
     pub max_concurrent_block_body_serves: usize,
+    /// Re-broadcast gossip-received chunks as announcements instead of full
+    /// bodies. `false` restores push-everything (the rollback switch).
+    pub chunk_announce: bool,
+    /// Wait before fetching an announced chunk, so the origin's push lands
+    /// first. Later fetch rounds wait 2 s and 8 s.
+    pub chunk_fetch_delay_ms: u64,
 }
 
 impl Default for P2PGossipConfig {
@@ -1278,7 +1350,24 @@ impl Default for P2PGossipConfig {
             enable_scoring: true,
             max_concurrent_gossip_chunks: 50,
             max_concurrent_block_body_serves: 8,
+            chunk_announce: true,
+            chunk_fetch_delay_ms: 500,
         }
+    }
+}
+
+#[cfg(test)]
+mod p2p_gossip_config_tests {
+    use super::*;
+
+    #[test]
+    fn p2p_gossip_chunk_announce_defaults() {
+        let cfg = P2PGossipConfig::default();
+        assert!(cfg.chunk_announce);
+        assert_eq!(cfg.chunk_fetch_delay_ms, 500);
+        let parsed: P2PGossipConfig = toml::from_str("broadcast_batch_size = 7").expect("parse");
+        assert!(parsed.chunk_announce, "missing keys take defaults");
+        assert_eq!(parsed.broadcast_batch_size, 7);
     }
 }
 
@@ -1633,6 +1722,11 @@ pub struct MempoolNodeConfig {
     pub max_http_chunk_waiters: usize,
     /// Monotonic wait for an admission permit, in milliseconds.
     pub http_chunk_admission_timeout_millis: u64,
+    /// Rollback switch for public `POST /v1/chunk` ingest. `false` (the
+    /// default) returns once the body is cached and queued on each assigned
+    /// storage module's disk lane. `true` waits for the disk lane to pack
+    /// the body, as before the change.
+    pub http_ingest_waits_for_module_write: bool,
 }
 
 impl Default for MempoolNodeConfig {
@@ -1663,6 +1757,7 @@ impl Default for MempoolNodeConfig {
             max_http_chunk_admission: 256,
             max_http_chunk_waiters: 32,
             http_chunk_admission_timeout_millis: 5000,
+            http_ingest_waits_for_module_write: false,
         }
     }
 }
@@ -1841,7 +1936,8 @@ impl NodeConfig {
             packing: PackingConfig {
                 local: LocalPackingConfig {
                     cpu_packing_concurrency: 4,
-                    gpu_packing_batch_size: 1024,
+                    gpu_packing_batch_size: GpuPackingBatchSize::Fixed(1024),
+                    cpu_packing_thread_priority: CpuPackingThreadPriority::Idle,
                 },
                 remote: Default::default(),
             },
@@ -1879,6 +1975,7 @@ impl NodeConfig {
                 max_http_chunk_admission: 256,
                 max_http_chunk_waiters: 32,
                 http_chunk_admission_timeout_millis: 5000,
+                http_ingest_waits_for_module_write: false,
             },
             metrics: MetricsConfig::default(),
 
@@ -2058,7 +2155,8 @@ impl NodeConfig {
             packing: PackingConfig {
                 local: LocalPackingConfig {
                     cpu_packing_concurrency: 4,
-                    gpu_packing_batch_size: 1024,
+                    gpu_packing_batch_size: GpuPackingBatchSize::Auto,
+                    cpu_packing_thread_priority: CpuPackingThreadPriority::Idle,
                 },
                 remote: Default::default(),
             },
@@ -2098,6 +2196,7 @@ impl NodeConfig {
                 max_http_chunk_admission: 256,
                 max_http_chunk_waiters: 32,
                 http_chunk_admission_timeout_millis: 5000,
+                http_ingest_waits_for_module_write: false,
             },
             metrics: MetricsConfig::default(),
 
@@ -2131,6 +2230,10 @@ impl NodeConfig {
     /// get the irys consensus data directory path
     pub fn irys_consensus_data_dir(&self) -> PathBuf {
         self.base_directory.join("irys_consensus_data")
+    }
+    /// Get the irys cache DB directory path
+    pub fn irys_cache_data_dir(&self) -> PathBuf {
+        self.base_directory.join("irys_cache_data")
     }
 
     /// get the irys mempool persistence path
@@ -2638,5 +2741,59 @@ mod node_mode_tests {
         let encoded = toml::to_string(&doc).expect("serializes");
         let decoded: ModeDoc = toml::from_str(&encoded).expect("deserializes");
         assert_eq!(doc, decoded);
+    }
+}
+
+#[cfg(test)]
+mod gpu_packing_batch_size_tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn parse(value: &str) -> Result<GpuPackingBatchSize, toml::de::Error> {
+        toml::from_str::<LocalPackingConfig>(&format!("gpu_packing_batch_size = {value}"))
+            .map(|c| c.gpu_packing_batch_size)
+    }
+
+    #[rstest]
+    #[case::number("1024", GpuPackingBatchSize::Fixed(1024))]
+    #[case::zero_packs_on_cpu("0", GpuPackingBatchSize::Fixed(0))]
+    #[case::auto("\"auto\"", GpuPackingBatchSize::Auto)]
+    #[case::auto_any_case("\"Auto\"", GpuPackingBatchSize::Auto)]
+    fn parses(#[case] value: &str, #[case] expected: GpuPackingBatchSize) {
+        assert_eq!(parse(value).unwrap(), expected);
+    }
+
+    #[rstest]
+    #[case::other_word("\"max\"")]
+    #[case::negative("-1")]
+    fn rejects(#[case] value: &str) {
+        assert!(parse(value).is_err(), "{value} should not parse");
+    }
+
+    #[rstest]
+    #[case(GpuPackingBatchSize::Auto)]
+    #[case(GpuPackingBatchSize::Fixed(87_040))]
+    fn round_trips(#[case] size: GpuPackingBatchSize) {
+        let config = LocalPackingConfig {
+            cpu_packing_concurrency: 2,
+            gpu_packing_batch_size: size,
+            cpu_packing_thread_priority: CpuPackingThreadPriority::Idle,
+        };
+        let text = toml::to_string(&config).unwrap();
+        assert_eq!(toml::from_str::<LocalPackingConfig>(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn templates_use_auto() {
+        for template in [
+            include_str!("../../../config/templates/mainnet_config.toml"),
+            include_str!("../../../config/templates/testnet_config.toml"),
+        ] {
+            let config = toml::from_str::<NodeConfig>(template).unwrap();
+            assert_eq!(
+                config.packing.local.gpu_packing_batch_size,
+                GpuPackingBatchSize::Auto
+            );
+        }
     }
 }

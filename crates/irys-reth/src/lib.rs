@@ -765,40 +765,22 @@ mod tests {
         Ok(())
     }
 
+    /// The payload builder skips a shadow tx that fails as an invalid transaction. The Irys
+    /// block producer rejects a payload that does not start with all its shadow txs, so block
+    /// production fails.
     async fn assert_nonexistent_account_fails_block_production(
         node: &mut NodeHelperType<IrysEthereumNode>,
         shadow_tx: EthPooledTransaction,
+        valid_shadow_tx: EthPooledTransaction,
     ) -> eyre::Result<()> {
-        node.payload.timestamp += 1;
-        let base_attributes = (node.payload.attributes_generator)(node.payload.timestamp);
-        let attributes = IrysPayloadBuilderAttributes {
-            inner: base_attributes.inner,
-            id: base_attributes.id,
-            shadow_txs: vec![shadow_tx],
-        };
+        let shadow_tx_hash = *shadow_tx.hash();
+        // The valid shadow tx keeps the payload non-empty, which `mine_block` waits for.
+        let block_payload = mine_block(node, vec![shadow_tx, valid_shadow_tx]).await?;
 
-        node.payload
-            .payload_builder
-            .send_new_payload(attributes.clone())
-            .await
-            .unwrap()?;
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let result = node
-            .payload
-            .payload_builder
-            .best_payload(attributes.payload_id())
-            .await;
-
-        let err = result
-            .expect("Expected Some result from best_payload")
-            .expect_err("Block production should have failed due to non-existent account");
-
-        let error_msg = format!("{err:?}");
-        assert!(
-            error_msg.contains("Shadow transaction priority fee failed"),
-            "Expected shadow transaction priority fee failure for non-existent account, got: {error_msg}"
+        assert_txs_not_in_block(
+            &block_payload,
+            &[shadow_tx_hash],
+            "Shadow tx paid from a non-existent account",
         );
 
         Ok(())
@@ -819,11 +801,13 @@ mod tests {
         let shadow_tx = make_shadow_tx(nonexistent_address);
         let shadow_tx =
             sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        let valid_shadow_tx = sign_shadow_tx(block_reward(), &ctx.block_producer_a, 0).await?;
 
-        assert_nonexistent_account_fails_block_production(&mut node, shadow_tx).await
+        assert_nonexistent_account_fails_block_production(&mut node, shadow_tx, valid_shadow_tx)
+            .await
     }
 
-    // test decrementing when account exists but not enough balance (expect block production failure)
+    // test decrementing when account exists but not enough balance (expect the shadow tx to be skipped)
     #[test_log::test(tokio::test)]
     async fn heavy_test_decrement_insufficient_balance() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
@@ -837,7 +821,6 @@ mod tests {
         );
 
         // Create a shadow tx that tries to decrement more than the balance
-        // This should cause block production to fail entirely
         let decrement_amount = funded_balance + U256::from(DEFAULT_PRIORITY_FEE) + U256::ONE;
         let shadow_tx = ShadowTransaction::new_v1(
             TransactionPacket::Stake(BalanceDecrement {
@@ -850,47 +833,82 @@ mod tests {
         let shadow_tx =
             sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
 
-        // Attempt to produce a new block - this should fail because the shadow transaction
-        // tries to decrement more than the available balance
+        // The shadow tx fails as an invalid transaction, so the payload builder skips it.
+        // The Irys block producer rejects a payload that does not start with all its shadow txs.
+        // The valid shadow tx keeps the payload non-empty, which `mine_block` waits for.
+        let valid_shadow_tx = sign_shadow_tx(block_reward(), &ctx.block_producer_a, 0).await?;
+        let shadow_tx_hash = *shadow_tx.hash();
+        let block_payload = mine_block(&mut node, vec![shadow_tx, valid_shadow_tx]).await?;
 
-        // Set up the payload attributes with shadow txs
+        assert_txs_not_in_block(&block_payload, &[shadow_tx_hash], "Unpayable shadow tx");
+        assert_eq!(
+            get_balance(&node.inner, ctx.normal_signer.address()),
+            funded_balance,
+            "Balance must not change when the shadow tx is skipped"
+        );
+
+        Ok(())
+    }
+
+    /// A block with an unpayable shadow tx must get payload status `INVALID` from the engine
+    /// API, not an engine error.
+    #[test_log::test(tokio::test)]
+    async fn heavy_unpayable_shadow_tx_payload_is_invalid() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let (mut node, ctx) = ctx.get_single_node()?;
+        let funded_balance = get_balance(&node.inner, ctx.normal_signer.address());
+
+        // Build a valid block without submitting it.
+        let valid_shadow_tx = sign_shadow_tx(block_reward(), &ctx.block_producer_a, 0).await?;
         node.payload.timestamp += 1;
         let base_attributes = (node.payload.attributes_generator)(node.payload.timestamp);
         let attributes = IrysPayloadBuilderAttributes {
             inner: base_attributes.inner,
             id: base_attributes.id,
-            shadow_txs: vec![shadow_tx],
+            shadow_txs: vec![valid_shadow_tx],
         };
-
-        // Send the payload - this will trigger block building
         node.payload
             .payload_builder
             .send_new_payload(attributes.clone())
             .await
             .unwrap()?;
-
-        // Wait briefly for the payload builder to process
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Try to get the payload - this should return an error
-        let result = node
-            .payload
-            .payload_builder
-            .best_payload(attributes.payload_id())
+        node.payload.expect_attr_event(attributes.clone()).await?;
+        node.payload
+            .wait_for_built_payload(attributes.payload_id())
             .await;
+        let built_payload = node.payload.expect_built_payload().await?;
 
-        // Verify the payload build failed with an error
-        let err = result
-            .expect("Expected Some result from best_payload")
-            .expect_err("Block production should have failed due to insufficient balance");
-
-        let error_msg = format!("{err:?}");
-        assert!(
-            error_msg.contains("insufficient balance")
-                || error_msg.contains("Shadow transaction failed")
-                || error_msg.contains("EVM"),
-            "Expected shadow transaction insufficient balance failure, got: {error_msg}"
+        // The payload builder skips an unpayable shadow tx, so replace the block body by hand.
+        let unpayable_shadow_tx = ShadowTransaction::new_v1(
+            TransactionPacket::Stake(BalanceDecrement {
+                amount: funded_balance + U256::ONE,
+                target: ctx.normal_signer.address(),
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
         );
+        let unpayable_shadow_tx =
+            sign_shadow_tx(unpayable_shadow_tx, &ctx.block_producer_a, 0).await?;
+        let mut block = built_payload.block().clone().into_block();
+        block.body.transactions = vec![unpayable_shadow_tx.into_consensus().into_inner()];
+        block.header.transactions_root =
+            alloy_consensus::proofs::calculate_transaction_root(&block.body.transactions);
+        let block = reth::primitives::SealedBlock::seal_slow(block);
+
+        let status = node
+            .inner
+            .add_ons_handle
+            .beacon_engine_handle
+            .new_payload(<IrysPayloadTypes as PayloadTypes>::block_to_payload(block))
+            .await?;
+
+        match status.status {
+            alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => assert!(
+                validation_error.contains("lack of funds"),
+                "unexpected validation error: {validation_error}"
+            ),
+            other => panic!("expected INVALID payload status, got: {other:?}"),
+        }
 
         Ok(())
     }
@@ -2237,6 +2255,104 @@ mod tests {
 
         assert!(res.is_ok(), "unexpected error tracing tx {:?}", res);
 
+        Ok(())
+    }
+
+    /// Irys has no EIP-7685 requests. A block with calls to the request predeploys (code present,
+    /// Prague active) has an empty requests hash and is valid.
+    #[test_log::test(tokio::test)]
+    async fn heavy_request_predeploy_calls_give_empty_requests_hash() -> eyre::Result<()> {
+        use alloy_consensus::TxEip1559;
+        use alloy_eips::eip7002::{
+            WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_PREDEPLOY_CODE,
+        };
+        use alloy_eips::eip7251::{
+            CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS, CONSOLIDATION_REQUEST_PREDEPLOY_CODE,
+        };
+        use alloy_eips::eip7685::EMPTY_REQUESTS_HASH;
+        use alloy_genesis::GenesisAccount;
+        use reth::providers::ReceiptProvider as _;
+
+        let mut genesis = custom_chain().genesis.clone();
+        genesis.config.prague_time = Some(0);
+        for (address, code) in [
+            (
+                WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS,
+                &WITHDRAWAL_REQUEST_PREDEPLOY_CODE,
+            ),
+            (
+                CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS,
+                &CONSOLIDATION_REQUEST_PREDEPLOY_CODE,
+            ),
+        ] {
+            genesis.alloc.insert(
+                address,
+                GenesisAccount::default()
+                    .with_nonce(Some(1))
+                    .with_code(Some(code.clone())),
+            );
+        }
+
+        let signer = EthereumWallet::from(Wallet::new(1).wallet_gen()[0].clone()).default_signer();
+        let (mut nodes, _tasks, _) = setup_irys_reth(
+            &[signer.address()],
+            Arc::new(genesis.into()),
+            false,
+            eth_payload_attributes_with_beneficiary,
+        )
+        .await?;
+        let mut node = nodes.remove(0);
+
+        // withdrawal request: validator pubkey (48 bytes) + amount (8 bytes);
+        // consolidation request: source pubkey (48 bytes) + target pubkey (48 bytes)
+        let requests = [
+            (WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, 56),
+            (CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS, 96),
+        ];
+        let mut tx_hashes = Vec::new();
+        for (nonce, (predeploy, input_len)) in (0_u64..).zip(requests) {
+            let tx = sign_tx(
+                TxEip1559 {
+                    chain_id: 1,
+                    nonce,
+                    gas_limit: 1_000_000,
+                    max_fee_per_gas: 10_000_000_000,
+                    max_priority_fee_per_gas: 1_000_000_000,
+                    to: TxKind::Call(predeploy),
+                    // Minimum request fee of the request predeploys (the excess is zero).
+                    value: U256::from(1),
+                    access_list: Default::default(),
+                    input: vec![0xab; input_len].into(),
+                },
+                &signer,
+            )
+            .await;
+            let outcome = node
+                .inner
+                .pool
+                .add_transaction(TransactionOrigin::Local, tx)
+                .await?;
+            tx_hashes.push(outcome.hash);
+        }
+
+        let payload = advance_block(&mut node, vec![]).await?;
+
+        assert_txs_in_block(&payload, &tx_hashes, "request predeploy calls");
+        for hash in tx_hashes {
+            let receipt = node
+                .inner
+                .provider
+                .receipt_by_hash(hash)?
+                .expect("receipt of included tx");
+            assert!(
+                receipt.success,
+                "request predeploy call {hash} must succeed"
+            );
+        }
+        assert_eq!(
+            payload.block().header().requests_hash,
+            Some(EMPTY_REQUESTS_HASH)
+        );
         Ok(())
     }
 }

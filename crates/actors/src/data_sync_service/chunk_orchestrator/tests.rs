@@ -4,17 +4,16 @@ use crate::{
     metrics,
     test_helpers::build_test_service_senders,
 };
-use irys_database::{
-    IrysDatabaseArgs as _, cache_chunk, cache_data_root, open_or_create_db, tables::IrysTables,
-};
+use irys_database::DatabaseProvider;
+use irys_database::{DatabaseProviderTestExt as _, cache_chunk, cache_data_root};
 use irys_domain::ChunkType;
 use irys_domain::{BlockTree, StorageModuleInfo};
 use irys_testing_utils::TempDirBuilder;
 use irys_types::{
     Config, ConsensusConfig, DataLedger, DataTransaction, DataTransactionLedger, H256, IrysAddress,
     LedgerChunkOffset, LedgerChunkRange, NodeConfig, PeerAddress, PeerListItem, TxChunkOffset,
-    app_state::DatabaseProvider, irys::IrysSigner, ledger_chunk_offset_ii,
-    partition::PartitionAssignment, partition_chunk_offset_ie,
+    irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
+    partition_chunk_offset_ie,
 };
 use nodit::interval::ii;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,7 +32,7 @@ fn test_config_with_pending_limit(
             chunk_size: 32,
             num_chunks_in_partition: num_chunks,
             num_chunks_in_recall_range: 2,
-            num_partitions_per_slot: 1,
+            num_partitions_per_slot: irys_types::ReplicaCount::new(1),
             entropy_packing_iterations: 1,
             block_migration_depth: 1,
             chain_id: 1,
@@ -115,13 +114,7 @@ fn open_test_db(config: &Config) -> DatabaseProvider {
         .node_config
         .base_directory
         .join(format!("orchestrator-db-{n}"));
-    let env = open_or_create_db(
-        path,
-        IrysTables::ALL,
-        reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
-    )
-    .expect("open orchestrator test db");
-    DatabaseProvider(Arc::new(env))
+    DatabaseProvider::for_testing(&path, &path.join("cache")).expect("open orchestrator test db")
 }
 
 fn make_orchestrator(sm: Arc<StorageModule>, config: &Config) -> ChunkOrchestrator {
@@ -1869,7 +1862,7 @@ fn index_and_settle(sm: &StorageModule, tx: &DataTransaction, last_inclusive: u6
 }
 
 fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, offsets: &[usize]) {
-    db.update_eyre(|wtx| {
+    db.update_cache_eyre(|wtx| {
         cache_data_root(
             wtx,
             &tx.header,
@@ -1888,14 +1881,13 @@ fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, offsets: &[usize
 fn strip_cached_body(db: &DatabaseProvider, tx: &DataTransaction) {
     use irys_database::db_cache::CachedChunk;
     use irys_database::tables::CachedChunks;
-    use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
     let chunk_key = irys_types::data_tree::chunk_key(
         tx.header
             .data_commitment(&irys_types::data_tree::Geometry::TESTING),
         TxChunkOffset::from(0),
     );
-    db.update_eyre(|wtx| {
+    db.update_cache_eyre(|wtx| {
         let existing = wtx
             .get::<CachedChunks>(chunk_key)?
             .expect("cached chunk row");
@@ -1970,6 +1962,12 @@ async fn local_cache_hit_writes_when_no_peer_is_connected() {
     assert!(orch.dispatch_next());
     assert!(fetcher.request_log.read().unwrap().is_empty());
     assert!(sm.is_data_write_pending_at(offset));
+    sm.force_sync_pending_chunks().expect("sweep and flush");
+    assert_eq!(sm.get_chunk_type(&offset), Some(ChunkType::Data));
+    assert!(
+        sm.is_data_chunk_durable_at(offset),
+        "a body only in the chunk cache reaches durable storage with no peer"
+    );
 }
 
 #[test_log::test(tokio::test)]
@@ -2189,6 +2187,53 @@ async fn local_cache_miss_sticks_for_one_peer_cycle_then_retries_the_cache() {
         sm.is_data_write_pending_at(offset),
         "a body cached during the backoff is written on the next cycle"
     );
+    sm.force_sync_pending_chunks().expect("sweep and flush");
+    assert!(
+        sm.is_data_chunk_durable_at(offset),
+        "a memoised miss delays, but does not prevent, the durable write"
+    );
+}
+
+/// HTTP ingest left a body only in the chunk cache. A restart drops the
+/// orchestrator, including its memoised cache miss. A fresh orchestrator
+/// over the same module and database fills the hole from the cache.
+#[test_log::test(tokio::test)]
+async fn restarted_orchestrator_writes_a_cached_body_to_durable_storage() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let db = open_test_db(&config);
+    let (tx, _) = signed_tx(&config, 1);
+    index_and_settle(&sm, &tx, 0);
+    let offset = PartitionChunkOffset::from(0);
+
+    let (mut before_restart, fetcher) =
+        make_orchestrator_with_db(Arc::clone(&sm), &config, db.clone());
+    add_assigned_peer(&mut before_restart, &config, 15, 9115);
+    insert_pending(&mut before_restart, offset);
+    assert!(before_restart.dispatch_next());
+    wait_for_ledger_requests(&fetcher, 1).await;
+    assert!(before_restart.chunk_requests[&offset].local_cache_miss);
+    drop(before_restart);
+
+    cache_bodies_at(&db, &tx, &[0]);
+
+    let mut after_restart = make_orchestrator_with_ledger_total_and_db(
+        Arc::clone(&sm),
+        &config,
+        DataLedger::Publish,
+        1,
+        db,
+    );
+    after_restart.populate_request_queue();
+    assert!(after_restart.chunk_requests.contains_key(&offset));
+    assert!(!after_restart.chunk_requests[&offset].local_cache_miss);
+    assert!(after_restart.dispatch_next());
+    assert!(sm.is_data_write_pending_at(offset));
+
+    sm.force_sync_pending_chunks().expect("sweep and flush");
+    assert_eq!(sm.get_chunk_type(&offset), Some(ChunkType::Data));
+    assert!(sm.is_data_chunk_durable_at(offset));
 }
 
 #[test_log::test(tokio::test)]
@@ -2663,7 +2708,7 @@ async fn local_cache_lookups_stop_at_the_per_tick_cap() {
             chunk_size: 32,
             num_chunks_in_partition: 4,
             num_chunks_in_recall_range: 2,
-            num_partitions_per_slot: 1,
+            num_partitions_per_slot: irys_types::ReplicaCount::new(1),
             entropy_packing_iterations: 1,
             block_migration_depth: 1,
             chain_id: 1,

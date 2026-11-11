@@ -8,8 +8,6 @@ use tracing::trace;
 #[cfg(feature = "nvidia")]
 use irys_packing::CUDAConfig;
 #[cfg(feature = "nvidia")]
-use irys_packing::capacity_pack_range_cuda_c;
-#[cfg(feature = "nvidia")]
 use irys_types::split_interval;
 
 use irys_packing::capacity_single::SHA_HASH_SIZE;
@@ -131,48 +129,71 @@ impl PackingWorkerState {
                     irys_types::ConsensusConfig::CHUNK_SIZE,
                     "Chunk size is not aligned with C code"
                 );
-                let chunk_size_usize =
-                    usize::try_from(chunk_size).expect("protocol-fixed chunk_size fits usize");
-                let split = split_interval(&chunk_range, self.0.config.gpu_packing_batch_size)?;
-                let stream = stream::iter(split).map(move |chunk_range_split| {
-                    let runtime_handle = runtime_handle.clone();
-                    let semaphore = semaphore.clone();
-                    async move {
-                        let _permit = semaphore.acquire_owned().await?;
-                        let start: u32 = *(*chunk_range_split).start();
-                        let end: u32 = *(*chunk_range_split).end();
-
+                // the worker runs one GPU batch at a time (see `start_worker`)
+                let batch_size = match self.0.config.gpu_packing_batch_size {
+                    irys_types::config::GpuPackingBatchSize::Fixed(chunks) => chunks,
+                    // A request is at most one window, so a larger packer would only hold idle
+                    // VRAM. A fixed capacity also lets every request reuse the pooled packer, and
+                    // the pooled packer (~0.5 GiB) barely reduces the free VRAM measured here.
+                    irys_types::config::GpuPackingBatchSize::Auto => {
+                        CUDAConfig::from_device_default()?
+                            .auto_batch_size_for_device(0, 1)?
+                            .min(REMOTE_PACK_WINDOW_CHUNKS)
+                    }
+                };
+                let split = split_interval(&chunk_range, batch_size)?;
+                let packers = self.0.cuda_packers.clone();
+                // Slabs stream to the client as the GPU produces them; two in flight (256 MiB),
+                // so a slow client holds the GPU back instead of growing host memory.
+                let (tx, rx) = tokio::sync::mpsc::channel::<eyre::Result<Vec<u8>>>(2);
+                runtime_handle.clone().spawn(async move {
+                    for chunk_range_split in split {
+                        let start: u32 = *chunk_range_split.start();
+                        let end: u32 = *chunk_range_split.end();
                         let num_chunks = end - start + 1;
-
                         tracing::debug!(
-                            "Packing using CUDA C implementation, start:{} end:{} (len: {})",
-                            &start, &end, &num_chunks
+                            "Packing using CUDA, start:{} end:{} (len: {})",
+                            &start,
+                            &end,
+                            &num_chunks
                         );
-
-                        let batch_bytes = usize::try_from(num_chunks)
-                            .ok()
-                            .and_then(|chunks| chunks.checked_mul(chunk_size_usize))
-                            .ok_or_else(|| {
-                                eyre::eyre!(
-                                    "CUDA packing buffer size overflows: {num_chunks} chunks of {chunk_size} bytes"
-                                )
-                            })?;
-                        let out = runtime_handle
-                            .spawn_blocking(move || -> eyre::Result<Vec<u8>> {
-                                let mut out: Vec<u8> = Vec::with_capacity(batch_bytes);
-                                capacity_pack_range_cuda_c(
-                                    num_chunks,
-                                    mining_address,
-                                    u64::from(start),
-                                    partition_hash,
-                                    entropy_packing_iterations,
-                                    chain_id,
-                                    CUDAConfig::from_device_default()?,
-                                    &mut out,
-                                )?;
-                                Ok(out)
+                        let permit = match semaphore.clone().acquire_owned().await {
+                            Ok(permit) => permit,
+                            Err(err) => {
+                                let _ = tx.send(Err(err.into())).await;
+                                return;
+                            }
+                        };
+                        let (gpu_tx, packers) = (tx.clone(), packers.clone());
+                        let packed = runtime_handle
+                            .spawn_blocking(move || {
+                                packers.with_packer(batch_size, |packer| {
+                                    packer.pack(
+                                        num_chunks,
+                                        mining_address,
+                                        u64::from(start),
+                                        partition_hash,
+                                        entropy_packing_iterations,
+                                        chain_id,
+                                        |_first, slab| {
+                                            gpu_tx
+                                                .blocking_send(Ok(slab.to_vec()))
+                                                .map_err(|_| eyre::eyre!("client went away"))
+                                        },
+                                    )
+                                })
                             })
-                            .await??;
+                            .await;
+                        drop(permit);
+                        let failed = match packed {
+                            Ok(Ok(())) => None,
+                            Ok(Err(err)) => Some(err),
+                            Err(err) => Some(eyre::eyre!("CUDA packing task failed: {err}")),
+                        };
+                        if let Some(err) = failed {
+                            let _ = tx.send(Err(err)).await;
+                            return;
+                        }
                         tracing::debug!(
                             target = "irys::packing::update",
                             packing_job.chunk_range = ?chunk_range,
@@ -181,8 +202,12 @@ impl PackingWorkerState {
                             packing_job.entropy_packing_iterations = ?entropy_packing_iterations,
                             "CUDA Packed chunks"
                         );
-                        Ok(out)
-                    }}).buffered(1).boxed();
+                    }
+                });
+                let stream = stream::unfold(rx, |mut rx| async move {
+                    rx.recv().await.map(|item| (item, rx))
+                })
+                .boxed();
                 Ok(stream)
             }
             other => eyre::bail!("unsupported packing type: {other:?}"),

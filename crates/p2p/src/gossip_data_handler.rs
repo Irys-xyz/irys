@@ -20,7 +20,7 @@ use irys_actors::{
     chunk_ingress_service::facade::ChunkIngressFacadeImpl,
 };
 use irys_database::{
-    cached_data_root_by_commitment, db::IrysDatabaseExt as _, tables::CachedChunks,
+    cached_data_root_by_commitment, db::DatabaseProviderCacheExt as _, tables::CachedChunks,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
@@ -49,6 +49,50 @@ const FAILED_HEADER_FETCH_TTL: Duration = Duration::from_secs(5);
 const FAILED_HEADER_FETCH_CAPACITY: u64 = 10_000;
 /// Header fetches for pushed bodies above this number wait for a permit.
 const MAX_CONCURRENT_HEADER_FETCHES: usize = 16;
+
+/// The chunk an announcement names: its commitment (data tree root and
+/// `data_size` under `geometry`) and its index.
+fn announced_chunk_key(
+    claim: &crate::wire_types::ChunkAnnouncement,
+    geometry: &irys_types::data_tree::Geometry,
+) -> ChunkKey {
+    irys_types::data_tree::chunk_key(
+        irys_types::data_tree::data_commitment(geometry, claim.data_tree_root, claim.data_size),
+        claim.tx_offset,
+    )
+}
+
+/// A fetched body answers a claim when it names the same chunk: the same
+/// data tree root, `data_size` and index. `data_size` is part of the
+/// commitment, so a body of another size is another chunk. The body must
+/// still prove itself, and `chunk_is_held` decides success.
+fn body_matches_claim(body: &UnpackedChunk, claim: &crate::wire_types::ChunkAnnouncement) -> bool {
+    body.data_tree_root == claim.data_tree_root
+        && body.data_size == claim.data_size
+        && body.tx_offset == claim.tx_offset
+}
+
+enum SourceOutcome {
+    /// The row exists: the chunk is held.
+    Held,
+    /// The source had no usable body; a backlog announcer may take its slot.
+    Failed,
+    /// The body was valid but no row exists yet (parked, still committing);
+    /// the source is not at fault. Try the next source.
+    NextSource,
+    /// Local pressure must not consume a source round or rotate announcers.
+    RetryLocal,
+    /// `fetch_permits` is closed. Shutdown does not close it: it aborts
+    /// the task through `ChunkAnnounceState::stop_fetches`.
+    Stopped,
+}
+
+enum FetchedIngest {
+    /// Ingress answered or rejected; check for the row.
+    Settled,
+    /// Local overload or timeout; retain the claim after releasing active resources.
+    RetryLocal,
+}
 
 /// Decide whether the outer body-pull retry should continue after an error.
 /// `NoPeersAvailable` means no candidate is reachable right now; the CB
@@ -120,6 +164,7 @@ where
 {
     pub mempool: TMempoolFacade,
     pub chunk_ingress: ChunkIngressFacadeImpl,
+    pub chunk_announce: Arc<crate::chunk_announce::ChunkAnnounceState>,
     pub block_pool: Arc<BlockPool<TBlockDiscovery, TMempoolFacade>>,
     pub(crate) cache: Arc<GossipCache>,
     pub gossip_client: GossipClient,
@@ -149,6 +194,7 @@ where
         Self {
             mempool: self.mempool.clone(),
             chunk_ingress: self.chunk_ingress.clone(),
+            chunk_announce: Arc::clone(&self.chunk_announce),
             block_pool: self.block_pool.clone(),
             cache: Arc::clone(&self.cache),
             gossip_client: self.gossip_client.clone(),
@@ -187,6 +233,22 @@ where
 
         record_gossip_chunk_received(chunk_size);
 
+        // Ingress returns `Ok` for a parked body and for a recent-key hit.
+        // Either `Ok` records the sender as holding the chunk.
+        if let Err(error) =
+            irys_types::validate_unpacked_chunk(&chunk, &self.config.data_tree_geometry())
+        {
+            debug!(%error, "rejecting a chunk push that does not prove itself");
+            record_gossip_inbound_error("invalid_data", false);
+            return Err(GossipError::InvalidData(
+                InvalidDataError::ChunkInvalidProof,
+            ));
+        }
+
+        let _arriving = self.chunk_announce.begin_arriving(chunk_key);
+        self.chunk_announce.record_push_body();
+        crate::metrics::record_chunk_body_received("push");
+
         match self
             .chunk_ingress
             .handle_chunk_ingress(chunk, ChunkIngressSource::Sent)
@@ -210,6 +272,292 @@ where
                 Err(error.into())
             }
         }
+    }
+
+    /// Verified possession: a `CachedChunks` row exists. Ingress writes the
+    /// row only after validating path, length, byte range and leaf hash,
+    /// and commits it before replying. A DB error counts as not held, so
+    /// the caller fetches rather than drops the chunk.
+    pub(crate) fn chunk_is_held(&self, chunk_key: &ChunkKey) -> bool {
+        match self
+            .block_pool
+            .db
+            .view_cache_eyre(|tx| Ok(tx.get::<CachedChunks>(*chunk_key)?.is_some()))
+        {
+            Ok(held) => held,
+            Err(error) => {
+                warn!(%error, chunk.key = %chunk_key, "chunk cache lookup failed");
+                false
+            }
+        }
+    }
+
+    /// "I have this chunk" from an authenticated peer (design, receiving an
+    /// announcement, steps 2-5).
+    pub(crate) fn handle_chunk_announcement(
+        self: &Arc<Self>,
+        announcer: IrysPeerId,
+        announcement: crate::wire_types::ChunkAnnouncement,
+    ) -> GossipResult<()> {
+        use crate::chunk_announce::AnnounceDecision;
+        self.chunk_announce.record_announcement();
+        let chunk_key = announced_chunk_key(&announcement, &self.config.data_tree_geometry());
+        let key = GossipCacheKey::Chunk(chunk_key);
+        if self.chunk_is_held(&chunk_key) {
+            crate::metrics::record_chunk_announcement_received("held");
+            return self.cache.record_seen(announcer, key);
+        }
+        let decision = self.chunk_announce.admit(&announcement, announcer);
+        crate::metrics::record_chunk_announcement_received(match decision {
+            AnnounceDecision::Joined => "joined",
+            AnnounceDecision::StartFetch => "fetch",
+            AnnounceDecision::OverCapacity => "over_capacity",
+        });
+        if decision == AnnounceDecision::OverCapacity {
+            return Err(GossipError::RateLimited);
+        }
+        if decision == AnnounceDecision::StartFetch {
+            self.chunk_announce.spawn_fetch(
+                self.chunk_fetch_task(announcement).in_current_span(),
+                &self.runtime_handle,
+            );
+        }
+        self.cache.record_seen(announcer, key)
+    }
+
+    /// The fetch task for a claim `admit` just created. The guard is built
+    /// here, not in the task body, so a task dropped before its first poll
+    /// still releases the claim.
+    pub(crate) fn chunk_fetch_task(
+        self: &Arc<Self>,
+        announcement: crate::wire_types::ChunkAnnouncement,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let claim =
+            crate::chunk_announce::ClaimGuard::new(Arc::clone(&self.chunk_announce), announcement);
+        Arc::clone(self).run_chunk_fetch(claim)
+    }
+
+    /// One fetch task per claim (design, "The fetch task").
+    async fn run_chunk_fetch(self: Arc<Self>, guard: crate::chunk_announce::ClaimGuard) {
+        let claim = *guard.announcement();
+        let chunk_key = announced_chunk_key(&claim, &self.config.data_tree_geometry());
+        let limits = self.chunk_announce.limits();
+        let delays = [
+            Duration::from_millis(self.config.node_config.p2p_gossip.chunk_fetch_delay_ms),
+            limits.later_round_delays[0],
+            limits.later_round_delays[1],
+        ];
+        match tokio::time::timeout_at(guard.deadline(), self.fetch_rounds(&claim, delays)).await {
+            Ok(true) => {}
+            Ok(false) => {
+                crate::metrics::record_gossip_pull_failure("chunk", "exhausted");
+                warn!(
+                    chunk.key = %chunk_key,
+                    "announced chunk could not be fetched from any source"
+                );
+            }
+            Err(_elapsed) => {
+                crate::metrics::record_gossip_pull_failure("chunk", "deadline");
+                warn!(chunk.key = %chunk_key, "announced chunk claim expired");
+            }
+        }
+    }
+
+    /// `true` once the chunk is held, whoever delivered it.
+    async fn fetch_rounds(
+        &self,
+        claim: &crate::wire_types::ChunkAnnouncement,
+        delays: [Duration; 3],
+    ) -> bool {
+        let chunk_key = announced_chunk_key(claim, &self.config.data_tree_geometry());
+        let poll = self.chunk_announce.limits().arriving_poll;
+        for delay in delays {
+            tokio::time::sleep(delay).await;
+            // A push in flight may still fail; keep the claim and wait.
+            while self.chunk_announce.is_arriving(&chunk_key) {
+                tokio::time::sleep(poll).await;
+            }
+            if self.chunk_is_held(&chunk_key) {
+                return true;
+            }
+            // Local pressure preserves the source; the fixed claim lifetime bounds recovery.
+            let mut tried = Vec::new();
+            while let Some(source) = self.chunk_announce.next_source(claim, &tried) {
+                match self.fetch_from_source(claim, source).await {
+                    SourceOutcome::Held => return true,
+                    SourceOutcome::Failed => self.chunk_announce.source_failed(claim, source),
+                    SourceOutcome::NextSource => {}
+                    SourceOutcome::RetryLocal => {
+                        let _phase = crate::metrics::ChunkFetchPhase::start("cooldown");
+                        tokio::time::sleep(self.chunk_announce.limits().local_retry_delay).await;
+                        continue;
+                    }
+                    SourceOutcome::Stopped => return false,
+                }
+                tried.push(source);
+            }
+        }
+        self.chunk_is_held(&chunk_key)
+    }
+
+    async fn fetch_from_source(
+        &self,
+        claim: &crate::wire_types::ChunkAnnouncement,
+        source: IrysPeerId,
+    ) -> SourceOutcome {
+        let geometry = self.config.data_tree_geometry();
+        let chunk_key = announced_chunk_key(claim, &geometry);
+        if self.chunk_is_held(&chunk_key) {
+            return SourceOutcome::Held;
+        }
+        let Some(peer) = self.peer_list.peer_by_id(&source) else {
+            return SourceOutcome::Failed;
+        };
+        // Held for the transfer and the ingest only, never across a round's sleep.
+        let permit = {
+            let _phase = crate::metrics::ChunkFetchPhase::start("queue");
+            Arc::clone(&self.chunk_announce.fetch_permits)
+                .acquire_owned()
+                .await
+        };
+        let Ok(_permit) = permit else {
+            return SourceOutcome::Stopped;
+        };
+        // A push or another source may have committed the row during the wait.
+        if self.chunk_is_held(&chunk_key) {
+            return SourceOutcome::Held;
+        }
+        let fetched = {
+            let _phase = crate::metrics::ChunkFetchPhase::start("network");
+            self.gossip_client
+                .fetch_chunk(
+                    &source,
+                    &peer.address.gossip,
+                    claim,
+                    &self.peer_list,
+                    self.chunk_announce.limits().fetch_timeout,
+                )
+                .await
+        };
+        let body = match fetched {
+            Ok(Some(body)) => body,
+            Ok(None) | Err(_) => return SourceOutcome::Failed,
+        };
+        if !body_matches_claim(&body, claim)
+            || irys_types::validate_unpacked_chunk(&body, &geometry).is_err()
+        {
+            self.peer_list.decrease_peer_score_by_peer_id(
+                &source,
+                ScoreDecreaseReason::BogusData("invalid chunk fetch response".to_string()),
+            );
+            return SourceOutcome::Failed;
+        }
+        let ingest = {
+            let _phase = crate::metrics::ChunkFetchPhase::start("ingest");
+            self.ingest_fetched_chunk(body).await
+        };
+        // Possession, not the ingest reply, decides success.
+        if self.chunk_is_held(&chunk_key) {
+            self.chunk_announce.record_fetch_body();
+            crate::metrics::record_chunk_body_received("fetch");
+            if let Err(error) = self
+                .cache
+                .record_seen(source, GossipCacheKey::Chunk(chunk_key))
+            {
+                warn!(%error, "failed to record fetched chunk source");
+            }
+            return SourceOutcome::Held;
+        }
+        match ingest {
+            FetchedIngest::RetryLocal => SourceOutcome::RetryLocal,
+            FetchedIngest::Settled => SourceOutcome::NextSource,
+        }
+    }
+
+    /// Ingest a validated body, retrying local `Overloaded` with the same body.
+    /// A timeout does not cancel the write: ingress may still commit it.
+    ///
+    /// The body is ingested as [`ChunkIngressSource::Sent`]: an announcement
+    /// replaces a gossip push of the same chunk, so the chunk parks for a
+    /// header that has not arrived yet, as a pushed chunk does.
+    async fn ingest_fetched_chunk(&self, chunk: UnpackedChunk) -> FetchedIngest {
+        use irys_actors::chunk_ingress_service::{AdvisoryChunkIngressError, ChunkIngressError};
+        let limits = self.chunk_announce.limits();
+        let attempts = limits.overload_backoff.len() + 1;
+        let chunk_key = chunk.chunk_key(&self.config.data_tree_geometry());
+        for attempt in 0..attempts {
+            if self.chunk_is_held(&chunk_key) {
+                return FetchedIngest::Settled;
+            }
+            let reply = tokio::time::timeout(
+                limits.ingest_timeout,
+                // clone: an Overloaded retry submits this same body again
+                self.chunk_ingress
+                    .handle_chunk_ingress(chunk.clone(), ChunkIngressSource::Sent),
+            )
+            .await;
+            match reply {
+                Ok(Err(ChunkIngressError::Advisory(AdvisoryChunkIngressError::Overloaded))) => {
+                    let Some(backoff) = limits.overload_backoff.get(attempt) else {
+                        crate::metrics::record_chunk_local_retry("overloaded");
+                        return FetchedIngest::RetryLocal;
+                    };
+                    tokio::time::sleep(*backoff).await;
+                }
+                Ok(Ok(())) => return FetchedIngest::Settled,
+                Ok(Err(error)) => {
+                    debug!(?error, "fetched chunk rejected by ingress");
+                    return FetchedIngest::Settled;
+                }
+                Err(_elapsed) => {
+                    crate::metrics::record_chunk_local_retry("ingest_timeout");
+                    return FetchedIngest::RetryLocal;
+                }
+            }
+        }
+        FetchedIngest::RetryLocal
+    }
+
+    /// Serve an announced chunk from the local chunk cache, under the
+    /// commitment the announcement names. A reclaimed body is `None`.
+    pub(crate) fn handle_chunk_fetch(
+        &self,
+        request: &crate::wire_types::ChunkAnnouncement,
+    ) -> GossipResult<Option<UnpackedChunk>> {
+        let Ok(_permit) = Arc::clone(&self.chunk_announce.serve_permits).try_acquire_owned() else {
+            return Err(GossipError::RateLimited);
+        };
+        let geometry = self.config.data_tree_geometry();
+        let data_commitment = irys_types::data_tree::data_commitment(
+            &geometry,
+            request.data_tree_root,
+            request.data_size,
+        );
+        let cached = self
+            .block_pool
+            .db
+            .view_cache_eyre(|tx| {
+                irys_database::cached_unpacked_chunk(
+                    tx,
+                    data_commitment,
+                    request.tx_offset,
+                    &geometry,
+                )
+            })
+            .map_err(|error| {
+                GossipError::Internal(InternalGossipError::Database(error.to_string()))
+            })?;
+        Ok(cached.filter(|chunk| {
+            // A stored body that does not open its commitment must not be
+            // served: the fetcher would score it BogusData.
+            match irys_types::validate_unpacked_chunk(chunk, &geometry) {
+                Ok(()) => true,
+                Err(error) => {
+                    debug!(%error, "not serving a cached chunk that does not prove itself");
+                    false
+                }
+            }
+        }))
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -1139,11 +1487,9 @@ where
         &self,
         chunk_key: ChunkKey,
     ) -> GossipResult<Option<UnpackedChunk>> {
-        use irys_database::reth_db::transaction::DbTx as _;
-
         self.block_pool
             .db
-            .view_eyre(|tx| {
+            .view_cache_eyre(|tx| {
                 let Some(cached_chunk) = tx.get::<CachedChunks>(chunk_key)? else {
                     return Ok(None);
                 };
@@ -1169,12 +1515,20 @@ where
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<IrysAddress> {
-        self.mempool
+    pub(crate) async fn handle_get_stake_and_pledge_whitelist(
+        &self,
+    ) -> GossipResult<Vec<IrysAddress>> {
+        let whitelist = self
+            .mempool
             .get_stake_and_pledge_whitelist()
             .await
-            .into_iter()
-            .collect()
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "get_stake_and_pledge_whitelist() errored: {}",
+                    e
+                )))
+            })?;
+        Ok(whitelist.into_iter().collect())
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -1489,9 +1843,15 @@ async fn get_block_body<M: MempoolFacade, B: BlockDiscoveryFacade>(
     // Expensive path: reconstruct from mempool/DB
     let maybe_block_header = block_pool.get_block_header(block_hash).await?;
     if let Some(block_header) = &maybe_block_header {
+        let mempool_guard = mempool.get_internal_read_guard().await.map_err(|err| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Mempool unavailable to build block body for block {}: {}",
+                block_hash, err
+            )))
+        })?;
         let block_body = build_block_body_for_processed_block_header(
             block_header,
-            &mempool.get_internal_read_guard().await,
+            &mempool_guard,
             &block_pool.db,
         )
         .await
@@ -1556,13 +1916,14 @@ mod fetch_body_retries_tests {
 mod block_body_serve_cap_tests {
     use super::*;
     use crate::tests::util::data_handler_stub;
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        BlockHash, Config, DatabaseProvider, DbSyncMode, H256, IrysAddress, IrysPeerId, NodeConfig,
-        PeerAddress, PeerListItem, PeerScore,
+        BlockHash, Config, H256, IrysAddress, IrysPeerId, NodeConfig, PeerAddress, PeerListItem,
+        PeerScore,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -1585,13 +1946,11 @@ mod block_body_serve_cap_tests {
         node_config.base_directory = dir.path().to_path_buf();
         node_config.p2p_gossip.max_concurrent_block_body_serves = limit;
         let config = Config::new_with_random_peer_id(node_config);
-        let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(
-                &config.node_config.base_directory,
-                DbSyncMode::UtterlyNoSync,
-            )
-            .expect("open test db"),
-        ));
+        let db = DatabaseProvider::for_testing(
+            &config.node_config.base_directory,
+            &config.node_config.irys_cache_data_dir(),
+        )
+        .expect("open test db");
         let peer_list = PeerList::test_mock().expect("peer list");
         let sync_state = ChainSyncState::new(false, false);
         let handler = data_handler_stub(&config, &peer_list, db, sync_state);
@@ -1823,17 +2182,15 @@ mod body_fetch_recovery_tests {
     use crate::block_pool::BlockRemovalReason;
     use crate::tests::util::{FakeGossipServer, data_handler_stub_with_sync, peer_list_item};
     use crate::types::GossipResponse;
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::SealedBlock;
     use irys_types::v2::GossipDataV2;
-    use irys_types::{
-        BlockBody, Config, DatabaseProvider, DbSyncMode, H256, IrysAddress, IrysPeerId, NodeConfig,
-        PeerScore,
-    };
+    use irys_types::{BlockBody, Config, H256, IrysAddress, IrysPeerId, NodeConfig, PeerScore};
     use irys_utils::circuit_breaker::CircuitBreakerConfig;
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -1863,13 +2220,11 @@ mod body_fetch_recovery_tests {
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = dir.path().to_path_buf();
         let config = Config::new_with_random_peer_id(node_config);
-        let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(
-                &config.node_config.base_directory,
-                DbSyncMode::UtterlyNoSync,
-            )
-            .expect("open test db"),
-        ));
+        let db = DatabaseProvider::for_testing(
+            &config.node_config.base_directory,
+            &config.node_config.irys_cache_data_dir(),
+        )
+        .expect("open test db");
         let peer_list = PeerList::test_mock().expect("peer list");
         let (handler, sync_rx) =
             data_handler_stub_with_sync(&config, &peer_list, db, ChainSyncState::new(false, false));
@@ -2867,16 +3222,14 @@ mod body_fetch_recovery_tests {
 mod chunk_pull_tests {
     use super::*;
     use crate::tests::util::data_handler_stub;
-    use irys_database::reth_db::transaction::{DbTx as _, DbTxMut as _};
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_database::tables::CachedDataRoots;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::data_tree::{chunk_key, verify_data_chunk};
-    use irys_types::{
-        DataCommitment, DataTransaction, DatabaseProvider, DbSyncMode, NodeConfig, TxChunkOffset,
-    };
+    use irys_types::{DataCommitment, DataTransaction, NodeConfig, TxChunkOffset};
 
     const WINDOW: Duration = Duration::from_secs(10);
 
@@ -2897,13 +3250,11 @@ mod chunk_pull_tests {
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = dir.path().to_path_buf();
         let config = Config::new_with_random_peer_id(node_config);
-        let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(
-                &config.node_config.base_directory,
-                DbSyncMode::UtterlyNoSync,
-            )
-            .expect("open test db"),
-        ));
+        let db = DatabaseProvider::for_testing(
+            &config.node_config.base_directory,
+            &config.node_config.irys_cache_data_dir(),
+        )
+        .expect("open test db");
         let peer_list = PeerList::test_mock().expect("peer list");
         let handler = data_handler_stub(
             &config,
@@ -2953,7 +3304,7 @@ mod chunk_pull_tests {
         let geometry = fixture.config.data_tree_geometry();
         fixture
             .db
-            .update_eyre(|tx| {
+            .update_cache_eyre(|tx| {
                 irys_database::cache_data_root(tx, &transaction.header, None, &geometry)?;
                 for chunk_index in 0..3 {
                     let chunk = unpacked_chunk(fixture, &transaction, &data, chunk_index);
@@ -3038,7 +3389,7 @@ mod chunk_pull_tests {
         let (_, _, data_commitment) = cache_upload(&fixture);
         fixture
             .db
-            .update_eyre(|tx| {
+            .update_cache_eyre(|tx| {
                 tx.delete::<CachedDataRoots>(data_commitment, None)?;
                 Ok(())
             })
@@ -3047,7 +3398,7 @@ mod chunk_pull_tests {
         let key = chunk_key(data_commitment, TxChunkOffset::from(0));
         let body = fixture
             .db
-            .view_eyre(|tx| Ok(tx.get::<CachedChunks>(key)?))
+            .view_cache_eyre(|tx| Ok(tx.get::<CachedChunks>(key)?))
             .expect("read the body");
         assert!(body.is_some(), "the body is still cached");
         assert!(pull(&fixture, 30, key).await.is_none());
@@ -3059,12 +3410,13 @@ mod execution_payload_tests {
     use super::*;
     use crate::tests::util::{FakeGossipServer, data_handler_stub, peer_list_item};
     use crate::types::GossipResponse;
+    use irys_database::DatabaseProvider;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::v2::GossipDataV2;
-    use irys_types::{DatabaseProvider, DbSyncMode, NodeConfig, PeerScore};
+    use irys_types::{NodeConfig, PeerScore};
     use reth::primitives::Header;
     use reth::primitives::proofs::calculate_ommers_root;
     use reth_ethereum_primitives::BlockBody as EvmBlockBody;
@@ -3077,13 +3429,11 @@ mod execution_payload_tests {
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = dir.path().to_path_buf();
         let config = Config::new_with_random_peer_id(node_config);
-        let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(
-                &config.node_config.base_directory,
-                DbSyncMode::UtterlyNoSync,
-            )
-            .expect("open test db"),
-        ));
+        let db = DatabaseProvider::for_testing(
+            &config.node_config.base_directory,
+            &config.node_config.irys_cache_data_dir(),
+        )
+        .expect("open test db");
         let peer_list = PeerList::test_mock().expect("peer list");
         let handler = data_handler_stub(&config, &peer_list, db, ChainSyncState::new(false, false));
         (dir, handler)
@@ -3291,5 +3641,41 @@ mod execution_payload_tests {
         .expect("served from the cache without a network request")
         .expect("payload is in the cache");
         assert_eq!(payload.into_block(), matching);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{announced_chunk_key, body_matches_claim};
+    use irys_types::{DataTreeRoot, H256};
+
+    #[test]
+    fn body_matches_claim_checks_root_size_and_index() {
+        let chunk = irys_types::UnpackedChunk {
+            data_tree_root: DataTreeRoot(H256::random()),
+            data_size: 64,
+            data_path: vec![1, 2, 3].into(),
+            bytes: vec![0; 32].into(),
+            tx_offset: irys_types::TxChunkOffset::from(1_i32),
+        };
+        let claim = crate::wire_types::ChunkAnnouncement::from(&chunk);
+        assert!(body_matches_claim(&chunk, &claim));
+        let geometry = irys_types::data_tree::Geometry::TESTING;
+        assert_eq!(
+            announced_chunk_key(&claim, &geometry),
+            chunk.chunk_key(&geometry)
+        );
+        let mut c = claim;
+        c.data_size = 63;
+        assert!(
+            !body_matches_claim(&chunk, &c),
+            "data_size is part of the commitment"
+        );
+        let mut c = claim;
+        c.tx_offset = irys_types::TxChunkOffset::from(0_i32);
+        assert!(!body_matches_claim(&chunk, &c));
+        let mut c = claim;
+        c.data_tree_root = DataTreeRoot(H256::random());
+        assert!(!body_matches_claim(&chunk, &c));
     }
 }

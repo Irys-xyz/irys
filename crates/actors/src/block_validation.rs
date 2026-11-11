@@ -10,12 +10,14 @@ use crate::{
 };
 use alloy_consensus::Transaction as _;
 use alloy_consensus::transaction::SignerRecoverable as _;
-use alloy_eips::eip7685::{Requests, RequestsOrHash};
+use alloy_eips::eip7685::{EMPTY_REQUESTS_HASH, Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
+use irys_database::DatabaseProvider;
 use irys_database::{
     block_header_by_hash, canonical_promoted_height, canonical_submit_height,
-    db::IrysDatabaseExt as _, tables::MigratedBlockHashes,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
+    tables::MigratedBlockHashes,
 };
 use irys_domain::{
     BlockBounds, BlockBoundsError, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard,
@@ -27,20 +29,25 @@ use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
-use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
-use irys_types::storage_pricing::{Amount, calculate_perm_fee_from_config};
+use irys_types::storage_pricing::PRECISION_SCALE;
+#[cfg(test)]
+use irys_types::storage_pricing::ReplicaCount;
+#[cfg(test)]
+use irys_types::storage_pricing::{
+    Amount, calculate_perm_fee_from_config,
+    phantoms::{Irys, NetworkFee},
+};
 use irys_types::{BlockHash, EvmBlockHash, H256List, LedgerChunkRange};
 use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
-    DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
-    SealedBlock, SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
-    app_state::DatabaseProvider,
-    calculate_difficulty,
+    DataTransactionLedger, H256, IrysAddress, IrysBlockHeader, PoaData, SealedBlock,
+    SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
+    consensus_context::EpochConsensusContext,
     data_tree::verify_data_chunk,
     ensure_proof_layout,
-    hardfork_config::{Cascade, ForEpoch, IrysHardforkConfig},
-    next_cumulative_diff,
+    hardfork_config::{Activation, Cascade, ForEpoch, IrysHardforkConfig},
+    partition_resize::PartitionGeometry,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path,
 };
@@ -61,7 +68,7 @@ use reth_db::Database as _;
 use reth_db::transaction::DbTx as _;
 use reth_ethereum_primitives::Block;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     ops::ControlFlow,
     sync::Arc,
     time::Duration,
@@ -140,6 +147,10 @@ pub enum PreValidationError {
     CascadeNotConfigured { tx_id: H256 },
     #[error("Invalid cumulative_difficulty (expected {expected} got {got})")]
     CumulativeDifficultyMismatch { expected: U256, got: U256 },
+    #[error(
+        "data ledgers must stay empty while the Fission activation is pending: ledger {ledger_id} holds {total_chunks} chunks"
+    )]
+    DataLedgersNotEmptyWhilePendingResize { ledger_id: u32, total_chunks: u64 },
     #[error("Invalid difficulty (expected {expected} got {got})")]
     DifficultyMismatch { expected: U256, got: U256 },
     #[error("Ema mismatch: recomputed EMA does not match Ema in block header")]
@@ -643,6 +654,7 @@ impl PreValidationError {
             | Self::CascadeNotConfigured { .. }
             | Self::CommitmentVersionInvalid { .. }
             | Self::CumulativeDifficultyMismatch { .. }
+            | Self::DataLedgersNotEmptyWhilePendingResize { .. }
             | Self::DataLedgerExtractionFailed(_)
             | Self::DifficultyMismatch { .. }
             | Self::DuplicateIngressProofSigner { .. }
@@ -826,6 +838,9 @@ impl PreValidationError {
             Self::TooManyPublishTxs { .. } => "too_many_publish_txs",
             Self::TxRootMismatch { .. } => "tx_root_mismatch",
             Self::TotalChunksMismatch { .. } => "total_chunks_mismatch",
+            Self::DataLedgersNotEmptyWhilePendingResize { .. } => {
+                "data_ledgers_not_empty_while_pending_resize"
+            }
             Self::PoaTxRootLeafMismatch { .. } => "poa_tx_root_leaf_mismatch",
             Self::ZeroSizeDataTx { .. } => "zero_size_data_tx",
             Self::PrefixSizeExceedsDataSize { .. } => "prefix_size_exceeds_data_size",
@@ -1071,6 +1086,14 @@ pub enum ValidationError {
         reason: String,
     },
 
+    /// Commitment transaction fee is below the minimum commitment fee
+    #[error("Commitment transaction {tx_id} at position {position} has insufficient fee: {reason}")]
+    CommitmentFeeInsufficient {
+        tx_id: H256,
+        position: usize,
+        reason: String,
+    },
+
     /// Commitment transaction version is below minimum required after hardfork activation
     #[error(
         "Commitment {tx_id} at position {position} has version {version}, minimum required is {minimum}"
@@ -1258,6 +1281,7 @@ impl ValidationError {
             | Self::RecallRangeInvalid(_)
             | Self::ShadowTransactionInvalid(_)
             | Self::CommitmentValueInvalid { .. }
+            | Self::CommitmentFeeInsufficient { .. }
             | Self::CommitmentVersionInvalid { .. }
             | Self::CommitmentTypeNotAllowed { .. }
             | Self::CommitmentOrderingFailed(_)
@@ -1323,6 +1347,7 @@ impl ValidationError {
             | Self::RecallRangeInvalid(_)
             | Self::ShadowTransactionInvalid(_)
             | Self::CommitmentValueInvalid { .. }
+            | Self::CommitmentFeeInsufficient { .. }
             | Self::CommitmentVersionInvalid { .. }
             | Self::CommitmentTypeNotAllowed { .. }
             | Self::CommitmentOrderingFailed(_)
@@ -1591,6 +1616,7 @@ impl ValidationError {
             Self::RecallRangeInvalid(_) => "recall_range_invalid",
             Self::ShadowTransactionInvalid(_) => "shadow_tx_invalid",
             Self::CommitmentValueInvalid { .. } => "commitment_value_invalid",
+            Self::CommitmentFeeInsufficient { .. } => "commitment_fee_insufficient",
             Self::CommitmentVersionInvalid { .. } => "commitment_version_invalid",
             Self::CommitmentTypeNotAllowed { .. } => "commitment_type_not_allowed",
             Self::CommitmentOrderingFailed(_) => "commitment_ordering_failed",
@@ -1683,8 +1709,9 @@ fn expected_ledger_total_chunks(
 }
 
 /// Reject a publish ledger whose flat ingress-proof list length is not
-/// `publish_tx_count * number_of_ingress_proofs_total` (N), or whose
-/// peer-supplied `required_proof_count` is not N.
+/// `publish_tx_count * N`, or whose peer-supplied `required_proof_count` is
+/// not N. N is [`required_ingress_proofs_total`]: the configured total clamped
+/// to the parent epoch's active stakes.
 ///
 /// `ShadowTxGenerator` slices the flat proofs list as `[i*N .. i*N+N]` for each
 /// publish tx `i`. A short/mis-sized peer-supplied list is a consensus-invalid
@@ -1703,7 +1730,7 @@ fn expected_ledger_total_chunks(
 fn publish_ingress_proof_count_is_valid(
     publish_ledger: &DataTransactionLedger,
     publish_tx_count: usize,
-    number_of_ingress_proofs_total: u64,
+    number_of_ingress_proofs_total: u8,
 ) -> Result<(), PreValidationError> {
     let Some(proofs) = &publish_ledger.proofs else {
         return Ok(());
@@ -1713,12 +1740,9 @@ fn publish_ingress_proof_count_is_valid(
         proof_count,
         tx_count: publish_tx_count,
     };
-    // Convert N to usize once and multiply with checked arithmetic. Overflow is
-    // unreachable for a valid block (tx count and N are bounded), so fail closed
-    // as a mismatch rather than relying on an `as` cast that could wrap.
-    let Ok(n) = usize::try_from(number_of_ingress_proofs_total) else {
-        return Err(mismatch());
-    };
+    // Multiply with checked arithmetic. Overflow is unreachable for a valid block
+    // (tx count and N are bounded), so fail closed as a mismatch.
+    let n = usize::from(number_of_ingress_proofs_total);
     let Some(expected) = publish_tx_count.checked_mul(n) else {
         return Err(mismatch());
     };
@@ -1783,7 +1807,11 @@ pub async fn prevalidate_block(
     publish_ingress_proof_count_is_valid(
         publish_ledger,
         publish_tx_count,
-        config.number_of_ingress_proofs_total_at(block.timestamp_secs()),
+        required_ingress_proofs_total(
+            &config.consensus.hardforks,
+            block.timestamp_secs(),
+            &parent_epoch_snapshot,
+        ),
     )?;
 
     debug!(
@@ -1852,24 +1880,33 @@ pub async fn prevalidate_block(
     )?;
 
     // Check the difficulty
-    difficulty_is_valid(
-        block,
-        previous_block,
-        &config.consensus.difficulty_adjustment,
-    )?;
+    let consensus_context = parent_epoch_snapshot.consensus_context();
+    let (expected_diff, _) =
+        consensus_context.child_difficulty(block.height, block.timestamp, previous_block);
+    if block.diff != expected_diff {
+        return Err(PreValidationError::DifficultyMismatch {
+            expected: expected_diff,
+            got: block.diff,
+        });
+    }
 
     // Validate the last_diff_timestamp field
-    last_diff_timestamp_is_valid(
-        block,
-        previous_block,
-        &config.consensus.difficulty_adjustment,
-    )?;
+    let expected_timestamp =
+        consensus_context.child_last_diff_timestamp(block.height, block.timestamp, previous_block);
+    if block.last_diff_timestamp != expected_timestamp {
+        return Err(PreValidationError::LastDiffTimestampMismatch {
+            expected: expected_timestamp,
+            got: block.last_diff_timestamp,
+        });
+    }
 
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
-        "difficulty_is_valid",
+        "difficulty_and_last_diff_timestamp_are_valid",
     );
+
+    data_ledgers_empty_while_pending_resize(block, &consensus_context)?;
 
     // Validate previous_cumulative_diff points to parent's cumulative_diff
     previous_cumulative_difficulty_is_valid(block, previous_block)?;
@@ -1880,7 +1917,7 @@ pub async fn prevalidate_block(
     );
 
     // Check the cumulative difficulty
-    cumulative_difficulty_is_valid(block, previous_block)?;
+    cumulative_difficulty_is_valid(block, previous_block, &consensus_context)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -2425,64 +2462,6 @@ pub fn timestamp_is_valid(
     Ok(())
 }
 
-/// Validates if a block's difficulty matches the expected difficulty calculated
-/// from previous block data.
-/// Returns Ok if valid, Err if the difficulty doesn't match the calculated value.
-pub fn difficulty_is_valid(
-    block: &IrysBlockHeader,
-    previous_block: &IrysBlockHeader,
-    difficulty_config: &DifficultyAdjustmentConfig,
-) -> Result<(), PreValidationError> {
-    let block_height = block.height;
-    let current_timestamp = block.timestamp;
-    let last_diff_timestamp = previous_block.last_diff_timestamp;
-    let current_difficulty = previous_block.diff;
-
-    let (diff, _stats) = calculate_difficulty(
-        block_height,
-        last_diff_timestamp,
-        current_timestamp,
-        current_difficulty,
-        difficulty_config,
-    );
-
-    if diff == block.diff {
-        Ok(())
-    } else {
-        Err(PreValidationError::DifficultyMismatch {
-            expected: diff,
-            got: block.diff,
-        })
-    }
-}
-
-/// Validates the `last_diff_timestamp` field in the block.
-///
-/// The value should equal the previous block's `last_diff_timestamp` unless the
-/// current block triggers a difficulty adjustment, in which case it must be set
-/// to the block's own timestamp.
-pub fn last_diff_timestamp_is_valid(
-    block: &IrysBlockHeader,
-    previous_block: &IrysBlockHeader,
-    difficulty_config: &DifficultyAdjustmentConfig,
-) -> Result<(), PreValidationError> {
-    let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
-    let expected = if block.height.is_multiple_of(blocks_between_adjustments) {
-        block.timestamp
-    } else {
-        previous_block.last_diff_timestamp
-    };
-
-    if block.last_diff_timestamp == expected {
-        Ok(())
-    } else {
-        Err(PreValidationError::LastDiffTimestampMismatch {
-            expected,
-            got: block.last_diff_timestamp,
-        })
-    }
-}
-
 /// Checks PoA data chunk data solution partitions has not expired
 pub fn check_poa_data_expiration(
     poa: &PoaData,
@@ -2499,6 +2478,24 @@ pub fn check_poa_data_expiration(
             partition_hash: poa.partition_hash,
         });
     };
+    Ok(())
+}
+
+/// While the Fission activation is pending on this branch the data ledgers
+/// must stay empty: E is validated under this same pending context, so
+/// `PartitionResizeState::activate` can then never fail `NonEmptyLedgers`.
+pub fn data_ledgers_empty_while_pending_resize(
+    block: &IrysBlockHeader,
+    consensus_context: &EpochConsensusContext,
+) -> Result<(), PreValidationError> {
+    if consensus_context.pending_activation()
+        && let Some(ledger) = block.data_ledgers.iter().find(|l| l.total_chunks != 0)
+    {
+        return Err(PreValidationError::DataLedgersNotEmptyWhilePendingResize {
+            ledger_id: ledger.ledger_id,
+            total_chunks: ledger.total_chunks,
+        });
+    }
     Ok(())
 }
 
@@ -2556,15 +2553,18 @@ pub fn poa_ledger_matches_assignment(
 /// Validates if a block's cumulative difficulty equals the previous cumulative difficulty
 /// plus the expected hashes from its new difficulty. Returns Ok if valid.
 ///
-/// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
+/// Note: Requires valid block difficulty - `prevalidate_block` checks it first.
 pub fn cumulative_difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
+    consensus_context: &EpochConsensusContext,
 ) -> Result<(), PreValidationError> {
-    let previous_cumulative_diff = previous_block.cumulative_diff;
-    let new_diff = block.diff;
-
-    let cumulative_diff = next_cumulative_diff(previous_cumulative_diff, new_diff);
+    let cumulative_diff = consensus_context.child_cumulative_diff(
+        block.height,
+        block.timestamp,
+        previous_block,
+        block.diff,
+    );
     if cumulative_diff == block.cumulative_diff {
         Ok(())
     } else {
@@ -2593,7 +2593,7 @@ pub fn previous_cumulative_difficulty_is_valid(
 /// Checks to see if the `solution_hash` exceeds the difficulty threshold
 /// of the previous block
 ///
-/// Note: Requires valid block difficulty - call `difficulty_is_valid()` first.
+/// Note: Requires valid block difficulty - `prevalidate_block` checks it first.
 pub fn solution_hash_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
@@ -3428,6 +3428,7 @@ mod height_tests {
 #[cfg(test)]
 mod c1_side_fork_regression_tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{
         BlockIndex, BlockMetadata, BlockState, BlockTree, ChainState, EmaSnapshot,
         dummy_epoch_snapshot,
@@ -3436,8 +3437,8 @@ mod c1_side_fork_regression_tests {
     use irys_testing_utils::new_mock_signed_header;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        BlockBody, BlockHash, BlockIndexItem, DataLedger, DataTransactionLedger, DbSyncMode, H256,
-        H256List, IrysBlockHeader, LedgerIndexItem, SealedBlock,
+        BlockBody, BlockHash, BlockIndexItem, DataLedger, DataTransactionLedger, H256, H256List,
+        IrysBlockHeader, LedgerIndexItem, SealedBlock,
     };
     use std::sync::{Arc, RwLock};
     use std::time::SystemTime;
@@ -3536,12 +3537,11 @@ mod c1_side_fork_regression_tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("c1_side_fork_regression")
             .build();
-        let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+        let db = irys_database::DatabaseProvider::for_testing(
             tmp_dir.path(),
-            DbSyncMode::UtterlyNoSync,
+            &tmp_dir.path().join("cache"),
         )
         .expect("open db");
-        let db = irys_types::DatabaseProvider(Arc::new(db_env));
         let block_index = BlockIndex::new_for_testing(db.clone());
 
         let canonical_genesis_hash = BlockHash::random();
@@ -3710,10 +3710,11 @@ mod c1_side_fork_regression_tests {
 #[cfg(test)]
 mod poa_bounds_snapshot_tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{BlockIndex, BlockTree};
     use irys_testing_utils::new_mock_signed_header;
     use irys_testing_utils::utils::TempDirBuilder;
-    use irys_types::{BlockHash, BlockIndexItem, DataLedger, DbSyncMode, H256, LedgerIndexItem};
+    use irys_types::{BlockHash, BlockIndexItem, DataLedger, H256, LedgerIndexItem};
     use std::sync::{Arc, RwLock};
 
     #[test]
@@ -3721,12 +3722,11 @@ mod poa_bounds_snapshot_tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("poa_bounds_snapshot_hash")
             .build();
-        let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+        let db = irys_database::DatabaseProvider::for_testing(
             tmp_dir.path(),
-            DbSyncMode::UtterlyNoSync,
+            &tmp_dir.path().join("cache"),
         )
         .expect("open db");
-        let db = irys_types::DatabaseProvider(Arc::new(db_env));
         let block_index = BlockIndex::new_for_testing(db.clone());
 
         let genesis_hash = BlockHash::random();
@@ -3921,32 +3921,45 @@ impl RecallRangeError {
 
 /// Validate the block's VDF recall range.
 ///
+/// `geometry` is the parent epoch snapshot's (`EpochSnapshot::geometry`), so the
+/// activation block E itself is still checked under the legacy layout.
+///
 /// Fast path: local seed buffer. On mismatch or `buffer_suspect`, rebuild the
 /// window from the block's ancestry (tree/DB) and re-check; missing ancestors
 /// → soft `StepsUnavailable`.
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
-    config: &ConsensusConfig,
+    geometry: PartitionGeometry,
     steps_guard: &VdfStateReadonly,
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     buffer_suspect: bool,
 ) -> Result<(), RecallRangeError> {
     let global_step_number = block.vdf_limiter_info.global_step_number;
-    let reset_step_number = irys_efficient_sampling::reset_step_number(global_step_number, config);
+    if u64::from(block.poa.partition_chunk_offset) >= geometry.partition_chunks {
+        return Err(RecallRangeError::Mismatch(eyre::eyre!(
+            "partition offset exceeds active geometry"
+        )));
+    }
+    let reset_step_number = irys_efficient_sampling::reset_step_from_origin(
+        global_step_number,
+        geometry.recall_ranges(),
+        geometry.sampling_origin,
+    )
+    .map_err(RecallRangeError::Mismatch)?;
     info!(
         "Validating recall ranges steps from: {} to: {}",
         reset_step_number, global_step_number
     );
 
-    let recall_offset = usize::try_from(
-        u64::from(block.poa.partition_chunk_offset) / config.num_chunks_in_recall_range,
-    )
-    .map_err(|_| RecallRangeError::StepsUnavailable(eyre::eyre!("recall offset too large")))?;
-    let num_ranges = usize::try_from(irys_efficient_sampling::num_recall_ranges_in_partition(
-        config,
-    ))
-    .map_err(|_| RecallRangeError::StepsUnavailable(eyre::eyre!("recall range count too large")))?;
+    let recall_offset =
+        usize::try_from(u64::from(block.poa.partition_chunk_offset) / geometry.recall_chunks)
+            .map_err(|_| {
+                RecallRangeError::StepsUnavailable(eyre::eyre!("recall offset too large"))
+            })?;
+    let num_ranges = usize::try_from(geometry.recall_ranges()).map_err(|_| {
+        RecallRangeError::StepsUnavailable(eyre::eyre!("recall range count too large"))
+    })?;
 
     // Ancestry rebuild when the local buffer cannot be trusted.
     let fork_local_check = |cause: String| -> Result<(), RecallRangeError> {
@@ -4169,12 +4182,11 @@ mod fork_local_window_tests {
 #[cfg(test)]
 mod recall_range_buffer_authority_tests {
     use super::*;
-    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::BlockTree;
     use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
     use irys_types::block_production::Seed;
     use irys_vdf::state::VdfState;
-    use reth_db::mdbx::DatabaseArguments;
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicBool;
 
@@ -4243,13 +4255,8 @@ mod recall_range_buffer_authority_tests {
         // Real (empty-beyond-genesis) tree + DB: the self-contained block never
         // consults them; the ancestry-miss test relies on them resolving nothing.
         let tmp = TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().expect("irys_testing db args"),
-        )
-        .expect("open temp MDBX env");
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))
+            .expect("open temp MDBX env");
         let mut genesis = IrysBlockHeader::new_mock_header();
         genesis.height = 0;
         genesis.test_sign();
@@ -4278,7 +4285,7 @@ mod recall_range_buffer_authority_tests {
         async fn run(&self, buffer_suspect: bool) -> Result<(), RecallRangeError> {
             recall_recall_range_is_valid(
                 &self.block,
-                &self.config,
+                PartitionGeometry::legacy(&self.config),
                 &self.steps_guard,
                 &self.block_tree_guard,
                 &self.db,
@@ -4844,6 +4851,10 @@ pub fn poa_is_valid(
     miner_address: &IrysAddress,
     block_height: u64,
 ) -> Result<(), PreValidationError> {
+    let geometry = epoch_snapshot.geometry();
+    if u64::from(poa.partition_chunk_offset) >= geometry.partition_chunks {
+        return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
+    }
     debug!("PoA validating");
     let poa_chunk_bytes: &[u8] = match &poa.chunk {
         Some(chunk) => chunk.as_ref(),
@@ -4879,7 +4890,7 @@ pub fn poa_is_valid(
             }
         })?;
         let ledger_chunk_offset =
-            slot_index_u64 * config.num_chunks_in_partition + u64::from(poa.partition_chunk_offset);
+            slot_index_u64 * geometry.partition_chunks + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
         let ledger = DataLedger::try_from(ledger_id)
@@ -4930,10 +4941,10 @@ pub fn poa_is_valid(
         // path into a node fault. The same holds for the data path.
         ensure_proof_layout(&tx_path.0)
             .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
-        let geometry = config
+        let data_tree_geometry = config
             .data_tree_geometry()
             .expect("data tree geometry is validated at load");
-        reject_malformed_data_path(&geometry, &data_path.0)?;
+        reject_malformed_data_path(&data_tree_geometry, &data_path.0)?;
 
         // The block index places each tx on whole chunks, while the tx_root tree
         // sizes each tx by raw `data_size`. Select the tx by the chunk prefix,
@@ -4980,7 +4991,7 @@ pub fn poa_is_valid(
         }
         let chunk_index =
             u32::try_from(tx_chunk_offset / u128::from(config.chunk_size)).map_err(out_of_chunk)?;
-        let chunk_length = geometry
+        let chunk_length = data_tree_geometry
             .chunk_len(owning_tx.data_size, chunk_index)
             .map_err(out_of_chunk)?;
 
@@ -5015,8 +5026,8 @@ pub fn poa_is_valid(
         }
 
         verify_data_chunk(
-            &geometry,
-            owning_tx.data_commitment(&geometry),
+            &data_tree_geometry,
+            owning_tx.data_commitment(&data_tree_geometry),
             owning_tx.data_size,
             TxChunkOffset(chunk_index),
             chunk_data,
@@ -5130,23 +5141,6 @@ pub async fn shadow_transactions_are_valid(
             "block contains EIP-4844 blobs/sidecars which are disabled",
         ));
     }
-    // Requests are disabled: reject if any present or if header-level requests hash is set.
-    if let Some(requests) = sidecar.requests()
-        && !requests.is_empty()
-    {
-        tracing::debug!(
-            block.block_hash = %block.block_hash,
-            block.evm_block_hash = %block.evm_block_hash,
-            block.versioned_hashes_len = requests.len(),
-            "Rejecting block: EIP-7685 requests which are disabled",
-        );
-        return Err(reject(
-            "block contains EIP-7685 requests which are disabled",
-        ));
-    }
-    // Note: `requests_hash` may be present even when the requests list is empty.
-    // Do not reject on presence of the hash alone; only non-empty requests are disallowed.
-
     // ensure the execution payload timestamp matches the block timestamp
     // truncated to full seconds
     let payload_timestamp: u128 = payload_v3.timestamp().into();
@@ -5208,8 +5202,10 @@ pub async fn shadow_transactions_are_valid(
         )));
     }
 
-    let evm_block: Block = payload_v3
-        .try_into_block()
+    // The sidecar carries the header fields that are not in the payload (parent beacon block
+    // root, requests hash).
+    let evm_block: Block = ExecutionPayload::V3(payload_v3)
+        .try_into_block_with_sidecar(&sidecar)
         .map_err(|e| reject(format!("payload conversion failed: {e}")))?;
 
     // Paid payout (EVM coinbase / beneficiary) must match the declared header
@@ -5224,16 +5220,19 @@ pub async fn shadow_transactions_are_valid(
         )));
     }
 
-    // Reject presence of EIP-7685 requests via header-level requests_hash as we disable requests.
-    if evm_block.header.requests_hash.is_some() {
+    // Irys has no EIP-7685 requests: every block's requests hash is the hash of an empty request
+    // list.
+    if evm_block.header.requests_hash != Some(EMPTY_REQUESTS_HASH) {
         tracing::debug!(
             block.block_hash = %block.block_hash,
             block.evm_block_hash = %block.evm_block_hash,
-            "Rejecting block: EIP-7685 requests_hash present which is disabled",
+            evm_block.requests_hash = ?evm_block.header.requests_hash,
+            "Rejecting block: EIP-7685 requests hash is not the empty requests hash",
         );
-        return Err(reject(
-            "block contains EIP-7685 requests_hash which is disabled",
-        ));
+        return Err(reject(format!(
+            "EVM block EIP-7685 requests hash {:?} is not the empty requests hash",
+            evm_block.header.requests_hash
+        )));
     }
 
     // 2. Enforce that no EIP-4844 (blob) transactions are present in the block
@@ -5792,7 +5791,6 @@ async fn generate_expected_shadow_transactions(
             block.height,
             &parent_epoch_snapshot,
             &prev_block,
-            config,
             cascade_for_block,
         )
         .map_err(|e| node_fault(format!("NC-0042 expiry check: {e}")))?;
@@ -6289,7 +6287,7 @@ pub async fn commitment_txs_are_valid(
         }
     }
 
-    // Validate that all commitment transactions have correct values
+    // Validate that all commitment transactions have correct values and fees
     for (idx, tx) in commitment_txs.iter().enumerate() {
         tx.validate_value(&config.consensus).map_err(|e| {
             error!(
@@ -6299,6 +6297,21 @@ pub async fn commitment_txs_are_valid(
                 e
             );
             ValidationError::CommitmentValueInvalid {
+                tx_id: tx.id(),
+                position: idx,
+                reason: e.to_string(),
+            }
+        })?;
+
+        // Same rule as mempool ingress, so a block cannot carry what the mempool rejects.
+        tx.validate_fee(&config.consensus).map_err(|e| {
+            error!(
+                "Commitment transaction {} at position {} has insufficient fee: {}",
+                tx.id(),
+                idx,
+                e
+            );
+            ValidationError::CommitmentFeeInsufficient {
                 tx_id: tx.id(),
                 position: idx,
                 reason: e.to_string(),
@@ -6450,34 +6463,35 @@ pub async fn commitment_txs_are_valid(
     Ok(())
 }
 
-/// Helper function to calculate permanent storage fee using a specific EMA snapshot
-/// This includes base network fee + ingress proof rewards
-pub fn calculate_perm_storage_total_fee(
+/// Test oracle: Publish perm fee priced on an explicit reward term fee. Production code
+/// uses `Config::required_publish_perm_fee_at`.
+#[cfg(test)]
+fn calculate_perm_storage_total_fee(
     bytes_to_store: u64,
     term_fee: U256,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
     timestamp_secs: UnixTimestamp,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
-    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
     calculate_perm_fee_from_config(
         bytes_to_store,
         &config.consensus,
-        number_of_ingress_proofs_total,
+        config.publish_replica_count_at(timestamp_secs),
+        config.ingress_proof_reward_pool_at(timestamp_secs, term_fee)?,
         ema_snapshot.ema_for_public_pricing(),
-        term_fee,
         timestamp_secs,
     )
 }
 
-/// Helper function to calculate term storage fee using a specific EMA snapshot
-/// Uses the same replica count as permanent storage but for the specified number of epochs
-pub fn calculate_term_storage_base_network_fee(
+/// Test oracle: term fee with explicit epochs and replica count, so tests can vary the inputs
+/// that production code picks in `Config::required_term_fee_at`.
+#[cfg(test)]
+fn calculate_term_storage_base_network_fee(
     bytes_to_store: u64,
     epochs_for_storage: u64,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
-    replica_count: u64,
+    replica_count: ReplicaCount,
     timestamp_secs: UnixTimestamp,
 ) -> eyre::Result<U256> {
     irys_types::storage_pricing::calculate_term_fee(
@@ -6521,30 +6535,36 @@ fn validate_publish_price(
     block_ema: &EmaSnapshot,
     config: &Config,
 ) -> Result<(), PreValidationError> {
-    let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-        block_height,
-        config.consensus.epoch.num_blocks_in_epoch,
-        config.consensus.epoch.submit_ledger_epoch_length,
-    );
-
-    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
-    let expected_term_fee = calculate_term_storage_base_network_fee(
-        tx.data_size,
-        epochs_for_storage,
-        block_ema,
-        config,
-        number_of_ingress_proofs_total,
-        timestamp_secs,
-    )
-    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-    let expected_perm_fee = calculate_perm_storage_total_fee(
-        tx.data_size,
-        expected_term_fee,
-        block_ema,
-        config,
-        timestamp_secs,
-    )
-    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    let expected_term_fee = config
+        .required_term_fee_at(
+            DataLedger::Publish,
+            timestamp_secs,
+            block_height,
+            tx.data_size,
+            block_ema.ema_for_public_pricing(),
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    // From Delta the proof reward pool is priced on the tx's own term fee. This bound keeps that
+    // arithmetic in range for any pool percent <= 1, so the perm fee errors have local inputs only.
+    if matches!(
+        config.consensus.hardforks.delta_for_block(timestamp_secs),
+        Activation::Active(_)
+    ) && tx.term_fee.get() > U256::MAX / PRECISION_SCALE
+    {
+        return Err(PreValidationError::InvalidTermFeeStructure {
+            tx_id: tx.id,
+            reason: "term_fee is too large to price the ingress proof reward pool".to_string(),
+        });
+    }
+    let expected_perm_fee = config
+        .required_publish_perm_fee_at(
+            timestamp_secs,
+            tx.data_size,
+            block_ema.ema_for_public_pricing(),
+            tx.term_fee.get(),
+            expected_term_fee,
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
     // Validate perm_fee is at least the expected amount
     check_perm_fee_sufficient(tx.id, tx.perm_fee, expected_perm_fee.amount)?;
@@ -6568,16 +6588,13 @@ fn validate_publish_price(
         }
     })?;
 
-    PublishFeeCharges::new(
-        actual_perm_fee,
-        actual_term_fee,
-        &config.consensus,
-        number_of_ingress_proofs_total,
-    )
-    .map_err(|e| PreValidationError::InvalidPermFeeStructure {
-        tx_id: tx.id,
-        reason: e.to_string(),
-    })?;
+    config
+        .ingress_proof_reward_pool_at(timestamp_secs, actual_term_fee.get())
+        .and_then(|pool| PublishFeeCharges::new(actual_perm_fee, pool))
+        .map_err(|e| PreValidationError::InvalidPermFeeStructure {
+            tx_id: tx.id,
+            reason: e.to_string(),
+        })?;
     Ok(())
 }
 
@@ -6595,32 +6612,20 @@ fn validate_term_only_price(
         return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
     }
 
-    let cascade = config
-        .consensus
-        .hardforks
-        .cascade
-        .as_ref()
-        .ok_or(PreValidationError::CascadeNotConfigured { tx_id: tx.id })?;
-    let epoch_length = match ledger {
-        DataLedger::OneYear => cascade.one_year_epoch_length,
-        DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-        DataLedger::Publish | DataLedger::Submit => unreachable!(),
-    };
-    let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-        block_height,
-        config.consensus.epoch.num_blocks_in_epoch,
-        epoch_length,
-    );
+    // The helper fails on a missing Cascade config too; check first to keep the typed error.
+    if config.consensus.hardforks.cascade.is_none() {
+        return Err(PreValidationError::CascadeNotConfigured { tx_id: tx.id });
+    }
 
-    let expected_term_fee = calculate_term_storage_base_network_fee(
-        tx.data_size,
-        epochs_for_storage,
-        block_ema,
-        config,
-        config.consensus.num_partitions_per_term_ledger_slot,
-        timestamp_secs,
-    )
-    .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+    let expected_term_fee = config
+        .required_term_fee_at(
+            ledger,
+            timestamp_secs,
+            block_height,
+            tx.data_size,
+            block_ema.ema_for_public_pricing(),
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
     let actual_term_fee = tx.term_fee;
     if actual_term_fee < expected_term_fee {
@@ -6792,7 +6797,9 @@ async fn ingress_proof_chunk_bytes_from_local(
     let geometry = config.data_tree_geometry();
     let data_commitment = irys_types::data_tree::data_commitment(&geometry, data_root, data_size);
     let cached = db
-        .view_eyre(|tx| irys_database::cached_chunk_by_chunk_offset(tx, data_commitment, tx_offset))
+        .view_cache_eyre(|tx| {
+            irys_database::cached_chunk_by_chunk_offset(tx, data_commitment, tx_offset)
+        })
         .map_err(|error| PreValidationError::DatabaseError {
             error: error.to_string(),
         })?;
@@ -7295,14 +7302,14 @@ pub async fn data_txs_are_valid(
     }
 
     if let Some(proofs_list) = &publish_ledger.proofs {
-        // Compute the expected total number of proofs based on the number of
-        // publish_tx and the number of proofs_per_tx
-        let expected_proof_count = {
-            let timestamp_secs = block.timestamp_secs();
-            let number_of_ingress_proofs_total =
-                config.number_of_ingress_proofs_total_at(timestamp_secs);
-            publish_txs.len() * number_of_ingress_proofs_total as usize
-        };
+        // Proofs per publish tx (N): one value for the aggregate count below
+        // and each tx's own count in the loop. The inputs do not change per tx.
+        let number_of_ingress_proofs_total = required_ingress_proofs_total(
+            &config.consensus.hardforks,
+            block.timestamp_secs(),
+            &parent_epoch_snapshot,
+        );
+        let expected_proof_count = publish_txs.len() * usize::from(number_of_ingress_proofs_total);
 
         if proofs_list.len() != expected_proof_count {
             return Err(PreValidationError::PublishLedgerProofCountMismatch {
@@ -7331,26 +7338,17 @@ pub async fn data_txs_are_valid(
                 &parent_epoch_snapshot,
             )?;
 
-            let timestamp_secs = block.timestamp_secs();
-            let mut expected_assigned_proofs =
-                config.number_of_ingress_proofs_from_assignees_at(timestamp_secs) as usize;
-
-            // While the protocol can require X number of assigned proofs, if there
-            // is less than that many assigned to the slot, it still needs to function.
-            if assigned_miners < expected_assigned_proofs {
-                warn!(
-                    "Clamping expected_assigned_proofs from {} to {} to match number of assigned miners ",
-                    expected_assigned_proofs, assigned_miners
-                );
-                expected_assigned_proofs = assigned_miners;
-            }
-
-            if assigned_proofs.len() < expected_assigned_proofs {
-                return Err(PreValidationError::AssignedProofCountMismatch {
-                    expected: expected_assigned_proofs,
-                    actual: assigned_proofs.len(),
-                });
-            }
+            // Clamp the protocol requirement to the number of eligible
+            // assignees, then verify enough assigned proofs were submitted.
+            // Extracted into a pure helper so unit tests exercise the exact
+            // production logic byte-for-byte — see `check_assigned_proof_count`.
+            check_assigned_proof_count(
+                usize::from(
+                    config.number_of_ingress_proofs_from_assignees_at(block.timestamp_secs()),
+                ),
+                assigned_miners,
+                assigned_proofs.len(),
+            )?;
 
             // Enforce data availability by verifying ingress proofs with the actual chunks
             // possible future improvements: refresh peer list on failure of all 5, try peers concurrently
@@ -7606,12 +7604,9 @@ pub async fn data_txs_are_valid(
                 }
             }
 
-            let timestamp_secs = block.timestamp_secs();
-            let number_of_ingress_proofs_total =
-                config.number_of_ingress_proofs_total_at(timestamp_secs);
-            if tx_proofs.len() != number_of_ingress_proofs_total as usize {
+            if tx_proofs.len() != usize::from(number_of_ingress_proofs_total) {
                 return Err(PreValidationError::IngressProofCountMismatch {
-                    expected: number_of_ingress_proofs_total as usize,
+                    expected: usize::from(number_of_ingress_proofs_total),
                     actual: tx_proofs.len(),
                 });
             }
@@ -7969,6 +7964,100 @@ fn merge_same_block_historical_ledgers(
     }
 }
 
+/// Unique miner addresses assigned to any Submit-ledger slot whose chunk range
+/// intersects `block_range`.
+///
+/// This is the assignee population for one tx: a proof counts as assigned when
+/// its signer is in the set, and the set's size clamps the configured assignee
+/// requirement. It depends only on `(block_range, epoch_snapshot)`, never on
+/// which proofs a block carries or their order. Validation, the tx selector and
+/// the ingress-status route all classify proofs through this one function.
+pub(crate) fn submit_assignees_for_range(
+    block_range: &LedgerChunkRange,
+    epoch_snapshot: &EpochSnapshot,
+) -> HashSet<IrysAddress> {
+    let num_chunks_in_partition = epoch_snapshot.partition_chunks();
+    epoch_snapshot
+        .partition_assignments
+        .data_partitions
+        .values()
+        .filter(|pa| pa.ledger_id == Some(DataLedger::Submit.into()))
+        .filter(|pa| {
+            pa.slot_index.is_some_and(|slot| {
+                let start = slot as u64 * num_chunks_in_partition;
+                let slot_range = LedgerChunkRange(ie(
+                    LedgerChunkOffset::from(start),
+                    LedgerChunkOffset::from(start + num_chunks_in_partition),
+                ));
+                block_range.intersection(&slot_range).is_some()
+            })
+        })
+        .map(|pa| pa.miner_address)
+        .collect()
+}
+
+/// Assigned proofs a tx needs: the configured requirement, clamped to the
+/// number of miners assigned to the Submit slots its range intersects. The
+/// protocol can require X assigned proofs, but with fewer than X assignees it
+/// still has to promote. Validation, the tx selector and the ingress-status
+/// route all take the requirement from here.
+/// Ingress proofs each promoted tx carries in a block at `timestamp`: the
+/// configured total clamped to the number of `Active` stakes in
+/// `epoch_snapshot`, and never below 1. Proof signers are deduplicated and must
+/// be staked, so a network with fewer stakes than the configured total could
+/// never promote. Same idea as [`clamped_assigned_requirement`] for assignees.
+///
+/// Block production, the tx selector, prevalidation, `data_txs_are_valid`,
+/// the shadow-tx generator, and the ingress-status route all size proofs with
+/// this, each from the parent block's epoch snapshot and the block's own
+/// timestamp, so they agree on every block.
+pub(crate) fn required_ingress_proofs_total(
+    hardforks: &irys_types::hardfork_config::IrysHardforkConfig,
+    timestamp: UnixTimestamp,
+    epoch_snapshot: &EpochSnapshot,
+) -> u8 {
+    let configured = hardforks.number_of_ingress_proofs_total_at(timestamp);
+    let stakes = u8::try_from(epoch_snapshot.active_stake_count()).unwrap_or(u8::MAX);
+    configured.min(stakes.max(1))
+}
+
+pub(crate) fn clamped_assigned_requirement(expected: usize, assigned_miners: usize) -> usize {
+    expected.min(assigned_miners)
+}
+
+/// Clamp-and-check used by the per-tx Publish proof loop in
+/// [`data_txs_are_valid`].  Extracted as a pure helper so unit tests can
+/// exercise the exact production logic byte-for-byte instead of modelling it
+/// (caller currently invoked once, inside the publish-tx validation loop).
+///
+/// - `expected_initial` is `number_of_ingress_proofs_from_assignees_at(ts)`.
+/// - If fewer miners are eligible than the protocol demands, the requirement
+///   is clamped down to what's actually achievable (the protocol can require
+///   X assigned proofs, but if fewer than X miners are assigned to the
+///   intersecting slots it still needs to function).
+/// - The final check compares the submitted assigned-proof count against the
+///   (possibly clamped) requirement.
+pub(crate) fn check_assigned_proof_count(
+    expected_initial: usize,
+    assigned_miners: usize,
+    assigned_proofs_len: usize,
+) -> Result<(), PreValidationError> {
+    let expected = clamped_assigned_requirement(expected_initial, assigned_miners);
+    if expected < expected_initial {
+        warn!(
+            "Clamping expected_assigned_proofs from {} to {} to match number of assigned miners ",
+            expected_initial, expected
+        );
+    }
+    if assigned_proofs_len < expected {
+        return Err(PreValidationError::AssignedProofCountMismatch {
+            expected,
+            actual: assigned_proofs_len,
+        });
+    }
+    Ok(())
+}
+
 /// Resolves the canonical Submit-ledger range a tx contributed to at or
 /// before `parent_height` via `tx_inclusion::find_canonical_ledger_range`
 /// (parent-anchored + `ChainState::Onchain`-filtered), then intersects it
@@ -7987,7 +8076,6 @@ pub fn get_assigned_ingress_proofs(
 ) -> Result<(Vec<IngressProof>, usize), PreValidationError> {
     // Returns (assigned_proofs, assigned_miners)
     let mut assigned_proofs = Vec::new();
-    let mut assigned_miners = 0;
 
     //  a) Get the canonical Submit-ledger range this tx contributed to at or
     //     before `parent_height`. Replaces the historical
@@ -8001,6 +8089,7 @@ pub fn get_assigned_ingress_proofs(
         &tx_header.id,
         parent_height,
         config.consensus.block_migration_depth,
+        config.consensus.chunk_size,
         block_tree,
         db,
     )
@@ -8019,7 +8108,41 @@ pub fn get_assigned_ingress_proofs(
         return Ok((vec![], 0));
     };
 
-    // Loop through all the ingress proofs for the published transaction and pre-validate them
+    // CONSENSUS RULE CHANGE (vs. the code this replaces):
+    //
+    // Old semantics: `assigned_miners` was set inside the per-proof loop from
+    // the first intersecting Submit slot of *that proof's* signer, and each
+    // later assigned proof overwrote it ("last write wins").  When
+    // `block_range` intersects more than one Submit slot, the result depended
+    // on the order of the proofs in the block, which the producer chooses.
+    //
+    // New semantics: `assigned_miners` is the count of **unique miner
+    // addresses** assigned to *any* Submit-ledger slot whose chunk range
+    // intersects `block_range`.  It is a pure function of `(block_range,
+    // epoch_snapshot)` and is computed once, before the per-proof loop.
+    //
+    // Why the new semantics is correct:
+    //   1. Deterministic: the result does not depend on slot iteration order
+    //      or on the order of the proofs in the block.
+    //   2. Matches the variable name and the intent of the caller (the
+    //      `expected_assigned_proofs` clamp at the call site): "how many
+    //      distinct miners are eligible to contribute an assigned proof for
+    //      this tx?"  That is a property of the epoch, not of which proofs
+    //      were actually submitted.
+    //   3. Robust: if the "same miner never assigned to the same slot twice"
+    //      invariant is ever violated we still get a correct unique-address
+    //      count rather than double-counting.
+    //
+    // When `block_range` spans multiple slots whose miner sets overlap, the
+    // new value will be >= the old value (strictly larger if any miner covers
+    // more than one intersecting slot).  This is a consensus rule change and
+    // must be coordinated with a network upgrade.
+
+    let assignees = submit_assignees_for_range(&block_range, epoch_snapshot);
+    let assigned_miners = assignees.len();
+
+    // 3. Per-proof: classify each proof as assigned-or-not.  Never mutates
+    //    `assigned_miners` — that value is now fixed above.
     for ingress_proof in tx_proofs.iter() {
         // Validate ingress proof signature and data_root match the transaction
         let proof_address = ingress_proof
@@ -8029,92 +8152,67 @@ pub fn get_assigned_ingress_proofs(
                 reason: e.to_string(),
             })?;
 
-        // 1.) is the proof from a miner assigned to store the data in the submit ledger?
-
-        //  c) Get the slots the proof address is assigned to store
-        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, epoch_snapshot);
-
-        // d) Get the ledger ranges of the slot indexes.
-        //
-        // `BTreeMap` (not `HashMap`) so iteration order in (f) is deterministic
-        // across nodes.  When `block_range` intersects multiple Submit slots,
-        // the `break`-on-first-intersection picks `assigned_miners` from
-        // whichever slot iterates first; HashMap order would let two honest
-        // nodes pick different `assigned_miners` and produce divergent
-        // ingress-proof acceptance decisions.  Currently vacuous because
-        // `Config::validate` pins `number_of_ingress_proofs_from_assignees == 0`
-        // (see `crates/types/src/config/mod.rs`), but switching the container
-        // here removes the fork landmine the guard masks.
-        let slot_ranges: BTreeMap<usize, LedgerChunkRange> = slot_indexes
-            .iter()
-            .map(|index| {
-                let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
-                let start = *index as u64 * num_chunks_in_partition;
-                let end = start + num_chunks_in_partition;
-                let range = LedgerChunkRange(ie(
-                    LedgerChunkOffset::from(start),
-                    LedgerChunkOffset::from(end),
-                ));
-                (*index, range)
-            })
-            .collect();
-
-        // e) Get the number of unique addresses assigned to each slot
-        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, epoch_snapshot);
-
-        //  f) are there any intersections of block and slot ranges?
-        for (slot_index, slot_range) in &slot_ranges {
-            if block_range.intersection(slot_range).is_some() {
-                assigned_miners = *slot_address_counts.get(slot_index).unwrap();
-                assigned_proofs.push(ingress_proof.clone());
-                break;
-            }
+        // Is the proof from a miner assigned to store the data in the submit ledger?
+        if assignees.contains(&proof_address) {
+            assigned_proofs.push(ingress_proof.clone());
         }
     }
 
     Ok((assigned_proofs, assigned_miners))
 }
 
-fn get_submit_ledger_slot_assignments(
-    address: &IrysAddress,
-    epoch_snapshot: &EpochSnapshot,
-) -> Vec<usize> {
-    let mut partition_assignments = epoch_snapshot.get_partition_assignments(*address);
-    partition_assignments.retain(|pa| pa.ledger_id == Some(DataLedger::Submit.into()));
-    partition_assignments
-        .iter()
-        .map(|pa| pa.slot_index.expect("Submit-ledger partition assignment must have slot_index — invariant from epoch_snapshot"))
-        .collect()
-}
-
-fn get_submit_ledger_slot_addresses(
-    slot_indexes: &Vec<usize>,
-    epoch_snapshot: &EpochSnapshot,
-) -> HashMap<usize, usize> {
-    let mut num_addresses_per_slot: HashMap<usize, usize> = HashMap::new();
-
-    for slot_index in slot_indexes {
-        let num_addresses = epoch_snapshot
-            .partition_assignments
-            .data_partitions
-            .iter()
-            .filter(|(_hash, pa)| {
-                pa.ledger_id == Some(DataLedger::Submit.into())
-                    && pa.slot_index == Some(*slot_index)
-            })
-            .count();
-
-        num_addresses_per_slot.insert(*slot_index, num_addresses);
-    }
-
-    num_addresses_per_slot
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn snapshot_with_stakes(statuses: &[irys_types::CommitmentStatus]) -> EpochSnapshot {
+        let mut snapshot = EpochSnapshot::default();
+        for status in statuses {
+            let address = IrysAddress::random();
+            snapshot.commitment_state.stake_commitments.insert(
+                address,
+                irys_domain::StakeEntry {
+                    id: H256::random(),
+                    commitment_status: *status,
+                    signer: address,
+                    amount: U256::from(1),
+                    reward_address: address,
+                },
+            );
+        }
+        snapshot
+    }
+
+    /// The configured total is clamped to the `Active` stakes, never below 1
+    /// and never above the configured total.
+    #[test]
+    fn required_ingress_proofs_total_clamps_to_active_stakes() {
+        use irys_types::CommitmentStatus::{Active, Inactive, Pending};
+        let mut consensus = ConsensusConfig::testing();
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 10;
+        let hardforks = &consensus.hardforks;
+        let at = UnixTimestamp::from_secs(1_000);
+
+        let four = snapshot_with_stakes(&[Active, Active, Active, Active, Pending, Inactive]);
+        assert_eq!(
+            required_ingress_proofs_total(hardforks, at, &four),
+            4,
+            "only Active stakes count"
+        );
+        assert_eq!(
+            required_ingress_proofs_total(hardforks, at, &snapshot_with_stakes(&[])),
+            1,
+            "never below one proof"
+        );
+        assert_eq!(
+            required_ingress_proofs_total(hardforks, at, &snapshot_with_stakes(&[Active; 12])),
+            10,
+            "never above the configured total"
+        );
+    }
+
     use irys_config::StorageSubmodulesConfig;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_database::add_genesis_commitments;
     use irys_domain::{
         BlockIndex, BlockTree, EpochSnapshot, block_index_guard::BlockIndexReadGuard,
@@ -8123,13 +8221,417 @@ mod tests {
     use irys_testing_utils::tempfile::TempDir;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        Base64, BlockHash, DataTransaction, DataTransactionHeader, DataTransactionLedger,
-        DbSyncMode, H256, H256List, IrysAddress, IrysBlockHeaderV1, NodeConfig, Signature, U256,
-        irys::IrysSigner, partition::PartitionAssignment,
+        Base64, BlockHash, DataTransaction, DataTransactionHeader, DataTransactionLedger, H256,
+        H256List, IrysAddress, IrysBlockHeaderV1, NodeConfig, Signature, U256, irys::IrysSigner,
+        partition::PartitionAssignment,
     };
     use std::sync::{Arc, RwLock};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tracing::{debug, info};
+
+    /// Term ledgers (OneYear/ThirtyDay) store `num_partitions_per_slot` replicas, so
+    /// their term fee must cover that many replicas.
+    #[rstest::rstest]
+    #[case::one_year(DataLedger::OneYear)]
+    #[case::thirty_day(DataLedger::ThirtyDay)]
+    fn term_only_price_requires_fee_for_slot_replica_count(#[case] ledger: DataLedger) {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().num_partitions_per_slot = ReplicaCount::new(2);
+        let config = Config::new_with_random_peer_id(node_config);
+        let header = IrysBlockHeader::new_mock_header();
+        let ema = EmaSnapshot::genesis(&header);
+        let timestamp = header.timestamp_secs();
+        let cascade = config.consensus.hardforks.cascade.as_ref().unwrap();
+        let epoch_length = match ledger {
+            DataLedger::OneYear => cascade.one_year_epoch_length,
+            _ => cascade.thirty_day_epoch_length,
+        };
+        let epochs = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            header.height,
+            config.consensus.epoch.num_blocks_in_epoch,
+            epoch_length,
+        );
+        // Large enough that the fee is above the minimum term fee and scales with replicas.
+        let data_size = 1 << 50;
+        let fee_for_replicas = |replicas| {
+            calculate_term_storage_base_network_fee(
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                ReplicaCount::new(replicas),
+                timestamp,
+            )
+            .unwrap()
+        };
+
+        assert!(fee_for_replicas(2) > fee_for_replicas(1));
+
+        let mut tx = DataTransactionHeader::new(&config.consensus);
+        tx.ledger_id = ledger as u32;
+        tx.data_size = data_size;
+        tx.perm_fee = None;
+
+        tx.term_fee = BoundedFee::new(fee_for_replicas(1));
+        assert!(matches!(
+            validate_term_only_price(&tx, ledger, header.height, timestamp, &ema, &config),
+            Err(PreValidationError::InsufficientTermFee { .. })
+        ));
+
+        tx.term_fee = BoundedFee::new(fee_for_replicas(2));
+        validate_term_only_price(&tx, ledger, header.height, timestamp, &ema, &config)
+            .expect("fee for num_partitions_per_slot replicas is sufficient");
+    }
+
+    /// A term fee priced on the epochs left in the height cycle is enough before Delta.
+    /// From Delta it must cover the full `epoch_length`, which is how long a slot is kept.
+    #[rstest::rstest]
+    #[case::one_year(DataLedger::OneYear)]
+    #[case::thirty_day(DataLedger::ThirtyDay)]
+    fn term_only_price_requires_full_term_from_delta(#[case] ledger: DataLedger) {
+        use irys_types::hardfork_config::Delta;
+
+        let mut header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let cascade = config.consensus.hardforks.cascade.as_ref().unwrap();
+        let epoch_length = match ledger {
+            DataLedger::OneYear => cascade.one_year_epoch_length,
+            _ => cascade.thirty_day_epoch_length,
+        };
+        // Last block of a cycle: the cycle remainder is one epoch.
+        let blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
+        header.height = blocks_in_epoch * epoch_length - 1;
+        let cycle_epochs = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            header.height,
+            blocks_in_epoch,
+            epoch_length,
+        );
+        assert_eq!(cycle_epochs, 1);
+        assert!(epoch_length > cycle_epochs);
+        let ema = EmaSnapshot::genesis(&header);
+        let data_size = 1 << 50;
+        let fee_for_epochs = |epochs, timestamp| {
+            calculate_term_storage_base_network_fee(
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                config.consensus.num_partitions_per_slot,
+                timestamp,
+            )
+            .unwrap()
+        };
+        let mut tx = DataTransactionHeader::new(&config.consensus);
+        tx.ledger_id = ledger as u32;
+        tx.data_size = data_size;
+        tx.perm_fee = None;
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_term_only_price(tx, ledger, header.height, timestamp, &ema, &config)
+        };
+
+        tx.term_fee = BoundedFee::new(fee_for_epochs(cycle_epochs, before_delta));
+        validate(&tx, before_delta).expect("before Delta, the cycle remainder is sufficient");
+
+        tx.term_fee = BoundedFee::new(fee_for_epochs(cycle_epochs, activation));
+        assert!(matches!(
+            validate(&tx, activation),
+            Err(PreValidationError::InsufficientTermFee { .. })
+        ));
+
+        tx.term_fee = BoundedFee::new(fee_for_epochs(epoch_length, activation));
+        validate(&tx, activation).expect("from Delta, the full term is sufficient");
+    }
+
+    /// Publish fees pay for the ingress proof total before Delta and for
+    /// `num_partitions_per_slot` replicas from Delta.
+    #[test]
+    fn publish_price_requires_fee_for_slot_replica_count_from_delta() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.num_partitions_per_slot = ReplicaCount::new(2);
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        // Large enough that both fees are above the minimum term fee and scale with replicas.
+        let data_size = 1 << 50;
+        let tx_priced_for = |replicas, timestamp| {
+            let epochs = config.term_storage_epochs_at(
+                timestamp,
+                header.height,
+                config.consensus.epoch.submit_ledger_epoch_length,
+            );
+            let term_fee = calculate_term_storage_base_network_fee(
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                ReplicaCount::new(replicas),
+                timestamp,
+            )
+            .unwrap();
+            let perm_fee = calculate_perm_fee_from_config(
+                data_size,
+                &config.consensus,
+                ReplicaCount::new(replicas),
+                config
+                    .ingress_proof_reward_pool_at(timestamp, term_fee)
+                    .unwrap(),
+                ema.ema_for_public_pricing(),
+                timestamp,
+            )
+            .unwrap();
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = data_size;
+            tx.term_fee = BoundedFee::new(term_fee);
+            tx.perm_fee = Some(BoundedFee::new(perm_fee.amount));
+            tx
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        validate(&tx_priced_for(1, before_delta), before_delta)
+            .expect("before Delta, a fee for the ingress proof total is sufficient");
+        assert!(matches!(
+            validate(&tx_priced_for(1, activation), activation),
+            Err(PreValidationError::InsufficientPermFee { .. })
+        ));
+        validate(&tx_priced_for(2, activation), activation)
+            .expect("from Delta, a fee for num_partitions_per_slot replicas is sufficient");
+
+        // Perm fee for slot replicas, term fee for the ingress proof total: the term check rejects it.
+        let mut tx = tx_priced_for(2, activation);
+        tx.term_fee = tx_priced_for(1, activation).term_fee;
+        assert!(matches!(
+            validate(&tx, activation),
+            Err(PreValidationError::InsufficientTermFee { .. })
+        ));
+    }
+
+    /// The fee split takes the proof rewards from the tx's own `term_fee`. Before Delta the
+    /// perm fee only covers rewards on the expected term fee. From Delta it must cover
+    /// rewards on the tx's own term fee.
+    #[test]
+    fn publish_price_requires_rewards_on_actual_term_fee_from_delta() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        let data_size = 1 << 50;
+        let perm_fee_for_term_fee = |term_fee, timestamp| {
+            calculate_perm_storage_total_fee(data_size, term_fee, &ema, &config, timestamp)
+                .unwrap()
+                .amount
+        };
+        let tx_overpaying_term_fee = |timestamp| {
+            let epochs = config.term_storage_epochs_at(
+                timestamp,
+                header.height,
+                config.consensus.epoch.submit_ledger_epoch_length,
+            );
+            let expected_term_fee = calculate_term_storage_base_network_fee(
+                data_size,
+                epochs,
+                &ema,
+                &config,
+                config.publish_replica_count_at(timestamp),
+                timestamp,
+            )
+            .unwrap();
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = data_size;
+            tx.term_fee = BoundedFee::new(expected_term_fee.saturating_mul(U256::from(3)));
+            (tx, expected_term_fee)
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        let (mut tx, expected_term_fee) = tx_overpaying_term_fee(before_delta);
+        tx.perm_fee = Some(BoundedFee::new(perm_fee_for_term_fee(
+            expected_term_fee,
+            before_delta,
+        )));
+        validate(&tx, before_delta)
+            .expect("before Delta, a perm fee priced on the expected term fee is sufficient");
+
+        let (mut tx, expected_term_fee) = tx_overpaying_term_fee(activation);
+        tx.perm_fee = Some(BoundedFee::new(perm_fee_for_term_fee(
+            expected_term_fee,
+            activation,
+        )));
+        assert!(matches!(
+            validate(&tx, activation),
+            Err(PreValidationError::InsufficientPermFee { .. })
+        ));
+
+        tx.perm_fee = Some(BoundedFee::new(perm_fee_for_term_fee(
+            tx.term_fee.get(),
+            activation,
+        )));
+        validate(&tx, activation)
+            .expect("from Delta, a perm fee priced on the actual term fee is sufficient");
+    }
+
+    /// From Delta the ingress proofs share one inclusion reward pool, so a perm fee of the
+    /// base storage cost plus one inclusion reward is sufficient. Before Delta the perm fee
+    /// must add one inclusion reward for each required ingress proof.
+    #[test]
+    fn publish_price_requires_one_proof_reward_pool_from_delta() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let replicas = ReplicaCount::new(3);
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        // Same replica count on both sides of Delta, so only the proof reward pool changes.
+        consensus.num_partitions_per_slot = replicas;
+        consensus.hardforks.frontier.number_of_ingress_proofs_total = 3;
+        consensus.hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        let data_size = 1 << 50;
+        // Perm fee = base storage cost + one inclusion reward on the tx's term fee.
+        let tx_with_one_reward_share = |timestamp| {
+            let epochs = config.term_storage_epochs_at(
+                timestamp,
+                header.height,
+                config.consensus.epoch.submit_ledger_epoch_length,
+            );
+            let term_fee = calculate_term_storage_base_network_fee(
+                data_size, epochs, &ema, &config, replicas, timestamp,
+            )
+            .unwrap();
+            let inclusion_reward =
+                TermFeeCharges::new(BoundedFee::new(term_fee), &config.consensus)
+                    .unwrap()
+                    .block_producer_reward;
+            let perm_fee = calculate_perm_fee_from_config(
+                data_size,
+                &config.consensus,
+                replicas,
+                inclusion_reward,
+                ema.ema_for_public_pricing(),
+                timestamp,
+            )
+            .unwrap();
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = data_size;
+            tx.term_fee = BoundedFee::new(term_fee);
+            tx.perm_fee = Some(BoundedFee::new(perm_fee.amount));
+            tx
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        assert!(matches!(
+            validate(&tx_with_one_reward_share(before_delta), before_delta),
+            Err(PreValidationError::InsufficientPermFee { .. })
+        ));
+        validate(&tx_with_one_reward_share(activation), activation)
+            .expect("from Delta, one inclusion reward for all proofs is sufficient");
+    }
+
+    /// From Delta the perm fee is priced on the tx's own term fee. A term fee too large for
+    /// that arithmetic is a peer fault, never a node fault.
+    #[test]
+    fn publish_price_rejects_unpriceable_term_fee_as_peer_fault() {
+        use irys_types::hardfork_config::Delta;
+
+        let header = IrysBlockHeader::new_mock_header();
+        let activation = header.timestamp_secs();
+        let before_delta = UnixTimestamp::from_secs(activation.as_secs() - 1);
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().hardforks.delta = Some(Delta {
+            activation_timestamp: activation,
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let ema = EmaSnapshot::genesis(&header);
+        let tx_with_term_fee = |term_fee| {
+            let mut tx = DataTransactionHeader::new(&config.consensus);
+            tx.ledger_id = DataLedger::Publish as u32;
+            tx.data_size = 1024;
+            tx.term_fee = BoundedFee::new(term_fee);
+            tx.perm_fee = Some(BoundedFee::new(U256::MAX));
+            tx
+        };
+        let validate = |tx: &DataTransactionHeader, timestamp| {
+            validate_publish_price(tx, header.height, timestamp, &ema, &config)
+        };
+
+        for term_fee in [U256::MAX, U256::MAX / PRECISION_SCALE + U256::one()] {
+            let tx = tx_with_term_fee(term_fee);
+            let err = validate(&tx, activation).unwrap_err();
+            assert!(
+                matches!(err, PreValidationError::InvalidTermFeeStructure { .. }),
+                "from Delta, term_fee {term_fee} must be rejected as a bad term fee, got {err:?}"
+            );
+            assert!(!err.is_node_fault());
+
+            if let Err(err) = validate(&tx, before_delta) {
+                assert!(
+                    !err.is_node_fault(),
+                    "before Delta, term_fee {term_fee} must not be a node fault, got {err:?}"
+                );
+            }
+        }
+
+        // The largest term fee that still prices is not the bad-term-fee variant.
+        let boundary = tx_with_term_fee(U256::MAX / PRECISION_SCALE);
+        if let Err(err) = validate(&boundary, activation) {
+            assert!(
+                !matches!(err, PreValidationError::InvalidTermFeeStructure { .. }),
+                "term_fee at the pricing bound must not be rejected as a bad term fee, got {err:?}"
+            );
+            assert!(!err.is_node_fault(), "got {err:?}");
+        }
+    }
 
     /// Build a minimal `BlockTreeReadGuard` for tests that exercise the
     /// `block_index` fast path of `poa_is_valid` — the helper's fallback is
@@ -8254,76 +8756,6 @@ mod tests {
         assert!(publish_ingress_proof_count_is_valid(&none, 1, 3).is_ok());
     }
 
-    /// `prevalidate_block` sizes N at the block's OWN timestamp
-    /// (`number_of_ingress_proofs_total_at(block.timestamp_secs())`), matching
-    /// block production and `data_txs_are_valid`. This must hold at an N-changing
-    /// hardfork boundary in BOTH directions: the first block after the fork carries
-    /// a proof list sized by the block's (new) N, so it passes the guard when N is
-    /// taken at the block timestamp — and would be wrongly rejected if N were taken
-    /// at the parent (pre-fork) timestamp.
-    ///
-    /// This locks in the guard's arithmetic under each N-source; the call site's
-    /// choice of `block.timestamp_secs()` is covered end-to-end elsewhere.
-    #[test]
-    fn ingress_proof_count_guard_uses_block_timestamp_across_hardfork() {
-        use irys_types::UnixTimestamp;
-        use irys_types::hardfork_config::{FrontierParams, IrysHardforkConfig, NextNameTBD};
-
-        // Parent sits just before activation; the boundary block sits at
-        // activation, so parent-N and block-N differ.
-        let activation = UnixTimestamp::from_secs(1_000);
-        let parent_ts = UnixTimestamp::from_secs(999);
-        let block_ts = activation;
-        let tx_id = H256::from([7_u8; 32]);
-
-        // Exercise an N increase and an N decrease across the same boundary.
-        for (frontier_n, fork_n) in [(1_u64, 3_u64), (3_u64, 1_u64)] {
-            let hardforks = IrysHardforkConfig {
-                frontier: FrontierParams {
-                    number_of_ingress_proofs_total: frontier_n,
-                    number_of_ingress_proofs_from_assignees: 0,
-                },
-                next_name_tbd: Some(NextNameTBD {
-                    activation_timestamp: activation,
-                    number_of_ingress_proofs_total: fork_n,
-                    number_of_ingress_proofs_from_assignees: 0,
-                }),
-                aurora: None,
-                borealis: None,
-                cascade: None,
-                delta: None,
-                echo: None,
-            };
-
-            let parent_n = hardforks.number_of_ingress_proofs_total_at(parent_ts);
-            let block_n = hardforks.number_of_ingress_proofs_total_at(block_ts);
-            assert_eq!(parent_n, frontier_n);
-            assert_eq!(block_n, fork_n);
-            assert_ne!(parent_n, block_n, "boundary must actually change N");
-
-            // Honest boundary block: one publish tx, proof list and
-            // `required_proof_count` sized by the block's N (what the producer
-            // emits at `block_ts`).
-            let honest =
-                publish_ledger_with_proofs(vec![tx_id], block_n as usize, Some(block_n as u8));
-
-            // Sized at the block timestamp (the call-site's choice): passes.
-            assert!(
-                publish_ingress_proof_count_is_valid(&honest, 1, block_n).is_ok(),
-                "honest boundary block must pass when N is taken at the block timestamp \
-                 (frontier={frontier_n}, fork={fork_n})",
-            );
-
-            // Sized at the parent timestamp (the rejected alternative): would
-            // false-reject the same honest block because parent-N != block-N.
-            assert!(
-                publish_ingress_proof_count_is_valid(&honest, 1, parent_n).is_err(),
-                "parent-timestamp N would false-reject an honest boundary block \
-                 (frontier={frontier_n}, fork={fork_n})",
-            );
-        }
-    }
-
     /// A commitment tx carrying a foreign `chain_id` is rejected by prevalidation:
     /// `find_commitment_chain_id_mismatch` reports the offending tx (with its position) so the
     /// commitment-ledger validation fails the block with `CommitmentChainIdMismatch`.
@@ -8405,21 +8837,12 @@ mod tests {
     #[tokio::test]
     async fn get_previous_tx_inclusions_finds_prior_submit_in_reorg_window_band() -> eyre::Result<()>
     {
-        use irys_database::{
-            IrysDatabaseArgs as _, open_or_create_db,
-            tables::{IrysBlockHeaders, IrysTables},
-        };
+        use irys_database::tables::IrysBlockHeaders;
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
-        use reth_db::mdbx::DatabaseArguments;
         use reth_db::transaction::DbTxMut as _;
 
         let tmp = TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(env));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
 
         let tx_id = H256::random();
 
@@ -8590,7 +9013,7 @@ mod tests {
         pub consensus_config: ConsensusConfig,
     }
 
-    async fn init() -> (TempDir, TestContext) {
+    async fn init() -> (TempDir, TempDir, TestContext) {
         let data_dir = TempDirBuilder::new()
             .prefix("block_validation_tests")
             .build();
@@ -8613,7 +9036,7 @@ mod tests {
             chunk_size,
             num_chunks_in_partition: 10,
             num_chunks_in_recall_range: 2,
-            num_partitions_per_slot: 1,
+            num_partitions_per_slot: irys_types::ReplicaCount::new(1),
             entropy_packing_iterations: 1_000,
             block_migration_depth: 1,
             ..node_config.consensus_config()
@@ -8629,12 +9052,9 @@ mod tests {
         let miner_address = signer.address();
 
         // Create epoch service with random miner address
-        let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
-            data_dir.path(),
-            DbSyncMode::UtterlyNoSync,
-        )
-        .expect("to create DB");
-        let db = irys_types::DatabaseProvider(Arc::new(db_env));
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = irys_database::DatabaseProvider::for_testing(data_dir.path(), _cache_dir.path())
+            .expect("test db setup");
         let block_index = BlockIndex::new_for_testing(db);
 
         let storage_submodules_config = StorageSubmodulesConfig::load(
@@ -8669,6 +9089,7 @@ mod tests {
 
         (
             data_dir,
+            _cache_dir,
             TestContext {
                 block_index,
                 miner_address,
@@ -8682,7 +9103,7 @@ mod tests {
 
     #[tokio::test]
     async fn poa_test_3_complete_txs() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         // Create a bunch of TX chunks
         let data_chunks = vec![
             vec![[0; 32], [1; 32], [2; 32]], // tx0
@@ -8730,7 +9151,7 @@ mod tests {
 
     #[tokio::test]
     async fn poa_not_complete_last_chunk_test() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
 
         // Create a signed TX from the chunks
         let signer = IrysSigner::random_signer(&context.consensus_config);
@@ -8768,18 +9189,24 @@ mod tests {
     }
 
     /// The honest PoA for a 40-byte tx's 8-byte tail, at ledger offset 1.
-    async fn tail_chunk_poa() -> (TempDir, TestContext, IndexedSubmit, IndexedChunkPoa) {
-        let (tmp, mut context) = init().await;
+    async fn tail_chunk_poa() -> (
+        TempDir,
+        TempDir,
+        TestContext,
+        IndexedSubmit,
+        IndexedChunkPoa,
+    ) {
+        let (tmp, cache_tmp, mut context) = init().await;
         let built = index_submit_poas(&mut context, &[vec![3_u8; 40]]);
         let tail = built.poas[1].clone();
         assert_eq!(tail.block_offset, 1);
         assert!(validate_indexed_poa(&context, &built, &tail).is_ok());
-        (tmp, context, built, tail)
+        (tmp, cache_tmp, context, built, tail)
     }
 
     #[tokio::test]
     async fn poa_shorter_than_chunk_size_is_too_short() {
-        let (_tmp, context, built, mut tail) = tail_chunk_poa().await;
+        let (_tmp, _cache_tmp, context, built, mut tail) = tail_chunk_poa().await;
         let chunk = tail.poa.chunk.as_mut().expect("packed chunk");
         // Keep the 8 data bytes. Only the zero padding is dropped.
         chunk.0.truncate(8);
@@ -8798,7 +9225,7 @@ mod tests {
     /// the PoA, not panic on a data span longer than the chunk.
     #[tokio::test]
     async fn poa_with_entropy_shorter_than_the_chunk_is_rejected() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         context.consensus_config.chunk_size = 48;
         let data = vec![0x33_u8; 48];
         let tx = sign_data_tx(
@@ -8851,7 +9278,7 @@ mod tests {
 
     #[tokio::test]
     async fn poa_tail_padding_must_unpack_to_zero() {
-        let (_tmp, context, built, mut tail) = tail_chunk_poa().await;
+        let (_tmp, _cache_tmp, context, built, mut tail) = tail_chunk_poa().await;
         let chunk = tail.poa.chunk.as_mut().expect("packed chunk");
         chunk.0[20] ^= 1;
 
@@ -8910,7 +9337,7 @@ mod tests {
     /// honest proofs of the larger tree do not open the prefix size.
     #[tokio::test]
     async fn poa_rejects_a_root_built_for_another_size() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let chunk_len = context.consensus_config.chunk_size as usize;
         let geometry = context.consensus_config.data_tree_geometry().unwrap();
         let data: Vec<u8> = (0..chunk_len * 3).map(|byte| byte as u8).collect();
@@ -8938,7 +9365,7 @@ mod tests {
     /// and the padding must unpack to zero.
     #[tokio::test]
     async fn data_poa_on_a_short_last_chunk() {
-        let (_tmp, context, built, tail) = tail_chunk_poa().await;
+        let (_tmp, _cache_tmp, context, built, tail) = tail_chunk_poa().await;
         assert!(validate_indexed_poa(&context, &built, &tail).is_ok());
 
         let mut padding_changed = tail.clone();
@@ -8960,7 +9387,7 @@ mod tests {
     /// sibling and the size witness. Every tampered path is rejected.
     #[tokio::test]
     async fn tampered_v2_data_path_is_rejected() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let chunk_size = context.consensus_config.chunk_size as usize;
         // Five chunks: chunk 0 has three siblings and the size witness.
         let data: Vec<u8> = (0..chunk_size * 5).map(|byte| byte as u8).collect();
@@ -9006,7 +9433,7 @@ mod tests {
     /// past the end of the tree.
     #[tokio::test]
     async fn poa_validates_every_chunk_after_an_unaligned_tx() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let data = [vec![3_u8; 40], vec![5_u8; 40]];
         let built = index_submit_poas(&mut context, &data);
         for poa in &built.poas {
@@ -9030,7 +9457,7 @@ mod tests {
     /// the chunk after the unaligned transaction.
     #[tokio::test]
     async fn poa_validates_unaligned_chunk_from_unmigrated_block() {
-        let (_tmp, context) = init().await;
+        let (_tmp, _cache_tmp, context) = init().await;
         let data = [vec![3_u8; 40], vec![5_u8; 40]];
         let seeded = seed_unmigrated_submit_block(&context, &data);
 
@@ -9088,7 +9515,7 @@ mod tests {
     /// to a different tx than the chunk layout is rejected.
     #[tokio::test]
     async fn poa_accepts_one_byte_txs_and_rejects_a_foreign_proof() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let one_byte = [vec![3_u8; 1], vec![4_u8; 1], vec![5_u8; 32]];
         let built = index_submit_poas(&mut context, &one_byte);
         for poa in &built.poas {
@@ -9102,7 +9529,7 @@ mod tests {
             );
         }
 
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let data = [vec![1_u8; 40], vec![2_u8; 80]];
         let built = index_submit_poas(&mut context, &data);
         let tx0_chunk0 = built.poas.iter().find(|poa| poa.tx_index == 0).unwrap();
@@ -9139,7 +9566,7 @@ mod tests {
         use irys_database::tables::IrysBlockHeaders;
         use reth_db::transaction::DbTxMut as _;
 
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let built = index_submit_poas(&mut context, &[vec![3_u8; 32]]);
         context
             .block_index
@@ -9170,7 +9597,7 @@ mod tests {
         use irys_database::tables::IrysBlockHeaders;
         use reth_db::transaction::DbTxMut as _;
 
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let built = index_submit_poas(&mut context, &[vec![3_u8; 32]]);
         context
             .block_index
@@ -9202,7 +9629,7 @@ mod tests {
     /// early check.
     #[tokio::test]
     async fn poa_data_path_length_bound_is_exact() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let built = index_submit_poas(&mut context, &[vec![3_u8; 32]]);
         let geometry = context.consensus_config.data_tree_geometry().unwrap();
         let max_depth = irys_data_tree::depth(0, geometry.max_data_tx_chunks()).unwrap() as usize;
@@ -9233,7 +9660,7 @@ mod tests {
     /// without the empty tx, and its PoA validates.
     #[tokio::test]
     async fn poa_skips_zero_size_tx() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let chunk_size = context.consensus_config.chunk_size as usize;
         let signer = IrysSigner::random_signer(&context.consensus_config);
         let left_bytes = vec![3_u8; chunk_size];
@@ -9964,8 +10391,10 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.difficulty_adjustment.difficulty_adjustment_interval = 10;
 
-        assert!(
-            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_ok()
+        let context = EpochConsensusContext::new(&config, None);
+        assert_eq!(
+            context.child_last_diff_timestamp(block.height, block.timestamp, &prev),
+            block.last_diff_timestamp
         );
     }
 
@@ -9983,8 +10412,10 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.difficulty_adjustment.difficulty_adjustment_interval = 10;
 
-        assert!(
-            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_ok()
+        let context = EpochConsensusContext::new(&config, None);
+        assert_eq!(
+            context.child_last_diff_timestamp(block.height, block.timestamp, &prev),
+            block.last_diff_timestamp
         );
     }
 
@@ -10002,8 +10433,10 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.difficulty_adjustment.difficulty_adjustment_interval = 10;
 
-        assert!(
-            last_diff_timestamp_is_valid(&block, &prev, &config.difficulty_adjustment,).is_err()
+        let context = EpochConsensusContext::new(&config, None);
+        assert_ne!(
+            context.child_last_diff_timestamp(block.height, block.timestamp, &prev),
+            block.last_diff_timestamp
         );
     }
 
@@ -10056,9 +10489,8 @@ mod tests {
     async fn assigned_ingress_proofs_uses_canonical_tx_metadata() -> eyre::Result<()> {
         use crate::tx_inclusion;
         use irys_database::{
-            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db,
-            set_data_tx_included_height,
-            tables::{IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+            insert_tx_header, set_data_tx_included_height,
+            tables::{IrysBlockHeaders, MigratedBlockHashes},
         };
         use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
@@ -10068,17 +10500,11 @@ mod tests {
             DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
         };
         use reth_db::Database as _;
-        use reth_db::mdbx::DatabaseArguments;
         use reth_db::transaction::DbTxMut as _;
         use std::sync::RwLock;
 
         let tmp = TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(env));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
 
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -10146,6 +10572,7 @@ mod tests {
             &tx_id,
             5,
             config.consensus.block_migration_depth,
+            config.consensus.chunk_size,
             &block_tree_guard,
             &db,
         )?;
@@ -10183,10 +10610,9 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn corrupt_cdr_does_not_affect_assigned_ingress_proofs() -> eyre::Result<()> {
         use irys_database::{
-            IrysDatabaseArgs as _,
             db_cache::CachedDataRoot,
-            insert_tx_header, open_or_create_db, set_data_tx_included_height,
-            tables::{CachedDataRoots, IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+            insert_tx_header, set_data_tx_included_height,
+            tables::{CachedDataRoots, IrysBlockHeaders, MigratedBlockHashes},
         };
         use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
@@ -10197,17 +10623,11 @@ mod tests {
             UnixTimestamp,
         };
         use reth_db::Database as _;
-        use reth_db::mdbx::DatabaseArguments;
         use reth_db::transaction::DbTxMut as _;
         use std::sync::RwLock;
 
         let tmp = TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(env));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
 
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -10268,13 +10688,13 @@ mod tests {
             cached_at: UnixTimestamp::from_secs(0),
             data_tree_root: Default::default(),
         };
-        db.update(|tx| -> eyre::Result<()> {
+        db.update_cache_eyre(|tx| {
             tx.put::<CachedDataRoots>(
                 header.data_commitment(&config.data_tree_geometry()),
                 corrupt_cdr,
             )?;
             Ok(())
-        })??;
+        })?;
 
         let mut genesis = IrysBlockHeader::new_mock_header();
         genesis.height = 0;
@@ -10321,9 +10741,8 @@ mod tests {
     async fn assigned_ingress_proofs_classifies_intersecting_proof() -> eyre::Result<()> {
         use crate::tx_inclusion;
         use irys_database::{
-            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db,
-            set_data_tx_included_height,
-            tables::{IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+            insert_tx_header, set_data_tx_included_height,
+            tables::{IrysBlockHeaders, MigratedBlockHashes},
         };
         use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
@@ -10336,17 +10755,11 @@ mod tests {
             irys::IrysSigner,
         };
         use reth_db::Database as _;
-        use reth_db::mdbx::DatabaseArguments;
         use reth_db::transaction::DbTxMut as _;
         use std::sync::RwLock;
 
         let tmp = TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(env));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
 
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -10409,6 +10822,7 @@ mod tests {
             &tx_id,
             5,
             config.consensus.block_migration_depth,
+            config.consensus.chunk_size,
             &block_tree_guard,
             &db,
         )?
@@ -10489,6 +10903,559 @@ mod tests {
             "DatabaseError must not be Consensus"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // assigned_miners determinism tests
+    //
+    // These tests exercise the new semantics introduced by the consensus rule
+    // change in `get_assigned_ingress_proofs`:
+    //
+    //   assigned_miners = count of unique miner addresses across ALL
+    //   Submit-ledger slots intersecting block_range.
+    //
+    // The shared DB / BlockTree setup is the same across all three tests:
+    //   h0: Submit total_chunks = 10  (slot 0 covers [0, 10))
+    //   h1: Submit total_chunks = 25  (tx contributes chunks 10..=24, slot 1
+    //       covers [10, 20) and slot 2 covers [20, 30))
+    //
+    // ConsensusConfig::testing() has num_chunks_in_partition = 10, so:
+    //   slot 0 = [0, 10), slot 1 = [10, 20), slot 2 = [20, 30)
+    //
+    // block_range resolves to ii(10, 24) which intersects both slot 1 and
+    // slot 2.
+    // -----------------------------------------------------------------------
+
+    /// Helper: build the shared DB + BlockTree used by the three determinism
+    /// tests.  Returns (tmp_dir, db, block_tree_guard, config, tx_id,
+    /// data_commitment, tx_header); keep `tmp_dir` bound so the DB outlives the test.
+    fn build_determinism_test_fixtures() -> eyre::Result<(
+        irys_testing_utils::tempfile::TempDir,
+        DatabaseProvider,
+        irys_domain::BlockTreeReadGuard,
+        Config,
+        H256,
+        DataCommitment,
+        DataTransactionHeader,
+    )> {
+        use irys_database::{
+            insert_tx_header, set_data_tx_included_height,
+            tables::{IrysBlockHeaders, MigratedBlockHashes},
+        };
+        use irys_domain::BlockTree;
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+            H256List,
+        };
+        use reth_db::Database as _;
+        use reth_db::transaction::DbTxMut as _;
+        use std::sync::RwLock;
+
+        let tmp = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
+
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+
+        let mut h0 = IrysBlockHeader::new_mock_header();
+        h0.height = 0;
+        h0.previous_block_hash = H256::zero();
+        h0.cumulative_diff = U256::from(0);
+        h0.data_ledgers[DataLedger::Submit as usize].total_chunks = 10;
+        h0.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![]);
+        h0.test_sign();
+
+        // tx contributes chunks 10..=24 to the Submit ledger
+        let mut h1 = IrysBlockHeader::new_mock_header();
+        h1.height = 1;
+        h1.previous_block_hash = h0.block_hash;
+        h1.cumulative_diff = U256::from(1);
+        h1.data_ledgers[DataLedger::Submit as usize].total_chunks = 25;
+        h1.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![tx_id]);
+        h1.test_sign();
+
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<IrysBlockHeaders>(h0.block_hash, h0.clone().into())?;
+            tx.put::<IrysBlockHeaders>(h1.block_hash, h1.clone().into())?;
+            tx.put::<MigratedBlockHashes>(0, h0.block_hash)?;
+            tx.put::<MigratedBlockHashes>(1, h1.block_hash)?;
+            Ok(())
+        })??;
+
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_tree_root: DataTreeRoot(data_root),
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|tx| -> eyre::Result<()> {
+            insert_tx_header(tx, &header)?;
+            set_data_tx_included_height(tx, &tx_id, 1)?;
+            Ok(())
+        })??;
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.cumulative_diff = U256::from(0);
+        genesis.test_sign();
+        let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree_guard = irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        let data_commitment = header.data_commitment(&config.data_tree_geometry());
+        Ok((
+            tmp,
+            db,
+            block_tree_guard,
+            config,
+            tx_id,
+            data_commitment,
+            header,
+        ))
+    }
+
+    /// Regression: `block_range` spans two slots (slot 1 = [10,20), slot 2 =
+    /// [20,30)).  One signer is assigned to both slots (two partitions, same
+    /// miner).  `assigned_miners` must equal 1 (one unique address), be
+    /// stable across repeated calls, and the proof must be classified as
+    /// assigned.
+    #[test_log::test(tokio::test)]
+    async fn assigned_miners_multi_slot_unique_address_count() -> eyre::Result<()> {
+        use irys_types::{
+            ConsensusConfig, ingress::generate_ingress_proof, irys::IrysSigner,
+            partition::PartitionAssignment,
+        };
+
+        let (_tmp, db, block_tree_guard, config, _tx_id, data_commitment, header) =
+            build_determinism_test_fixtures()?;
+
+        let consensus = ConsensusConfig::testing();
+        let signer = IrysSigner::random_signer(&consensus);
+
+        // Same miner assigned to two partitions, one in slot 1 and one in
+        // slot 2.  Both slots intersect block_range [10, 24].
+        let mut epoch_snapshot = EpochSnapshot::default();
+        for slot_index in [1_usize, 2_usize] {
+            let pa = PartitionAssignment {
+                partition_hash: H256::random(),
+                miner_address: signer.address(),
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(slot_index),
+            };
+            epoch_snapshot
+                .partition_assignments
+                .data_partitions
+                .insert(pa.partition_hash, pa);
+        }
+
+        // Generate a proof signed by the miner
+        let chunk_bytes: [u8; 32] = [0; 32];
+        let proof = generate_ingress_proof(
+            &signer,
+            data_commitment,
+            std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
+            consensus.chain_id,
+            H256::zero(),
+        )?;
+
+        // Call multiple times — result must be identical every time.
+        for run in 0..5 {
+            let (assigned, miners) = get_assigned_ingress_proofs(
+                std::slice::from_ref(&proof),
+                &header,
+                /* parent_height */ 5,
+                &block_tree_guard,
+                &db,
+                &config,
+                &epoch_snapshot,
+            )?;
+            assert_eq!(
+                miners, 1,
+                "run {run}: assigned_miners must be 1 (one unique address across both slots)"
+            );
+            assert_eq!(
+                assigned.len(),
+                1,
+                "run {run}: proof from the assigned miner must be classified as assigned"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Single-slot: `block_range` intersects exactly one slot.  Two distinct
+    /// miners each hold a partition in that slot.  `assigned_miners` == 2.
+    #[test_log::test(tokio::test)]
+    async fn assigned_miners_single_slot_two_miners() -> eyre::Result<()> {
+        use irys_types::{
+            ConsensusConfig, ingress::generate_ingress_proof, irys::IrysSigner,
+            partition::PartitionAssignment,
+        };
+
+        let (_tmp, db, block_tree_guard, config, _tx_id, data_commitment, header) =
+            build_determinism_test_fixtures()?;
+
+        let consensus = ConsensusConfig::testing();
+        let signer_a = IrysSigner::random_signer(&consensus);
+        let signer_b = IrysSigner::random_signer(&consensus);
+
+        // Two miners, both assigned to slot 1 = [10, 20), which intersects
+        // the tx's block_range [10, 24].
+        let mut epoch_snapshot = EpochSnapshot::default();
+        for miner_address in [signer_a.address(), signer_b.address()] {
+            let pa = PartitionAssignment {
+                partition_hash: H256::random(),
+                miner_address,
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(1),
+            };
+            epoch_snapshot
+                .partition_assignments
+                .data_partitions
+                .insert(pa.partition_hash, pa);
+        }
+
+        // Only signer_a submits a proof.
+        let chunk_bytes: [u8; 32] = [0; 32];
+        let proof = generate_ingress_proof(
+            &signer_a,
+            data_commitment,
+            std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
+            consensus.chain_id,
+            H256::zero(),
+        )?;
+
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            std::slice::from_ref(&proof),
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+
+        assert_eq!(
+            miners, 2,
+            "assigned_miners must equal the replication count of the intersecting slot"
+        );
+        assert_eq!(assigned.len(), 1, "signer_a's proof must be classified");
+
+        Ok(())
+    }
+
+    /// Rule-change lock-in: distinct miners in DIFFERENT intersecting slots.
+    /// This is the exact scenario where the new semantics (unique addresses
+    /// across all intersecting slots) diverges from the old semantics (count
+    /// from whichever single slot the HashMap happened to yield first).
+    ///
+    /// Setup: `block_range` = [10, 24] spans slot 1 = [10, 20) and slot 2 =
+    /// [20, 30).  Alice holds the only partition in slot 1; Bob holds the
+    /// only partition in slot 2.  Alice submits a proof.
+    ///
+    /// - Old code: would have iterated Alice's slot list, found slot 1 as
+    ///   her sole intersecting slot, and returned `assigned_miners = 1`
+    ///   (count of addresses in slot 1).
+    /// - New code: counts unique addresses across all intersecting slots —
+    ///   {Alice, Bob} = 2.
+    ///
+    /// Asserting `miners == 2` locks in the new value.  A regression to the
+    /// old semantics would return 1 and fail this test.
+    #[test_log::test(tokio::test)]
+    async fn assigned_miners_distinct_miners_across_intersecting_slots() -> eyre::Result<()> {
+        use irys_types::{
+            ConsensusConfig, ingress::generate_ingress_proof, irys::IrysSigner,
+            partition::PartitionAssignment,
+        };
+
+        let (_tmp, db, block_tree_guard, config, _tx_id, data_commitment, header) =
+            build_determinism_test_fixtures()?;
+
+        let consensus = ConsensusConfig::testing();
+        let alice = IrysSigner::random_signer(&consensus);
+        let bob = IrysSigner::random_signer(&consensus);
+
+        // Alice in slot 1, Bob in slot 2.  Both slots intersect block_range.
+        let mut epoch_snapshot = EpochSnapshot::default();
+        for (miner_address, slot_index) in [(alice.address(), 1_usize), (bob.address(), 2_usize)] {
+            let pa = PartitionAssignment {
+                partition_hash: H256::random(),
+                miner_address,
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(slot_index),
+            };
+            epoch_snapshot
+                .partition_assignments
+                .data_partitions
+                .insert(pa.partition_hash, pa);
+        }
+
+        // Alice submits a proof.
+        let chunk_bytes: [u8; 32] = [0; 32];
+        let proof = generate_ingress_proof(
+            &alice,
+            data_commitment,
+            std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
+            consensus.chain_id,
+            H256::zero(),
+        )?;
+
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            std::slice::from_ref(&proof),
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+
+        assert_eq!(
+            miners, 2,
+            "new semantics: unique addresses across both intersecting slots = 2 \
+             (old semantics would have returned 1 — the count from Alice's single slot)"
+        );
+        assert_eq!(
+            assigned.len(),
+            1,
+            "Alice's proof must be classified as assigned"
+        );
+
+        Ok(())
+    }
+
+    /// The `assigned_miners` rule change is invisible under the current
+    /// network config (`number_of_ingress_proofs_from_assignees = 0` across
+    /// `ConsensusConfig::testing()` / `testnet()` / `mainnet()`) and only
+    /// "lights up" when a future hardfork bumps `from_assignees > 0`.
+    ///
+    /// Setup mirrors `assigned_miners_distinct_miners_across_intersecting_slots`:
+    /// Alice in slot 1, Bob in slot 2, block_range [10,24] spans both, Alice
+    /// submits one proof.  Under the two semantics:
+    ///   - Old (per-proof, count of unique addresses in the proof signer's
+    ///     single intersecting slot): 1
+    ///   - New (unique addresses across all intersecting slots): 2
+    ///
+    /// We model the consumer logic at block_validation.rs:2853-2870 as a pure
+    /// function and verify:
+    ///   - With `from_assignees = 0`: BOTH values produce ACCEPT (the clamp
+    ///     and the count check are both no-ops; the rule change has no
+    ///     observable effect on validation).
+    ///   - With `from_assignees = 2`: the values diverge — old ACCEPTS
+    ///     (assigned.len()=1 >= clamp(2,1)=1) and new REJECTS
+    ///     (assigned.len()=1 < clamp(2,2)=2).
+    ///
+    /// Conclusion: activation of the new semantics is implicitly tied to the
+    /// future hardfork that bumps `from_assignees > 0` (which is itself a
+    /// coordinated network upgrade), so no separate hardfork gate for this
+    /// rule change is required on the current branch.
+    #[test_log::test(tokio::test)]
+    async fn assigned_miners_rule_change_invisible_under_current_config() -> eyre::Result<()> {
+        use irys_types::{
+            ConsensusConfig, ingress::generate_ingress_proof, irys::IrysSigner,
+            partition::PartitionAssignment,
+        };
+
+        let (_tmp, db, block_tree_guard, config, _tx_id, data_commitment, header) =
+            build_determinism_test_fixtures()?;
+
+        let consensus = ConsensusConfig::testing();
+        let alice = IrysSigner::random_signer(&consensus);
+        let bob = IrysSigner::random_signer(&consensus);
+
+        // Alice in slot 1, Bob in slot 2.  Both slots intersect block_range
+        // [10, 24] given num_chunks_in_partition = 10 (slot 1 = [10,20),
+        // slot 2 = [20,30)).
+        let mut epoch_snapshot = EpochSnapshot::default();
+        for (miner_address, slot_index) in [(alice.address(), 1_usize), (bob.address(), 2_usize)] {
+            let pa = PartitionAssignment {
+                partition_hash: H256::random(),
+                miner_address,
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(slot_index),
+            };
+            epoch_snapshot
+                .partition_assignments
+                .data_partitions
+                .insert(pa.partition_hash, pa);
+        }
+
+        // Alice submits exactly one proof.
+        let chunk_bytes: [u8; 32] = [0; 32];
+        let proof = generate_ingress_proof(
+            &alice,
+            data_commitment,
+            std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
+            consensus.chain_id,
+            H256::zero(),
+        )?;
+
+        let (assigned, new_miners) = get_assigned_ingress_proofs(
+            std::slice::from_ref(&proof),
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+        assert_eq!(
+            new_miners, 2,
+            "new semantics across both intersecting slots"
+        );
+        assert_eq!(assigned.len(), 1);
+
+        // Reproduce the OLD algorithm's value computation in-place to keep
+        // this test honest if anyone later changes `get_assigned_ingress_proofs`:
+        // for each proof, take the proof signer's slots, find the first that
+        // intersects block_range, return the count of unique addresses
+        // assigned to *that* slot (and overwrite on each proof iteration —
+        // here there is only one proof so the "last write wins" detail
+        // doesn't change the result).
+        let proof_address = alice.address();
+        let alice_slot_indices: Vec<usize> = epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .iter()
+            .filter(|(_, pa)| {
+                pa.miner_address == proof_address && pa.ledger_id == Some(DataLedger::Submit as u32)
+            })
+            .filter_map(|(_, pa)| pa.slot_index)
+            .collect();
+        // Alice is assigned only to slot 1, which intersects block_range.
+        let old_miners: usize = epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .iter()
+            .filter(|(_, pa)| {
+                pa.ledger_id == Some(DataLedger::Submit as u32)
+                    && pa
+                        .slot_index
+                        .is_some_and(|i| alice_slot_indices.contains(&i))
+            })
+            .map(|(_, pa)| pa.miner_address)
+            .collect::<HashSet<IrysAddress>>()
+            .len();
+        assert_eq!(
+            old_miners, 1,
+            "old semantics: only Alice in her single intersecting slot"
+        );
+        assert_ne!(
+            old_miners, new_miners,
+            "the rule change actually changes the computed value in this scenario"
+        );
+
+        // Call the *real* production helper that the publish-tx loop in
+        // `data_txs_are_valid` uses.  Same function, same code — no modelling
+        // gap between test and prod.
+        let accepts = |from_assignees: usize, miners: usize, proofs_len: usize| -> bool {
+            check_assigned_proof_count(from_assignees, miners, proofs_len).is_ok()
+        };
+
+        // Current network config: from_assignees = 0 in every deployed
+        // ConsensusConfig (mainnet/testnet/testing).  The clamp is dead
+        // (no usize < 0) and the count check is vacuously true.  Both old
+        // and new produce the identical accept-everything outcome — the
+        // rule change has zero effect on validation today.
+        let from_assignees_current = 0;
+        assert!(
+            accepts(from_assignees_current, old_miners, assigned.len()),
+            "old semantics under from_assignees=0 must ACCEPT"
+        );
+        assert!(
+            accepts(from_assignees_current, new_miners, assigned.len()),
+            "new semantics under from_assignees=0 must ACCEPT"
+        );
+        assert_eq!(
+            accepts(from_assignees_current, old_miners, assigned.len()),
+            accepts(from_assignees_current, new_miners, assigned.len()),
+            "under current network config the rule change is invisible"
+        );
+
+        // Future hardfork config: from_assignees = 2 (matches the commented
+        // post-Frontier reference at testnet_config.toml:167-168 — total=4,
+        // from_assignees=2).  This is the moment the new semantics becomes
+        // a visible consensus change.
+        let from_assignees_future = 2;
+        assert!(
+            accepts(from_assignees_future, old_miners, assigned.len()),
+            "old semantics under from_assignees=2: 1 proof >= clamp(2,1)=1 → ACCEPT"
+        );
+        let err = check_assigned_proof_count(from_assignees_future, new_miners, assigned.len())
+            .expect_err("new semantics under from_assignees=2 must REJECT");
+        assert!(
+            matches!(
+                err,
+                PreValidationError::AssignedProofCountMismatch {
+                    expected: 2,
+                    actual: 1,
+                }
+            ),
+            "expected AssignedProofCountMismatch {{ expected: 2, actual: 1 }}, got: {err:?}"
+        );
+
+        Ok(())
+    }
+
+    /// Zero proofs: with at least one intersecting slot `assigned_miners > 0`
+    /// and `assigned_proofs` is empty.  With no intersecting slot (block_range
+    /// is None / tx unconfirmed) both are 0.
+    #[test_log::test(tokio::test)]
+    async fn assigned_miners_zero_proofs_returns_correct_counts() -> eyre::Result<()> {
+        use irys_types::partition::PartitionAssignment;
+
+        let (_tmp, db, block_tree_guard, config, _tx_id, _data_commitment, header) =
+            build_determinism_test_fixtures()?;
+
+        // Register one miner to slot 1 — intersects block_range [10, 24].
+        let mut epoch_snapshot = EpochSnapshot::default();
+        let pa = PartitionAssignment {
+            partition_hash: H256::random(),
+            miner_address: IrysAddress::random(),
+            ledger_id: Some(DataLedger::Submit as u32),
+            slot_index: Some(1),
+        };
+        epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .insert(pa.partition_hash, pa);
+
+        // Pass zero proofs — must still count the intersecting miners correctly.
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            &[],
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+        assert!(assigned.is_empty(), "no proofs submitted");
+        assert_eq!(miners, 1, "one miner in the intersecting slot");
+
+        // With an empty epoch_snapshot (no partitions) assigned_miners == 0.
+        let empty_snapshot = EpochSnapshot::default();
+        let (assigned2, miners2) = get_assigned_ingress_proofs(
+            &[],
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &empty_snapshot,
+        )?;
+        assert!(assigned2.is_empty());
+        assert_eq!(miners2, 0, "no partitions → zero assigned_miners");
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -10508,7 +11475,6 @@ mod commitment_version_tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: Some(Aurora {
                     activation_timestamp: UnixTimestamp::from_secs(activation_secs),
                     minimum_commitment_tx_version: min_version,
@@ -10517,6 +11483,7 @@ mod commitment_version_tests {
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -10529,12 +11496,12 @@ mod commitment_version_tests {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None,
                 aurora: None,
                 borealis: None,
                 cascade: None,
                 delta: None,
                 echo: None,
+                fission: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -10669,9 +11636,7 @@ mod commitment_version_tests {
 #[cfg(test)]
 mod ingress_proof_local_bytes_tests {
     use super::*;
-    use irys_database::{
-        IrysDatabaseArgs as _, cache_chunk, cache_data_root, open_or_create_db, tables::IrysTables,
-    };
+    use irys_database::{DatabaseProviderTestExt as _, cache_chunk, cache_data_root};
     use irys_domain::{BlockTree, ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_testing_utils::TempDirBuilder;
@@ -10698,13 +11663,7 @@ mod ingress_proof_local_bytes_tests {
     }
 
     fn open_db(path: &std::path::Path) -> DatabaseProvider {
-        let env = open_or_create_db(
-            path,
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-        )
-        .unwrap();
-        DatabaseProvider(Arc::new(env))
+        DatabaseProvider::for_testing(path, &path.join("cache")).unwrap()
     }
 
     fn one_chunk(config: &Config) -> (DataTransaction, Vec<u8>) {
@@ -10717,7 +11676,7 @@ mod ingress_proof_local_bytes_tests {
     }
 
     fn cache_body(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8]) {
-        db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             cache_data_root(
                 wtx,
                 &tx.header,
@@ -10743,14 +11702,13 @@ mod ingress_proof_local_bytes_tests {
     fn strip_body(db: &DatabaseProvider, tx: &DataTransaction) {
         use irys_database::db_cache::CachedChunk;
         use irys_database::tables::CachedChunks;
-        use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
         let chunk_key = irys_types::data_tree::chunk_key(
             tx.header
                 .data_commitment(&irys_types::data_tree::Geometry::TESTING),
             TxChunkOffset::from(0),
         );
-        db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             let existing = wtx.get::<CachedChunks>(chunk_key)?.expect("cached chunk");
             wtx.put::<CachedChunks>(
                 chunk_key,
@@ -11049,7 +12007,7 @@ mod ingress_proof_local_bytes_tests {
             epochs,
             &parent_ema,
             &config,
-            config.number_of_ingress_proofs_total_at(timestamp),
+            config.publish_replica_count_at(timestamp),
             timestamp,
         )
         .expect("term fee");
@@ -11272,14 +12230,13 @@ mod ingress_proof_local_bytes_tests {
     fn put_cached_body(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8]) {
         use irys_database::db_cache::CachedChunk;
         use irys_database::tables::CachedChunks;
-        use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
         let chunk_key = irys_types::data_tree::chunk_key(
             tx.header
                 .data_commitment(&irys_types::data_tree::Geometry::TESTING),
             TxChunkOffset::from(0),
         );
-        db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             let existing = wtx.get::<CachedChunks>(chunk_key)?.expect("cached chunk");
             wtx.put::<CachedChunks>(
                 chunk_key,
@@ -11579,6 +12536,109 @@ mod engine_client_error_tests {
         assert_eq!(
             irys_types::config::ENGINE_CLIENT_MAX_REQUEST_BYTES,
             u64::from(jsonrpsee_core::TEN_MB_SIZE_BYTES),
+        );
+    }
+}
+
+#[cfg(test)]
+mod pending_resize_tests {
+    use super::*;
+    use irys_types::{
+        ConsensusConfig, DataLedger, UnixTimestamp, hardfork_config::Fission,
+        partition_resize::PartitionResizeState,
+    };
+
+    #[test]
+    fn submit_assignees_follow_epoch_partition_resize() {
+        let mut snapshot = EpochSnapshot::default();
+        let miner = IrysAddress::repeat_byte(1);
+        let hash = H256::repeat_byte(2);
+        snapshot.partition_assignments.data_partitions.insert(
+            hash,
+            irys_types::partition::PartitionAssignment {
+                partition_hash: hash,
+                miner_address: miner,
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(1),
+            },
+        );
+        let legacy_chunks = snapshot.partition_chunks();
+        let resized_chunks = legacy_chunks / 2;
+        let range = LedgerChunkRange(ie(
+            LedgerChunkOffset::from(resized_chunks),
+            LedgerChunkOffset::from(legacy_chunks),
+        ));
+        assert!(submit_assignees_for_range(&range, &snapshot).is_empty());
+
+        // Slot 1 moves into this range only after the branch-local activation.
+        snapshot.partition_resize = Some(PartitionResizeState {
+            params: Fission {
+                partition_chunks: resized_chunks,
+                recall_chunks: 1,
+                ..Fission::proposed(UnixTimestamp::from_secs(0))
+            },
+            activation_height: snapshot.config.consensus.epoch.num_blocks_in_epoch,
+            activation_hash: H256::repeat_byte(3),
+            sampling_origin: 0,
+            preserved_id_floor: 0,
+            reference_partition_chunks: legacy_chunks,
+        });
+        assert_eq!(
+            submit_assignees_for_range(&range, &snapshot),
+            HashSet::from([miner])
+        );
+    }
+
+    fn block_with_submit_chunks(total_chunks: u64) -> IrysBlockHeader {
+        let mut block = IrysBlockHeader::default();
+        block.data_ledgers = vec![DataTransactionLedger {
+            ledger_id: DataLedger::Submit as u32,
+            total_chunks,
+            ..Default::default()
+        }];
+        block
+    }
+
+    /// Blocks on a branch where Fission is scheduled but not yet active must
+    /// keep the data ledgers empty; once activated, or never scheduled, the
+    /// rule does not apply.
+    #[test]
+    fn pending_resize_rejects_non_empty_data_ledgers() {
+        let mut config = ConsensusConfig::testing();
+        let fission = Fission::proposed(UnixTimestamp::from_secs(0));
+        config.hardforks.fission = Some(fission);
+        let pending = EpochConsensusContext::new(&config, None);
+        assert!(
+            data_ledgers_empty_while_pending_resize(&block_with_submit_chunks(0), &pending).is_ok()
+        );
+        assert!(matches!(
+            data_ledgers_empty_while_pending_resize(&block_with_submit_chunks(1), &pending),
+            Err(PreValidationError::DataLedgersNotEmptyWhilePendingResize {
+                ledger_id,
+                total_chunks: 1,
+            }) if ledger_id == DataLedger::Submit as u32
+        ));
+
+        let activated = EpochConsensusContext::new(
+            &config,
+            Some(PartitionResizeState {
+                params: fission,
+                activation_height: config.epoch.num_blocks_in_epoch,
+                activation_hash: H256::repeat_byte(7),
+                sampling_origin: 2,
+                preserved_id_floor: 0,
+                reference_partition_chunks: config.num_chunks_in_partition,
+            }),
+        );
+        assert!(
+            data_ledgers_empty_while_pending_resize(&block_with_submit_chunks(1), &activated)
+                .is_ok()
+        );
+
+        let unscheduled = EpochConsensusContext::new(&ConsensusConfig::testing(), None);
+        assert!(
+            data_ledgers_empty_while_pending_resize(&block_with_submit_chunks(1), &unscheduled)
+                .is_ok()
         );
     }
 }
