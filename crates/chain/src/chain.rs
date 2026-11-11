@@ -920,11 +920,10 @@ impl IrysNode {
         // Skipped when sha_1s_difficulty is low (test configs use ~1000).
         //
         // A mining node must hold the one-step-per-second rate, so failing the
-        // check aborts startup. A non-mining node has no such need: its local
-        // VDF only serves as validation's fast path, and it follows the chain
-        // from validated fast-forward steps without one. Such a node therefore
-        // starts, and gives up only the free-run, and only once it is slow
-        // enough for the free-run to cost more than it earns — see
+        // check aborts startup. A non-mining node has no such need: it follows
+        // the chain from validated fast-forward steps without mining. Such a
+        // node therefore starts, and gives up only the free-run, and only once
+        // it is slow enough for the free-run to cost more than it earns — see
         // [`vdf_free_run_allowed`].
         //
         // This is the `Auto` verdict. `vdf.free_run` overrides it below, so the
@@ -1003,7 +1002,7 @@ impl IrysNode {
                     warn!(
                         "VDF step takes {step_duration_ms}ms against a {target_step_ms}ms target \
                          ({ratio:.1}x slower than chain rate). node_mode {node_mode:?} does not \
-                         mine, so this only slows validation's local fast path. The node follows \
+                         mine, so this only slows local free-run. The node follows \
                          the chain normally."
                     );
                 } else {
@@ -1012,7 +1011,7 @@ impl IrysNode {
                          {MAX_FREE_RUN_STEP_MULTIPLE}x the {target_step_ms}ms target, and it must \
                          stay under the {stall_budget:?} vdf.progress_timeout_secs budget. Local \
                          VDF free-run is disabled: at this rate it would starve the fast-forward \
-                         drain rather than serve as validation's fast path, and a step outlasting \
+                         drain rather than keep the local step counter moving, and a step outlasting \
                          the budget would freeze the step counter. node_mode {node_mode:?} does \
                          not mine, so the node follows the chain from validated fast-forward \
                          steps instead — a supported way to run a non-mining node, not a fault."

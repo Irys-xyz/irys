@@ -1,7 +1,10 @@
+use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use irys_types::{ConsensusConfig, H256, H256List, NodeConfig, U256, VDFLimiterInfo, VdfConfig};
+use irys_vdf::state::{CancelEnum, vdf_step_batch_is_valid};
 use irys_vdf::{
     apply_reset_seed, last_step_checkpoints_is_valid, step_number_to_salt_number, vdf_sha,
     vdf_sha_verification,
@@ -168,11 +171,81 @@ fn bench_apply_reset_seed(c: &mut Criterion) {
     });
 }
 
+fn bench_step_batch_validation(c: &mut Criterion) {
+    let tiers = build_tiers();
+    let mut group = c.benchmark_group("vdf_step_batch_is_valid");
+
+    for tier in &tiers {
+        for threads in [1_usize, 4_usize] {
+            let mut config = tier.config.clone();
+            config.parallel_verification_thread_limit = threads;
+            let num_steps = threads.saturating_mul(2).max(1);
+            let num_checkpoints = config.num_checkpoints_in_vdf_step;
+            let prev_output = fixed_seed();
+            let reset_seed = H256::from([0x11; 32]);
+            let mut steps = Vec::with_capacity(num_steps);
+            let mut last_checkpoints = vec![H256::default(); num_checkpoints];
+            let mut seed = prev_output;
+            for i in 0..u64::try_from(num_steps).expect("step count fits in u64") {
+                if i > 0
+                    && i.is_multiple_of(
+                        u64::try_from(config.reset_frequency).expect("reset_frequency fits in u64"),
+                    )
+                {
+                    seed = apply_reset_seed(seed, reset_seed);
+                }
+                let salt = U256::from(step_number_to_salt_number(&config, i));
+                let mut checkpoints = vec![H256::default(); num_checkpoints];
+                vdf_sha(
+                    salt,
+                    &mut seed,
+                    num_checkpoints,
+                    config.num_iterations_per_checkpoint(),
+                    &mut checkpoints,
+                );
+                steps.push(seed);
+                last_checkpoints = checkpoints;
+            }
+            let vdf_info = VDFLimiterInfo {
+                output: seed,
+                global_step_number: u64::try_from(num_steps).expect("step count fits in u64"),
+                seed: reset_seed,
+                next_seed: reset_seed,
+                prev_output,
+                last_step_checkpoints: H256List(last_checkpoints),
+                steps: H256List(steps),
+                vdf_difficulty: None,
+                next_vdf_difficulty: None,
+            };
+            let pool = irys_vdf::build_verification_pool(&config);
+            let id = format!("{}_{threads}t", tier.name);
+            group.sample_size(tier.sample_size);
+            group.measurement_time(tier.measurement_time);
+            group.bench_function(BenchmarkId::from_parameter(id), |b| {
+                b.iter(|| {
+                    vdf_step_batch_is_valid(
+                        &pool,
+                        &vdf_info,
+                        &config,
+                        0..num_steps,
+                        true,
+                        Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+                    )
+                    .unwrap();
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_vdf_sha,
     bench_vdf_sha_verification,
     bench_parallel_verification,
     bench_apply_reset_seed,
+    bench_step_batch_validation,
 );
 criterion_main!(benches);
