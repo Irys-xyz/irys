@@ -255,8 +255,9 @@ pub enum EmaSampling {
     /// EMA recalculation block. Its producer decides the whole update.
     PreviousIntervalBlock,
     /// From Delta: the median of the oracle prices of every block in the interval,
-    /// the new block included (the lower middle price for an even count). A minority of producers cannot move it outside the
-    /// prices the other producers reported.
+    /// the new block included (the lower middle price for an even count). A
+    /// minority of producers cannot move it outside the prices the other
+    /// producers reported.
     IntervalMedian,
 }
 
@@ -268,6 +269,10 @@ pub struct EmaRules {
     pub token_price_safe_range: Amount<Percentage>,
     /// Number of blocks in an EMA price interval.
     pub price_adjustment_interval: u64,
+    /// Which oracle price an EMA update takes after the bootstrap. The other
+    /// Delta rules that have no parameter of their own travel with
+    /// [`EmaSampling::IntervalMedian`]: see [`Self::is_bootstrap_block`] and
+    /// [`Self::keeps_prices_positive`].
     pub sampling: EmaSampling,
     /// Number of blocks from genesis that recalculate the EMA on every block:
     /// two base intervals (`EmaConfig::price_adjustment_interval`). It does not
@@ -284,6 +289,28 @@ impl EmaRules {
             || height
                 .saturating_add(1)
                 .is_multiple_of(self.price_adjustment_interval)
+    }
+
+    /// True when the EMA update of the block at `height` is a bootstrap update,
+    /// which takes the block's own oracle price.
+    ///
+    /// From Delta this matches [`Self::is_ema_recalculation_block`]: the blocks
+    /// below `bootstrap_blocks`. Before Delta the check was keyed on the parent's
+    /// height, so the block at `bootstrap_blocks` is also a bootstrap update.
+    /// That historical rule must stay as it is.
+    pub fn is_bootstrap_block(&self, height: u64) -> bool {
+        let keyed_height = match self.sampling {
+            EmaSampling::IntervalMedian => height,
+            EmaSampling::PreviousIntervalBlock => height.saturating_sub(1),
+        };
+        keyed_height < self.bootstrap_blocks
+    }
+
+    /// True from Delta: oracle prices and calculated EMAs stay at least one
+    /// atomic unit, and a positive safe range always permits a one-unit upward
+    /// step. Before Delta the percentage arithmetic rounds down unchanged.
+    pub fn keeps_prices_positive(&self) -> bool {
+        self.sampling == EmaSampling::IntervalMedian
     }
 }
 

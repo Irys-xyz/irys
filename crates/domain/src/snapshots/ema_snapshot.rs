@@ -63,8 +63,9 @@
 //!   height that is a multiple of the new length.
 //! - **Sampling**: after the two bootstrap intervals an EMA update takes the median
 //!   of the oracle prices of every block in the interval, the recalculation block
-//!   included (the lower of the two middle prices for an even count). Before Delta it takes the oracle price of one earlier block (block
-//!   18 for the update at block 29), so that block's producer decides the update.
+//!   included (the lower of the two middle prices for an even count). Before Delta
+//!   it takes the oracle price of one earlier block (block 18 for the update at
+//!   block 29), so that block's producer decides the update.
 //!   With the median, the producers of fewer than half of the interval's blocks
 //!   cannot move the update outside the prices the other producers reported.
 //! - **Bootstrap**: stays two base intervals (blocks 0-19), also when Delta is
@@ -125,10 +126,15 @@ pub struct EmaSnapshot {
 #[derive(Debug)]
 pub struct ExponentialMarketAvgCalculation {
     /// The oracle price that was used for EMA calculations.
-    /// After the first 2 pricing intervals, this value will
+    /// During the first 2 pricing intervals it is the block's own bounded price.
+    ///
+    /// After them, before Delta, this value will
     /// point to the oracle price of the preceding EMA recalculation block.
     ///
     /// eg. On block 25, this will blocks 18 oracle price (19 being the preceding EMA recalculation block)
+    ///
+    /// From Delta it is the median of the oracle prices of the block's interval,
+    /// its own bounded price included (the lower middle price for an even count).
     pub oracle_price_for_calculation: IrysTokenPrice,
 
     /// Oracle price after applying safe range bounds.
@@ -306,11 +312,8 @@ impl EmaSnapshot {
         // From Delta step 1 takes the median oracle price of the interval instead.
         // Delta ends bootstrap at the candidate height, matching the update
         // schedule. Preserve the legacy parent-height rule before Delta.
-        let bootstrap_height = match rules.sampling {
-            EmaSampling::IntervalMedian => parent_block.height.saturating_add(1),
-            EmaSampling::PreviousIntervalBlock => parent_block.height,
-        };
-        let oracle_price_for_calculation = if bootstrap_height < rules.bootstrap_blocks {
+        let new_block_height = parent_block.height.saturating_add(1);
+        let oracle_price_for_calculation = if rules.is_bootstrap_block(new_block_height) {
             oracle_price_for_block_inclusion
         } else {
             match rules.sampling {
@@ -323,7 +326,7 @@ impl EmaSnapshot {
                 // Every price in the interval already passed its own safe-range
                 // check, so the median needs no further bound.
                 EmaSampling::IntervalMedian => parent_snapshot.interval_median_oracle_price_with(
-                    parent_block.height.saturating_add(1),
+                    new_block_height,
                     blocks_in_interval,
                     oracle_price_for_block_inclusion,
                 ),
@@ -343,7 +346,7 @@ impl EmaSnapshot {
         // therefore produce zero at atomic precision. Delta keeps fee prices
         // positive, including recovery from a legacy zero EMA; historical
         // pre-Delta arithmetic must remain unchanged.
-        if rules.sampling == EmaSampling::IntervalMedian {
+        if rules.keeps_prices_positive() {
             ema = ema.max(IrysTokenPrice::new(U256::one()));
         }
         ExponentialMarketAvgCalculation {
@@ -379,7 +382,7 @@ impl EmaSnapshot {
         rules: &EmaRules,
     ) -> IrysTokenPrice {
         let range = rules.token_price_safe_range;
-        if rules.sampling == EmaSampling::PreviousIntervalBlock {
+        if !rules.keeps_prices_positive() {
             return bound_in_min_max_range(desired, range, parent);
         }
         let one = IrysTokenPrice::new(U256::one());
@@ -1499,6 +1502,10 @@ mod test {
     #[case::after_ten_block_boundary(31)]
     #[case::before_twenty_block_boundary(39)]
     #[case::on_twenty_block_boundary(40)]
+    // 84 and 120 put activation exactly on a boundary of each Delta interval
+    // that is not a multiple of the base interval (4 and 7; 15).
+    #[case::on_four_and_seven_block_boundary(84)]
+    #[case::on_fifteen_block_boundary(120)]
     #[case::late(87)]
     #[case::never(u64::MAX)]
     fn delta_history_rebuild_matches_iterative_snapshot(
