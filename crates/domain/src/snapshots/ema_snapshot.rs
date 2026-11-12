@@ -302,7 +302,13 @@ impl EmaSnapshot {
         //    which will be reported to other systems querying for EMA prices.
         //
         // From Delta step 1 takes the median oracle price of the interval instead.
-        let oracle_price_for_calculation = if parent_block.height < rules.bootstrap_blocks {
+        // Delta ends bootstrap at the candidate height, matching the update
+        // schedule. Preserve the legacy parent-height rule before Delta.
+        let bootstrap_height = match rules.sampling {
+            EmaSampling::IntervalMedian => parent_block.height.saturating_add(1),
+            EmaSampling::PreviousIntervalBlock => parent_block.height,
+        };
+        let oracle_price_for_calculation = if bootstrap_height < rules.bootstrap_blocks {
             oracle_price_for_block_inclusion
         } else {
             match rules.sampling {
@@ -1156,6 +1162,36 @@ mod test {
             blocks_and_snapshots[39].1.ema_price_current_interval,
             expected_ema
         );
+    }
+
+    /// The first post-bootstrap block can also end a custom Delta interval.
+    /// Its own outlier must not replace the median of blocks 14..=20.
+    #[test]
+    fn delta_bootstrap_boundary_uses_interval_median() {
+        let mut config = config_with_delta_at(0);
+        config
+            .hardforks
+            .delta
+            .as_mut()
+            .unwrap()
+            .ema_price_adjustment_interval = 7;
+        let honest_price = IrysTokenPrice::token(dec!(1.0)).unwrap();
+        let outlier_price = IrysTokenPrice::token(dec!(1.1)).unwrap();
+        let blocks = build_blocks_with_oracle_prices(20, &config, |height| {
+            if height == 20 {
+                outlier_price
+            } else {
+                honest_price
+            }
+        });
+        let (block, snapshot) = &blocks[20];
+        let rules = config.ema_rules_at(block.timestamp_secs());
+        assert_eq!(rules.bootstrap_blocks, 20);
+        assert!(rules.is_ema_recalculation_block(block.height));
+        assert_eq!(block.oracle_irys_price, outlier_price);
+        assert_eq!(snapshot.interval_oracle_prices.len(), 7);
+        assert_eq!(block.ema_irys_price, honest_price);
+        assert_eq!(snapshot.ema_price_current_interval, honest_price);
     }
 
     /// One producer reporting the lowest allowed price cannot move the Delta EMA
