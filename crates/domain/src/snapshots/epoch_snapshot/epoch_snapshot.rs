@@ -1635,6 +1635,8 @@ impl EpochSnapshot {
     /// Processes partition assignments for a specific ledger, creating StorageModuleInfo entries and updating packing state.
     /// The StorageModuleInfos will reference existing storage modules if that store the partition assignment or use the first
     /// available storage module index with no partition assignments.
+    /// Assignments are processed in the given order. An assignment that finds no
+    /// storage module is logged and skipped; the rest are still processed.
     fn process_storage_module_assignments(
         &self,
         assignments: &[PartitionAssignment],
@@ -1651,14 +1653,18 @@ impl EpochSnapshot {
         let assignments_to_process = filtered_assignments.collect::<Vec<_>>();
 
         for pa in assignments_to_process {
-            let id = self.find_or_assign_storage_module(sm_packing_info, pa);
-
-            if id.is_none() {
-                error!("No available storage modules for partition assignment!");
-                return;
-            }
-
-            let id = id.unwrap();
+            // Continue, do not stop: a later assignment can be a partition that
+            // a module already holds. An unmapped module is cleared and wiped
+            // as missing from the update.
+            let Some(id) = self.find_or_assign_storage_module(sm_packing_info, pa) else {
+                warn!(
+                    partition.hash = %pa.partition_hash,
+                    partition.ledger_id = ?pa.ledger_id,
+                    partition.slot_index = ?pa.slot_index,
+                    "no available storage module for partition assignment"
+                );
+                continue;
+            };
             let path = sm_packing_info[id].0.clone();
 
             module_infos.push(StorageModuleInfo {
@@ -2504,5 +2510,152 @@ mod tests {
                 proptest::prop_assert_eq!(ids(&actual), ids(&expected));
             }
         }
+    }
+
+    /// One storage module still holds a partition the canonical epoch no longer
+    /// assigns to this miner (for example the orphaned fork's assignment after a
+    /// reorg), so a new capacity assignment finds no free module. A later
+    /// assignment whose partition already has a module must still map to it: an
+    /// unmapped module is cleared and wiped as missing from the update.
+    #[test]
+    fn existing_partition_keeps_its_module_when_an_earlier_assignment_finds_none() {
+        let snapshot = EpochSnapshot::default();
+        let miner = IrysAddress::from([0xAA; 20]);
+        // Partition hashes sort in this order. The capacity map is keyed by hash,
+        // so the new assignment is processed before the existing one.
+        let orphaned_hash = H256::from([0x01; 32]);
+        let new_hash = H256::from([0x02; 32]);
+        let existing_hash = H256::from([0x03; 32]);
+        let capacity_params = |partition_hash: H256| PackingParams {
+            packing_address: miner,
+            partition_hash: Some(partition_hash),
+            last_updated_height: Some(0),
+            ..Default::default()
+        };
+        let mut sm_packing_info = vec![
+            (PathBuf::from("sm0"), Some(capacity_params(orphaned_hash))),
+            (PathBuf::from("sm1"), Some(capacity_params(existing_hash))),
+        ];
+        let capacity_assignment = |partition_hash: H256| PartitionAssignment {
+            partition_hash,
+            miner_address: miner,
+            ledger_id: None,
+            slot_index: None,
+        };
+        let assignments = vec![
+            capacity_assignment(new_hash),
+            capacity_assignment(existing_hash),
+        ];
+        const NUM_CHUNKS: u32 = 10;
+        let mut module_infos = Vec::new();
+
+        snapshot.process_storage_module_assignments(
+            &assignments,
+            &mut sm_packing_info,
+            &mut module_infos,
+            None,
+            miner,
+            NUM_CHUNKS,
+        );
+
+        let existing_module = module_infos.iter().find(|info| {
+            info.partition_assignment
+                .is_some_and(|assignment| assignment.partition_hash == existing_hash)
+        });
+        assert_eq!(
+            existing_module.map(|info| info.id),
+            Some(1),
+            "a partition that already has a module must map to that module even when an \
+             earlier assignment found no free module; got {module_infos:#?}"
+        );
+    }
+
+    /// The miner has more partition assignments than configured storage modules
+    /// (a drive was removed after its pledge). The partition of the removed drive
+    /// sorts first. Each module that holds an assigned partition must keep it, and
+    /// the free module goes to the lowest unmapped partition hash. Only the
+    /// partitions that find no module stay out of the mapping.
+    #[test]
+    fn more_assignments_than_modules_keeps_every_held_partition() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("more_assignments_than_modules")
+            .build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let miner = config.node_config.miner_address();
+
+        // Hash order: the removed drive's partition, two new partitions, then the
+        // two partitions that the configured modules hold.
+        let removed_drive_hash = H256::from([0x01; 32]);
+        let first_new_hash = H256::from([0x02; 32]);
+        let second_new_hash = H256::from([0x03; 32]);
+        let first_held_hash = H256::from([0x04; 32]);
+        let second_held_hash = H256::from([0x05; 32]);
+
+        let held_modules = [
+            (PathBuf::from("held0"), first_held_hash),
+            (PathBuf::from("held1"), second_held_hash),
+        ];
+        for (path, partition_hash) in &held_modules {
+            let dir = tmp.path().join(path);
+            std::fs::create_dir_all(&dir).unwrap();
+            PackingParams {
+                packing_address: miner,
+                partition_hash: Some(*partition_hash),
+                last_updated_height: Some(0),
+                ..Default::default()
+            }
+            .write_to_disk(&dir.join(PACKING_PARAMS_FILE_NAME))
+            .unwrap();
+        }
+        // A fresh module with no packing file is free.
+        let free_module = PathBuf::from("free");
+        let mut submodule_paths: Vec<PathBuf> =
+            held_modules.iter().map(|(path, _)| path.clone()).collect();
+        submodule_paths.push(free_module);
+
+        let mut snapshot = snapshot_with_submodules(config, submodule_paths);
+        for partition_hash in [
+            removed_drive_hash,
+            first_new_hash,
+            second_new_hash,
+            first_held_hash,
+            second_held_hash,
+        ] {
+            snapshot.partition_assignments.capacity_partitions.insert(
+                partition_hash,
+                PartitionAssignment {
+                    partition_hash,
+                    miner_address: miner,
+                    ledger_id: None,
+                    slot_index: None,
+                },
+            );
+        }
+
+        let infos = snapshot
+            .map_storage_modules_to_partition_assignments()
+            .expect("mapping reads the packing files");
+        let mapping: Vec<(usize, Option<H256>)> = infos
+            .iter()
+            .map(|info| {
+                (
+                    info.id,
+                    info.partition_assignment
+                        .map(|assignment| assignment.partition_hash),
+                )
+            })
+            .collect();
+        assert_eq!(
+            mapping,
+            vec![
+                (2, Some(removed_drive_hash)),
+                (0, Some(first_held_hash)),
+                (1, Some(second_held_hash)),
+            ],
+            "every module that holds an assigned partition keeps it, and the free module \
+             takes the lowest unmapped partition hash"
+        );
     }
 }

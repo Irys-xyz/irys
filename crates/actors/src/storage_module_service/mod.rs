@@ -39,6 +39,11 @@ use tracing::{Instrument as _, debug, error, warn};
 pub enum StorageModuleServiceMessage {
     PartitionAssignmentsUpdated {
         storage_module_infos: Arc<Vec<StorageModuleInfo>>,
+        /// The highest epoch height whose local writes this update supersedes.
+        /// This is the epoch block height, except after a reorg that orphans the
+        /// only epoch block: then it is the orphaned epoch height, and the infos
+        /// come from the new tip's epoch snapshot. A local write stored above
+        /// this height is newer and an unassign leaves it.
         update_height: u64,
     },
     /// Rollback marked this span `Uninitialized` and the packing channel did
@@ -4529,6 +4534,44 @@ mod assignment_reset_tests {
         assert_one_deferred_full_span(&harness);
         deferred_span_is_sent_on_tick(&mut harness).await;
         assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// After a reorg that orphans the only epoch block, the block tree sends the
+    /// new tip's assignments at the orphaned epoch height. An unassign at that
+    /// height clears what the orphaned epoch stored. An unassign at the lower
+    /// canonical epoch height leaves it.
+    #[tokio::test]
+    async fn unassign_at_the_orphaned_epoch_height_clears_its_assignment() {
+        const CANONICAL_EPOCH_HEIGHT: u64 = 40;
+        const ORPHANED_EPOCH_HEIGHT: u64 = 50;
+
+        let (mut harness, _hash, _miner) =
+            store_slot_one_with_data(ORPHANED_EPOCH_HEIGHT, 0xE1).await;
+        let path = harness.path.clone();
+
+        apply_update(
+            &mut harness,
+            explicit_unassign(&path),
+            CANONICAL_EPOCH_HEIGHT,
+        )
+        .await;
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().slot_index,
+            Some(1),
+            "an unassign below the stored height leaves the assignment"
+        );
+
+        apply_update(
+            &mut harness,
+            explicit_unassign(&path),
+            ORPHANED_EPOCH_HEIGHT,
+        )
+        .await;
+        assert!(
+            harness.module.partition_assignment().is_none(),
+            "an unassign at the orphaned epoch height must clear its assignment"
+        );
+        assert_eq!(stored_height(&path), Some(ORPHANED_EPOCH_HEIGHT));
     }
 
     /// A marker wipe on a stale unassign publishes `Uninitialized` while the
