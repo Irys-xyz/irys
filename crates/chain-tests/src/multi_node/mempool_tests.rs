@@ -2600,6 +2600,13 @@ async fn heavy_stake_tx_fee_and_value_validation_test(
         tx.set_value(CommitmentTransaction::calculate_pledge_value_at_count(config, 0));
     },
 )]
+#[case::pledge_count_without_successor(
+    u64::MAX, // pledge count
+    |_tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: u64, _required_fee: u64| {
+        // No modification: `new_pledge` prices this count at the fallback base value,
+        // so the count is the only thing wrong with the transaction.
+    },
+)]
 #[test_log::test(tokio::test)]
 async fn heavy_pledge_tx_fee_validation_test(
     #[case] pledge_count: u64,
@@ -2639,6 +2646,59 @@ async fn heavy_pledge_tx_fee_validation_test(
         res,
         AddTxError::TxIngress(TxIngressError::CommitmentValidationError(_))
     ));
+    genesis_node.stop().await;
+    Ok(())
+}
+
+/// Gossip ingress skips the balance check, so a signer with no funds reaches value
+/// validation. A pledge whose count has no successor must be rejected there and must
+/// not be admitted to the mempool.
+#[test_log::test(tokio::test)]
+async fn heavy_gossiped_pledge_count_without_successor_is_rejected() -> eyre::Result<()> {
+    let genesis_config = NodeConfig::testing();
+    let unfunded_signer = genesis_config.new_random_signer();
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    let config = &genesis_config.consensus_config();
+    let mut pledge_tx = CommitmentTransaction::new_pledge(
+        config,
+        genesis_node.get_anchor().await?,
+        &u64::MAX,
+        unfunded_signer.address(),
+    )
+    .await;
+    unfunded_signer.sign_commitment(&mut pledge_tx)?;
+
+    let err = genesis_node
+        .gossip_commitment_to_node(&pledge_tx)
+        .await
+        .expect_err("a pledge count without a successor must be rejected");
+
+    assert!(
+        matches!(
+            err.downcast_ref::<TxIngressError>(),
+            Some(TxIngressError::CommitmentValidationError(
+                irys_types::CommitmentValidationError::PledgeCountOverflow {
+                    pledge_count: u64::MAX
+                }
+            ))
+        ),
+        "expected PledgeCountOverflow but got: {err:?}"
+    );
+    let held = genesis_node
+        .node_ctx
+        .mempool_guard
+        .get_commitment_txs(&[pledge_tx.id()])
+        .await
+        .map_err(|e| eyre::eyre!("mempool commitment lookup failed: {e}"))?;
+    assert!(
+        held.is_empty(),
+        "a rejected pledge must not be held in the mempool"
+    );
+
     genesis_node.stop().await;
     Ok(())
 }

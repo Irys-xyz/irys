@@ -255,6 +255,15 @@ impl CommitmentTransactionV1 {
             CommitmentTypeV1::Pledge {
                 pledge_count_before_executing,
             } => {
+                // The fee formula prices pledge number `count + 1`. A count with no
+                // successor cannot be priced, and `calculate_pledge_value_at_count`
+                // would fall back to the base value for it.
+                if pledge_count_before_executing.checked_add(1).is_none() {
+                    return Err(CommitmentValidationError::PledgeCountOverflow {
+                        pledge_count: *pledge_count_before_executing,
+                    });
+                }
+
                 // For pledge, validate using the embedded pledge count
                 let expected_value =
                     Self::calculate_pledge_value_at_count(config, *pledge_count_before_executing);
@@ -620,5 +629,41 @@ mod tests {
         #[case] expected_length: usize,
     ) {
         assert_eq!(commitment_type.length(), expected_length);
+    }
+
+    #[rstest]
+    #[case::zero_value(U256::zero())]
+    #[case::fallback_base_value(ConsensusConfig::testing().pledge_base_value.amount)]
+    fn validate_value_rejects_pledge_count_without_successor(#[case] value: U256) {
+        let config = ConsensusConfig::testing();
+        let tx = CommitmentTransactionV1 {
+            commitment_type: CommitmentTypeV1::Pledge {
+                pledge_count_before_executing: u64::MAX,
+            },
+            value,
+            ..CommitmentTransactionV1::new(&config)
+        };
+
+        assert_eq!(
+            tx.validate_value(&config),
+            Err(CommitmentValidationError::PledgeCountOverflow {
+                pledge_count: u64::MAX
+            })
+        );
+    }
+
+    #[test]
+    fn validate_value_accepts_largest_priceable_pledge_count() {
+        let config = ConsensusConfig::testing();
+        let count = u64::MAX - 1;
+        let tx = CommitmentTransactionV1 {
+            commitment_type: CommitmentTypeV1::Pledge {
+                pledge_count_before_executing: count,
+            },
+            value: CommitmentTransactionV1::calculate_pledge_value_at_count(&config, count),
+            ..CommitmentTransactionV1::new(&config)
+        };
+
+        assert_eq!(tx.validate_value(&config), Ok(()));
     }
 }

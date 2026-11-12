@@ -225,7 +225,9 @@ impl Amount<Irys> {
     ) -> Result<Self> {
         // The formula is: pledge_value = pledge_base_fee / ((count + 1) ^ decay_rate)
         // We use the identity: x^y = exp(y * ln(x))
-        let count_plus_one = current_pledge_count + 1;
+        let count_plus_one = current_pledge_count.checked_add(1).ok_or_else(|| {
+            eyre!("pledge count {current_pledge_count} has no successor to price")
+        })?;
 
         // Convert count+1 to fixed-point
         let count_fp18 = safe_mul(U256::from(count_plus_one), TOKEN_SCALE)?;
@@ -2816,6 +2818,27 @@ mod tests {
                     high_result.amount, low_result.amount
                 );
             }
+        }
+    }
+
+    mod pledge_decay_count_boundary {
+        use super::*;
+        use rstest::rstest;
+        use rust_decimal_macros::dec;
+
+        #[rstest]
+        #[case::largest_count_with_a_successor(u64::MAX - 1, true)]
+        #[case::count_without_a_successor(u64::MAX, false)]
+        fn pledge_decay_prices_only_counts_with_a_successor(
+            #[case] count: u64,
+            #[case] priceable: bool,
+        ) {
+            let base_fee = Amount::token(dec!(14_000)).unwrap();
+            let decay_rate = Amount::percentage(dec!(0.9)).unwrap();
+
+            let result = base_fee.apply_pledge_decay(count, decay_rate);
+
+            assert_eq!(result.is_ok(), priceable, "count {count}: {result:?}");
         }
     }
 
