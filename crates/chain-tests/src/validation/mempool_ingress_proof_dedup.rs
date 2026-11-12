@@ -68,7 +68,7 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
     let anchor2 = genesis_node.get_block_by_height(1).await?.block_hash;
     assert_ne!(anchor, anchor2, "need two distinct anchors");
 
-    let chain_id = 1_u64;
+    let chain_id = genesis_node.node_ctx.config.consensus.chain_id;
     let mk_chunks = |cs: Vec<Vec<u8>>| cs.into_iter().map(Ok);
 
     let data_bytes_1 = vec![0_u8; chunk_size * 2];
