@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794345050683,
+  "lastUpdate": 1794504712466,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -22939,6 +22939,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "cf5a24b5b59706ee61b867d1515ad86c9b8afa47",
+          "message": "fix(consensus): harden oracle price and EMA against producer manipulation (Delta) (#1824)\n\n* fix(consensus): harden oracle price and EMA against producer manipulation (Delta)\n\nFrom the Delta hardfork:\n- a block's oracle price may move 10% from its parent's (was 100%)\n- an EMA price interval is 20 blocks (was 10)\n- an EMA update takes the median oracle price of its interval, not the\n  oracle price of one earlier block\n\nThe rules for a block resolve at its own timestamp via\nConsensusConfig::ema_rules_at. The EMA snapshot rebuild from chain history\nnow walks headers under each block's own rules, so it stays correct across\nthe interval length change.\n\n* refactor(ema): lower-middle interval median, simpler snapshot rebuild\n\n- the interval median is the lower of the two middle prices for an even\n  count, so it is always a reported price; the unreachable empty case is gone\n- the history rebuild searches with rposition and checks for a parent once\n- drop tests that restated the pre-Delta rule or duplicated the\n  rebuild-vs-iterative check\n\n* fix(ema): Delta does not restart the EMA bootstrap\n\nThe bootstrap check compared the height with twice the interval in force,\nso Delta lengthening the interval to 20 blocks put a chain below height 40\nback into per-block EMA updates, and the update at block 39 took that\nblock's own price instead of the interval median.\n\nThe bootstrap is now two base intervals on either side of Delta\n(EmaRules::bootstrap_blocks).\n\n* refactor(ema): build the next snapshot once\n\n* fix(consensus): end Delta EMA bootstrap at candidate height\n\n* fix(consensus): keep Delta prices recoverable and quotes safe at activation\n\n* refactor(ema): name the Delta rules on EmaRules, fix stale docs\n\nEmaRules gains is_bootstrap_block and keeps_prices_positive, so the\nsnapshot no longer matches on the sampling rule to decide where the\nbootstrap ends or whether prices have a one-unit floor. No behaviour\nchange.\n\nDocs: oracle_price_for_calculation and the hardfork authoring note now\ndescribe the Delta rules, EmaRules::sampling is documented, and two\nlong doc lines are rewrapped.\n\nTests: the history rebuild test also activates Delta exactly on a\nboundary of the 4, 7 and 15 block intervals.",
+          "timestamp": "2026-11-12T09:10:59-08:00",
+          "tree_id": "2df8a9677226aaa4afc66bd20335cb0650450a1b",
+          "url": "https://github.com/Irys-xyz/irys/commit/cf5a24b5b59706ee61b867d1515ad86c9b8afa47"
+        },
+        "date": 1794504710762,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011978,
+            "range": "± 0.000225",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120683,
+            "range": "± 0.001833",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.203386,
+            "range": "± 0.019898",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.982736,
+            "range": "± 0.129659",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.065938,
+            "range": "± 0.001302",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 656.096242,
+            "range": "± 4.048838",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 873.645754,
+            "range": "± 43.563714",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119739,
+            "range": "± 0.000397",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1200.481502,
+            "range": "± 5.235336",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1572.483913,
+            "range": "± 10.784936",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027468,
+            "range": "± 0.00118",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 137.810159,
+            "range": "± 0.565555",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 180.2317,
+            "range": "± 1.071619",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000115,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
