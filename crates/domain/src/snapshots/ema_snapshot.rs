@@ -47,10 +47,35 @@
 //! - **Block 29**: Records EMA (E29) using oracle\[18\] + ema\[19\]
 //! - **Block 30-39**: Uses E19 for fees
 //! - **Block 40-49**: Uses E29 for fees
+//!
+//! ## Rules from the Delta hardfork
+//!
+//! The rules for a block are resolved at that block's own timestamp
+//! (`ConsensusConfig::ema_rules_at`). From Delta:
+//!
+//! - **Oracle price bound**: a block's oracle price may differ from its parent's by
+//!   `Delta::token_price_safe_range` (±10%), not `token_price_safe_range` (±100%).
+//!   A positive bound allows at least a one-atomic-unit upward step for recovery
+//!   from tiny prices. Oracle prices and calculated EMAs have a one-unit floor.
+//! - **Interval length**: an interval is `Delta::ema_price_adjustment_interval`
+//!   blocks (20), not `ema.price_adjustment_interval` (10). Interval boundaries stay
+//!   keyed on the block height, so the first Delta interval ends at the next
+//!   height that is a multiple of the new length.
+//! - **Sampling**: after the two bootstrap intervals an EMA update takes the median
+//!   of the oracle prices of every block in the interval, the recalculation block
+//!   included (the lower of the two middle prices for an even count). Before Delta
+//!   it takes the oracle price of one earlier block (block 18 for the update at
+//!   block 29), so that block's producer decides the update.
+//!   With the median, the producers of fewer than half of the interval's blocks
+//!   cannot move the update outside the prices the other producers reported.
+//! - **Bootstrap**: stays two base intervals (blocks 0-19), also when Delta is
+//!   active from genesis. A chain that finished it does not start it again when
+//!   Delta lengthens the interval.
 
 use eyre::{Result, ensure};
 use irys_types::{
-    ConsensusConfig, IrysBlockHeader, IrysTokenPrice,
+    ConsensusConfig, IrysBlockHeader, IrysTokenPrice, U256, UnixTimestamp,
+    hardfork_config::{EmaRules, EmaSampling},
     storage_pricing::{Amount, phantoms::Percentage},
 };
 use std::sync::Arc;
@@ -87,16 +112,29 @@ pub struct EmaSnapshot {
     /// Note: this value is crucial only during the first 2 pricing intervals.
     /// After the first 2 pricing intervals, it contains the same value as `ema_price_current_interval`
     pub ema_price_1_interval_ago: IrysTokenPrice,
+
+    /// Oracle prices of the blocks of the current interval, oldest first: from the
+    /// latest block that crossed an interval boundary (genesis before the first
+    /// one) up to and including this snapshot's block.
+    ///
+    /// From Delta the EMA update takes the median of these prices. Tracked before
+    /// Delta too, so the first Delta update has the prices of its whole interval.
+    pub interval_oracle_prices: Vec<IrysTokenPrice>,
 }
 
 /// Result of EMA calculation for a new block.
 #[derive(Debug)]
 pub struct ExponentialMarketAvgCalculation {
     /// The oracle price that was used for EMA calculations.
-    /// After the first 2 pricing intervals, this value will
+    /// During the first 2 pricing intervals it is the block's own bounded price.
+    ///
+    /// After them, before Delta, this value will
     /// point to the oracle price of the preceding EMA recalculation block.
     ///
     /// eg. On block 25, this will blocks 18 oracle price (19 being the preceding EMA recalculation block)
+    ///
+    /// From Delta it is the median of the oracle prices of the block's interval,
+    /// its own bounded price included (the lower middle price for an even count).
     pub oracle_price_for_calculation: IrysTokenPrice,
 
     /// Oracle price after applying safe range bounds.
@@ -119,6 +157,7 @@ impl EmaSnapshot {
             oracle_price_for_current_ema_predecessor: genesis_header.oracle_irys_price,
             ema_price_current_interval: genesis_header.ema_irys_price,
             ema_price_1_interval_ago: genesis_header.ema_irys_price,
+            interval_oracle_prices: vec![genesis_header.oracle_irys_price],
         })
     }
 
@@ -129,12 +168,13 @@ impl EmaSnapshot {
         parent_block: &IrysBlockHeader,
         consensus_config: &ConsensusConfig,
     ) -> eyre::Result<Arc<Self>> {
-        let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
+        let rules = consensus_config.ema_rules_at(new_block.timestamp_secs());
+        let blocks_in_interval = rules.price_adjustment_interval;
 
         // Check if we're at an EMA boundary where we shift intervals
         // This happens at blocks 10, 20, 30, etc. (assuming the price adj interval is 10 blocks)
         let crossing_interval_boundary =
-            new_block.height.is_multiple_of(blocks_in_interval) && new_block.height > 0;
+            crosses_ema_interval_boundary(new_block.height, blocks_in_interval);
 
         // Update the interval tracking
         let (ema_price_2_intervals_ago, ema_price_1_interval_ago) = if crossing_interval_boundary {
@@ -153,24 +193,67 @@ impl EmaSnapshot {
             )
         };
 
+        // A block that crosses the boundary opens a new interval.
+        let interval_oracle_prices = self.interval_oracle_prices_with(
+            new_block.height,
+            blocks_in_interval,
+            new_block.oracle_irys_price,
+        );
+
         // Update oracle_price_for_ema_predecessor and ema_price_last_interval when we hit an EMA recalculation block
         // During the first 2 intervals, every block is an EMA recalculation block
-        if new_block.is_ema_recalculation_block(blocks_in_interval) {
-            Ok(Arc::new(Self {
-                ema_price_2_intervals_ago,
-                ema_price_1_interval_ago,
-                oracle_price_for_current_ema_predecessor: parent_block.oracle_irys_price,
-                ema_price_current_interval: new_block.ema_irys_price,
-            }))
-        } else {
-            Ok(Arc::new(Self {
-                ema_price_2_intervals_ago,
-                ema_price_1_interval_ago,
-                ema_price_current_interval: self.ema_price_current_interval,
-                oracle_price_for_current_ema_predecessor: self
-                    .oracle_price_for_current_ema_predecessor,
-            }))
+        let (oracle_price_for_current_ema_predecessor, ema_price_current_interval) =
+            if rules.is_ema_recalculation_block(new_block.height) {
+                (parent_block.oracle_irys_price, new_block.ema_irys_price)
+            } else {
+                (
+                    self.oracle_price_for_current_ema_predecessor,
+                    self.ema_price_current_interval,
+                )
+            };
+
+        Ok(Arc::new(Self {
+            ema_price_2_intervals_ago,
+            ema_price_1_interval_ago,
+            oracle_price_for_current_ema_predecessor,
+            ema_price_current_interval,
+            interval_oracle_prices,
+        }))
+    }
+
+    /// The oracle prices of the interval of the block at `new_block_height`, built
+    /// on this (parent) snapshot, ending with that block's own `oracle_price`.
+    fn interval_oracle_prices_with(
+        &self,
+        new_block_height: u64,
+        blocks_in_interval: u64,
+        oracle_price: IrysTokenPrice,
+    ) -> Vec<IrysTokenPrice> {
+        if crosses_ema_interval_boundary(new_block_height, blocks_in_interval) {
+            return vec![oracle_price];
         }
+        let mut prices = Vec::with_capacity(self.interval_oracle_prices.len() + 1);
+        prices.extend_from_slice(&self.interval_oracle_prices);
+        prices.push(oracle_price);
+        prices
+    }
+
+    /// Median oracle price of the interval of the block at `new_block_height`,
+    /// built on this (parent) snapshot, that block's own `oracle_price` included.
+    ///
+    /// For an even count it is the lower of the two middle prices, so the result
+    /// is always a price that a block reported.
+    fn interval_median_oracle_price_with(
+        &self,
+        new_block_height: u64,
+        blocks_in_interval: u64,
+        oracle_price: IrysTokenPrice,
+    ) -> IrysTokenPrice {
+        let mut prices =
+            self.interval_oracle_prices_with(new_block_height, blocks_in_interval, oracle_price);
+        prices.sort_unstable();
+        // `prices` holds at least the block's own price.
+        prices[(prices.len() - 1) / 2]
     }
 
     /// Calculate EMA for a new block based on the current snapshot.
@@ -183,12 +266,19 @@ impl EmaSnapshot {
     /// - Each block's EMA is based on its immediate predecessor
     ///
     /// ## Standard Intervals (blocks 20+)
-    /// - Uses oracle price from the predecessor of the previous EMA recalculation block
-    /// - Example: Block 29 uses oracle price from block 18 (not block 28)
+    /// - Before Delta ([`EmaSampling::PreviousIntervalBlock`]): uses the oracle price
+    ///   from the predecessor of the previous EMA recalculation block.
+    ///   Example: Block 29 uses oracle price from block 18 (not block 28)
+    /// - From Delta ([`EmaSampling::IntervalMedian`]): uses the median of the oracle
+    ///   prices of every block in the interval, the new block included.
+    ///   Example (20-block intervals): Block 59 uses the median of blocks 40..=59
     ///
     /// ## Price Safety
     /// The oracle price is always bounded within a safe range to prevent manipulation.
     /// If the price change is too large, it's capped to the maximum allowed change.
+    ///
+    /// `rules` are the rules of the new block, resolved at its own timestamp
+    /// (`ConsensusConfig::ema_rules_at`).
     ///
     /// # Returns
     ///
@@ -197,10 +287,14 @@ impl EmaSnapshot {
         &self,
         parent_block: &IrysBlockHeader,
         oracle_price: IrysTokenPrice,
-        safe_range: Amount<Percentage>,
-        blocks_in_interval: u64,
+        rules: &EmaRules,
     ) -> ExponentialMarketAvgCalculation {
         let parent_snapshot = self;
+        let safe_range = rules.token_price_safe_range;
+        let blocks_in_interval = rules.price_adjustment_interval;
+
+        let oracle_price_for_block_inclusion =
+            Self::bound_oracle_price(oracle_price, parent_block.oracle_irys_price, rules);
 
         // Special handling for first 2 adjustment intervals.
         // the first 2 adjustment intervals have special handling where we calculate the
@@ -214,19 +308,32 @@ impl EmaSnapshot {
         //    the *n* (number of block prices) would be 10 (E29.height - E19.height).
         // 3. this is the price that will be used in the interval 39->49,
         //    which will be reported to other systems querying for EMA prices.
-        let oracle_price_for_calculation = if parent_block.height < (blocks_in_interval * 2) {
-            oracle_price
+        //
+        // From Delta step 1 takes the median oracle price of the interval instead.
+        // Delta ends bootstrap at the candidate height, matching the update
+        // schedule. Preserve the legacy parent-height rule before Delta.
+        let new_block_height = parent_block.height.saturating_add(1);
+        let oracle_price_for_calculation = if rules.is_bootstrap_block(new_block_height) {
+            oracle_price_for_block_inclusion
         } else {
-            // Use oracle price from the predecessor of the latest EMA block
-            parent_snapshot.oracle_price_for_current_ema_predecessor
+            match rules.sampling {
+                // Use oracle price from the predecessor of the latest EMA block
+                EmaSampling::PreviousIntervalBlock => bound_in_min_max_range(
+                    parent_snapshot.oracle_price_for_current_ema_predecessor,
+                    safe_range,
+                    parent_block.oracle_irys_price,
+                ),
+                // Every price in the interval already passed its own safe-range
+                // check, so the median needs no further bound.
+                EmaSampling::IntervalMedian => parent_snapshot.interval_median_oracle_price_with(
+                    new_block_height,
+                    blocks_in_interval,
+                    oracle_price_for_block_inclusion,
+                ),
+            }
         };
-        let oracle_price_for_calculation = bound_in_min_max_range(
-            oracle_price_for_calculation,
-            safe_range,
-            parent_block.oracle_irys_price,
-        );
 
-        let ema = oracle_price_for_calculation
+        let mut ema = oracle_price_for_calculation
             .calculate_ema(
                 blocks_in_interval,
                 parent_snapshot.ema_price_current_interval,
@@ -235,14 +342,17 @@ impl EmaSnapshot {
                 tracing::warn!(custom.error = ?err, "price overflow, using previous EMA price");
                 parent_snapshot.ema_price_current_interval
             });
+        // Each weighted term is rounded down separately. Positive inputs can
+        // therefore produce zero at atomic precision. Delta keeps fee prices
+        // positive, including recovery from a legacy zero EMA; historical
+        // pre-Delta arithmetic must remain unchanged.
+        if rules.keeps_prices_positive() {
+            ema = ema.max(IrysTokenPrice::new(U256::one()));
+        }
         ExponentialMarketAvgCalculation {
             oracle_price_for_calculation,
             ema,
-            oracle_price_for_block_inclusion: bound_in_min_max_range(
-                oracle_price,
-                safe_range,
-                parent_block.oracle_irys_price,
-            ),
+            oracle_price_for_block_inclusion,
         }
     }
 
@@ -257,13 +367,35 @@ impl EmaSnapshot {
     pub fn oracle_price_is_valid(
         oracle_price: IrysTokenPrice,
         previous_oracle_price: IrysTokenPrice,
-        safe_range: Amount<Percentage>,
+        rules: &EmaRules,
     ) -> bool {
         if oracle_price.amount.is_zero() {
             return false;
         }
-        let capped = bound_in_min_max_range(oracle_price, safe_range, previous_oracle_price);
-        oracle_price == capped
+        oracle_price == Self::bound_oracle_price(oracle_price, previous_oracle_price, rules)
+    }
+
+    /// Producer and validator share the same fork-specific rounding rules.
+    fn bound_oracle_price(
+        desired: IrysTokenPrice,
+        parent: IrysTokenPrice,
+        rules: &EmaRules,
+    ) -> IrysTokenPrice {
+        let range = rules.token_price_safe_range;
+        if !rules.keeps_prices_positive() {
+            return bound_in_min_max_range(desired, range, parent);
+        }
+        let one = IrysTokenPrice::new(U256::one());
+        let mut upper = parent.add_multiplier(range).unwrap_or(parent);
+        // A positive percentage must allow recovery from atomic prices whose
+        // percentage increment rounds to zero. Saturation handles U256::MAX.
+        if !range.amount.is_zero() {
+            upper = upper.max(IrysTokenPrice::new(
+                parent.amount.saturating_add(U256::one()),
+            ));
+        }
+        let lower = parent.sub_multiplier(range).unwrap_or(parent).max(one);
+        desired.clamp(lower, upper.max(lower))
     }
 
     /// Get the EMA price that should be used for public pricing.
@@ -292,6 +424,24 @@ impl EmaSnapshot {
         }
     }
 
+    /// Quote conservatively across a possible Delta activation. A child's
+    /// timestamp is not known at quote time, so while Delta is pending both
+    /// interval schedules can determine the next roll.
+    pub fn ema_for_public_quote_at(
+        &self,
+        tip_height: u64,
+        tip_timestamp: UnixTimestamp,
+        config: &ConsensusConfig,
+    ) -> IrysTokenPrice {
+        let current = config.ema_rules_at(tip_timestamp).price_adjustment_interval;
+        let quote = self.ema_for_public_quote(tip_height, current);
+        match config.hardforks.delta {
+            Some(delta) if tip_timestamp < delta.activation_timestamp => quote
+                .min(self.ema_for_public_quote(tip_height, delta.ema_price_adjustment_interval)),
+            _ => quote,
+        }
+    }
+
     // NON CANONICAL HASH
     // SHOULD BE USED FOR DEBUGGING ONLY
     pub fn get_hash(&self) -> String {
@@ -302,6 +452,12 @@ impl EmaSnapshot {
         use irys_types::ToBase58 as _;
         res.to_le_bytes().to_base58()
     }
+}
+
+/// True when the block at `height` crosses an EMA interval boundary: it is the
+/// first block of an interval, and the snapshot shifts its interval EMAs on it.
+fn crosses_ema_interval_boundary(height: u64, blocks_in_interval: u64) -> bool {
+    height > 0 && height.is_multiple_of(blocks_in_interval)
 }
 
 /// True when the tip at `tip_height` is in the last quarter of its EMA interval.
@@ -367,8 +523,14 @@ pub fn bound_in_min_max_range(
 
 /// Create EMA snapshot for a block using chain history.
 ///
-/// The function identifies which blocks contain the relevant price data based on
-/// the current block height and interval configuration.
+/// `blocks` are consecutive ancestors, oldest first, ending with the block the
+/// snapshot is for. The result equals the snapshot that [`EmaSnapshot::next_snapshot`]
+/// builds block by block from genesis.
+///
+/// Each block decides with its own rules (`ConsensusConfig::ema_rules_at`) whether
+/// it crosses an interval boundary and whether it recalculates the EMA, so the
+/// walk stays correct across the Delta change of the interval length.
+/// [`ConsensusConfig::ema_snapshot_history_depth`] blocks are always enough.
 ///
 /// # Example
 ///
@@ -380,73 +542,106 @@ pub fn create_ema_snapshot_from_chain_history(
     blocks: &[IrysBlockHeader],
     consensus_config: &ConsensusConfig,
 ) -> Result<Arc<EmaSnapshot>> {
-    let latest_block = blocks.last().ok_or_else(|| {
+    let oldest_block = blocks.first().ok_or_else(|| {
         eyre::eyre!("No blocks provided to create_ema_snapshot_from_chain_history")
     })?;
-
-    // Ensure the latest block has the highest height
-    let max_height = blocks.iter().map(|b| b.height).max().unwrap_or(0);
     ensure!(
-        latest_block.height == max_height,
-        "Latest block (height {}) does not have the highest height in the provided blocks (max height: {})",
-        latest_block.height,
-        max_height
+        blocks
+            .windows(2)
+            .all(|pair| pair[0].height.checked_add(1) == Some(pair[1].height)),
+        "Blocks provided to create_ema_snapshot_from_chain_history must have consecutive ascending heights"
     );
+    let reaches_genesis = oldest_block.height == 0;
+    let tip_idx = blocks.len() - 1;
 
-    let blocks_in_interval = consensus_config.ema.price_adjustment_interval;
-
-    let height_pricing_block = latest_block.block_height_to_use_for_price(blocks_in_interval);
-    let height_latest_ema_block = if latest_block.is_ema_recalculation_block(blocks_in_interval) {
-        latest_block.height
-    } else {
-        latest_block.previous_ema_recalculation_block_height(blocks_in_interval)
+    let interval_of = |block: &IrysBlockHeader| {
+        consensus_config
+            .ema_rules_at(block.timestamp_secs())
+            .price_adjustment_interval
     };
-    let height_latest_ema_interval_predecessor = height_latest_ema_block.saturating_sub(1);
+    let crosses_boundary =
+        |block: &IrysBlockHeader| crosses_ema_interval_boundary(block.height, interval_of(block));
+    let recalculates_ema = |block: &IrysBlockHeader| {
+        consensus_config
+            .ema_rules_at(block.timestamp_secs())
+            .is_ema_recalculation_block(block.height)
+    };
+    let not_enough_history = |what: &str| {
+        eyre::eyre!(
+            "Chain history starting at height {} is too short to find {what}",
+            oldest_block.height
+        )
+    };
+    let parent_idx = |idx: usize| {
+        idx.checked_sub(1)
+            .ok_or_else(|| not_enough_history("a parent block"))
+    };
 
-    // utility to get the block with the desired height
-    let get_block_with_height = |desired_height: u64| {
-        let block = blocks
+    // The EMA that the snapshot of the block at `idx` holds as its current one:
+    // the EMA of the latest recalculation block at or below it. Genesis is a
+    // recalculation block, so a history that reaches genesis always has one.
+    let current_ema_idx = |idx: usize| {
+        blocks[..=idx]
             .iter()
-            .find(|b| b.height == desired_height)
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "Block with height {} not found in chain history",
-                    desired_height
-                )
-            })?;
-        Result::<_, eyre::Report>::Ok(block)
+            .rposition(recalculates_ema)
+            .ok_or_else(|| not_enough_history("the latest EMA recalculation block"))
+    };
+    // The latest boundary crossing at or below `idx`. `None` when there was none
+    // since genesis, which only a history that reaches genesis can tell.
+    let latest_boundary_idx = |idx: usize| -> Result<Option<usize>> {
+        match blocks[..=idx].iter().rposition(crosses_boundary) {
+            None if !reaches_genesis => Err(not_enough_history("an interval boundary block")),
+            boundary_idx => Ok(boundary_idx),
+        }
     };
 
-    // Calculate the height for 1 interval ago
-    // This is the last EMA recalculation block from the previous interval
-    let height_1_interval_ago = if latest_block.height < blocks_in_interval {
-        // First interval (0-9) - no previous interval, use genesis
-        0
+    let latest_ema_idx = current_ema_idx(tip_idx)?;
+    let latest_ema_block = &blocks[latest_ema_idx];
+    // Genesis has no parent: its snapshot holds its own oracle price.
+    let oracle_price_for_current_ema_predecessor = if latest_ema_block.height == 0 {
+        latest_ema_block.oracle_irys_price
     } else {
-        // Get the last EMA block from the previous interval
-        // For blocks 10-19: returns 9 (last EMA of interval 0)
-        // For blocks 20-29: returns 19 (last EMA of interval 1)
-        // For blocks 30-39: returns 29 (last EMA of interval 2)
-        let current_interval = latest_block.height / blocks_in_interval;
-        (current_interval - 1) * blocks_in_interval + (blocks_in_interval - 1)
+        blocks[parent_idx(latest_ema_idx)?].oracle_irys_price
     };
 
-    // Calculate new EMA if this is a recalculation block
+    // Before any boundary crossing the snapshot still holds the genesis EMA. A
+    // block that crosses a boundary shifts in the current EMA of its parent.
+    let genesis_ema = oldest_block.ema_irys_price;
+    let latest_boundary = latest_boundary_idx(tip_idx)?;
+    let (ema_price_1_interval_ago, ema_price_2_intervals_ago) = match latest_boundary {
+        None => (genesis_ema, genesis_ema),
+        Some(boundary_idx) => {
+            let boundary_parent_idx = parent_idx(boundary_idx)?;
+            let ema_price_2_intervals_ago = match latest_boundary_idx(boundary_parent_idx)? {
+                None => genesis_ema,
+                Some(previous_boundary_idx) => {
+                    blocks[current_ema_idx(parent_idx(previous_boundary_idx)?)?].ema_irys_price
+                }
+            };
+            (
+                blocks[current_ema_idx(boundary_parent_idx)?].ema_irys_price,
+                ema_price_2_intervals_ago,
+            )
+        }
+    };
+
+    let interval_oracle_prices = blocks[latest_boundary.unwrap_or(0)..]
+        .iter()
+        .map(|block| block.oracle_irys_price)
+        .collect();
+
     Ok(Arc::new(EmaSnapshot {
-        ema_price_2_intervals_ago: get_block_with_height(height_pricing_block)?.ema_irys_price,
-        ema_price_1_interval_ago: get_block_with_height(height_1_interval_ago)?.ema_irys_price,
-        oracle_price_for_current_ema_predecessor: get_block_with_height(
-            height_latest_ema_interval_predecessor,
-        )?
-        .oracle_irys_price,
-        ema_price_current_interval: get_block_with_height(height_latest_ema_block)?.ema_irys_price,
+        ema_price_2_intervals_ago,
+        ema_price_1_interval_ago,
+        oracle_price_for_current_ema_predecessor,
+        ema_price_current_interval: latest_ema_block.ema_irys_price,
+        interval_oracle_prices,
     }))
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use irys_types::is_ema_recalculation_block;
     use irys_types::{ConsensusConfig, EmaConfig};
     use rstest::rstest;
     use rust_decimal::Decimal;
@@ -473,17 +668,30 @@ mod test {
         max_height: u64,
         config: &ConsensusConfig,
     ) -> Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> {
+        build_blocks_with_oracle_prices(max_height, config, oracle_price_for_height)
+    }
+
+    /// Like [`build_blocks_with_snapshots`], with the oracle price of every
+    /// non-genesis block given by `oracle_price`. Block `n` has timestamp `n` seconds.
+    fn build_blocks_with_oracle_prices(
+        max_height: u64,
+        config: &ConsensusConfig,
+        oracle_price: impl Fn(u64) -> IrysTokenPrice,
+    ) -> Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         let mut results: Vec<(IrysBlockHeader, Arc<EmaSnapshot>)> = Vec::new();
 
         for height in 0..=max_height {
             let mut block = IrysBlockHeader::new_mock_header();
             block.height = height;
+            // One block per second, so a hardfork timestamp of `n` seconds
+            // activates at height `n`.
+            block.timestamp = irys_types::UnixTimestampMs::from_millis(u128::from(height) * 1000);
 
             // Set oracle price for all blocks
             block.oracle_irys_price = if height == 0 {
                 config.genesis.genesis_price
             } else {
-                oracle_price_for_height(height)
+                oracle_price(height)
             };
 
             // Calculate snapshot and EMA price based on block height
@@ -495,15 +703,15 @@ mod test {
                 // Non-genesis blocks: calculate EMA and create next snapshot
                 let (parent_block, parent_snapshot) = &results[height as usize - 1];
 
-                // Calculate and set EMA price before creating snapshot
-                block.ema_irys_price = parent_snapshot
-                    .calculate_ema_for_new_block(
-                        parent_block,
-                        block.oracle_irys_price,
-                        config.token_price_safe_range,
-                        config.ema.price_adjustment_interval,
-                    )
-                    .ema;
+                // Calculate and set EMA price before creating snapshot. Like the
+                // block producer, cap the oracle price to the safe range first.
+                let ema_calculation = parent_snapshot.calculate_ema_for_new_block(
+                    parent_block,
+                    block.oracle_irys_price,
+                    &config.ema_rules_at(block.timestamp_secs()),
+                );
+                block.oracle_irys_price = ema_calculation.oracle_price_for_block_inclusion;
+                block.ema_irys_price = ema_calculation.ema;
 
                 // Create next snapshot with the block that now has the correct EMA price
                 parent_snapshot
@@ -594,6 +802,14 @@ mod test {
                 .oracle_irys_price,
             ema_price_current_interval: get_block(height_current_ema).ema_irys_price,
             ema_price_1_interval_ago: get_block(height_1_interval_ago).ema_irys_price,
+            // Every block since the latest interval boundary (genesis before the first).
+            interval_oracle_prices: blocks
+                .iter()
+                .filter(|block| {
+                    block.height >= height_latest_block - height_latest_block % interval
+                })
+                .map(|block| block.oracle_irys_price)
+                .collect(),
         };
         assert_eq!(&expected_price_snapshot, ema_snapshot.as_ref());
     }
@@ -626,8 +842,7 @@ mod test {
         let ema_block = genesis_snapshot.calculate_ema_for_new_block(
             &genesis_block,
             new_oracle_price,
-            config.token_price_safe_range,
-            config.ema.price_adjustment_interval,
+            &config.ema_rules_at(irys_types::UnixTimestamp::from_secs(0)),
         );
 
         // Assert the computed EMA matches expected value
@@ -667,8 +882,7 @@ mod test {
         let ema_block = current_snapshot.calculate_ema_for_new_block(
             parent_block,
             new_oracle_price,
-            config.token_price_safe_range,
-            config.ema.price_adjustment_interval,
+            &config.ema_rules_at(irys_types::UnixTimestamp::from_secs(0)),
         );
 
         // Verify the EMA was calculated using the current interval's EMA
@@ -731,8 +945,7 @@ mod test {
             let ema_block = current_snapshot.calculate_ema_for_new_block(
                 parent_block,
                 oracle_price,
-                config.token_price_safe_range,
-                config.ema.price_adjustment_interval,
+                &config.ema_rules_at(irys_types::UnixTimestamp::from_secs(0)),
             );
 
             // Verify price was capped
@@ -746,7 +959,7 @@ mod test {
                 EmaSnapshot::oracle_price_is_valid(
                     ema_block.oracle_price_for_calculation,
                     parent_block.oracle_irys_price,
-                    config.token_price_safe_range,
+                    &config.ema_rules_at(UnixTimestamp::from_secs(0)),
                 ),
                 "Capped oracle price should be within safe range"
             );
@@ -756,7 +969,7 @@ mod test {
                 !EmaSnapshot::oracle_price_is_valid(
                     oracle_price,
                     parent_block.oracle_irys_price,
-                    config.token_price_safe_range,
+                    &config.ema_rules_at(UnixTimestamp::from_secs(0)),
                 ),
                 "Original oracle price should be outside safe range"
             );
@@ -794,7 +1007,9 @@ mod test {
 
         // Verify this is an EMA recalculation block
         assert!(
-            is_ema_recalculation_block(new_block_height, config.ema.price_adjustment_interval),
+            config
+                .ema_rules_at(UnixTimestamp::from_secs(new_block_height))
+                .is_ema_recalculation_block(new_block_height),
             "Block {} should be an EMA recalculation block",
             new_block_height
         );
@@ -802,8 +1017,7 @@ mod test {
         let ema_block = current_snapshot.calculate_ema_for_new_block(
             parent_block,
             new_oracle_price,
-            config.token_price_safe_range,
-            config.ema.price_adjustment_interval,
+            &config.ema_rules_at(irys_types::UnixTimestamp::from_secs(0)),
         );
 
         // Calculate expected EMA using the formula:
@@ -880,6 +1094,464 @@ mod test {
                 test_height
             );
         }
+    }
+
+    /// Testing config with Delta active from the block at `activation_height`
+    /// (blocks are one second apart), a 10-block interval before it and a
+    /// 20-block interval from it.
+    fn config_with_delta_at(activation_height: u64) -> ConsensusConfig {
+        use irys_types::hardfork_config::Delta;
+        let mut config = ConsensusConfig {
+            ema: EmaConfig {
+                price_adjustment_interval: 10,
+            },
+            ..ConsensusConfig::testing()
+        };
+        config.hardforks.delta = Some(Delta {
+            activation_timestamp: irys_types::UnixTimestamp::from_secs(activation_height),
+            initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+            ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: 20,
+        });
+        config
+    }
+
+    #[rstest]
+    #[case::odd(&[3, 1], 2, 2)]
+    #[case::even_takes_lower_middle(&[4, 1, 10], 2, 2)]
+    #[case::own_price_alone(&[], 7, 7)]
+    #[case::own_outlier_is_ignored(&[100, 100, 100, 100], 1_000_000, 100)]
+    #[case::earlier_outlier_is_ignored(&[1, 100, 100, 100], 100, 100)]
+    fn interval_median_cases(
+        #[case] earlier_amounts: &[u64],
+        #[case] own_amount: u64,
+        #[case] expected: u64,
+    ) {
+        let price = |amount: u64| IrysTokenPrice::new(amount.into());
+        let parent_snapshot = EmaSnapshot {
+            interval_oracle_prices: earlier_amounts.iter().copied().map(price).collect(),
+            ..Default::default()
+        };
+        // Height 5 of a 100-block interval does not cross a boundary.
+        assert_eq!(
+            parent_snapshot.interval_median_oracle_price_with(5, 100, price(own_amount)),
+            price(expected)
+        );
+    }
+
+    /// The block that crosses a boundary opens a new interval: the median is its
+    /// own price, whatever the previous interval held.
+    #[test]
+    fn interval_median_restarts_on_boundary() {
+        let price = |amount: u64| IrysTokenPrice::new(amount.into());
+        let parent_snapshot = EmaSnapshot {
+            interval_oracle_prices: vec![price(1), price(2), price(3)],
+            ..Default::default()
+        };
+        assert_eq!(
+            parent_snapshot.interval_median_oracle_price_with(100, 100, price(50)),
+            price(50)
+        );
+    }
+
+    /// From Delta the update at the end of an interval takes the median of the
+    /// interval's 20 oracle prices, the recalculation block's own included.
+    #[test]
+    fn delta_ema_update_uses_interval_median() {
+        let config = config_with_delta_at(0);
+        // Interval 40..=59 ends with the recalculation block 59.
+        let blocks_and_snapshots = build_blocks_with_snapshots(59, &config);
+        let (recalculation_block, snapshot) = &blocks_and_snapshots[59];
+        let (_, parent_snapshot) = &blocks_and_snapshots[58];
+
+        let interval_prices: Vec<IrysTokenPrice> = (40..=59)
+            .map(|height| blocks_and_snapshots[height].0.oracle_irys_price)
+            .collect();
+        assert_eq!(snapshot.interval_oracle_prices, interval_prices);
+
+        // Prices rise with the height, so the median of the 20 is block 49's:
+        // the lower of the two middle prices.
+        let median = blocks_and_snapshots[49].0.oracle_irys_price;
+        let expected_ema = median
+            .calculate_ema(20, parent_snapshot.ema_price_current_interval)
+            .unwrap();
+        assert_eq!(recalculation_block.ema_irys_price, expected_ema);
+        assert_eq!(snapshot.ema_price_current_interval, expected_ema);
+    }
+
+    /// The bootstrap is two base intervals (blocks 0-19) and does not start again
+    /// when Delta lengthens the interval to 20 blocks. The first Delta update, at
+    /// block 39, takes the median of blocks 20..=39 and the EMA of block 19,
+    /// whether Delta is active from genesis or from a block up to 29.
+    #[rstest]
+    #[case::delta_from_genesis(0)]
+    #[case::delta_inside_second_bootstrap_interval(15)]
+    #[case::delta_right_after_bootstrap(20)]
+    #[case::delta_mid_interval(25)]
+    // Block 29 is the last one that could still update under the 10-block rule.
+    #[case::delta_on_last_ten_block_update(29)]
+    fn delta_does_not_restart_bootstrap(#[case] activation_height: u64) {
+        let config = config_with_delta_at(activation_height);
+        let blocks_and_snapshots = build_blocks_with_snapshots(39, &config);
+
+        // No block of 20..=38 recalculates the EMA.
+        for (block, snapshot) in &blocks_and_snapshots[20..=38] {
+            assert_eq!(
+                snapshot.ema_price_current_interval, blocks_and_snapshots[19].0.ema_irys_price,
+                "block {} must keep the EMA of block 19",
+                block.height
+            );
+        }
+
+        // Prices rise with the height: the lower middle of blocks 20..=39 is block 29's.
+        let median = blocks_and_snapshots[29].0.oracle_irys_price;
+        let expected_ema = median
+            .calculate_ema(20, blocks_and_snapshots[19].0.ema_irys_price)
+            .unwrap();
+        assert_eq!(blocks_and_snapshots[39].0.ema_irys_price, expected_ema);
+        assert_eq!(
+            blocks_and_snapshots[39].1.ema_price_current_interval,
+            expected_ema
+        );
+    }
+
+    /// The first post-bootstrap block can also end a custom Delta interval.
+    /// Its own outlier must not replace the median of blocks 14..=20.
+    #[test]
+    fn delta_bootstrap_boundary_uses_interval_median() {
+        let mut config = config_with_delta_at(0);
+        config
+            .hardforks
+            .delta
+            .as_mut()
+            .unwrap()
+            .ema_price_adjustment_interval = 7;
+        let honest_price = IrysTokenPrice::token(dec!(1.0)).unwrap();
+        let outlier_price = IrysTokenPrice::token(dec!(1.1)).unwrap();
+        let blocks = build_blocks_with_oracle_prices(20, &config, |height| {
+            if height == 20 {
+                outlier_price
+            } else {
+                honest_price
+            }
+        });
+        let (block, snapshot) = &blocks[20];
+        let rules = config.ema_rules_at(block.timestamp_secs());
+        assert_eq!(rules.bootstrap_blocks, 20);
+        assert!(rules.is_ema_recalculation_block(block.height));
+        assert_eq!(block.oracle_irys_price, outlier_price);
+        assert_eq!(snapshot.interval_oracle_prices.len(), 7);
+        assert_eq!(block.ema_irys_price, honest_price);
+        assert_eq!(snapshot.ema_price_current_interval, honest_price);
+    }
+
+    /// One producer reporting the lowest allowed price cannot move the Delta EMA
+    /// update, at any position in the interval.
+    #[rstest]
+    #[case::first_block_of_interval(40)]
+    #[case::middle_of_interval(47)]
+    #[case::block_before_recalculation(58)]
+    #[case::recalculation_block(59)]
+    fn delta_single_producer_cannot_move_ema_update(#[case] manipulated_height: u64) {
+        let config = config_with_delta_at(0);
+        let honest_price = IrysTokenPrice::token(dec!(1.0)).unwrap();
+        // The largest drop the 10% bound allows from the honest price.
+        let manipulated_price = IrysTokenPrice::token(dec!(0.9)).unwrap();
+
+        let honest = build_blocks_with_oracle_prices(59, &config, |_| honest_price);
+        let manipulated = build_blocks_with_oracle_prices(59, &config, |height| {
+            if height == manipulated_height {
+                manipulated_price
+            } else {
+                honest_price
+            }
+        });
+
+        assert_eq!(
+            manipulated[manipulated_height as usize].0.oracle_irys_price,
+            manipulated_price
+        );
+        assert_eq!(
+            manipulated[59].1.ema_price_current_interval, honest[59].1.ema_price_current_interval,
+            "one manipulated oracle price must not change the interval's EMA update"
+        );
+    }
+
+    #[test]
+    fn delta_tiny_prices_can_recover_without_zero_ema() {
+        let config = config_with_delta_at(50);
+        let rules = config.ema_rules_at(UnixTimestamp::from_secs(50));
+        let one = IrysTokenPrice::new(U256::one());
+        let healthy = IrysTokenPrice::token(dec!(1)).unwrap();
+        // A final pre-Delta producer may legally report one atomic unit.
+        let legacy = config.ema_rules_at(UnixTimestamp::from_secs(49));
+        assert!(EmaSnapshot::oracle_price_is_valid(one, healthy, &legacy));
+        let mut parent = IrysBlockHeader::new_mock_header();
+        parent.height = 49;
+        parent.oracle_irys_price = one;
+        parent.ema_irys_price = one;
+        let mut snapshot = EmaSnapshot::genesis(&parent);
+        for _ in 0..450 {
+            let result = snapshot.calculate_ema_for_new_block(&parent, healthy, &rules);
+            assert!(
+                result.oracle_price_for_block_inclusion > parent.oracle_irys_price
+                    || parent.oracle_irys_price == healthy
+            );
+            assert!(EmaSnapshot::oracle_price_is_valid(
+                result.oracle_price_for_block_inclusion,
+                parent.oracle_irys_price,
+                &rules,
+            ));
+            assert!(result.ema >= one);
+            let mut child = parent.clone();
+            child.height += 1;
+            child.timestamp =
+                irys_types::UnixTimestampMs::from_millis(u128::from(child.height) * 1000);
+            child.oracle_irys_price = result.oracle_price_for_block_inclusion;
+            child.ema_irys_price = result.ema;
+            snapshot = snapshot.next_snapshot(&child, &parent, &config).unwrap();
+            assert!(snapshot.ema_price_current_interval >= one);
+            parent = child;
+        }
+        assert_eq!(parent.oracle_irys_price, healthy);
+    }
+
+    #[test]
+    fn delta_positive_ema_floor_preserves_legacy_arithmetic() {
+        let config = config_with_delta_at(50);
+        let one = IrysTokenPrice::new(U256::one());
+        let mut parent = IrysBlockHeader::new_mock_header();
+        parent.height = 1;
+        parent.oracle_irys_price = one;
+        parent.ema_irys_price = one;
+        let snapshot = EmaSnapshot::genesis(&parent);
+        let legacy = config.ema_rules_at(UnixTimestamp::from_secs(49));
+        let delta = config.ema_rules_at(UnixTimestamp::from_secs(50));
+        assert!(
+            snapshot
+                .calculate_ema_for_new_block(&parent, one, &legacy)
+                .ema
+                .amount
+                .is_zero()
+        );
+        assert_eq!(
+            snapshot
+                .calculate_ema_for_new_block(&parent, one, &delta)
+                .ema,
+            one
+        );
+        let zero_snapshot = EmaSnapshot {
+            ema_price_current_interval: IrysTokenPrice::new(U256::zero()),
+            ..(*snapshot).clone()
+        };
+        assert_eq!(
+            zero_snapshot
+                .calculate_ema_for_new_block(&parent, one, &delta)
+                .ema,
+            one
+        );
+    }
+
+    #[test]
+    fn delta_oracle_rounding_handles_atomic_and_maximum_prices() {
+        let mut rules = config_with_delta_at(0).ema_rules_at(UnixTimestamp::from_secs(0));
+        for raw in 1..=9 {
+            let parent = IrysTokenPrice::new(U256::from(raw));
+            let next = IrysTokenPrice::new(U256::from(raw + 1));
+            assert!(EmaSnapshot::oracle_price_is_valid(next, parent, &rules));
+            assert!(!EmaSnapshot::oracle_price_is_valid(
+                IrysTokenPrice::new(U256::zero()),
+                parent,
+                &rules
+            ));
+        }
+        let max = IrysTokenPrice::new(U256::MAX);
+        assert_eq!(EmaSnapshot::bound_oracle_price(max, max, &rules), max);
+        rules.token_price_safe_range = Amount::percentage(dec!(0)).unwrap();
+        let one = IrysTokenPrice::new(U256::one());
+        assert_eq!(EmaSnapshot::bound_oracle_price(max, one, &rules), one);
+    }
+
+    #[rstest]
+    #[case(10, 15, 44)]
+    #[case(10, 7, 41)]
+    #[case(20, 10, 29)]
+    #[case(10, 20, 39)]
+    fn quote_covers_activation_roll(
+        #[case] base_interval: u64,
+        #[case] delta_interval: u64,
+        #[case] tip_height: u64,
+    ) {
+        let mut config = config_with_delta_at(tip_height + 1);
+        config.ema.price_adjustment_interval = base_interval;
+        config
+            .hardforks
+            .delta
+            .as_mut()
+            .unwrap()
+            .ema_price_adjustment_interval = delta_interval;
+        let lower = IrysTokenPrice::token(dec!(0.9)).unwrap();
+        let higher = IrysTokenPrice::token(dec!(1.1)).unwrap();
+        let snapshot = EmaSnapshot {
+            ema_price_2_intervals_ago: higher,
+            ema_price_1_interval_ago: lower,
+            ..Default::default()
+        };
+        let mut parent = IrysBlockHeader::new_mock_header();
+        parent.height = tip_height;
+        parent.timestamp = irys_types::UnixTimestampMs::from_millis(u128::from(tip_height) * 1000);
+        let quote = snapshot.ema_for_public_quote_at(tip_height, parent.timestamp_secs(), &config);
+        let mut child = parent.clone();
+        child.height += 1;
+        child.timestamp = irys_types::UnixTimestampMs::from_millis(u128::from(child.height) * 1000);
+        let after = snapshot.next_snapshot(&child, &parent, &config).unwrap();
+        assert_eq!(quote, lower);
+        assert_eq!(quote, after.ema_for_public_pricing());
+        // A lower USD price quotes at least the token fee validation requires.
+        let cost = irys_types::storage_pricing::Amount::<(
+            irys_types::storage_pricing::phantoms::CostPerChunkDurationAdjusted,
+            irys_types::storage_pricing::phantoms::Usd,
+        )>::token(dec!(1))
+        .unwrap();
+        assert!(
+            cost.base_network_fee(U256::from(32), 32, quote).unwrap()
+                >= cost
+                    .base_network_fee(U256::from(32), 32, after.ema_for_public_pricing())
+                    .unwrap()
+        );
+    }
+
+    /// From Delta an oracle price may differ from its parent's by 10%, where the
+    /// base config allows 100%.
+    #[test]
+    fn delta_narrows_oracle_price_bound() {
+        let config = config_with_delta_at(50);
+        assert_eq!(
+            config.token_price_safe_range,
+            Amount::percentage(dec!(1)).unwrap(),
+            "the testing config allows a 100% move before Delta"
+        );
+        let blocks_and_snapshots = build_blocks_with_oracle_prices(49, &config, |_| {
+            IrysTokenPrice::token(dec!(1.0)).unwrap()
+        });
+        let (parent_block, parent_snapshot) = blocks_and_snapshots.last().unwrap();
+        let doubled = IrysTokenPrice::token(dec!(2.0)).unwrap();
+
+        let before = config.ema_rules_at(irys_types::UnixTimestamp::from_secs(49));
+        let from = config.ema_rules_at(irys_types::UnixTimestamp::from_secs(50));
+
+        assert!(EmaSnapshot::oracle_price_is_valid(
+            doubled,
+            parent_block.oracle_irys_price,
+            &before
+        ));
+        assert!(!EmaSnapshot::oracle_price_is_valid(
+            doubled,
+            parent_block.oracle_irys_price,
+            &from
+        ));
+        // The producer caps its own price to the Delta bound.
+        assert_eq!(
+            parent_snapshot
+                .calculate_ema_for_new_block(parent_block, doubled, &from)
+                .oracle_price_for_block_inclusion,
+            IrysTokenPrice::token(dec!(1.1)).unwrap()
+        );
+    }
+
+    /// Delta switches the interval from 10 to 20 blocks at whichever height its
+    /// timestamp falls on. Each block crosses a boundary by its own rules.
+    #[rstest]
+    // Active from block 25: 20 was the last 10-block boundary, 30 is not one.
+    #[case(25, &[10, 20, 40, 60, 80])]
+    // Active from block 30, which no longer crosses a boundary.
+    #[case(30, &[10, 20, 40, 60, 80])]
+    // Active from block 31: 30 still crossed under the 10-block rule.
+    #[case(31, &[10, 20, 30, 40, 60, 80])]
+    #[case(40, &[10, 20, 30, 40, 60, 80])]
+    #[case(55, &[10, 20, 30, 40, 50, 60, 80])]
+    fn delta_interval_boundaries_across_activation(
+        #[case] activation_height: u64,
+        #[case] expected_boundaries: &[u64],
+    ) {
+        let config = config_with_delta_at(activation_height);
+        let blocks_and_snapshots = build_blocks_with_snapshots(85, &config);
+
+        // A block crosses a boundary exactly when its snapshot restarts the
+        // interval's oracle prices with its own.
+        let boundaries: Vec<u64> = blocks_and_snapshots
+            .iter()
+            .skip(1)
+            .filter(|(_, snapshot)| snapshot.interval_oracle_prices.len() == 1)
+            .map(|(block, _)| block.height)
+            .collect();
+        assert_eq!(boundaries, expected_boundaries);
+    }
+
+    /// A node that restarts rebuilds the snapshot from the latest
+    /// `ema_snapshot_history_depth` blocks. That must equal the snapshot built
+    /// block by block from genesis, at every height around Delta activation.
+    #[rstest]
+    #[case::delta_from_genesis(0)]
+    #[case::inside_first_bootstrap_interval(5)]
+    #[case::inside_second_bootstrap_interval(15)]
+    #[case::mid_interval(25)]
+    #[case::on_ten_block_boundary(30)]
+    #[case::after_ten_block_boundary(31)]
+    #[case::before_twenty_block_boundary(39)]
+    #[case::on_twenty_block_boundary(40)]
+    // 84 and 120 put activation exactly on a boundary of each Delta interval
+    // that is not a multiple of the base interval (4 and 7; 15).
+    #[case::on_four_and_seven_block_boundary(84)]
+    #[case::on_fifteen_block_boundary(120)]
+    #[case::late(87)]
+    #[case::never(u64::MAX)]
+    fn delta_history_rebuild_matches_iterative_snapshot(
+        #[case] activation_height: u64,
+        #[values(4, 7, 15, 20)] delta_interval: u64,
+    ) {
+        let mut config = config_with_delta_at(activation_height);
+        config
+            .hardforks
+            .delta
+            .as_mut()
+            .unwrap()
+            .ema_price_adjustment_interval = delta_interval;
+        let depth = config.ema_snapshot_history_depth() as usize;
+        let blocks_and_snapshots = build_blocks_with_snapshots(200, &config);
+        let blocks: Vec<IrysBlockHeader> = blocks_and_snapshots
+            .iter()
+            .map(|(block, _)| block.clone())
+            .collect();
+
+        for (height, (_, iterative_snapshot)) in blocks_and_snapshots.iter().enumerate() {
+            let oldest = (height + 1).saturating_sub(depth);
+            let rebuilt =
+                create_ema_snapshot_from_chain_history(&blocks[oldest..=height], &config).unwrap();
+            assert_eq!(
+                rebuilt.as_ref(),
+                iterative_snapshot.as_ref(),
+                "rebuilt snapshot differs at height {height} (Delta from height {activation_height})"
+            );
+        }
+    }
+
+    #[test]
+    fn history_rebuild_rejects_too_short_or_gapped_history() {
+        let config = config_with_delta_at(u64::MAX);
+        let blocks: Vec<IrysBlockHeader> = build_blocks_with_snapshots(100, &config)
+            .into_iter()
+            .map(|(block, _)| block)
+            .collect();
+
+        // Five blocks do not reach back two interval boundaries.
+        assert!(create_ema_snapshot_from_chain_history(&blocks[96..=100], &config).is_err());
+
+        let mut gapped = blocks[40..=100].to_vec();
+        gapped.remove(10);
+        assert!(create_ema_snapshot_from_chain_history(&gapped, &config).is_err());
     }
 
     #[rstest]
@@ -959,6 +1631,13 @@ mod test {
         use super::*;
         use rust_decimal_macros::dec;
 
+        fn rules(range: Amount<Percentage>) -> EmaRules {
+            EmaRules {
+                token_price_safe_range: range,
+                ..config_with_delta_at(u64::MAX).ema_rules_at(UnixTimestamp::from_secs(0))
+            }
+        }
+
         #[test]
         fn zero_oracle_price_is_always_invalid() {
             let parent = IrysTokenPrice::token(dec!(1.0)).unwrap();
@@ -967,7 +1646,7 @@ mod test {
             let zero = IrysTokenPrice::token(dec!(0.0)).unwrap();
 
             assert!(
-                !EmaSnapshot::oracle_price_is_valid(zero, parent, full_range),
+                !EmaSnapshot::oracle_price_is_valid(zero, parent, &rules(full_range)),
                 "zero oracle price must be rejected even when the relative safe range includes 0"
             );
         }
@@ -978,7 +1657,11 @@ mod test {
             let range = Amount::percentage(dec!(0.1)).unwrap();
             let price = IrysTokenPrice::token(dec!(1.05)).unwrap();
 
-            assert!(EmaSnapshot::oracle_price_is_valid(price, parent, range));
+            assert!(EmaSnapshot::oracle_price_is_valid(
+                price,
+                parent,
+                &rules(range)
+            ));
         }
 
         #[test]
@@ -987,7 +1670,11 @@ mod test {
             let range = Amount::percentage(dec!(0.1)).unwrap();
             let price = IrysTokenPrice::token(dec!(1.20)).unwrap();
 
-            assert!(!EmaSnapshot::oracle_price_is_valid(price, parent, range));
+            assert!(!EmaSnapshot::oracle_price_is_valid(
+                price,
+                parent,
+                &rules(range)
+            ));
         }
     }
 }

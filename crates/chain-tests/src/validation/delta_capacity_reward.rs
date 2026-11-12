@@ -35,6 +35,8 @@ fn delta_from_genesis_config() -> NodeConfig {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
     })
 }
@@ -483,6 +485,8 @@ async fn heavy_delta_midchain_activation_boundary() -> eyre::Result<()> {
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
             capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
             ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+            token_price_safe_range: Delta::default_token_price_safe_range(),
+            ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
     });
     let node = IrysNodeTest::new_genesis(config)

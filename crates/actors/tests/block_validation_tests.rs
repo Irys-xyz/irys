@@ -290,6 +290,8 @@ fn solution_hash_link_follows_delta_activation(
         initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
         capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
         ingress_proof_reward_pool_percent: Delta::default_ingress_proof_reward_pool_percent(),
+        token_price_safe_range: Delta::default_token_price_safe_range(),
+        ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
     };
     consensus.hardforks.delta = Some(delta);
 
