@@ -15,7 +15,7 @@ use crate::tx_selector::helpers::{
 use eyre::eyre;
 use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::tables::CompactCachedIngressProof;
-use irys_database::{DatabaseProvider, ingress_proofs_by_data_root};
+use irys_database::{DatabaseProvider, ingress_proofs_by_commitment};
 use irys_domain::{BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{Config, DataTransactionHeader, H256, IrysAddress, UnixTimestamp};
 use serde::{Deserialize, Serialize};
@@ -101,7 +101,7 @@ impl IngressProofAssessment {
     }
 }
 
-/// One stored miner for the assessed data root.
+/// One stored miner for the assessed data commitment.
 ///
 /// `address` is the cache subkey promotion deduplicates on: the miner who owns
 /// the proof, not a peer that only relayed it. Duplicate proofs from one
@@ -117,23 +117,24 @@ pub struct IngressProofSigner {
     pub eligible: bool,
 }
 
-/// Load the cache rows for `tx_header.data_root` and assess them.
+/// Load the cache rows for the data commitment of `tx_header` and assess them.
 ///
 /// A cache read error is returned. An empty walker is a confirmed empty set.
 pub fn load_submit_ingress_assessment(
     tx_header: &DataTransactionHeader,
     query: &IngressStatusQuery<'_>,
 ) -> eyre::Result<IngressProofAssessment> {
+    let data_commitment = tx_header.data_commitment(&query.config.data_tree_geometry());
     let stored = query
         .db
-        .view_cache_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?;
+        .view_cache_eyre(|read_tx| ingress_proofs_by_commitment(read_tx, data_commitment))?;
     let proofs = stored.into_iter().map(|(_, proof)| proof).collect();
     assess_submit_ingress_proofs(tx_header, proofs, query)
 }
 
 /// Assess an already loaded proof set.
 ///
-/// The caller supplies every cached proof for this data root. Signers are the
+/// The caller supplies every cached proof for this data commitment. Signers are the
 /// addresses stored with those proofs.
 ///
 /// A corrupt canonical Submit range, or an anchor read that returns a database
@@ -226,10 +227,11 @@ fn selector_candidates(
     let min_anchor_height = min_ingress_proof_anchor_height(query.parent_height + 1, query.config);
     let anchor_valid =
         anchor_valid_ingress_proofs(deduped, query.block_tree, query.db, min_anchor_height)?;
+    let data_commitment = tx_header.data_commitment(&query.config.data_tree_geometry());
 
     Ok(anchor_valid
         .into_iter()
-        .filter_map(|cached| match cached.proof.pre_validate(&tx_header.data_root) {
+        .filter_map(|cached| match cached.proof.pre_validate(&data_commitment) {
             Ok(recovered) => Some((cached.address, recovered)),
             Err(e) => {
                 debug!(
@@ -287,9 +289,9 @@ mod tests {
     use irys_types::irys::IrysSigner;
     use irys_types::partition::PartitionAssignment;
     use irys_types::{
-        CommitmentStatus, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
-        DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
-        H256, H256List, IrysBlockHeader, NodeConfig, U256,
+        CommitmentStatus, Config, ConsensusConfig, DataCommitment, DataLedger,
+        DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+        DataTransactionMetadata, DataTreeRoot, H256, H256List, IrysBlockHeader, NodeConfig, U256,
     };
     use reth_db::transaction::DbTxMut as _;
 
@@ -397,7 +399,7 @@ mod tests {
             let chunk = [marker; 32];
             let proof = generate_ingress_proof(
                 signer,
-                data_root,
+                self.commitment(data_root),
                 std::iter::once(Ok(chunk.as_slice())),
                 self.config.consensus.chain_id,
                 anchor,
@@ -406,6 +408,11 @@ mod tests {
                 address: signer.address(),
                 proof,
             }))
+        }
+
+        /// The commitment of a [`data_header`] built with `data_root`.
+        fn commitment(&self, data_root: H256) -> DataCommitment {
+            data_header(H256::zero(), data_root).data_commitment(&self.config.data_tree_geometry())
         }
 
         fn query(&self, secs: u64) -> IngressStatusQuery<'_> {
@@ -444,7 +451,7 @@ mod tests {
         DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: tx_id,
-                data_root,
+                data_tree_root: DataTreeRoot(data_root),
                 ledger_id: u32::from(DataLedger::Submit),
                 ..Default::default()
             },
@@ -1003,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn ingress_status_load_reads_only_the_data_root() -> eyre::Result<()> {
+    fn ingress_status_load_reads_only_the_data_commitment() -> eyre::Result<()> {
         let mut harness = Harness::testing()?;
         let data_root = H256::random();
         let header = data_header(H256::random(), data_root);
@@ -1016,8 +1023,8 @@ mod tests {
         let other = harness.proof(&other_signer, other_root, anchor, 2)?;
 
         harness.db.update_cache_eyre(|tx| {
-            tx.put::<IngressProofs>(data_root, proof.clone())?;
-            tx.put::<IngressProofs>(other_root, other)?;
+            tx.put::<IngressProofs>(harness.commitment(data_root), proof.clone())?;
+            tx.put::<IngressProofs>(harness.commitment(other_root), other)?;
             Ok(())
         })?;
 

@@ -1,4 +1,4 @@
-use irys_types::{BlockHash, ChunkPathHash, H256, IrysAddress, IrysPeerId};
+use irys_types::{BlockHash, ChunkKey, H256, IrysAddress, IrysPeerId};
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block as RethBlock;
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ pub enum GossipDataV2 {
 pub enum GossipDataRequestV1 {
     ExecutionPayload(B256),
     Block(BlockHash),
-    Chunk(ChunkPathHash),
+    Chunk(ChunkKey),
     Transaction(H256),
 }
 
@@ -50,7 +50,7 @@ pub enum GossipDataRequestV2 {
     ExecutionPayload(B256),
     BlockHeader(BlockHash),
     BlockBody(BlockHash),
-    Chunk(ChunkPathHash),
+    Chunk(ChunkKey),
     Transaction(H256),
 }
 

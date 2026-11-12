@@ -13,7 +13,8 @@ use irys_database::submodule::{
 };
 use irys_database::{consensus_db_args, submodule_db_args};
 use irys_types::IrysAddress;
-use irys_types::config::DatabaseConfig;
+use irys_types::config::{ConsensusConfig, ConsensusOptions, DatabaseConfig, NodeConfig};
+use irys_types::data_tree::Geometry;
 
 const USAGE: &str = "\
 usage:
@@ -35,8 +36,17 @@ required flags:
   --ledger <id>                  data ledger id.
                                  Publish is 0, Submit is 1, OneYear is 10, ThirtyDay is 20.
   --slot <n>                     partition slot from packing_params.toml (`slot`)
-  --chunks-per-partition <n>     consensus num_chunks_in_partition
-  --chunk-size <bytes>           consensus chunk size (mainnet is 262144)
+  --config <path>                config.toml of the node that wrote this index.
+                                 The tool reads num_chunks_in_partition, the chunk
+                                 size and the data tree geometry from its consensus
+                                 config. The geometry derives each tx's data
+                                 commitment. Every node of one chain has the same
+                                 consensus config, but a config for another chain
+                                 or preset, or another custom consensus file,
+                                 gives false mismatches. A relative `consensus`
+                                 path in the file resolves from the current
+                                 directory: run the tool from the node's working
+                                 directory or use an absolute path.
 
 optional:
   --rollback                     verify only: the <db-dir> is a rocks-to-mdbx copy.
@@ -95,18 +105,17 @@ CONVERTING. Do not start the node on an incomplete directory.
 
 mdbx-to-rocks writes <submodule>/rocks. Set database.submodule_index to rocksdb
 before the next start. Read `ledger` and `slot` from <submodule>/packing_params.toml.
-Read num_chunks_in_partition and the chunk size from the chain config.
 
   submodule-index-convert mdbx-to-rocks \\
     --consensus-db <node>/.irys/irys_consensus_data \\
     --ledger <id> --slot <slot> \\
-    --chunks-per-partition <n> --chunk-size <bytes> \\
+    --config <node>/config.toml \\
     <submodule>/db <submodule>/rocks
 
   submodule-index-convert verify \\
     --consensus-db <node>/.irys/irys_consensus_data \\
     --ledger <id> --slot <slot> \\
-    --chunks-per-partition <n> --chunk-size <bytes> \\
+    --config <node>/config.toml \\
     <submodule>/db <submodule>/rocks
 
   submodule-index-convert verify-rocks <submodule>/rocks <other>/rocks
@@ -192,9 +201,12 @@ fn consensus_options(tool: &ToolArgs) -> eyre::Result<ConvertOptions> {
     let consensus_db = required("--consensus-db", tool.consensus_db.clone())?;
     let ledger_id = required("--ledger", tool.ledger_id)?;
     let slot_index = required("--slot", tool.slot_index)?;
-    let chunks_per_partition = required("--chunks-per-partition", tool.chunks_per_partition)?;
-    let chunk_size = required("--chunk-size", tool.chunk_size)?;
-    let mut options = ConvertOptions::new(submodule_db_args(&DatabaseConfig::default())?);
+    let config_path = required("--config", tool.config.clone())?;
+    let (consensus, data_tree_geometry) = load_consensus(&config_path)?;
+    let mut options = ConvertOptions::new(
+        submodule_db_args(&DatabaseConfig::default())?,
+        data_tree_geometry,
+    );
     options.consensus = consensus_db_args(&DatabaseConfig::default())?;
     options.replace_incomplete = tool.replace_incomplete;
     options.dry_run = tool.dry_run;
@@ -203,10 +215,52 @@ fn consensus_options(tool: &ToolArgs) -> eyre::Result<ConvertOptions> {
     options.consensus_db = Some(consensus_db);
     options.ledger_id = ledger_id;
     options.slot_index = slot_index;
-    options.chunks_per_partition = chunks_per_partition;
-    options.chunk_size = chunk_size;
-    options.packing_record = packing_record_from_flags(tool, chunk_size)?;
+    options.chunks_per_partition = consensus.num_chunks_in_partition;
+    options.packing_record = packing_record_from_flags(tool, data_tree_geometry.chunk_size())?;
     Ok(options)
+}
+
+/// The consensus config and data tree geometry of the node config at `config_path`.
+///
+/// `NodeConfig::consensus_config` panics when a `consensus = Path(..)` file is
+/// missing or malformed. The tool reads that file itself so the operator gets an
+/// error that names it. A relative path resolves from the current directory,
+/// the same as in the node.
+fn load_consensus(config_path: &Path) -> eyre::Result<(ConsensusConfig, Geometry)> {
+    let contents = std::fs::read_to_string(config_path)
+        .map_err(|err| eyre::eyre!("--config {}: {err}", config_path.display()))?;
+    let node_config = toml::from_str::<NodeConfig>(&contents).map_err(|err| {
+        eyre::eyre!(
+            "--config {}: invalid node config: {err}",
+            config_path.display()
+        )
+    })?;
+    let consensus = match &node_config.consensus {
+        ConsensusOptions::Path(consensus_path) => {
+            let text = std::fs::read_to_string(consensus_path).map_err(|err| {
+                eyre::eyre!(
+                    "--config {}: consensus file {}: {err}. A relative path resolves from the current directory.",
+                    config_path.display(),
+                    consensus_path.display()
+                )
+            })?;
+            toml::from_str::<ConsensusConfig>(&text).map_err(|err| {
+                eyre::eyre!(
+                    "--config {}: invalid consensus file {}: {err}",
+                    config_path.display(),
+                    consensus_path.display()
+                )
+            })?
+        }
+        _ => node_config.consensus_config(),
+    };
+    let data_tree_geometry = consensus.data_tree_geometry().map_err(|err| {
+        eyre::eyre!(
+            "--config {}: invalid data tree geometry: {err}",
+            config_path.display()
+        )
+    })?;
+    Ok((consensus, data_tree_geometry))
 }
 
 fn packing_record_from_flags(
@@ -245,8 +299,7 @@ struct ToolArgs {
     consensus_db: Option<PathBuf>,
     ledger_id: Option<u32>,
     slot_index: Option<u64>,
-    chunks_per_partition: Option<u64>,
-    chunk_size: Option<u64>,
+    config: Option<PathBuf>,
     packing_address: Option<IrysAddress>,
     packing_iterations: Option<u32>,
     chain_id: Option<u64>,
@@ -285,8 +338,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
     let mut consensus_db = None;
     let mut ledger_id = None;
     let mut slot_index = None;
-    let mut chunks_per_partition = None;
-    let mut chunk_size = None;
+    let mut config = None;
     let mut packing_address = None;
     let mut packing_iterations = None;
     let mut chain_id = None;
@@ -320,8 +372,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
             "--consensus-db"
             | "--ledger"
             | "--slot"
-            | "--chunks-per-partition"
-            | "--chunk-size"
+            | "--config"
             | "--packing-address"
             | "--packing-iterations"
             | "--chain-id" => {
@@ -334,10 +385,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
                     "--consensus-db" => consensus_db = Some(PathBuf::from(value)),
                     "--ledger" => ledger_id = Some(parse_u32_flag("--ledger", value)?),
                     "--slot" => slot_index = Some(parse_u64("--slot", value)?),
-                    "--chunks-per-partition" => {
-                        chunks_per_partition = Some(parse_u64("--chunks-per-partition", value)?)
-                    }
-                    "--chunk-size" => chunk_size = Some(parse_u64("--chunk-size", value)?),
+                    "--config" => config = Some(PathBuf::from(value)),
                     "--packing-address" => packing_address = Some(parse_address(value)?),
                     "--packing-iterations" => {
                         packing_iterations = Some(parse_u32_flag("--packing-iterations", value)?)
@@ -393,8 +441,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         && (consensus_db.is_none()
             || ledger_id.is_none()
             || slot_index.is_none()
-            || chunks_per_partition.is_none()
-            || chunk_size.is_none())
+            || config.is_none())
     {
         eprintln!("{USAGE}");
         std::process::exit(2);
@@ -409,8 +456,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         consensus_db,
         ledger_id,
         slot_index,
-        chunks_per_partition,
-        chunk_size,
+        config,
         packing_address,
         packing_iterations,
         chain_id,
@@ -451,5 +497,37 @@ fn paths_are_same(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_testing_utils::TempDirBuilder;
+
+    #[test]
+    fn a_missing_consensus_file_is_an_error_not_a_panic() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new().prefix("convert-config").build();
+        let missing = dir.path().join("no-such-consensus.toml");
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus = ConsensusOptions::Path(missing.clone());
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, toml::to_string(&node_config)?)?;
+
+        let err = load_consensus(&config_path).expect_err("missing consensus file");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("--config"), "{message}");
+
+        std::fs::write(&missing, "not = [valid")?;
+        let err = load_consensus(&config_path).expect_err("malformed consensus file");
+        assert!(
+            format!("{err:#}").contains("invalid consensus file"),
+            "{err:#}"
+        );
+        Ok(())
     }
 }

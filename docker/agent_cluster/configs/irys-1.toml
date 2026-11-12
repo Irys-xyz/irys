@@ -92,6 +92,7 @@ token_price_safe_range = 0.1
 annual_cost_per_gb = 0.01
 decay_rate = 0.01
 chunk_size = 262144
+segments_per_chunk = 64
 block_migration_depth = 6
 block_tree_depth = 20
 num_chunks_in_partition = 100

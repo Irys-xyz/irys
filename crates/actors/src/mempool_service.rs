@@ -25,8 +25,8 @@ use irys_types::{
     U256,
 };
 use irys_types::{
-    CommitmentTransaction, CommitmentValidationError, DataTransactionHeader, IrysAddress,
-    MempoolConfig,
+    CommitmentTransaction, CommitmentValidationError, DataCommitment, DataTransactionHeader,
+    IrysAddress, MempoolConfig,
 };
 use irys_types::{TokioServiceHandle, Traced, TxKnownStatus};
 use lru::LruCache;
@@ -992,7 +992,7 @@ impl AtomicMempoolState {
                     id: tx.id,
                     byte_size,
                     chunks: byte_size.div_ceil(chunk_size),
-                    data_root: tx.data_root,
+                    data_root: tx.data_tree_root.0,
                     ledger_id: tx.ledger_id,
                 }
             })
@@ -2234,20 +2234,21 @@ impl MempoolState {
 
     /// Revalidates data txs in-place against the current canonical chain.
     /// Removes those that fail `should_prune` and returns a map of
-    /// `data_root → [pruned txids]` so the caller can send a
+    /// `data_commitment → [pruned txids]` so the caller can send a
     /// `PruneTxidsFromCachedDataRoots` message to clean up stale references.
     pub fn revalidate_data_txs(
         &mut self,
+        geometry: &irys_types::data_tree::Geometry,
         mut should_prune: impl FnMut(&DataTransactionHeader) -> bool,
-    ) -> HashMap<H256, Vec<H256>> {
+    ) -> HashMap<DataCommitment, Vec<H256>> {
         let mut expired: Vec<(H256, H256)> = Vec::new();
-        let mut expired_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
+        let mut expired_by_data_root: HashMap<DataCommitment, Vec<H256>> = HashMap::new();
 
         for tx in self.valid_submit_ledger_tx.values() {
             if should_prune(tx) {
                 expired.push((tx.id, tx.anchor));
                 expired_by_data_root
-                    .entry(tx.data_root)
+                    .entry(tx.data_commitment(geometry))
                     .or_default()
                     .push(tx.id);
             }
@@ -2856,6 +2857,7 @@ where
 #[cfg(test)]
 mod bounded_mempool_tests {
     use super::*;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
         DataTransactionMetadata, IrysSignature,
@@ -2872,7 +2874,7 @@ mod bounded_mempool_tests {
                 id: H256::random(),
                 anchor: H256::zero(),
                 signer: IrysAddress::random(),
-                data_root: H256::random(),
+                data_tree_root: DataTreeRoot(H256::random()),
                 data_size: 1024,
                 prefix_size: 0,
                 prefix_hash: H256::zero(),
@@ -3165,6 +3167,7 @@ mod bounded_mempool_tests {
 #[cfg(test)]
 mod test_helpers {
     use super::*;
+    use irys_types::DataTreeRoot;
     use irys_types::{
         CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
         DataTransactionMetadata, IrysSignature,
@@ -3195,7 +3198,7 @@ mod test_helpers {
                 id,
                 anchor: H256::zero(),
                 signer: IrysAddress::random(),
-                data_root: H256::random(),
+                data_tree_root: DataTreeRoot(H256::random()),
                 data_size: 1024,
                 prefix_size: 0,
                 prefix_hash: H256::zero(),

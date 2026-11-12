@@ -95,9 +95,12 @@ async fn block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Result<()>
     // 6. Retrieve a valid ingress proof to use as template
     let valid_proof = genesis_node.node_ctx.db.view_cache_eyre(|db_tx| {
         let mut found_proof = None;
+        let data_commitment = tx
+            .header
+            .data_commitment(&genesis_node.node_ctx.config.data_tree_geometry());
         for (root, cached) in walk_all::<IngressProofsTable, _>(db_tx.inner()).expect("walk proofs")
         {
-            if root == tx.header.data_root {
+            if root == data_commitment {
                 found_proof = Some(cached.proof.clone());
                 break;
             }
@@ -108,7 +111,7 @@ async fn block_with_unstaked_ingress_proof_signer_rejected() -> eyre::Result<()>
     // 7. Create evil ingress proof signed by UNSTAKED signer
     let mut evil_proof = IngressProof::V1(IngressProofV1 {
         signature: Default::default(),
-        data_root: valid_proof.data_root,
+        data_commitment: valid_proof.data_commitment,
         proof: valid_proof.proof,
         chain_id: valid_proof.chain_id,
         anchor: valid_proof.anchor,
@@ -280,7 +283,8 @@ async fn mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()> {
     // Generate proof from signer B (currently unstaked, but proof is still valid structurally)
     let signer_b_proof = generate_ingress_proof(
         &signer_b,
-        tx.header.data_root,
+        tx.header
+            .data_commitment(&consensus_config.data_tree_geometry()?),
         chunks.iter().map(|c| Ok(c.as_slice())),
         chain_id,
         anchor,
@@ -397,10 +401,11 @@ async fn heavy_mempool_rejects_unstaked_but_accepts_pending_stake_ingress_proofs
     let consensus = genesis_config.consensus_config();
     let chunk_size = consensus.chunk_size as usize;
     let chunks: Vec<Vec<u8>> = data.chunks(chunk_size).map(Vec::from).collect();
+    let data_commitment = tx.header.data_commitment(&consensus.data_tree_geometry()?);
     let make_proof = |signer: &IrysSigner, anchor| {
         generate_ingress_proof(
             signer,
-            tx.header.data_root,
+            data_commitment,
             chunks.iter().map(|c| Ok(c.as_slice())),
             consensus.chain_id,
             anchor,

@@ -13,7 +13,7 @@ use crate::chunk_fetcher::{
 use futures::StreamExt as _;
 use irys_database::data_ledger::LedgerSlot;
 use irys_domain::{BlockTreeReadGuard, EpochSnapshot, PeerList};
-use irys_types::{DataLedger, DataRoot, IrysAddress, TxChunkOffset};
+use irys_types::{DataCommitment, DataLedger, IrysAddress, TxChunkOffset};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -33,7 +33,7 @@ pub struct SlotPoint {
 /// root's ledger spans give it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageCandidate {
-    pub data_root: DataRoot,
+    pub data_commitment: DataCommitment,
     pub tx_offset: TxChunkOffset,
     pub points: Vec<SlotPoint>,
 }
@@ -126,7 +126,10 @@ pub fn chunk_released(
 /// pass runs on its own `std::thread`.
 pub trait ReplicaCoverage: Send + Sync + std::fmt::Debug {
     /// The key of every candidate that is released.
-    fn released(&self, candidates: &[CoverageCandidate]) -> BTreeSet<(DataRoot, TxChunkOffset)>;
+    fn released(
+        &self,
+        candidates: &[CoverageCandidate],
+    ) -> BTreeSet<(DataCommitment, TxChunkOffset)>;
 }
 
 /// A ledger slot as this node sees it.
@@ -297,10 +300,10 @@ impl HttpReplicaCoverage {
     ) -> Vec<SlotQuery> {
         let mut asked: BTreeMap<
             (DataLedger, usize),
-            BTreeMap<u32, Option<(DataRoot, TxChunkOffset)>>,
+            BTreeMap<u32, Option<(DataCommitment, TxChunkOffset)>>,
         > = BTreeMap::new();
         for candidate in candidates {
-            let chunk = Some((candidate.data_root, candidate.tx_offset));
+            let chunk = Some((candidate.data_commitment, candidate.tx_offset));
             for point in candidate.points.iter().filter(|point| live(point)) {
                 asked
                     .entry((point.ledger, point.slot_index))
@@ -322,10 +325,10 @@ impl HttpReplicaCoverage {
             let entries: Vec<PersistedQueryEntry> = offsets
                 .into_iter()
                 .filter_map(|(offset, claimed)| {
-                    let (data_root, tx_offset) = claimed?;
+                    let (data_commitment, tx_offset) = claimed?;
                     Some(PersistedQueryEntry {
                         offset,
-                        data_root,
+                        data_commitment,
                         tx_offset,
                     })
                 })
@@ -453,7 +456,10 @@ impl HttpReplicaCoverage {
 }
 
 impl ReplicaCoverage for HttpReplicaCoverage {
-    fn released(&self, candidates: &[CoverageCandidate]) -> BTreeSet<(DataRoot, TxChunkOffset)> {
+    fn released(
+        &self,
+        candidates: &[CoverageCandidate],
+    ) -> BTreeSet<(DataCommitment, TxChunkOffset)> {
         if candidates.is_empty() {
             return BTreeSet::new();
         }
@@ -473,7 +479,7 @@ impl ReplicaCoverage for HttpReplicaCoverage {
         candidates
             .iter()
             .filter(|candidate| chunk_released(&candidate.points, live, &witnessed))
-            .map(|candidate| (candidate.data_root, candidate.tx_offset))
+            .map(|candidate| (candidate.data_commitment, candidate.tx_offset))
             .collect()
     }
 }
@@ -492,7 +498,7 @@ pub(super) const HOLD_ONLY_INTERVAL: Duration = Duration::from_secs(30);
 pub struct ReannounceSchedule {
     interval: Duration,
     max_per_pass: usize,
-    last: BTreeMap<(DataRoot, TxChunkOffset), Instant>,
+    last: BTreeMap<(DataCommitment, TxChunkOffset), Instant>,
 }
 
 impl Default for ReannounceSchedule {
@@ -517,13 +523,13 @@ impl ReannounceSchedule {
     /// interval expires.
     pub(super) fn due(
         &mut self,
-        held: &BTreeSet<(DataRoot, TxChunkOffset)>,
+        held: &BTreeSet<(DataCommitment, TxChunkOffset)>,
         now: Instant,
-    ) -> Vec<(DataRoot, TxChunkOffset)> {
+    ) -> Vec<(DataCommitment, TxChunkOffset)> {
         self.last.retain(|key, at| {
             held.contains(key) || now.saturating_duration_since(*at) < self.interval
         });
-        let mut eligible: Vec<(Option<Instant>, (DataRoot, TxChunkOffset))> = held
+        let mut eligible: Vec<(Option<Instant>, (DataCommitment, TxChunkOffset))> = held
             .iter()
             .filter_map(|key| match self.last.get(key) {
                 Some(at) if now.saturating_duration_since(*at) < self.interval => None,
@@ -587,15 +593,15 @@ impl ReplicaCustody {
     pub(super) fn released(
         &self,
         candidates: &[CoverageCandidate],
-    ) -> BTreeSet<(DataRoot, TxChunkOffset)> {
+    ) -> BTreeSet<(DataCommitment, TxChunkOffset)> {
         self.coverage.released(candidates)
     }
 
     pub(super) fn due_reannouncements(
         &self,
-        held: &BTreeSet<(DataRoot, TxChunkOffset)>,
+        held: &BTreeSet<(DataCommitment, TxChunkOffset)>,
         now: Instant,
-    ) -> Vec<(DataRoot, TxChunkOffset)> {
+    ) -> Vec<(DataCommitment, TxChunkOffset)> {
         self.reannounce
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -634,10 +640,10 @@ pub(crate) mod stubs {
         fn released(
             &self,
             candidates: &[CoverageCandidate],
-        ) -> BTreeSet<(DataRoot, TxChunkOffset)> {
+        ) -> BTreeSet<(DataCommitment, TxChunkOffset)> {
             candidates
                 .iter()
-                .map(|candidate| (candidate.data_root, candidate.tx_offset))
+                .map(|candidate| (candidate.data_commitment, candidate.tx_offset))
                 .collect()
         }
     }
@@ -645,7 +651,7 @@ pub(crate) mod stubs {
     /// Releases only `keys`, and records every call's candidates.
     #[derive(Debug, Default)]
     pub(crate) struct ReleasedOnly {
-        pub(crate) keys: Mutex<BTreeSet<(DataRoot, TxChunkOffset)>>,
+        pub(crate) keys: Mutex<BTreeSet<(DataCommitment, TxChunkOffset)>>,
         pub(crate) calls: Mutex<Vec<Vec<CoverageCandidate>>>,
     }
 
@@ -653,7 +659,7 @@ pub(crate) mod stubs {
         fn released(
             &self,
             candidates: &[CoverageCandidate],
-        ) -> BTreeSet<(DataRoot, TxChunkOffset)> {
+        ) -> BTreeSet<(DataCommitment, TxChunkOffset)> {
             self.calls
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -664,7 +670,7 @@ pub(crate) mod stubs {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             candidates
                 .iter()
-                .map(|candidate| (candidate.data_root, candidate.tx_offset))
+                .map(|candidate| (candidate.data_commitment, candidate.tx_offset))
                 .filter(|key| keys.contains(key))
                 .collect()
         }
@@ -674,7 +680,7 @@ pub(crate) mod stubs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::LedgerChunkOffset;
+    use irys_types::{H256, LedgerChunkOffset};
 
     fn point(slot_index: usize, offset: u32) -> SlotPoint {
         SlotPoint {
@@ -912,14 +918,17 @@ mod tests {
 
     fn candidate(root: u8, tx_offset: u32, points: &[SlotPoint]) -> CoverageCandidate {
         CoverageCandidate {
-            data_root: DataRoot::repeat_byte(root),
+            data_commitment: DataCommitment(H256::repeat_byte(root)),
             tx_offset: TxChunkOffset::from(tx_offset),
             points: points.to_vec(),
         }
     }
 
-    fn key(root: u8, tx_offset: u32) -> (DataRoot, TxChunkOffset) {
-        (DataRoot::repeat_byte(root), TxChunkOffset::from(tx_offset))
+    fn key(root: u8, tx_offset: u32) -> (DataCommitment, TxChunkOffset) {
+        (
+            DataCommitment(H256::repeat_byte(root)),
+            TxChunkOffset::from(tx_offset),
+        )
     }
 
     #[test]

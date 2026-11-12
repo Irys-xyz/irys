@@ -1,13 +1,13 @@
 //! Schema v2 placement reads.
 //!
-//! A placement is the tx-path interval, the data root recovered from the
-//! stored path and its leaf binding, and the [`DataRootInfo`] that covers the
-//! probe offset. v2 does not store a ledger, a block height, or a tx index.
+//! A placement is the tx-path interval, the data root and data commitment
+//! recovered from the stored path and its leaf binding, and the
+//! [`DataRootInfo`] that covers the probe offset. v2 does not store a ledger, a block height, or a tx index.
 
 use eyre::eyre;
 use irys_types::{
-    Base64, DataRoot, DataTransactionLedger, H256, PartitionChunkOffset, ProofDeserialize as _,
-    RelativeChunkOffset, get_leaf_proof,
+    Base64, DataCommitment, DataTransactionLedger, DataTreeRoot, H256, PartitionChunkOffset,
+    ProofDeserialize as _, RelativeChunkOffset, get_leaf_proof,
 };
 
 use super::interval::IntervalRow;
@@ -42,9 +42,9 @@ pub(super) fn read_placements_in_range<R: SubmoduleRead + ?Sized>(
 
 pub(super) fn read_placements_for_data_root<R: SubmoduleRead + ?Sized>(
     reader: &R,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
 ) -> eyre::Result<Vec<Placement>> {
-    let Some(infos) = reader.get_data_root_infos_for_data_root(data_root)? else {
+    let Some(infos) = reader.get_data_root_infos_for_commitment(data_commitment)? else {
         return Ok(Vec::new());
     };
     let mut infos = infos.0;
@@ -59,7 +59,7 @@ pub(super) fn read_placements_for_data_root<R: SubmoduleRead + ?Sized>(
     for info in &infos {
         let probe = probe_offset(info.start_offset);
         if let Some(found) = reader.placement_at(probe)?
-            && found.data_root == data_root
+            && found.data_commitment == data_commitment
             && found.tx_start_offset == info.start_offset
         {
             // A middle hole leaves a second segment with the same tx start.
@@ -68,7 +68,9 @@ pub(super) fn read_placements_for_data_root<R: SubmoduleRead + ?Sized>(
             // a chunk is at least one byte.
             let spanned = reader.placements_in_range(probe, scan_end_for_info(info))?;
             for found in spanned {
-                if found.data_root == data_root && found.tx_start_offset == info.start_offset {
+                if found.data_commitment == data_commitment
+                    && found.tx_start_offset == info.start_offset
+                {
                     push_unique(&mut out, &mut seen_starts, found);
                 }
             }
@@ -86,7 +88,7 @@ pub(super) fn read_placements_for_data_root<R: SubmoduleRead + ?Sized>(
         reader.placements_in_range(PartitionChunkOffset(0), PartitionChunkOffset(u32::MAX))?;
     for start_offset in missed {
         for found in &all {
-            if found.data_root == data_root && found.tx_start_offset == start_offset {
+            if found.data_commitment == data_commitment && found.tx_start_offset == start_offset {
                 push_unique(&mut out, &mut seen_starts, found.clone());
             }
         }
@@ -143,10 +145,12 @@ fn placements_for_interval<R: SubmoduleRead + ?Sized>(
     query_start: PartitionChunkOffset,
     query_end: PartitionChunkOffset,
 ) -> eyre::Result<Vec<Placement>> {
-    let Some(data_root) = data_root_for_stored_path(reader, interval.tx_path_hash)? else {
+    let Some((data_tree_root, data_commitment)) =
+        data_root_for_stored_path(reader, interval.tx_path_hash)?
+    else {
         return Ok(Vec::new());
     };
-    let Some(infos) = reader.get_data_root_infos_for_data_root(data_root)? else {
+    let Some(infos) = reader.get_data_root_infos_for_commitment(data_commitment)? else {
         return Ok(Vec::new());
     };
     let mut cuts = vec![interval.start];
@@ -173,7 +177,8 @@ fn placements_for_interval<R: SubmoduleRead + ?Sized>(
             continue;
         };
         out.push(Placement {
-            data_root,
+            data_tree_root,
+            data_commitment,
             tx_start_offset: info.start_offset,
             data_size: info.data_size,
             ledger: None,
@@ -213,14 +218,15 @@ fn covering_info(
     Ok((info.start_offset <= probe_rel).then(|| info.clone()))
 }
 
-/// Real data root for a stored tx path, checked against the proof leaf.
+/// Real data root and data commitment for a stored tx path, checked against
+/// the proof leaf.
 ///
 /// `Ok(None)` when the tx-path bytes are absent. A missing binding, or a leaf
 /// that does not match the stored fold, is corruption.
 fn data_root_for_stored_path<R: SubmoduleRead + ?Sized>(
     reader: &R,
     tx_path_hash: H256,
-) -> eyre::Result<Option<DataRoot>> {
+) -> eyre::Result<Option<(DataTreeRoot, DataCommitment)>> {
     let Some(tx_path) = reader.get_full_tx_path(tx_path_hash)? else {
         return Ok(None);
     };
@@ -239,7 +245,10 @@ fn data_root_for_stored_path<R: SubmoduleRead + ?Sized>(
         binding.data_root,
         binding.prefix_hash,
     );
-    Ok(Some(binding.data_root))
+    Ok(Some((
+        DataTreeRoot(binding.data_root),
+        binding.data_commitment,
+    )))
 }
 
 #[cfg(test)]
@@ -251,6 +260,7 @@ mod tests {
         let infos = [DataRootInfo {
             start_offset: RelativeChunkOffset(0),
             data_size: 1,
+            data_tree_root: DataTreeRoot::default(),
         }];
         let err = covering_info(&infos, PartitionChunkOffset((i32::MAX as u32) + 1))
             .expect_err("offset above i32::MAX");

@@ -427,7 +427,7 @@ impl GossipServiceTestFixture {
                 Some(Arc::clone(&mempool_chunks)),
                 Some(TestIngestStore {
                     db: db.clone(),
-                    chunk_size: config.consensus.chunk_size,
+                    geometry: config.data_tree_geometry(),
                 }),
                 Arc::clone(&ingest_script),
             );
@@ -922,8 +922,8 @@ async fn handle_get_data_v2(
                     .content_type("application/json")
                     .json(GossipResponse::Accepted(true))
             }
-            GossipDataRequestV2::Chunk(chunk_hash) => {
-                warn!("Chunk request for hash {:?}", chunk_hash);
+            GossipDataRequestV2::Chunk(chunk_key) => {
+                warn!("Chunk request for key {:?}", chunk_key);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(GossipResponse::Accepted(false))
@@ -1140,7 +1140,7 @@ pub(crate) enum ScriptedIngest {
 
 pub(crate) struct TestIngestStore {
     pub db: DatabaseProvider,
-    pub chunk_size: u64,
+    pub geometry: irys_types::data_tree::Geometry,
 }
 
 fn send_test_reply<T>(reply: Option<tokio::sync::oneshot::Sender<T>>, value: T) {
@@ -1170,7 +1170,7 @@ fn spawn_test_chunk_ingress_consumer(
         while let Some(traced) = rx.recv().await {
             let (message, _parent_span) = traced.into_parts();
             match message {
-                ChunkIngressMessage::IngestChunk(chunk, reply, _) => {
+                ChunkIngressMessage::IngestChunk(chunk, reply, ..) => {
                     if let Some(ref chunks) = chunk_store {
                         // clone: the store keeps a copy and the default path still validates
                         chunks
@@ -1201,14 +1201,15 @@ fn spawn_test_chunk_ingress_consumer(
                             if let Some(ref ingest_store) = store
                                 && irys_types::validate_unpacked_chunk(
                                     &chunk,
-                                    ingest_store.chunk_size,
+                                    &ingest_store.geometry,
                                 )
                                 .is_ok()
                             {
-                                // Fails without a cached data root: the chunk is
-                                // then parked, with no row.
+                                // Fails without a cached data commitment: the chunk
+                                // is then parked, with no row.
                                 if let Err(error) = ingest_store.db.update_cache_eyre(|tx| {
-                                    irys_database::cache_chunk(tx, &chunk).map(|_| ())
+                                    irys_database::cache_chunk(tx, &chunk, &ingest_store.geometry)
+                                        .map(|_| ())
                                 }) {
                                     debug!(%error, "test ingress left the chunk uncached");
                                 }

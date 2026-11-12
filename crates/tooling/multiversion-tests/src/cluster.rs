@@ -611,7 +611,10 @@ impl Cluster {
     ) -> Result<(), ClusterError> {
         let genesis_url = self.find_running_genesis_url()?;
         let client = self.client.clone();
-        crate::data_tx::assert_chunks_match_original(&client, &genesis_url, tx, timeout)
+        let geometry =
+            crate::data_tx::geometry_for_chunk_size(self.fetch_chain_params().await?.chunk_size)
+                .map_err(|e| ClusterError::DataTx(format!("data tree geometry: {e}")))?;
+        crate::data_tx::assert_chunks_match_original(&client, &genesis_url, tx, &geometry, timeout)
             .await
             .map_err(|e| ClusterError::DataTx(format!("chunk read-back on genesis: {e}")))
     }

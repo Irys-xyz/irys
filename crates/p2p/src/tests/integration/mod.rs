@@ -196,7 +196,8 @@ async fn heavy3_should_broadcast_chunk_data() -> eyre::Result<()> {
 
     // Create and send chunk data
     let chunk = chunk_announce::valid_chunk(chunk_announce::chunk_size(&fixture1), 1);
-    let data = GossipBroadcastMessageV2::from(chunk);
+    let data =
+        GossipBroadcastMessageV2::chunk(Arc::new(chunk), &fixture1.config.data_tree_geometry());
 
     gossip_service1_message_bus
         .send_traced(data)

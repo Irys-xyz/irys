@@ -356,7 +356,6 @@ fn own_block_rejection_cause(err: &PreValidationError) -> OwnBlockRejectionCause
         | PreValidationError::InvalidIngressProof { .. }
         | PreValidationError::InvalidLedgerIdForTx { .. }
         | PreValidationError::InvalidPermFeeStructure { .. }
-        | PreValidationError::InvalidPromotionDataSizeMismatch { .. }
         | PreValidationError::InvalidPromotionPath { .. }
         | PreValidationError::InvalidTermFeeStructure { .. }
         | PreValidationError::PrefixSizeExceedsDataSize { .. }

@@ -70,7 +70,7 @@ async fn slow_ingress_status_endpoint_reports_proofs_then_promotion() -> eyre::R
         .cloned()
         .expect("canonical tip");
     assert_eq!(awaiting.tx_id, tx_id);
-    assert_eq!(awaiting.data_root, tx.header.data_root);
+    assert_eq!(awaiting.data_tree_root, tx.header.data_tree_root);
     assert_eq!(awaiting.as_of_block_height, tip.height());
     assert_eq!(awaiting.as_of_block_hash, tip.block_hash());
     assert!(

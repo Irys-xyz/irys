@@ -1,4 +1,4 @@
-use irys_types::{DataRoot, TxChunkOffset, UnpackedChunk};
+use irys_types::{DataCommitment, TxChunkOffset, UnpackedChunk};
 use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -17,7 +17,7 @@ struct ActiveDrain {
 #[derive(Debug, Default)]
 struct DrainFlags {
     next_token: u64,
-    active: HashMap<DataRoot, ActiveDrain>,
+    active: HashMap<DataCommitment, ActiveDrain>,
 }
 
 /// How a park interacts with an active drain. Decided under the drain lock so
@@ -42,7 +42,7 @@ pub(crate) enum DrainAdmission {
 #[must_use = "dropping the ticket ends the drain"]
 pub(crate) struct DrainTicket {
     flags: Arc<Mutex<DrainFlags>>,
-    data_root: DataRoot,
+    data_commitment: DataCommitment,
     token: u64,
     armed: bool,
     on_gained: Option<Box<dyn FnOnce() + Send>>,
@@ -52,7 +52,7 @@ impl std::fmt::Debug for DrainTicket {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("DrainTicket")
-            .field("data_root", &self.data_root)
+            .field("data_commitment", &self.data_commitment)
             .field("token", &self.token)
             .field("armed", &self.armed)
             .finish_non_exhaustive()
@@ -71,10 +71,10 @@ impl DrainTicket {
         self.armed = false;
         let schedule = {
             let mut flags = lock_drain_flags(&self.flags);
-            match flags.active.get(&self.data_root) {
+            match flags.active.get(&self.data_commitment) {
                 Some(state) if state.token == self.token => {
                     let gained = state.gained;
-                    flags.active.remove(&self.data_root);
+                    flags.active.remove(&self.data_commitment);
                     gained
                 }
                 _ => false,
@@ -99,7 +99,7 @@ impl Drop for DrainTicket {
 /// with single-chunk fake entries.
 #[derive(Debug)]
 pub struct PriorityPendingChunks {
-    entries: HashMap<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
+    entries: HashMap<DataCommitment, LruCache<TxChunkOffset, UnpackedChunk>>,
     max_entries: usize,
     max_chunks_per_entry: usize,
     draining: Arc<Mutex<DrainFlags>>,
@@ -119,13 +119,17 @@ impl PriorityPendingChunks {
         lock_drain_flags(&self.draining)
     }
 
-    /// Mark `data_root` draining. `reserved` is the popped set this drain still holds.
-    pub(crate) fn begin_drain(&self, data_root: DataRoot, reserved: usize) -> DrainTicket {
+    /// Mark `data_commitment` draining. `reserved` is the popped set this drain still holds.
+    pub(crate) fn begin_drain(
+        &self,
+        data_commitment: DataCommitment,
+        reserved: usize,
+    ) -> DrainTicket {
         let mut flags = self.lock_drains();
         let token = flags.next_token;
         flags.next_token = flags.next_token.wrapping_add(1);
         flags.active.insert(
-            data_root,
+            data_commitment,
             ActiveDrain {
                 token,
                 reserved,
@@ -134,7 +138,7 @@ impl PriorityPendingChunks {
         );
         DrainTicket {
             flags: Arc::clone(&self.draining),
-            data_root,
+            data_commitment,
             token,
             armed: true,
             on_gained: None,
@@ -142,11 +146,11 @@ impl PriorityPendingChunks {
     }
 
     #[cfg(test)]
-    pub(crate) fn is_draining(&self, data_root: &DataRoot) -> bool {
-        self.lock_drains().active.contains_key(data_root)
+    pub(crate) fn is_draining(&self, data_commitment: &DataCommitment) -> bool {
+        self.lock_drains().active.contains_key(data_commitment)
     }
 
-    /// Decide whether a chunk may park while `data_root` is draining.
+    /// Decide whether a chunk may park while `data_commitment` is draining.
     ///
     /// An external chunk that fits sets the gained bit under this lock. The
     /// caller puts the chunk and must not start another drain: the active
@@ -154,13 +158,13 @@ impl PriorityPendingChunks {
     /// the restore can put them back without evicting a sibling.
     pub(crate) fn drain_admission(
         &self,
-        data_root: &DataRoot,
+        data_commitment: &DataCommitment,
         current: usize,
         cap: usize,
         own_reingest: bool,
     ) -> DrainAdmission {
         let mut flags = self.lock_drains();
-        let Some(state) = flags.active.get_mut(data_root) else {
+        let Some(state) = flags.active.get_mut(data_commitment) else {
             return DrainAdmission::Idle;
         };
         let occupied = current.saturating_add(state.reserved);
@@ -175,10 +179,10 @@ impl PriorityPendingChunks {
     }
 
     /// Clear the drain flag. True when an external chunk parked during it.
-    pub(crate) fn take_arrived_and_clear_drain(&self, data_root: &DataRoot) -> bool {
+    pub(crate) fn take_arrived_and_clear_drain(&self, data_commitment: &DataCommitment) -> bool {
         self.lock_drains()
             .active
-            .remove(data_root)
+            .remove(data_commitment)
             .is_some_and(|state| state.gained)
     }
 
@@ -190,15 +194,14 @@ impl PriorityPendingChunks {
         self.entries.is_empty()
     }
 
-    /// Insert a chunk into the cache.
+    /// Insert a chunk into the cache under its `data_commitment`.
     ///
-    /// If the data_root doesn't exist and the cache is at capacity,
+    /// If the data_commitment doesn't exist and the cache is at capacity,
     /// evicts the entry with the fewest chunks first.
-    pub fn put(&mut self, chunk: UnpackedChunk) {
-        let data_root = chunk.data_root;
+    pub fn put(&mut self, data_commitment: DataCommitment, chunk: UnpackedChunk) {
         let tx_offset = chunk.tx_offset;
 
-        if let Some(chunks) = self.entries.get_mut(&data_root) {
+        if let Some(chunks) = self.entries.get_mut(&data_commitment) {
             chunks.put(tx_offset, chunk);
             return;
         }
@@ -211,24 +214,30 @@ impl PriorityPendingChunks {
             NonZeroUsize::new(self.max_chunks_per_entry).expect("max_chunks_per_entry must be > 0"),
         );
         new_cache.put(tx_offset, chunk);
-        self.entries.insert(data_root, new_cache);
+        self.entries.insert(data_commitment, new_cache);
     }
 
     #[must_use]
-    pub fn pop(&mut self, data_root: &DataRoot) -> Option<LruCache<TxChunkOffset, UnpackedChunk>> {
-        self.entries.remove(data_root)
+    pub fn pop(
+        &mut self,
+        data_commitment: &DataCommitment,
+    ) -> Option<LruCache<TxChunkOffset, UnpackedChunk>> {
+        self.entries.remove(data_commitment)
     }
 
     pub fn get_mut(
         &mut self,
-        data_root: &DataRoot,
+        data_commitment: &DataCommitment,
     ) -> Option<&mut LruCache<TxChunkOffset, UnpackedChunk>> {
-        self.entries.get_mut(data_root)
+        self.entries.get_mut(data_commitment)
     }
 
-    /// Get read-only access to the chunks for a given data_root without modifying LRU order.
-    pub fn get(&self, data_root: &DataRoot) -> Option<&LruCache<TxChunkOffset, UnpackedChunk>> {
-        self.entries.get(data_root)
+    /// Get read-only access to the chunks for a given data_commitment without modifying LRU order.
+    pub fn get(
+        &self,
+        data_commitment: &DataCommitment,
+    ) -> Option<&LruCache<TxChunkOffset, UnpackedChunk>> {
+        self.entries.get(data_commitment)
     }
 
     /// Evict the entry with the fewest chunks.
@@ -242,11 +251,14 @@ impl PriorityPendingChunks {
             .entries
             .iter()
             .min_by_key(|(_, chunks)| chunks.len())
-            .map(|(data_root, _)| *data_root);
+            .map(|(data_commitment, _)| *data_commitment);
 
-        if let Some(data_root) = victim {
-            tracing::debug!(?data_root, "Evicting lowest-priority pending chunks entry");
-            self.entries.remove(&data_root);
+        if let Some(data_commitment) = victim {
+            tracing::debug!(
+                ?data_commitment,
+                "Evicting lowest-priority pending chunks entry"
+            );
+            self.entries.remove(&data_commitment);
         }
     }
 }
@@ -260,12 +272,17 @@ fn lock_drain_flags(flags: &Mutex<DrainFlags>) -> std::sync::MutexGuard<'_, Drai
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{DataRoot, TxChunkOffset};
+    use irys_types::DataTreeRoot;
+    use irys_types::{H256, TxChunkOffset};
+
+    fn key(data_root: [u8; 32]) -> DataCommitment {
+        DataCommitment(H256::from(data_root))
+    }
     use proptest::prelude::*;
 
     fn make_chunk(data_root: [u8; 32], offset: u32, data_size: u64) -> UnpackedChunk {
         UnpackedChunk {
-            data_root: DataRoot::from(data_root),
+            data_tree_root: DataTreeRoot(H256::from(data_root)),
             data_size,
             tx_offset: TxChunkOffset::from(offset),
             data_path: Default::default(),
@@ -278,27 +295,27 @@ mod tests {
         let mut cache = PriorityPendingChunks::new(3, 10);
 
         let root_a = [1_u8; 32];
-        cache.put(make_chunk(root_a, 0, 1000));
-        cache.put(make_chunk(root_a, 1, 1000));
-        cache.put(make_chunk(root_a, 2, 1000));
+        cache.put(key(root_a), make_chunk(root_a, 0, 1000));
+        cache.put(key(root_a), make_chunk(root_a, 1, 1000));
+        cache.put(key(root_a), make_chunk(root_a, 2, 1000));
 
         let root_b = [2_u8; 32];
-        cache.put(make_chunk(root_b, 0, 1000));
+        cache.put(key(root_b), make_chunk(root_b, 0, 1000));
 
         let root_c = [3_u8; 32];
-        cache.put(make_chunk(root_c, 0, 1000));
-        cache.put(make_chunk(root_c, 1, 1000));
+        cache.put(key(root_c), make_chunk(root_c, 0, 1000));
+        cache.put(key(root_c), make_chunk(root_c, 1, 1000));
 
         assert_eq!(cache.len(), 3);
 
         let root_d = [4_u8; 32];
-        cache.put(make_chunk(root_d, 0, 1000));
+        cache.put(key(root_d), make_chunk(root_d, 0, 1000));
 
         assert_eq!(cache.len(), 3);
-        assert!(cache.entries.contains_key(&DataRoot::from(root_a))); // 3 chunks - kept
-        assert!(!cache.entries.contains_key(&DataRoot::from(root_b))); // 1 chunk - evicted
-        assert!(cache.entries.contains_key(&DataRoot::from(root_c))); // 2 chunks - kept
-        assert!(cache.entries.contains_key(&DataRoot::from(root_d))); // new entry
+        assert!(cache.entries.contains_key(&key(root_a))); // 3 chunks - kept
+        assert!(!cache.entries.contains_key(&key(root_b))); // 1 chunk - evicted
+        assert!(cache.entries.contains_key(&key(root_c))); // 2 chunks - kept
+        assert!(cache.entries.contains_key(&key(root_d))); // new entry
     }
 
     proptest! {
@@ -312,18 +329,18 @@ mod tests {
 
             let legitimate_root = [0xAA_u8; 32];
             for i in 0..legitimate_chunk_count as u32 {
-                cache.put(make_chunk(legitimate_root, i, 1000));
+                cache.put(key(legitimate_root), make_chunk(legitimate_root, i, 1000));
             }
 
             for i in 0..attacker_count {
                 let attacker_root = [i as u8; 32];
-                cache.put(make_chunk(attacker_root, 0, 1000));
+                cache.put(key(attacker_root), make_chunk(attacker_root, 0, 1000));
             }
 
             // Property: multi-chunk entry survives single-chunk flooding
-            prop_assert!(cache.entries.contains_key(&DataRoot::from(legitimate_root)));
+            prop_assert!(cache.entries.contains_key(&key(legitimate_root)));
             prop_assert_eq!(
-                cache.entries.get(&DataRoot::from(legitimate_root)).unwrap().len(),
+                cache.entries.get(&key(legitimate_root)).unwrap().len(),
                 legitimate_chunk_count
             );
         }
@@ -335,11 +352,11 @@ mod tests {
 
         let root = [1_u8; 32];
         for i in 0..5 {
-            cache.put(make_chunk(root, i, 1000));
+            cache.put(key(root), make_chunk(root, i, 1000));
         }
 
         // Only 3 chunks should be kept (max_chunks_per_entry = 3)
-        assert_eq!(cache.entries.get(&DataRoot::from(root)).unwrap().len(), 3);
+        assert_eq!(cache.entries.get(&key(root)).unwrap().len(), 3);
     }
 
     /// Map-level illustration of the TX/chunk TOCTOU order (drain-empty then
@@ -349,10 +366,10 @@ mod tests {
     fn early_drain_then_park_leaves_entry_until_second_pop() {
         let mut cache = PriorityPendingChunks::new(10, 10);
         let root_bytes = [0x3e_u8; 32];
-        let root = DataRoot::from(root_bytes);
+        let root = key(root_bytes);
 
         assert!(cache.pop(&root).is_none());
-        cache.put(make_chunk(root_bytes, 0, 12));
+        cache.put(key(root_bytes), make_chunk(root_bytes, 0, 12));
         assert!(cache.entries.contains_key(&root));
         let recovered = cache
             .pop(&root)
@@ -365,7 +382,7 @@ mod tests {
     #[test]
     fn drain_ticket_clears_only_its_own_token() {
         let cache = PriorityPendingChunks::new(4, 4);
-        let root = DataRoot::from([0xD1; 32]);
+        let root = key([0xD1; 32]);
 
         let ticket = cache.begin_drain(root, 0);
         assert!(cache.is_draining(&root));
@@ -394,7 +411,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let cache = PriorityPendingChunks::new(4, 4);
-        let root = DataRoot::from([0xD2; 32]);
+        let root = key([0xD2; 32]);
         let fired = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&fired);
         let mut ticket = cache.begin_drain(root, 1);
@@ -418,7 +435,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let cache = PriorityPendingChunks::new(4, 4);
-        let root = DataRoot::from([0xD3; 32]);
+        let root = key([0xD3; 32]);
         let fired = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&fired);
         let mut ticket = cache.begin_drain(root, 1);
@@ -439,7 +456,7 @@ mod tests {
     #[test]
     fn drain_admission_reserves_the_popped_set_and_rejects_its_own_chunk() {
         let cache = PriorityPendingChunks::new(4, 4);
-        let root = DataRoot::from([0xD4; 32]);
+        let root = key([0xD4; 32]);
         let _ticket = cache.begin_drain(root, 2);
         assert_eq!(
             cache.drain_admission(&root, 0, 2, false),

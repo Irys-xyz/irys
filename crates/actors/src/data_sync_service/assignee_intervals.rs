@@ -1224,15 +1224,15 @@ mod tests {
                     .fetch_chunk_by_ledger_offset(offset, api, timeout)
                     .await
             }
-            async fn fetch_chunk_by_data_root(
+            async fn fetch_chunk_by_commitment(
                 &self,
-                root: irys_types::DataRoot,
+                data_commitment: irys_types::DataCommitment,
                 tx_offset: irys_types::TxChunkOffset,
                 api: SocketAddr,
                 timeout: Duration,
             ) -> Result<irys_types::ChunkFormat, ChunkFetchError> {
                 self.0
-                    .fetch_chunk_by_data_root(root, tx_offset, api, timeout)
+                    .fetch_chunk_by_commitment(data_commitment, tx_offset, api, timeout)
                     .await
             }
             async fn fetch_data_intervals(

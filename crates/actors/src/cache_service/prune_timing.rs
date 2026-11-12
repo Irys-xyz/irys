@@ -14,9 +14,9 @@ use irys_domain::{
 use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
 use irys_types::{
     Base64, BlockTransactions, ConsensusConfig, ConsensusOptions, DataTransactionHeaderV1,
-    DataTransactionHeaderV1WithMetadata, DataTransactionLedger, DataTransactionMetadata, H256List,
-    LedgerChunkRange, NodeConfig, PartitionChunkOffset, SealedBlock, SubmoduleIndexEngine, U256,
-    UnpackedChunk, partition::PartitionAssignment, partition_chunk_offset_ii,
+    DataTransactionHeaderV1WithMetadata, DataTransactionLedger, DataTransactionMetadata,
+    DataTreeRoot, H256List, LedgerChunkRange, NodeConfig, PartitionChunkOffset, SealedBlock,
+    SubmoduleIndexEngine, U256, partition::PartitionAssignment, partition_chunk_offset_ii,
 };
 use nodit::interval::ii;
 use reth_db::transaction::DbTxMut as _;
@@ -100,7 +100,7 @@ fn submit_tx(id: H256, data_root: H256, data_size: u64) -> DataTransactionHeader
     DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
         tx: DataTransactionHeaderV1 {
             id,
-            data_root,
+            data_tree_root: DataTreeRoot(data_root),
             data_size,
             ledger_id: DataLedger::Submit.into(),
             ..Default::default()
@@ -237,6 +237,7 @@ fn slow_timed_capacity_prune() -> eyre::Result<()> {
     node_config.database.submodule_index = SubmoduleIndexEngine::Rocksdb;
     node_config.cache.max_cache_size_bytes = root_count * chunk_size / 2;
     let config = Config::new_with_random_peer_id(node_config);
+    let geometry = config.data_tree_geometry();
     let local_address = config.irys_signer().address();
     let db = DatabaseProvider::for_testing(temp.path(), &temp.path().join("cache"))?;
     let storage = Arc::new(StorageModule::new(
@@ -305,7 +306,7 @@ fn slow_timed_capacity_prune() -> eyre::Result<()> {
         })?;
         db.update_cache_eyre(|tx| {
             for header in &headers {
-                database::cache_data_root(tx, header, None)?;
+                database::cache_data_root(tx, header, None, &geometry)?;
             }
             Ok(())
         })?;
@@ -386,30 +387,37 @@ fn slow_timed_capacity_prune() -> eyre::Result<()> {
             db.update_cache_eyre(|tx| {
                 for index in first..(first + 256).min(roots) {
                     let root = fixture_hash(index)?;
-                    let chunk = UnpackedChunk {
-                        data_root: root,
-                        data_size: chunk_size,
-                        data_path: Base64(root.as_bytes().to_vec()),
-                        bytes: Base64(body.clone()),
-                        tx_offset: TxChunkOffset::from(0),
-                    };
-                    let path_hash = chunk.chunk_path_hash();
-                    tx.put::<CachedChunks>(path_hash, CachedChunk::from(&chunk))?;
+                    let data_commitment = irys_types::data_tree::data_commitment(
+                        &geometry,
+                        DataTreeRoot(root),
+                        chunk_size,
+                    );
+                    let tx_offset = TxChunkOffset::from(0);
+                    let chunk_key = irys_types::data_tree::chunk_key(data_commitment, tx_offset);
+                    tx.put::<CachedChunks>(
+                        chunk_key,
+                        CachedChunk {
+                            data_commitment,
+                            tx_offset,
+                            chunk: Some(Base64(body.clone())),
+                            data_path: Base64(root.as_bytes().to_vec()),
+                        },
+                    )?;
                     tx.put::<CachedChunksIndex>(
-                        root,
+                        data_commitment,
                         CachedChunkIndexEntry {
-                            index: chunk.tx_offset,
+                            index: tx_offset,
                             meta: CachedChunkIndexMetadata {
-                                chunk_path_hash: path_hash,
+                                chunk_key,
                                 updated_at: UnixTimestamp::from_secs(0),
                             },
                         },
                     )?;
                     irys_database::store_ingress_data_hash(
                         tx,
-                        root,
+                        data_commitment,
                         local_address,
-                        chunk.tx_offset,
+                        tx_offset,
                         ingress_hash,
                     )?;
                 }

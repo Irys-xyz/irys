@@ -477,15 +477,18 @@ fn test_block_index_item_v2_rejects_oversized_ledger_list() {
 #[test]
 fn chunk_announcement_round_trips_and_matches_chunk() {
     let chunk = irys_types::UnpackedChunk {
-        data_root: irys_types::H256::random(),
+        data_tree_root: irys_types::DataTreeRoot(irys_types::H256::random()),
         data_size: 64,
         data_path: vec![1, 2, 3].into(),
         bytes: vec![4, 5].into(),
         tx_offset: irys_types::TxChunkOffset::from(1),
     };
     let a = wire::ChunkAnnouncement::from(&chunk);
-    assert_eq!(a.chunk_path_hash, chunk.chunk_path_hash());
+    assert_eq!(a.data_tree_root, chunk.data_tree_root);
+    assert_eq!(a.data_size, chunk.data_size);
+    assert_eq!(a.tx_offset, chunk.tx_offset);
     let json = serde_json::to_string(&a).expect("ser");
+    assert!(json.contains("\"dataRoot\":"), "{json}");
     assert!(json.contains("\"dataSize\":\"64\""), "{json}");
     let back: wire::ChunkAnnouncement = serde_json::from_str(&json).expect("de");
     assert_eq!(back, a);

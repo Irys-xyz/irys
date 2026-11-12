@@ -8,7 +8,7 @@ use irys_actors::chunk_fetcher::{
     MAX_PERSISTED_QUERY_ENTRIES, PersistedOffsetsResponse, PersistedQueryEntry,
 };
 use irys_domain::{ChunkType, StorageModule};
-use irys_types::{DataLedger, DataRoot, H256, PartitionChunkOffset, TxChunkOffset, ii};
+use irys_types::{DataCommitment, DataLedger, H256, PartitionChunkOffset, TxChunkOffset, ii};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -254,7 +254,7 @@ fn admit_persisted_query(admission: &Arc<Semaphore>) -> Result<OwnedSemaphorePer
     })
 }
 
-/// First-seen exact `(offset, data_root, tx_offset)` triples, in request
+/// First-seen exact `(offset, data_commitment, tx_offset)` triples, in request
 /// order. Same offset with a different identity stays distinct.
 fn unique_persisted_entries(entries: Vec<PersistedQueryEntry>) -> Vec<PersistedQueryEntry> {
     let mut seen = HashSet::with_capacity(entries.len());
@@ -266,13 +266,13 @@ fn unique_persisted_entries(entries: Vec<PersistedQueryEntry>) -> Vec<PersistedQ
 
 /// Offsets of `entries` that hold a crash-safe placement of exactly the
 /// requested chunk, ascending and unique. `persisted` is
-/// `StorageModule::is_data_chunk_persisted_at`; `indexed` is
-/// `StorageModule::data_root_and_tx_offset_at`. A failed index read
-/// attests nothing.
+/// `StorageModule::is_data_chunk_persisted_at`; `indexed` gives the data
+/// commitment and tx offset of `StorageModule::data_root_and_tx_offset_at`.
+/// A failed index read attests nothing.
 fn persisted_offsets(
     entries: &[PersistedQueryEntry],
     persisted: impl Fn(PartitionChunkOffset) -> bool,
-    indexed: impl Fn(PartitionChunkOffset) -> eyre::Result<Option<(DataRoot, TxChunkOffset)>>,
+    indexed: impl Fn(PartitionChunkOffset) -> eyre::Result<Option<(DataCommitment, TxChunkOffset)>>,
 ) -> Vec<u32> {
     let mut offsets: Vec<u32> = entries
         .iter()
@@ -280,8 +280,8 @@ fn persisted_offsets(
             let offset = PartitionChunkOffset::from(entry.offset);
             let names_this_chunk = matches!(
                 indexed(offset),
-                Ok(Some((data_root, tx_offset)))
-                    if data_root == entry.data_root && tx_offset == entry.tx_offset
+                Ok(Some((data_commitment, tx_offset)))
+                    if data_commitment == entry.data_commitment && tx_offset == entry.tx_offset
             );
             names_this_chunk && persisted(offset)
         })
@@ -290,6 +290,16 @@ fn persisted_offsets(
     offsets.sort_unstable();
     offsets.dedup();
     offsets
+}
+
+/// The data commitment and tx offset the storage module indexes at `offset`.
+fn indexed_commitment_and_tx_offset(
+    module: &StorageModule,
+    offset: PartitionChunkOffset,
+) -> eyre::Result<Option<(DataCommitment, TxChunkOffset)>> {
+    Ok(module
+        .data_root_and_tx_offset_at(offset)?
+        .map(|(data_commitment, _data_tree_root, tx_offset)| (data_commitment, tx_offset)))
 }
 
 /// This node's storage module for `ledger` slot `slot_index`, if it is
@@ -336,7 +346,7 @@ pub async fn post_persisted(
                 persisted_offsets(
                     &entries,
                     |offset| module.is_data_chunk_persisted_at(offset),
-                    |offset| module.data_root_and_tx_offset_at(offset),
+                    |offset| indexed_commitment_and_tx_offset(&module, offset),
                 )
             })
             .await
@@ -931,10 +941,10 @@ mod tests {
     }
     // === Persisted-placement attestation ===
 
-    fn asked(offset: u32, data_root: H256, tx_offset: u32) -> PersistedQueryEntry {
+    fn asked(offset: u32, data_commitment: DataCommitment, tx_offset: u32) -> PersistedQueryEntry {
         PersistedQueryEntry {
             offset,
-            data_root,
+            data_commitment,
             tx_offset: TxChunkOffset::from(tx_offset),
         }
     }
@@ -945,11 +955,11 @@ mod tests {
     /// row. Offset 4's index read fails. Only offset 0 is attested.
     #[core::prelude::v1::test]
     fn persisted_offsets_lists_only_persisted_placements_of_the_asked_chunk() {
-        let root = H256::repeat_byte(1);
-        let other = H256::repeat_byte(2);
+        let root = DataCommitment(H256::repeat_byte(1));
+        let other = DataCommitment(H256::repeat_byte(2));
         let persisted = |offset: PartitionChunkOffset| *offset != 1;
         let indexed =
-            |offset: PartitionChunkOffset| -> eyre::Result<Option<(H256, TxChunkOffset)>> {
+            |offset: PartitionChunkOffset| -> eyre::Result<Option<(DataCommitment, TxChunkOffset)>> {
                 match *offset {
                     0 | 1 => Ok(Some((root, TxChunkOffset::from(*offset)))),
                     2 => Ok(Some((other, TxChunkOffset::from(2)))),
@@ -974,8 +984,8 @@ mod tests {
 
     #[core::prelude::v1::test]
     fn unique_persisted_entries_keeps_first_seen_identity() {
-        let root = H256::repeat_byte(1);
-        let other = H256::repeat_byte(2);
+        let root = DataCommitment(H256::repeat_byte(1));
+        let other = DataCommitment(H256::repeat_byte(2));
         let first = asked(0, root, 0);
         let same_offset_other_chunk = asked(0, other, 0);
         let dup = asked(0, root, 0);
@@ -1037,22 +1047,26 @@ mod tests {
         assert!(module.is_data_chunk_persisted_at(PartitionChunkOffset::from(0)));
         assert!(!module.is_data_chunk_persisted_at(PartitionChunkOffset::from(1)));
 
-        let root = tx.header.data_root;
+        let root = tx.header.data_commitment(&config.data_tree_geometry());
         let read = |query: &[PersistedQueryEntry]| {
             persisted_offsets(
                 query,
                 |offset| module.is_data_chunk_persisted_at(offset),
-                |offset| module.data_root_and_tx_offset_at(offset),
+                |offset| indexed_commitment_and_tx_offset(&module, offset),
             )
         };
         assert_eq!(read(&[asked(0, root, 0), asked(1, root, 1)]), vec![0]);
-        assert!(read(&[asked(0, H256::repeat_byte(7), 0)]).is_empty());
+        assert!(read(&[asked(0, DataCommitment(H256::repeat_byte(7)), 0)]).is_empty());
+        assert!(
+            read(&[asked(0, DataCommitment(tx.header.data_tree_root.0), 0)]).is_empty(),
+            "the bare data tree root is not the commitment"
+        );
         Ok(())
     }
 
     #[core::prelude::v1::test]
     fn a_full_persisted_query_fits_the_json_limit_and_one_more_is_rejected() {
-        let widest = asked(u32::MAX, H256::repeat_byte(0xff), u32::MAX);
+        let widest = asked(u32::MAX, DataCommitment(H256::repeat_byte(0xff)), u32::MAX);
         let full = vec![widest; MAX_PERSISTED_QUERY_ENTRIES];
         let bytes = serde_json::to_vec(&full).expect("serialise").len();
         assert!(

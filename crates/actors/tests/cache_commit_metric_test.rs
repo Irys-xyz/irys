@@ -3,19 +3,17 @@
 //! so no other test can ingest into that provider or bind the instrument to
 //! an earlier one, under nextest or `cargo test`.
 
-use irys_actors::ChunkIngressService;
 use irys_actors::chunk_ingress_service::IngressProofGenerationState;
 use irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl;
 use irys_actors::test_helpers::build_test_service_senders;
+use irys_actors::{ChunkIngressService, ChunkIngressSource};
 use irys_database::DatabaseProvider;
 use irys_database::db::{DatabaseProviderCacheExt as _, DatabaseProviderTestExt as _};
 use irys_domain::{BlockTree, BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_testing_utils::new_mock_signed_header;
 use irys_testing_utils::utils::TempDirBuilder;
-use irys_types::{
-    Config, DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-    DataTransactionMetadata, H256, NodeConfig, TxChunkOffset, UnpackedChunk,
-};
+use irys_types::irys::IrysSigner;
+use irys_types::{Config, DataTransactionHeader, H256, NodeConfig, UnpackedChunk};
 use opentelemetry_sdk::metrics::data::{
     AggregatedMetrics, HistogramDataPoint, MetricData, ResourceMetrics, ScopeMetrics,
 };
@@ -23,42 +21,30 @@ use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMete
 use reth::tasks::TaskExecutor;
 use std::sync::{Arc, RwLock};
 
-fn single_chunk(bytes: Vec<u8>) -> UnpackedChunk {
-    let chunk_size = bytes.len();
-    // clone: generate_leaves consumes the bytes the chunk keeps
-    let leaves = irys_types::generate_leaves(std::iter::once(Ok(bytes.clone())), chunk_size)
-        .expect("leaves");
-    let root = irys_types::generate_data_root(leaves).expect("root");
-    let data_root = H256(root.id);
-    let proof = irys_types::resolve_proofs(root, None)
-        .expect("proofs")
+/// A one-chunk transaction header and its chunk.
+fn single_chunk_transaction(
+    config: &Config,
+    bytes: Vec<u8>,
+) -> (DataTransactionHeader, UnpackedChunk) {
+    let signer = IrysSigner::random_signer(&config.consensus);
+    let transaction = signer
+        .create_transaction(bytes, H256::zero())
+        .expect("create transaction");
+    let chunk = transaction
+        .data_chunks()
+        .expect("chunks")
         .into_iter()
         .next()
-        .expect("one proof");
-    UnpackedChunk {
-        data_root,
-        data_size: u64::try_from(chunk_size).expect("chunk length fits u64"),
-        data_path: proof.proof.into(),
-        bytes: bytes.into(),
-        tx_offset: TxChunkOffset::from(0),
-    }
+        .expect("one chunk");
+    (transaction.header, chunk)
 }
 
-fn confirm_data_root(db: &DatabaseProvider, chunk: &UnpackedChunk) {
-    let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-        tx: DataTransactionHeaderV1 {
-            data_root: chunk.data_root,
-            data_size: chunk.data_size,
-            ..Default::default()
-        },
-        metadata: DataTransactionMetadata::new(),
-    });
+fn cache_data_root(db: &DatabaseProvider, config: &Config, header: &DataTransactionHeader) {
     db.update_cache_eyre(|tx| {
-        irys_database::cache_data_root(tx, &header, None)?;
-        irys_database::confirm_data_size_for_data_root(tx, &chunk.data_root, chunk.data_size)?;
+        irys_database::cache_data_root(tx, header, None, &config.data_tree_geometry())?;
         Ok(())
     })
-    .expect("cache and confirm data root");
+    .expect("cache data root");
 }
 
 /// An ingest records its chunk-cache commit wait once, so a slow root
@@ -95,10 +81,10 @@ async fn ingest_records_the_cache_commit_duration() {
         TaskExecutor::test(),
     );
 
-    let chunk = single_chunk(vec![5_u8; 32]);
-    confirm_data_root(&db, &chunk);
+    let (header, chunk) = single_chunk_transaction(&config, vec![5_u8; 32]);
+    cache_data_root(&db, &config, &header);
     ChunkIngressFacadeImpl::new(service_senders.chunk_ingress.clone())
-        .handle_chunk_ingress(chunk)
+        .handle_chunk_ingress(chunk, ChunkIngressSource::Sent)
         .await
         .expect("chunk ingress");
     provider.force_flush().expect("flush metrics");

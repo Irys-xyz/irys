@@ -15,7 +15,10 @@ use irys_types::{
     Base64, BlockHeight, DataLedger, IrysAddress, IrysPeerId, LedgerIndexItem, PeerListItemInner,
     RelativeChunkOffset, chunk::RelativeChunkOffsetFlags,
 };
-use irys_types::{ChunkPathHash, DataRoot, H256, PartitionChunkOffset, decode_address};
+use irys_types::{
+    ChunkKey, DataCommitment, DataTreeRoot, H256, PartitionChunkOffset, TxChunkOffset,
+    decode_address,
+};
 use irys_types::{
     CommitmentTransaction, CommitmentTransactionMetadata, CommitmentTransactionV1,
     CommitmentTransactionV2, DataTransactionHeader, DataTransactionHeaderV1,
@@ -263,12 +266,7 @@ impl CompactRowCheck for CompactCachedIngressProof {
     }
 }
 
-impl_compact_row_check_for_flag_header!(
-    CachedDataRoot,
-    CachedChunk,
-    ChunkPathHashes,
-    PendingBodyMigration
-);
+impl_compact_row_check_for_flag_header!(CachedDataRoot, ChunkPathHashes, PendingBodyMigration);
 
 /// Longest varint `usize` the walk accepts. `decode_varuint` reads up to 33 bytes, but its
 /// shift overflows (and panics in debug builds) from the 11th byte on, and no valid length
@@ -335,7 +333,10 @@ impl_compact_row_check_for_min_len!(
     CompactDataTxMetadata => DataTransactionMetadata::bitflag_encoded_bytes(),
     // `end` (its own flag header) and `tx_path_hash`
     TxPathInterval => PartitionChunkOffset::bitflag_encoded_bytes() + size_of::<H256>(),
-    TxLeafBinding => 2 * size_of::<H256>(),
+    // `data_root`, `prefix_hash` and `data_commitment`
+    TxLeafBinding => 2 * size_of::<H256>() + size_of::<DataCommitment>(),
+    // flag header, `data_commitment` and `tx_offset` (fixed 4 bytes, read unconditionally)
+    CachedChunk => CachedChunk::bitflag_encoded_bytes() + size_of::<DataCommitment>() + size_of::<TxChunkOffset>(),
 );
 
 // The wrapper derive emits no flag header, so the row is the bare `Vec` encoding.
@@ -358,7 +359,8 @@ impl CompactRowCheck for DataRootInfos {
 }
 
 /// Layout: flag header (holds the `data_size` byte length), the nested `start_offset` (its
-/// own flag header holding the `i32` byte length, then those bytes), then `data_size`.
+/// own flag header holding the `i32` byte length, then those bytes), then `data_size`, then
+/// the 32-byte `data_tree_root`.
 impl CompactRowCheck for DataRootInfo {
     fn check_compact_row(buf: &[u8]) -> Result<(), String> {
         const OFFSET_MAX_LEN: usize = size_of::<i32>();
@@ -379,7 +381,7 @@ impl CompactRowCheck for DataRootInfo {
                 "start_offset length {offset_len} exceeds {OFFSET_MAX_LEN}"
             ));
         }
-        require_min_compact_row_len(rest, offset_len + data_size_len)
+        require_min_compact_row_len(rest, offset_len + data_size_len + size_of::<DataTreeRoot>())
     }
 }
 
@@ -531,22 +533,22 @@ mod cache_tables_inner {
     tables! {
     CacheTables;
 
-    /// Indexes the DataRoots currently in the cache
+    /// Indexes the data currently in the cache. The key is the `data_commitment`.
     table CachedDataRoots {
-        type Key = DataRoot;
+        type Key = DataCommitment;
         type Value = CachedDataRoot;
     }
 
-    /// Index mapping a DataRoot to a set of ordered-by-index index entries, which contain the ChunkPathHash ('chunk id')
+    /// Index mapping a `data_commitment` to a set of ordered-by-index index entries, which contain the ChunkKey ('chunk id')
     table CachedChunksIndex {
-        type Key = DataRoot;
+        type Key = DataCommitment;
         type Value = CachedChunkIndexEntry;
         type SubKey = u32;
     }
 
-    /// Maps a ChunkPathHash to the cached chunk metadata and optionally its data
+    /// Maps a ChunkKey (`chunk_key(data_commitment, chunk index)`) to the cached chunk body
     table CachedChunks {
-        type Key = ChunkPathHash;
+        type Key = ChunkKey;
         type Value = CachedChunk;
     }
 
@@ -559,9 +561,9 @@ mod cache_tables_inner {
         type SubKey = u32;
     }
 
-    /// Indexes ingress proofs by DataRoot and Address
+    /// Indexes ingress proofs by `data_commitment` and Address
     table IngressProofs {
-        type Key = DataRoot;
+        type Key = DataCommitment;
         type Value = CompactCachedIngressProof;
         type SubKey = IrysAddress;
     }
@@ -711,7 +713,7 @@ mod compact_row_check_tests {
     #[case::cached_ingress_leaf(row_case(CachedIngressLeaf { tx_offset: 7.into(), ingress_data_hash: H256::repeat_byte(1) }, 36, None))]
     #[case::cached_chunk_index_entry(row_case(CachedChunkIndexEntry::default(), 5, None))]
     #[case::cached_data_root(row_case(CachedDataRoot::default(), 2, None))]
-    #[case::cached_chunk(row_case(CachedChunk::default(), 1, None))]
+    #[case::cached_chunk(row_case(CachedChunk::default(), 37, None))]
     #[case::chunk_path_hashes(row_case(ChunkPathHashes::default(), 1, None))]
     #[case::pending_body_migration(row_case(PendingBodyMigration::default(), 2, None))]
     #[case::peer_list_item(row_case(CompactPeerListItem::default(), 4, None))]
@@ -720,7 +722,7 @@ mod compact_row_check_tests {
     #[case::commitment_metadata(row_case(CompactCommitmentTxMetadata::default(), 1, None))]
     #[case::data_metadata(row_case(CompactDataTxMetadata::default(), 1, None))]
     #[case::tx_path_interval(row_case(TxPathInterval::default(), 33, None))]
-    #[case::tx_leaf_binding(row_case(TxLeafBinding::default(), 64, None))]
+    #[case::tx_leaf_binding(row_case(TxLeafBinding::default(), 96, None))]
     #[case::data_root_infos(row_case(DataRootInfos::default(), 1, None))]
     #[case::partition_hashes(row_case(PartitionHashes::default(), 1, None))]
     #[case::h256(row_case(H256::repeat_byte(1), 32, None))]
@@ -811,6 +813,7 @@ mod compact_row_check_tests {
         crate::submodule::tables::DataRootInfo {
             start_offset: RelativeChunkOffset(start_offset),
             data_size,
+            data_tree_root: DataTreeRoot(H256::repeat_byte(4)),
         }
     }
 
@@ -861,6 +864,11 @@ mod compact_row_check_tests {
         // start_offset length above 4 bytes
         assert!(DataRootInfos::decompress(&[1, 7, 0, 5, 0, 0, 0, 0, 0]).is_err());
         assert!(DataRootInfos::decompress(&one[..one.len() - 1]).is_err());
+        // element cut inside `data_tree_root`, with a consistent outer length
+        let element = &one[2..];
+        let mut cut_root = vec![1, u8::try_from(element.len() - 1).unwrap()];
+        cut_root.extend_from_slice(&element[..element.len() - 1]);
+        assert!(DataRootInfos::decompress(&cut_root).is_err());
     }
 
     #[test]

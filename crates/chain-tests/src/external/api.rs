@@ -105,10 +105,11 @@ async fn external_api() -> eyre::Result<()> {
     // now we wait for an ingress proof to be generated for this tx (automatic once all chunks have been uploaded)
     let ingress_proof = loop {
         // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
+        let data_commitment = recv_tx.data_commitment(&node.node_ctx.config.data_tree_geometry());
         let result = node
             .node_ctx
             .db
-            .view_cache(|tx| tx.get::<IngressProofs>(recv_tx.data_root))??;
+            .view_cache(|tx| tx.get::<IngressProofs>(data_commitment))??;
         match result {
             Some(ip) => break ip,
             None => sleep(Duration::from_millis(100)).await,
@@ -117,9 +118,12 @@ async fn external_api() -> eyre::Result<()> {
 
     info!(
         "got ingress proof for data root {}",
-        &ingress_proof.proof.data_root
+        &ingress_proof.proof.data_commitment
     );
-    assert_eq!(&ingress_proof.proof.data_root, &recv_tx.data_root);
+    assert_eq!(
+        ingress_proof.proof.data_commitment,
+        recv_tx.data_commitment(&node.node_ctx.config.data_tree_geometry())
+    );
 
     let id: String = tx_id.to_string();
 

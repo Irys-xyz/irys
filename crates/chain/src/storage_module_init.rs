@@ -152,6 +152,21 @@ mod tests {
         Ok(())
     }
 
+    /// The schema row of an index keyed by the data root, with no data rows.
+    /// Open must upgrade the row in place.
+    fn seed_data_root_keys(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
+        let dir = db_dir(base, name);
+        std::fs::create_dir_all(&dir)?;
+        let env = open_or_create_db(&dir, SubmoduleTables::ALL, db_args(config)?)?;
+        let tx = env.tx_mut()?;
+        tx.put::<Metadata>(
+            MetadataKey::DBSchemaVersion,
+            b"irys-submodule-index 2\n".to_vec(),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Schema v2 already. Open must leave the interval row where it is.
     fn seed_v2(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
         let dir = db_dir(base, name);
@@ -192,20 +207,20 @@ mod tests {
         Ok(())
     }
 
-    fn assert_migrated(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
+    fn assert_upgraded(config: &Config, base: &Path, name: &str) -> eyre::Result<()> {
         let env = open_or_create_db(db_dir(base, name), SubmoduleTables::ALL, db_args(config)?)?;
         let tx = env.tx()?;
         let schema = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)?;
         assert_eq!(
             schema.as_deref(),
             Some(SUBMODULE_SCHEMA.as_bytes()),
-            "{name} did not finish migration"
+            "{name} did not upgrade its schema row"
         );
-        let interval = tx
-            .get::<TxPathIntervalByStart>(PartitionChunkOffset::from(0))?
-            .unwrap_or_else(|| panic!("{name} has no interval"));
-        assert_eq!(interval.end, PartitionChunkOffset(CHUNKS - 1));
-        assert_eq!(interval.tx_path_hash, H256::repeat_byte(7));
+        assert_eq!(
+            tx.entries::<TxPathIntervalByStart>()?,
+            0,
+            "{name} gained interval rows"
+        );
         Ok(())
     }
 
@@ -231,16 +246,17 @@ mod tests {
         Ok(())
     }
 
-    /// Opens several v1 modules together. The break this catches is a serial
-    /// loop, a reordered result, or an error that names only the first failure.
+    /// Opens several modules that need a schema upgrade together. The break
+    /// this catches is a serial loop, a reordered result, or an error that
+    /// names only the first failure.
     #[tokio::test(flavor = "multi_thread")]
-    async fn parallel_v1_open_keeps_order_reports_every_failure_and_overlaps() -> eyre::Result<()> {
+    async fn parallel_open_keeps_order_reports_every_failure_and_overlaps() -> eyre::Result<()> {
         let tmp = TempDirBuilder::new().prefix("sm-open-parallel").build();
         let base = tmp.path();
         let config = config(base);
         let names = ["good-0", "good-1", "good-2"];
         for name in names {
-            seed_v1(&config, base, name)?;
+            seed_data_root_keys(&config, base, name)?;
         }
         let infos = vec![info(10, "good-0"), info(20, "good-1"), info(30, "good-2")];
         let started = Instant::now();
@@ -250,7 +266,7 @@ mod tests {
         assert_eq!(ids, vec![10, 20, 30]);
         drop(opened);
         for name in names {
-            assert_migrated(&config, base, name)?;
+            assert_upgraded(&config, base, name)?;
         }
         let serial = DELAY * names.len() as u32;
         assert!(
@@ -268,12 +284,14 @@ mod tests {
         let kept_b = "kept-b";
         let already = "already-v2";
         let rocks = "rocks-mod";
+        let v1_data = "v1-data";
         seed_foreign(&config, base, bad_first)?;
-        seed_v1(&config, base, kept_a)?;
+        seed_data_root_keys(&config, base, kept_a)?;
         seed_foreign(&config, base, bad_second)?;
-        seed_v1(&config, base, kept_b)?;
+        seed_data_root_keys(&config, base, kept_b)?;
         seed_v2(&config, base, already)?;
         seed_rocks(base, rocks)?;
+        seed_v1(&config, base, v1_data)?;
         let err = open_storage_modules(
             &config,
             vec![
@@ -283,6 +301,7 @@ mod tests {
                 info(4, kept_b),
                 info(5, already),
                 info(6, rocks),
+                info(7, v1_data),
             ],
             Duration::ZERO,
         )
@@ -304,11 +323,17 @@ mod tests {
             "{text}"
         );
         assert!(
+            text.contains("storage module 7")
+                && text.contains(v1_data)
+                && text.contains("The network must reset"),
+            "{text}"
+        );
+        assert!(
             !text.contains("storage module 5"),
             "already-v2 module failed to open: {text}"
         );
-        assert_migrated(&config, base, kept_a)?;
-        assert_migrated(&config, base, kept_b)?;
+        assert_upgraded(&config, base, kept_a)?;
+        assert_upgraded(&config, base, kept_b)?;
         assert_v2_unchanged(&config, base, already)?;
         Ok(())
     }
