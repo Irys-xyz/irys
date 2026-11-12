@@ -2025,7 +2025,7 @@ pub async fn prevalidate_block(
     let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
         block.oracle_irys_price,
         previous_block.oracle_irys_price,
-        ema_rules.token_price_safe_range,
+        &ema_rules,
     );
     if !oracle_price_valid {
         return Err(PreValidationError::OraclePriceInvalid);

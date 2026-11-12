@@ -542,27 +542,6 @@ impl IrysBlockHeaderV1 {
         Encodable::encode(&self, buf);
     }
 
-    // treat any block whose height is a multiple of blocks_in_price_adjustment_interval
-    pub fn is_ema_recalculation_block(&self, blocks_in_price_adjustment_interval: u64) -> bool {
-        is_ema_recalculation_block(self.height, blocks_in_price_adjustment_interval)
-    }
-
-    /// Returns the height of the "previous" EMA recalculation block.
-    ///
-    /// - For the first two intervals (`height < 2 * blocks_in_price_adjustment_interval`), always return 0.
-    /// - Otherwise, return the largest multiple of `blocks_in_price_adjustment_interval` less than `height`.
-    ///   (If the current block is exactly on an interval boundary, step one interval back.)
-    pub fn previous_ema_recalculation_block_height(
-        &self,
-        blocks_in_price_adjustment_interval: u64,
-    ) -> u64 {
-        previous_ema_recalculation_block_height(self.height, blocks_in_price_adjustment_interval)
-    }
-
-    pub fn block_height_to_use_for_price(&self, blocks_in_price_adjustment_interval: u64) -> u64 {
-        block_height_to_use_for_price(self.height, blocks_in_price_adjustment_interval)
-    }
-
     /// Returns a borrowed slice of commitment ledger transaction IDs.
     pub fn commitment_tx_ids(&self) -> &[H256] {
         self.system_ledgers
@@ -603,59 +582,6 @@ impl IrysBlockHeaderV1 {
             .iter()
             .find(|l| l.ledger_id == ledger_id as u32)
             .map(|l| l.tx_ids.0.as_slice())
-    }
-}
-
-// treat any block whose height is a multiple of blocks_in_price_adjustment_interval
-pub fn is_ema_recalculation_block(height: u64, blocks_in_price_adjustment_interval: u64) -> bool {
-    // the first 2 adjustment intervals have special handling where we calculate the
-    // EMA for each block using the value from the preceding one
-    if height < (blocks_in_price_adjustment_interval * 2) {
-        true
-    } else {
-        (height.saturating_add(1)).is_multiple_of(blocks_in_price_adjustment_interval)
-    }
-}
-
-pub fn block_height_to_use_for_price(height: u64, blocks_in_price_adjustment_interval: u64) -> u64 {
-    // we need to use the genesis price
-    if height < (blocks_in_price_adjustment_interval * 2) {
-        0
-    } else {
-        // we need to use the price from 2 intervals ago
-        let prev_ema_height =
-            prev_ema_ignore_genesis_rules(height, blocks_in_price_adjustment_interval);
-
-        // the preceding ema
-        prev_ema_ignore_genesis_rules(prev_ema_height, blocks_in_price_adjustment_interval)
-    }
-}
-
-/// Returns the height of the "previous" EMA recalculation block.
-pub fn previous_ema_recalculation_block_height(
-    height: u64,
-    blocks_in_price_adjustment_interval: u64,
-) -> u64 {
-    // the first 2 adjustment intervals have special handling where we calculate the
-    // EMA for each block using the value from the preceding one
-    if height < (blocks_in_price_adjustment_interval * 2) {
-        return height.saturating_sub(1);
-    }
-
-    // After the first 2 adjustment intervals we start calculating the EMA
-    // only using the last EMA block
-    prev_ema_ignore_genesis_rules(height, blocks_in_price_adjustment_interval)
-}
-
-fn prev_ema_ignore_genesis_rules(height: u64, blocks_in_price_adjustment_interval: u64) -> u64 {
-    // heights are zero indexed hence adding +1
-    let remainder = (height + 1) % blocks_in_price_adjustment_interval;
-    if remainder == 0 {
-        // If the current block is on an interval boundary, go one interval back.
-        height.saturating_sub(blocks_in_price_adjustment_interval)
-    } else {
-        // Otherwise, drop the remainder.
-        height.saturating_sub(remainder)
     }
 }
 
@@ -1691,7 +1617,6 @@ mod tests {
     use alloy_primitives::{Signature, keccak256};
     use alloy_rlp::Decodable;
     use rand::{Rng as _, SeedableRng as _, rngs::StdRng};
-    use rstest::rstest;
     use serde_json;
     use zerocopy::IntoBytes as _;
 
@@ -1862,64 +1787,6 @@ mod tests {
 
         // assert
         assert_eq!(derived_header, header);
-    }
-
-    #[rstest]
-    #[case(0, 0)]
-    #[case(1, 0)]
-    #[case(15, 14)]
-    #[case(19, 18)]
-    #[case(20, 19)]
-    #[case(21, 19)]
-    #[case(29, 19)]
-    #[case(30, 29)]
-    #[case(31, 29)]
-    #[case(39, 29)]
-    #[case(40, 39)]
-    #[case(41, 39)]
-    #[case(99, 89)]
-    #[case(100, 99)]
-    fn test_previous_ema_for_multiple_intervals(
-        #[case] height: u64,
-        #[case] expected_prev_ema: u64,
-    ) {
-        let interval = 10;
-        let header = IrysBlockHeaderV1 {
-            height,
-            ..Default::default()
-        };
-        let result = header.previous_ema_recalculation_block_height(interval);
-
-        assert_eq!(
-            result, expected_prev_ema,
-            "For height={height}, expected {expected_prev_ema} but got {result}"
-        );
-    }
-
-    #[rstest]
-    #[case(0, true)]
-    #[case(1, true)]
-    #[case(9, true)]
-    #[case(10, true)]
-    #[case(11, true)]
-    #[case(19, true)]
-    #[case(20, false)]
-    #[case(21, false)]
-    #[case(30, false)]
-    #[case(99, true)]
-    #[case(100, false)]
-    fn test_is_ema_recalculation_block(#[case] height: u64, #[case] expected_is_ema: bool) {
-        let interval = 10;
-        let header = IrysBlockHeaderV1 {
-            height,
-            ..Default::default()
-        };
-        let is_ema = header.is_ema_recalculation_block(interval);
-
-        assert_eq!(
-            is_ema, expected_is_ema,
-            "For height={height}, expected is_ema_recalculation_block={expected_is_ema} but got {is_ema}"
-        );
     }
 
     #[test]

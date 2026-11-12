@@ -55,6 +55,8 @@
 //!
 //! - **Oracle price bound**: a block's oracle price may differ from its parent's by
 //!   `Delta::token_price_safe_range` (±10%), not `token_price_safe_range` (±100%).
+//!   A positive bound allows at least a one-atomic-unit upward step for recovery
+//!   from tiny prices. Oracle prices and calculated EMAs have a one-unit floor.
 //! - **Interval length**: an interval is `Delta::ema_price_adjustment_interval`
 //!   blocks (20), not `ema.price_adjustment_interval` (10). Interval boundaries stay
 //!   keyed on the block height, so the first Delta interval ends at the next
@@ -71,7 +73,7 @@
 
 use eyre::{Result, ensure};
 use irys_types::{
-    ConsensusConfig, IrysBlockHeader, IrysTokenPrice,
+    ConsensusConfig, IrysBlockHeader, IrysTokenPrice, U256, UnixTimestamp,
     hardfork_config::{EmaRules, EmaSampling},
     storage_pricing::{Amount, phantoms::Percentage},
 };
@@ -286,7 +288,7 @@ impl EmaSnapshot {
         let blocks_in_interval = rules.price_adjustment_interval;
 
         let oracle_price_for_block_inclusion =
-            bound_in_min_max_range(oracle_price, safe_range, parent_block.oracle_irys_price);
+            Self::bound_oracle_price(oracle_price, parent_block.oracle_irys_price, rules);
 
         // Special handling for first 2 adjustment intervals.
         // the first 2 adjustment intervals have special handling where we calculate the
@@ -328,7 +330,7 @@ impl EmaSnapshot {
             }
         };
 
-        let ema = oracle_price_for_calculation
+        let mut ema = oracle_price_for_calculation
             .calculate_ema(
                 blocks_in_interval,
                 parent_snapshot.ema_price_current_interval,
@@ -337,6 +339,13 @@ impl EmaSnapshot {
                 tracing::warn!(custom.error = ?err, "price overflow, using previous EMA price");
                 parent_snapshot.ema_price_current_interval
             });
+        // Each weighted term is rounded down separately. Positive inputs can
+        // therefore produce zero at atomic precision. Delta keeps fee prices
+        // positive, including recovery from a legacy zero EMA; historical
+        // pre-Delta arithmetic must remain unchanged.
+        if rules.sampling == EmaSampling::IntervalMedian {
+            ema = ema.max(IrysTokenPrice::new(U256::one()));
+        }
         ExponentialMarketAvgCalculation {
             oracle_price_for_calculation,
             ema,
@@ -355,13 +364,35 @@ impl EmaSnapshot {
     pub fn oracle_price_is_valid(
         oracle_price: IrysTokenPrice,
         previous_oracle_price: IrysTokenPrice,
-        safe_range: Amount<Percentage>,
+        rules: &EmaRules,
     ) -> bool {
         if oracle_price.amount.is_zero() {
             return false;
         }
-        let capped = bound_in_min_max_range(oracle_price, safe_range, previous_oracle_price);
-        oracle_price == capped
+        oracle_price == Self::bound_oracle_price(oracle_price, previous_oracle_price, rules)
+    }
+
+    /// Producer and validator share the same fork-specific rounding rules.
+    fn bound_oracle_price(
+        desired: IrysTokenPrice,
+        parent: IrysTokenPrice,
+        rules: &EmaRules,
+    ) -> IrysTokenPrice {
+        let range = rules.token_price_safe_range;
+        if rules.sampling == EmaSampling::PreviousIntervalBlock {
+            return bound_in_min_max_range(desired, range, parent);
+        }
+        let one = IrysTokenPrice::new(U256::one());
+        let mut upper = parent.add_multiplier(range).unwrap_or(parent);
+        // A positive percentage must allow recovery from atomic prices whose
+        // percentage increment rounds to zero. Saturation handles U256::MAX.
+        if !range.amount.is_zero() {
+            upper = upper.max(IrysTokenPrice::new(
+                parent.amount.saturating_add(U256::one()),
+            ));
+        }
+        let lower = parent.sub_multiplier(range).unwrap_or(parent).max(one);
+        desired.clamp(lower, upper.max(lower))
     }
 
     /// Get the EMA price that should be used for public pricing.
@@ -387,6 +418,24 @@ impl EmaSnapshot {
                 .min(self.ema_price_2_intervals_ago)
         } else {
             self.ema_for_public_pricing()
+        }
+    }
+
+    /// Quote conservatively across a possible Delta activation. A child's
+    /// timestamp is not known at quote time, so while Delta is pending both
+    /// interval schedules can determine the next roll.
+    pub fn ema_for_public_quote_at(
+        &self,
+        tip_height: u64,
+        tip_timestamp: UnixTimestamp,
+        config: &ConsensusConfig,
+    ) -> IrysTokenPrice {
+        let current = config.ema_rules_at(tip_timestamp).price_adjustment_interval;
+        let quote = self.ema_for_public_quote(tip_height, current);
+        match config.hardforks.delta {
+            Some(delta) if tip_timestamp < delta.activation_timestamp => quote
+                .min(self.ema_for_public_quote(tip_height, delta.ema_price_adjustment_interval)),
+            _ => quote,
         }
     }
 
@@ -590,7 +639,6 @@ pub fn create_ema_snapshot_from_chain_history(
 #[cfg(test)]
 mod test {
     use super::*;
-    use irys_types::is_ema_recalculation_block;
     use irys_types::{ConsensusConfig, EmaConfig};
     use rstest::rstest;
     use rust_decimal::Decimal;
@@ -908,7 +956,7 @@ mod test {
                 EmaSnapshot::oracle_price_is_valid(
                     ema_block.oracle_price_for_calculation,
                     parent_block.oracle_irys_price,
-                    config.token_price_safe_range,
+                    &config.ema_rules_at(UnixTimestamp::from_secs(0)),
                 ),
                 "Capped oracle price should be within safe range"
             );
@@ -918,7 +966,7 @@ mod test {
                 !EmaSnapshot::oracle_price_is_valid(
                     oracle_price,
                     parent_block.oracle_irys_price,
-                    config.token_price_safe_range,
+                    &config.ema_rules_at(UnixTimestamp::from_secs(0)),
                 ),
                 "Original oracle price should be outside safe range"
             );
@@ -956,7 +1004,9 @@ mod test {
 
         // Verify this is an EMA recalculation block
         assert!(
-            is_ema_recalculation_block(new_block_height, config.ema.price_adjustment_interval),
+            config
+                .ema_rules_at(UnixTimestamp::from_secs(new_block_height))
+                .is_ema_recalculation_block(new_block_height),
             "Block {} should be an EMA recalculation block",
             new_block_height
         );
@@ -1226,6 +1276,150 @@ mod test {
         );
     }
 
+    #[test]
+    fn delta_tiny_prices_can_recover_without_zero_ema() {
+        let config = config_with_delta_at(50);
+        let rules = config.ema_rules_at(UnixTimestamp::from_secs(50));
+        let one = IrysTokenPrice::new(U256::one());
+        let healthy = IrysTokenPrice::token(dec!(1)).unwrap();
+        // A final pre-Delta producer may legally report one atomic unit.
+        let legacy = config.ema_rules_at(UnixTimestamp::from_secs(49));
+        assert!(EmaSnapshot::oracle_price_is_valid(one, healthy, &legacy));
+        let mut parent = IrysBlockHeader::new_mock_header();
+        parent.height = 49;
+        parent.oracle_irys_price = one;
+        parent.ema_irys_price = one;
+        let mut snapshot = EmaSnapshot::genesis(&parent);
+        for _ in 0..450 {
+            let result = snapshot.calculate_ema_for_new_block(&parent, healthy, &rules);
+            assert!(
+                result.oracle_price_for_block_inclusion > parent.oracle_irys_price
+                    || parent.oracle_irys_price == healthy
+            );
+            assert!(EmaSnapshot::oracle_price_is_valid(
+                result.oracle_price_for_block_inclusion,
+                parent.oracle_irys_price,
+                &rules,
+            ));
+            assert!(result.ema >= one);
+            let mut child = parent.clone();
+            child.height += 1;
+            child.timestamp =
+                irys_types::UnixTimestampMs::from_millis(u128::from(child.height) * 1000);
+            child.oracle_irys_price = result.oracle_price_for_block_inclusion;
+            child.ema_irys_price = result.ema;
+            snapshot = snapshot.next_snapshot(&child, &parent, &config).unwrap();
+            assert!(snapshot.ema_price_current_interval >= one);
+            parent = child;
+        }
+        assert_eq!(parent.oracle_irys_price, healthy);
+    }
+
+    #[test]
+    fn delta_positive_ema_floor_preserves_legacy_arithmetic() {
+        let config = config_with_delta_at(50);
+        let one = IrysTokenPrice::new(U256::one());
+        let mut parent = IrysBlockHeader::new_mock_header();
+        parent.height = 1;
+        parent.oracle_irys_price = one;
+        parent.ema_irys_price = one;
+        let snapshot = EmaSnapshot::genesis(&parent);
+        let legacy = config.ema_rules_at(UnixTimestamp::from_secs(49));
+        let delta = config.ema_rules_at(UnixTimestamp::from_secs(50));
+        assert!(
+            snapshot
+                .calculate_ema_for_new_block(&parent, one, &legacy)
+                .ema
+                .amount
+                .is_zero()
+        );
+        assert_eq!(
+            snapshot
+                .calculate_ema_for_new_block(&parent, one, &delta)
+                .ema,
+            one
+        );
+        let zero_snapshot = EmaSnapshot {
+            ema_price_current_interval: IrysTokenPrice::new(U256::zero()),
+            ..(*snapshot).clone()
+        };
+        assert_eq!(
+            zero_snapshot
+                .calculate_ema_for_new_block(&parent, one, &delta)
+                .ema,
+            one
+        );
+    }
+
+    #[test]
+    fn delta_oracle_rounding_handles_atomic_and_maximum_prices() {
+        let mut rules = config_with_delta_at(0).ema_rules_at(UnixTimestamp::from_secs(0));
+        for raw in 1..=9 {
+            let parent = IrysTokenPrice::new(U256::from(raw));
+            let next = IrysTokenPrice::new(U256::from(raw + 1));
+            assert!(EmaSnapshot::oracle_price_is_valid(next, parent, &rules));
+            assert!(!EmaSnapshot::oracle_price_is_valid(
+                IrysTokenPrice::new(U256::zero()),
+                parent,
+                &rules
+            ));
+        }
+        let max = IrysTokenPrice::new(U256::MAX);
+        assert_eq!(EmaSnapshot::bound_oracle_price(max, max, &rules), max);
+        rules.token_price_safe_range = Amount::percentage(dec!(0)).unwrap();
+        let one = IrysTokenPrice::new(U256::one());
+        assert_eq!(EmaSnapshot::bound_oracle_price(max, one, &rules), one);
+    }
+
+    #[rstest]
+    #[case(10, 15, 44)]
+    #[case(10, 7, 41)]
+    #[case(20, 10, 29)]
+    #[case(10, 20, 39)]
+    fn quote_covers_activation_roll(
+        #[case] base_interval: u64,
+        #[case] delta_interval: u64,
+        #[case] tip_height: u64,
+    ) {
+        let mut config = config_with_delta_at(tip_height + 1);
+        config.ema.price_adjustment_interval = base_interval;
+        config
+            .hardforks
+            .delta
+            .as_mut()
+            .unwrap()
+            .ema_price_adjustment_interval = delta_interval;
+        let lower = IrysTokenPrice::token(dec!(0.9)).unwrap();
+        let higher = IrysTokenPrice::token(dec!(1.1)).unwrap();
+        let snapshot = EmaSnapshot {
+            ema_price_2_intervals_ago: higher,
+            ema_price_1_interval_ago: lower,
+            ..Default::default()
+        };
+        let mut parent = IrysBlockHeader::new_mock_header();
+        parent.height = tip_height;
+        parent.timestamp = irys_types::UnixTimestampMs::from_millis(u128::from(tip_height) * 1000);
+        let quote = snapshot.ema_for_public_quote_at(tip_height, parent.timestamp_secs(), &config);
+        let mut child = parent.clone();
+        child.height += 1;
+        child.timestamp = irys_types::UnixTimestampMs::from_millis(u128::from(child.height) * 1000);
+        let after = snapshot.next_snapshot(&child, &parent, &config).unwrap();
+        assert_eq!(quote, lower);
+        assert_eq!(quote, after.ema_for_public_pricing());
+        // A lower USD price quotes at least the token fee validation requires.
+        let cost = irys_types::storage_pricing::Amount::<(
+            irys_types::storage_pricing::phantoms::CostPerChunkDurationAdjusted,
+            irys_types::storage_pricing::phantoms::Usd,
+        )>::token(dec!(1))
+        .unwrap();
+        assert!(
+            cost.base_network_fee(U256::from(32), 32, quote).unwrap()
+                >= cost
+                    .base_network_fee(U256::from(32), 32, after.ema_for_public_pricing())
+                    .unwrap()
+        );
+    }
+
     /// From Delta an oracle price may differ from its parent's by 10%, where the
     /// base config allows 100%.
     #[test]
@@ -1248,12 +1442,12 @@ mod test {
         assert!(EmaSnapshot::oracle_price_is_valid(
             doubled,
             parent_block.oracle_irys_price,
-            before.token_price_safe_range
+            &before
         ));
         assert!(!EmaSnapshot::oracle_price_is_valid(
             doubled,
             parent_block.oracle_irys_price,
-            from.token_price_safe_range
+            &from
         ));
         // The producer caps its own price to the Delta bound.
         assert_eq!(
@@ -1307,8 +1501,17 @@ mod test {
     #[case::on_twenty_block_boundary(40)]
     #[case::late(87)]
     #[case::never(u64::MAX)]
-    fn delta_history_rebuild_matches_iterative_snapshot(#[case] activation_height: u64) {
-        let config = config_with_delta_at(activation_height);
+    fn delta_history_rebuild_matches_iterative_snapshot(
+        #[case] activation_height: u64,
+        #[values(4, 7, 15, 20)] delta_interval: u64,
+    ) {
+        let mut config = config_with_delta_at(activation_height);
+        config
+            .hardforks
+            .delta
+            .as_mut()
+            .unwrap()
+            .ema_price_adjustment_interval = delta_interval;
         let depth = config.ema_snapshot_history_depth() as usize;
         let blocks_and_snapshots = build_blocks_with_snapshots(200, &config);
         let blocks: Vec<IrysBlockHeader> = blocks_and_snapshots
@@ -1421,6 +1624,13 @@ mod test {
         use super::*;
         use rust_decimal_macros::dec;
 
+        fn rules(range: Amount<Percentage>) -> EmaRules {
+            EmaRules {
+                token_price_safe_range: range,
+                ..config_with_delta_at(u64::MAX).ema_rules_at(UnixTimestamp::from_secs(0))
+            }
+        }
+
         #[test]
         fn zero_oracle_price_is_always_invalid() {
             let parent = IrysTokenPrice::token(dec!(1.0)).unwrap();
@@ -1429,7 +1639,7 @@ mod test {
             let zero = IrysTokenPrice::token(dec!(0.0)).unwrap();
 
             assert!(
-                !EmaSnapshot::oracle_price_is_valid(zero, parent, full_range),
+                !EmaSnapshot::oracle_price_is_valid(zero, parent, &rules(full_range)),
                 "zero oracle price must be rejected even when the relative safe range includes 0"
             );
         }
@@ -1440,7 +1650,11 @@ mod test {
             let range = Amount::percentage(dec!(0.1)).unwrap();
             let price = IrysTokenPrice::token(dec!(1.05)).unwrap();
 
-            assert!(EmaSnapshot::oracle_price_is_valid(price, parent, range));
+            assert!(EmaSnapshot::oracle_price_is_valid(
+                price,
+                parent,
+                &rules(range)
+            ));
         }
 
         #[test]
@@ -1449,7 +1663,11 @@ mod test {
             let range = Amount::percentage(dec!(0.1)).unwrap();
             let price = IrysTokenPrice::token(dec!(1.20)).unwrap();
 
-            assert!(!EmaSnapshot::oracle_price_is_valid(price, parent, range));
+            assert!(!EmaSnapshot::oracle_price_is_valid(
+                price,
+                parent,
+                &rules(range)
+            ));
         }
     }
 }

@@ -228,7 +228,9 @@ pub struct Delta {
     /// Largest change of a block's oracle price against its parent's oracle price
     /// (default: 0.1, i.e. ±10%). Replaces `ConsensusConfig::token_price_safe_range`
     /// from the first block whose timestamp meets `activation_timestamp`.
-    /// Must be <= 1.0.
+    /// Must be <= 1.0. A positive bound permits at least one atomic unit of
+    /// upward movement when percentage rounding would otherwise trap the price.
+    /// Oracle prices and calculated EMA prices remain at least one atomic unit.
     #[serde(
         default = "Delta::default_token_price_safe_range",
         deserialize_with = "crate::serde_utils::percentage_amount",

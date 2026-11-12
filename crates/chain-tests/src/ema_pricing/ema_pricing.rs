@@ -224,10 +224,11 @@ async fn heavy_test_delta_ema_uses_interval_median_and_narrow_oracle_bound() -> 
             ema_price_adjustment_interval: delta_interval,
         });
     }
-    // The mock oracle reports a price far above the bound on every block.
+    // A constant $10 is above every cap through block 12 (1.1^12 < 4),
+    // even before the first poll. This must not depend on poller progress.
     config.oracles = vec![OracleConfig::Mock {
-        initial_price: Amount::token(dec!(1.0)).unwrap(),
-        incremental_change: Amount::token(dec!(1.0)).unwrap(),
+        initial_price: Amount::token(dec!(10.0)).unwrap(),
+        incremental_change: Amount::token(dec!(0.0)).unwrap(),
         smoothing_interval: 100,
         initial_direction_up: true,
         poll_interval_ms: 500,
