@@ -413,6 +413,24 @@ pub trait SubmoduleWrite: SubmoduleRead {
     /// Delete index rows. Does not delete the schema-version metadata row.
     fn clear(&mut self) -> eyre::Result<()>;
 
+    /// Delete the rows that describe ledger data: data roots, pending body
+    /// migrations, tx intervals, content placements, and the offset rows in
+    /// `uninitialized` (inclusive spans that the caller now labels
+    /// `Uninitialized`). Offset rows elsewhere and metadata (packing record,
+    /// partition binding, flags) stay.
+    ///
+    /// For a partition that moves to another ledger, slot, or capacity: its
+    /// entropy is still valid, its ledger data is not. Offset rows under the
+    /// kept `Entropy` labels are checksum-only: a proof row is written only
+    /// with `Data`. No value is read.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX stores no checksum, so it clears every row. RocksDB v1 keeps offset rows and metadata.
+    fn clear_ledger_data(
+        &mut self,
+        _uninitialized: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<()> {
+        self.clear()
+    }
+
     /// Ledger, height, and tx index for intervals assigned later in this batch.
     ///
     /// MDBX ignores this. RocksDB v1 copies it onto each new placement.
