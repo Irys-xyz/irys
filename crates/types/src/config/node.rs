@@ -198,10 +198,11 @@ impl Default for DatabaseConfig {
 /// Controls whether the local VDF thread computes its own steps.
 ///
 /// Not a switch for the VDF itself: the thread and its step buffer are always
-/// needed, because block validation uses the local buffer as a fast path and
-/// falls back to recomputing from a block's own seeds when it misses. What this
-/// selects is whether the thread *free-runs* — produces fresh steps — or only
-/// drains the validated fast-forward steps validation hands it.
+/// needed, because mining, recall-range lookups, the Stage A liveness wait,
+/// and the fast-forward drain all read it. Block validation hashes each block's
+/// steps from that block's own `prev_output` and `seed`; the buffer is not a
+/// proof. What this selects is whether the thread *free-runs* — produces fresh
+/// steps — or only drains the validated fast-forward steps validation hands it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum VdfFreeRun {
     /// Free-run only if the startup throughput benchmark says it pays off.

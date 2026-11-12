@@ -553,13 +553,13 @@ pub enum CancelEnum {
     Cancelled = 2,
 }
 
-/// Validate the steps from the `nonce_info` to see if they are valid.
+/// Validate a range of the block's VDF steps by hashing from the block's own
+/// `prev_output` (or the previous claimed step) and this block's reset `seed`.
 /// Verifies each step in parallel across as many cores as are available.
 pub fn vdf_step_batch_is_valid(
     pool: &rayon::ThreadPool,
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
-    vdf_steps_guard: &VdfStateReadonly,
     batch_range: Range<usize>,
     verify_last_step_checkpoints: bool,
     cancel: Arc<AtomicU8>,
@@ -577,37 +577,6 @@ pub fn vdf_step_batch_is_valid(
 
     let batch_steps = &vdf_info.steps.0[batch_range.clone()];
     let batch_start_step_number = vdf_info.first_step_number() + batch_range.start as u64;
-    let batch_end_step_number = batch_start_step_number + batch_steps.len() as u64 - 1;
-
-    // Fast-path: if the range is already known locally and matches, skip the
-    // parallel VDF recomputation. `get_steps` returns owned data and releases
-    // the underlying read guard before we log or compare below.
-    match vdf_steps_guard.get_steps(ii(batch_start_step_number, batch_end_step_number)) {
-        Ok(steps) => {
-            tracing::debug!(
-                vdf.batch_start = batch_start_step_number,
-                vdf.batch_end = batch_end_step_number,
-                "Validating VDF steps from VdfStepsReadGuard!"
-            );
-            if steps.0.as_slice() == batch_steps {
-                // Checkpoints already proven in prevalidate; do not re-hash here.
-                return Ok(());
-            }
-
-            // Mismatch: recompute from the block (buffer may be post-reorg poison).
-            tracing::debug!(
-                vdf.batch_start = batch_start_step_number,
-                vdf.batch_end = batch_end_step_number,
-                "Local VDF buffer disagrees with the block's claimed steps; recomputing from the block's own seed (buffer may be poisoned by a cross-boundary reorg)"
-            );
-        }
-        Err(err) => tracing::debug!(
-            vdf.batch_start = batch_start_step_number,
-            vdf.batch_end = batch_end_step_number,
-            "Unable to get full steps range from VdfStepsReadGuard: {:?} so calculating vdf batch for validation",
-            err.to_string()
-        ),
-    }
 
     let previous_seed = if batch_range.start == 0 {
         vdf_info.prev_output
@@ -736,13 +705,13 @@ pub fn vdf_step_batch_is_valid(
     Ok(())
 }
 
-/// Validate the steps from the `nonce_info` to see if they are valid.
+/// Validate every step in `vdf_info` by hashing from the block's own
+/// `prev_output` and reset `seed`.
 /// Verifies each step in parallel across as many cores as are available.
 pub fn vdf_steps_are_valid(
     pool: &rayon::ThreadPool,
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
-    vdf_steps_guard: &VdfStateReadonly,
     cancel: Arc<AtomicU8>, // fun fact: AtomicBool is the same thing as AtomicU8 (UnsafeCell around a u8)
                            // but we use AtomicU8 to signal *why* we need to stop (cancellation vs actual error)
 ) -> eyre::Result<()> {
@@ -754,7 +723,6 @@ pub fn vdf_steps_are_valid(
         pool,
         vdf_info,
         config,
-        vdf_steps_guard,
         0..vdf_info.steps.len(),
         true,
         cancel,
@@ -785,7 +753,7 @@ pub mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{Config, H256List, NodeConfig, VDFLimiterInfo};
+    use irys_types::{Config, H256List, NodeConfig, VDFLimiterInfo, VdfConfig};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::Duration;
@@ -834,22 +802,6 @@ mod tests {
             steps.push(seed);
         }
 
-        // Create VDF state WITHOUT the steps we're going to validate
-        // This forces vdf_steps_are_valid to actually compute them
-        let vdf_state = Arc::new(RwLock::new(VdfState {
-            global_step: Arc::new(AtomicU64::new(0)), // Start at 0, not at num_steps
-            global_step_from_the_latest_canonical_block: 0,
-            minimum_step_to_keep: 0,
-            capacity: 1000,
-            seeds: {
-                let mut seeds = VecDeque::new();
-                // Only store the initial seed (step 0)
-                seeds.push_back(Seed(H256::from_low_u64_be(42)));
-                seeds
-            },
-            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
-        }));
-
         // Create VDFLimiterInfo with our generated steps
         let vdf_info = VDFLimiterInfo {
             output: steps.last().copied().unwrap_or(H256::from_low_u64_be(42)), // Last step output
@@ -876,18 +828,9 @@ mod tests {
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
         let cancel_clone = Arc::clone(&cancel);
 
-        // Create VdfStateReadonly wrapper
-        let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
-
         // Spawn validation task
         let validation_handle = tokio::task::spawn_blocking(move || {
-            vdf_steps_are_valid(
-                &pool,
-                &vdf_info,
-                &vdf_config,
-                &vdf_state_readonly,
-                cancel_clone,
-            )
+            vdf_steps_are_valid(&pool, &vdf_info, &vdf_config, cancel_clone)
         });
 
         // Wait longer to ensure validation has started processing multiple steps
@@ -986,21 +929,11 @@ mod tests {
             .num_threads(threads)
             .build()
             .unwrap();
-        // Only the initial seed is buffered, so every step is recomputed.
-        let vdf_state = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
-            global_step: Arc::new(AtomicU64::new(0)),
-            global_step_from_the_latest_canonical_block: 0,
-            minimum_step_to_keep: 0,
-            capacity: 1000,
-            seeds: VecDeque::from([Seed(prev_output)]),
-            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
-        })));
         let validate = |info: &VDFLimiterInfo| {
             vdf_steps_are_valid(
                 &pool,
                 info,
                 &config,
-                &vdf_state,
                 Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
             )
         };
@@ -1028,6 +961,227 @@ mod tests {
                 .contains("last step checkpoints are invalid"),
             "{err}"
         );
+    }
+
+    struct ComputedChain {
+        prev_output: H256,
+        reset_seed: H256,
+        steps: Vec<H256>,
+        last_checkpoints: Vec<H256>,
+    }
+
+    fn low_cost_vdf_config(reset_frequency: usize) -> VdfConfig {
+        let mut node_config = NodeConfig::testing();
+        let vdf = &mut node_config.consensus.get_mut().vdf;
+        vdf.sha_1s_difficulty = 25 * 5;
+        vdf.num_checkpoints_in_vdf_step = 25;
+        vdf.reset_frequency = reset_frequency;
+        Config::new_with_random_peer_id(node_config).vdf.clone()
+    }
+
+    fn compute_chain(
+        config: &VdfConfig,
+        prev_output: H256,
+        reset_seed: H256,
+        num_steps: usize,
+    ) -> ComputedChain {
+        let mut steps = Vec::with_capacity(num_steps);
+        let mut last_checkpoints = Vec::new();
+        let mut seed = prev_output;
+        for i in 0..u64::try_from(num_steps).expect("step count fits in u64") {
+            if i > 0
+                && i.is_multiple_of(
+                    u64::try_from(config.reset_frequency).expect("reset_frequency fits in u64"),
+                )
+            {
+                seed = apply_reset_seed(seed, reset_seed);
+            }
+            let salt = U256::from(step_number_to_salt_number(config, i));
+            let mut checkpoints = vec![H256::zero(); config.num_checkpoints_in_vdf_step];
+            crate::vdf_sha_compress256(
+                salt,
+                &mut seed,
+                config.num_checkpoints_in_vdf_step,
+                config.num_iterations_per_checkpoint(),
+                &mut checkpoints,
+            );
+            steps.push(seed);
+            last_checkpoints = checkpoints;
+        }
+        ComputedChain {
+            prev_output,
+            reset_seed,
+            steps,
+            last_checkpoints,
+        }
+    }
+
+    fn limiter_from(chain: &ComputedChain) -> VDFLimiterInfo {
+        VDFLimiterInfo {
+            output: *chain.steps.last().expect("non-empty chain"),
+            global_step_number: u64::try_from(chain.steps.len()).expect("step count fits in u64"),
+            seed: chain.reset_seed,
+            next_seed: chain.reset_seed,
+            prev_output: chain.prev_output,
+            last_step_checkpoints: H256List(chain.last_checkpoints.clone()),
+            steps: H256List(chain.steps.clone()),
+            vdf_difficulty: None,
+            next_vdf_difficulty: None,
+        }
+    }
+
+    fn assert_invalid_step(result: eyre::Result<()>, cancel: &Arc<AtomicU8>) {
+        assert!(
+            result.is_err(),
+            "forged steps must be rejected, got {result:?}"
+        );
+        assert_eq!(
+            cancel.load(Ordering::Relaxed),
+            CancelEnum::InvalidStep as u8,
+            "rejection must set InvalidStep so the batch is not fast-forwarded"
+        );
+    }
+
+    #[test]
+    fn copied_steps_with_foreign_prev_output_are_rejected() {
+        let config = low_cost_vdf_config(10_000);
+        let chain_a = compute_chain(&config, H256::repeat_byte(0x11), H256::repeat_byte(0xAA), 4);
+        let chain_b = compute_chain(&config, H256::repeat_byte(0x22), H256::repeat_byte(0xAA), 4);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+
+        let mut forged = limiter_from(&chain_a);
+        forged.prev_output = chain_b.prev_output;
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        assert_invalid_step(
+            vdf_steps_are_valid(&pool, &forged, &config, Arc::clone(&cancel)),
+            &cancel,
+        );
+
+        let honest = limiter_from(&chain_a);
+        vdf_steps_are_valid(
+            &pool,
+            &honest,
+            &config,
+            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+        )
+        .expect("honest A-rooted steps must still pass");
+    }
+
+    #[test]
+    fn copied_steps_with_foreign_reset_seed_are_rejected() {
+        let config = low_cost_vdf_config(3);
+        let prev = H256::repeat_byte(0x42);
+        let chain_a = compute_chain(&config, prev, H256::repeat_byte(0x13), 7);
+        let chain_b = compute_chain(&config, prev, H256::repeat_byte(0x31), 7);
+        assert_eq!(
+            &chain_a.steps[..3],
+            &chain_b.steps[..3],
+            "pre-reset prefix must match"
+        );
+        assert_ne!(
+            chain_a.steps[3], chain_b.steps[3],
+            "post-reset steps must diverge"
+        );
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+
+        let mut forged = limiter_from(&chain_a);
+        forged.seed = chain_b.reset_seed;
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        assert_invalid_step(
+            vdf_steps_are_valid(&pool, &forged, &config, Arc::clone(&cancel)),
+            &cancel,
+        );
+
+        let cancel_sub = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        assert_invalid_step(
+            vdf_step_batch_is_valid(
+                &pool,
+                &forged,
+                &config,
+                3..5,
+                false,
+                Arc::clone(&cancel_sub),
+            ),
+            &cancel_sub,
+        );
+
+        vdf_steps_are_valid(
+            &pool,
+            &limiter_from(&chain_a),
+            &config,
+            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+        )
+        .expect("honest A-seed steps must still pass");
+    }
+
+    #[test]
+    fn later_batch_is_rooted_in_the_block_not_the_buffer() {
+        let config = low_cost_vdf_config(10_000);
+        let chain_a = compute_chain(&config, H256::repeat_byte(0x11), H256::repeat_byte(0xAA), 5);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+
+        let mut forged = limiter_from(&chain_a);
+        forged.steps.0[1] = H256::repeat_byte(0xFF);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        assert_invalid_step(
+            vdf_step_batch_is_valid(&pool, &forged, &config, 2..4, false, Arc::clone(&cancel)),
+            &cancel,
+        );
+    }
+
+    #[test]
+    fn spliced_buffer_range_is_rejected() {
+        let config = low_cost_vdf_config(3);
+        let chain_a = compute_chain(&config, H256::repeat_byte(0x11), H256::repeat_byte(0xAA), 6);
+        let chain_b = compute_chain(&config, H256::repeat_byte(0x22), H256::repeat_byte(0xBB), 6);
+        // Join after global step 2: previous_step_number for step 3 is 2, not a multiple of 3.
+        let mut spliced_steps = chain_a.steps[..2].to_vec();
+        spliced_steps.extend_from_slice(&chain_b.steps[2..]);
+        assert_ne!(
+            spliced_steps[2], chain_a.steps[2],
+            "the join must not be a hash link"
+        );
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+
+        let mut forged = limiter_from(&chain_a);
+        forged.steps = H256List(spliced_steps);
+        forged.output = *forged.steps.0.last().expect("non-empty");
+        forged.last_step_checkpoints = H256List(chain_b.last_checkpoints.clone());
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        assert_invalid_step(
+            vdf_steps_are_valid(&pool, &forged, &config, Arc::clone(&cancel)),
+            &cancel,
+        );
+    }
+
+    #[test]
+    fn valid_steps_pass_whatever_the_buffer_holds() {
+        let config = low_cost_vdf_config(3);
+        let chain_a = compute_chain(&config, H256::repeat_byte(0x11), H256::repeat_byte(0xAA), 5);
+        let honest = limiter_from(&chain_a);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        vdf_steps_are_valid(
+            &pool,
+            &honest,
+            &config,
+            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+        )
+        .expect("honest steps must pass");
     }
 
     fn vdf_state_at(current_step: u64) -> VdfState {
