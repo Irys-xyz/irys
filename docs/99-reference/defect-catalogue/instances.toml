@@ -1,0 +1,66 @@
+# Defect instance log. Add rows only; do not edit or remove rows.
+# One [[instance]] table per instance. Fields: class, site, found ("YYYY-MM-DD"),
+# found_by, fix (PR number or commit), released_in (release tag), note (optional).
+# See README.md and `cargo xtask defects check`.
+
+[[instance]]
+class = "hash-iteration-order-in-consensus"
+site = "crates/domain/src/models/block_tree.rs::BlockTree::get_by_solution_hash"
+found = "2026-05-19"
+found_by = "audit"
+fix = "#1425"
+released_in = "testnet-3.0.0"
+note = "solutions map changed to BTreeMap<H256, BTreeSet<BlockHash>>; smallest block hash wins a tie"
+
+[[instance]]
+class = "hash-iteration-order-in-consensus"
+site = "crates/actors/src/block_validation.rs::get_assigned_ingress_proofs"
+found = "2026-05-19"
+found_by = "audit"
+fix = "#1425"
+released_in = "testnet-3.0.0"
+note = "slot_ranges changed to BTreeMap so the first intersecting slot is the lowest slot index on all nodes; masked while config pins number_of_ingress_proofs_from_assignees to 0"
+
+[[instance]]
+class = "uncapped-peer-response-body"
+site = "crates/p2p/src/gossip_client.rs::GossipClient"
+found = "2026-10-13"
+found_by = "other"
+fix = "#1574"
+released_in = "testnet-4.1.0"
+note = "all gossip response reads, error bodies included"
+
+[[instance]]
+class = "uncapped-peer-response-body"
+site = "crates/api-client/src/lib.rs::IrysApiClient"
+found = "2026-10-13"
+found_by = "other"
+fix = "#1574"
+released_in = "testnet-4.1.0"
+
+[[instance]]
+class = "uncapped-peer-response-body"
+site = "crates/chain/src/peer_utilities.rs::fetch_genesis_block"
+found = "2026-10-13"
+found_by = "other"
+fix = "#1574"
+released_in = "testnet-4.1.0"
+note = "also fetch_block; both now read through IrysApiClient"
+
+[[instance]]
+class = "uncapped-peer-response-body"
+site = "crates/actors/src/data_sync_service/chunk_fetcher.rs::HttpChunkFetcher::get_chunk_json"
+found = "2026-10-26"
+found_by = "review"
+fix = "#1678"
+released_in = "testnet-4.1.1"
+note = "sibling of the gossip client sites; the earlier fix did not sweep this file"
+
+[[instance]]
+class = "uncapped-peer-response-body"
+site = "crates/actors/src/block_validation.rs::data_txs_are_valid"
+found = "2026-10-26"
+found_by = "review"
+fix = "#1678"
+released_in = "testnet-4.1.1"
+note = "peer chunk fetch for ingress-proof checks"

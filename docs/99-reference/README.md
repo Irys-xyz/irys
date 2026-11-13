@@ -43,6 +43,9 @@ Conventions for adding tracing to functions in the Irys codebase.
 ### [Authoring Hardforks](./06-authoring-hardforks.md)
 Outlines the steps involved to add a hardfork to the Irys codebase.
 
+### [Defect Catalogue](./defect-catalogue/README.md)
+Defect classes that we found and fixed before, with a log of each instance. Reviewers check new work against it.
+
 ### [Release Process](./RELEASE_PROCESS.md)
 Conceptual reference for the release process: branches, tags, image streams, atomicity, head-tracking tags, hotfixes, rollback, and the rules for authoring deployment-specific patches.
 

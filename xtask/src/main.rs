@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use xshell::{Shell, cmd};
 
+use xtask::defects;
 use xtask::failures::{
     self, FailuresFile, RunResults, generate_nextest_config, get_failures_file_path,
     get_stats_file_path,
@@ -57,6 +58,46 @@ struct PruneArgs {
 struct Args {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum DefectsAction {
+    /// Validate the catalogue files. Reads only the catalogue directory, not git.
+    Check {
+        /// Catalogue directory (default: the one in this checkout).
+        #[clap(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Print instance counts per class, most frequent first.
+    ///
+    /// `--last-releases N` reads the release tags from git and takes the N highest versions of
+    /// each stream (testnet and mainnet apart). A release with no logged instance still counts.
+    Trend {
+        /// Catalogue directory (default: the one in this checkout).
+        #[clap(long)]
+        dir: Option<PathBuf>,
+        /// Count instances found on or after this date (YYYY-MM-DD).
+        #[clap(long, conflicts_with = "last_releases")]
+        since: Option<chrono::NaiveDate>,
+        /// Count instances whose fix shipped in the last N releases of each stream (N >= 1).
+        #[clap(long, value_parser = clap::value_parser!(u64).range(1..))]
+        last_releases: Option<u64>,
+    },
+    /// Match class patterns against the lines a diff adds. Hits are leads to verify, not findings.
+    ///
+    /// With `--head`, scans `<base>...<head>`. Without it, scans the working tree against `<base>`,
+    /// and every line of each untracked file (ignored files excluded). Always exits 0 on hits.
+    Scan {
+        /// Catalogue directory (default: the one in this checkout).
+        #[clap(long)]
+        dir: Option<PathBuf>,
+        /// Base ref (default: the merge-base of `master` and `HEAD`).
+        #[clap(long)]
+        base: Option<String>,
+        /// Head ref (default: the working tree).
+        #[clap(long)]
+        head: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -146,6 +187,11 @@ enum Commands {
         fix: bool,
     },
     CleanWorkspace,
+    /// Defect catalogue tools (`docs/99-reference/defect-catalogue/`).
+    Defects {
+        #[clap(subcommand)]
+        action: DefectsAction,
+    },
     /// Run multiversion integration tests from the multiversion-tests crate.
     ///
     /// Examples:
@@ -802,6 +848,13 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             .remove_and_run()?;
         }
         Commands::LocalChecks { with_tests, fix } => {
+            // First: it reads only the catalogue files, so a bad catalogue fails before any build.
+            run_command(
+                Commands::Defects {
+                    action: DefectsAction::Check { dir: None },
+                },
+                sh,
+            )?;
             run_command(
                 Commands::Fmt {
                     check_only: !fix,
@@ -828,6 +881,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 run_command(Args::try_parse_from(["xtask", "test"])?.command, sh)?
             }
         }
+        Commands::Defects { action } => run_defects(action)?,
         Commands::CleanWorkspace => {
             // get workspace metadata
             let metadata = MetadataCommand::new().exec()?;
@@ -1240,6 +1294,132 @@ fn run_manual_prune(window: &PruneWindow) -> eyre::Result<()> {
         Some(report) => report_prune(&report.executables, &report.units, false),
     }
     Ok(())
+}
+
+fn run_defects(action: DefectsAction) -> eyre::Result<()> {
+    match action {
+        DefectsAction::Check { dir } => {
+            let dir = dir.unwrap_or_else(defects::default_dir);
+            let problems = defects::catalogue::check(&dir);
+            for problem in &problems {
+                println!("{problem}");
+            }
+            if !problems.is_empty() {
+                eyre::bail!("defect catalogue: {} problem(s)", problems.len());
+            }
+        }
+        DefectsAction::Trend {
+            dir,
+            since,
+            last_releases,
+        } => {
+            let catalogue = load_valid_catalogue(dir)?;
+            let window = match (since, last_releases) {
+                (Some(date), _) => Some(defects::trend::Window::Since(date)),
+                (None, Some(count)) => {
+                    let sh = Shell::new()?;
+                    let tags: Vec<String> = cmd!(sh, "git tag --list")
+                        .read()?
+                        .lines()
+                        .map(str::to_owned)
+                        .collect();
+                    let releases = defects::trend::last_releases(&tags, usize::try_from(count)?);
+                    let names: Vec<&str> = releases.iter().map(String::as_str).collect();
+                    println!("window: {}", names.join(", "));
+                    Some(defects::trend::Window::Releases(releases))
+                }
+                (None, None) => None,
+            };
+            let rows = defects::trend::trend(&catalogue, window.as_ref());
+            print!("{}", defects::trend::render_trend(&rows, window.is_some()));
+        }
+        DefectsAction::Scan { dir, base, head } => {
+            let catalogue = load_valid_catalogue(dir)?;
+            let classes = defects::scan::compile(&catalogue)?;
+            let sh = Shell::new()?;
+            let base = match base {
+                Some(base) => base,
+                None => cmd!(sh, "git merge-base master HEAD").read()?,
+            };
+            // Fixed prefixes: a user's `diff.mnemonicPrefix` or `diff.noprefix` must not change
+            // the `+++ b/<path>` lines that the parser reads.
+            let diff_args = [
+                "-U0",
+                "--find-renames",
+                "--no-color",
+                "--no-ext-diff",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+            ];
+            let range = match &head {
+                Some(head) => format!("{base}...{head}"),
+                None => base,
+            };
+            // `core.quotepath=false`: a non-ASCII path stays as it is, not an escaped string.
+            let diff = cmd!(
+                sh,
+                "git -c core.quotepath=false diff {diff_args...} {range}"
+            )
+            .read()?;
+            let mut added = defects::scan::parse_added_lines(&diff);
+            if head.is_none() {
+                // `git diff` does not show untracked files: scan each one in full.
+                let untracked = cmd!(
+                    sh,
+                    "git -c core.quotepath=false ls-files -z --others --exclude-standard"
+                )
+                .read()?;
+                for path in untracked.split('\0').filter(|p| !p.is_empty()) {
+                    // A file that is not UTF-8 text (binary) has no lines to scan.
+                    if let Ok(text) = std::fs::read_to_string(path) {
+                        added.extend(defects::scan::file_as_added_lines(path, &text));
+                    }
+                }
+            }
+            let hits = defects::scan::scan(&classes, &added);
+            for hit in &hits {
+                println!(
+                    "{}  {}:{}  {}",
+                    hit.class,
+                    hit.path,
+                    hit.line,
+                    hit.text.trim()
+                );
+            }
+            println!("{} lead(s); verify each before you report it.", hits.len());
+            let unscanned: Vec<&str> = catalogue
+                .classes
+                .iter()
+                .filter(|class| class.meta.patterns.is_empty())
+                .map(|class| class.slug.as_str())
+                .collect();
+            if !unscanned.is_empty() {
+                println!(
+                    "classes with no scan pattern (read the diff for these): {}",
+                    unscanned.join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Loads the catalogue and refuses to continue if it has problems, so that `trend` and `scan`
+/// never work from a partial catalogue.
+fn load_valid_catalogue(dir: Option<PathBuf>) -> eyre::Result<defects::catalogue::Catalogue> {
+    let dir = dir.unwrap_or_else(defects::default_dir);
+    let (catalogue, mut problems) = defects::catalogue::load(&dir);
+    problems.extend(defects::catalogue::validate(&catalogue));
+    for problem in &problems {
+        eprintln!("{problem}");
+    }
+    if !problems.is_empty() {
+        eyre::bail!(
+            "defect catalogue: {} problem(s); run `cargo xtask defects check`",
+            problems.len()
+        );
+    }
+    Ok(catalogue)
 }
 
 fn main() -> eyre::Result<()> {
