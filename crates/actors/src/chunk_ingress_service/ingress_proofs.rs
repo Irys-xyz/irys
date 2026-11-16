@@ -186,6 +186,11 @@ impl ChunkIngressServiceInner {
         &self,
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
+        // A foreign signed payload is invalid independently of whether its signature recovers.
+        if ingress_proof.chain_id != self.config.consensus.chain_id {
+            return Err(IngressProofError::InvalidSignature);
+        }
+
         // Validate the proofs signature and basic details
         let address = ingress_proof
             .pre_validate(&ingress_proof.data_root)
@@ -708,8 +713,11 @@ mod unknown_anchor_tests {
     use irys_domain::BlockTree;
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::{
-        ConsensusConfig, IrysBlockHeader, IrysSignature, NodeConfig, ingress::IngressProofV1,
+        CommitmentStatus, ConsensusConfig, DataTransactionHeader, IrysBlockHeader, IrysSignature,
+        NodeConfig, U256, ingress::IngressProofV1, irys::IrysSigner,
     };
+    use reth::tasks::TaskExecutor;
+    use std::num::NonZeroUsize;
     use std::sync::RwLock as StdRwLock;
 
     fn signed_genesis() -> IrysBlockHeader {
@@ -758,5 +766,126 @@ mod unknown_anchor_tests {
             &dummy_proof(genesis.block_hash()),
         )
         .expect("genesis anchor is known and within expiry");
+    }
+
+    fn signed_proof(
+        signer: &IrysSigner,
+        data_root: H256,
+        anchor: H256,
+        chain_id: u64,
+    ) -> IngressProof {
+        let mut proof = IngressProof::V1(IngressProofV1 {
+            signature: IrysSignature::default(),
+            data_root,
+            proof: H256::random(),
+            chain_id,
+            anchor,
+        });
+        signer.sign_ingress_proof(&mut proof).unwrap();
+        proof
+    }
+
+    #[test]
+    fn ingest_rejects_foreign_chain_ingress_proof_without_storage_or_gossip() {
+        use irys_database::{cache_data_root, ingress_proofs_by_data_root};
+        use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
+
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let genesis = signed_genesis();
+        let mut tree = BlockTree::new(&genesis, config.consensus.clone());
+        let genesis_entry = tree.blocks.get_mut(&genesis.block_hash()).unwrap();
+        let epoch_snapshot = Arc::make_mut(&mut genesis_entry.epoch_snapshot);
+        epoch_snapshot.commitment_state.stake_commitments.insert(
+            signer.address(),
+            irys_domain::StakeEntry {
+                id: H256::random(),
+                commitment_status: CommitmentStatus::Active,
+                signer: signer.address(),
+                amount: U256::from(1),
+                reward_address: signer.address(),
+            },
+        );
+        let block_tree_read_guard = BlockTreeReadGuard::new(Arc::new(StdRwLock::new(tree)));
+        let db =
+            DatabaseProvider::for_testing(&tmp.path().join("db"), &tmp.path().join("db/cache"))
+                .unwrap();
+        let foreign_root = H256::repeat_byte(1);
+        let same_chain_root = H256::repeat_byte(2);
+        db.update_cache_eyre(|tx| {
+            for data_root in [foreign_root, same_chain_root] {
+                let mut header = DataTransactionHeader::new(&config.consensus);
+                header.data_root = data_root;
+                header.data_size = 1;
+                cache_data_root(tx, &header, None)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        let (service_senders, mut receivers) = crate::test_helpers::build_test_service_senders();
+        let inner = ChunkIngressServiceInner {
+            block_tree_read_guard,
+            config: config.clone(),
+            exec: TaskExecutor::test(),
+            irys_db: db.clone(),
+            message_handler_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            control_plane_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            max_concurrent_tasks: 1,
+            max_control_plane_tasks: 1,
+            service_senders,
+            storage_modules_guard: StorageModulesReadGuard::new(Arc::new(StdRwLock::new(vec![]))),
+            recent_valid_chunks: tokio::sync::RwLock::new(lru::LruCache::new(
+                NonZeroUsize::new(8).unwrap(),
+            )),
+            pending_chunks: Arc::new(tokio::sync::RwLock::new(
+                super::super::PriorityPendingChunks::new(8, 8),
+            )),
+            pending_ingress_proofs: std::sync::Mutex::new(
+                super::super::pending_ingress_proofs::PendingIngressProofs::new(8),
+            ),
+            chunk_data_writer: super::super::chunk_data_writer::ChunkDataWriter::closed_for_test(),
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            http_ingress_open: Arc::new(std::sync::Mutex::new(true)),
+            after_missing_data_size_scan: None,
+        };
+
+        let foreign = signed_proof(
+            &signer,
+            foreign_root,
+            genesis.block_hash(),
+            config.consensus.chain_id + 1,
+        );
+        assert_eq!(
+            inner.handle_ingest_ingress_proof(foreign),
+            Err(IngressProofError::InvalidSignature)
+        );
+        let stored_foreign = db
+            .view_cache_eyre(|tx| ingress_proofs_by_data_root(tx, foreign_root))
+            .unwrap();
+        assert!(stored_foreign.is_empty());
+        assert!(receivers.gossip_broadcast.try_recv().is_err());
+
+        let same_chain = signed_proof(
+            &signer,
+            same_chain_root,
+            genesis.block_hash(),
+            config.consensus.chain_id,
+        );
+        inner
+            .handle_ingest_ingress_proof(same_chain.clone())
+            .expect("same-chain proof keeps the existing ingest behavior");
+        let stored_same_chain = db
+            .view_cache_eyre(|tx| ingress_proofs_by_data_root(tx, same_chain_root))
+            .unwrap();
+        assert_eq!(stored_same_chain.len(), 1);
+        assert_eq!(stored_same_chain[0].1.proof, same_chain);
+        receivers
+            .gossip_broadcast
+            .try_recv()
+            .expect("same-chain proof is gossiped");
     }
 }

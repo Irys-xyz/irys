@@ -14,7 +14,7 @@ use eyre::{OptionExt as _, eyre};
 use futures::FutureExt as _;
 use helpers::{
     anchor_valid_ingress_proofs, dedup_ingress_proofs_by_signer, min_ingress_proof_anchor_height,
-    unexpired_ingress_proofs,
+    same_chain_ingress_proofs, unexpired_ingress_proofs,
 };
 use irys_database::DatabaseProvider;
 use irys_database::db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _};
@@ -1172,8 +1172,11 @@ async fn get_publish_txs_and_proofs(
                     ingress_proofs_by_data_root(read_tx, tx_header.data_root)
                 })?
                 .into_iter()
-                .map(|(_root, cached_proof)| cached_proof)
-                .collect::<Vec<_>>();
+                .map(|(_root, cached_proof)| cached_proof);
+            // External ingest rejects foreign-chain proofs, but direct or
+            // pre-existing cache rows can bypass that path.
+            let stored_proofs =
+                same_chain_ingress_proofs(stored_proofs, ctx.config.consensus.chain_id);
             let non_expired =
                 unexpired_ingress_proofs(stored_proofs, ctx.block_tree, ctx.db, ctx.config);
             // Dedup by signer address, keeping the first proof per address.

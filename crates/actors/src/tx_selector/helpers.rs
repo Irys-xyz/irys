@@ -94,6 +94,16 @@ pub(crate) fn min_ingress_proof_anchor_height(next_block_height: u64, config: &C
         .saturating_sub(config.consensus.mempool.ingress_proof_anchor_expiry_depth as u64)
 }
 
+pub(super) fn same_chain_ingress_proofs(
+    proofs: impl IntoIterator<Item = CompactCachedIngressProof>,
+    chain_id: u64,
+) -> Vec<CompactCachedIngressProof> {
+    proofs
+        .into_iter()
+        .filter(|cached| cached.proof.chain_id == chain_id)
+        .collect()
+}
+
 /// Proofs whose anchor has not expired.
 ///
 /// A database error inside the expiry check counts as not expired. That is what
@@ -164,4 +174,30 @@ pub(crate) fn keep_first_per_address<T>(
         .collect::<Vec<_>>();
     let dropped = before - kept.len();
     (kept, dropped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::{H256, IrysAddress};
+
+    #[test]
+    fn selector_keeps_only_same_chain_proof_for_data_root() {
+        let chain_id = 1_270;
+        let data_root = H256::repeat_byte(9);
+        let cached_proof = |address, proof_chain_id| {
+            let mut proof = irys_types::IngressProof::default();
+            proof.data_root = data_root;
+            proof.chain_id = proof_chain_id;
+            CompactCachedIngressProof(CachedIngressProof { address, proof })
+        };
+        let foreign = cached_proof(IrysAddress::repeat_byte(1), chain_id + 1);
+        let same_chain = cached_proof(IrysAddress::repeat_byte(2), chain_id);
+
+        let selected = same_chain_ingress_proofs(vec![foreign, same_chain.clone()], chain_id);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0, same_chain.0);
+        assert_eq!(selected[0].proof.data_root, data_root);
+    }
 }
