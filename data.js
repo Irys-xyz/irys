@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794504712466,
+  "lastUpdate": 1794837545974,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -23047,6 +23047,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000115,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c62b093148ff1d262bbacae3f4eef1cf6abfb950",
+          "message": "fix(consensus): reject an ingress proof signed for another chain (#1825)\n\nAn ingress proof signs its chain id, but block validation compared it only\nwhen full proof validation was on, which no preset enables. A block whose\nPublish ledger holds a proof for another chain is now invalid; the check\nruns before the PoA and VDF work. Ingest rejects such a proof before it\nrecovers the signer, and the producer skips one that is already stored.",
+          "timestamp": "2026-11-16T13:43:20Z",
+          "tree_id": "696550ed547bb66004476c9e029d990a60eda843",
+          "url": "https://github.com/Irys-xyz/irys/commit/c62b093148ff1d262bbacae3f4eef1cf6abfb950"
+        },
+        "date": 1794837544151,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015653,
+            "range": "± 0.000535",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.15338,
+            "range": "± 0.015685",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.643579,
+            "range": "± 0.183282",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.339245,
+            "range": "± 0.316445",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.073915,
+            "range": "± 0.002098",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 749.415883,
+            "range": "± 17.826227",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 862.772406,
+            "range": "± 59.616565",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117614,
+            "range": "± 0.000635",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1215.354719,
+            "range": "± 15.738964",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1597.449086,
+            "range": "± 184.374271",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027558,
+            "range": "± 0.000752",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 137.580116,
+            "range": "± 1.06168",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 179.87536,
+            "range": "± 0.51852",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
