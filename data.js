@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794837545974,
+  "lastUpdate": 1794848935579,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -23155,6 +23155,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "baac8639c35979231b793fe85b5f21f5b6e70276",
+          "message": "feat: add defect catalogue for reviews (#1781)\n\n* docs: add defect catalogue design\n\n* docs: add defect catalogue implementation plan\n\n* feat(xtask): add defect catalogue model and check command\n\n* feat(xtask): add defect catalogue trend command\n\n* feat(xtask): add defect catalogue diff scan\n\n* docs: add defect catalogue skills and process\n\n* docs: seed the defect catalogue\n\nTwo classes from released fixes: uncapped peer response bodies (5 sites)\nand hash iteration order in consensus code (2 sites).\n\nScan of the first cap fix commit: 0 leads. Scan of testnet-4.1.0...testnet-4.1.1:\n5 leads, all HashMap/HashSet in test code.\n\n* fix(xtask): satisfy clippy in defect trend window\n\n* docs: correct defect catalogue seed facts\n\nThe second raw read removed from peer_utilities was in fetch_block. Both\nhash-order sites came from one audit. The pre-fix slot loop took the first\nmatch, not the last.\n\n* feat(xtask): move defect review to a one-line-per-class detection list\n\nA review reads detect.md in full: id, severity, scope and the code shape to\nflag, plus one line per known non-issue. The rationale stays in the class\nfiles, which a review opens only to confirm a lead. Class front matter gains\nscope and flag (replacing applies_when) and drops title; check requires each\ndetect.md line to equal the line the front matter gives.\n\n* fix(xtask): tighten defect trend, scan and check\n\n- trend --last-releases N takes the last N release tags of each stream from\n  git. Testnet and mainnet version numbers differ, and a release with no\n  logged instance must still move the window. N must be at least 1.\n- scan reads untracked files in full when there is no --head, unquotes\n  quoted paths, drops the tab git adds after a path with a space, and runs\n  git with core.quotepath=false. A `*` in a paths glob no longer crosses\n  directories. It lists the classes that have no scan pattern.\n- check rejects a fix that is not a PR number or a commit SHA. A bad scope\n  or flag gives one problem that quotes the value, not a second detect.md\n  difference built from it.\n- local-checks runs the catalogue check first, before any build.\n- The hash-order class also matches turbofish, from and from_iter\n  constructors, and covers the other consensus actor files.\n\n* docs: harden defect catalogue skills and seed notes\n\n- Add skill: version-sorted release tag, and a disclosure check that fails\n  closed and reports no detail of a skipped defect.\n- Review skill: split a large diff by crate, fork and data-loss first, and\n  list the parts not reviewed.\n- Body class: say the scan misses a chunk loop with no cap.\n- Slot-range row: note that config masks the effect today.\n- Design and README: per-stream release window, untracked scan, detect.md\n  order. Mark the implementation plan superseded.\n\n* feat(xtask): record defect class enforcement and check known non-issue ids\n\nEach class now states how it is stopped today (review, scan, lint or\ntype), so a class that a lint or a type could stop is visible, and\n`trend` shows it next to the counts. `check` requires patterns for\n`scan` and none for `review`.\n\nEach known non-issue in the catalogue README now has a kebab-case id,\nand its \"Do not flag\" line in detect.md starts with the same id.\n`check` reports an id that is in one list and not in the other, so a\nstale line cannot hide real leads.\n\nThe docs and skills define \"recent\" for the trend: the last release\nof each stream for the version-bump review, the last two for a\nquarterly priority review.\n\n* fix(xtask): reject duplicate defect instance rows; show last release per stream\n\nTwo instance rows with the same class, site and fix count one instance\ntwice in the trend, so `check` now rejects the second row.\n\n`trend` showed one last release, the highest version over both\nstreams. Testnet and mainnet have their own version numbers, so a\ntestnet tag always won. It now shows the last testnet and the last\nmainnet release in separate columns.\n\n* fix(xtask): run defect scan from the repo root and report stale globs\n\n`git ls-files --others` lists untracked files relative to the current\ndirectory, so a scan run from a crate directory missed path globs.\nThe scan now runs git from the repo root.\n\nThe default base now prefers `origin/master` (a worktree's local\n`master` is often stale), and the scan prints the base it uses. It\nalso prints each class glob that matches no tracked file, so a\nrenamed file does not remove scan coverage without notice.\n\n* docs: fix defect catalogue release tag, advisory and seed details\n\n- The add skill took `released_in` from `sort -V`, which puts every\n  mainnet tag before every testnet tag. It now takes the first release\n  tag in time.\n- The advisory list is read with pagination, so a covering advisory\n  past the first page is not missed.\n- The review skill reports released or security-relevant instances\n  only to the user, never in a public PR comment, issue or commit.\n- Seed `found` dates use the fix PR open date, not the merge date.\n- The hash-order class scans block discovery, the tx selector and\n  irys-reth.\n\n* fix(xtask): drop the last-release columns from the defect trend\n\nMainnet releases get fixes by cherry-pick, which `git tag --contains`\ndoes not see, so a row records only the first release (in practice a\ntestnet tag) and the mainnet column was nearly always empty, even for\nfixes that are live on mainnet. `last-found` already shows recency.\nThe per-stream `--last-releases` window stays.\n\n* docs: log defect catalogue entries after release, not in the fix PR\n\nA fix PR is not released, so the disclosure rule stopped the add skill\non every open PR and no rows got logged. A fix PR now names its class\nin its description (`Defect class: <id>` or `Defect class: new`). Any\ntime after a release contains the fix, the add skill lists the merged\nPRs with that line and no row, and writes the entries.\n\n* feat(xtask): make released_in optional in the defect instance log\n\nAn entry can now land with its fix, before a release contains it, so\n`released_in` is optional and a later backfill adds it. `check`\nvalidates the tag only when it is present. A row with no release\ncounts in a `--since` trend window but not in a `--last-releases`\nwindow.\n\n* docs: let a public fix add its defect catalogue entry; add backfill\n\nA new defect class must guide other work at once, not after the next\nrelease. The fix PR is public and already shows the flaw, so an entry\nmay now land in the fix PR itself. A fix under a private advisory\nstill waits until the advisory is published, and unfixed sites are\nnever logged.\n\nLogging is best effort: the add skill also runs as a backfill over\nmerged PRs since a date or in a range. It skips PRs that already have\na row, triages from titles first, reads diffs only of likely fixes,\nand fills in missing `released_in` values. This replaces the\n`Defect class:` description line.\n\n* fix(xtask): report skipped defect files and accept CRLF front matter\n\n- `check` accepts a class file with CRLF line endings, and reports a\n  classes directory entry that it cannot list, not skip it.\n- `scan` reports an untracked file that it cannot read (other than a\n  binary file), so a clean result does not hide an unchecked file.\n- `scan` tells the user to pass `--base` when it cannot find the\n  merge-base.\n- The `scan` doc says that each pattern sees one added line, so no\n  hit does not mean the code is clean.\n\n* fix(xtask): keep added lines after a context line in a scan hunk\n\nA user's `diff.interHunkContext` setting merges near changes into one\nhunk with unchanged context lines. The parser took a context line as\nthe end of the hunk and dropped the added lines after it. It now\ncounts context lines, and the scan also passes\n`--inter-hunk-context=0`.\n\n* docs: add the wall-clock-for-internal-timing defect class\n\nThe issue names wall-clock time used where monotonic time is necessary\nas a seed class. The class file points to the `monotonic-time` skill\nfor the full guidance, and its scan pattern matches each new\n`SystemTime::now()` or `UnixTimestamp(Ms)::now()` as a lead.\n\nTwo instances, both fixed in one released PR: the p2p data request\nrate limiter windows, and the block producer's wait for a timestamp\npast the parent's second.\n\n* docs: flag Clock::now_ms() as a wall-clock read in the timing class\n\n`irys_types::global_clock().now_ms()` reads the OS wall clock in\nproduction, and a private `now_ms()` in the block tree service does the\nsame, but the scan pattern matched only `SystemTime::now()` and\n`UnixTimestamp(Ms)::now()`. The flag and a second pattern now cover\n`now_ms()` calls.\n\n* docs: shorten the wall-clock timing class scope and flag\n\nscope and flag are what a reviewer reads first for every class, so they\nkeep only the code shapes; the class body holds the details.",
+          "timestamp": "2026-11-16T16:41:34Z",
+          "tree_id": "a4b0d903bdd5f4248cc69c547a351bf39f7caa89",
+          "url": "https://github.com/Irys-xyz/irys/commit/baac8639c35979231b793fe85b5f21f5b6e70276"
+        },
+        "date": 1794848932387,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012255,
+            "range": "± 0.000373",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.121563,
+            "range": "± 0.003403",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.236678,
+            "range": "± 0.032437",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.357724,
+            "range": "± 0.177389",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.06723,
+            "range": "± 0.001511",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 664.763692,
+            "range": "± 17.597644",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 958.09031,
+            "range": "± 55.338217",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.11758,
+            "range": "± 0.000777",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1182.013512,
+            "range": "± 7.283248",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1541.489241,
+            "range": "± 4.629658",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027023,
+            "range": "± 0.000813",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 138.622483,
+            "range": "± 0.590326",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 181.041533,
+            "range": "± 0.892885",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000117,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
