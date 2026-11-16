@@ -144,7 +144,7 @@ Never add "Co-Authored-By" lines to commit messages.
 
 Reusable skills and commands live in the harness-neutral locations `.agents/skills/` and `.agents/commands/`. Harnesses that look in their own private directory (e.g. Claude Code's `.claude/skills`) may create a local bridge there, but the tracked source of truth is always under `.agents/`.
 
-Defect catalogue (`docs/99-reference/defect-catalogue/`): use the `defect-catalogue-review` skill in the final review before a PR merges and in the version-bump review; when a PR fixes an instance of a defect class, put a `Defect class: <id>` (or `Defect class: new`) line in its description; the `defect-catalogue-add` skill logs it after a release contains the fix.
+Defect catalogue (`docs/99-reference/defect-catalogue/`): use the `defect-catalogue-review` skill in the final review before a PR merges and in the version-bump review; when a PR fixes an instance of a defect class, use the `defect-catalogue-add` skill in that PR to add it (best effort; a backfill with the same skill adds missed fixes).
 
 ### Local changes
 

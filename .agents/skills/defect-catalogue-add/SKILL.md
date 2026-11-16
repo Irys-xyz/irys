@@ -1,6 +1,6 @@
 ---
 name: defect-catalogue-add
-description: Use to turn a PR, a commit, or a range of them into defect catalogue entries (a class file and/or instance log rows), for a new fix or to backfill old fixes. Checks the disclosure rule first. Optional sibling sweep.
+description: Use to turn a PR (open or merged), a commit, or a range of merged PRs into defect catalogue entries (a class file and/or instance log rows), in the fix PR itself or as a backfill of missed fixes. Checks the disclosure rule first. Optional sibling sweep.
 ---
 
 # Add defect catalogue entries from a PR or commit
@@ -9,16 +9,24 @@ The catalogue is in `docs/99-reference/defect-catalogue/`: `detect.md` (one dete
 class, read first in a review), `README.md` (process, known non-issues), `classes/<id>.md` (one
 file per class), `instances.toml` (instance log, rows are only added).
 
-Input: a PR number, a commit, or a range of either; or "pending": the merged PRs whose description
-has a `Defect class:` line and that have no row yet. To list them, run
+Logging is best effort: a fix PR adds its own entries when its author knows the class, and a
+backfill finds the fixes that nobody logged.
 
-```sh
-gh pr list --state merged --search '"Defect class" in:body' --limit 200 --json number,body \
-  --jq '.[] | select(.body | test("^Defect class:")) | .number'
-```
+Input, one of:
 
-and drop each PR whose number is already a `fix` in `instances.toml`. A PR that is not released
-yet stops at step 2; it stays pending for a later run.
+- **A fix:** a PR (open or merged), a commit, or a list of them. A fix PR can run this skill on
+  itself, so the entries land with the fix.
+- **A backfill:** a range of merged PRs, given as a date (`--since YYYY-MM-DD`) or two refs.
+  1. List the PRs: `gh pr list --state merged --search "merged:>=<date>" --limit 500 --json number,title,labels`,
+     or the `(#<n>)` suffixes of `git log --format=%s <from>..<to>`.
+  2. Drop each PR whose number is already a `fix` in `instances.toml`.
+  3. Triage from the title and labels, and the description only when they are not clear. Keep
+     the PRs that fix a defect. Read the diff of those PRs only.
+  4. In the report, give the range that this backfill covered, so that the next one starts after
+     it.
+
+  A backfill also fills in `released_in`: for each row that has no `released_in`, run the tag
+  command of step 2 on its fix, and add the tag if it prints one.
 
 Optional: `--sweep` (or ask the user) to search for sibling sites of a new class.
 
@@ -29,21 +37,26 @@ For each fix, do these steps in order.
    or a one-off. Skip one-offs and say why. One PR can contain several fixes; handle each.
 
 2. **Disclosure check.** This repo is public. Continue only if both are true:
-   - The fix is released. Run
-     `git tag --contains <sha> --sort=creatordate | grep -E '^(testnet|mainnet)-[0-9]+\.[0-9]+\.[0-9]+$' | head -1`.
-     It must print a tag. That tag is `released_in`: the first release, in time, that contains
-     the fix. Use the tag as printed; do not edit it.
+   - The fix is public: a commit on this repo's `master`, or an open PR on this repo. A fix that
+     is under a private security advisory (for example in its temporary private fork) is not
+     public until the advisory is published.
    - No open private advisory covers it. Read the titles and descriptions of
      `gh api --paginate "repos/Irys-xyz/irys/security-advisories?state=draft&per_page=100"` and
      the same with `state=triage`. If either call fails (for example 403), this check fails.
 
    If either check fails, stop for this fix. Write nothing about it in the repo, a commit, a PR,
-   an issue or a comment. To the user, report only the PR or commit and one of: "not released",
+   an issue or a comment. To the user, report only the PR or commit and one of: "not public",
    "advisory list unavailable", "open advisory". Do not describe the defect.
 
+   `released_in`: for a merged fix, run
+   `git tag --contains <sha> --sort=creatordate | grep -E '^(testnet|mainnet)-[0-9]+\.[0-9]+\.[0-9]+$' | head -1`.
+   If it prints a tag, that is `released_in` (the first release, in time, that contains the fix);
+   use it as printed. If it prints nothing, or the fix is an open PR, leave `released_in` out. A
+   later backfill adds it.
+
 3. **Confirm the fix is in the final tree.** A squash-merged PR can contain a fix that a later
-   commit in the same PR reverted. Read the current code at the site and confirm the correct form is
-   there. Do not log a reverted change.
+   commit in the same PR reverted. For a merged fix, read the current code at the site; for an open
+   PR, read the PR head. Confirm the correct form is there. Do not log a reverted change.
 
 4. **Write the entries.** Read `detect.md`.
    - The class exists: append an `[[instance]]` row to `instances.toml`.
@@ -130,6 +143,6 @@ site = "crates/p2p/src/gossip_client.rs::GossipClient::fetch"   # path::item
 found = "2026-09-22"                # date found; if unknown, the fix PR open date (gh pr view <n> --json createdAt)
 found_by = "review"                 # review | test | testnet | mainnet | audit | sweep | other
 fix = "#1574"                       # PR number or commit SHA
-released_in = "testnet-4.1.0"       # first release tag that contains the fix
+released_in = "testnet-4.1.0"       # optional: first release tag that contains the fix; a backfill adds it later
 note = "optional one line"          # optional
 ```

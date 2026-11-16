@@ -10,19 +10,20 @@ new work against it, so that a class we fixed once does not come back at a sibli
 - [`instances.toml`](instances.toml): one row per instance found, with where it was found and
   where it was fixed.
 
-**Disclosure:** this repo is public. Add only defects that are fixed **and** released (a
-`testnet-*` or `mainnet-*` tag contains the fix). Unfixed or unreleased security defects stay in
-private security advisories until the fix is released.
+**Disclosure:** this repo is public. Add a defect only when its fix is public: merged, or in an open
+PR on this repo. The public fix already shows the flaw, so the entry discloses nothing more. A fix
+under a private security advisory waits until the advisory is published. Never add an unfixed
+site.
 
 ## Process
 
-- A PR that fixes a defect that can occur at other sites names its class in the PR description:
-  a line `Defect class: <id>`, or `Defect class: new` for a class that is not in the catalogue.
-  The PR does not change the catalogue: its fix is not released yet.
-- Any time after a release contains the fix, the `defect-catalogue-add` skill
-  (`.agents/skills/defect-catalogue-add/`) turns the PR into entries: a class file and its
-  `detect.md` line for a new class, and an instance row. The skill can find the PRs that are not
-  logged yet, so this can run at any convenient time, for example with a backfill.
+- A PR that fixes a defect that can occur at other sites adds its entries in the same PR, with the
+  `defect-catalogue-add` skill (`.agents/skills/defect-catalogue-add/`): an instance row, and for
+  a new class, a class file and its `detect.md` line. Reviews of other work then use the new class
+  at once.
+- Logging is best effort. A backfill with the same skill goes through merged PRs (since a date,
+  or in a range) that have no row, and adds the fixes that were missed. It also adds
+  `released_in` (optional) to rows that do not have it yet.
 - Each class has an `enforcement` value: how the class is stopped today, the strongest control
   that applies. `review`: only a reviewer finds it. `scan`: `defects scan` patterns give leads.
   `lint`: a lint or another CI check rejects the code. `type`: a type or an API makes the defect
@@ -40,7 +41,8 @@ private security advisories until the fix is released.
   - `cargo xtask defects trend [--since YYYY-MM-DD | --last-releases N]`: instance counts per
     class, most frequent first, with each class's `enforcement`. `--last-releases N` counts
     instances whose `released_in` (the first release that contains the fix) is one of the last N
-    release tags in git, per stream (testnet and mainnet apart). `--since` counts by `found` date, for an ad hoc question.
+    release tags in git, per stream (testnet and mainnet apart). A row with no `released_in`
+    counts only with `--since`. `--since` counts by `found` date, for an ad hoc question.
   - "Recent" means `--last-releases 1` in the version-bump review and `--last-releases 2` in a
     quarterly priority review. A backfilled row keeps the date the defect was found, not the
     backfill date, so a backfill does not look like a spike.

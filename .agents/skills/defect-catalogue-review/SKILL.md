@@ -39,9 +39,8 @@ Do these steps in order.
    proof that the code is correct. Question the design as it is, and what it could be.
 
 6. **Report.** Report only true instances, each with `file:line`, the class id, why it is an
-   instance, and the **Correct form** from the class file. For each, give the
-   `Defect class: <id>` line for the fix PR's description; the add skill logs the row after a
-   release contains the fix. For a defect that fits no class, say "candidate new class"
+   instance, and the **Correct form** from the class file. For each, suggest an
+   `instances.toml` row; the fix PR adds it with the `defect-catalogue-add` skill. For a defect that fits no class, say "candidate new class"
    and give a one-line pattern. In a version-bump review, also give the output of
    `cargo xtask defects trend --last-releases 1` (instances in the last release of each stream).
 

@@ -42,16 +42,18 @@ Both passes must stay cheap in tokens. A review must not read the full catalogue
 
 - A review that reads every class file on every pass.
 - Scan hits reported as findings. They are leads that the reviewer verifies.
-- Any entry for a defect that is not fixed and released (see Disclosure).
+- Any entry for a defect whose fix is not public (see Disclosure).
 - Tests taken as proof of correct behaviour. Tests can encode bad behaviour. The review skill tells
   the reviewer to question the design and tests as they are, and what they could be.
 
 ## Disclosure
 
-This repo is public. The catalogue and the log contain only defects that are fixed **and** released
-(a `testnet-*` or `mainnet-*` tag contains the fix). Unfixed or unreleased security defects stay in
-private security advisories until the fix is released. The add skill checks this before it writes
-anything, and stops on a defect that an open advisory still covers.
+This repo is public. The catalogue and the log contain only defects whose fix is public: merged, or
+in an open PR on this repo. The public fix already shows the flaw, so an entry discloses nothing
+more, and a new class can guide other work before the fix is released. A fix under a private
+security advisory waits until the advisory is published. Unfixed sites are never logged. The add
+skill checks this before it writes anything, and stops on a defect that an open advisory still
+covers.
 
 ## Layout
 
@@ -107,7 +109,7 @@ will conflict at the end of the file; the resolution is to keep both rows.
 | `found`       | date   | yes      | Date the defect was found (or the fix PR open date, if unknown).     |
 | `found_by`    | string | yes      | `review`, `test`, `testnet`, `mainnet`, `audit`, `sweep`, `other`.   |
 | `fix`         | string | yes      | PR number (`#1678`) or commit SHA.                                   |
-| `released_in` | string | yes      | First release tag that contains the fix, e.g. `testnet-4.1.1`.       |
+| `released_in` | string | no       | First release tag that contains the fix, e.g. `testnet-4.1.1`. Added later, best effort. |
 | `note`        | string | no       | One line, if the site needs context.                                 |
 
 A row must be traceable from the repo alone: the `fix` and `released_in` values let a reader find
@@ -117,10 +119,10 @@ the change. These are data fields, not comments, so the "no comments of record" 
 
 - One paragraph: what the catalogue is and the disclosure rule.
 - Process:
-  - A fix PR names its class in its description (`Defect class: <id>` or `Defect class: new`).
-    It does not change the catalogue, because its fix is not released yet.
-  - Any time after a release contains the fix, the add skill writes the entries. It finds the
-    merged PRs with a `Defect class:` line and no log row.
+  - A fix PR adds its entries in the same PR (use the add skill). This is best effort.
+  - A backfill (the same skill, over merged PRs since a date or in a range) adds missed fixes and
+    fills in `released_in`. It keeps no record of PRs it judged "not a defect class"; its report
+    names the range it covered.
   - The sibling sweep is optional when the class is new; it may run as a separate step.
 - **Known non-issues**: patterns that look like defects but are correct by design. Reviewers must
   not raise them again. Seed: a Reth/Irys state mismatch is fatal on purpose (`RethService` exits).
@@ -164,14 +166,15 @@ The skill does not write to the catalogue. The add skill does that.
 
 ## Skill: `defect-catalogue-add`
 
-Input: a PR number, a commit, or a range of either.
+Input: a PR (open or merged), a commit, or a backfill range of merged PRs.
 
 For each fix:
 
 1. Read the diff and the PR text. Decide: a fix of a defect class, or a one-off. Skip one-offs and
    say why.
-2. Disclosure check: is the fix in a released tag (`git tag --contains`)? Is it under an open
-   private advisory? If not released, or under an advisory, stop for that fix and report it.
+2. Disclosure check: is the fix public (merged, or an open PR on this repo)? Is it under an open
+   private advisory? If not public, or under an advisory, stop for that fix and report only the
+   reason. Set `released_in` if a release tag contains the fix.
 3. Read `detect.md`. If the class exists, append a log row. If not, draft a new class file and
    its `detect.md` line, then append the log row.
 4. Squash-merged PRs can contain fixes that were later reverted inside the same PR. Confirm the fix
@@ -216,7 +219,7 @@ already covers the guidance.
 
 ## Settled details
 
-- `released_in` must match `^(testnet|mainnet)-\d+\.\d+\.\d+$`. `check` rejects other values
+- `released_in`, when present, must match `^(testnet|mainnet)-\d+\.\d+\.\d+$`. `check` rejects other values
   (for example `mainnet-latest`).
 - `check` is offline and pure: it reads only the catalogue files, not git. It does not verify that
   the `fix` or the tag exists; the add skill does that when it writes a row. This keeps CI simple.
