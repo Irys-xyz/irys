@@ -2,8 +2,8 @@
 id = "wall-clock-for-internal-timing"
 severity = "dos"
 enforcement = "scan"
-scope = "node code that measures time: timeouts, sleeps, retry and backoff, rate limits, deduplication windows, cache expiry, last-seen bookkeeping"
-flag = "`SystemTime::now()`, `UnixTimestamp(Ms)::now()` or a `now_ms()` clock read (`global_clock().now_ms()`) used for a duration, a timeout, an expiry window or an in-process last-seen value; or a `tokio::time::sleep` that the code trusts to move the wall clock by its duration"
+scope = "code that measures time: timeouts, sleeps, backoff, rate limits, windows, expiry"
+flag = "a wall-clock read (`SystemTime::now()`, `UnixTimestamp(Ms)::now()`, `now_ms()`) that feeds a duration, timeout, expiry or last-seen value; or a `tokio` sleep trusted to move the wall clock"
 paths = ["crates/**"]
 patterns = ['\b(SystemTime|UnixTimestamp(Ms)?)::now\(\)', '\bnow_ms\(\)']
 +++
