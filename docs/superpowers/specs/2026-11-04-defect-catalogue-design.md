@@ -104,7 +104,7 @@ will conflict at the end of the file; the resolution is to keep both rows.
 |---------------|--------|----------|----------------------------------------------------------------------|
 | `class`       | string | yes      | Class id. Must exist in `classes/`.                                  |
 | `site`        | string | yes      | `path::item`, e.g. `crates/actors/src/data_sync_service/chunk_fetcher.rs::HttpChunkFetcher`. |
-| `found`       | date   | yes      | Date the defect was found (or the fix PR date, if unknown).          |
+| `found`       | date   | yes      | Date the defect was found (or the fix PR open date, if unknown).     |
 | `found_by`    | string | yes      | `review`, `test`, `testnet`, `mainnet`, `audit`, `sweep`, `other`.   |
 | `fix`         | string | yes      | PR number (`#1678`) or commit SHA.                                   |
 | `released_in` | string | yes      | First release tag that contains the fix, e.g. `testnet-4.1.1`.       |
@@ -249,7 +249,8 @@ already covers the guidance.
   to crates that talk to peers (`crates/p2p/**`, `crates/actors/**`, `crates/api-client/**`,
   `crates/chain/**`).
 - The seed is made by running the add skill. `gh` works, and so does the advisory API:
-  `gh api "repos/Irys-xyz/irys/security-advisories?state=draft"` and `?state=triage`. The add skill
+  `gh api --paginate "repos/Irys-xyz/irys/security-advisories?state=draft&per_page=100"` and the
+  same with `state=triage`. The add skill
   reads the advisory titles and descriptions and stops on any that match the fix.
 
 ## Left to the builder

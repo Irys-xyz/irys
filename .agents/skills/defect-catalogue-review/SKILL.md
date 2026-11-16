@@ -44,5 +44,9 @@ Do these steps in order.
    and give a one-line pattern. In a version-bump review, also give the output of
    `cargo xtask defects trend --last-releases 1` (instances in the last release of each stream).
 
+   This repo is public. Report an instance in code that is already released, or any instance of
+   a `fork`, `data-loss` or `dos` class, only to the user. Do not put it in a PR comment, an
+   issue or a commit: the user decides between a public fix and a private advisory.
+
 This skill does not change the catalogue. To add classes or instances, use the
 `defect-catalogue-add` skill.

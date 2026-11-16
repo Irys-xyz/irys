@@ -6,6 +6,7 @@ scope = "consensus code: block validation, block production, shadow transactions
 flag = "a result that must be the same on every node depends on HashMap or HashSet iteration order (first match or `break`, last write wins, a tie-break, collect into a Vec, hash or serialize)"
 paths = [
     "crates/actors/src/anchor_validation.rs",
+    "crates/actors/src/block_discovery.rs",
     "crates/actors/src/block_producer.rs",
     "crates/actors/src/block_producer/**",
     "crates/actors/src/block_reward.rs",
@@ -19,10 +20,12 @@ paths = [
     "crates/actors/src/mempool_service/**",
     "crates/actors/src/shadow_tx_generator.rs",
     "crates/actors/src/tx_inclusion.rs",
+    "crates/actors/src/tx_selector/**",
     "crates/actors/src/validation_service.rs",
     "crates/actors/src/validation_service/**",
     "crates/domain/src/models/**",
     "crates/domain/src/snapshots/**",
+    "crates/irys-reth/src/**",
 ]
 patterns = ['\bHash(Map|Set)\s*<', '\bHash(Map|Set)(::<.+?>)?::(new|with_capacity|default|from|from_iter)\b']
 +++

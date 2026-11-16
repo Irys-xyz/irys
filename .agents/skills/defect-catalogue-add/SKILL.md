@@ -20,12 +20,12 @@ For each fix, do these steps in order.
 
 2. **Disclosure check.** This repo is public. Continue only if both are true:
    - The fix is released. Run
-     `git tag --contains <sha> | grep -E '^(testnet|mainnet)-[0-9]+\.[0-9]+\.[0-9]+$' | sort -V`.
-     It must print a tag. `released_in` is the first line of the output (the lowest version). Use
-     the tag as printed; do not edit it.
+     `git tag --contains <sha> --sort=creatordate | grep -E '^(testnet|mainnet)-[0-9]+\.[0-9]+\.[0-9]+$' | head -1`.
+     It must print a tag. That tag is `released_in`: the first release, in time, that contains
+     the fix. Use the tag as printed; do not edit it.
    - No open private advisory covers it. Read the titles and descriptions of
-     `gh api "repos/Irys-xyz/irys/security-advisories?state=draft"` and `?state=triage`. If either
-     call fails (for example 403), this check fails.
+     `gh api --paginate "repos/Irys-xyz/irys/security-advisories?state=draft&per_page=100"` and
+     the same with `state=triage`. If either call fails (for example 403), this check fails.
 
    If either check fails, stop for this fix. Write nothing about it in the repo, a commit, a PR,
    an issue or a comment. To the user, report only the PR or commit and one of: "not released",
@@ -117,7 +117,7 @@ and one line under `## Do not flag` in `detect.md`:
 [[instance]]
 class = "short-class-name"          # class id
 site = "crates/p2p/src/gossip_client.rs::GossipClient::fetch"   # path::item
-found = "2026-10-13"                # date found; the fix PR date if unknown
+found = "2026-09-22"                # date found; if unknown, the fix PR open date (gh pr view <n> --json createdAt)
 found_by = "review"                 # review | test | testnet | mainnet | audit | sweep | other
 fix = "#1574"                       # PR number or commit SHA
 released_in = "testnet-4.1.0"       # first release tag that contains the fix
