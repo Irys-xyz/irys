@@ -184,7 +184,9 @@ pub struct ScanHit {
     pub text: String,
 }
 
-/// One hit per (class, added line) that matches. Sorted by path, line, class.
+/// One hit per (class, added line) that matches. Sorted by path, line, class. Each pattern sees one
+/// added line at a time, so an expression that starts on an unchanged line or spans lines can give
+/// no hit: no hit does not mean the code is clean.
 pub fn scan(classes: &[CompiledClass], added: &[AddedLine]) -> Vec<ScanHit> {
     let mut hits: Vec<ScanHit> = classes
         .iter()

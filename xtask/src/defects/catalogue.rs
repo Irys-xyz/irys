@@ -177,6 +177,7 @@ pub fn parse_release(tag: &str) -> Option<(Stream, (u64, u64, u64))> {
 pub fn split_front_matter(text: &str) -> eyre::Result<(&str, &str)> {
     let rest = text
         .strip_prefix("+++\n")
+        .or_else(|| text.strip_prefix("+++\r\n"))
         .ok_or_else(|| eyre!("front matter must start with a `+++` line"))?;
     let mut offset = 0;
     for line in rest.split_inclusive('\n') {
@@ -283,7 +284,16 @@ pub fn load(dir: &Path) -> (Catalogue, Vec<String>) {
     let classes_dir = dir.join("classes");
     let mut class_paths = match fs::read_dir(&classes_dir) {
         Ok(entries) => entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter_map(|entry| match entry {
+                Ok(entry) => Some(entry.path()),
+                Err(err) => {
+                    problems.push(format!(
+                        "{}: cannot list an entry: {err}",
+                        classes_dir.display()
+                    ));
+                    None
+                }
+            })
             .filter(|p| p.extension().is_some_and(|ext| ext == "md"))
             .collect::<Vec<_>>(),
         Err(err) => {
@@ -940,6 +950,18 @@ released_in = "testnet-4.1.0"
             &detect_with(&[VALID_LINE]),
             &[("uncapped-x", VALID_CLASS)],
             &instances,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn check_accepts_crlf_line_endings() {
+        let crlf = |text: &str| text.replace('\n', "\r\n");
+        let problems = problems_with_readme(
+            &crlf(&readme_with(&["reth-exit"])),
+            &crlf(&detect_with(&[VALID_LINE])),
+            &[("uncapped-x", &crlf(VALID_CLASS))],
+            &crlf(VALID_INSTANCE),
         );
         assert!(problems.is_empty(), "{problems:?}");
     }

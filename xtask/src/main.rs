@@ -1356,7 +1356,13 @@ fn run_defects(action: DefectsAction) -> eyre::Result<()> {
                     } else {
                         "master"
                     };
-                    let base = cmd!(sh, "git merge-base {master} HEAD").read()?;
+                    let base = cmd!(sh, "git merge-base {master} HEAD")
+                        .read()
+                        .map_err(|err| {
+                            eyre::eyre!(
+                                "cannot find the merge-base of HEAD and {master}; pass --base: {err}"
+                            )
+                        })?;
                     println!("base: {base} (merge-base of HEAD and {master})");
                     base
                 }
@@ -1390,9 +1396,11 @@ fn run_defects(action: DefectsAction) -> eyre::Result<()> {
                 )
                 .read()?;
                 for path in untracked.split('\0').filter(|p| !p.is_empty()) {
-                    // A file that is not UTF-8 text (binary) has no lines to scan.
-                    if let Ok(text) = std::fs::read_to_string(root.join(path)) {
-                        added.extend(defects::scan::file_as_added_lines(path, &text));
+                    match std::fs::read_to_string(root.join(path)) {
+                        Ok(text) => added.extend(defects::scan::file_as_added_lines(path, &text)),
+                        // A file that is not UTF-8 text (binary) has no lines to scan.
+                        Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {}
+                        Err(err) => println!("not scanned: {path}: {err}"),
                     }
                 }
             }
