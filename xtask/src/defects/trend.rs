@@ -57,7 +57,10 @@ pub fn trend(catalogue: &Catalogue, window: Option<&Window>) -> Vec<TrendRow> {
     let is_recent = |instance: &Instance| match window {
         None => false,
         Some(Window::Since(since)) => found(instance).is_some_and(|d| d >= *since),
-        Some(Window::Releases(tags)) => tags.contains(&instance.released_in),
+        Some(Window::Releases(tags)) => instance
+            .released_in
+            .as_ref()
+            .is_some_and(|tag| tags.contains(tag)),
     };
 
     let mut rows: Vec<TrendRow> = catalogue
@@ -154,7 +157,7 @@ mod tests {
             found: found.to_owned(),
             found_by: FoundBy::Review,
             fix: "#1".to_owned(),
-            released_in: released_in.to_owned(),
+            released_in: Some(released_in.to_owned()),
             note: None,
         }
     }
@@ -267,6 +270,22 @@ mod tests {
         assert_eq!(ids(&rows), ["b", "a", "c"]);
         assert_eq!(rows[0].in_window, Some(1));
         assert_eq!(rows[1].in_window, Some(0));
+    }
+
+    #[test]
+    fn unreleased_instance_counts_by_date_but_not_by_release() {
+        let mut unreleased = instance("c", "2026-11-01", "testnet-4.1.1");
+        unreleased.released_in = None;
+        let catalogue = Catalogue {
+            instances: vec![unreleased],
+            ..fixture()
+        };
+        let row = |rows: Vec<TrendRow>| rows.into_iter().find(|r| r.id == "c").unwrap();
+        let since = Window::Since(date("2026-10-01"));
+        assert_eq!(row(trend(&catalogue, Some(&since))).in_window, Some(1));
+        let releases = Window::Releases(last_releases(&tags(&["testnet-4.1.1"]), 1));
+        assert_eq!(row(trend(&catalogue, Some(&releases))).in_window, Some(0));
+        assert_eq!(row(trend(&catalogue, None)).total, 1);
     }
 
     #[test]

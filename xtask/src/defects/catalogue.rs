@@ -120,7 +120,9 @@ pub struct Instance {
     pub found: String,
     pub found_by: FoundBy,
     pub fix: String,
-    pub released_in: String,
+    /// The first release tag that contains the fix. Absent until a release contains it; it is
+    /// filled in later, best effort.
+    pub released_in: Option<String>,
     pub note: Option<String>,
 }
 
@@ -422,10 +424,11 @@ fn validate_instance(
             instance.found
         ));
     }
-    if parse_release(&instance.released_in).is_none() {
+    if let Some(tag) = &instance.released_in
+        && parse_release(tag).is_none()
+    {
         problems.push(format!(
-            "{at}: released_in {:?} must be a release tag such as testnet-4.1.1",
-            instance.released_in
+            "{at}: released_in {tag:?} must be a release tag such as testnet-4.1.1"
         ));
     }
 }
@@ -925,6 +928,18 @@ released_in = "testnet-4.1.0"
             &detect_with(&[VALID_LINE]),
             &[("uncapped-x", VALID_CLASS)],
             &format!("{VALID_INSTANCE}\n{other_fix}"),
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn check_accepts_instance_with_no_release() {
+        let instances = VALID_INSTANCE.replace("released_in = \"testnet-4.1.0\"\n", "");
+        assert!(!instances.contains("released_in"));
+        let problems = problems_for(
+            &detect_with(&[VALID_LINE]),
+            &[("uncapped-x", VALID_CLASS)],
+            &instances,
         );
         assert!(problems.is_empty(), "{problems:?}");
     }
