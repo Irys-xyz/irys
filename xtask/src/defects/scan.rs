@@ -82,6 +82,13 @@ pub fn parse_added_lines(diff: &str) -> Vec<AddedLine> {
             if line.starts_with('\\') {
                 continue;
             }
+            // A context line: `-U0` gives none, but a user's `diff.interHunkContext` can.
+            if line.starts_with(' ') {
+                old_left = old_left.saturating_sub(1);
+                new_left = new_left.saturating_sub(1);
+                next_line += 1;
+                continue;
+            }
             // Any other line ends the hunk early (malformed counts); parse it as a header.
             old_left = 0;
             new_left = 0;
@@ -253,6 +260,25 @@ mod tests {
         assert_eq!(
             unmatched_paths(&classes, &files),
             [("uncapped-x".to_owned(), "crates/gone.rs".to_owned())]
+        );
+    }
+
+    #[test]
+    fn context_line_inside_hunk_keeps_later_added_lines() {
+        // A user's `diff.interHunkContext` merges near changes into one hunk with context lines.
+        let diff = "diff --git a/x.rs b/x.rs
+--- a/x.rs
++++ b/x.rs
+@@ -1,3 +1,3 @@
+-a
++A
+ b
+-c
++C
+";
+        assert_eq!(
+            parse_added_lines(diff),
+            [added("x.rs", 1, "A"), added("x.rs", 3, "C")]
         );
     }
 

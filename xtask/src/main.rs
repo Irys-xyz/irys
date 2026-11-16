@@ -1371,6 +1371,7 @@ fn run_defects(action: DefectsAction) -> eyre::Result<()> {
             // the `+++ b/<path>` lines that the parser reads.
             let diff_args = [
                 "-U0",
+                "--inter-hunk-context=0",
                 "--find-renames",
                 "--no-color",
                 "--no-ext-diff",
