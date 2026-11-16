@@ -1,6 +1,7 @@
 +++
 id = "hash-iteration-order-in-consensus"
 severity = "fork"
+enforcement = "scan"
 scope = "consensus code: block validation, block production, shadow transactions, epoch and ledger state"
 flag = "a result that must be the same on every node depends on HashMap or HashSet iteration order (first match or `break`, last write wins, a tie-break, collect into a Vec, hash or serialize)"
 paths = [

@@ -28,7 +28,8 @@ Do these steps in order.
 3. **Read the detection list.** Read `docs/99-reference/defect-catalogue/detect.md` and nothing
    else from the catalogue yet. Check the diff against each line whose scope it touches: a change
    that matches a "Flag" is a lead. A scan pattern does not find all instances, so read the diff
-   for the flags too. Drop leads that match a "Do not flag" line.
+   for the flags too. Drop leads that match a "Do not flag" line. If you are not sure that a lead
+   matches one, read that id's entry under "Known non-issues" in `README.md`.
 
 4. **Verify each lead.** For each scan hit and each lead, read the code at that site. Then open
    `classes/<id>.md` for that lead's class only, and confirm the lead against its **Pattern** and
@@ -40,7 +41,8 @@ Do these steps in order.
 6. **Report.** Report only true instances, each with `file:line`, the class id, why it is an
    instance, and the **Correct form** from the class file. For each, suggest an `instances.toml`
    row (to add after the fix ships). For a defect that fits no class, say "candidate new class"
-   and give a one-line pattern.
+   and give a one-line pattern. In a version-bump review, also give the output of
+   `cargo xtask defects trend --last-releases 1` (instances in the last release of each stream).
 
 This skill does not change the catalogue. To add classes or instances, use the
 `defect-catalogue-add` skill.

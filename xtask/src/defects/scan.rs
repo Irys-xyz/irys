@@ -199,7 +199,7 @@ pub fn scan(classes: &[CompiledClass], added: &[AddedLine]) -> Vec<ScanHit> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defects::catalogue::{ClassFile, ClassMeta, Severity};
+    use crate::defects::catalogue::{ClassFile, ClassMeta, Enforcement, Severity};
 
     fn added(path: &str, line: u32, text: &str) -> AddedLine {
         AddedLine {
@@ -216,6 +216,7 @@ mod tests {
                 meta: ClassMeta {
                     id: "uncapped-x".to_owned(),
                     severity: Severity::Dos,
+                    enforcement: Enforcement::Scan,
                     scope: "always".to_owned(),
                     flag: "always".to_owned(),
                     paths: paths.iter().map(|p| (*p).to_owned()).collect(),

@@ -33,8 +33,6 @@ Both passes must stay cheap in tokens. A review must not read the full catalogue
 ## Non-goals
 
 - Backfill of past fixes. The add skill makes it possible; we run it later.
-- A choice of trend window ("recent" is TBD). The data supports days and releases; the command takes
-  the window as a flag.
 - Custom lints or clippy `disallowed_methods`. An entry may name one under detection, but this work
   does not add any.
 - A change to the version-bump review process itself. It is not written down in the repo; it calls
@@ -81,6 +79,7 @@ dependency). Fields:
 |----------------|-----------------|-------------------------------------------------------------------------|
 | `id`           | string          | Must equal the file slug.                                               |
 | `severity`     | string          | Worst typical effect: `fork`, `data-loss`, `dos`, `stall`, `other`.     |
+| `enforcement`  | string          | How the class is stopped today: `review`, `scan`, `lint`, `type`.       |
 | `scope`        | string          | One line: the code this class can occur in. Used in `detect.md`.        |
 | `flag`         | string          | One line: what to flag, in code terms. Used in `detect.md`.             |
 | `paths`        | list of globs   | Optional. Limits the scan to these paths.                               |
@@ -133,7 +132,7 @@ New xtask subcommand with three actions. No model use.
   has the required fields; `detect.md` has exactly one line per class, equal to the line its front matter gives. Exit non-zero on any error.
   Added to `cargo xtask local-checks` and to CI next to the existing checks.
 - `trend [--since <YYYY-MM-DD> | --last-releases <N>]` — prints one row per class: id, severity,
-  total instances, instances in the window, last `found` date, last `released_in`. Sorted by
+  enforcement, total instances, instances in the window, last `found` date, last `released_in`. Sorted by
   instances in the window, then total. With no flag, the window column is omitted.
   `--last-releases N` reads the release tags from git and takes the N highest versions of each
   stream (testnet and mainnet apart, since their version numbers differ); an instance counts when
@@ -224,11 +223,20 @@ already covers the guidance.
   Class lines are the `- ` lines under `## Classes`, one per class:
   `` - `<id>` (<severity>). Scope: <scope>. Flag: <flag>. ``
   `check` requires each line to equal the line the class front matter gives, reports a missing,
-  changed, duplicate or orphan line, and prints the expected line. Line order does not matter;
-  keep lines sorted by id by convention. `scope` and `flag` are one line each with no final `.`.
-- Known non-issues: a full entry in the README (one `###` heading per item, then **Pattern** and
-  **Why it is correct**), and one line under `## Do not flag` in `detect.md`. `check` does not
-  parse either.
+  changed, duplicate or orphan line, and prints the expected line. Line order does not matter to
+  `check`; by convention, sort by severity, then by id. `scope` and `flag` are one line each with no final `.`.
+- Known non-issues: a full entry in the README under `## Known non-issues` (one `### <id>`
+  heading per item, kebab-case, then **Pattern** and **Why it is correct**), and one line under
+  `## Do not flag` in `detect.md` that starts with `` - `<id>` ``. `check` reports an id that is
+  in one list and not in the other, a duplicate, and a line with no id. It does not compare the
+  text.
+- `enforcement`: `review` (only a reviewer finds it), `scan` (`defects scan` patterns give
+  leads), `lint` (a lint or another CI check rejects the code), `type` (a type or an API makes the
+  defect impossible to write). `check` requires patterns for `scan` and no patterns for `review`.
+  A class moves to `lint` or `type` when that is possible.
+- "Recent": the version-bump review uses `trend --last-releases 1`; a quarterly priority review
+  uses `--last-releases 2`. `--since` is for an ad hoc question by found date. A backfilled row
+  keeps the original found date.
 - `scan` diff source: with `--head`, `git diff -U0 --find-renames <base>...<head>`; without
   `--head`, `git diff -U0 --find-renames <merge-base>` (working tree), plus every line of each
   untracked, non-ignored file. Added lines in a renamed file count under the new

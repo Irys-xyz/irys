@@ -1,7 +1,8 @@
 # Defect detection list
 
 Flag code that matches a line below. Then read `classes/<id>.md` to confirm each lead and to get the
-correct form. Do not flag an item under "Do not flag".
+correct form. Do not flag an item under "Do not flag"; `README.md` has its full entry under
+"Known non-issues", by the same id.
 
 ## Classes
 
@@ -10,4 +11,4 @@ correct form. Do not flag an item under "Do not flag".
 
 ## Do not flag
 
-- `RethService` stops, with no retry, when a fork-choice update to Reth fails (Reth/Irys state mismatch). This is intended: see "Known non-issues" in `README.md`.
+- `reth-irys-state-mismatch-is-fatal`: `RethService` stops, with no retry, when a fork-choice update to Reth fails (Reth/Irys state mismatch). This is intended.

@@ -17,6 +17,15 @@ pub const DETECT_FILE: &str = "detect.md";
 /// The section of the detection list that holds the class lines.
 const DETECT_CLASSES_HEADING: &str = "## Classes";
 
+/// The section of the detection list that holds one line per known non-issue.
+const DETECT_DO_NOT_FLAG_HEADING: &str = "## Do not flag";
+
+/// The catalogue README: the process, and the full entry for each known non-issue.
+pub const README_FILE: &str = "README.md";
+
+/// The README section with one `### <id>` entry per known non-issue.
+const README_NON_ISSUES_HEADING: &str = "## Known non-issues";
+
 /// Body sections every class file must have, in this order.
 pub const REQUIRED_SECTIONS: [&str; 4] =
     ["Pattern", "Why it is a defect", "Correct form", "Detection"];
@@ -43,11 +52,37 @@ impl fmt::Display for Severity {
     }
 }
 
+/// How a class is stopped today: the strongest control that applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Enforcement {
+    /// Only a reviewer finds it.
+    Review,
+    /// `defects scan` patterns give leads; a reviewer confirms them.
+    Scan,
+    /// A lint or another CI check rejects the code.
+    Lint,
+    /// A type or an API makes the defect impossible to write.
+    Type,
+}
+
+impl fmt::Display for Enforcement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Review => "review",
+            Self::Scan => "scan",
+            Self::Lint => "lint",
+            Self::Type => "type",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClassMeta {
     pub id: String,
     pub severity: Severity,
+    pub enforcement: Enforcement,
     /// The code this class can occur in.
     pub scope: String,
     /// What to flag: the defect signal, in code terms.
@@ -102,6 +137,10 @@ pub struct Catalogue {
     pub instances: Vec<Instance>,
     /// The class lines of the detection list, in file order.
     pub detect_lines: Vec<String>,
+    /// The "Do not flag" lines of the detection list, in file order.
+    pub do_not_flag_lines: Vec<String>,
+    /// The ids of the known non-issues in the README, in file order.
+    pub known_non_issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,22 +194,53 @@ pub fn detect_line(meta: &ClassMeta) -> String {
     )
 }
 
-/// The class lines of a detection list: the `- ` lines under its `## Classes` heading.
-pub fn parse_detect(text: &str) -> eyre::Result<Vec<String>> {
-    let mut lines = text
-        .lines()
-        .skip_while(|l| l.trim_end() != DETECT_CLASSES_HEADING);
-    if lines.next().is_none() {
-        bail!("no `{DETECT_CLASSES_HEADING}` heading");
-    }
-    Ok(lines
-        .take_while(|l| !l.starts_with("## "))
-        .filter(|l| l.starts_with("- "))
-        .map(|l| l.trim_end().to_owned())
-        .collect())
+/// The lines of the markdown section under `heading`, up to the next `## ` heading. `None` if
+/// the text has no such heading.
+fn section_lines<'a>(text: &'a str, heading: &str) -> Option<impl Iterator<Item = &'a str>> {
+    let mut lines = text.lines().skip_while(move |l| l.trim_end() != heading);
+    lines.next()?;
+    Some(
+        lines
+            .take_while(|l| !l.starts_with("## "))
+            .map(str::trim_end),
+    )
 }
 
-/// The class id of a detection line: the text in its first pair of backticks.
+fn bullet_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+    lines
+        .filter(|l| l.starts_with("- "))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The class lines of a detection list: the `- ` lines under its `## Classes` heading.
+pub fn parse_detect(text: &str) -> eyre::Result<Vec<String>> {
+    section_lines(text, DETECT_CLASSES_HEADING)
+        .map(bullet_lines)
+        .ok_or_else(|| eyre!("no `{DETECT_CLASSES_HEADING}` heading"))
+}
+
+/// The "Do not flag" lines of a detection list. Empty if the section is missing.
+fn parse_do_not_flag(text: &str) -> Vec<String> {
+    section_lines(text, DETECT_DO_NOT_FLAG_HEADING)
+        .map(bullet_lines)
+        .unwrap_or_default()
+}
+
+/// The known non-issue ids of the README: its `### <id>` headings under "Known non-issues".
+/// Empty if the section is missing.
+fn parse_known_non_issues(text: &str) -> Vec<String> {
+    section_lines(text, README_NON_ISSUES_HEADING)
+        .map(|lines| {
+            lines
+                .filter_map(|l| l.strip_prefix("### "))
+                .map(|id| id.trim().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The id of a detection line: the text in its first pair of backticks.
 fn detect_line_id(line: &str) -> Option<&str> {
     line.strip_prefix("- `")?.split_once('`').map(|(id, _)| id)
 }
@@ -184,10 +254,19 @@ pub fn load(dir: &Path) -> (Catalogue, Vec<String>) {
     let detect_path = dir.join(DETECT_FILE);
     match fs::read_to_string(&detect_path)
         .wrap_err("cannot read")
-        .and_then(|text| parse_detect(&text))
+        .and_then(|text| Ok((parse_detect(&text)?, parse_do_not_flag(&text))))
     {
-        Ok(lines) => catalogue.detect_lines = lines,
+        Ok((lines, do_not_flag)) => {
+            catalogue.detect_lines = lines;
+            catalogue.do_not_flag_lines = do_not_flag;
+        }
         Err(err) => problems.push(format!("{}: {err:#}", detect_path.display())),
+    }
+
+    let readme_path = dir.join(README_FILE);
+    match fs::read_to_string(&readme_path) {
+        Ok(text) => catalogue.known_non_issues = parse_known_non_issues(&text),
+        Err(err) => problems.push(format!("{}: cannot read: {err}", readme_path.display())),
     }
 
     let log_path = dir.join("instances.toml");
@@ -297,6 +376,15 @@ fn validate_class(class: &ClassFile, problems: &mut Vec<String>) {
             break;
         }
     }
+    match (meta.enforcement, meta.patterns.is_empty()) {
+        (Enforcement::Scan, true) => problems.push(format!(
+            "class {id}: enforcement \"scan\" needs at least one pattern"
+        )),
+        (Enforcement::Review, false) => problems.push(format!(
+            "class {id}: has scan patterns, so enforcement must be \"scan\", \"lint\" or \"type\", not \"review\""
+        )),
+        _ => {}
+    }
     for pattern in &meta.patterns {
         if let Err(err) = regex::Regex::new(pattern) {
             problems.push(format!("class {id}: invalid regex {pattern:?}: {err}"));
@@ -342,19 +430,29 @@ fn validate_instance(
     }
 }
 
-fn validate_detect(catalogue: &Catalogue, problems: &mut Vec<String>) {
-    let mut lines: BTreeMap<&str, &str> = BTreeMap::new();
-    for line in &catalogue.detect_lines {
+/// The lines of one detection-list section, by id. Reports lines with no id and duplicate ids.
+fn index_detect_lines<'a>(
+    lines: &'a [String],
+    section: &str,
+    problems: &mut Vec<String>,
+) -> BTreeMap<&'a str, &'a str> {
+    let mut by_id = BTreeMap::new();
+    for line in lines {
         let Some(id) = detect_line_id(line) else {
             problems.push(format!(
-                "{DETECT_FILE}: line must start with \"- `<id>`\": {line}"
+                "{DETECT_FILE}: {section} line must start with \"- `<id>`\": {line}"
             ));
             continue;
         };
-        if lines.insert(id, line).is_some() {
-            problems.push(format!("{DETECT_FILE}: duplicate line for {id}"));
+        if by_id.insert(id, line.as_str()).is_some() {
+            problems.push(format!("{DETECT_FILE}: duplicate {section} line for {id}"));
         }
     }
+    by_id
+}
+
+fn validate_detect(catalogue: &Catalogue, problems: &mut Vec<String>) {
+    let mut lines = index_detect_lines(&catalogue.detect_lines, "class", problems);
     for class in &catalogue.classes {
         let id = class.slug.as_str();
         let line = lines.remove(id);
@@ -378,6 +476,34 @@ fn validate_detect(catalogue: &Catalogue, problems: &mut Vec<String>) {
     }
 }
 
+/// Each known non-issue in the README has one "Do not flag" line in the detection list, and
+/// each "Do not flag" line has a README entry.
+fn validate_known_non_issues(catalogue: &Catalogue, problems: &mut Vec<String>) {
+    let mut lines = index_detect_lines(&catalogue.do_not_flag_lines, "\"Do not flag\"", problems);
+    let mut seen = BTreeSet::new();
+    for id in &catalogue.known_non_issues {
+        if !is_kebab_case(id) {
+            problems.push(format!(
+                "{README_FILE}: known non-issue heading {id:?} must be a kebab-case id"
+            ));
+        }
+        if !seen.insert(id.as_str()) {
+            problems.push(format!("{README_FILE}: duplicate known non-issue {id}"));
+            continue;
+        }
+        if lines.remove(id.as_str()).is_none() {
+            problems.push(format!(
+                "{DETECT_FILE}: no \"Do not flag\" line for known non-issue {id}; add: - `{id}`: <what not to flag>."
+            ));
+        }
+    }
+    for id in lines.keys() {
+        problems.push(format!(
+            "{DETECT_FILE}: \"Do not flag\" line {id} has no entry under \"Known non-issues\" in {README_FILE}"
+        ));
+    }
+}
+
 /// Cross-checks a loaded catalogue. Returns every problem, not only the first.
 pub fn validate(catalogue: &Catalogue) -> Vec<String> {
     let mut problems = Vec::new();
@@ -389,6 +515,7 @@ pub fn validate(catalogue: &Catalogue) -> Vec<String> {
         validate_instance(position, instance, &class_ids, &mut problems);
     }
     validate_detect(catalogue, &mut problems);
+    validate_known_non_issues(catalogue, &mut problems);
     problems
 }
 
@@ -408,6 +535,7 @@ mod tests {
     const VALID_CLASS: &str = r#"+++
 id = "uncapped-x"
 severity = "dos"
+enforcement = "scan"
 scope = "code that reads a peer HTTP body"
 flag = "`.json()` with no byte cap"
 paths = ["crates/p2p/**"]
@@ -433,10 +561,28 @@ Scan.
 
     const VALID_LINE: &str = "- `uncapped-x` (dos). Scope: code that reads a peer HTTP body. Flag: `.json()` with no byte cap.";
 
+    const VALID_DO_NOT_FLAG_LINE: &str =
+        "- `reth-exit`: `RethService` exits on a mismatch. This is intended.";
+
     fn detect_with(lines: &[&str]) -> String {
+        detect_with_do_not_flag(lines, &[VALID_DO_NOT_FLAG_LINE])
+    }
+
+    fn detect_with_do_not_flag(lines: &[&str], do_not_flag: &[&str]) -> String {
         format!(
-            "# Detection list\n\nIntro.\n\n## Classes\n\n{}\n\n## Do not flag\n\n- `RethService` exits on a mismatch: intended.\n",
-            lines.join("\n")
+            "# Detection list\n\nIntro.\n\n## Classes\n\n{}\n\n## Do not flag\n\n{}\n",
+            lines.join("\n"),
+            do_not_flag.join("\n")
+        )
+    }
+
+    fn readme_with(non_issue_ids: &[&str]) -> String {
+        let entries: String = non_issue_ids
+            .iter()
+            .map(|id| format!("### {id}\n\nWhy it is correct.\n\n"))
+            .collect();
+        format!(
+            "# Defect catalogue\n\n## Process\n\n### Not an entry\n\n## Known non-issues\n\n{entries}## Later\n\n### also-not-an-entry\n"
         )
     }
 
@@ -449,8 +595,15 @@ fix = "#1574"
 released_in = "testnet-4.1.0"
 "##;
 
-    fn write_catalogue(dir: &Path, detect: &str, classes: &[(&str, &str)], instances: &str) {
+    fn write_catalogue(
+        dir: &Path,
+        readme: &str,
+        detect: &str,
+        classes: &[(&str, &str)],
+        instances: &str,
+    ) {
         fs::create_dir_all(dir.join("classes")).unwrap();
+        fs::write(dir.join(README_FILE), readme).unwrap();
         fs::write(dir.join(DETECT_FILE), detect).unwrap();
         fs::write(dir.join("instances.toml"), instances).unwrap();
         for (slug, text) in classes {
@@ -459,8 +612,17 @@ released_in = "testnet-4.1.0"
     }
 
     fn problems_for(detect: &str, classes: &[(&str, &str)], instances: &str) -> Vec<String> {
+        problems_with_readme(&readme_with(&["reth-exit"]), detect, classes, instances)
+    }
+
+    fn problems_with_readme(
+        readme: &str,
+        detect: &str,
+        classes: &[(&str, &str)],
+        instances: &str,
+    ) -> Vec<String> {
         let tmp = TempDirBuilder::new().build();
-        write_catalogue(tmp.path(), detect, classes, instances);
+        write_catalogue(tmp.path(), readme, detect, classes, instances);
         check(tmp.path())
     }
 
@@ -619,6 +781,117 @@ released_in = "testnet-4.1.0"
     fn detect_line_ignores_do_not_flag_section() {
         let lines = parse_detect(&detect_with(&[VALID_LINE])).unwrap();
         assert_eq!(lines, vec![VALID_LINE.to_owned()]);
+    }
+
+    #[test]
+    fn check_rejects_unknown_enforcement() {
+        let class = VALID_CLASS.replace(r#"enforcement = "scan""#, r#"enforcement = "hope""#);
+        let problems = problems_for(&detect_with(&[VALID_LINE]), &[("uncapped-x", &class)], "");
+        assert_one_problem_contains(&problems, "uncapped-x.md");
+    }
+
+    #[test]
+    fn check_rejects_scan_enforcement_with_no_patterns() {
+        let class = VALID_CLASS.replace("patterns = ['\\.json\\(\\)']\n", "");
+        assert!(!class.contains("patterns"));
+        let problems = problems_for(&detect_with(&[VALID_LINE]), &[("uncapped-x", &class)], "");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_one_problem_contains(&problems, "enforcement \"scan\" needs at least one pattern");
+    }
+
+    #[test]
+    fn check_rejects_review_enforcement_with_patterns() {
+        let class = VALID_CLASS.replace(r#"enforcement = "scan""#, r#"enforcement = "review""#);
+        let problems = problems_for(&detect_with(&[VALID_LINE]), &[("uncapped-x", &class)], "");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_one_problem_contains(&problems, "has scan patterns");
+    }
+
+    #[test]
+    fn check_accepts_lint_and_type_enforcement_with_or_without_patterns() {
+        for value in ["lint", "type"] {
+            let with_patterns = VALID_CLASS.replace(
+                r#"enforcement = "scan""#,
+                &format!("enforcement = {value:?}"),
+            );
+            let without_patterns = with_patterns.replace("patterns = ['\\.json\\(\\)']\n", "");
+            for class in [with_patterns, without_patterns] {
+                let problems =
+                    problems_for(&detect_with(&[VALID_LINE]), &[("uncapped-x", &class)], "");
+                assert!(problems.is_empty(), "{value}: {problems:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn check_reports_known_non_issue_with_no_do_not_flag_line() {
+        let problems = problems_with_readme(
+            &readme_with(&["reth-exit", "slow-path"]),
+            &detect_with(&[]),
+            &[],
+            "",
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_one_problem_contains(&problems, "slow-path");
+        assert_one_problem_contains(&problems, "no \"Do not flag\" line");
+    }
+
+    #[test]
+    fn check_reports_do_not_flag_line_with_no_known_non_issue() {
+        let problems = problems_with_readme(&readme_with(&[]), &detect_with(&[]), &[], "");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_one_problem_contains(&problems, "reth-exit");
+        assert_one_problem_contains(&problems, "Known non-issues");
+    }
+
+    #[test]
+    fn check_reports_duplicate_and_malformed_do_not_flag_lines() {
+        let problems = problems_for(
+            &detect_with_do_not_flag(
+                &[],
+                &[
+                    VALID_DO_NOT_FLAG_LINE,
+                    VALID_DO_NOT_FLAG_LINE,
+                    "- no id here",
+                ],
+            ),
+            &[],
+            "",
+        );
+        assert_one_problem_contains(&problems, "duplicate");
+        assert_one_problem_contains(&problems, "- no id here");
+    }
+
+    #[test]
+    fn check_rejects_known_non_issue_id_that_is_not_kebab_case() {
+        let problems = problems_with_readme(
+            &readme_with(&["Reth exit"]),
+            &detect_with_do_not_flag(&[], &["- `Reth exit`: intended."]),
+            &[],
+            "",
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_one_problem_contains(&problems, "kebab-case");
+    }
+
+    #[test]
+    fn check_reports_duplicate_known_non_issue_once() {
+        let problems = problems_with_readme(
+            &readme_with(&["reth-exit", "reth-exit"]),
+            &detect_with(&[]),
+            &[],
+            "",
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_one_problem_contains(&problems, "duplicate known non-issue reth-exit");
+    }
+
+    #[test]
+    fn check_reports_missing_readme() {
+        let tmp = TempDirBuilder::new().build();
+        write_catalogue(tmp.path(), "", &detect_with(&[]), &[], "");
+        fs::remove_file(tmp.path().join(README_FILE)).unwrap();
+        assert_one_problem_contains(&check(tmp.path()), README_FILE);
     }
 
     #[test]

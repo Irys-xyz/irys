@@ -18,6 +18,7 @@ pub enum Window {
 pub struct TrendRow {
     pub id: String,
     pub severity: String,
+    pub enforcement: String,
     pub total: usize,
     pub in_window: Option<usize>,
     pub last_found: Option<NaiveDate>,
@@ -76,6 +77,7 @@ pub fn trend(catalogue: &Catalogue, window: Option<&Window>) -> Vec<TrendRow> {
             TrendRow {
                 id: class.slug.clone(),
                 severity: class.meta.severity.to_string(),
+                enforcement: class.meta.enforcement.to_string(),
                 total: instances.len(),
                 in_window: window.map(|_| instances.iter().filter(|i| is_recent(i)).count()),
                 last_found: instances.iter().filter_map(|i| found(i)).max(),
@@ -94,14 +96,19 @@ pub fn trend(catalogue: &Catalogue, window: Option<&Window>) -> Vec<TrendRow> {
 /// Renders rows as an aligned plain-text table with a header line.
 pub fn render_trend(rows: &[TrendRow], with_window: bool) -> String {
     let mut table: Vec<Vec<String>> = Vec::with_capacity(rows.len() + 1);
-    let mut header = vec!["id", "severity", "total"];
+    let mut header = vec!["id", "severity", "enforcement", "total"];
     if with_window {
         header.push("window");
     }
     header.extend(["last-found", "last-release"]);
     table.push(header.into_iter().map(str::to_owned).collect());
     for row in rows {
-        let mut cells = vec![row.id.clone(), row.severity.clone(), row.total.to_string()];
+        let mut cells = vec![
+            row.id.clone(),
+            row.severity.clone(),
+            row.enforcement.clone(),
+            row.total.to_string(),
+        ];
         if with_window {
             cells.push(row.in_window.unwrap_or(0).to_string());
         }
@@ -131,7 +138,9 @@ pub fn render_trend(rows: &[TrendRow], with_window: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defects::catalogue::{ClassFile, ClassMeta, FoundBy, Instance, Severity};
+    use crate::defects::catalogue::{
+        ClassFile, ClassMeta, Enforcement, FoundBy, Instance, Severity,
+    };
 
     fn class(id: &str, severity: Severity) -> ClassFile {
         ClassFile {
@@ -139,6 +148,7 @@ mod tests {
             meta: ClassMeta {
                 id: id.to_owned(),
                 severity,
+                enforcement: Enforcement::Review,
                 scope: "always".to_owned(),
                 flag: "always".to_owned(),
                 paths: vec![],
@@ -263,6 +273,16 @@ mod tests {
         assert!(rows.is_empty());
         let rendered = render_trend(&[], false);
         assert_eq!(rendered.lines().count(), 1, "{rendered}");
+    }
+
+    #[test]
+    fn render_shows_enforcement_after_severity() {
+        let rendered = render_trend(&trend(&fixture(), None), false);
+        let mut lines = rendered.lines();
+        let header: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
+        assert_eq!(&header[..3], ["id", "severity", "enforcement"]);
+        let first: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
+        assert_eq!(&first[..3], ["a", "dos", "review"]);
     }
 
     #[test]

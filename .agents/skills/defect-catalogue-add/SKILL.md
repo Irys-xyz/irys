@@ -39,6 +39,10 @@ For each fix, do these steps in order.
    - The class exists: append an `[[instance]]` row to `instances.toml`.
    - The class is new: write `classes/<id>.md`, add its `detect.md` line, then append the row.
 
+   Set `enforcement` to the strongest control that stops the class today (see the template). If a
+   lint or a type could stop the class, say so in **Detection** and tell the user, so they can open
+   an issue for it.
+
    `scope` and `flag` are what a reviewer reads before anything else, for every class, so keep them
    short and concrete. `flag` names the code shape to look for (calls, types, control flow), not
    the effect. The rationale goes in the class file body.
@@ -58,7 +62,9 @@ the reason), and sweep leads.
 ## Class file template
 
 `id` must equal the file name (kebab-case). `severity` is the worst typical effect: `fork`,
-`data-loss`, `dos`, `stall` or `other`. `scope` (the code this class can occur in) and `flag` (what
+`data-loss`, `dos`, `stall` or `other`. `enforcement` is how the class is stopped today: `review`
+(only a reviewer finds it; no `patterns`), `scan` (`patterns` give leads), `lint` (a lint or another
+CI check rejects the code) or `type` (a type or an API makes the defect impossible to write). `scope` (the code this class can occur in) and `flag` (what
 to flag) are each one line with no final `.`. `paths` (globs relative to the repo root) and `patterns`
 (Rust `regex` syntax) are optional and feed `cargo xtask defects scan`; set `paths` to keep the scan
 output small.
@@ -67,6 +73,7 @@ output small.
 +++
 id = "short-class-name"
 severity = "dos"
+enforcement = "scan"
 scope = "code that reads an HTTP response body from a peer"
 flag = "`.json()` on a peer response with no byte cap"
 paths = ["crates/p2p/**"]
@@ -97,8 +104,12 @@ is missing or differs):
 - `short-class-name` (dos). Scope: code that reads an HTTP response body from a peer. Flag: `.json()` on a peer response with no byte cap.
 ```
 
-A new known non-issue gets a full entry in the README and one line under `## Do not flag` in
-`detect.md`.
+A new known non-issue gets a `### <id>` entry (kebab-case) under "Known non-issues" in the README,
+and one line under `## Do not flag` in `detect.md`:
+
+```markdown
+- `short-non-issue-name`: what not to flag, in code terms. This is intended.
+```
 
 ## Instance row template
 
