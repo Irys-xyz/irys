@@ -2245,7 +2245,12 @@ mod tests {
                 &chunk,
                 solution.chunk_offset,
                 &seed,
-                irys_types::hardfork_config::Activation::Inactive,
+                config.consensus.hardforks.delta_for_block(
+                    irys_types::global_clock()
+                        .now_ms()
+                        .expect("clock")
+                        .to_secs()
+                ),
             ),
             "solution hash must be over the true offset"
         );

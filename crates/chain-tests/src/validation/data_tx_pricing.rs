@@ -121,10 +121,7 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     // Create a block with evil strategy and zero immediate inclusion reward percent
     let genesis_block_prod = &genesis_node.node_ctx.block_producer_inner;
     let mut evil_config = genesis_node.node_ctx.config.node_config.clone();
-    evil_config
-        .consensus
-        .get_mut()
-        .immediate_tx_inclusion_reward_percent = Amount::new(U256::from(0));
+    zero_ingress_proof_reward(evil_config.consensus.get_mut());
 
     let block_prod_strategy = EvilBlockProdStrategy {
         malicious_tx: malicious_tx.header.clone(),
@@ -184,8 +181,10 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
 /// the shadow-tx path.
 ///
 /// This test closes that gap by configuring the **validator's** consensus
-/// with `immediate_tx_inclusion_reward_percent = 0`. That zeroes the
-/// ingress proof reward pool passed to `PublishFeeCharges::new`, so:
+/// with a zero ingress proof reward (`immediate_tx_inclusion_reward_percent`
+/// before Delta, `Delta::ingress_proof_reward_pool_percent` from it; see
+/// `zero_ingress_proof_reward`). That zeroes the ingress proof reward pool
+/// passed to `PublishFeeCharges::new`, so:
 ///   - `ingress_proof_reward = 0`
 ///   - `perm_fee_amount >= ingress_proof_reward` is trivially satisfied for
 ///     any non-zero perm_fee.
@@ -239,16 +238,13 @@ async fn heavy_block_insufficient_perm_fee_pre_validation_only() -> eyre::Result
     }
 
     // Configure a test network where BOTH the producer and the validator
-    // see `immediate_tx_inclusion_reward_percent = 0`. This is what makes
+    // see a zero ingress proof reward (`zero_ingress_proof_reward`). This is what makes
     // the shadow-tx side accept the malicious block (see doc above) and
     // therefore makes pre-validation the sole rejection path.
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
     genesis_config.consensus.get_mut().chunk_size = 32;
-    genesis_config
-        .consensus
-        .get_mut()
-        .immediate_tx_inclusion_reward_percent = Amount::new(U256::from(0));
+    zero_ingress_proof_reward(genesis_config.consensus.get_mut());
 
     let test_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&test_signer]);
@@ -267,7 +263,7 @@ async fn heavy_block_insufficient_perm_fee_pre_validation_only() -> eyre::Result
         .await?;
 
     // Create transaction with INSUFFICIENT perm_fee (50% of expected).
-    // With reward_percent=0, expected_perm_fee == base_network_fee > 0,
+    // With a zero ingress proof reward, expected_perm_fee == base_network_fee > 0,
     // so half of it is still strictly less than the threshold.
     let insufficient_perm_fee = price_info.perm_fee / U256::from(2);
     let malicious_tx = test_signer.create_transaction_with_fees(
@@ -280,8 +276,8 @@ async fn heavy_block_insufficient_perm_fee_pre_validation_only() -> eyre::Result
     let malicious_tx = test_signer.sign_transaction(malicious_tx)?;
 
     // Build the evil block. The producer reuses the validator's already-
-    // zeroed reward_percent (cloning from `node_ctx.config.node_config`),
-    // so both sides agree on `reward_percent = 0`.
+    // zeroed ingress proof reward (cloning from `node_ctx.config.node_config`),
+    // so both sides agree on a zero reward.
     let genesis_block_prod = &genesis_node.node_ctx.block_producer_inner;
     let evil_config = genesis_node.node_ctx.config.node_config.clone();
 
@@ -305,7 +301,7 @@ async fn heavy_block_insufficient_perm_fee_pre_validation_only() -> eyre::Result
         send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
     // Deterministic assertion: only `PreValidation(InsufficientPermFee)` is
     // accepted here. `ShadowTransactionInvalid` would mean shadow-tx won
-    // the race — which can't happen with reward_percent=0 on the validator,
+    // the race — which can't happen with a zero ingress proof reward on the validator,
     // so its presence indicates the validator's shadow-tx setup deviates
     // from the doc above (e.g. configuration ignored, non-zero reward_percent
     // resurrected).
@@ -404,10 +400,7 @@ async fn block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
     // Use an evil strategy to insert the malicious tx with zero immediate inclusion reward percent
     let genesis_block_prod = &genesis_node.node_ctx.block_producer_inner;
     let mut evil_config = genesis_node.node_ctx.config.node_config.clone();
-    evil_config
-        .consensus
-        .get_mut()
-        .immediate_tx_inclusion_reward_percent = Amount::new(U256::from(0));
+    zero_ingress_proof_reward(evil_config.consensus.get_mut());
 
     let block_prod_strategy = EvilBlockProdStrategy {
         malicious_tx: malicious_tx.header.clone(),
@@ -449,11 +442,10 @@ async fn block_valid_data_tx_after_ema_change_gets_accepted() -> eyre::Result<()
     genesis_config.consensus.get_mut().chunk_size = 32;
     // Make EMA recalc frequent to speed up test
     let price_adjustment_interval = 3_u64;
-    genesis_config
-        .consensus
-        .get_mut()
-        .ema
-        .price_adjustment_interval = price_adjustment_interval;
+    crate::utils::set_ema_price_adjustment_interval(
+        genesis_config.consensus.get_mut(),
+        price_adjustment_interval,
+    );
 
     let test_signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&test_signer]);
@@ -518,11 +510,10 @@ async fn block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result
 
     // Set EMA interval to 2 blocks for quick price changes
     let price_adjustment_interval = 2_u64;
-    genesis_config
-        .consensus
-        .get_mut()
-        .ema
-        .price_adjustment_interval = price_adjustment_interval;
+    crate::utils::set_ema_price_adjustment_interval(
+        genesis_config.consensus.get_mut(),
+        price_adjustment_interval,
+    );
 
     // Configure mock oracle with ever-increasing prices
     genesis_config.oracles = vec![OracleConfig::Mock {
@@ -648,11 +639,10 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
 
     // Set EMA interval to 2 blocks for quick price changes
     let price_adjustment_interval = 2_u64;
-    genesis_config
-        .consensus
-        .get_mut()
-        .ema
-        .price_adjustment_interval = price_adjustment_interval;
+    crate::utils::set_ema_price_adjustment_interval(
+        genesis_config.consensus.get_mut(),
+        price_adjustment_interval,
+    );
 
     // Configure mock oracle with ever-increasing prices
     genesis_config.oracles = vec![OracleConfig::Mock {
@@ -793,11 +783,18 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         .unwrap();
 
     // Validate by sending block directly to the block tree.
-    // Expect the block to be rejected for insufficient perm_fee — either via
-    // `data_txs_are_valid` (`PreValidation(InsufficientPermFee)`) or via
-    // `ShadowTxGenerator::new` (`ShadowTransactionInvalid` from the typed
-    // `Structural` classification of `PublishFeeCharges::new`'s rejection).
-    // Both are valid consensus rejections; accept either.
+    // Expect the block to be rejected for insufficient fees — either via
+    // `data_txs_are_valid` (`PreValidation(InsufficientPermFee)` or
+    // `PreValidation(InsufficientTermFee)`) or via `ShadowTxGenerator::new`
+    // (`ShadowTransactionInvalid` from the typed `Structural` classification of
+    // `PublishFeeCharges::new`'s rejection). All are valid consensus rejections.
+    //
+    // Which pre-validation error fires depends on Delta. Before Delta the
+    // ingress proof reward pool is priced on the required term fee, so the
+    // perm_fee built from the halved term fee falls short and the perm_fee
+    // check (which runs first) fails. From Delta the pool is priced on the
+    // tx's own term fee, so that perm_fee is exactly sufficient and the
+    // halved term fee is what fails.
     let outcome =
         send_block_and_read_state(&genesis_node.node_ctx, promote_block.clone(), false).await?;
     assert_validation_error(
@@ -805,11 +802,13 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         |e| {
             matches!(
                 e,
-                ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
-                    | ValidationError::ShadowTransactionInvalid(_)
+                ValidationError::PreValidation(
+                    PreValidationError::InsufficientPermFee { .. }
+                        | PreValidationError::InsufficientTermFee { .. }
+                ) | ValidationError::ShadowTransactionInvalid(_)
             )
         },
-        "block with insufficient perm_fee should be rejected",
+        "block with insufficient fees should be rejected",
     );
 
     genesis_node.stop().await;
@@ -945,4 +944,15 @@ async fn heavy_block_term_ledger_tx_with_perm_fee_gets_rejected() -> eyre::Resul
 
     genesis_node.stop().await;
     Ok(())
+}
+
+/// Sets the ingress proof reward of a Publish tx to zero, so `PublishFeeCharges`
+/// accepts any `perm_fee`. Before Delta the reward comes from
+/// `immediate_tx_inclusion_reward_percent`. From Delta it is a pool of
+/// `Delta::ingress_proof_reward_pool_percent` of the term fee.
+fn zero_ingress_proof_reward(consensus: &mut irys_types::ConsensusConfig) {
+    consensus.immediate_tx_inclusion_reward_percent = Amount::new(U256::from(0));
+    if let Some(delta) = consensus.hardforks.delta.as_mut() {
+        delta.ingress_proof_reward_pool_percent = Amount::new(U256::from(0));
+    }
 }

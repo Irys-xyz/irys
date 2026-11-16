@@ -229,12 +229,14 @@ fn solution_hash_link_valid_ok() {
 
     let poa_chunk: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD];
 
-    // compute expected solution_hash = sha256(poa_chunk || offset_le || seed)
+    // compute expected solution_hash in the order the config selects for the block
     block.solution_hash = compute_solution_hash(
         &poa_chunk,
         block.poa.partition_chunk_offset,
         &block.vdf_limiter_info.output,
-        Activation::Inactive,
+        ConsensusConfig::testing()
+            .hardforks
+            .delta_for_block(block.timestamp.to_secs()),
     );
 
     assert!(
@@ -256,7 +258,9 @@ fn solution_hash_link_invalid_when_inputs_tampered() {
         &poa_chunk,
         block.poa.partition_chunk_offset,
         &block.vdf_limiter_info.output,
-        Activation::Inactive,
+        ConsensusConfig::testing()
+            .hardforks
+            .delta_for_block(block.timestamp.to_secs()),
     );
 
     // now tamper the inputs (e.g., change poa_chunk by one byte) to trigger mismatch

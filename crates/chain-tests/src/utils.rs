@@ -4320,6 +4320,44 @@ pub fn assert_reorg_event_lca_contract(reorg_event: &ReorgEvent) {
     );
 }
 
+/// Sets the EMA price adjustment interval for both rule sets: the base
+/// `EmaConfig::price_adjustment_interval` (which also sizes the two-interval
+/// bootstrap) and, when Delta is configured, `Delta::ema_price_adjustment_interval`,
+/// which replaces the base interval once Delta is active.
+pub fn set_ema_price_adjustment_interval(consensus: &mut ConsensusConfig, interval: u64) {
+    consensus.ema.price_adjustment_interval = interval;
+    if let Some(delta) = consensus.hardforks.delta.as_mut() {
+        delta.ema_price_adjustment_interval = interval;
+    }
+}
+
+/// The part of `block`'s reward-curve amount that goes to the treasury rather
+/// than the miner. Non-zero only for a capacity PoA block from Delta, where
+/// the miner gets `Delta::capacity_chunk_reward_percent`. The genesis block
+/// carries no reward.
+pub fn block_reward_treasury_share(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    block: &IrysBlockHeader,
+) -> eyre::Result<U256> {
+    let Some(parent_height) = block.height.checked_sub(1) else {
+        return Ok(U256::zero());
+    };
+    let consensus = &node.node_ctx.config.consensus;
+    let full_reward = irys_actors::block_reward::full_block_reward(
+        &node.node_ctx.reward_curve,
+        consensus.difficulty_adjustment.block_time,
+        parent_height,
+    )?;
+    Ok(irys_actors::block_reward::split_block_reward(
+        full_reward,
+        consensus,
+        block.timestamp_secs(),
+        !block.poa.is_data_poa(),
+    )?
+    .treasury
+    .amount)
+}
+
 /// Waits until the supply state is ready and has counted every block up to
 /// `height`. Migration writes the block index before it updates the supply
 /// state, so a wait on the index height alone can read a stale supply state.

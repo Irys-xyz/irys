@@ -1665,6 +1665,8 @@ mod tests {
         config.hardforks.frontier.number_of_ingress_proofs_total = 1;
         if delta_active {
             config_with_delta_active(&mut config);
+        } else {
+            config.hardforks.delta = None;
         }
         let block_timestamp_secs = UnixTimestamp::from_secs(0);
         let term_fee = U256::from(30000);

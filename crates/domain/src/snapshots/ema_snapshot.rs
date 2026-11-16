@@ -761,12 +761,14 @@ mod test {
     ) {
         // setup
         let interval = 10;
-        let config = ConsensusConfig {
+        let mut config = ConsensusConfig {
             ema: irys_types::EmaConfig {
                 price_adjustment_interval: interval,
             },
             ..ConsensusConfig::testing()
         };
+        // These cases pin the pre-Delta EMA rules.
+        config.hardforks.delta = None;
 
         // Build blocks and snapshots iteratively
         let blocks_and_snapshots = build_blocks_with_snapshots(height_latest_block, &config);
@@ -819,12 +821,14 @@ mod test {
         use rust_decimal_macros::dec;
 
         // Setup
-        let config = ConsensusConfig {
+        let mut config = ConsensusConfig {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
             ..ConsensusConfig::testing()
         };
+        // These cases pin the pre-Delta EMA rules.
+        config.hardforks.delta = None;
 
         // Create genesis block
         let mut genesis_block = IrysBlockHeader::new_mock_header();
@@ -861,12 +865,14 @@ mod test {
     #[case(19)]
     fn calculate_ema_for_new_block_first_and_second_adjustment_period(#[case] max_height: u64) {
         // Setup
-        let config = ConsensusConfig {
+        let mut config = ConsensusConfig {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
             ..ConsensusConfig::testing()
         };
+        // These cases pin the pre-Delta EMA rules.
+        config.hardforks.delta = None;
 
         // Build blocks and snapshots using utility function
         let blocks_and_snapshots = build_blocks_with_snapshots(max_height, &config);
@@ -912,13 +918,15 @@ mod test {
     #[case(27)]
     fn oracle_price_gets_capped(#[case] max_height: u64) {
         // Setup
-        let config = ConsensusConfig {
+        let mut config = ConsensusConfig {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
             token_price_safe_range: Amount::percentage(dec!(0.1)).unwrap(),
             ..ConsensusConfig::testing()
         };
+        // These cases pin the pre-Delta EMA rules.
+        config.hardforks.delta = None;
 
         // Build blocks and snapshots using utility function
         let blocks_and_snapshots = build_blocks_with_snapshots(max_height, &config);
@@ -986,12 +994,14 @@ mod test {
         #[case] prev_ema_predecessor_height: u64,
     ) {
         // Setup
-        let config = ConsensusConfig {
+        let mut config = ConsensusConfig {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
             ..ConsensusConfig::testing()
         };
+        // These cases pin the pre-Delta EMA rules.
+        config.hardforks.delta = None;
 
         // Build blocks and snapshots using utility function
         let blocks_and_snapshots = build_blocks_with_snapshots(max_height, &config);

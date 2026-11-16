@@ -1577,6 +1577,10 @@ mod tests {
         thirty_day_epoch_length = 30
         annual_cost_per_gb = 0.028
 
+        # Delta parameters other than the activation take their serde defaults.
+        [hardforks.delta]
+        activation_timestamp = "1970-01-01T00:00:00+00:00"
+
         [hardforks.echo]
         activation_height = 0
 

@@ -48,7 +48,10 @@ async fn test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Result<(
     // setup
     let price_adjustment_interval = 3;
     let mut config = NodeConfig::testing();
-    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    crate::utils::set_ema_price_adjustment_interval(
+        config.consensus.get_mut(),
+        price_adjustment_interval,
+    );
     let ctx = IrysNodeTest::new_genesis(config).start().await;
 
     // action
@@ -96,7 +99,10 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
     // setup
     let price_adjustment_interval = 3;
     let mut config = NodeConfig::testing();
-    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    crate::utils::set_ema_price_adjustment_interval(
+        config.consensus.get_mut(),
+        price_adjustment_interval,
+    );
     //start node with modified config
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     // (oracle price, EMA price)
@@ -154,7 +160,10 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
     let price_adjustment_interval = 3;
     let token_price_safe_range = Amount::percentage(dec!(0.1)).unwrap();
     let mut config = NodeConfig::testing();
-    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+    crate::utils::set_ema_price_adjustment_interval(
+        config.consensus.get_mut(),
+        price_adjustment_interval,
+    );
     config.consensus.get_mut().token_price_safe_range = token_price_safe_range;
 
     config.oracles = vec![OracleConfig::Mock {
