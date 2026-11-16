@@ -214,8 +214,16 @@ Produce the seed with the add skill (this also tests the skill):
      change, not part of this class. Do not log it.
    The add skill confirms both against the final tree before it logs them.
 
-The wall-clock-vs-monotonic class from the issue is left to the backfill; the `monotonic-time` skill
-already covers the guidance.
+3. Class `wall-clock-for-internal-timing`: wall-clock time (`SystemTime`, `UnixTimestamp`) used
+   for internal timing, or a monotonic `tokio` sleep trusted to move the wall clock. The class file
+   points to the `monotonic-time` skill for the full guidance. Instances, both from #1402 (first
+   released in `testnet-3.1.0`):
+   - `crates/p2p/src/rate_limiting.rs::DataRequestTracker`: the rate, deduplication and cleanup
+     windows moved from `SystemTime` milliseconds to `Instant`. An earlier fix (#1445) only
+     saturated the subtraction that panicked when the clock stepped back; it is one instance, not
+     two.
+   - `crates/actors/src/block_producer.rs::current_timestamp`: the wait for a timestamp past the
+     parent's second re-reads the wall clock in a loop, not after one sleep.
 
 ## Settled details
 

@@ -64,3 +64,21 @@ found_by = "review"
 fix = "#1678"
 released_in = "testnet-4.1.1"
 note = "peer chunk fetch for ingress-proof checks"
+
+[[instance]]
+class = "wall-clock-for-internal-timing"
+site = "crates/p2p/src/rate_limiting.rs::DataRequestTracker"
+found = "2026-04-29"
+found_by = "test"
+fix = "#1402"
+released_in = "testnet-3.1.0"
+note = "rate, deduplication and cleanup windows moved from SystemTime milliseconds to Instant; an earlier fix (#1445) only saturated the subtraction that panicked when the clock stepped back"
+
+[[instance]]
+class = "wall-clock-for-internal-timing"
+site = "crates/actors/src/block_producer.rs::current_timestamp"
+found = "2026-04-29"
+found_by = "test"
+fix = "#1402"
+released_in = "testnet-3.1.0"
+note = "one tokio sleep was trusted to move the wall clock past the parent block's second; the wait now re-reads the clock in a loop"
