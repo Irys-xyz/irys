@@ -91,7 +91,8 @@ enum DefectsAction {
         /// Catalogue directory (default: the one in this checkout).
         #[clap(long)]
         dir: Option<PathBuf>,
-        /// Base ref (default: the merge-base of `master` and `HEAD`).
+        /// Base ref (default: the merge-base of `HEAD` and `origin/master`, or `master` if there is
+        /// no `origin/master`).
         #[clap(long)]
         base: Option<String>,
         /// Head ref (default: the working tree).
@@ -1337,9 +1338,28 @@ fn run_defects(action: DefectsAction) -> eyre::Result<()> {
             let catalogue = load_valid_catalogue(dir)?;
             let classes = defects::scan::compile(&catalogue)?;
             let sh = Shell::new()?;
+            // Git paths are relative to the repo root, but `ls-files` lists them relative to
+            // the current directory, and only below it: run every git command from the root.
+            let root = PathBuf::from(cmd!(sh, "git rev-parse --show-toplevel").read()?);
+            sh.change_dir(&root);
             let base = match base {
                 Some(base) => base,
-                None => cmd!(sh, "git merge-base master HEAD").read()?,
+                None => {
+                    // A worktree's local `master` is often stale; prefer the remote branch.
+                    let master = if cmd!(sh, "git rev-parse --verify --quiet origin/master")
+                        .quiet()
+                        .ignore_stdout()
+                        .run()
+                        .is_ok()
+                    {
+                        "origin/master"
+                    } else {
+                        "master"
+                    };
+                    let base = cmd!(sh, "git merge-base {master} HEAD").read()?;
+                    println!("base: {base} (merge-base of HEAD and {master})");
+                    base
+                }
             };
             // Fixed prefixes: a user's `diff.mnemonicPrefix` or `diff.noprefix` must not change
             // the `+++ b/<path>` lines that the parser reads.
@@ -1371,10 +1391,15 @@ fn run_defects(action: DefectsAction) -> eyre::Result<()> {
                 .read()?;
                 for path in untracked.split('\0').filter(|p| !p.is_empty()) {
                     // A file that is not UTF-8 text (binary) has no lines to scan.
-                    if let Ok(text) = std::fs::read_to_string(path) {
+                    if let Ok(text) = std::fs::read_to_string(root.join(path)) {
                         added.extend(defects::scan::file_as_added_lines(path, &text));
                     }
                 }
+            }
+            let tracked = cmd!(sh, "git -c core.quotepath=false ls-files -z").read()?;
+            let tracked: Vec<&str> = tracked.split('\0').filter(|p| !p.is_empty()).collect();
+            for (class, glob) in defects::scan::unmatched_paths(&classes, &tracked) {
+                println!("class {class}: paths glob {glob} matches no tracked file");
             }
             let hits = defects::scan::scan(&classes, &added);
             for hit in &hits {

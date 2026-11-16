@@ -161,6 +161,21 @@ const PATH_MATCH: glob::MatchOptions = glob::MatchOptions {
     require_literal_leading_dot: false,
 };
 
+/// The `(class id, glob)` pairs whose glob matches none of `files`. A renamed or moved file can
+/// leave a glob that matches nothing, and the scan then covers less with no error.
+pub fn unmatched_paths(classes: &[CompiledClass], files: &[&str]) -> Vec<(String, String)> {
+    classes
+        .iter()
+        .flat_map(|class| {
+            class
+                .paths
+                .iter()
+                .filter(|glob| !files.iter().any(|f| glob.matches_with(f, PATH_MATCH)))
+                .map(|glob| (class.id.clone(), glob.as_str().to_owned()))
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanHit {
     pub class: String,
@@ -226,6 +241,17 @@ mod tests {
             }],
             ..Catalogue::default()
         }
+    }
+
+    #[test]
+    fn unmatched_paths_lists_globs_that_match_no_file() {
+        let catalogue = catalogue_with(&["crates/p2p/**", "crates/gone.rs"], &[r"\.json"]);
+        let classes = compile(&catalogue).unwrap();
+        let files = ["crates/p2p/src/a.rs", "crates/other.rs"];
+        assert_eq!(
+            unmatched_paths(&classes, &files),
+            [("uncapped-x".to_owned(), "crates/gone.rs".to_owned())]
+        );
     }
 
     #[test]
