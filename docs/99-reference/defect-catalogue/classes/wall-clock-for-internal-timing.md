@@ -3,16 +3,17 @@ id = "wall-clock-for-internal-timing"
 severity = "dos"
 enforcement = "scan"
 scope = "node code that measures time: timeouts, sleeps, retry and backoff, rate limits, deduplication windows, cache expiry, last-seen bookkeeping"
-flag = "`SystemTime::now()` or `UnixTimestamp(Ms)::now()` used for a duration, a timeout, an expiry window or an in-process last-seen value; or a `tokio::time::sleep` that the code trusts to move the wall clock by its duration"
+flag = "`SystemTime::now()`, `UnixTimestamp(Ms)::now()` or a `now_ms()` clock read (`global_clock().now_ms()`) used for a duration, a timeout, an expiry window or an in-process last-seen value; or a `tokio::time::sleep` that the code trusts to move the wall clock by its duration"
 paths = ["crates/**"]
-patterns = ['\b(SystemTime|UnixTimestamp(Ms)?)::now\(\)']
+patterns = ['\b(SystemTime|UnixTimestamp(Ms)?)::now\(\)', '\bnow_ms\(\)']
 +++
 
 ## Pattern
 
-Code reads the wall clock (`SystemTime::now()`, `UnixTimestamp::now()`, `UnixTimestampMs::now()`)
-to measure time inside the process: `later - earlier` arithmetic, a timeout target, a "window has
-expired" check, or a last-request timestamp that only this process reads.
+Code reads the wall clock (`SystemTime::now()`, `UnixTimestamp::now()`, `UnixTimestampMs::now()`,
+or `Clock::now_ms()` through `irys_types::global_clock()`) to measure time inside the process:
+`later - earlier` arithmetic, a timeout target, a "window has expired" check, or a last-request
+timestamp that only this process reads.
 
 A second form uses a wall-clock value correctly, but computes one `tokio::time::sleep` from it and
 then assumes that the wall clock has moved by the sleep duration. `tokio` sleeps use the monotonic
@@ -43,9 +44,10 @@ gives the full guidance.
 
 ## Detection
 
-`cargo xtask defects scan`: the pattern matches each added `SystemTime::now()`,
-`UnixTimestamp::now()` and `UnixTimestampMs::now()` in `crates/`. Most hits are correct uses (block
-timestamps, persisted records, logs): for each hit, follow the value and flag it only if it feeds a
+`cargo xtask defects scan`: the patterns match each added `SystemTime::now()`,
+`UnixTimestamp::now()`, `UnixTimestampMs::now()` and `now_ms()` call in `crates/`. In production,
+`Clock::now_ms()` (`Clock::Real`) reads the OS wall clock, which is not monotonic. Most hits are
+correct uses (block timestamps, persisted records, logs): for each hit, follow the value and flag it only if it feeds a
 duration, a timeout, an expiry check or in-process bookkeeping. The scan misses a wall-clock value
 that comes from a helper or another type (for example `chrono`), and a sleep that is trusted to move
 the wall clock when the clock read is on an unchanged line. Manual check: for each new sleep, timeout
