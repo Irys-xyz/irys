@@ -9,8 +9,18 @@ The catalogue is in `docs/99-reference/defect-catalogue/`: `detect.md` (one dete
 class, read first in a review), `README.md` (process, known non-issues), `classes/<id>.md` (one
 file per class), `instances.toml` (instance log, rows are only added).
 
-Input: a PR number, a commit, or a range of either. Optional: `--sweep` (or ask the user) to search
-for sibling sites of a new class.
+Input: a PR number, a commit, or a range of either; or "pending": the merged PRs whose description
+has a `Defect class:` line and that have no row yet. To list them, run
+
+```sh
+gh pr list --state merged --search '"Defect class" in:body' --limit 200 --json number,body \
+  --jq '.[] | select(.body | test("^Defect class:")) | .number'
+```
+
+and drop each PR whose number is already a `fix` in `instances.toml`. A PR that is not released
+yet stops at step 2; it stays pending for a later run.
+
+Optional: `--sweep` (or ask the user) to search for sibling sites of a new class.
 
 For each fix, do these steps in order.
 

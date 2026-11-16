@@ -117,8 +117,10 @@ the change. These are data fields, not comments, so the "no comments of record" 
 
 - One paragraph: what the catalogue is and the disclosure rule.
 - Process:
-  - A fix for a new defect class adds a class file and a log row in the same PR (use the add skill).
-  - A fix for a known class adds a log row.
+  - A fix PR names its class in its description (`Defect class: <id>` or `Defect class: new`).
+    It does not change the catalogue, because its fix is not released yet.
+  - Any time after a release contains the fix, the add skill writes the entries. It finds the
+    merged PRs with a `Defect class:` line and no log row.
   - The sibling sweep is optional when the class is new; it may run as a separate step.
 - **Known non-issues**: patterns that look like defects but are correct by design. Reviewers must
   not raise them again. Seed: a Reth/Irys state mismatch is fatal on purpose (`RethService` exits).
@@ -132,12 +134,13 @@ New xtask subcommand with three actions. No model use.
   has the required fields; no two log rows have the same class, site and fix; `detect.md` has exactly one line per class, equal to the line its front matter gives. Exit non-zero on any error.
   Added to `cargo xtask local-checks` and to CI next to the existing checks.
 - `trend [--since <YYYY-MM-DD> | --last-releases <N>]` — prints one row per class: id, severity,
-  enforcement, total instances, instances in the window, last `found` date, and the last
-  `released_in` of each stream (testnet and mainnet apart). Sorted by
+  enforcement, total instances, instances in the window, last `found` date. Sorted by
   instances in the window, then total. With no flag, the window column is omitted.
   `--last-releases N` reads the release tags from git and takes the N highest versions of each
   stream (testnet and mainnet apart, since their version numbers differ); an instance counts when
   its `released_in` is one of those tags. A release with no logged instance still moves the window.
+  A row records only the first release that contains the fix (in practice a testnet tag: mainnet
+  releases get fixes by cherry-pick, which `git tag --contains` does not see).
 - `scan [--base <ref>] [--head <ref>]` — runs `git diff -U0 <base>...<head>` (default base: the
   merge-base with `master`; default head: working tree) and matches each class's `patterns`
   against **added** lines in files that match its `paths`. Prints `class  file:line  line-text`.

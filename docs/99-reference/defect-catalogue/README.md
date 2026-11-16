@@ -16,10 +16,13 @@ private security advisories until the fix is released.
 
 ## Process
 
-- A fix for a new defect class adds a class file, its `detect.md` line, and an instance row in the
-  same PR.
-  Use the `defect-catalogue-add` skill (`.agents/skills/defect-catalogue-add/`).
-- A fix for a known class adds an instance row.
+- A PR that fixes a defect that can occur at other sites names its class in the PR description:
+  a line `Defect class: <id>`, or `Defect class: new` for a class that is not in the catalogue.
+  The PR does not change the catalogue: its fix is not released yet.
+- Any time after a release contains the fix, the `defect-catalogue-add` skill
+  (`.agents/skills/defect-catalogue-add/`) turns the PR into entries: a class file and its
+  `detect.md` line for a new class, and an instance row. The skill can find the PRs that are not
+  logged yet, so this can run at any convenient time, for example with a backfill.
 - Each class has an `enforcement` value: how the class is stopped today, the strongest control
   that applies. `review`: only a reviewer finds it. `scan`: `defects scan` patterns give leads.
   `lint`: a lint or another CI check rejects the code. `type`: a type or an API makes the defect
@@ -36,8 +39,8 @@ private security advisories until the fix is released.
     are an error.
   - `cargo xtask defects trend [--since YYYY-MM-DD | --last-releases N]`: instance counts per
     class, most frequent first, with each class's `enforcement`. `--last-releases N` counts
-    instances whose `released_in` is one of the last N release tags in git, per stream (testnet
-    and mainnet apart). `--since` counts by `found` date, for an ad hoc question.
+    instances whose `released_in` (the first release that contains the fix) is one of the last N
+    release tags in git, per stream (testnet and mainnet apart). `--since` counts by `found` date, for an ad hoc question.
   - "Recent" means `--last-releases 1` in the version-bump review and `--last-releases 2` in a
     quarterly priority review. A backfilled row keeps the date the defect was found, not the
     backfill date, so a backfill does not look like a spike.
