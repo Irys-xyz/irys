@@ -511,8 +511,25 @@ pub fn validate(catalogue: &Catalogue) -> Vec<String> {
         validate_class(class, &mut problems);
     }
     let class_ids: BTreeSet<&str> = catalogue.classes.iter().map(|c| c.slug.as_str()).collect();
+    // One fix removes a site once, so a second row with the same class, site and fix would
+    // count the same instance twice in the trend.
+    let mut first_row: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
     for (position, instance) in catalogue.instances.iter().enumerate() {
         validate_instance(position, instance, &class_ids, &mut problems);
+        let key = (
+            instance.class.as_str(),
+            instance.site.as_str(),
+            instance.fix.as_str(),
+        );
+        let first = *first_row.entry(key).or_insert(position);
+        if first != position {
+            problems.push(format!(
+                "instance {} ({}): same class, site and fix as instance {}",
+                position + 1,
+                instance.site,
+                first + 1
+            ));
+        }
     }
     validate_detect(catalogue, &mut problems);
     validate_known_non_issues(catalogue, &mut problems);
@@ -884,6 +901,32 @@ released_in = "testnet-4.1.0"
         );
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_one_problem_contains(&problems, "duplicate known non-issue reth-exit");
+    }
+
+    #[test]
+    fn check_rejects_duplicate_instance_rows() {
+        let later_date = VALID_INSTANCE.replace("2026-10-13", "2026-10-20");
+        for second in [VALID_INSTANCE.to_owned(), later_date] {
+            let problems = problems_for(
+                &detect_with(&[VALID_LINE]),
+                &[("uncapped-x", VALID_CLASS)],
+                &format!("{VALID_INSTANCE}\n{second}"),
+            );
+            assert_eq!(problems.len(), 1, "{problems:?}");
+            assert_one_problem_contains(&problems, "instance 2");
+            assert_one_problem_contains(&problems, "same class, site and fix as instance 1");
+        }
+    }
+
+    #[test]
+    fn check_accepts_same_site_with_another_fix() {
+        let other_fix = VALID_INSTANCE.replace(r##"fix = "#1574""##, r##"fix = "#1678""##);
+        let problems = problems_for(
+            &detect_with(&[VALID_LINE]),
+            &[("uncapped-x", VALID_CLASS)],
+            &format!("{VALID_INSTANCE}\n{other_fix}"),
+        );
+        assert!(problems.is_empty(), "{problems:?}");
     }
 
     #[test]

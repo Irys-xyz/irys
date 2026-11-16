@@ -129,10 +129,11 @@ New xtask subcommand with three actions. No model use.
 
 - `check` — validates the catalogue: front matter parses; `id` equals the slug; required fields and
   body sections exist; every regex compiles; every log row names an existing class; every log row
-  has the required fields; `detect.md` has exactly one line per class, equal to the line its front matter gives. Exit non-zero on any error.
+  has the required fields; no two log rows have the same class, site and fix; `detect.md` has exactly one line per class, equal to the line its front matter gives. Exit non-zero on any error.
   Added to `cargo xtask local-checks` and to CI next to the existing checks.
 - `trend [--since <YYYY-MM-DD> | --last-releases <N>]` — prints one row per class: id, severity,
-  enforcement, total instances, instances in the window, last `found` date, last `released_in`. Sorted by
+  enforcement, total instances, instances in the window, last `found` date, and the last
+  `released_in` of each stream (testnet and mainnet apart). Sorted by
   instances in the window, then total. With no flag, the window column is omitted.
   `--last-releases N` reads the release tags from git and takes the N highest versions of each
   stream (testnet and mainnet apart, since their version numbers differ); an instance counts when

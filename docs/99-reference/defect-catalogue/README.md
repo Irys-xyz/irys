@@ -32,7 +32,8 @@ private security advisories until the fix is released.
   - `cargo xtask defects check`: validates the catalogue. CI runs it. Each `detect.md` class line
     must equal the line that the class front matter gives (`id`, `severity`, `scope`, `flag`); on
     a difference, `check` prints the expected line. The "Do not flag" lines and the known
-    non-issues below must have the same ids.
+    non-issues below must have the same ids. Two instance rows with the same class, site and fix
+    are an error.
   - `cargo xtask defects trend [--since YYYY-MM-DD | --last-releases N]`: instance counts per
     class, most frequent first, with each class's `enforcement`. `--last-releases N` counts
     instances whose `released_in` is one of the last N release tags in git, per stream (testnet

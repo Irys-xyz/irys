@@ -22,13 +22,24 @@ pub struct TrendRow {
     pub total: usize,
     pub in_window: Option<usize>,
     pub last_found: Option<NaiveDate>,
-    pub last_release: Option<String>,
+    /// The highest `released_in` tag of each stream. The streams have their own version numbers,
+    /// so the two are not compared.
+    pub last_testnet: Option<String>,
+    pub last_mainnet: Option<String>,
 }
 
 type Version = (u64, u64, u64);
 
-fn version(instance: &Instance) -> Option<Version> {
-    parse_release(&instance.released_in).map(|(_, version)| version)
+/// The highest `released_in` tag of `stream` among `instances`.
+fn last_release(instances: &[&Instance], stream: Stream) -> Option<String> {
+    instances
+        .iter()
+        .filter_map(|i| match parse_release(&i.released_in) {
+            Some((s, version)) if s == stream => Some((version, &i.released_in)),
+            _ => None,
+        })
+        .max()
+        .map(|(_, tag)| tag.clone())
 }
 
 fn found(instance: &Instance) -> Option<NaiveDate> {
@@ -81,11 +92,8 @@ pub fn trend(catalogue: &Catalogue, window: Option<&Window>) -> Vec<TrendRow> {
                 total: instances.len(),
                 in_window: window.map(|_| instances.iter().filter(|i| is_recent(i)).count()),
                 last_found: instances.iter().filter_map(|i| found(i)).max(),
-                last_release: instances
-                    .iter()
-                    .filter_map(|i| version(i).map(|v| (v, &i.released_in)))
-                    .max()
-                    .map(|(_, tag)| tag.clone()),
+                last_testnet: last_release(&instances, Stream::Testnet),
+                last_mainnet: last_release(&instances, Stream::Mainnet),
             }
         })
         .collect();
@@ -100,7 +108,7 @@ pub fn render_trend(rows: &[TrendRow], with_window: bool) -> String {
     if with_window {
         header.push("window");
     }
-    header.extend(["last-found", "last-release"]);
+    header.extend(["last-found", "last-testnet", "last-mainnet"]);
     table.push(header.into_iter().map(str::to_owned).collect());
     for row in rows {
         let mut cells = vec![
@@ -116,7 +124,9 @@ pub fn render_trend(rows: &[TrendRow], with_window: bool) -> String {
             row.last_found
                 .map_or_else(|| "-".to_owned(), |d| d.to_string()),
         );
-        cells.push(row.last_release.clone().unwrap_or_else(|| "-".to_owned()));
+        for tag in [&row.last_testnet, &row.last_mainnet] {
+            cells.push(tag.clone().unwrap_or_else(|| "-".to_owned()));
+        }
         table.push(cells);
     }
     let widths: Vec<usize> = (0..table[0].len())
@@ -202,11 +212,37 @@ mod tests {
         assert_eq!(rows[0].total, 3);
         assert_eq!(rows[0].in_window, None);
         assert_eq!(rows[0].last_found, Some(date("2026-10-20")));
-        assert_eq!(rows[0].last_release.as_deref(), Some("testnet-4.1.1"));
+        assert_eq!(rows[0].last_testnet.as_deref(), Some("testnet-4.1.1"));
+        assert_eq!(rows[0].last_mainnet, None);
         assert_eq!(rows[0].severity, "dos");
         assert_eq!(rows[2].total, 0);
         assert_eq!(rows[2].last_found, None);
-        assert_eq!(rows[2].last_release, None);
+        assert_eq!(rows[2].last_testnet, None);
+        assert_eq!(rows[2].last_mainnet, None);
+    }
+
+    #[test]
+    fn last_release_is_per_stream_and_by_version() {
+        let catalogue = Catalogue {
+            classes: vec![class("a", Severity::Dos)],
+            instances: vec![
+                instance("a", "2026-01-01", "mainnet-4.0.10"),
+                instance("a", "2026-01-02", "testnet-4.1.1"),
+                instance("a", "2026-01-03", "mainnet-4.0.9"),
+            ],
+            ..Catalogue::default()
+        };
+        let rows = trend(&catalogue, None);
+        assert_eq!(rows[0].last_testnet.as_deref(), Some("testnet-4.1.1"));
+        assert_eq!(rows[0].last_mainnet.as_deref(), Some("mainnet-4.0.10"));
+        let rendered = render_trend(&rows, false);
+        let header: Vec<&str> = rendered
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect();
+        assert_eq!(header[header.len() - 2..], ["last-testnet", "last-mainnet"]);
     }
 
     #[test]
