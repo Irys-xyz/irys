@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794907083851,
+  "lastUpdate": 1794918439430,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -23479,6 +23479,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "66ad40830593f256e50e503f1005528dcf406b53",
+          "message": "fix(ci): stop the release CI gate from waiting on its own checks (#1831)\n\nA release dispatched from a ref whose head is the gate target puts the\nrelease run's own jobs on that commit as check runs. The gate then waited\non its own in-progress `validate release` job until the timeout. Check\nruns are only collapsed per check suite, so a cancelled earlier release\nrun on the same commit also failed the gate.\n\nThe gate now skips check runs in any check suite of the calling\nworkflow's runs on the gate commit, re-read on each poll. If that list\ncannot be read, the poll does not read check runs and re-polls. The\ncheck-run TSV puts the suite id first, because `read` with IFS=tab\nmerges an empty field into the next one.\n\nThe validate job gets actions:read for the workflow-run lookup.",
+          "timestamp": "2026-11-17T12:12:41Z",
+          "tree_id": "a0fc165f4ca286d21c1027e687ac70347b2df304",
+          "url": "https://github.com/Irys-xyz/irys/commit/66ad40830593f256e50e503f1005528dcf406b53"
+        },
+        "date": 1794918438013,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015021,
+            "range": "± 0.000463",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.152714,
+            "range": "± 0.004795",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.532449,
+            "range": "± 0.013903",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.413977,
+            "range": "± 0.690656",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.073415,
+            "range": "± 0.004562",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 728.589575,
+            "range": "± 5.723501",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 896.173368,
+            "range": "± 26.287736",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.147195,
+            "range": "± 0.002641",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1274.512051,
+            "range": "± 112.276819",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1620.326968,
+            "range": "± 158.978728",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.094796,
+            "range": "± 0.026568",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 195.766038,
+            "range": "± 8.972688",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 180.599052,
+            "range": "± 3.034603",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
