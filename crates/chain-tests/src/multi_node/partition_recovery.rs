@@ -1,5 +1,4 @@
-use crate::utils::{IrysNodeTest, wait_supply_height};
-use irys_actors::block_reward::block_emission;
+use crate::utils::{IrysNodeTest, expected_block_emission, wait_supply_height};
 use irys_chain::IrysNodeCtx;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_domain::ChunkType;
@@ -336,21 +335,11 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     // Emission is each block's full reward-curve amount. After Delta a
     // capacity PoA block's `reward_amount` is only the miner's share, so the
     // headers' rewards undercount it.
-    let block_time_secs = genesis
-        .node_ctx
-        .config
-        .consensus
-        .difficulty_adjustment
-        .block_time;
     let mut expected_emitted = irys_types::U256::zero();
     for h in 1..=supply_after.height {
         // The canonical chain must be readable from the index up to this height.
         genesis.get_block_by_height_from_index(h, false)?;
-        expected_emitted = expected_emitted.saturating_add(block_emission(
-            &genesis.node_ctx.reward_curve,
-            block_time_secs,
-            h,
-        )?);
+        expected_emitted = expected_emitted.saturating_add(expected_block_emission(&genesis, h)?);
     }
     assert_eq!(
         supply_after.cumulative_emitted, expected_emitted,
@@ -488,11 +477,7 @@ async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     for h in 1..=final_supply.height {
         // Full reward-curve emission per block; see the supply check above.
         genesis.get_block_by_height_from_index(h, false)?;
-        final_expected = final_expected.saturating_add(block_emission(
-            &genesis.node_ctx.reward_curve,
-            block_time_secs,
-            h,
-        )?);
+        final_expected = final_expected.saturating_add(expected_block_emission(&genesis, h)?);
     }
     assert_eq!(
         final_supply.cumulative_emitted, final_expected,

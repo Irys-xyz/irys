@@ -483,14 +483,8 @@ async fn rewards_get_calculated_correctly() -> eyre::Result<()> {
         )?;
         assert!(full_reward.amount > irys_types::U256::zero());
         // After Delta a capacity PoA pays the miner only its share of the curve amount.
-        let expected_reward = irys_actors::block_reward::split_block_reward(
-            full_reward,
-            &node.node_ctx.config.consensus,
-            block.timestamp_secs(),
-            !block.poa.is_data_poa(),
-        )?
-        .miner
-        .amount;
+        let (expected_reward, _treasury_share) =
+            crate::utils::expected_block_reward_split(&node, &block)?;
         assert_eq!(block.reward_amount, expected_reward);
 
         let balance_before = reth_context

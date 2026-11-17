@@ -674,34 +674,45 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         .node_ctx
         .config
         .publish_replica_count_at(UnixTimestamp::from_secs(0));
-    let expected_term_fee = calculate_term_fee_from_config(
+    // Overpay the term fee so the term fee check passes even after the EMA
+    // moves at the promotion block; only the perm_fee is short. From Delta the
+    // ingress proof reward pool is priced on the tx's own term fee, so the
+    // required perm_fee is computed from the term fee the tx actually pays.
+    let term_fee = calculate_term_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
         replica_count,
         price_before_the_interval.ema_for_public_pricing(),
         UnixTimestamp::from_secs(0),
     )?
-    .checked_div(U256::from(2))
+    .checked_mul(U256::from(2))
     .unwrap();
 
-    let expected_perm_fee = calculate_perm_fee_from_config(
+    let ingress_proof_reward_pool = genesis_node
+        .node_ctx
+        .config
+        .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), term_fee)?;
+    let required_perm_fee = calculate_perm_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
         replica_count,
-        genesis_node
-            .node_ctx
-            .config
-            .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), expected_term_fee)?,
+        ingress_proof_reward_pool,
         price_before_the_interval.ema_for_public_pricing(),
         UnixTimestamp::from_secs(0),
     )?;
+    // The pool plus half the storage part of the required perm_fee: above the
+    // pool, so the producer's own fee split still builds the block, but short
+    // of the required perm_fee at the old EMA, and more so after the falling
+    // oracle price raises the required fees.
+    let storage_part = required_perm_fee.amount - ingress_proof_reward_pool;
+    let insufficient_perm_fee = ingress_proof_reward_pool + storage_part / U256::from(2);
 
     let tx = test_signer.create_transaction_with_fees(
         data,
         genesis_node.get_anchor().await?,
         DataLedger::Publish,
-        expected_term_fee.into(),
-        Some((expected_perm_fee.amount).into()),
+        term_fee.into(),
+        Some(insufficient_perm_fee.into()),
     )?;
     let tx = test_signer.sign_transaction(tx)?;
 
@@ -783,18 +794,11 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         .unwrap();
 
     // Validate by sending block directly to the block tree.
-    // Expect the block to be rejected for insufficient fees — either via
-    // `data_txs_are_valid` (`PreValidation(InsufficientPermFee)` or
-    // `PreValidation(InsufficientTermFee)`) or via `ShadowTxGenerator::new`
-    // (`ShadowTransactionInvalid` from the typed `Structural` classification of
-    // `PublishFeeCharges::new`'s rejection). All are valid consensus rejections.
-    //
-    // Which pre-validation error fires depends on Delta. Before Delta the
-    // ingress proof reward pool is priced on the required term fee, so the
-    // perm_fee built from the halved term fee falls short and the perm_fee
-    // check (which runs first) fails. From Delta the pool is priced on the
-    // tx's own term fee, so that perm_fee is exactly sufficient and the
-    // halved term fee is what fails.
+    // Expect the block to be rejected for insufficient perm_fee — either via
+    // `data_txs_are_valid` (`PreValidation(InsufficientPermFee)`) or via
+    // `ShadowTxGenerator::new` (`ShadowTransactionInvalid` from the typed
+    // `Structural` classification of `PublishFeeCharges::new`'s rejection).
+    // Both are valid consensus rejections; accept either.
     let outcome =
         send_block_and_read_state(&genesis_node.node_ctx, promote_block.clone(), false).await?;
     assert_validation_error(
@@ -802,13 +806,11 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         |e| {
             matches!(
                 e,
-                ValidationError::PreValidation(
-                    PreValidationError::InsufficientPermFee { .. }
-                        | PreValidationError::InsufficientTermFee { .. }
-                ) | ValidationError::ShadowTransactionInvalid(_)
+                ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
+                    | ValidationError::ShadowTransactionInvalid(_)
             )
         },
-        "block with insufficient fees should be rejected",
+        "block with insufficient perm_fee should be rejected",
     );
 
     genesis_node.stop().await;
