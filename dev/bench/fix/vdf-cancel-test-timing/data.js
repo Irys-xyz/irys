@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794918439430,
+  "lastUpdate": 1794918777725,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -23581,6 +23581,110 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 180.599052,
             "range": "± 3.034603",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "9a14c173a4a25ec7ac10f9e7edf1d45659cb6de6",
+          "message": "test(vdf): drop the wall-clock limit in the mid-execution cancel test",
+          "timestamp": "2026-11-13T07:54:48Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1832/commits/9a14c173a4a25ec7ac10f9e7edf1d45659cb6de6"
+        },
+        "date": 1794918776282,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015402,
+            "range": "± 0.000429",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153644,
+            "range": "± 0.011354",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.265819,
+            "range": "± 0.05534",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.291438,
+            "range": "± 0.518529",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.073243,
+            "range": "± 0.000362",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 684.280667,
+            "range": "± 3.518876",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 934.501299,
+            "range": "± 42.886349",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.153636,
+            "range": "± 0.0078",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1273.583047,
+            "range": "± 157.611258",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1582.092126,
+            "range": "± 23.040596",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027483,
+            "range": "± 0.001787",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 138.365699,
+            "range": "± 0.38792",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 180.236797,
+            "range": "± 0.71269",
             "unit": "ms/iter"
           },
           {
