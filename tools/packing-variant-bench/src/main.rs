@@ -2,7 +2,7 @@ use clap::Parser;
 use packing_variant_bench::{
     CHUNK_SIZE, Chunk, ChunkId, DEFAULT_ITERATIONS, Variant,
     cpu::{self, CpuKind, CpuScratch},
-    fixed_id, new_chunk,
+    fixed_id, new_chunk, vde,
 };
 use serde::Serialize;
 use std::{path::PathBuf, time::Instant};
@@ -100,6 +100,14 @@ struct Args {
     /// Prod: total chunks to pack (default: 4 batches).
     #[arg(long)]
     prod_chunks: Option<u32>,
+
+    /// VDE: layers per chunk (difficulty). Cost scales linearly; 1 gives the per-layer cost.
+    #[arg(long, default_value_t = 1)]
+    vde_layers: u32,
+
+    /// VDE: mix lane counts to compare (1 = sequential mix over the chunk, 8192 = no mix).
+    #[arg(long, value_delimiter = ',', default_values_t = vec![1_usize, 64, 8192])]
+    vde_lanes: Vec<usize>,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -113,6 +121,9 @@ enum Mode {
     /// Production GPU packing end to end (`irys_packing::CudaPackerPool`, variant A): kernels,
     /// copy-back, CPU spot-check and one host copy per chunk, as the packing service does.
     Prod,
+    /// Prototype VDE packing (`src/vde.rs`) on the CPU: encode / decode latency and throughput,
+    /// against today's SHA chain at `iterations`.
+    Vde,
 }
 
 impl Default for Mode {
@@ -180,6 +191,8 @@ struct Report {
     tune: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prod: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    vde: Vec<VdeResult>,
 }
 
 const OFFSET_START: u64 = 1_000;
@@ -211,6 +224,15 @@ fn main() {
     }
     if args.mode == Mode::Prod {
         run_prod(&args, &mut report);
+    }
+    if args.mode == Mode::Vde {
+        report.vde = run_vde(&args, logical);
+        if let Some(path) = &args.json {
+            std::fs::write(path, serde_json::to_string_pretty(&report).unwrap())
+                .unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+            println!("JSON results written to {}", path.display());
+        }
+        return;
     }
 
     print_summary(&report);
@@ -804,4 +826,167 @@ fn verdict(pass: bool, nothing_checked: bool) -> &'static str {
         (false, true) => "PASS",
         (false, false) => "FAIL",
     }
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct VdeResult {
+    params: vde::Params,
+    /// One chunk on one thread.
+    encode_1t_s: f64,
+    /// Step split of that encode.
+    encode_1t_timing: vde::Timing,
+    /// One chunk, root step split over `threads` threads (mix still on one thread).
+    encode_mt_s: f64,
+    threads: usize,
+    /// One chunk on one thread.
+    decode_1t_s: f64,
+    /// Every thread encoding its own chunks.
+    throughput_chunks_per_s: f64,
+    /// encode_1t / decode_1t.
+    asymmetry: f64,
+    /// Today's SHA chain (variant A) iterations costing the same single-thread time.
+    equivalent_sha_iterations: f64,
+}
+
+/// Prototype VDE: per-chunk encode / decode cost on this CPU, against today's SHA chain.
+fn run_vde(args: &Args, logical: usize) -> Vec<VdeResult> {
+    let threads = args.threads.unwrap_or(logical);
+    let id = fixed_id(OFFSET_START);
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+
+    // today's packing on one core, for scale (SHA-NI single chain, or OpenSSL without it)
+    let mut buf = new_chunk();
+    let sha_s = median(
+        (0..3)
+            .map(|_| {
+                let t = Instant::now();
+                packing_variant_bench::cpu_fast::entropy(
+                    Variant::A,
+                    &id,
+                    args.iterations,
+                    &mut buf,
+                );
+                t.elapsed().as_secs_f64()
+            })
+            .collect(),
+    );
+    println!(
+        "[vde] reference: SHA chain (variant A, {}) {} iterations: {:.4} s per chunk on one thread",
+        if packing_variant_bench::cpu_fast::available() {
+            "SHA-NI"
+        } else {
+            "OpenSSL"
+        },
+        args.iterations,
+        sha_s
+    );
+    println!(
+        "[vde] {:>6} {:>6} {:>10} {:>8} {:>8} {:>10} {:>10} {:>10} {:>8} {:>12}",
+        "layers",
+        "lanes",
+        "enc 1T s",
+        "roots s",
+        "mix s",
+        "enc NT s",
+        "dec 1T s",
+        "chunks/s",
+        "enc/dec",
+        "~SHA iters"
+    );
+
+    let mut out = vec![];
+    for &lanes in &args.vde_lanes {
+        let params = vde::Params {
+            layers: args.vde_layers,
+            lanes,
+        };
+        let zeros = vde::zero_elems();
+
+        // warm-up and correctness: encode, then decode back to zeros
+        let mut xs = zeros.clone();
+        vde::encode(&id, &mut xs, params, 1);
+        let replica = xs.clone();
+        vde::decode(&id, &mut xs, params);
+        assert_eq!(xs, zeros, "VDE decode did not restore the input");
+
+        let mut runs = vec![];
+        for _ in 0..3 {
+            let mut xs = zeros.clone();
+            let t = Instant::now();
+            let timing = vde::encode(&id, &mut xs, params, 1);
+            runs.push((t.elapsed().as_secs_f64(), timing));
+        }
+        runs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (encode_1t_s, encode_1t_timing) = runs[1];
+
+        let encode_mt_s = median(
+            (0..3)
+                .map(|_| {
+                    let mut xs = zeros.clone();
+                    let t = Instant::now();
+                    vde::encode(&id, &mut xs, params, threads);
+                    t.elapsed().as_secs_f64()
+                })
+                .collect(),
+        );
+
+        let decode_1t_s = median(
+            (0..5)
+                .map(|_| {
+                    let mut ys = replica.clone();
+                    let t = Instant::now();
+                    vde::decode(&id, &mut ys, params);
+                    t.elapsed().as_secs_f64()
+                })
+                .collect(),
+        );
+
+        // throughput: every thread encodes its own chunks, single-threaded
+        let per_thread = 3;
+        let t = Instant::now();
+        std::thread::scope(|s| {
+            for k in 0..threads {
+                let zeros = &zeros;
+                s.spawn(move || {
+                    for c in 0..per_thread {
+                        let mut xs = zeros.clone();
+                        let id = fixed_id(OFFSET_START + (k * per_thread + c) as u64);
+                        vde::encode(&id, &mut xs, params, 1);
+                        std::hint::black_box(&xs);
+                    }
+                });
+            }
+        });
+        let throughput = (threads * per_thread) as f64 / t.elapsed().as_secs_f64();
+
+        let r = VdeResult {
+            params,
+            encode_1t_s,
+            encode_1t_timing,
+            encode_mt_s,
+            threads,
+            decode_1t_s,
+            throughput_chunks_per_s: throughput,
+            asymmetry: encode_1t_s / decode_1t_s,
+            equivalent_sha_iterations: encode_1t_s / sha_s * args.iterations as f64,
+        };
+        println!(
+            "[vde] {:>6} {:>6} {:>10.4} {:>8.4} {:>8.4} {:>10.4} {:>10.5} {:>10.1} {:>8.0} {:>12.0}",
+            params.layers,
+            lanes,
+            r.encode_1t_s,
+            r.encode_1t_timing.roots_s,
+            r.encode_1t_timing.mix_s,
+            r.encode_mt_s,
+            r.decode_1t_s,
+            r.throughput_chunks_per_s,
+            r.asymmetry,
+            r.equivalent_sha_iterations
+        );
+        out.push(r);
+    }
+    out
 }

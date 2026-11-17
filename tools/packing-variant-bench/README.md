@@ -270,6 +270,40 @@ does, would need another `batch × 256 KiB` of host RAM. CPU: 256 KiB per chunk 
   CPU implementation.
 * `--json PATH` writes everything, plus device and kernel info (registers, local memory, host time).
 
+## VDE prototype (`--mode vde`, CPU)
+
+A slow-to-encode, fast-to-decode packing (`src/vde.rs`; spec and slow reference in
+`scripts/vde_ref.py`, which also produces the known-answer tests). Per layer, each of the 8192
+elements gets a key added and then the Sloth square root mod p = 2^256 − 189 (253 squarings +
+13 multiplies). After that comes a data-dependent mix over `--vde-lanes` lanes:
+`y[i] = z[i] + SHA256(y[i-1] ‖ y[j]) mod p`, where 1 lane is one sequential pass and 8192 is
+no mix. Decode is one squaring plus one hash per element per layer, and every element is
+independent. Capacity is the encoding of zeros. Difficulty is the number of layers.
+
+One layer on a 9950X3D (one thread unless stated; today's SHA chain at 1M iterations: 0.0496 s):
+
+| lanes | encode | roots / mix | encode, roots on 32 threads | decode | 32-thread throughput | encode / decode |
+|---|---|---|---|---|---|---|
+| 1 | 0.0196 s | 0.0188 / 0.0005 s | 0.0037 s | 0.70 ms | 1 100 chunks/s | 28× |
+| 64 | 0.0197 s | 0.0191 / 0.0004 s | 0.0035 s | 0.69 ms | 1 050 chunks/s | 28× |
+| 8192 | 0.0194 s | 0.0191 / 0 s | 0.0032 s | 0.34 ms | 1 109 chunks/s | 58× |
+
+Cost is linear in layers (8 layers: 0.154 s encode, 3.9 ms decode). One layer costs the same
+single-thread time as ~0.39M SHA-chain iterations.
+
+* About 9 ns per 256-bit modular multiply (portable u128 code, no assembly or IFMA yet).
+* Decode is dominated by hashing, not the squaring: 8192 key hashes per chunk (~0.35 ms) plus
+  8192 mix hashes per layer. The squaring alone would give ~270× asymmetry. Cheaper key
+  derivation and a field-arithmetic mix would move decode toward that.
+* The mix costs ~2% of encode on the CPU, whatever the lane count. Lanes matter on a GPU,
+  where the roots run in parallel and the mix's sequential depth sets the latency.
+* Prototype limitation: an input element must be below p, so arbitrary data needs an
+  encoding into 254-bit elements before production use.
+
+```sh
+cargo run --release -- 1000000 --mode vde --vde-layers 1 --vde-lanes 1,64,8192 --json vde.json
+```
+
 ## Future work
 
 * SHA-NI and AVX-512 on the same core at once (SHA-NI chains on one SMT sibling, AVX-512 lanes on the

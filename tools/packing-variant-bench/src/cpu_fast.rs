@@ -61,6 +61,20 @@ pub fn entropy(variant: Variant, id: &ChunkId, iterations: u32, buf: &mut Chunk)
     crate::entropy(variant, id, iterations, buf);
 }
 
+/// SHA-256 of the 64-byte message `left || right` (SHA-NI when available, else OpenSSL).
+#[inline]
+pub fn sha256_64(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    #[cfg(target_arch = "x86_64")]
+    if available() {
+        // SAFETY: SHA-NI/SSE4.1/SSSE3 were detected above.
+        return unsafe { ni::sha256_64_bytes(left, right) };
+    }
+    let mut h = openssl::sha::Sha256::new();
+    h.update(left);
+    h.update(right);
+    h.finish()
+}
+
 pub(crate) const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -265,6 +279,38 @@ mod ni {
         compress!(N, &mut st, &mut m);
         compress_pad64(&mut st);
         st.map(|s| state_to_words(s))
+    }
+
+    /// SHA-256 of `left || right` in byte form: big-endian message words in, digest bytes out.
+    #[inline]
+    #[target_feature(enable = "sha,sse4.1,ssse3")]
+    pub(super) fn sha256_64_bytes(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        // byte-swap each 32-bit lane: bytes <-> big-endian words
+        let bswap = _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
+        // SAFETY: each array is 32 readable bytes; unaligned loads.
+        let (l, r) = unsafe {
+            (
+                [
+                    _mm_shuffle_epi8(_mm_loadu_si128(left.as_ptr().cast()), bswap),
+                    _mm_shuffle_epi8(_mm_loadu_si128(left.as_ptr().add(16).cast()), bswap),
+                ],
+                [
+                    _mm_shuffle_epi8(_mm_loadu_si128(right.as_ptr().cast()), bswap),
+                    _mm_shuffle_epi8(_mm_loadu_si128(right.as_ptr().add(16).cast()), bswap),
+                ],
+            )
+        };
+        let out = sha64::<1>(iv_state(), &[l], &[r])[0];
+        let mut digest = [0_u8; 32];
+        // SAFETY: `digest` is 32 writable bytes; unaligned stores.
+        unsafe {
+            _mm_storeu_si128(digest.as_mut_ptr().cast(), _mm_shuffle_epi8(out[0], bswap));
+            _mm_storeu_si128(
+                digest.as_mut_ptr().add(16).cast(),
+                _mm_shuffle_epi8(out[1], bswap),
+            );
+        }
+        digest
     }
 
     /// SHA-256 of a 32-byte message, N chains at once (one block, constant padding words).

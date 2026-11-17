@@ -21,6 +21,7 @@ pub mod cpu_avx512;
 pub mod cpu_fast;
 #[cfg(feature = "cuda")]
 pub mod gpu;
+pub mod vde;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, clap::ValueEnum)]
 pub enum Variant {
