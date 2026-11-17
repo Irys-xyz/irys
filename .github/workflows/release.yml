@@ -63,6 +63,8 @@ jobs:
     permissions:
       contents: read
       # Read check runs and commit statuses to CI-gate the gate target below.
+      # actions:read lets the gate find and skip this workflow's own check runs.
+      actions: read
       checks: read
       statuses: read
     steps:
