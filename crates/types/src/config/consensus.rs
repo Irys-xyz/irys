@@ -1244,8 +1244,21 @@ impl ConsensusConfig {
                     thirty_day_epoch_length: 10, // 10 hrs
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
-                // Delta hardfork - not scheduled yet
-                delta: None,
+                // Delta hardfork - 2026-11-17T12:00:00+00:00
+                delta: Some(Delta {
+                    activation_timestamp: unix_timestamp_string_serde::deserialize(
+                        StringDeserializer::<serde::de::value::Error>::new(
+                            "2026-11-17T12:00:00+00:00".to_owned(),
+                        ),
+                    )
+                    .unwrap(),
+                    initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+                    capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+                    ingress_proof_reward_pool_percent:
+                        Delta::default_ingress_proof_reward_pool_percent(),
+                    token_price_safe_range: Delta::default_token_price_safe_range(),
+                    ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
+                }),
                 // Echo hardfork - enabled from genesis
                 echo: Some(Echo {
                     activation_height: 0,
@@ -1260,7 +1273,7 @@ impl ConsensusConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hardfork_config::Delta;
+    use crate::hardfork_config::{Activation, Delta};
 
     #[test]
     fn test_consensus_hash_differs_on_change() {
@@ -1393,7 +1406,7 @@ mod tests {
         );
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("7ShUw2VECgbqSB36dSYvsdZXiY2fiPaLeH8X3AvZnX2j"), // spellchecker:disable-line
+            H256::from_base58("2oHKywD7jtEuD1KYRqRoupXzJzYFMLdFd247srF5Pvv9"), // spellchecker:disable-line
             "testnet consensus-config hash snapshot changed"
         );
     }
@@ -1480,10 +1493,10 @@ mod tests {
         );
     }
 
-    /// Pins the testnet hardfork schedule: the Borealis activation time
-    /// (controlled rollout) and the forks that must stay unscheduled.
+    /// Pins the testnet hardfork schedule: the Borealis and Delta activation
+    /// times (controlled rollouts) and the forks that must stay unscheduled.
     #[test]
-    fn test_testnet_borealis_activation_time() {
+    fn test_testnet_hardfork_activation_times() {
         let config = ConsensusConfig::testnet();
 
         // Borealis — 2026-05-22T08:00:00+00:00 (epoch-aligned at runtime).
@@ -1497,12 +1510,47 @@ mod tests {
             UnixTimestamp::from_secs(1779436800)
         );
 
-        // Delta — unscheduled. Scheduling it also moves the canonical config hash
-        // pinned by `test_testnet_genesis_constants_are_frozen`.
-        assert!(
-            config.hardforks.delta.is_none(),
-            "testnet Delta is unscheduled"
+        // Delta — 2026-11-17T12:00:00+00:00. Pin the activation timestamp and its
+        // parameters; any change also moves the canonical config hash pinned by
+        // `test_testnet_genesis_constants_are_frozen`.
+        let delta_ts = UnixTimestamp::from_secs(1794916800);
+        let delta = config
+            .hardforks
+            .delta
+            .as_ref()
+            .expect("testnet Delta must be configured");
+        assert_eq!(delta.activation_timestamp, delta_ts);
+        assert_eq!(
+            delta.initial_slots_per_new_ledger,
+            Delta::default_initial_slots_per_new_ledger()
         );
+        assert_eq!(
+            delta.capacity_chunk_reward_percent,
+            Delta::default_capacity_chunk_reward_percent()
+        );
+        assert_eq!(
+            delta.ingress_proof_reward_pool_percent,
+            Delta::default_ingress_proof_reward_pool_percent()
+        );
+        assert_eq!(
+            delta.token_price_safe_range,
+            Delta::default_token_price_safe_range()
+        );
+        assert_eq!(
+            delta.ema_price_adjustment_interval,
+            Delta::default_ema_price_adjustment_interval()
+        );
+        // Inactive one second before the boundary, active at it.
+        assert_eq!(
+            config
+                .hardforks
+                .delta_for_block(UnixTimestamp::from_secs(1794916800 - 1)),
+            Activation::Inactive
+        );
+        assert!(matches!(
+            config.hardforks.delta_for_block(delta_ts),
+            Activation::Active(_)
+        ));
         // Fission (partition resize) — unscheduled, like Delta: scheduling it moves the
         // canonical config hash too.
         assert!(
