@@ -329,6 +329,13 @@ registers (`PVB_VDE_MIN_BLOCKS` 5/6/8: 96/80/64 registers) changes nothing, so t
 multiply throughput, not occupancy. It draws ~402 W at 2.49 GHz, not the 575 W limit. Energy
 is 8.4 mJ per chunk-layer, against 41.7 mJ per 1M-iteration SHA chunk.
 
+**CPU multiply** (`cargo run --release --example vde_mul_bench`, best of 7): a dependent 256-bit
+modular squaring takes ~12 ns on a 9950X3D core, both portable Rust (LLVM already emits MULX) and
+hand-written MULX/ADCX/ADOX assembly with the reduction fused in (`PVB_VDE_CPU_MUL=adx`). That
+makes one root ~3.2 µs in series. With 8 independent chains interleaved it is 6.0 ns (portable)
+vs 6.5 ns (assembly). The assembly stays opt-in. Whole-chunk timings drift ±20% between runs
+under WSL2, so compare implementations with the example, not `--mode vde`.
+
 **Chained roots** (`--vde-chains`): `z[i] = root(x[i] + k[i] + layer + z[i-1])` within each of
 `chains` chains of consecutive elements. With 1 chain, a layer is 8192 roots in series, so the
 encode latency per chunk has a floor set by one core's root latency, however much hardware is

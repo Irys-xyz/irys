@@ -87,8 +87,244 @@ fn reduce(t: [u64; 8]) -> U256 {
     r
 }
 
+/// Whether `mul` / `sqr` use the MULX/ADX assembly: only with `PVB_VDE_CPU_MUL=adx` on x86_64
+/// with BMI2 + ADX. Read once. Off by default: it measured no faster than the portable code,
+/// which LLVM already compiles to MULX (~12 ns per dependent squaring either way on Zen 5).
+pub fn use_adx() -> bool {
+    static USE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *USE.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            std::env::var("PVB_VDE_CPU_MUL").as_deref() == Ok("adx")
+                && is_x86_feature_detected!("bmi2")
+                && is_x86_feature_detected!("adx")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    })
+}
+
+/// 256x256 -> 512-bit product with MULX and two carry chains (ADCX on CF, ADOX on OF), one row
+/// per limb of `b`. Five rolling registers hold the row window; finished limbs go to `out`.
+///
+/// # Safety
+/// The CPU must support BMI2 and ADX.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "bmi2,adx")]
+unsafe fn mul_wide_adx(a: &U256, b: &U256) -> [u64; 8] {
+    let mut out = [0_u64; 8];
+    // SAFETY: reads 4 limbs from each of a and b, writes 8 limbs to out; no stack use.
+    unsafe {
+        core::arch::asm!(
+            // row 0: t0..t4 = r8, r9, r10, r11, r12
+            "mov rdx, qword ptr [rcx]",
+            "mulx r9, r8, qword ptr [rsi]",
+            "mulx r10, r14, qword ptr [rsi + 8]",
+            "add r9, r14",
+            "mulx r11, r14, qword ptr [rsi + 16]",
+            "adc r10, r14",
+            "mulx r12, r14, qword ptr [rsi + 24]",
+            "adc r11, r14",
+            "adc r12, 0",
+            "mov qword ptr [rdi], r8",
+            // row 1: t1..t5 = r9, r10, r11, r12, r8
+            "mov rdx, qword ptr [rcx + 8]",
+            "xor r15, r15",
+            "mulx r13, r14, qword ptr [rsi]",
+            "adcx r9, r14",
+            "adox r10, r13",
+            "mulx r13, r14, qword ptr [rsi + 8]",
+            "adcx r10, r14",
+            "adox r11, r13",
+            "mulx r13, r14, qword ptr [rsi + 16]",
+            "adcx r11, r14",
+            "adox r12, r13",
+            "mulx r8, r14, qword ptr [rsi + 24]",
+            "adcx r12, r14",
+            "adox r8, r15",
+            "adcx r8, r15",
+            "mov qword ptr [rdi + 8], r9",
+            // row 2: t2..t6 = r10, r11, r12, r8, r9
+            "mov rdx, qword ptr [rcx + 16]",
+            "xor r15, r15",
+            "mulx r13, r14, qword ptr [rsi]",
+            "adcx r10, r14",
+            "adox r11, r13",
+            "mulx r13, r14, qword ptr [rsi + 8]",
+            "adcx r11, r14",
+            "adox r12, r13",
+            "mulx r13, r14, qword ptr [rsi + 16]",
+            "adcx r12, r14",
+            "adox r8, r13",
+            "mulx r9, r14, qword ptr [rsi + 24]",
+            "adcx r8, r14",
+            "adox r9, r15",
+            "adcx r9, r15",
+            "mov qword ptr [rdi + 16], r10",
+            // row 3: t3..t7 = r11, r12, r8, r9, r10
+            "mov rdx, qword ptr [rcx + 24]",
+            "xor r15, r15",
+            "mulx r13, r14, qword ptr [rsi]",
+            "adcx r11, r14",
+            "adox r12, r13",
+            "mulx r13, r14, qword ptr [rsi + 8]",
+            "adcx r12, r14",
+            "adox r8, r13",
+            "mulx r13, r14, qword ptr [rsi + 16]",
+            "adcx r8, r14",
+            "adox r9, r13",
+            "mulx r10, r14, qword ptr [rsi + 24]",
+            "adcx r9, r14",
+            "adox r10, r15",
+            "adcx r10, r15",
+            "mov qword ptr [rdi + 24], r11",
+            "mov qword ptr [rdi + 32], r12",
+            "mov qword ptr [rdi + 40], r8",
+            "mov qword ptr [rdi + 48], r9",
+            "mov qword ptr [rdi + 56], r10",
+            in("rsi") a.as_ptr(),
+            in("rcx") b.as_ptr(),
+            in("rdi") out.as_mut_ptr(),
+            out("rdx") _,
+            out("r8") _,
+            out("r9") _,
+            out("r10") _,
+            out("r11") _,
+            out("r12") _,
+            out("r13") _,
+            out("r14") _,
+            out("r15") _,
+            options(nostack),
+        );
+    }
+    out
+}
+
+/// a^2 mod p as a value < 2^256 (same contract as `reduce`), all in registers: 6 cross products
+/// (MULX, ADCX/ADOX), doubled, plus 4 squares, then the 2^256 = 189 fold and a second fold.
+///
+/// # Safety
+/// The CPU must support BMI2 and ADX.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "bmi2,adx")]
+unsafe fn sqr_adx(a: &U256) -> U256 {
+    let mut out = [0_u64; 4];
+    // SAFETY: reads 4 limbs of a, writes 4 limbs of out; no stack use.
+    unsafe {
+        core::arch::asm!(
+            // cross products into t1..t6 = r9..r14
+            "mov rdx, qword ptr [rsi]",
+            "mulx r10, r9, qword ptr [rsi + 8]",
+            "mulx r11, rcx, qword ptr [rsi + 16]",
+            "add r10, rcx",
+            "mulx r12, rcx, qword ptr [rsi + 24]",
+            "adc r11, rcx",
+            "adc r12, 0",
+            "mov rdx, qword ptr [rsi + 8]",
+            "xor eax, eax",
+            "mulx rax, rcx, qword ptr [rsi + 16]",
+            "adcx r11, rcx",
+            "adox r12, rax",
+            "mulx r13, rcx, qword ptr [rsi + 24]",
+            "adcx r12, rcx",
+            "mov ecx, 0",
+            "adox r13, rcx",
+            "adcx r13, rcx",
+            "mov rdx, qword ptr [rsi + 16]",
+            "mulx r14, rcx, qword ptr [rsi + 24]",
+            "add r13, rcx",
+            "adc r14, 0",
+            // double t1..t6, carry into t7 = r15
+            "xor r15d, r15d",
+            "add r9, r9",
+            "adc r10, r10",
+            "adc r11, r11",
+            "adc r12, r12",
+            "adc r13, r13",
+            "adc r14, r14",
+            "adc r15, r15",
+            // squares at limbs 0, 2, 4, 6 (t0 = r8)
+            "mov rdx, qword ptr [rsi]",
+            "mulx rax, r8, rdx",
+            "add r9, rax",
+            "mov rdx, qword ptr [rsi + 8]",
+            "mulx rax, rcx, rdx",
+            "adc r10, rcx",
+            "adc r11, rax",
+            "mov rdx, qword ptr [rsi + 16]",
+            "mulx rax, rcx, rdx",
+            "adc r12, rcx",
+            "adc r13, rax",
+            "mov rdx, qword ptr [rsi + 24]",
+            "mulx rax, rcx, rdx",
+            "adc r14, rcx",
+            "adc r15, rax",
+            // t0..t3 += 189 * t4..t7, top word into r12
+            "mov edx, 189",
+            "xor eax, eax",
+            "mulx rax, rcx, r12",
+            "adcx r8, rcx",
+            "adox r9, rax",
+            "mulx rax, rcx, r13",
+            "adcx r9, rcx",
+            "adox r10, rax",
+            "mulx rax, rcx, r14",
+            "adcx r10, rcx",
+            "adox r11, rax",
+            "mulx r12, rcx, r15",
+            "adcx r11, rcx",
+            "mov ecx, 0",
+            "adox r12, rcx",
+            "adcx r12, rcx",
+            // fold the top word (<= 191) once more; a final wrap leaves a tiny value, add 189
+            "imul r12, r12, 189",
+            "add r8, r12",
+            "adc r9, 0",
+            "adc r10, 0",
+            "adc r11, 0",
+            "mov ecx, 0",
+            "mov eax, 189",
+            "cmovc rcx, rax",
+            "add r8, rcx",
+            "mov qword ptr [rdi], r8",
+            "mov qword ptr [rdi + 8], r9",
+            "mov qword ptr [rdi + 16], r10",
+            "mov qword ptr [rdi + 24], r11",
+            in("rsi") a.as_ptr(),
+            in("rdi") out.as_mut_ptr(),
+            out("rax") _,
+            out("rcx") _,
+            out("rdx") _,
+            out("r8") _,
+            out("r9") _,
+            out("r10") _,
+            out("r11") _,
+            out("r12") _,
+            out("r13") _,
+            out("r14") _,
+            out("r15") _,
+            options(nostack),
+        );
+    }
+    out
+}
+
 #[inline(always)]
 pub fn mul(a: &U256, b: &U256) -> U256 {
+    #[cfg(target_arch = "x86_64")]
+    if use_adx() {
+        // SAFETY: use_adx() checked BMI2 and ADX.
+        return reduce(unsafe { mul_wide_adx(a, b) });
+    }
+    mul_portable(a, b)
+}
+
+#[inline(always)]
+fn mul_portable(a: &U256, b: &U256) -> U256 {
     let mut t = [0_u64; 8];
     for i in 0..4 {
         let mut carry: u128 = 0;
@@ -104,6 +340,27 @@ pub fn mul(a: &U256, b: &U256) -> U256 {
 
 #[inline(always)]
 pub fn sqr(a: &U256) -> U256 {
+    #[cfg(target_arch = "x86_64")]
+    if use_adx() {
+        // SAFETY: use_adx() checked BMI2 and ADX.
+        return unsafe { sqr_adx(a) };
+    }
+    sqr_portable(a)
+}
+
+/// Squaring with the MULX/ADX assembly when the CPU supports it, else portable (benchmarks).
+pub fn sqr_asm_or_portable(a: &U256) -> U256 {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("bmi2") && is_x86_feature_detected!("adx") {
+        // SAFETY: BMI2 and ADX checked.
+        return unsafe { sqr_adx(a) };
+    }
+    sqr_portable(a)
+}
+
+/// Portable squaring (benchmarks).
+#[inline(always)]
+pub fn sqr_portable(a: &U256) -> U256 {
     // cross products once, doubled, plus the squares: 10 multiplies instead of 16
     let mut t = [0_u64; 8];
     for i in 0..4 {
@@ -482,6 +739,35 @@ mod tests {
         }
         // (p - 1)^2 = 1
         assert_eq!(canonical(sqr(&neg(&[1, 0, 0, 0]))), [1, 0, 0, 0]);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn adx_multiply_matches_portable() {
+        if !(is_x86_feature_detected!("bmi2") && is_x86_feature_detected!("adx")) {
+            return;
+        }
+        let mut rng = StdRng::seed_from_u64(9);
+        let edges = [
+            [0; 4],
+            [1, 0, 0, 0],
+            [u64::MAX; 4],
+            P,
+            [u64::MAX, 0, u64::MAX, 0],
+        ];
+        let values: Vec<U256> = edges
+            .into_iter()
+            .chain((0..20_000).map(|_| core::array::from_fn(|_| rng.r#gen())))
+            .collect();
+        for w in values.windows(2) {
+            let (a, b) = (&w[0], &w[1]);
+            // SAFETY: BMI2 and ADX checked above.
+            let wide = unsafe { mul_wide_adx(a, b) };
+            assert_eq!(canonical(reduce(wide)), canonical(mul_portable(a, b)));
+            // SAFETY: as above.
+            let sq = unsafe { sqr_adx(a) };
+            assert_eq!(canonical(sq), canonical(sqr_portable(a)));
+        }
     }
 
     #[test]
