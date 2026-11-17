@@ -1237,7 +1237,6 @@ impl ValidationServiceInner {
                 let batch_range = batch_start_index..batch_start_index + batch_steps.len();
                 let is_final_batch = batch_end_step_number == vdf_info.global_step_number;
                 let vdf_info_for_batch = Arc::clone(&vdf_info);
-                let vdf_state_for_batch = self.vdf_state.clone();
                 let vdf_config_for_batch = vdf_config.clone();
                 let this_inner = Arc::clone(&self);
                 let cancel_for_blocking = Arc::clone(&cancel);
@@ -1246,7 +1245,6 @@ impl ValidationServiceInner {
                         &this_inner.pool,
                         &vdf_info_for_batch,
                         &vdf_config_for_batch,
-                        &vdf_state_for_batch,
                         batch_range,
                         is_final_batch,
                         cancel_for_blocking,
@@ -1357,8 +1355,8 @@ fn handle_broadcast_recv<T>(
 mod tests {
     use super::*;
     use irys_types::{H256, H256List, NodeConfig, U256, VDFLimiterInfo};
-    use irys_vdf::state::{CancelEnum, test_helpers::mocked_vdf_service};
-    use irys_vdf::{VdfStep, step_number_to_salt_number, vdf_sha};
+    use irys_vdf::state::CancelEnum;
+    use irys_vdf::{step_number_to_salt_number, vdf_sha};
 
     /// `ValidateSeeds` and `ValidateBatch` are watched by the 15s stage clock.
     /// That clock must measure the check, so neither stage may wait on the
@@ -1521,34 +1519,54 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
-    async fn invalid_batch_does_not_fast_forward_any_steps() {
-        let (config, mut vdf_info) = build_vdf_info(2);
-        vdf_info.steps.0[1] = H256::from_low_u64_be(999);
-        vdf_info.output = vdf_info.steps[1];
-
-        let vdf_state = VdfStateReadonly::new(mocked_vdf_service(&config));
+    async fn forged_later_batch_is_not_fast_forwarded() {
+        let (config, mut vdf_info) = build_vdf_info(3);
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(2)
             .build()
             .expect("thread pool");
-        let (_tx, mut rx) = tokio::sync::mpsc::channel::<Traced<VdfStep>>(4);
+        let (tx, mut rx, _signals) = irys_vdf::fast_forward_channel();
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
 
-        let result = vdf_step_batch_is_valid(
+        vdf_step_batch_is_valid(
             &pool,
             &vdf_info,
             &config.vdf,
-            &vdf_state,
-            0..vdf_info.steps.len(),
-            true,
-            cancel,
+            0..1,
+            false,
+            Arc::clone(&cancel),
+        )
+        .expect("valid prefix must pass");
+        let captured = tx.current_generation();
+        tx.send_validated_batch(1, &vdf_info.steps.0[..1], Duration::from_secs(1), captured)
+            .await
+            .expect("validated prefix should fast-forward");
+
+        vdf_info.steps.0[1] = H256::from_low_u64_be(999);
+        vdf_info.output = vdf_info.steps[1];
+        let forged_cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let err = vdf_step_batch_is_valid(
+            &pool,
+            &vdf_info,
+            &config.vdf,
+            1..2,
+            false,
+            Arc::clone(&forged_cancel),
+        );
+        assert!(err.is_err(), "forged later batch must fail: {err:?}");
+        assert_eq!(
+            forged_cancel.load(Ordering::Relaxed),
+            CancelEnum::InvalidStep as u8
         );
 
-        assert!(result.is_err(), "invalid batch must fail validation");
-        assert!(
-            rx.try_recv().is_err(),
-            "no fast-forward steps should be emitted for an invalid batch"
-        );
+        let (ff_step, _span) = rx
+            .recv()
+            .await
+            .expect("validated prefix should emit one fast-forward step")
+            .into_parts();
+        assert_eq!(ff_step.global_step_number, 1);
+        assert_eq!(ff_step.step, vdf_info.steps[0]);
+        assert!(rx.try_recv().is_err(), "the forged batch must not be sent");
     }
 
     /// On send failure, a node-fault `InternalFailure` payload must trigger a
@@ -1641,7 +1659,6 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn valid_batch_fast_forwards_only_validated_prefix() {
         let (config, vdf_info) = build_vdf_info(3);
-        let vdf_state = VdfStateReadonly::new(mocked_vdf_service(&config));
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(2)
             .build()
@@ -1649,16 +1666,8 @@ mod tests {
         let (tx, mut rx, _signals) = irys_vdf::fast_forward_channel();
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
 
-        vdf_step_batch_is_valid(
-            &pool,
-            &vdf_info,
-            &config.vdf,
-            &vdf_state,
-            0..1,
-            false,
-            cancel,
-        )
-        .expect("valid prefix should be accepted");
+        vdf_step_batch_is_valid(&pool, &vdf_info, &config.vdf, 0..1, false, cancel)
+            .expect("valid prefix should be accepted");
 
         let captured = tx.current_generation();
         tx.send_validated_batch(1, &vdf_info.steps.0[..1], Duration::from_secs(1), captured)

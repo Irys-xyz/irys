@@ -729,27 +729,39 @@ mod tests {
             step_num
         );
 
-        // get last 4 steps
+        // Window [s_{n-3}, s_{n-2}, s_{n-1}, s_n]. The limiter claims the last three
+        // with prev_output s_{n-3}.
         let steps = vdf_steps_guard
             .read()
             .get_steps(ii(step_num - 3, step_num))
             .unwrap();
 
-        // calculate last step checkpoints
-        let salt = U256::from(step_number_to_salt_number(&config.vdf, step_num - 1_u64));
-        let mut seed = steps[2];
-
+        let applied_reset_seed = IrysBlockHeader::new_mock_header()
+            .vdf_limiter_info
+            .next_seed;
+        let previous_step_number = step_num - 1;
+        let salt = U256::from(step_number_to_salt_number(
+            &config.vdf,
+            previous_step_number,
+        ));
+        let mut last_step_seed = steps[2];
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-        if step_num > 0 && (step_num - 1).is_multiple_of(config.vdf.reset_frequency as u64) {
-            seed = apply_reset_seed(seed, reset_seed);
+        if previous_step_number > 0
+            && previous_step_number.is_multiple_of(config.vdf.reset_frequency as u64)
+        {
+            last_step_seed = apply_reset_seed(last_step_seed, applied_reset_seed);
         }
         vdf_sha(
             salt,
-            &mut seed,
+            &mut last_step_seed,
             config.vdf.num_checkpoints_in_vdf_step,
             config.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
+        );
+        assert_eq!(
+            last_step_seed, steps[3],
+            "recomputed last step must match the buffer"
         );
 
         let vdf_info = VDFLimiterInfo {
@@ -758,23 +770,19 @@ mod tests {
             prev_output: steps[0],
             steps: H256List(steps.0[1..=3].into()),
             last_step_checkpoints: H256List(checkpoints),
-            seed: reset_seed,
+            seed: applied_reset_seed,
             ..VDFLimiterInfo::default()
         };
 
         let pool = crate::build_verification_pool(&config.vdf);
 
-        assert!(
-            vdf_steps_are_valid(
-                &pool,
-                &vdf_info,
-                &config.vdf,
-                &vdf_steps_guard,
-                Arc::new(AtomicU8::new(CancelEnum::Continue as u8))
-            )
-            .is_ok(),
-            "Invalid VDF"
-        );
+        vdf_steps_are_valid(
+            &pool,
+            &vdf_info,
+            &config.vdf,
+            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+        )
+        .expect("produced steps must validate from the block's own prev_output and seed");
 
         // Send shutdown signal
         shutdown_token.cancel();
@@ -841,27 +849,40 @@ mod tests {
 
         assert_eq!(step_num, 3);
 
-        // get last 4 steps
+        // Window [s1, s2, s3]. The limiter claims s2..=s3 with prev_output s1.
         let steps = vdf_steps_guard
             .read()
             .get_steps(ii(step_num - 2, step_num))
             .unwrap();
 
-        // calculate last step checkpoints
-        let salt = U256::from(step_number_to_salt_number(&config.vdf, step_num - 1_u64));
-        let mut seed = steps[2];
-
+        // The loop applies the mock header's next_seed at reset boundaries, not
+        // the `reset_seed` argument to `run_vdf`.
+        let applied_reset_seed = IrysBlockHeader::new_mock_header()
+            .vdf_limiter_info
+            .next_seed;
+        let previous_step_number = step_num - 1;
+        let salt = U256::from(step_number_to_salt_number(
+            &config.vdf,
+            previous_step_number,
+        ));
+        let mut last_step_seed = steps[1];
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-        if step_num > 0 && (step_num - 1).is_multiple_of(config.vdf.reset_frequency as u64) {
-            seed = apply_reset_seed(seed, reset_seed);
+        if previous_step_number > 0
+            && previous_step_number.is_multiple_of(config.vdf.reset_frequency as u64)
+        {
+            last_step_seed = apply_reset_seed(last_step_seed, applied_reset_seed);
         }
         vdf_sha(
             salt,
-            &mut seed,
+            &mut last_step_seed,
             config.vdf.num_checkpoints_in_vdf_step,
             config.vdf.num_iterations_per_checkpoint(),
             &mut checkpoints,
+        );
+        assert_eq!(
+            last_step_seed, steps[2],
+            "recomputed last step must match the buffer"
         );
 
         let vdf_info = VDFLimiterInfo {
@@ -870,23 +891,19 @@ mod tests {
             prev_output: steps[0],
             steps: H256List(steps.0[1..=2].into()),
             last_step_checkpoints: H256List(checkpoints),
-            seed: reset_seed,
+            seed: applied_reset_seed,
             ..VDFLimiterInfo::default()
         };
 
         let pool = crate::build_verification_pool(&config.vdf);
 
-        assert!(
-            vdf_steps_are_valid(
-                &pool,
-                &vdf_info,
-                &config.vdf,
-                &vdf_steps_guard,
-                Arc::new(AtomicU8::new(CancelEnum::Continue as u8))
-            )
-            .is_ok(),
-            "Invalid VDF"
-        );
+        vdf_steps_are_valid(
+            &pool,
+            &vdf_info,
+            &config.vdf,
+            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+        )
+        .expect("produced steps must validate from the block's own prev_output and seed");
 
         // Send shutdown signal
         shutdown_token.cancel();
@@ -1641,21 +1658,19 @@ mod tests {
         (provider, vdf_steps_guard, shutdown_token, handle)
     }
 
-    /// Issue #1447 — deterministic end-to-end reproduction across the real causal chain.
+    /// Issue #1447 — confirmation gate parks the loop on an unconfirmed reset seed.
     ///
-    /// A VDF loop that crosses a reset boundary while the seed's rotation block is still
-    /// forkable consumes a fork-LOSER seed, poisoning its step buffer; it then REJECTS the
-    /// canonical fork-WINNER block during validation and wedges. The confirmation gate
+    /// A VDF loop that would cross a reset boundary while the seed's rotation block is still
+    /// forkable consumes a fork-LOSER seed and poisons its step buffer. The confirmation gate
     /// prevents this: presented the same unconfirmed seed the loop parks, and crosses only
-    /// once the rotation block is confirmed — so its buffer matches canonical and validation
-    /// passes.
+    /// once the rotation block is confirmed. Step validation is independent of the buffer:
+    /// a correctly seeded canonical limiter validates either way.
     ///
-    /// This drives the real `run_vdf` loop and the real `vdf_steps_are_valid` (the function
-    /// the validation service calls), deterministically via `wait_for_step`. It exercises the
-    /// fix directly: the "loop stays parked while the seed is unconfirmed" assertion FAILS if
-    /// the gate is reverted to read the canonical tip instead of the confirmed step.
+    /// This drives the real `run_vdf` loop, deterministically via `wait_for_step`. The
+    /// "loop stays parked while the seed is unconfirmed" assertion FAILS if the gate is
+    /// reverted to read the canonical tip instead of the confirmed step.
     #[tokio::test]
-    async fn issue_1447_unconfirmed_reset_seed_poisons_buffer_and_wedges_block_validation() {
+    async fn issue_1447_confirmation_gate_parks_before_unconfirmed_reset_seed() {
         let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = 8;
         node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
@@ -1722,38 +1737,44 @@ mod tests {
             "loser vs winner reset seed must diverge the VDF buffer after the boundary"
         );
 
-        // --- The wedge: the canonical (winner) block is REJECTED by the poisoned buffer but
-        //     ACCEPTED by the clean one. `vdf_steps_are_valid` is exactly what the validation
-        //     service runs, so this is the real rejection a poisoned node would hit. ---
+        let prev_output = clean_guard
+            .get_step(16)
+            .expect("clean buffer must hold step 16 as the parent output of steps 17..=20");
+        let mut last_seed = clean_steps.0[2];
+        let mut checkpoints = vec![H256::zero(); config.vdf.num_checkpoints_in_vdf_step];
+        let salt = U256::from(step_number_to_salt_number(&config.vdf, 19));
+        crate::vdf_sha(
+            salt,
+            &mut last_seed,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+        assert_eq!(
+            last_seed, clean_steps.0[3],
+            "recomputed step 20 must match the clean buffer"
+        );
+
         let canonical_block = VDFLimiterInfo {
             global_step_number: 20,
-            steps: clean_steps,
+            steps: clean_steps.clone(),
+            prev_output,
+            seed: winner_seed,
+            next_seed: winner_seed,
+            last_step_checkpoints: H256List(checkpoints),
+            output: clean_steps.0[3],
             ..VDFLimiterInfo::default()
         };
         let pool = crate::build_verification_pool(&config.vdf);
-
-        let rejected = vdf_steps_are_valid(
-            &pool,
-            &canonical_block,
-            &config.vdf,
-            &poisoned_guard,
-            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
-        );
-        assert!(
-            rejected.is_err(),
-            "poisoned buffer must REJECT the canonical winner block — this is the #1447 wedge"
-        );
-
         let accepted = vdf_steps_are_valid(
             &pool,
             &canonical_block,
             &config.vdf,
-            &clean_guard,
             Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
         );
         assert!(
             accepted.is_ok(),
-            "clean buffer (gate held until the seed was confirmed) must ACCEPT the canonical block: {accepted:?}"
+            "a correctly seeded canonical limiter must validate regardless of local buffer contents: {accepted:?}"
         );
     }
 
