@@ -199,6 +199,9 @@ struct Report {
     vde: Vec<VdeResult>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     vde_gpu: Vec<serde_json::Value>,
+    /// Enforced GPU power limit during the run (GPU modes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_power: Option<serde_json::Value>,
 }
 
 const OFFSET_START: u64 = 1_000;
@@ -219,6 +222,15 @@ fn main() {
         args.iterations, args.mode
     );
 
+    // GPU results are only comparable at the same enforced power limit: record it, warn if capped
+    let gpu_mode = cfg!(feature = "cuda")
+        && matches!(
+            args.mode,
+            Mode::Gpu | Mode::All | Mode::Tune | Mode::Prod | Mode::Vde
+        );
+    if gpu_mode {
+        report.gpu_power = gpu_power_limit();
+    }
     if matches!(args.mode, Mode::Cpu | Mode::All) {
         report.cpu = run_cpu(&args, logical);
     }
@@ -1143,4 +1155,46 @@ fn run_vde_gpu(
         }
     }
     Ok(out)
+}
+
+/// The GPU's enforced power limit, read with `nvidia-smi` (on WSL2 it lives in
+/// /usr/lib/wsl/lib). GPU results are only comparable at the same enforced limit: the fast SHA
+/// kernel and the VDE kernels are power-bound, so a lowered limit lowers their throughput
+/// roughly in proportion. Warns when the limit is below the card's default.
+fn gpu_power_limit() -> Option<serde_json::Value> {
+    let query = "--query-gpu=name,enforced.power.limit,power.default_limit,power.max_limit";
+    let out = ["nvidia-smi", "/usr/lib/wsl/lib/nvidia-smi"]
+        .iter()
+        .find_map(|bin| {
+            std::process::Command::new(bin)
+                .args([query, "--format=csv,noheader,nounits"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+        });
+    let Some(out) = out else {
+        println!("[power] nvidia-smi not found: GPU power limit NOT recorded");
+        return None;
+    };
+    let line = String::from_utf8_lossy(&out.stdout);
+    let f: Vec<&str> = line.lines().next()?.split(',').map(str::trim).collect();
+    let watts = |k: usize| f.get(k).and_then(|v| v.parse::<f64>().ok());
+    let (enforced, default, max) = (watts(1)?, watts(2)?, watts(3)?);
+    println!(
+        "[power] {}: enforced power limit {enforced:.0} W (default {default:.0} W, max {max:.0} W)",
+        f[0]
+    );
+    if enforced + 1.0 < default {
+        println!(
+            "[power] WARNING: the GPU is power-capped below its default. Throughput here is NOT \
+             comparable with runs at {default:.0} W. Raise it (e.g. `nvidia-smi -pl {default:.0}`, \
+             or the vendor tool on Windows hosts) or state the cap with the results."
+        );
+    }
+    Some(serde_json::json!({
+        "name": f[0],
+        "enforced_power_limit_w": enforced,
+        "default_power_limit_w": default,
+        "max_power_limit_w": max,
+    }))
 }

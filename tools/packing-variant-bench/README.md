@@ -212,6 +212,24 @@ A production GPU packer on Windows hosts should keep launches short in the same 
 
 ## Commands
 
+**GPU power limit.** Only compare GPU results taken at the same enforced power limit. The fast
+SHA kernel and the VDE roots kernel are power-bound, so a lower cap lowers throughput (and raises
+efficiency). Every GPU mode prints `[power] ... enforced power limit` at the start, warns when the
+limit is below the card's default, and records it under `gpu_power` in `--json` output. Check it
+before quoting numbers. On WSL2, `nvidia-smi` is at `/usr/lib/wsl/lib/nvidia-smi`, and the cap is
+set on the Windows host. The headline results in this README are at the 5090's default 575 W,
+except where a table says otherwise.
+
+**GPU power limit: check it before every GPU run, and keep it the same across runs you
+compare.** The fast SHA kernel and the VDE kernels are power-bound, so a lowered limit lowers
+throughput (and energy per chunk) roughly in step. A capped card once made the VDE look
+multiply-bound at 402 W. Every GPU mode (`gpu`, `all`, `tune`, `prod`, `vde` with `--features cuda`)
+prints the enforced limit via `nvidia-smi` (`/usr/lib/wsl/lib/nvidia-smi` under WSL2) and records
+it in the JSON as `gpu_power`. It warns when the enforced limit is below the card's default. Check by
+hand with `nvidia-smi --query-gpu=enforced.power.limit,power.default_limit --format=csv`. On a
+Windows host the limit is set by the host's GPU tool, not from WSL2. Unless a table says otherwise,
+GPU figures in this README are at the RTX 5090's default 575 W.
+
 Run from this directory. Do not set `RUSTFLAGS`: the repo's `.cargo/config.toml`
 (`-C target-cpu=native`) applies here too. Cargo may be configured with a shared target dir; a CUDA
 build and a plain build there overwrite the same binary. Use a separate `CARGO_TARGET_DIR` for the
@@ -305,29 +323,39 @@ single-thread time as ~0.39M SHA-chain iterations.
 With `--features cuda` the same mode also runs the encoder on the GPU (`cuda/vde.cuh`).
 The roots kernel uses one thread per element; the mix kernel uses one block per chunk with one
 thread per lane, so up to 1024 lanes. Every lane count is first checked byte-for-byte against
-the CPU encoder on three chunks: zeros, pseudo-random and all 0xFF. RTX 5090, one layer:
+the CPU encoder on three chunks: zeros, pseudo-random and all 0xFF. RTX 5090 at 575 W, one
+layer, dedicated squaring:
 
 | lanes | 1 chunk: roots + mix | batch 21 760: roots + mix | chunk-layers/s | vs CPU, 32 threads |
 |---|---|---|---|---|
-| 1 | 0.095 + 14.7 ms | 548 + 400 ms | 22 954 | 21× |
-| 64 | 0.092 + 0.24 ms | 549 + 25 ms | 37 864 | 32× |
-| 8192 | 0.090 + 0 ms | 563 + 0 ms | 38 651 | 33× |
+| 1 | 0.078 + 14.7 ms | 436 + 404 ms | 25 893 | ~24× |
+| 64 | 0.078 + 0.24 ms | 439 + 26 ms | 46 862 | ~42× |
+| 8192 | 0.074 + 0 ms | 445 + 0 ms | 48 892 | ~44× |
 
 * One chunk's roots take 0.09 ms on the GPU against 19 ms on a CPU core. All 8192 elements run
   in parallel, so a GPU encodes one chunk with low latency, unlike the SHA chain.
 * A fully sequential mix (1 lane) costs 14.7 ms per layer per chunk on the GPU, about 160× the
   roots, because one GPU thread hashes 8191 times in a row. 64 lanes cuts that to 0.24 ms.
-* Throughput, GPU vs all CPU threads: 33× for the VDE. For the SHA chain it is 11× against
-  AVX-512 and 22× against SHA-NI ×4. Neither VDE implementation is tuned yet: the CPU uses
-  portable u128 multiplies (no MULX/ADX assembly or AVX-512 IFMA), and the GPU kernel uses
-  128 registers and spills 64 B, with no hand-written PTX carry chains.
+* Throughput, GPU vs all CPU threads: ~44× for the VDE. For the SHA chain it is 11× against
+  AVX-512 and 22× against SHA-NI ×4. The CPU VDE has no SIMD path yet (no AVX-512 IFMA), so
+  this ratio flatters the GPU.
 
-**Multiply tuning** (roots only, batch 21 760, verified): portable C 39.7k chunk-layers/s;
-dedicated squaring 49.1k (**+24%**, now the default, `PVB_VDE_MUL=1`); PTX `madc` carry chains
-39.1k (no gain: nvcc already emits wide multiply-adds); PTX plus squaring 49.4k. Capping
-registers (`PVB_VDE_MIN_BLOCKS` 5/6/8: 96/80/64 registers) changes nothing, so the kernel is bound by
-multiply throughput, not occupancy. It draws ~402 W at 2.49 GHz, not the 575 W limit. Energy
-is 8.4 mJ per chunk-layer, against 41.7 mJ per 1M-iteration SHA chunk.
+**Multiply tuning** (roots only, batch 21 760, verified; measured with the card capped at
+402.5 W, so compare these with each other only): portable C 39.7k chunk-layers/s; dedicated
+squaring 49.1k (**+24%**, now the default, `PVB_VDE_MUL=1`); PTX `madc` carry chains 39.1k (no
+gain: nvcc already emits wide multiply-adds); PTX plus squaring 49.4k. Capping registers
+(`PVB_VDE_MIN_BLOCKS` 5/6/8: 96/80/64 registers) changes nothing.
+
+**Power.** The roots kernel is power-bound. Unchained, batch 87 040:
+
+| enforced limit | draw | SM clock | chunk-layers/s | energy per chunk-layer |
+|---|---|---|---|---|
+| 402.5 W | ~402 W | 2.49 GHz | ~48 000 | 8.4 mJ |
+| 575 W (default) | ~543 W | 2.75 GHz | 50 351 | 10.8 mJ |
+
+35% more power buys ~5–10% more throughput, so a cost-minimising faker would cap the card. Use
+the capped energy figure, not the default, when costing a faker. For comparison, the SHA chain at
+575 W is 41.7 mJ per 1M-iteration chunk (its efficiency when capped has not been measured).
 
 **CPU multiply** (`cargo run --release --example vde_mul_bench`, best of 7): a dependent 256-bit
 modular squaring takes ~12 ns on a 9950X3D core, both portable Rust (LLVM already emits MULX) and
@@ -343,11 +371,12 @@ used. Decode recovers every `z` first, so it stays element-parallel. One layer, 
 
 | chains | CPU encode, 1 thread / 32 threads | GPU, 1 chunk | GPU throughput (batch 87 040) | decode, 1 thread |
 |---|---|---|---|---|
-| 1 | 19.1 / **19.3 ms** | 544 ms | 42 040 chunk-layers/s | 0.55 ms |
-| 64 | 19.2 / 3.5 ms | 10 ms | 44 074 | 0.54 ms |
-| 8192 | 19.3 / 3.2 ms | 0.08 ms | 46 228 | 0.55 ms |
+| 1 | 19.1 / **19.3 ms** | 546 ms | 46 352 chunk-layers/s | 0.55 ms |
+| 64 | 19.2 / 3.5 ms | 9 ms | 42 663 | 0.54 ms |
+| 8192 | 19.3 / 3.2 ms | 0.08 ms | 50 351 | 0.55 ms |
 
-Chaining costs the GPU ~9% of throughput and nothing on decode. The fastest single-chunk encode
+GPU columns at 575 W. Chaining costs the GPU ~8% of throughput (run-to-run spread is a few
+percent: chains = 64 came out below chains = 1 here, above it at 402.5 W) and nothing on decode. The fastest single-chunk encode
 of a fully chained layer is one CPU core (19 ms per layer here); a GPU is ~28× slower at it.
 
 ```sh
