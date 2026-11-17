@@ -14,15 +14,17 @@ description: >-
     - the combined legacy commit status (if any contexts exist) is success.
   A commit with no CI results at all is a hard failure — absence of a run is not
   proof of a passing run. skipped/neutral check runs are treated as non-blocking,
-  matching GitHub's own required-status-check semantics. The caller must pass a
-  token with checks:read and statuses:read.
+  matching GitHub's own required-status-check semantics. Check runs of the
+  calling workflow (this run and its earlier runs on the same commit) are
+  ignored: they are not CI, and this run's own jobs never settle while it waits.
+  The caller must pass a token with actions:read, checks:read and statuses:read.
 
 inputs:
   commit:
     description: "Full commit SHA to verify CI status for."
     required: true
   github-token:
-    description: "Token with checks:read and statuses:read on this repo."
+    description: "Token with actions:read, checks:read and statuses:read on this repo."
     required: true
   wait-timeout-seconds:
     description: >-
@@ -154,6 +156,21 @@ runs:
           return 1
         }
 
+        # The calling workflow's own check runs are on SHA when it was dispatched
+        # from a ref whose head is SHA (e.g. a release dispatched from master
+        # right after the release branch is cut). Its own in-progress jobs would
+        # make the gate wait on itself until timeout, and a cancelled earlier run
+        # of it would fail the gate. Identify the workflow here, then on each
+        # poll skip every check run in a check suite of that workflow's runs.
+        if own_workflow_id=$(gh_api "repos/${REPO}/actions/runs/${GITHUB_RUN_ID}" -q '.workflow_id'); then
+          :
+        else
+          rc=$?
+          if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
+          echo "::error::Could not read the workflow of run ${GITHUB_RUN_ID} from the GitHub API after retries."
+          exit 1
+        fi
+
         # SECONDS is bash's monotonic elapsed-seconds counter since shell start;
         # the poll loop below waits until SECONDS exceeds this deadline.
         deadline=$((SECONDS + WAIT_TIMEOUT))
@@ -161,19 +178,39 @@ runs:
         while true; do
           api_error=0    # a read failed after its retries (transient API error)
 
+          # Read per poll: a run of this workflow queued after the gate started
+          # also adds check runs to SHA.
+          if own_suites=$(gh_api --paginate \
+            "repos/${REPO}/actions/workflows/${own_workflow_id}/runs?head_sha=${SHA}&per_page=100" \
+            -q '.workflow_runs[].check_suite_id'); then
+            :
+          else
+            rc=$?
+            own_suites=""
+            if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
+            api_error=1
+          fi
+
           # GitHub Actions jobs surface as "check runs"; external CI / bots surface
           # as legacy "commit statuses". A passing core CI result must satisfy both.
           # filter=latest (the API default) collapses re-runs to the most recent run
           # per check name, so a red run that was later re-run green is not counted.
-          if runs_tsv=$(gh_api --paginate \
-            "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" \
-            -q '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv'); then
-            :
-          else
-            rc=$?
-            runs_tsv=""
-            if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
-            api_error=1
+          # Without the own-suite list, this workflow's check runs cannot be told
+          # apart, so do not read check runs on this poll (api_error re-polls).
+          # Only the last field may be empty: `read` with IFS=tab merges adjacent
+          # tabs, so an empty field before it would shift the later fields left.
+          runs_tsv=""
+          if [ "${api_error}" -eq 0 ]; then
+            if runs_tsv=$(gh_api --paginate \
+              "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" \
+              -q '.check_runs[] | [.check_suite.id, .name, .status, (.conclusion // "")] | @tsv'); then
+              :
+            else
+              rc=$?
+              runs_tsv=""
+              if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
+              api_error=1
+            fi
           fi
 
           fail=0          # a check reached a real, terminal non-pass conclusion
@@ -184,8 +221,11 @@ runs:
           check_successes=0
           total_runs=0
           if [ -n "${runs_tsv}" ]; then
-            while IFS=$'\t' read -r name status conclusion; do
+            while IFS=$'\t' read -r suite_id name status conclusion; do
               [ -z "${name}" ] && continue
+              if grep -qxF "${suite_id}" <<< "${own_suites}"; then
+                continue
+              fi
               if is_non_core_check "${name}"; then
                 if [ "${status}" = "completed" ]; then
                   case "${conclusion}" in
