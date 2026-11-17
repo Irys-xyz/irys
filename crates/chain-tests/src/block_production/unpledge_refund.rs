@@ -18,7 +18,7 @@ use std::{
 use tokio::time::{Duration, Instant, sleep};
 use tracing::warn;
 
-use crate::utils::IrysNodeTest;
+use crate::utils::{IrysNodeTest, block_reward_treasury_share};
 
 // Test setup: two-node network with genesis producing blocks and the peer starting with three
 // pledged partitions assigned to local storage modules and reflected in treasury accounting.
@@ -193,12 +193,14 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
         "Unpledge inclusion should reduce balance by fee only"
     );
 
-    // Treasury should be unchanged at inclusion (unpledge has no treasury movement)
+    // Treasury moves only by the block's reward share at inclusion (unpledge
+    // has no treasury movement)
     let prev_header = genesis_node
         .get_block_by_height(inclusion_block.height - 1)
         .await?;
     assert_eq!(
-        inclusion_block.treasury, prev_header.treasury,
+        inclusion_block.treasury,
+        prev_header.treasury + block_reward_treasury_share(&genesis_node, &inclusion_block)?,
         "Treasury must be unchanged in unpledge inclusion block"
     );
 
@@ -295,7 +297,8 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
         .await?;
     assert_eq!(
         last_block.treasury,
-        epoch_prev.treasury - expected_refund_amount,
+        epoch_prev.treasury - expected_refund_amount
+            + block_reward_treasury_share(&genesis_node, &last_block)?,
         "Epoch block treasury must decrease exactly by the refund value"
     );
 
@@ -503,8 +506,10 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         "Every unpledge commitment should produce a matching shadow debit"
     );
 
+    // `head_block` is the inclusion block's parent.
     assert_eq!(
-        inclusion_block.treasury, treasury_before,
+        inclusion_block.treasury,
+        treasury_before + block_reward_treasury_share(&genesis_node, &inclusion_block)?,
         "Treasury must remain unchanged during inclusion block"
     );
 
@@ -581,7 +586,8 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         .await?;
     assert_eq!(
         epoch_block.treasury,
-        epoch_prev.treasury - total_refund,
+        epoch_prev.treasury - total_refund
+            + block_reward_treasury_share(&genesis_node, &epoch_block)?,
         "Epoch treasury should decrease by total refund amount"
     );
 
@@ -772,7 +778,8 @@ async fn heavy3_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         .get_block_by_height(inclusion_block.height - 1)
         .await?;
     assert_eq!(
-        inclusion_block.treasury, prev_header.treasury,
+        inclusion_block.treasury,
+        prev_header.treasury + block_reward_treasury_share(&genesis_node, &inclusion_block)?,
         "Treasury must remain unchanged during inclusion"
     );
 
@@ -857,7 +864,8 @@ async fn heavy3_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         .await?;
     assert_eq!(
         epoch_block.treasury,
-        epoch_prev.treasury - total_refund,
+        epoch_prev.treasury - total_refund
+            + block_reward_treasury_share(&genesis_node, &epoch_block)?,
         "Treasury must drop by the total refund amount"
     );
 

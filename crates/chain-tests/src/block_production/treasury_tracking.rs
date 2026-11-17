@@ -1,7 +1,8 @@
-use crate::utils::IrysNodeTest;
+use crate::utils::{IrysNodeTest, block_reward_treasury_share};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    CommitmentTransaction, NodeConfig, UnixTimestamp,
+    CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, NodeConfig, U256,
+    hardfork_config::Activation,
     irys::IrysSigner,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
 };
@@ -83,7 +84,32 @@ async fn test_treasury_tracking() -> eyre::Result<()> {
 
     // ===== ASSERT =====
 
-    // Calculate exact expected treasury values for each block
+    // Calculate exact expected treasury values for each block.
+    //
+    // Every block after genesis also adds its share of the block reward: from
+    // Delta a capacity PoA block sends part of the reward-curve amount to the
+    // treasury (see `block_reward_treasury_share`).
+    let reward_share = |block: &IrysBlockHeader| block_reward_treasury_share(&node, block);
+
+    // A data tx credits the treasury its term fee treasury part plus its perm
+    // fee credit. Before Delta the perm fee credit leaves out the ingress proof
+    // reward; from Delta it is the full `perm_fee`.
+    let data_tx_fees =
+        |tx: &DataTransactionHeader, block: &IrysBlockHeader| -> eyre::Result<U256> {
+            let block_ts = block.timestamp_secs();
+            let term_charges = TermFeeCharges::new(tx.term_fee, &consensus_config)?;
+            let publish_charges = PublishFeeCharges::new(
+                tx.perm_fee.unwrap(),
+                consensus_config.ingress_proof_reward_pool_at(block_ts, tx.term_fee.get())?,
+            )?;
+            let perm_fee_credit = match consensus_config.hardforks.delta_for_block(block_ts) {
+                Activation::Active(_) => {
+                    publish_charges.perm_fee_treasury + publish_charges.ingress_proof_reward
+                }
+                Activation::Inactive => publish_charges.perm_fee_treasury,
+            };
+            Ok(term_charges.term_fee_treasury + perm_fee_credit)
+        };
 
     // Block 0: Genesis treasury from initial commitments
     // Genesis has 1 stake + 3 pledges (with decay)
@@ -104,69 +130,53 @@ async fn test_treasury_tracking() -> eyre::Result<()> {
 
     // Block 1: Genesis treasury + stake commitment
     let stake1_value = consensus_config.stake_value.amount;
-    let expected_block1_treasury = expected_genesis_treasury + stake1_value;
+    let expected_block1_treasury =
+        expected_genesis_treasury + stake1_value + reward_share(&block1)?;
 
     assert_eq!(
         block1.treasury, expected_block1_treasury,
-        "Block 1 treasury should be genesis + stake value"
+        "Block 1 treasury should be genesis + stake value + reward share"
     );
 
     // Block 2: Previous treasury + pledge commitment
     // User1 has 1 stake, so this is pledge at index 0
     let pledge1_value =
         CommitmentTransaction::calculate_pledge_value_at_count(&consensus_config, 0);
-    let expected_block2_treasury = expected_block1_treasury + pledge1_value;
+    let expected_block2_treasury =
+        expected_block1_treasury + pledge1_value + reward_share(&block2)?;
 
     assert_eq!(
         block2.treasury, expected_block2_treasury,
-        "Block 2 treasury should be previous + pledge value"
+        "Block 2 treasury should be previous + pledge value + reward share"
     );
 
     // Block 3: Previous treasury + data tx fees
-    let data_tx1_fees = {
-        let term_charges = TermFeeCharges::new(data_tx1.header.term_fee, &consensus_config)?;
-        let publish_charges = PublishFeeCharges::new(
-            data_tx1.header.perm_fee.unwrap(),
-            consensus_config.ingress_proof_reward_pool_at(
-                UnixTimestamp::from_secs(0),
-                data_tx1.header.term_fee.get(),
-            )?,
-        )?;
-        term_charges.term_fee_treasury + publish_charges.perm_fee_treasury
-    };
-    let expected_block3_treasury = expected_block2_treasury + data_tx1_fees;
+    let data_tx1_fees = data_tx_fees(&data_tx1.header, &block3)?;
+    let expected_block3_treasury =
+        expected_block2_treasury + data_tx1_fees + reward_share(&block3)?;
 
     assert_eq!(
         block3.treasury, expected_block3_treasury,
-        "Block 3 treasury should be previous + data tx fees"
+        "Block 3 treasury should be previous + data tx fees + reward share"
     );
 
     // Block 4: Previous treasury + stake2 + data tx2 fees
     let stake2_value = consensus_config.stake_value.amount;
-    let data_tx2_fees = {
-        let term_charges = TermFeeCharges::new(data_tx2.header.term_fee, &consensus_config)?;
-        let publish_charges = PublishFeeCharges::new(
-            data_tx2.header.perm_fee.unwrap(),
-            consensus_config.ingress_proof_reward_pool_at(
-                UnixTimestamp::from_secs(0),
-                data_tx2.header.term_fee.get(),
-            )?,
-        )?;
-        term_charges.term_fee_treasury + publish_charges.perm_fee_treasury
-    };
-    let expected_block4_treasury = expected_block3_treasury + stake2_value + data_tx2_fees;
+    let data_tx2_fees = data_tx_fees(&data_tx2.header, &block4)?;
+    let expected_block4_treasury =
+        expected_block3_treasury + stake2_value + data_tx2_fees + reward_share(&block4)?;
 
     assert_eq!(
         block4.treasury, expected_block4_treasury,
-        "Block 4 treasury should be previous + stake + data tx fees"
+        "Block 4 treasury should be previous + stake + data tx fees + reward share"
     );
 
-    // Block 5: Empty block - treasury unchanged
-    let expected_block5_treasury = expected_block4_treasury;
+    // Block 5: Empty block - treasury changes only by the reward share
+    let expected_block5_treasury = expected_block4_treasury + reward_share(&block5)?;
 
     assert_eq!(
         block5.treasury, expected_block5_treasury,
-        "Block 5 treasury should remain unchanged (empty block)"
+        "Block 5 treasury should change only by the reward share (empty block)"
     );
 
     info!("Treasury tracking test completed: all assertions passed");

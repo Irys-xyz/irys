@@ -1,5 +1,5 @@
 use crate::hardfork_config::{
-    Activation, Aurora, Borealis, Cascade, Echo, EmaRules, EmaSampling, FrontierParams,
+    Activation, Aurora, Borealis, Cascade, Delta, Echo, EmaRules, EmaSampling, FrontierParams,
     IrysHardforkConfig,
 };
 use crate::storage_pricing::{PRECISION_SCALE, ReplicaCount, mul_div};
@@ -1094,9 +1094,16 @@ impl ConsensusConfig {
                     thirty_day_epoch_length: 30,
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
-                // Delta hardfork - not active by default in testing;
-                // tests that need it should override via with_consensus()
-                delta: None,
+                // Delta hardfork - enabled from genesis for testing
+                delta: Some(Delta {
+                    activation_timestamp: UnixTimestamp::from_secs(0),
+                    initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+                    capacity_chunk_reward_percent: Delta::default_capacity_chunk_reward_percent(),
+                    ingress_proof_reward_pool_percent:
+                        Delta::default_ingress_proof_reward_pool_percent(),
+                    token_price_safe_range: Delta::default_token_price_safe_range(),
+                    ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
+                }),
                 // Echo hardfork - enabled from genesis for testing
                 echo: Some(Echo {
                     activation_height: 0,
@@ -1289,7 +1296,8 @@ mod tests {
 
     #[test]
     fn setting_delta_changes_consensus_hash() {
-        let without_delta = ConsensusConfig::testing();
+        let mut without_delta = ConsensusConfig::testing();
+        without_delta.hardforks.delta = None;
         let mut with_delta = ConsensusConfig::testing();
         with_delta.hardforks.delta = Some(Delta {
             activation_timestamp: UnixTimestamp::from_secs(1500),
@@ -1299,7 +1307,6 @@ mod tests {
             token_price_safe_range: Delta::default_token_price_safe_range(),
             ema_price_adjustment_interval: Delta::default_ema_price_adjustment_interval(),
         });
-        assert_eq!(without_delta.hardforks.delta, None);
         assert_ne!(without_delta.keccak256_hash(), with_delta.keccak256_hash());
     }
 
@@ -1664,7 +1671,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("Av64zPuqYbAM3DYqrgMJX4uVtKdXnZw59MyYdvDdNaF4");
+        let expected_hash = H256::from_base58("AzeWwT58RP3GKpcS9eXbZCUFsj87gcaBMDZD6V1exboG");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,

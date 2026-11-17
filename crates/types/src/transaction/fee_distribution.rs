@@ -273,8 +273,11 @@ mod tests {
     use crate::storage_pricing::phantoms::Percentage;
     use rust_decimal_macros::dec;
 
-    /// Ingress proof reward pool at a timestamp before any Delta activation.
+    /// Ingress proof reward pool under the pre-Delta rules. The testing config
+    /// activates Delta at genesis, so this resolves the pool with Delta unset.
     fn pre_delta_pool(config: &ConsensusConfig, term_fee: BoundedFee) -> U256 {
+        let mut config = config.clone();
+        config.hardforks.delta = None;
         config
             .ingress_proof_reward_pool_at(UnixTimestamp::from_secs(0), term_fee.get())
             .unwrap()
