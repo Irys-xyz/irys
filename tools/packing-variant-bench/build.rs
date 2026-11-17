@@ -33,6 +33,11 @@ fn main() {
     let fma_adds = env::var("PVB_FAST_FMA_ADDS").unwrap_or_else(|_| "0".to_string());
     println!("cargo:rerun-if-env-changed=PVB_FAST_CACHE_HINT");
     let cache_hint = env::var("PVB_FAST_CACHE_HINT").unwrap_or_else(|_| "1".to_string());
+    // VDE prototype: 256-bit multiply implementation (see VDE_MUL in cuda/vde.cuh).
+    println!("cargo:rerun-if-env-changed=PVB_VDE_MUL");
+    let vde_mul = env::var("PVB_VDE_MUL").unwrap_or_else(|_| "1".to_string());
+    println!("cargo:rerun-if-env-changed=PVB_VDE_MIN_BLOCKS");
+    let vde_min_blocks = env::var("PVB_VDE_MIN_BLOCKS").unwrap_or_else(|_| "0".to_string());
 
     // Same nvcc flags as crates/c/build/capacity.rs (build_capacity_cuda) so the variant A
     // baseline matches the production kernel. `.debug(false)` matters: with debug info enabled
@@ -60,6 +65,8 @@ fn main() {
         .debug(false)
         .define("FAST_FMA_ADDS", fma_adds.as_str())
         .define("FAST_CACHE_HINT", cache_hint.as_str())
+        .define("VDE_MUL", vde_mul.as_str())
+        .define("VDE_MIN_BLOCKS", vde_min_blocks.as_str())
         .include(&cuda_src)
         .file(&kernel)
         .compile("pvb_cuda");

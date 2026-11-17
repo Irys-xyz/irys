@@ -108,6 +108,10 @@ struct Args {
     /// VDE: mix lane counts to compare (1 = sequential mix over the chunk, 8192 = no mix).
     #[arg(long, value_delimiter = ',', default_values_t = vec![1_usize, 64, 8192])]
     vde_lanes: Vec<usize>,
+
+    /// VDE: root chain counts to compare (1 = all roots of a layer in series, 8192 = independent).
+    #[arg(long, value_delimiter = ',', default_values_t = vec![8192_usize])]
+    vde_chains: Vec<usize>,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -894,9 +898,10 @@ fn run_vde(args: &Args, logical: usize) -> Vec<VdeResult> {
         sha_s
     );
     println!(
-        "[vde] {:>6} {:>6} {:>10} {:>8} {:>8} {:>10} {:>10} {:>10} {:>8} {:>12}",
+        "[vde] {:>6} {:>6} {:>6} {:>10} {:>8} {:>8} {:>10} {:>10} {:>10} {:>8} {:>12}",
         "layers",
         "lanes",
+        "chains",
         "enc 1T s",
         "roots s",
         "mix s",
@@ -908,8 +913,9 @@ fn run_vde(args: &Args, logical: usize) -> Vec<VdeResult> {
     );
 
     let mut out = vec![];
-    for &lanes in &args.vde_lanes {
+    for (lanes, chains) in vde_pairs(args) {
         let params = vde::Params {
+            chains,
             layers: args.vde_layers,
             lanes,
         };
@@ -984,9 +990,10 @@ fn run_vde(args: &Args, logical: usize) -> Vec<VdeResult> {
             equivalent_sha_iterations: encode_1t_s / sha_s * args.iterations as f64,
         };
         println!(
-            "[vde] {:>6} {:>6} {:>10.4} {:>8.4} {:>8.4} {:>10.4} {:>10.5} {:>10.1} {:>8.0} {:>12.0}",
+            "[vde] {:>6} {:>6} {:>6} {:>10.4} {:>8.4} {:>8.4} {:>10.4} {:>10.5} {:>10.1} {:>8.0} {:>12.0}",
             params.layers,
             lanes,
+            chains,
             r.encode_1t_s,
             r.encode_1t_timing.roots_s,
             r.encode_1t_timing.mix_s,
@@ -999,6 +1006,14 @@ fn run_vde(args: &Args, logical: usize) -> Vec<VdeResult> {
         out.push(r);
     }
     out
+}
+
+/// Every (mix lanes, root chains) pair to benchmark.
+fn vde_pairs(args: &Args) -> Vec<(usize, usize)> {
+    args.vde_lanes
+        .iter()
+        .flat_map(|&l| args.vde_chains.iter().map(move |&c| (l, c)))
+        .collect()
 }
 
 /// Prototype VDE on the GPU: verified against the CPU encoder, then single-chunk latency and
@@ -1035,7 +1050,7 @@ fn run_vde_gpu(
     verify_input[2 * CHUNK_SIZE..].fill(0xFF);
 
     let mut out = vec![];
-    for (k, &lanes) in args.vde_lanes.iter().enumerate() {
+    for (lanes, chains) in vde_pairs(args) {
         if lanes != 8192 && lanes > 1024 {
             println!(
                 "[vde-gpu] lanes={lanes}: skipped (the mix kernel runs one block per chunk, <= 1024 lanes)"
@@ -1046,7 +1061,7 @@ fn run_vde_gpu(
         // verify 3 chunks at 2 layers against the CPU encoder
         let mut d = gpu::VdeDevice::new(3)?;
         d.upload(&seeds_for(3), &verify_input)?;
-        d.encode(2, lanes as u32, tpb)?;
+        d.encode(2, lanes as u32, chains as u32, tpb)?;
         for c in 0..3_usize {
             let mut got = vec![0_u8; CHUNK_SIZE];
             d.download_chunk(c as u64, &mut got)?;
@@ -1055,12 +1070,16 @@ fn run_vde_gpu(
             vde::encode(
                 &fixed_id(OFFSET_START + c as u64),
                 &mut want,
-                vde::Params { layers: 2, lanes },
+                vde::Params {
+                    layers: 2,
+                    lanes,
+                    chains,
+                },
                 1,
             );
             if got != vde::elems_to_bytes(&want) {
                 eprintln!(
-                    "[vde-gpu] lanes={lanes}: chunk {c}: GPU output differs from the CPU encoder"
+                    "[vde-gpu] lanes={lanes} chains={chains}: chunk {c}: GPU output differs from the CPU encoder"
                 );
                 std::process::exit(1);
             }
@@ -1070,8 +1089,8 @@ fn run_vde_gpu(
         // latency: one chunk
         let mut d = gpu::VdeDevice::new(1)?;
         d.upload(&seeds_for(1), &vec![0_u8; CHUNK_SIZE])?;
-        d.encode(1, lanes as u32, tpb)?; // warm-up
-        let (lr, lm) = d.encode(layers, lanes as u32, tpb)?;
+        d.encode(1, lanes as u32, chains as u32, tpb)?; // warm-up
+        let (lr, lm) = d.encode(layers, lanes as u32, chains as u32, tpb)?;
         drop(d);
 
         // throughput: each batch size
@@ -1085,17 +1104,18 @@ fn run_vde_gpu(
             };
             d.upload(&seeds_for(batch), &vec![0_u8; batch as usize * CHUNK_SIZE])?;
             let host = Instant::now();
-            let (tr, tm) = d.encode(layers, lanes as u32, tpb)?;
+            let (tr, tm) = d.encode(layers, lanes as u32, chains as u32, tpb)?;
             let host_s = host.elapsed().as_secs_f64();
             let kernel_s = (tr + tm) as f64 / 1e3;
             let chunk_layers_per_s = (batch * layers as u64) as f64 / kernel_s;
             let cpu_rate = cpu
-                .get(k)
+                .iter()
+                .find(|c| c.params.lanes == lanes && c.params.chains == chains)
                 .map(|c| c.throughput_chunks_per_s * c.params.layers as f64)
                 .unwrap_or(f64::NAN);
             let per = layers as f32;
             println!(
-                "[vde-gpu] lanes={lanes:>5} verify=PASS | 1 chunk: roots {:.3} + mix {:.3} ms/layer | batch {batch}: roots {:.1} + mix {:.1} ms/layer = {:.0} chunk-layers/s ({:.1}x CPU {:.0}) host {:.2} s",
+                "[vde-gpu] lanes={lanes:>5} chains={chains:>5} verify=PASS | 1 chunk: roots {:.3} + mix {:.3} ms/layer | batch {batch}: roots {:.1} + mix {:.1} ms/layer = {:.0} chunk-layers/s ({:.1}x CPU {:.0}) host {:.2} s",
                 lr / per,
                 lm / per,
                 tr / per,
@@ -1107,6 +1127,7 @@ fn run_vde_gpu(
             );
             out.push(serde_json::json!({
                 "lanes": lanes,
+                "chains": chains,
                 "layers": layers,
                 "threads_per_block": tpb,
                 "verify": "pass",

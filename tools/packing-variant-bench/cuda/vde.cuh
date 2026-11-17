@@ -39,8 +39,17 @@ __device__ __forceinline__ void reduce(const uint32_t t[16], uint32_t r[8]) {
     if (c) r[0] += C;  // wrapped: the value is tiny now
 }
 
-__device__ __forceinline__ void mul(const uint32_t a[8], const uint32_t b[8], uint32_t r[8]) {
-    uint32_t t[16];
+// VDE_MUL selects the 256x256 multiply (build switch PVB_VDE_MUL):
+//   0 = portable C, 32x32->64 products with 64-bit carries; squaring = mul
+//   1 = 0, plus a dedicated squaring (cross products once, doubled: 36 instead of 64 products)
+//   2 = PTX carry chains (mad.lo/madc.hi, two chains per row); squaring = mul
+//   3 = 2, plus the dedicated C squaring of 1
+#ifndef VDE_MUL
+#define VDE_MUL 1
+#endif
+
+// t = a * b (16 limbs), portable.
+__device__ __forceinline__ void mul_wide_c(const uint32_t a[8], const uint32_t b[8], uint32_t t[16]) {
 #pragma unroll
     for (int k = 0; k < 16; ++k) t[k] = 0;
 #pragma unroll
@@ -54,10 +63,100 @@ __device__ __forceinline__ void mul(const uint32_t a[8], const uint32_t b[8], ui
         }
         t[i + 8] = (uint32_t)c;
     }
+}
+
+// t = a * b (16 limbs, t[16] scratch), PTX carry chains. Row i adds a[i] * b at limb i: one chain
+// adds the low halves of the products into t[i..i+7] (carry into t[i+8]), a second adds the high
+// halves into t[i+1..i+8] (carry into t[i+9], still zero). The running sum after row i is below
+// 2^(32 (i + 9)), so neither final carry can overflow.
+__device__ __forceinline__ void mul_wide_ptx(const uint32_t a[8], const uint32_t b[8], uint32_t t[17]) {
+#pragma unroll
+    for (int k = 0; k < 17; ++k) t[k] = 0;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        asm("mad.lo.cc.u32  %0, %9, %10, %0;\n\t"
+            "madc.lo.cc.u32 %1, %9, %11, %1;\n\t"
+            "madc.lo.cc.u32 %2, %9, %12, %2;\n\t"
+            "madc.lo.cc.u32 %3, %9, %13, %3;\n\t"
+            "madc.lo.cc.u32 %4, %9, %14, %4;\n\t"
+            "madc.lo.cc.u32 %5, %9, %15, %5;\n\t"
+            "madc.lo.cc.u32 %6, %9, %16, %6;\n\t"
+            "madc.lo.cc.u32 %7, %9, %17, %7;\n\t"
+            "addc.u32       %8, %8, 0;"
+            : "+r"(t[i]), "+r"(t[i + 1]), "+r"(t[i + 2]), "+r"(t[i + 3]), "+r"(t[i + 4]), "+r"(t[i + 5]),
+              "+r"(t[i + 6]), "+r"(t[i + 7]), "+r"(t[i + 8])
+            : "r"(a[i]), "r"(b[0]), "r"(b[1]), "r"(b[2]), "r"(b[3]), "r"(b[4]), "r"(b[5]), "r"(b[6]),
+              "r"(b[7]));
+        asm("mad.hi.cc.u32  %0, %9, %10, %0;\n\t"
+            "madc.hi.cc.u32 %1, %9, %11, %1;\n\t"
+            "madc.hi.cc.u32 %2, %9, %12, %2;\n\t"
+            "madc.hi.cc.u32 %3, %9, %13, %3;\n\t"
+            "madc.hi.cc.u32 %4, %9, %14, %4;\n\t"
+            "madc.hi.cc.u32 %5, %9, %15, %5;\n\t"
+            "madc.hi.cc.u32 %6, %9, %16, %6;\n\t"
+            "madc.hi.cc.u32 %7, %9, %17, %7;\n\t"
+            "addc.u32       %8, %8, 0;"
+            : "+r"(t[i + 1]), "+r"(t[i + 2]), "+r"(t[i + 3]), "+r"(t[i + 4]), "+r"(t[i + 5]), "+r"(t[i + 6]),
+              "+r"(t[i + 7]), "+r"(t[i + 8]), "+r"(t[i + 9])
+            : "r"(a[i]), "r"(b[0]), "r"(b[1]), "r"(b[2]), "r"(b[3]), "r"(b[4]), "r"(b[5]), "r"(b[6]),
+              "r"(b[7]));
+    }
+}
+
+// t = a^2 (16 limbs), portable: cross products a[i] a[j] (i < j) once, doubled, plus the squares.
+__device__ __forceinline__ void sqr_wide_c(const uint32_t a[8], uint32_t t[16]) {
+#pragma unroll
+    for (int k = 0; k < 16; ++k) t[k] = 0;
+#pragma unroll
+    for (int i = 0; i < 7; ++i) {
+        uint64_t c = 0;
+#pragma unroll
+        for (int j = i + 1; j < 8; ++j) {
+            uint64_t v = (uint64_t)a[i] * a[j] + t[i + j] + c;
+            t[i + j] = (uint32_t)v;
+            c = v >> 32;
+        }
+        t[i + 8] = (uint32_t)c;
+    }
+    uint32_t top = 0;
+#pragma unroll
+    for (int k = 0; k < 16; ++k) {
+        uint32_t next = t[k] >> 31;
+        t[k] = (t[k] << 1) | top;
+        top = next;
+    }
+    uint64_t c = 0;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        uint64_t sq = (uint64_t)a[i] * a[i];
+        uint64_t lo = (uint64_t)t[2 * i] + (uint32_t)sq + c;
+        t[2 * i] = (uint32_t)lo;
+        uint64_t hi = (uint64_t)t[2 * i + 1] + (sq >> 32) + (lo >> 32);
+        t[2 * i + 1] = (uint32_t)hi;
+        c = hi >> 32;
+    }
+}
+
+__device__ __forceinline__ void mul(const uint32_t a[8], const uint32_t b[8], uint32_t r[8]) {
+#if VDE_MUL >= 2
+    uint32_t t[17];
+    mul_wide_ptx(a, b, t);
+#else
+    uint32_t t[16];
+    mul_wide_c(a, b, t);
+#endif
     reduce(t, r);
 }
 
-__device__ __forceinline__ void sqr(const uint32_t a[8], uint32_t r[8]) { mul(a, a, r); }
+__device__ __forceinline__ void sqr(const uint32_t a[8], uint32_t r[8]) {
+#if VDE_MUL == 1 || VDE_MUL == 3
+    uint32_t t[16];
+    sqr_wide_c(a, t);
+    reduce(t, r);
+#else
+    mul(a, a, r);
+#endif
+}
 
 __device__ __forceinline__ void sqr_n(uint32_t x[8], int n) {
     for (int k = 0; k < n; ++k) {
@@ -184,8 +283,19 @@ __device__ __forceinline__ void store(uint32_t *p, const uint32_t v[8]) {
     q[1] = make_uint4(v[4], v[5], v[6], v[7]);
 }
 
+// Minimum resident 128-thread blocks per SM for the roots kernel (build switch PVB_VDE_MIN_BLOCKS):
+// caps registers per thread, trading spills for occupancy. 0 = no bound.
+#ifndef VDE_MIN_BLOCKS
+#define VDE_MIN_BLOCKS 0
+#endif
+#if VDE_MIN_BLOCKS > 0
+#define VDE_ROOTS_BOUNDS __launch_bounds__(128, VDE_MIN_BLOCKS)
+#else
+#define VDE_ROOTS_BOUNDS
+#endif
+
 // seeds: chunks x 8 limbs (the seed bytes, little-endian words).
-__global__ void roots_kernel(const uint32_t *__restrict__ seeds, uint64_t chunks, uint32_t *__restrict__ elems,
+__global__ void VDE_ROOTS_BOUNDS roots_kernel(const uint32_t *__restrict__ seeds, uint64_t chunks, uint32_t *__restrict__ elems,
                              uint32_t layer) {
     uint64_t g = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (g >= chunks * N) return;
@@ -200,6 +310,32 @@ __global__ void roots_kernel(const uint32_t *__restrict__ seeds, uint64_t chunks
     add_wrap(t, l, x);
     root(x);
     store(elems + g * 8, x);
+}
+
+// Chained roots: one thread per chain of `wc` consecutive elements,
+// z[i] = root(x[i] + k[i] + layer + z[i-1]) within the chain.
+__global__ void roots_chain_kernel(const uint32_t *__restrict__ seeds, uint64_t chunks,
+                                   uint32_t *__restrict__ elems, uint32_t layer, uint32_t chains, uint32_t wc) {
+    uint64_t g = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= chunks * chains) return;
+    uint64_t c = g / chains;
+    uint32_t first = (uint32_t)(g % chains) * wc;
+    uint32_t seed[8], prev[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    load(seeds + c * 8, seed);
+    uint32_t l[8] = {layer, 0, 0, 0, 0, 0, 0, 0};
+    for (uint32_t t = 0; t < wc; ++t) {
+        uint32_t i = first + t;
+        uint32_t msg[8] = {i, 0, 0, 0, 0, 0, 0, 0}, k[8], x[8], u[8];
+        hash2(seed, msg, k);
+        uint32_t *p = elems + (c * N + i) * 8;
+        load(p, x);
+        add_wrap(x, k, u);
+        add_wrap(u, l, x);
+        add_wrap(x, prev, u);  // prev is zero at the start of a chain
+        root(u);
+        store(p, u);
+        copy(u, prev);
+    }
 }
 
 // One block per chunk, blockDim.x == lanes (<= 1024), w = 8192 / lanes.
@@ -242,8 +378,11 @@ extern "C" int pvb_vde_kernel_regs(int *roots_regs, size_t *roots_local, int *mi
 // Encodes `chunks` chunks in place: `layers` x (roots, then mix unless lanes == 8192).
 // `d_seeds` holds chunks x 32 seed bytes on the device. Kernel times are summed per step.
 extern "C" int pvb_vde_encode(const void *d_seeds, uint64_t chunks, void *d_elems, unsigned int layers,
-                              unsigned int lanes, int threads_per_block, float *roots_ms, float *mix_ms) {
+                              unsigned int lanes, unsigned int chains, int threads_per_block, float *roots_ms,
+                              float *mix_ms) {
     if (lanes == 0 || (lanes & (lanes - 1)) || lanes > (unsigned)vde::N) return (int)cudaErrorInvalidValue;
+    if (chains == 0 || (chains & (chains - 1)) || chains > (unsigned)vde::N) return (int)cudaErrorInvalidValue;
+    unsigned int wc = vde::N / chains;
     if (lanes < (unsigned)vde::N && lanes > 1024) return (int)cudaErrorInvalidValue;  // one block per chunk
     unsigned int w = vde::N / lanes;
     cudaEvent_t e0, e1, e2;
@@ -252,13 +391,18 @@ extern "C" int pvb_vde_encode(const void *d_seeds, uint64_t chunks, void *d_elem
     cudaEventCreate(&e2);
     *roots_ms = 0;
     *mix_ms = 0;
-    uint64_t threads = chunks * vde::N;
+    uint64_t threads = chunks * chains;
     unsigned int blocks = (unsigned int)((threads + threads_per_block - 1) / threads_per_block);
     cudaError_t e = cudaSuccess;
     for (unsigned int layer = 0; layer < layers && e == cudaSuccess; ++layer) {
         cudaEventRecord(e0);
-        vde::roots_kernel<<<blocks, threads_per_block>>>((const uint32_t *)d_seeds, chunks, (uint32_t *)d_elems,
-                                                         layer);
+        if (wc == 1) {
+            vde::roots_kernel<<<blocks, threads_per_block>>>((const uint32_t *)d_seeds, chunks,
+                                                             (uint32_t *)d_elems, layer);
+        } else {
+            vde::roots_chain_kernel<<<blocks, threads_per_block>>>((const uint32_t *)d_seeds, chunks,
+                                                                   (uint32_t *)d_elems, layer, chains, wc);
+        }
         cudaEventRecord(e1);
         if (w > 1) vde::mix_kernel<<<(unsigned int)chunks, lanes>>>((uint32_t *)d_elems, lanes, w);
         cudaEventRecord(e2);

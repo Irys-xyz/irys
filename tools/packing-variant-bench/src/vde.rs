@@ -5,7 +5,11 @@
 //! The roots work mod p = 2^256 - 189 (prime, p = 3 mod 4); everything else is mod 2^256. Each
 //! layer:
 //!
-//! 1. Root step, every element independently: `z = root(x + k[i] + layer)`. `root` is the
+//! 1. Root step: `z[i] = root(x[i] + k[i] + layer + z[i-1])`, the `z[i-1]` term only within one
+//!    of `chains` chains of `8192 / chains` consecutive elements. `chains = 8192`: every root
+//!    is independent. `chains = 1`: a layer is 8192 roots in series, so its encode latency is
+//!    fixed by one core's root latency however much hardware is used. Decode recovers every
+//!    `z` first, so it stays element-parallel either way. `root` is the
 //!    Sloth permutation, a modular square root `x^((p+1)/4)` (253 squarings and 13 multiplies,
 //!    strictly sequential per element; its inverse is one squaring), for values below p. The
 //!    189 values from p up pass through unchanged, so any 32-byte input encodes and chunks keep
@@ -308,6 +312,8 @@ pub struct Params {
     pub layers: u32,
     /// Mix lanes: 1 (one sequential pass over the chunk) ..= 8192 (no mix). A power of two.
     pub lanes: usize,
+    /// Root chains: 1 (all roots of a layer in series) ..= 8192 (independent). A power of two.
+    pub chains: usize,
 }
 
 impl Params {
@@ -317,6 +323,14 @@ impl Params {
             "lanes must be a power of two <= 8192"
         );
         SEGMENTS / self.lanes
+    }
+
+    fn chain_len(&self) -> usize {
+        assert!(
+            self.chains.is_power_of_two() && self.chains <= SEGMENTS,
+            "chains must be a power of two <= 8192"
+        );
+        SEGMENTS / self.chains
     }
 }
 
@@ -331,11 +345,16 @@ fn mix_hash(prev: &U256, other: &U256) -> U256 {
     from_le_bytes(&sha256_64(&to_le_bytes(prev), &to_le_bytes(other)))
 }
 
-/// Root step of one layer over `xs[range]`: x = root(x + k + layer).
-fn roots(xs: &mut [U256], ks: &[U256], layer: u32) {
+/// Root step of one layer over `xs`, which starts at a chain boundary:
+/// z[i] = root(x[i] + k[i] + layer + z[i-1]), the last term only within a chain of `wc` elements.
+fn roots(xs: &mut [U256], ks: &[U256], layer: u32, wc: usize) {
     let l = [layer as u64, 0, 0, 0];
-    for (x, k) in xs.iter_mut().zip(ks) {
-        *x = root(&add_wrap(&add_wrap(x, k), &l));
+    for i in 0..xs.len() {
+        let mut v = add_wrap(&add_wrap(&xs[i], &ks[i]), &l);
+        if i % wc != 0 {
+            v = add_wrap(&v, &xs[i - 1]);
+        }
+        xs[i] = root(&v);
     }
 }
 
@@ -358,24 +377,25 @@ pub struct Timing {
     pub mix_s: f64,
 }
 
-/// Encodes `xs` in place. The root step runs on `threads` threads (it is element-parallel);
-/// the mix runs on the calling thread.
+/// Encodes `xs` in place. The root step runs on up to `threads` threads (one or more whole
+/// chains each); the mix runs on the calling thread.
 pub fn encode(id: &ChunkId, xs: &mut [U256], p: Params, threads: usize) -> Timing {
     assert_eq!(xs.len(), SEGMENTS);
     let w = p.width();
+    let wc = p.chain_len();
     let mut timing = Timing::default();
     let t0 = std::time::Instant::now();
     let ks = keys(id);
     timing.keys_s = t0.elapsed().as_secs_f64();
-    let per = SEGMENTS.div_ceil(threads.max(1));
+    let per = SEGMENTS.div_ceil(threads.max(1)).next_multiple_of(wc);
     for layer in 0..p.layers {
         let t0 = std::time::Instant::now();
         if threads <= 1 {
-            roots(xs, &ks, layer);
+            roots(xs, &ks, layer, wc);
         } else {
             std::thread::scope(|s| {
                 for (xc, kc) in xs.chunks_mut(per).zip(ks.chunks(per)) {
-                    s.spawn(move || roots(xc, kc, layer));
+                    s.spawn(move || roots(xc, kc, layer, wc));
                 }
             });
         }
@@ -392,6 +412,7 @@ pub fn encode(id: &ChunkId, xs: &mut [U256], p: Params, threads: usize) -> Timin
 pub fn decode(id: &ChunkId, ys: &mut [U256], p: Params) {
     assert_eq!(ys.len(), SEGMENTS);
     let w = p.width();
+    let wc = p.chain_len();
     let ks = keys(id);
     for layer in (0..p.layers).rev() {
         // undo the mix from the stored y: walk t downwards so y[i-1] and y[j] (both at an
@@ -404,9 +425,14 @@ pub fn decode(id: &ChunkId, ys: &mut [U256], p: Params) {
                 ys[i] = sub_wrap(&ys[i], &h);
             }
         }
+        // undo the roots from the recovered z: walk i downwards so z[i-1] is still unmodified
         let l = [layer as u64, 0, 0, 0];
-        for (y, k) in ys.iter_mut().zip(ks.iter()) {
-            *y = sub_wrap(&sub_wrap(&root_inv(y), k), &l);
+        for i in (0..SEGMENTS).rev() {
+            let mut x = sub_wrap(&sub_wrap(&root_inv(&ys[i]), &ks[i]), &l);
+            if i % wc != 0 {
+                x = sub_wrap(&x, &ys[i - 1]);
+            }
+            ys[i] = x;
         }
     }
 }
@@ -529,7 +555,16 @@ mod tests {
             ),
         ] {
             let mut xs = zero_elems();
-            encode(&id, &mut xs, Params { layers: 2, lanes }, 1);
+            encode(
+                &id,
+                &mut xs,
+                Params {
+                    layers: 2,
+                    lanes,
+                    chains: SEGMENTS,
+                },
+                1,
+            );
             assert_eq!(digest(&xs), want, "lanes={lanes}");
         }
         let mut data: Elems = (0..SEGMENTS as u32)
@@ -545,6 +580,7 @@ mod tests {
             Params {
                 layers: 1,
                 lanes: 64,
+                chains: SEGMENTS,
             },
             1,
         );
@@ -552,6 +588,43 @@ mod tests {
             digest(&data),
             "9f7468553ee444a1a06e47482590dbc96dfc306859fac79bb33d4ba9f8a4b634"
         );
+    }
+
+    /// Chained roots: known answers from `scripts/vde_ref.py`, and the round trip.
+    #[test]
+    fn chained_roots_match_python_reference() {
+        let id = fixed_id(7);
+        let data: Elems = (0..SEGMENTS as u32)
+            .map(|i| {
+                let mut m = b"data".to_vec();
+                m.extend_from_slice(&i.to_le_bytes());
+                from_le_bytes(&openssl::sha::sha256(&m))
+            })
+            .collect();
+        for (chains, want) in [
+            (
+                1,
+                "d1aec72239b4579cb5d47d46ad652cb0af396594ac7092c6961eec783d9fd8c2",
+            ),
+            (
+                64,
+                "20fac2b7706d07b21ebd4f532efe3f1c9d74b99ceac355beb3ccadb4558618bb",
+            ),
+        ] {
+            let p = Params {
+                layers: 2,
+                lanes: 64,
+                chains,
+            };
+            let mut xs = data.clone();
+            encode(&id, &mut xs, p, 1);
+            assert_eq!(digest(&xs), want, "chains={chains}");
+            let mut ys = data.clone();
+            encode(&id, &mut ys, p, 5);
+            assert_eq!(ys, xs, "chains={chains}: thread count changed the output");
+            decode(&id, &mut xs, p);
+            assert_eq!(xs, data, "chains={chains}");
+        }
     }
 
     /// Crafted data: every element is at or above p after layer 0's key, so layer 0's roots
@@ -566,6 +639,7 @@ mod tests {
         let p = Params {
             layers: 2,
             lanes: 64,
+            chains: SEGMENTS,
         };
         let mut xs = crafted.clone();
         encode(&id, &mut xs, p, 1);
@@ -599,7 +673,11 @@ mod tests {
             for k in 0..64 {
                 data[k * 97] = add_wrap(&P, &[k as u64, 0, 0, 0]);
             }
-            let p = Params { layers: 2, lanes };
+            let p = Params {
+                layers: 2,
+                lanes,
+                chains: SEGMENTS,
+            };
             let (mut a, mut b) = (data.clone(), data.clone());
             encode(&id, &mut a, p, 1);
             encode(&id, &mut b, p, 7);

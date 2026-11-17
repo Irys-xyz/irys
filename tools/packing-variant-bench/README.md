@@ -322,8 +322,30 @@ the CPU encoder on three chunks: zeros, pseudo-random and all 0xFF. RTX 5090, on
   portable u128 multiplies (no MULX/ADX assembly or AVX-512 IFMA), and the GPU kernel uses
   128 registers and spills 64 B, with no hand-written PTX carry chains.
 
+**Multiply tuning** (roots only, batch 21 760, verified): portable C 39.7k chunk-layers/s;
+dedicated squaring 49.1k (**+24%**, now the default, `PVB_VDE_MUL=1`); PTX `madc` carry chains
+39.1k (no gain: nvcc already emits wide multiply-adds); PTX plus squaring 49.4k. Capping
+registers (`PVB_VDE_MIN_BLOCKS` 5/6/8: 96/80/64 registers) changes nothing, so the kernel is bound by
+multiply throughput, not occupancy. It draws ~402 W at 2.49 GHz, not the 575 W limit. Energy
+is 8.4 mJ per chunk-layer, against 41.7 mJ per 1M-iteration SHA chunk.
+
+**Chained roots** (`--vde-chains`): `z[i] = root(x[i] + k[i] + layer + z[i-1])` within each of
+`chains` chains of consecutive elements. With 1 chain, a layer is 8192 roots in series, so the
+encode latency per chunk has a floor set by one core's root latency, however much hardware is
+used. Decode recovers every `z` first, so it stays element-parallel. One layer, 64 mix lanes:
+
+| chains | CPU encode, 1 thread / 32 threads | GPU, 1 chunk | GPU throughput (batch 87 040) | decode, 1 thread |
+|---|---|---|---|---|
+| 1 | 19.1 / **19.3 ms** | 544 ms | 42 040 chunk-layers/s | 0.55 ms |
+| 64 | 19.2 / 3.5 ms | 10 ms | 44 074 | 0.54 ms |
+| 8192 | 19.3 / 3.2 ms | 0.08 ms | 46 228 | 0.55 ms |
+
+Chaining costs the GPU ~9% of throughput and nothing on decode. The fastest single-chunk encode
+of a fully chained layer is one CPU core (19 ms per layer here); a GPU is ~28× slower at it.
+
 ```sh
 cargo run --release -- 1000000 --mode vde --vde-layers 1 --vde-lanes 1,64,8192 --json vde.json
+cargo run --release -- 1000000 --mode vde --vde-lanes 64 --vde-chains 1,64,8192
 cargo run --release --features cuda -- 1000000 --mode vde --batch 21760,43520   # + GPU
 ```
 

@@ -359,6 +359,7 @@ unsafe extern "C" {
         d_elems: *mut c_void,
         layers: u32,
         lanes: u32,
+        chains: u32,
         threads_per_block: c_int,
         roots_ms: *mut f32,
         mix_ms: *mut f32,
@@ -448,7 +449,13 @@ impl VdeDevice {
     }
 
     /// Encodes every chunk in place; returns (roots ms, mix ms), summed over layers.
-    pub fn encode(&mut self, layers: u32, lanes: u32, tpb: u32) -> Result<(f32, f32), CudaError> {
+    pub fn encode(
+        &mut self,
+        layers: u32,
+        lanes: u32,
+        chains: u32,
+        tpb: u32,
+    ) -> Result<(f32, f32), CudaError> {
         let (mut r, mut m) = (0.0_f32, 0.0_f32);
         // SAFETY: buffers hold self.chunks chunks and seeds; kernels stay in bounds.
         unsafe {
@@ -460,6 +467,7 @@ impl VdeDevice {
                     self.elems,
                     layers,
                     lanes,
+                    chains,
                     tpb as c_int,
                     &mut r,
                     &mut m,

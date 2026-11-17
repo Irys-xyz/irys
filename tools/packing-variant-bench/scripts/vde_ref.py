@@ -11,7 +11,10 @@ Construction (one 256 KiB chunk = 8192 elements of 32 bytes, little-endian integ
     seed    = SHA256(address || partition_hash || chain_id LE64 || offset LE64)   (as today)
     k[i]    = SHA256(seed || LE32(i) || 0^28)                                    (per-element key)
     layer l = 0 .. layers-1:
-        z[i] = root((x[i] + k[i] + l) mod M)                       every element, independent
+        roots (chains, Wc = 8192 / chains; element i = chain * Wc + t):
+            z[i] = root((x[i] + k[i] + l + (z[i - 1] if t > 0 else 0)) mod M)
+        chains = 8192: every root independent. chains = 1: all 8192 roots in series, so a
+        layer's encode latency is 8192 sequential roots however much hardware is used.
         mix (lanes, W = 8192 / lanes; element i = lane * W + t), in order of t, then lane:
             t == 0: y[i] = z[i]
             t >= 1: prev = y[i - 1]; m = LE32(prev[0..4]) mod (t * lanes)
@@ -28,7 +31,8 @@ sloth(x): r = x^((p+1)/4). If r^2 == x, x is a square: return the even one of {r
 sloth^-1(y): y even -> y^2; y odd -> p - y^2.
 
 Decode runs the layers in reverse; the mix is undone from the stored y alone (every y[i-1], y[j]
-is known), so every element decodes independently: one hash and one squaring per element per layer.
+is known), then the roots from the recovered z alone (every z[i-1] is known), so every element
+decodes independently: one hash and one squaring per element per layer.
 """
 
 import hashlib
@@ -92,12 +96,16 @@ def mix_index(prev: int, t: int, lanes: int, w: int) -> int:
     return (m % lanes) * w + m // lanes
 
 
-def encode(cid, data, layers: int, lanes: int):
+def encode(cid, data, layers: int, lanes: int, chains: int = N):
     w = N // lanes
     k = keys(seed_hash(cid))
     x = list(data)
     for layer in range(layers):
-        y = [root((x[i] + k[i] + layer) % M) for i in range(N)]
+        wc = N // chains
+        y = [0] * N
+        for i in range(N):
+            chained = y[i - 1] if i % wc else 0
+            y[i] = root((x[i] + k[i] + layer + chained) % M)
         for t in range(1, w):
             for lane in range(lanes):
                 i = lane * w + t
@@ -109,7 +117,7 @@ def encode(cid, data, layers: int, lanes: int):
     return x
 
 
-def decode(cid, replica, layers: int, lanes: int):
+def decode(cid, replica, layers: int, lanes: int, chains: int = N):
     w = N // lanes
     k = keys(seed_hash(cid))
     y = list(replica)
@@ -122,7 +130,8 @@ def decode(cid, replica, layers: int, lanes: int):
                 j = mix_index(prev, t, lanes, w)
                 h = le(sha(to_le(prev) + to_le(y[j])))
                 z[i] = (y[i] - h) % M
-        y = [(root_inv(z[i]) - k[i] - layer) % M for i in range(N)]
+        wc = N // chains
+        y = [(root_inv(z[i]) - k[i] - layer - (z[i - 1] if i % wc else 0)) % M for i in range(N)]
     return y
 
 
@@ -147,6 +156,10 @@ def main():
     out = encode(cid, crafted, 2, 64)
     assert decode(cid, out, 2, 64) == crafted
     print(f"layers=2 lanes=   64 crafted sha256(replica)={digest(out)}")
+    for chains in (1, 64):
+        out = encode(cid, data, 2, 64, chains)
+        assert decode(cid, out, 2, 64, chains) == data
+        print(f"layers=2 lanes=   64 chains={chains} data sha256(replica)={digest(out)}")
     # sloth sanity
     for x in (0, 1, 2, 3, P - 1, P - 2):
         assert sloth_inv(sloth(x)) == x
