@@ -7,26 +7,28 @@ Slow (pure Python big integers). Used to generate the known-answer values in the
 
 Construction (one 256 KiB chunk = 8192 elements of 32 bytes, little-endian integers mod p):
 
-    p       = 2^256 - 189 (prime, p = 3 mod 4)
+    p       = 2^256 - 189 (prime, p = 3 mod 4); M = 2^256 (all other arithmetic is mod M)
     seed    = SHA256(address || partition_hash || chain_id LE64 || offset LE64)   (as today)
-    k[i]    = SHA256(seed || LE32(i) || 0^28) mod p                              (per-element key)
+    k[i]    = SHA256(seed || LE32(i) || 0^28)                                    (per-element key)
     layer l = 0 .. layers-1:
-        z[i] = sloth((x[i] + k[i] + l) mod p)                      every element, independent
+        z[i] = root((x[i] + k[i] + l) mod M)                       every element, independent
         mix (lanes, W = 8192 / lanes; element i = lane * W + t), in order of t, then lane:
             t == 0: y[i] = z[i]
             t >= 1: prev = y[i - 1]; m = LE32(prev[0..4]) mod (t * lanes)
                     j = (m mod lanes) * W + m // lanes            (an element finished at an earlier t)
-                    y[i] = (z[i] + (SHA256(prev || y[j]) mod p)) mod p
+                    y[i] = (z[i] + SHA256(prev || y[j])) mod M
         x = y
     replica = x
 
+root(x): sloth(x) for x < p; the 189 values p..M-1 pass through unchanged. A permutation of
+         [0, M), so any 32-byte input encodes and chunks keep their size. Crafted data can make
+         layer 0 skip its roots; the layer-0 mix then adds hashes it cannot steer.
 sloth(x): r = x^((p+1)/4). If r^2 == x, x is a square: return the even one of {r, p - r};
           otherwise r^2 == -x: return the odd one of {r, p - r}. A permutation of [0, p).
 sloth^-1(y): y even -> y^2; y odd -> p - y^2.
 
 Decode runs the layers in reverse; the mix is undone from the stored y alone (every y[i-1], y[j]
 is known), so every element decodes independently: one hash and one squaring per element per layer.
-Inputs must be < p (an element >= p is not encodable in this prototype).
 """
 
 import hashlib
@@ -35,6 +37,7 @@ import sys
 P = 2**256 - 189
 E = (P + 1) // 4
 N = 8192
+M = 2**256
 
 
 def sha(b: bytes) -> bytes:
@@ -61,7 +64,7 @@ def seed_hash(cid) -> bytes:
 
 
 def keys(seed: bytes):
-    return [le(sha(seed + i.to_bytes(4, "little") + bytes(28))) % P for i in range(N)]
+    return [le(sha(seed + i.to_bytes(4, "little") + bytes(28))) for i in range(N)]
 
 
 def sloth(x: int) -> int:
@@ -76,6 +79,14 @@ def sloth_inv(y: int) -> int:
     return s if y % 2 == 0 else (P - s) % P
 
 
+def root(x: int) -> int:
+    return sloth(x) if x < P else x
+
+
+def root_inv(y: int) -> int:
+    return sloth_inv(y) if y < P else y
+
+
 def mix_index(prev: int, t: int, lanes: int, w: int) -> int:
     m = (prev & 0xFFFFFFFF) % (t * lanes)
     return (m % lanes) * w + m // lanes
@@ -85,16 +96,15 @@ def encode(cid, data, layers: int, lanes: int):
     w = N // lanes
     k = keys(seed_hash(cid))
     x = list(data)
-    assert all(v < P for v in x)
     for layer in range(layers):
-        y = [sloth((x[i] + k[i] + layer) % P) for i in range(N)]
+        y = [root((x[i] + k[i] + layer) % M) for i in range(N)]
         for t in range(1, w):
             for lane in range(lanes):
                 i = lane * w + t
                 prev = y[i - 1]
                 j = mix_index(prev, t, lanes, w)
-                h = le(sha(to_le(prev) + to_le(y[j]))) % P
-                y[i] = (y[i] + h) % P
+                h = le(sha(to_le(prev) + to_le(y[j])))
+                y[i] = (y[i] + h) % M
         x = y
     return x
 
@@ -110,9 +120,9 @@ def decode(cid, replica, layers: int, lanes: int):
                 i = lane * w + t
                 prev = y[i - 1]
                 j = mix_index(prev, t, lanes, w)
-                h = le(sha(to_le(prev) + to_le(y[j]))) % P
-                z[i] = (y[i] - h) % P
-        y = [(sloth_inv(z[i]) - k[i] - layer) % P for i in range(N)]
+                h = le(sha(to_le(prev) + to_le(y[j])))
+                z[i] = (y[i] - h) % M
+        y = [(root_inv(z[i]) - k[i] - layer) % M for i in range(N)]
     return y
 
 
@@ -127,10 +137,16 @@ def main():
         out = encode(cid, zeros, 2, lanes)
         assert decode(cid, out, 2, lanes) == zeros
         print(f"layers=2 lanes={lanes:5} sha256(replica)={digest(out)} elem0={to_le(out[0]).hex()}")
-    data = [le(sha(b"data" + i.to_bytes(4, "little"))) % P for i in range(N)]
+    data = [le(sha(b"data" + i.to_bytes(4, "little"))) for i in range(N)]
     out = encode(cid, data, 1, 64)
     assert decode(cid, out, 1, 64) == data
     print(f"layers=1 lanes=   64 data sha256(replica)={digest(out)}")
+    # crafted data: every element lands at or above p after the layer-0 key, so layer 0 roots pass through
+    k = keys(seed_hash(cid))
+    crafted = [(P + (i % 189) - k[i]) % M for i in range(N)]
+    out = encode(cid, crafted, 2, 64)
+    assert decode(cid, out, 2, 64) == crafted
+    print(f"layers=2 lanes=   64 crafted sha256(replica)={digest(out)}")
     # sloth sanity
     for x in (0, 1, 2, 3, P - 1, P - 2):
         assert sloth_inv(sloth(x)) == x

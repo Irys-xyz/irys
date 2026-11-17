@@ -1,20 +1,23 @@
 //! Prototype VDE (verifiable delay encoding) packing: slow to encode, fast to decode.
 //!
 //! Spec and slow reference: `scripts/vde_ref.py` (the known-answer tests below come from it).
-//! One 256 KiB chunk is 8192 elements of 32 bytes, read as little-endian integers mod
-//! p = 2^256 - 189 (prime, p = 3 mod 4). Each layer:
+//! One 256 KiB chunk is 8192 elements of 32 bytes, read as little-endian 256-bit integers.
+//! The roots work mod p = 2^256 - 189 (prime, p = 3 mod 4); everything else is mod 2^256. Each
+//! layer:
 //!
-//! 1. Root step, every element independently: `z = sloth(x + k[i] + layer)`. The Sloth
-//!    permutation is a modular square root, `x^((p+1)/4)`: 253 squarings and 13 multiplies,
-//!    strictly sequential per element. Its inverse is one squaring.
+//! 1. Root step, every element independently: `z = root(x + k[i] + layer)`. `root` is the
+//!    Sloth permutation, a modular square root `x^((p+1)/4)` (253 squarings and 13 multiplies,
+//!    strictly sequential per element; its inverse is one squaring), for values below p. The
+//!    189 values from p up pass through unchanged, so any 32-byte input encodes and chunks keep
+//!    their size. Crafted data can make layer 0 skip its roots; layer 0's mix then adds hashes
+//!    it cannot steer.
 //! 2. Mix, with `lanes` lanes of `W = 8192 / lanes` steps each:
-//!    `y[i] = z[i] + SHA256(y[i-1] || y[j]) mod p`, where `j` is chosen by `y[i-1]` among the
+//!    `y[i] = z[i] + SHA256(y[i-1] || y[j]) mod 2^256`, where `j` is chosen by `y[i-1]` among the
 //!    elements finished at earlier steps (a data-dependent read, as in packing variant B).
 //!    Encoding is sequential within a lane (`lanes = 1`: the whole chunk, `8192`: no mix);
 //!    decoding needs only the stored `y`, so every element decodes independently.
 //!
 //! Capacity (empty space) is the encoding of zeros. Difficulty is the number of layers.
-//! Prototype limitation: an input element must be < p (only crafted data can hit this).
 
 use crate::{CHUNK_SIZE, ChunkId, SEGMENTS, cpu_fast::sha256_64, seed_hash};
 
@@ -44,7 +47,7 @@ pub fn to_le_bytes(x: &U256) -> [u8; 32] {
     b
 }
 
-/// Chunk bytes to elements. Every element must be < p.
+/// Chunk bytes to elements.
 pub fn elems_from_bytes(bytes: &[u8]) -> Elems {
     assert_eq!(bytes.len(), CHUNK_SIZE);
     bytes.chunks_exact(32).map(from_le_bytes).collect()
@@ -193,6 +196,34 @@ pub fn sub(a: &U256, b: &U256) -> U256 {
     d
 }
 
+/// (a + b) mod 2^256.
+#[inline(always)]
+pub fn add_wrap(a: &U256, b: &U256) -> U256 {
+    let mut s = [0_u64; 4];
+    let mut c = false;
+    for k in 0..4 {
+        let (v, c1) = a[k].overflowing_add(b[k]);
+        let (v, c2) = v.overflowing_add(c as u64);
+        s[k] = v;
+        c = c1 | c2;
+    }
+    s
+}
+
+/// (a - b) mod 2^256.
+#[inline(always)]
+pub fn sub_wrap(a: &U256, b: &U256) -> U256 {
+    let mut d = [0_u64; 4];
+    let mut borrow = false;
+    for k in 0..4 {
+        let (v, b1) = a[k].overflowing_sub(b[k]);
+        let (v, b2) = v.overflowing_sub(borrow as u64);
+        d[k] = v;
+        borrow = b1 | b2;
+    }
+    d
+}
+
 #[inline(always)]
 fn neg(x: &U256) -> U256 {
     sub(&[0; 4], x)
@@ -245,16 +276,28 @@ pub fn sloth_inv(y: &U256) -> U256 {
     if y[0] & 1 == 0 { s } else { neg(&s) }
 }
 
+/// The root step's permutation of all 2^256 values: [`sloth`] below p, identity from p up.
+#[inline]
+pub fn root(x: &U256) -> U256 {
+    if ge_p(x) { *x } else { sloth(x) }
+}
+
+/// Inverse of [`root`] (sloth maps [0, p) onto itself, so values from p up are fixed points).
+#[inline]
+pub fn root_inv(y: &U256) -> U256 {
+    if ge_p(y) { *y } else { sloth_inv(y) }
+}
+
 // ---- the encoding ------------------------------------------------------------------------
 
-/// k[i] = SHA256(seed || LE32(i) || 0^28) mod p.
+/// k[i] = SHA256(seed || LE32(i) || 0^28).
 pub fn keys(id: &ChunkId) -> Elems {
     let seed = seed_hash(id);
     (0..SEGMENTS)
         .map(|i| {
             let mut m = [0_u8; 32];
             m[..4].copy_from_slice(&(i as u32).to_le_bytes());
-            canonical(from_le_bytes(&sha256_64(&seed, &m)))
+            from_le_bytes(&sha256_64(&seed, &m))
         })
         .collect()
 }
@@ -285,17 +328,14 @@ fn mix_index(prev: &U256, t: usize, lanes: usize, w: usize) -> usize {
 
 #[inline(always)]
 fn mix_hash(prev: &U256, other: &U256) -> U256 {
-    canonical(from_le_bytes(&sha256_64(
-        &to_le_bytes(prev),
-        &to_le_bytes(other),
-    )))
+    from_le_bytes(&sha256_64(&to_le_bytes(prev), &to_le_bytes(other)))
 }
 
-/// Root step of one layer over `xs[range]`: x = sloth(x + k + layer).
+/// Root step of one layer over `xs[range]`: x = root(x + k + layer).
 fn roots(xs: &mut [U256], ks: &[U256], layer: u32) {
     let l = [layer as u64, 0, 0, 0];
     for (x, k) in xs.iter_mut().zip(ks) {
-        *x = sloth(&add(&add(x, k), &l));
+        *x = root(&add_wrap(&add_wrap(x, k), &l));
     }
 }
 
@@ -305,7 +345,7 @@ fn mix(ys: &mut [U256], lanes: usize, w: usize) {
         for lane in 0..lanes {
             let i = lane * w + t;
             let j = mix_index(&ys[i - 1], t, lanes, w);
-            ys[i] = add(&ys[i], &mix_hash(&ys[i - 1], &ys[j]));
+            ys[i] = add_wrap(&ys[i], &mix_hash(&ys[i - 1], &ys[j]));
         }
     }
 }
@@ -322,7 +362,6 @@ pub struct Timing {
 /// the mix runs on the calling thread.
 pub fn encode(id: &ChunkId, xs: &mut [U256], p: Params, threads: usize) -> Timing {
     assert_eq!(xs.len(), SEGMENTS);
-    assert!(xs.iter().all(|x| !ge_p(x)), "input element >= p");
     let w = p.width();
     let mut timing = Timing::default();
     let t0 = std::time::Instant::now();
@@ -362,12 +401,12 @@ pub fn decode(id: &ChunkId, ys: &mut [U256], p: Params) {
                 let i = lane * w + t;
                 let j = mix_index(&ys[i - 1], t, p.lanes, w);
                 let h = mix_hash(&ys[i - 1], &ys[j]);
-                ys[i] = sub(&ys[i], &h);
+                ys[i] = sub_wrap(&ys[i], &h);
             }
         }
         let l = [layer as u64, 0, 0, 0];
         for (y, k) in ys.iter_mut().zip(ks.iter()) {
-            *y = sub(&sub(&sloth_inv(y), k), &l);
+            *y = sub_wrap(&sub_wrap(&root_inv(y), k), &l);
         }
     }
 }
@@ -478,15 +517,15 @@ mod tests {
         for (lanes, want) in [
             (
                 1,
-                "9759b214e1c66e3db29b054ee3feb778c1adb59931f15d8f165fba13cd1c1401",
+                "0c78bb9f5f4fdffc5224f97de61ae0468e79df62718a8c8ef9687f21dbe060bb",
             ),
             (
                 64,
-                "e3520e93c8cf5eb6c8acbd665ad6c2d75c930752c6915ce259e66f2019f64aab",
+                "c08575b6dcf76f8675026fac4dbc15ca45d820f1c121a478dbc9d0b3f89df169",
             ),
             (
                 8192,
-                "56fa200b82b22821cd686eb0c4a443ab2a394a40437712744a8c3dd3cfb01663",
+                "078c6d935c2f4d84c8c2f77d781e25e25e0dcea4fd0d6c6779af45cbafd0f8fa",
             ),
         ] {
             let mut xs = zero_elems();
@@ -497,7 +536,7 @@ mod tests {
             .map(|i| {
                 let mut m = b"data".to_vec();
                 m.extend_from_slice(&i.to_le_bytes());
-                canonical(from_le_bytes(&openssl::sha::sha256(&m)))
+                from_le_bytes(&openssl::sha::sha256(&m))
             })
             .collect();
         encode(
@@ -511,8 +550,41 @@ mod tests {
         );
         assert_eq!(
             digest(&data),
-            "d68a44a57865057efe069db29e77991a41a03f01846ea2efbeb44e9bf7c1980d"
+            "9f7468553ee444a1a06e47482590dbc96dfc306859fac79bb33d4ba9f8a4b634"
         );
+    }
+
+    /// Crafted data: every element is at or above p after layer 0's key, so layer 0's roots
+    /// pass through. It must still round-trip, and match the reference.
+    #[test]
+    fn crafted_data_at_or_above_p() {
+        let id = fixed_id(7);
+        let ks = keys(&id);
+        let crafted: Elems = (0..SEGMENTS)
+            .map(|i| sub_wrap(&add_wrap(&P, &[(i % 189) as u64, 0, 0, 0]), &ks[i]))
+            .collect();
+        let p = Params {
+            layers: 2,
+            lanes: 64,
+        };
+        let mut xs = crafted.clone();
+        encode(&id, &mut xs, p, 1);
+        assert_eq!(
+            digest(&xs),
+            "84b98f8b2b4a9efc4b607b529391cd3238163e40bbb7cd267150dbf247916f67"
+        );
+        decode(&id, &mut xs, p);
+        assert_eq!(xs, crafted);
+    }
+
+    #[test]
+    fn root_permutes_every_value() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let top = (0..189).map(|k| add_wrap(&P, &[k, 0, 0, 0]));
+        for x in top.chain((0..1_000).map(|_| random_elem(&mut rng))) {
+            assert_eq!(root_inv(&root(&x)), x);
+        }
+        assert_eq!(root(&[u64::MAX; 4]), [u64::MAX; 4]);
     }
 
     #[test]
@@ -520,7 +592,13 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(5);
         let id = fixed_id(11);
         for lanes in [1, 2, 64, 4096, 8192] {
-            let data: Elems = (0..SEGMENTS).map(|_| random_elem(&mut rng)).collect();
+            // any 32-byte values, including some at or above p
+            let mut data: Elems = (0..SEGMENTS)
+                .map(|_| core::array::from_fn(|_| rng.r#gen()))
+                .collect();
+            for k in 0..64 {
+                data[k * 97] = add_wrap(&P, &[k as u64, 0, 0, 0]);
+            }
             let p = Params { layers: 2, lanes };
             let (mut a, mut b) = (data.clone(), data.clone());
             encode(&id, &mut a, p, 1);

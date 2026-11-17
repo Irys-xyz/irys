@@ -297,8 +297,10 @@ single-thread time as ~0.39M SHA-chain iterations.
   derivation and a field-arithmetic mix would move decode toward that.
 * The mix costs ~2% of encode on the CPU, whatever the lane count. Lanes matter on a GPU,
   where the roots run in parallel and the mix's sequential depth sets the latency.
-* Prototype limitation: an input element must be below p, so arbitrary data needs an
-  encoding into 254-bit elements before production use.
+* Any 32-byte input encodes, so chunks keep their 256 KiB size. The roots work mod p and the
+  189 values from p up pass through them unchanged. Key addition and the mix are mod 2^256.
+  Crafted data can make layer 0 skip its roots (at most 1/layers of the work, for that
+  chunk only). Layer 0's mix then adds hashes it cannot steer.
 
 ```sh
 cargo run --release -- 1000000 --mode vde --vde-layers 1 --vde-lanes 1,64,8192 --json vde.json
