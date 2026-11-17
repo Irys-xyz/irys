@@ -801,6 +801,10 @@ mod tests {
             .get_mut()
             .vdf
             .num_checkpoints_in_vdf_step = 10;
+        // Reset on every step, so each validation task logs "Applying reset
+        // seed" from `step_input` after its cancel check and before it hashes.
+        // `HoldStartedTask` uses that event to synchronise with a running task.
+        node_config.consensus.get_mut().vdf.reset_frequency = 1;
 
         let config = Config::new_with_random_peer_id(node_config.clone());
         let vdf_config = config.vdf.clone();
@@ -866,15 +870,25 @@ mod tests {
             next_vdf_difficulty: Some(vdf_config.sha_1s_difficulty),
         };
 
-        // Create thread pool with limited threads
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
-            .build()
-            .expect("Failed to build thread pool");
-
         // Create cancel signal
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
         let cancel_clone = Arc::clone(&cancel);
+
+        // Create thread pool with limited threads. Only its worker threads get
+        // the subscriber, so only validation tasks signal.
+        let (task_started_tx, mut task_started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker_subscriber = tracing::Dispatch::new(HoldStartedTask {
+            task_started: task_started_tx,
+            cancel: Arc::clone(&cancel),
+        });
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .start_handler(move |_| {
+                // The guard must live as long as the worker thread.
+                std::mem::forget(tracing::dispatcher::set_default(&worker_subscriber));
+            })
+            .build()
+            .expect("Failed to build thread pool");
 
         // Create VdfStateReadonly wrapper
         let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
@@ -890,8 +904,11 @@ mod tests {
             )
         });
 
-        // Wait longer to ensure validation has started processing multiple steps
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait until a validation task has passed its cancel check.
+        tokio::time::timeout(Duration::from_secs(60), task_started_rx.recv())
+            .await
+            .expect("no validation task started")
+            .expect("task-start channel closed");
 
         // Set cancellation signal
         cancel.store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
@@ -904,11 +921,11 @@ mod tests {
 
         println!("Validation completed in {:?}", elapsed);
 
-        // A task checks the cancel flag only before it hashes, so `Cancelled`
-        // proves at least one task stopped without hashing. The test does not
-        // set a wall-clock limit: the wait is for the tasks already running,
-        // and their hash time depends on the build (a coverage build hashes an
-        // interleaved pair of steps many times slower than a normal build).
+        // `HoldStartedTask` holds every started task until cancel is set, so
+        // at most two tasks (one per thread) started before it, and the other
+        // tasks (10 steps make at least 5) must observe cancel in the task
+        // loop. There is no wall-clock limit: the wait is for the held tasks to
+        // finish hashing, and hash time depends on the build.
         match result {
             Ok(Err(e)) if e.to_string().contains("Cancelled") => {
                 println!("Validation cancelled successfully: {}", e);
@@ -924,6 +941,32 @@ mod tests {
                 panic!("Task panicked: {}", e);
             }
         }
+    }
+
+    /// Worker-thread subscriber for `test_mid_execution_cancellation`. On each
+    /// event it signals the test, then holds the task until cancel is set.
+    struct HoldStartedTask {
+        task_started: tokio::sync::mpsc::UnboundedSender<()>,
+        cancel: Arc<AtomicU8>,
+    }
+
+    impl tracing::Subscriber for HoldStartedTask {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {
+            let _ = self.task_started.send(());
+            while self.cancel.load(Ordering::Relaxed) != CancelEnum::Cancelled as u8 {
+                std::thread::yield_now();
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
     }
 
     /// Step validation hashes one or two steps per task depending on the pool
