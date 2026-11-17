@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794907083851,
+  "lastUpdate": 1794915045233,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -23479,6 +23479,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "ca6af3b05f1da3e2ae219cbe1b4de38266a358ef",
+          "message": "fix(ci): stop the release CI gate from waiting on its own checks",
+          "timestamp": "2026-11-13T07:54:48Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1831/commits/ca6af3b05f1da3e2ae219cbe1b4de38266a358ef"
+        },
+        "date": 1794915043907,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.017063,
+            "range": "± 0.00138",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.160263,
+            "range": "± 0.014045",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.701776,
+            "range": "± 0.15333",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.361747,
+            "range": "± 0.462624",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.065562,
+            "range": "± 0.000474",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 660.825147,
+            "range": "± 3.862109",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 860.272497,
+            "range": "± 9.407918",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117389,
+            "range": "± 0.001109",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1189.913644,
+            "range": "± 7.225715",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1530.138059,
+            "range": "± 160.875437",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027364,
+            "range": "± 0.000422",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 136.513016,
+            "range": "± 9.406349",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 239.694383,
+            "range": "± 5.218107",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000118,
+            "range": "± 0.000005",
             "unit": "ms/iter"
           }
         ]
