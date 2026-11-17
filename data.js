@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794868433939,
+  "lastUpdate": 1794907083851,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -23371,6 +23371,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "da2983ed1a70c141d7f71d4ef0ca87d090cba149",
+          "message": "feat: activate Delta at genesis in the testing consensus config (#1830)\n\n* feat: activate Delta at genesis in the testing consensus config\n\n`ConsensusConfig::testing()` now activates the Delta hardfork from\ntimestamp 0, so the default test config runs Delta rules. Tests that\nrelied on Delta being off are updated:\n\n- Capacity reward split: treasury, refund, reward and supply assertions\n  account for the treasury share of capacity PoA rewards\n  (`block_reward_treasury_share`, `block_emission`).\n- EMA interval: tests that shorten the EMA interval now set both the\n  base and the Delta interval (`set_ema_price_adjustment_interval`).\n- Ingress proof reward pool: the evil-producer perm_fee tests zero the\n  Delta pool percent too, and the same-block promotion test accepts the\n  term-fee rejection that Delta's tx-priced pool produces.\n- Solution hash order: tests take the order from the config.\n- Tests that pin pre-Delta rules or magic values set `delta = None`.\n- Testing consensus-config hash snapshot and TOML fixture updated.\n\n* test: pin reward split conservation between miner and treasury\n\n- `split_conserves_any_reward` (proptest): for any U256 reward and any\n  capacity percent in [0, 1], a capacity PoA split succeeds exactly when\n  `full * percent` fits in a U256, pays the miner the rounded-down share\n  and the treasury the rest (`miner + treasury == full`), and errors\n  rather than wrapping past the overflow limit, which each case also\n  probes exactly. A data PoA pays the miner the full amount.\n- `heavy_delta_capacity_poa_overcredited_treasury_share_rejected`: a\n  capacity PoA block with a correct miner part but a treasury share one\n  atomic unit too large is discarded with a treasury mismatch. It shares\n  a generalised tamper strategy with the missing-share test.\n\n* test: skip the past-limit split check when the limit is U256::MAX\n\nAt a capacity percent of one raw unit the overflow limit is U256::MAX,\nso `limit + 1` overflowed and panicked inside the test. Use checked_add\nand probe the successor only when it is representable.\n\n* test: restore perm_fee coverage and use independent reward oracles\n\n- `same_block_promoted_tx_with_ema_price_change_gets_rejected`: overpay\n  the term fee and short only the perm_fee (the ingress proof pool plus\n  half the storage part, priced on the term fee the tx pays), so the\n  perm_fee check fires under Delta again. Restore the original matcher,\n  which no longer accepts `InsufficientTermFee`.\n- Reward expectations no longer call `irys_actors::block_reward`:\n  `expected_block_emission` and `expected_block_reward_split` in\n  chain-tests utils compute them from the reward curve and the Delta\n  config directly. `partition_recovery`'s supply checks, the treasury\n  share helper and `rewards_get_calculated_correctly` use them, so a bug\n  in `block_emission` or `split_block_reward` can no longer cancel out.",
+          "timestamp": "2026-11-17T09:03:22Z",
+          "tree_id": "d01ddbe9ed17aff44b73eb9894e264ad0d10a093",
+          "url": "https://github.com/Irys-xyz/irys/commit/da2983ed1a70c141d7f71d4ef0ca87d090cba149"
+        },
+        "date": 1794907081986,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012427,
+            "range": "± 0.000984",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.150765,
+            "range": "± 0.004072",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.553029,
+            "range": "± 0.04428",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.661458,
+            "range": "± 0.469925",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.072089,
+            "range": "± 0.001056",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 728.768091,
+            "range": "± 8.259856",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 950.683314,
+            "range": "± 37.877254",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117899,
+            "range": "± 0.002582",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1185.199365,
+            "range": "± 7.347519",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1566.245945,
+            "range": "± 179.990241",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027007,
+            "range": "± 0.000905",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 137.466259,
+            "range": "± 0.857191",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 179.466848,
+            "range": "± 0.836559",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
