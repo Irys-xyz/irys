@@ -336,3 +336,146 @@ impl Drop for DeviceChunks {
         let _ = check("cudaFree", unsafe { pvb_cuda_free(self.ptr) });
     }
 }
+
+unsafe extern "C" {
+    fn pvb_cuda_memcpy(
+        dst: *mut c_void,
+        src: *const c_void,
+        bytes: usize,
+        to_device: c_int,
+    ) -> c_int;
+    fn pvb_vde_kernel_regs(
+        roots_regs: *mut c_int,
+        roots_local: *mut usize,
+        mix_regs: *mut c_int,
+    ) -> c_int;
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "launch parameters forwarded one-to-one"
+    )]
+    fn pvb_vde_encode(
+        d_seeds: *const c_void,
+        chunks: u64,
+        d_elems: *mut c_void,
+        layers: u32,
+        lanes: u32,
+        threads_per_block: c_int,
+        roots_ms: *mut f32,
+        mix_ms: *mut f32,
+    ) -> c_int;
+}
+
+/// Registers per thread of the VDE kernels: (roots, roots local bytes, mix).
+pub fn vde_kernel_regs() -> Result<(i32, usize, i32), CudaError> {
+    let (mut r, mut l, mut m) = (0, 0, 0);
+    // SAFETY: valid out-pointers.
+    unsafe {
+        check(
+            "cudaFuncGetAttributes",
+            pvb_vde_kernel_regs(&mut r, &mut l, &mut m),
+        )?
+    };
+    Ok((r, l, m))
+}
+
+/// Device buffers for prototype VDE encoding (`crate::vde`) of `chunks` chunks.
+pub struct VdeDevice {
+    elems: *mut c_void,
+    seeds: *mut c_void,
+    pub chunks: u64,
+}
+
+impl VdeDevice {
+    pub fn new(chunks: u64) -> Result<Self, CudaError> {
+        let (mut elems, mut seeds) = (std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: valid out-pointers.
+        unsafe {
+            check(
+                "cudaMalloc",
+                pvb_cuda_malloc(chunks as usize * CHUNK_SIZE, &mut elems),
+            )?;
+            if let Err(e) = check(
+                "cudaMalloc",
+                pvb_cuda_malloc(chunks as usize * 32, &mut seeds),
+            ) {
+                let _ = pvb_cuda_free(elems);
+                return Err(e);
+            }
+        }
+        Ok(Self {
+            elems,
+            seeds,
+            chunks,
+        })
+    }
+
+    /// Uploads one seed per chunk (`seed_hash`) and the chunks' input bytes.
+    pub fn upload(&mut self, seeds: &[[u8; 32]], bytes: &[u8]) -> Result<(), CudaError> {
+        assert_eq!(seeds.len() as u64, self.chunks);
+        assert_eq!(bytes.len() as u64, self.chunks * CHUNK_SIZE as u64);
+        // SAFETY: both device buffers are exactly as large as the slices copied into them.
+        unsafe {
+            check(
+                "cudaMemcpy H2D",
+                pvb_cuda_memcpy(self.seeds, seeds.as_ptr().cast(), seeds.len() * 32, 1),
+            )?;
+            check(
+                "cudaMemcpy H2D",
+                pvb_cuda_memcpy(self.elems, bytes.as_ptr().cast(), bytes.len(), 1),
+            )
+        }
+    }
+
+    /// Copies chunk `index` back.
+    pub fn download_chunk(&self, index: u64, out: &mut [u8]) -> Result<(), CudaError> {
+        assert!(index < self.chunks);
+        assert_eq!(out.len(), CHUNK_SIZE);
+        // SAFETY: index is in bounds; `out` is CHUNK_SIZE bytes.
+        unsafe {
+            check(
+                "cudaMemcpy D2H",
+                pvb_cuda_memcpy(
+                    out.as_mut_ptr().cast(),
+                    self.elems
+                        .cast::<u8>()
+                        .add(index as usize * CHUNK_SIZE)
+                        .cast(),
+                    CHUNK_SIZE,
+                    0,
+                ),
+            )
+        }
+    }
+
+    /// Encodes every chunk in place; returns (roots ms, mix ms), summed over layers.
+    pub fn encode(&mut self, layers: u32, lanes: u32, tpb: u32) -> Result<(f32, f32), CudaError> {
+        let (mut r, mut m) = (0.0_f32, 0.0_f32);
+        // SAFETY: buffers hold self.chunks chunks and seeds; kernels stay in bounds.
+        unsafe {
+            check(
+                "VDE encode",
+                pvb_vde_encode(
+                    self.seeds,
+                    self.chunks,
+                    self.elems,
+                    layers,
+                    lanes,
+                    tpb as c_int,
+                    &mut r,
+                    &mut m,
+                ),
+            )?;
+        }
+        Ok((r, m))
+    }
+}
+
+impl Drop for VdeDevice {
+    fn drop(&mut self) {
+        // SAFETY: both came from cudaMalloc and are freed exactly once.
+        unsafe {
+            let _ = check("cudaFree", pvb_cuda_free(self.elems));
+            let _ = check("cudaFree", pvb_cuda_free(self.seeds));
+        }
+    }
+}

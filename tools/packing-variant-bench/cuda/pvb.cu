@@ -267,3 +267,5 @@ extern "C" int pvb_fast_copy_chunk(int layout, const void *d_chunks, uint64_t ch
     }
     return 0;
 }
+
+#include "vde.cuh"

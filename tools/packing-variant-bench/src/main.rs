@@ -193,6 +193,8 @@ struct Report {
     prod: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     vde: Vec<VdeResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    vde_gpu: Vec<serde_json::Value>,
 }
 
 const OFFSET_START: u64 = 1_000;
@@ -227,6 +229,14 @@ fn main() {
     }
     if args.mode == Mode::Vde {
         report.vde = run_vde(&args, logical);
+        #[cfg(feature = "cuda")]
+        match run_vde_gpu(&args, &report.vde) {
+            Ok(v) => report.vde_gpu = v,
+            Err(e) => {
+                eprintln!("[vde-gpu] CUDA error: {e}");
+                std::process::exit(1);
+            }
+        }
         if let Some(path) = &args.json {
             std::fs::write(path, serde_json::to_string_pretty(&report).unwrap())
                 .unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
@@ -989,4 +999,127 @@ fn run_vde(args: &Args, logical: usize) -> Vec<VdeResult> {
         out.push(r);
     }
     out
+}
+
+/// Prototype VDE on the GPU: verified against the CPU encoder, then single-chunk latency and
+/// full-batch throughput per lane count.
+#[cfg(feature = "cuda")]
+fn run_vde_gpu(
+    args: &Args,
+    cpu: &[VdeResult],
+) -> Result<Vec<serde_json::Value>, packing_variant_bench::gpu::CudaError> {
+    use packing_variant_bench::{gpu, seed_hash};
+    let (rr, rl, mr) = gpu::vde_kernel_regs()?;
+    let dev = gpu::device_info()?;
+    println!(
+        "[vde-gpu] {} SMs, cc {}; roots kernel {rr} regs, {rl} B local; mix kernel {mr} regs",
+        dev.sm_count, dev.compute_capability
+    );
+    let tpb = args.tpb.first().copied().unwrap_or(128);
+    let layers = args.vde_layers;
+    let seeds_for = |n: u64| -> Vec<[u8; 32]> {
+        (0..n)
+            .map(|c| seed_hash(&fixed_id(OFFSET_START + c)))
+            .collect()
+    };
+    // chunk 0 zeros (capacity), chunk 1 pseudo-random bytes, chunk 2 all 0xFF (at or above p,
+    // so it passes through the layer-0 roots... after the key, mostly not: still a useful input)
+    let mut verify_input = vec![0_u8; 3 * CHUNK_SIZE];
+    let mut s = 0x9E37_79B9_7F4A_7C15_u64;
+    for b in &mut verify_input[CHUNK_SIZE..2 * CHUNK_SIZE] {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        *b = s as u8;
+    }
+    verify_input[2 * CHUNK_SIZE..].fill(0xFF);
+
+    let mut out = vec![];
+    for (k, &lanes) in args.vde_lanes.iter().enumerate() {
+        if lanes != 8192 && lanes > 1024 {
+            println!(
+                "[vde-gpu] lanes={lanes}: skipped (the mix kernel runs one block per chunk, <= 1024 lanes)"
+            );
+            continue;
+        }
+
+        // verify 3 chunks at 2 layers against the CPU encoder
+        let mut d = gpu::VdeDevice::new(3)?;
+        d.upload(&seeds_for(3), &verify_input)?;
+        d.encode(2, lanes as u32, tpb)?;
+        for c in 0..3_usize {
+            let mut got = vec![0_u8; CHUNK_SIZE];
+            d.download_chunk(c as u64, &mut got)?;
+            let mut want =
+                vde::elems_from_bytes(&verify_input[c * CHUNK_SIZE..(c + 1) * CHUNK_SIZE]);
+            vde::encode(
+                &fixed_id(OFFSET_START + c as u64),
+                &mut want,
+                vde::Params { layers: 2, lanes },
+                1,
+            );
+            if got != vde::elems_to_bytes(&want) {
+                eprintln!(
+                    "[vde-gpu] lanes={lanes}: chunk {c}: GPU output differs from the CPU encoder"
+                );
+                std::process::exit(1);
+            }
+        }
+        drop(d);
+
+        // latency: one chunk
+        let mut d = gpu::VdeDevice::new(1)?;
+        d.upload(&seeds_for(1), &vec![0_u8; CHUNK_SIZE])?;
+        d.encode(1, lanes as u32, tpb)?; // warm-up
+        let (lr, lm) = d.encode(layers, lanes as u32, tpb)?;
+        drop(d);
+
+        // throughput: each batch size
+        for &batch in &args.batch {
+            let mut d = match gpu::VdeDevice::new(batch) {
+                Ok(d) => d,
+                Err(e) => {
+                    println!("[vde-gpu] batch {batch}: {e}");
+                    continue;
+                }
+            };
+            d.upload(&seeds_for(batch), &vec![0_u8; batch as usize * CHUNK_SIZE])?;
+            let host = Instant::now();
+            let (tr, tm) = d.encode(layers, lanes as u32, tpb)?;
+            let host_s = host.elapsed().as_secs_f64();
+            let kernel_s = (tr + tm) as f64 / 1e3;
+            let chunk_layers_per_s = (batch * layers as u64) as f64 / kernel_s;
+            let cpu_rate = cpu
+                .get(k)
+                .map(|c| c.throughput_chunks_per_s * c.params.layers as f64)
+                .unwrap_or(f64::NAN);
+            let per = layers as f32;
+            println!(
+                "[vde-gpu] lanes={lanes:>5} verify=PASS | 1 chunk: roots {:.3} + mix {:.3} ms/layer | batch {batch}: roots {:.1} + mix {:.1} ms/layer = {:.0} chunk-layers/s ({:.1}x CPU {:.0}) host {:.2} s",
+                lr / per,
+                lm / per,
+                tr / per,
+                tm / per,
+                chunk_layers_per_s,
+                chunk_layers_per_s / cpu_rate,
+                cpu_rate,
+                host_s,
+            );
+            out.push(serde_json::json!({
+                "lanes": lanes,
+                "layers": layers,
+                "threads_per_block": tpb,
+                "verify": "pass",
+                "latency_roots_ms_per_layer": lr / per,
+                "latency_mix_ms_per_layer": lm / per,
+                "batch": batch,
+                "batch_roots_ms_per_layer": tr / per,
+                "batch_mix_ms_per_layer": tm / per,
+                "chunk_layers_per_s": chunk_layers_per_s,
+                "cpu_chunk_layers_per_s": cpu_rate,
+                "host_s": host_s,
+            }));
+        }
+    }
+    Ok(out)
 }

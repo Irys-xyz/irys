@@ -302,8 +302,29 @@ single-thread time as ~0.39M SHA-chain iterations.
   Crafted data can make layer 0 skip its roots (at most 1/layers of the work, for that
   chunk only). Layer 0's mix then adds hashes it cannot steer.
 
+With `--features cuda` the same mode also runs the encoder on the GPU (`cuda/vde.cuh`).
+The roots kernel uses one thread per element; the mix kernel uses one block per chunk with one
+thread per lane, so up to 1024 lanes. Every lane count is first checked byte-for-byte against
+the CPU encoder on three chunks: zeros, pseudo-random and all 0xFF. RTX 5090, one layer:
+
+| lanes | 1 chunk: roots + mix | batch 21 760: roots + mix | chunk-layers/s | vs CPU, 32 threads |
+|---|---|---|---|---|
+| 1 | 0.095 + 14.7 ms | 548 + 400 ms | 22 954 | 21× |
+| 64 | 0.092 + 0.24 ms | 549 + 25 ms | 37 864 | 32× |
+| 8192 | 0.090 + 0 ms | 563 + 0 ms | 38 651 | 33× |
+
+* One chunk's roots take 0.09 ms on the GPU against 19 ms on a CPU core. All 8192 elements run
+  in parallel, so a GPU encodes one chunk with low latency, unlike the SHA chain.
+* A fully sequential mix (1 lane) costs 14.7 ms per layer per chunk on the GPU, about 160× the
+  roots, because one GPU thread hashes 8191 times in a row. 64 lanes cuts that to 0.24 ms.
+* Throughput, GPU vs all CPU threads: 33× for the VDE. For the SHA chain it is 11× against
+  AVX-512 and 22× against SHA-NI ×4. Neither VDE implementation is tuned yet: the CPU uses
+  portable u128 multiplies (no MULX/ADX assembly or AVX-512 IFMA), and the GPU kernel uses
+  128 registers and spills 64 B, with no hand-written PTX carry chains.
+
 ```sh
 cargo run --release -- 1000000 --mode vde --vde-layers 1 --vde-lanes 1,64,8192 --json vde.json
+cargo run --release --features cuda -- 1000000 --mode vde --batch 21760,43520   # + GPU
 ```
 
 ## Future work

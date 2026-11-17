@@ -22,6 +22,10 @@ fn main() {
         "cargo:rerun-if-changed={}",
         cuda_src.join("sha256.cuh").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        cuda_src.join("vde.cuh").display()
+    );
 
     let arch = env::var("PVB_CUDA_ARCH").unwrap_or_else(|_| "native".to_string());
     // Experiment switch for the fast kernel (see FAST_FMA_ADDS in cuda/pvb_fast.cuh).
