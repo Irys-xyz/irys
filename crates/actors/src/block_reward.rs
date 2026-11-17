@@ -263,11 +263,15 @@ mod tests {
             is_capacity_poa in proptest::prelude::any::<bool>(),
         ) {
             assert_split_conserves(full, raw_percent, is_capacity_poa);
-            // The exact overflow limit for this percent, and one past it.
+            // The exact overflow limit for this percent, and one past it when
+            // that is representable (at a percent of one unit the limit is
+            // `U256::MAX`, which has no successor).
             if raw_percent > 0 {
                 let limit = U256::MAX / U256::from(raw_percent);
                 assert_split_conserves(limit, raw_percent, true);
-                assert_split_conserves(limit + U256::from(1), raw_percent, true);
+                if let Some(past_limit) = limit.checked_add(U256::from(1)) {
+                    assert_split_conserves(past_limit, raw_percent, true);
+                }
             }
         }
     }
