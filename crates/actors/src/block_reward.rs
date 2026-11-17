@@ -98,6 +98,7 @@ mod tests {
     use irys_types::{
         Base64, PoaData, UnixTimestampMs, hardfork_config::Delta, storage_pricing::Decimal,
     };
+    use proptest::strategy::Strategy as _;
 
     fn config_with_delta(activation: u64) -> ConsensusConfig {
         let mut config = ConsensusConfig::testing();
@@ -184,6 +185,90 @@ mod tests {
                 U256::from(full),
                 "percent {percent}, full {full}"
             );
+        }
+    }
+
+    /// Delta config with a capacity percent of `raw` precision units
+    /// (`PRECISION_SCALE` is 100%).
+    fn config_with_raw_percent(raw: u64) -> ConsensusConfig {
+        let mut config = config_with_delta(0);
+        let Some(delta) = config.hardforks.delta.as_mut() else {
+            unreachable!("config_with_delta sets delta");
+        };
+        delta.capacity_chunk_reward_percent = Amount::new(U256::from(raw));
+        config
+    }
+
+    /// Checks one split against the conservation rules: a capacity PoA split
+    /// succeeds exactly when `full * percent` fits in a U256, and then the
+    /// miner gets the rounded-down percentage and the treasury the rest, so
+    /// `miner + treasury == full`. When the product does not fit, the split
+    /// returns an error. A data PoA pays the miner the full amount.
+    fn assert_split_conserves(full: U256, raw_percent: u64, is_capacity_poa: bool) {
+        let config = config_with_raw_percent(raw_percent);
+        let result = split_block_reward(
+            Amount::new(full),
+            &config,
+            UnixTimestamp::from_secs(0),
+            is_capacity_poa,
+        );
+        if !is_capacity_poa {
+            assert_eq!(
+                result.expect("a data PoA split cannot fail"),
+                BlockRewardSplit {
+                    miner: Amount::new(full),
+                    treasury: Amount::new(U256::zero()),
+                },
+                "data PoA, full {full}"
+            );
+            return;
+        }
+        let percent = U256::from(raw_percent);
+        match full.checked_mul(percent) {
+            Some(product) => {
+                let split = result.unwrap_or_else(|e| {
+                    panic!("full {full}, percent {raw_percent}: split must succeed: {e}")
+                });
+                assert_eq!(
+                    split.miner.amount,
+                    product / PRECISION_SCALE,
+                    "full {full}, percent {raw_percent}: miner part"
+                );
+                assert!(split.miner.amount <= full);
+                assert_eq!(
+                    split.miner.amount + split.treasury.amount,
+                    full,
+                    "full {full}, percent {raw_percent}: miner + treasury"
+                );
+            }
+            None => assert!(
+                result.is_err(),
+                "full {full}, percent {raw_percent}: an overflowing split must error, got {result:?}"
+            ),
+        }
+    }
+
+    proptest::proptest! {
+        /// For any reward and any percent in [0, 1], the split neither mints
+        /// nor burns: `miner + treasury == full`, or it errors on overflow.
+        #[test]
+        fn split_conserves_any_reward(
+            full in proptest::prop_oneof![
+                // Reward-curve sized amounts: the split must succeed.
+                proptest::prelude::any::<u128>().prop_map(U256::from),
+                // The whole U256 range, mostly past the overflow limit.
+                proptest::prelude::any::<[u64; 4]>().prop_map(U256),
+            ],
+            raw_percent in 0..=PRECISION_SCALE.as_u64(),
+            is_capacity_poa in proptest::prelude::any::<bool>(),
+        ) {
+            assert_split_conserves(full, raw_percent, is_capacity_poa);
+            // The exact overflow limit for this percent, and one past it.
+            if raw_percent > 0 {
+                let limit = U256::MAX / U256::from(raw_percent);
+                assert_split_conserves(limit, raw_percent, true);
+                assert_split_conserves(limit + U256::from(1), raw_percent, true);
+            }
         }
     }
 
