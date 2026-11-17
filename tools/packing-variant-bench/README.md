@@ -332,7 +332,7 @@ layer, dedicated squaring:
 | 64 | 0.078 + 0.24 ms | 439 + 26 ms | 46 862 | ~42× |
 | 8192 | 0.074 + 0 ms | 445 + 0 ms | 48 892 | ~44× |
 
-* One chunk's roots take 0.09 ms on the GPU against 19 ms on a CPU core. All 8192 elements run
+* One chunk's roots take 0.08 ms on the GPU against 19 ms on a CPU core. All 8192 elements run
   in parallel, so a GPU encodes one chunk with low latency, unlike the SHA chain.
 * A fully sequential mix (1 lane) costs 14.7 ms per layer per chunk on the GPU, about 160× the
   roots, because one GPU thread hashes 8191 times in a row. 64 lanes cuts that to 0.24 ms.
@@ -354,8 +354,19 @@ gain: nvcc already emits wide multiply-adds); PTX plus squaring 49.4k. Capping r
 | 575 W (default) | ~543 W | 2.75 GHz | 50 351 | 10.8 mJ |
 
 35% more power buys ~5–10% more throughput, so a cost-minimising faker would cap the card. Use
-the capped energy figure, not the default, when costing a faker. For comparison, the SHA chain at
-575 W is 41.7 mJ per 1M-iteration chunk (its efficiency when capped has not been measured).
+the capped energy figure, not the default, when costing a faker.
+
+The fast SHA kernel (variant A, fast-interleaved, tpb 512, batch 87 040, 1M iterations, verified)
+behaves the same way:
+
+| enforced limit | draw | SM clock | chunks/s | energy per chunk |
+|---|---|---|---|---|
+| 400 W | ~387 W | 2.28 GHz | 11 752 | 32.9 mJ |
+| 575 W (default) | ~550 W | 2.63 GHz | 13 781 | 39.9 mJ |
+
+Capping costs SHA 15% of throughput for 18% less energy, against 5–10% for 22% on the VDE. At a
+$2 000 card over 5 years and $0.127/kWh, capping cuts a faker's cost per chunk ~4% for SHA and ~11%
+for the VDE. At cheap power ($0.05/kWh) the uncapped card is cheaper for SHA.
 
 **CPU multiply** (`cargo run --release --example vde_mul_bench`, best of 7): a dependent 256-bit
 modular squaring takes ~12 ns on a 9950X3D core, both portable Rust (LLVM already emits MULX) and
