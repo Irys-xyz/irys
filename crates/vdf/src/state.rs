@@ -905,14 +905,18 @@ mod tests {
         });
 
         // Wait until a validation task has passed its cancel check.
-        tokio::time::timeout(Duration::from_secs(60), task_started_rx.recv())
-            .await
-            .expect("no validation task started")
-            .expect("task-start channel closed");
+        let task_started =
+            tokio::time::timeout(Duration::from_secs(60), task_started_rx.recv()).await;
 
-        // Set cancellation signal
+        // Set cancellation signal. Also set it when the wait failed: a task
+        // that starts later would otherwise wait in `HoldStartedTask` forever,
+        // and the runtime shutdown after the panic below waits for the
+        // validation, so the test would hang instead of failing.
         cancel.store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
         println!("Cancellation signal set");
+        task_started
+            .expect("no validation task started")
+            .expect("task-start channel closed");
 
         // Wait for validation to complete (should return quickly after cancellation)
         let start = std::time::Instant::now();
