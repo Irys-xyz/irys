@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794918439430,
+  "lastUpdate": 1795086477554,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -23587,6 +23587,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "448d452925b11e4882a864a96f4e56a08b1a8e47",
+          "message": "test(vdf): drop the wall-clock limit in the mid-execution cancel test (#1832)\n\n* test(vdf): drop the wall-clock limit in the mid-execution cancel test\n\nA validation task checks the cancel flag only before it hashes, so after\ncancel the test waits for the tasks already running. With interleaved\nvalidation a task can hash a pair of steps, and a coverage build hashes\na pair many times slower than a normal build: the wait was 15-17 s\nagainst a 5 s limit, so the coverage job failed on every run.\n\nA `Cancelled` result already proves that at least one task stopped\nwithout hashing, so keep that check and remove the time limit.\n\n* test(vdf): sync the cancel test on a running validation task\n\nA 200 ms sleep was the only sync before the test set cancel. If no task\nhad started by then, the pre-check before the task loop returned\n`Cancelled`, and the test passed without running the in-loop check.\n\nReset on every step, so each task logs from `step_input` after its\ncancel check and before it hashes. A subscriber on the pool's worker\nthreads signals the test at that event and holds the task until cancel\nis set. At most one task per thread starts before cancel, so the other\ntasks must observe it in the task loop.\n\n* test(vdf): set cancel before failing the task-start wait\n\nIf no validation task signalled within the wait, the test panicked with\ncancel still unset. A task that started later then waited forever in\n`HoldStartedTask`, and the runtime shutdown waits for the blocking\nvalidation, so the test hung instead of failing. Set cancel before the\nwait result is checked; the success path is unchanged.",
+          "timestamp": "2026-11-19T10:50:35Z",
+          "tree_id": "4b687e1ede08879691b29378c5b2705ccace4db1",
+          "url": "https://github.com/Irys-xyz/irys/commit/448d452925b11e4882a864a96f4e56a08b1a8e47"
+        },
+        "date": 1795086476057,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.016142,
+            "range": "± 0.002292",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.155979,
+            "range": "± 0.004746",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.640965,
+            "range": "± 0.09795",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.084552,
+            "range": "± 0.150905",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.069058,
+            "range": "± 0.002683",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 676.141323,
+            "range": "± 22.787436",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 854.186067,
+            "range": "± 7.102567",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.13591,
+            "range": "± 0.00504",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1504.150971,
+            "range": "± 104.402996",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1557.944386,
+            "range": "± 4.509076",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.027219,
+            "range": "± 0.000989",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 138.047012,
+            "range": "± 0.561431",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 179.421472,
+            "range": "± 0.889661",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
